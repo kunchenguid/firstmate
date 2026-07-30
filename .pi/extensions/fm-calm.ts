@@ -4,9 +4,10 @@
 // per-slot renderers, renderShell: "self", session_start replacement reasons,
 // ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), and
 // setHiddenThinkingLabel(). The focused tests pin those assumptions but never reject a
-// newer Pi solely for its version. The assistant, tool-row, and operational-user
-// presentation adapters probe the exact API they patch and degrade independently with a
-// diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it.
+// newer Pi solely for its version. The assistant, tool-row, operational-user, and
+// non-conversation row presentation adapters probe the exact API they patch and degrade
+// independently with a diagnostic (see installCalmPresentationAdapter below) if a future Pi
+// removes it.
 // docs/configuration.md owns the home-local Calm preference contract.
 import { randomUUID } from "node:crypto";
 import {
@@ -36,6 +37,16 @@ import {
 import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
+import {
+  installCalmBranchSummaryLayout,
+  installCalmCacheNoticeLayout,
+  installCalmCompactionSummaryLayout,
+  installCalmCustomEntryLayout,
+  installCalmCustomMessageLayout,
+  installCalmLeadingSpacerLayout,
+  installCalmSkillInvocationLayout,
+  installCalmUserBashLayout,
+} from "./lib/fm-calm-nonconversation-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
 import {
   installCalmToolErrorTurnBoundary,
@@ -102,6 +113,14 @@ export default function (pi: ExtensionAPI) {
   installCalmPresentationAdapter("tool-row", installCalmToolLayout);
   installCalmPresentationAdapter("tool-error-turn", installCalmToolErrorTurnBoundary);
   installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
+  installCalmPresentationAdapter("user-bash-row", installCalmUserBashLayout);
+  installCalmPresentationAdapter("skill-invocation-row", installCalmSkillInvocationLayout);
+  installCalmPresentationAdapter("compaction-summary-row", installCalmCompactionSummaryLayout);
+  installCalmPresentationAdapter("branch-summary-row", installCalmBranchSummaryLayout);
+  installCalmPresentationAdapter("custom-message-row", installCalmCustomMessageLayout);
+  installCalmPresentationAdapter("custom-entry-row", installCalmCustomEntryLayout);
+  installCalmPresentationAdapter("cache-notice-row", installCalmCacheNoticeLayout);
+  installCalmPresentationAdapter("hidden-row-spacing", installCalmLeadingSpacerLayout);
 
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;

@@ -10,6 +10,7 @@ EXT="$ROOT/.pi/extensions/fm-calm.ts"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 TOOL_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-tool-layout.ts"
+NONCONVERSATION_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-nonconversation-layout.ts"
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
@@ -39,6 +40,50 @@ mkdir -p "$TMP_ROOT"
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 cp "$OPERATIONAL_INPUT" "$TMP_ROOT/fm-operational-input.sh"
 chmod +x "$TMP_ROOT/fm-operational-input.sh"
+
+# The E2E cases below reuse one tmux session name across sequential Pi launches. tmux refuses
+# a duplicate name, and this file runs without `set -e`, so a launch that raced a still-exiting
+# predecessor would silently keep driving the dying pane. Panes are kept after their command
+# exits so each launch can wait for the previous Pi to be gone and assert it left cleanly first.
+# A long-lived holder session keeps the tmux server up so the global window option is in place
+# before any Pi window exists, rather than racing each launch.
+TMUX_HOLDER_SESSION="fmhold-$$"
+init_pi_tmux_server() {
+  if tmux -L "$TMUX_SOCKET" has-session -t "$TMUX_HOLDER_SESSION" 2>/dev/null; then
+    return 0
+  fi
+  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_HOLDER_SESSION" 'sleep 100000' 2>/dev/null \
+    || return 1
+  tmux -L "$TMUX_SOCKET" set-option -wg remain-on-exit on 2>/dev/null || return 1
+}
+
+retire_pi_session() {
+  local context=$1 i=0 dead status
+  while [ "$i" -lt 400 ]; do
+    if ! tmux -L "$TMUX_SOCKET" has-session -t "$TMUX_SESSION" 2>/dev/null; then
+      return 0
+    fi
+    dead=$(tmux -L "$TMUX_SOCKET" display-message -p -t "$TMUX_SESSION" '#{pane_dead}' 2>/dev/null || printf '')
+    if [ "$dead" = 1 ]; then
+      status=$(tmux -L "$TMUX_SOCKET" display-message -p -t "$TMUX_SESSION" '#{pane_dead_status}' 2>/dev/null || printf '')
+      tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+      i=0
+      while tmux -L "$TMUX_SOCKET" has-session -t "$TMUX_SESSION" 2>/dev/null && [ "$i" -lt 200 ]; do
+        sleep 0.05
+        i=$((i + 1))
+      done
+      if tmux -L "$TMUX_SOCKET" has-session -t "$TMUX_SESSION" 2>/dev/null; then
+        fail "$context did not release the tmux session name after /quit"
+      fi
+      [ "$status" = 0 ] \
+        || fail "$context exited with status ${status:-unknown} instead of exiting cleanly"
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  fail "$context did not exit after /quit"
+}
 
 wait_for_text() {
   local file=$1 text=$2 i=0
@@ -73,16 +118,18 @@ find_chrome() {
 }
 
 test_static_contract() {
-  local text assistant_layout operational_user_layout tool_layout visibility watch operational
+  local text assistant_layout operational_user_layout tool_layout nonconversation_layout visibility watch operational
   assert_present "$EXT" "tracked Pi calm extension is missing"
   assert_present "$ASSISTANT_LAYOUT" "tracked Pi Calm assistant-layout adapter is missing"
   assert_present "$OPERATIONAL_USER_LAYOUT" "tracked Pi Calm operational-user layout adapter is missing"
   assert_present "$TOOL_LAYOUT" "tracked Pi Calm tool-layout adapter is missing"
+  assert_present "$NONCONVERSATION_LAYOUT" "tracked Pi Calm non-conversation row adapter is missing"
   assert_present "$VISIBILITY" "tracked Pi calm visibility policy is missing"
   text=$(cat "$EXT")
   assistant_layout=$(cat "$ASSISTANT_LAYOUT")
   operational_user_layout=$(cat "$OPERATIONAL_USER_LAYOUT")
   tool_layout=$(cat "$TOOL_LAYOUT")
+  nonconversation_layout=$(cat "$NONCONVERSATION_LAYOUT")
   visibility=$(cat "$VISIBILITY")
   watch=$(cat "$WATCH_EXT")
   operational=$(cat "$PI_OPERATIONAL_INPUT")
@@ -131,6 +178,33 @@ test_static_contract() {
   assert_contains "$operational_user_layout" '"\u2063Supervisor escalate ("' "Pi Calm operational-user layout lost the narrow legacy marker"
   assert_contains "$operational_user_layout" 'hidesOperationalInput()' "Pi Calm operational-user row does not use presentation-only hiding"
   assert_not_contains "$operational_user_layout" 'FIRSTMATE_OP: ' "Pi Calm operational-user layout duplicates the canonical marker grammar"
+  for adapter in \
+    'installCalmPresentationAdapter("user-bash-row", installCalmUserBashLayout)' \
+    'installCalmPresentationAdapter("skill-invocation-row", installCalmSkillInvocationLayout)' \
+    'installCalmPresentationAdapter("compaction-summary-row", installCalmCompactionSummaryLayout)' \
+    'installCalmPresentationAdapter("branch-summary-row", installCalmBranchSummaryLayout)' \
+    'installCalmPresentationAdapter("custom-message-row", installCalmCustomMessageLayout)' \
+    'installCalmPresentationAdapter("custom-entry-row", installCalmCustomEntryLayout)' \
+    'installCalmPresentationAdapter("cache-notice-row", installCalmCacheNoticeLayout)' \
+    'installCalmPresentationAdapter("hidden-row-spacing", installCalmLeadingSpacerLayout)'
+  do
+    assert_contains "$text" "$adapter" "Pi Calm extension does not install a degradable $adapter"
+  done
+  for exported in \
+    BashExecutionComponent \
+    SkillInvocationMessageComponent \
+    CompactionSummaryMessageComponent \
+    BranchSummaryMessageComponent \
+    CustomMessageComponent
+  do
+    assert_contains "$nonconversation_layout" "\"$exported\"," "Pi Calm non-conversation adapter does not own the $exported row"
+  done
+  assert_contains "$nonconversation_layout" 'Firstmate Calm requires Pi InteractiveMode.addCustomEntryToChat' "Pi Calm non-conversation adapter does not probe the unrelated custom-entry seam"
+  assert_contains "$nonconversation_layout" 'Firstmate Calm requires Pi InteractiveMode.addCacheMissNotice' "Pi Calm non-conversation adapter does not probe the cache-notice seam"
+  assert_contains "$nonconversation_layout" 'Firstmate Calm requires Pi InteractiveMode.addMessageToChat' "Pi Calm non-conversation adapter does not probe the hidden-row spacing seam"
+  assert_contains "$nonconversation_layout" 'calmPresentationHides(itemClass)' "Pi Calm non-conversation adapter does not read the centralized visibility policy"
+  assert_contains "$nonconversation_layout" 'row instanceof entry.rowClass' "Pi Calm non-conversation adapter drops the spacer beside a row whose adapter degraded"
+  assert_not_contains "$nonconversation_layout" 'chatContainer.clear' "Pi Calm non-conversation adapter rebuilds the transcript instead of rendering at zero height"
   assert_not_contains "$text" 'calm transcript' "Pi calm extension still adds a persistent Calm status row"
   assert_not_contains "$text" 'pi.on("input"' "Pi calm extension still intercepts semantic input"
   assert_not_contains "$text" 'sendMessage' "Pi calm extension still replaces user-role input with custom context"
@@ -178,6 +252,7 @@ test_home_resolution() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$TOOL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-tool-layout.ts"
+  cp "$NONCONVERSATION_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-nonconversation-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
@@ -298,6 +373,7 @@ test_pi_compat_degraded_adapter() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$TOOL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-tool-layout.ts"
+  cp "$NONCONVERSATION_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-nonconversation-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
@@ -414,6 +490,7 @@ test_pi_compat_missing_adapter_exports() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$TOOL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-tool-layout.ts"
+  cp "$NONCONVERSATION_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-nonconversation-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
@@ -429,12 +506,21 @@ test_pi_compat_missing_adapter_exports() {
 const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts");
 const operational = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
 const tool = await import("./.pi/extensions/lib/fm-calm-tool-layout.ts");
+const rows = await import("./.pi/extensions/lib/fm-calm-nonconversation-layout.ts");
 
 for (const [name, install, expected] of [
   ["collapsed-thinking", assistant.installCalmAssistantLayout, "AssistantMessageComponent"],
   ["tool-row", tool.installCalmToolLayout, "ToolExecutionComponent"],
   ["tool-error-turn", tool.installCalmToolErrorTurnBoundary, "AssistantMessageComponent"],
   ["operational-user-row", operational.installCalmOperationalUserLayout, "InteractiveMode"],
+  ["user-bash-row", rows.installCalmUserBashLayout, "BashExecutionComponent"],
+  ["skill-invocation-row", rows.installCalmSkillInvocationLayout, "SkillInvocationMessageComponent"],
+  ["compaction-summary-row", rows.installCalmCompactionSummaryLayout, "CompactionSummaryMessageComponent"],
+  ["branch-summary-row", rows.installCalmBranchSummaryLayout, "BranchSummaryMessageComponent"],
+  ["custom-message-row", rows.installCalmCustomMessageLayout, "CustomMessageComponent"],
+  ["custom-entry-row", rows.installCalmCustomEntryLayout, "InteractiveMode"],
+  ["cache-notice-row", rows.installCalmCacheNoticeLayout, "InteractiveMode"],
+  ["hidden-row-spacing", rows.installCalmLeadingSpacerLayout, "Spacer"],
 ]) {
   let reason;
   try {
@@ -461,6 +547,7 @@ JS
       "$variant/node_modules/@earendil-works/pi-coding-agent" \
       "$variant/node_modules/@earendil-works/pi-tui"
     cp "$TOOL_LAYOUT" "$variant/.pi/extensions/lib/fm-calm-tool-layout.ts"
+    cp "$NONCONVERSATION_LAYOUT" "$variant/.pi/extensions/lib/fm-calm-nonconversation-layout.ts"
     cp "$VISIBILITY" "$variant/.pi/extensions/lib/fm-calm-visibility.ts"
     printf '%s\n' '{"type":"module"}' >"$variant/package.json"
     printf '%s\n' \
@@ -533,6 +620,7 @@ test_adapter_reload_turn_scope() {
   fixture="$TMP_ROOT/adapter-reload"
   mkdir -p "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$TOOL_LAYOUT" "$fixture/lib/fm-calm-tool-layout.ts"
+  cp "$NONCONVERSATION_LAYOUT" "$fixture/lib/fm-calm-nonconversation-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
@@ -684,6 +772,7 @@ test_rendering_and_session_lifecycle() {
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$TOOL_LAYOUT" "$fixture/lib/fm-calm-tool-layout.ts"
+  cp "$NONCONVERSATION_LAYOUT" "$fixture/lib/fm-calm-nonconversation-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
@@ -1610,6 +1699,8 @@ test_operational_followup_turn_e2e() {
   fi
   version=$(pi --version 2>/dev/null || true)
   record_pi_version_evidence "$version" "Pi operational follow-up E2E"
+  init_pi_tmux_server \
+    || fail "Pi operational follow-up E2E could not prepare a tmux server that keeps exited Pi panes"
 
   project="$TMP_ROOT/followup-project"
   home="$TMP_ROOT/followup-home"
@@ -1621,6 +1712,7 @@ test_operational_followup_turn_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$TOOL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-tool-layout.ts"
+  cp "$NONCONVERSATION_LAYOUT" "$project/.pi/extensions/lib/fm-calm-nonconversation-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
@@ -1910,7 +2002,7 @@ JS
     fi
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-    sleep 0.2
+    retire_pi_session "Pi follow-up $label case"
   }
 
   replay_exact_case() {
@@ -1948,7 +2040,7 @@ if (users.length !== 1 || responses.length !== 1) {
 JS
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-    sleep 0.2
+    retire_pi_session "Pi exact watcher replay"
   }
 
   run_followup_case loaded-on on loaded_on 1
@@ -1968,13 +2060,15 @@ JS
 
 test_hidden_block_geometry_e2e() {
   local project home config sessions session_file snapshot expanded_snapshot calm_off_snapshot restarted_snapshot
-  local version skill_line final_line gap i
+  local version prompt_line final_line gap i
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi Calm hidden-block geometry E2E"
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
   record_pi_version_evidence "$version" "Pi Calm hidden-block geometry E2E"
+  init_pi_tmux_server \
+    || fail "Pi Calm hidden-block geometry E2E could not prepare a tmux server that keeps exited Pi panes"
 
   project="$TMP_ROOT/geometry-project"
   home="$TMP_ROOT/geometry-home"
@@ -1995,6 +2089,7 @@ test_hidden_block_geometry_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$TOOL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-tool-layout.ts"
+  cp "$NONCONVERSATION_LAYOUT" "$project/.pi/extensions/lib/fm-calm-nonconversation-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' on >"$home/config/calm"
@@ -2108,13 +2203,13 @@ TS
 
   assert_geometry_gap() {
     local file=$1 label=$2
-    skill_line=$(grep -n -m1 '\[skill\] ahoy' "$file" | cut -d: -f1)
+    prompt_line=$(grep -n -m1 'CALM_GEOMETRY_PROMPT' "$file" | cut -d: -f1)
     final_line=$(grep -n -m1 'CALM_GEOMETRY_FINAL' "$file" | cut -d: -f1)
-    [ -n "$skill_line" ] && [ -n "$final_line" ] \
-      || fail "$label did not render the collapsed skill row and final assistant response"
-    gap=$((final_line - skill_line - 1))
+    [ -n "$prompt_line" ] && [ -n "$final_line" ] \
+      || fail "$label did not render the genuine captain prompt and final assistant response"
+    gap=$((final_line - prompt_line - 1))
     [ "$gap" -eq 2 ] \
-      || fail "$label left $gap rows between the collapsed skill row and final response instead of the two standard visible-row separators"
+      || fail "$label left $gap rows between the captain prompt and final response instead of the two standard visible-row separators"
   }
 
   start_geometry_pi "--session-dir '../geometry-sessions'"
@@ -2123,7 +2218,7 @@ TS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm-geometry-e2e'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   sleep 0.1
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/skill:ahoy'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/skill:ahoy CALM_GEOMETRY_PROMPT'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   wait_for_geometry_text "$snapshot" "visible row two" \
     || fail "Pi Calm hidden-block geometry E2E did not complete the /skill:ahoy turn"
@@ -2134,7 +2229,8 @@ TS
     sleep 0.05
     i=$((i + 1))
   done
-  assert_contains "$(cat "$snapshot")" "[skill] ahoy" "Calm hid the collapsed skill header"
+  assert_not_contains "$(cat "$snapshot")" "[skill] ahoy" "Calm left the skill invocation block visible"
+  assert_contains "$(cat "$snapshot")" "CALM_GEOMETRY_PROMPT" "Calm hid the captain message carried by the skill invocation"
   assert_contains "$(cat "$snapshot")" "CALM_GEOMETRY_FINAL" "Calm hid the final assistant response"
   assert_not_contains "$(cat "$snapshot")" "Thinking..." "Calm left a collapsed thinking label visible"
   assert_not_contains "$(cat "$snapshot")" "probe-one.txt" "Calm left a tool-call row visible"
@@ -2162,6 +2258,7 @@ TS
   capture_geometry_viewport "$expanded_snapshot"
   assert_not_contains "$(cat "$expanded_snapshot")" "CALM_GEOMETRY_THINKING_ONE" "thinking expansion exposed internal reasoning under Calm"
   assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" "thinking expansion restored Calm-hidden tool rows"
+  assert_not_contains "$(cat "$expanded_snapshot")" "[skill] ahoy" "thinking expansion restored the Calm-hidden skill invocation block"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
   i=0
   while [ "$i" -lt 120 ]; do
@@ -2178,12 +2275,15 @@ TS
   wait_for_geometry_text "$calm_off_snapshot" "probe-one.txt" \
     || fail "turning Calm off did not restore the tool-call row"
   assert_contains "$(cat "$calm_off_snapshot")" "Thinking..." "turning Calm off did not restore collapsed thinking labels"
+  assert_contains "$(cat "$calm_off_snapshot")" "[skill] ahoy" "turning Calm off did not restore the skill invocation block"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   i=0
   while [ "$i" -lt 120 ]; do
     capture_geometry_viewport "$snapshot"
-    if ! grep -Fq "probe-one.txt" "$snapshot" && ! grep -Fq "Thinking..." "$snapshot"; then
+    if ! grep -Fq "probe-one.txt" "$snapshot" &&
+      ! grep -Fq "[skill] ahoy" "$snapshot" &&
+      ! grep -Fq "Thinking..." "$snapshot"; then
       break
     fi
     sleep 0.05
@@ -2193,17 +2293,160 @@ TS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  sleep 0.2
+  retire_pi_session "Pi Calm hidden-block geometry E2E"
   start_geometry_pi "--session '../geometry-sessions/${session_file#"$sessions/"}'"
   wait_for_geometry_text "$restarted_snapshot" "visible row two" \
     || fail "Pi did not restore the Calm hidden-block geometry session"
   assert_not_contains "$(cat "$restarted_snapshot")" "Thinking..." "restart restored a collapsed thinking label under Calm"
   assert_not_contains "$(cat "$restarted_snapshot")" "probe-one.txt" "restart restored a tool-call row under Calm"
+  assert_not_contains "$(cat "$restarted_snapshot")" "[skill] ahoy" "restart restored the skill invocation block under Calm"
   assert_geometry_gap "$restarted_snapshot" "restarted native Calm transcript"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  sleep 0.2
-  pass "Pi Calm native /skill:ahoy geometry keeps every thinking and tool block at zero height while preserving history, restart, and Calm-off rendering"
+  retire_pi_session "restarted Pi Calm hidden-block geometry E2E"
+  pass "Pi Calm native /skill:ahoy geometry keeps every thinking, tool, and skill-invocation block at zero height while preserving the captain's own message, history, restart, and Calm-off rendering"
+}
+
+test_nonconversation_rows_e2e() {
+  local project home config session_file version now snapshot restored_snapshot rehidden_snapshot i
+  local marker prompt_line reply_line gap
+  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: pi or tmux not found for Pi Calm non-conversation row E2E"
+    return 0
+  fi
+  version=$(pi --version 2>/dev/null || true)
+  record_pi_version_evidence "$version" "Pi Calm non-conversation row E2E"
+  init_pi_tmux_server \
+    || fail "Pi Calm non-conversation row E2E could not prepare a tmux server that keeps exited Pi panes"
+
+  project="$TMP_ROOT/rows-project"
+  home="$TMP_ROOT/rows-home"
+  config="$TMP_ROOT/rows-config"
+  session_file="$TMP_ROOT/rows-session.jsonl"
+  snapshot="$TMP_ROOT/rows-calm-on.txt"
+  restored_snapshot="$TMP_ROOT/rows-calm-off.txt"
+  rehidden_snapshot="$TMP_ROOT/rows-calm-rehidden.txt"
+  mkdir -p "$project/.pi/extensions/lib" "$home/config" "$config"
+  fm_git_init_commit "$project"
+  cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$TOOL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-tool-layout.ts"
+  cp "$NONCONVERSATION_LAYOUT" "$project/.pi/extensions/lib/fm-calm-nonconversation-layout.ts"
+  cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  printf '%s\n' on >"$home/config/calm"
+  printf '%s\n' '{"terminal":{"clearOnShrink":false}}' >"$config/settings.json"
+  cat >"$project/rows-probe.ts" <<'TS'
+import {
+  getMarkdownTheme,
+  type ExtensionAPI,
+  UserMessageComponent,
+} from "@earendil-works/pi-coding-agent";
+
+export default function (pi: ExtensionAPI): void {
+  pi.registerEntryRenderer<{ text?: string }>(
+    "calm-unrelated-entry-e2e",
+    (entry) => new UserMessageComponent(entry.data?.text ?? "", getMarkdownTheme()),
+  );
+}
+TS
+  now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+  cat >"$session_file" <<JSON
+{"type":"session","version":3,"id":"22222222-2222-4222-8222-222222222222","timestamp":"$now","cwd":"$project"}
+{"type":"message","id":"b0000001","parentId":null,"timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"CALM_ROWS_PROMPT"}],"timestamp":1}}
+{"type":"message","id":"b0000002","parentId":"b0000001","timestamp":"$now","message":{"role":"bashExecution","command":"printf CALM_ROWS_BASH_COMMAND","output":"CALM_ROWS_BASH_OUTPUT\n","exitCode":0,"cancelled":false,"truncated":false,"timestamp":2}}
+{"type":"custom_message","id":"b0000003","parentId":"b0000002","timestamp":"$now","customType":"calm-unrelated-message-e2e","content":"CALM_ROWS_CUSTOM_MESSAGE","display":true,"details":{}}
+{"type":"custom","id":"b0000004","parentId":"b0000003","timestamp":"$now","customType":"calm-unrelated-entry-e2e","data":{"text":"CALM_ROWS_CUSTOM_ENTRY"}}
+{"type":"branch_summary","id":"b0000005","parentId":"b0000004","timestamp":"$now","fromId":"b0000001","summary":"CALM_ROWS_BRANCH_SUMMARY"}
+{"type":"compaction","id":"b0000006","parentId":"b0000005","timestamp":"$now","summary":"CALM_ROWS_COMPACTION_SUMMARY","firstKeptEntryId":"b0000001","tokensBefore":1234}
+{"type":"message","id":"b0000007","parentId":"b0000006","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"CALM_ROWS_REPLY"}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":7}}
+JSON
+
+  capture_rows_viewport() {
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$1" 2>/dev/null
+  }
+
+  wait_for_rows_text() {
+    local file=$1 text=$2 attempt=0
+    while [ "$attempt" -lt 200 ]; do
+      capture_rows_viewport "$file" || true
+      grep -Fq "$text" "$file" 2>/dev/null && return 0
+      sleep 0.05
+      attempt=$((attempt + 1))
+    done
+    return 1
+  }
+
+  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -c "$project" -x 120 -y 90 \
+    "env FM_HOME='../rows-home' PI_CODING_AGENT_DIR='../rows-config' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./rows-probe.ts --session '../rows-session.jsonl'"
+  wait_for_rows_text "$snapshot" "CALM_ROWS_REPLY" \
+    || fail "Pi Calm non-conversation row E2E did not restore the session transcript"
+  assert_contains "$(cat "$snapshot")" "CALM_ROWS_PROMPT" "Calm hid the genuine captain prompt"
+  for marker in \
+    CALM_ROWS_BASH_COMMAND \
+    CALM_ROWS_BASH_OUTPUT \
+    CALM_ROWS_CUSTOM_MESSAGE \
+    CALM_ROWS_CUSTOM_ENTRY \
+    "[branch]" \
+    "[compaction]"
+  do
+    assert_not_contains "$(cat "$snapshot")" "$marker" "Calm rendered the non-conversation row $marker"
+  done
+  prompt_line=$(grep -n -m1 'CALM_ROWS_PROMPT' "$snapshot" | cut -d: -f1)
+  reply_line=$(grep -n -m1 'CALM_ROWS_REPLY' "$snapshot" | cut -d: -f1)
+  [ -n "$prompt_line" ] && [ -n "$reply_line" ] \
+    || fail "Pi Calm non-conversation row E2E lost its conversation anchors"
+  gap=$((reply_line - prompt_line - 1))
+  [ "$gap" -eq 2 ] \
+    || fail "Calm left $gap rows between the captain prompt and reply instead of the two standard visible-row separators"
+
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  wait_for_rows_text "$restored_snapshot" "CALM_ROWS_BASH_OUTPUT" \
+    || fail "turning Calm off did not restore the user bash row"
+  for marker in \
+    CALM_ROWS_BASH_COMMAND \
+    CALM_ROWS_CUSTOM_MESSAGE \
+    CALM_ROWS_CUSTOM_ENTRY \
+    "[branch]" \
+    "[compaction]"
+  do
+    assert_contains "$(cat "$restored_snapshot")" "$marker" "turning Calm off did not restore the non-conversation row $marker"
+  done
+  [ "$(cat "$home/config/calm")" = off ] || fail "/calm did not persist the inactive choice"
+
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  i=0
+  while [ "$i" -lt 120 ]; do
+    capture_rows_viewport "$rehidden_snapshot" || true
+    if ! grep -Fq "CALM_ROWS_BASH_OUTPUT" "$rehidden_snapshot" &&
+      ! grep -Fq "CALM_ROWS_CUSTOM_ENTRY" "$rehidden_snapshot" &&
+      ! grep -Fq "/calm" "$rehidden_snapshot"; then
+      break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  for marker in \
+    CALM_ROWS_BASH_COMMAND \
+    CALM_ROWS_BASH_OUTPUT \
+    CALM_ROWS_CUSTOM_MESSAGE \
+    CALM_ROWS_CUSTOM_ENTRY \
+    "[branch]" \
+    "[compaction]"
+  do
+    assert_not_contains "$(cat "$rehidden_snapshot")" "$marker" "re-enabling Calm did not redraw the loaded non-conversation row $marker at zero height"
+  done
+  assert_contains "$(cat "$rehidden_snapshot")" "CALM_ROWS_PROMPT" "re-enabling Calm removed the genuine captain prompt"
+  assert_contains "$(cat "$rehidden_snapshot")" "CALM_ROWS_REPLY" "re-enabling Calm removed the genuine assistant reply"
+  [ "$(cat "$home/config/calm")" = on ] || fail "the second /calm did not persist the active choice"
+
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  retire_pi_session "Pi Calm non-conversation row E2E"
+  pass "Pi Calm renders user bash, unrelated custom message and entry, and compaction and branch summary rows at zero height, restores them Calm-off, and redraws loaded rows on each toggle"
 }
 
 test_interactive_terminal_e2e() {
@@ -2214,6 +2457,8 @@ test_interactive_terminal_e2e() {
   fi
   version=$(pi --version 2>/dev/null || true)
   record_pi_version_evidence "$version" "Pi calm interactive E2E"
+  init_pi_tmux_server \
+    || fail "Pi calm interactive E2E could not prepare a tmux server that keeps exited Pi panes"
 
   project="$TMP_ROOT/e2e-project"
   config="$TMP_ROOT/e2e-config"
@@ -2239,6 +2484,7 @@ test_interactive_terminal_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$TOOL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-tool-layout.ts"
+  cp "$NONCONVERSATION_LAYOUT" "$project/.pi/extensions/lib/fm-calm-nonconversation-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
@@ -2668,7 +2914,7 @@ JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  sleep 0.2
+  retire_pi_session "Pi calm interactive E2E"
 
   tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -c "$project" -x 180 -y 44 \
     "env FM_HOME='../e2e-home' PI_CODING_AGENT_DIR='../e2e-config' FM_OPERATIONAL_INPUT_SCRIPT='../fm-operational-input.sh' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '../calm-session.jsonl'"
@@ -2698,6 +2944,7 @@ JS
   [ "$(cat "$home/config/calm")" = off ] || fail "/calm after restart did not persist the inactive choice"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  retire_pi_session "restarted Pi calm interactive E2E"
   pass "Pi calm native E2E hides working activity, keeps captain turns visible, hides exact operational user rows without changing persistence, restores them Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
@@ -2710,4 +2957,5 @@ test_adapter_reload_turn_scope
 test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
+test_nonconversation_rows_e2e
 test_interactive_terminal_e2e

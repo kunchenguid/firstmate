@@ -7,6 +7,8 @@ An absent or unrecognized preference remains off, while a home with `config/calm
 While Calm is active, Pi's transcript shows genuine captain prompts and normal assistant replies.
 It removes thinking blocks, tool call and result rows, tool images and shells, Pi's working row, canonically classified Firstmate operational user rows, and legacy Calm operational presentation entries.
 The hidden operational kinds are session start, watcher, turn-end guard, away supervisor, from-firstmate routing, and launch briefs.
+It also removes the remaining non-conversation transcript rows: `!bash` execution blocks, skill-invocation blocks, compaction and branch summaries, prompt-cache miss notices, and custom messages and entries from unrelated extensions.
+A skill invocation keeps the captain's own message that accompanied it; only the expanded skill block is removed.
 Calm adds no enable banner, footer chip, replacement status, or other presentation row.
 Interactive dialogs and explicit Pi errors remain visible so the captain can respond.
 A tool row whose assistant turn stopped on an abort or a provider failure keeps only that plain error text, so the failures that need a captain response stay visible without exposing routine tool call, result, image, or shell content.
@@ -25,7 +27,7 @@ RPC, JSON, print, and untrusted contexts keep stock presentation even when the h
 
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
 Pi 0.81.1 through 0.82.1 are current empirical evidence.
-The assistant-thinking, complete-tool-row, tool-error-turn, and operational-user-row adapters probe the exact exported Pi methods they patch, including the tool-row result seam and column helpers behind the actionable-error surface.
+The assistant-thinking, complete-tool-row, tool-error-turn, operational-user-row, and non-conversation row adapters probe the exact exported Pi methods they patch, including the tool-row result seam and column helpers behind the actionable-error surface.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter while `/calm`, the remaining adapters, and unrelated Pi extensions continue to load.
 The seven built-in tool renderers remain independently wrapped as a supported-API fallback for text tool rows if the complete-tool-row adapter is unavailable.
 
