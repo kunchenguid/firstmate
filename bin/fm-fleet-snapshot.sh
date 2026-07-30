@@ -11,15 +11,23 @@
 #   generated: UTC observation time for this fresh command execution.
 #   fm_home: resolved operational home.
 #   roots: resolved root/config/data/state/projects directories.
-#   backlog: {path,present,records[]} where records are ordered as written in
-#     data/backlog.md and cover In flight, Queued, and Done.
+#   backlog: {path,present,records[],hidden_backlogged_count,hidden_backlogged_hint}
+#     where records are ordered as written in data/backlog.md and cover
+#     In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
 #     Structured rows preserve captain-hold metadata such as hold_kind and
 #     hold_reason when tasks-axi emits it. They also carry normalized current_role,
-#     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
-#     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
-#     resolves only when its structured record is Done, and missing ids stay open.
+#     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids,
+#     captain_actionable, and backlogged fields. Repeated blocker tokens remain
+#     ordered; a blocker resolves only when its structured record is Done, and
+#     missing ids stay open.
+#     A structured hold whose reason starts with "backlog:" is the hidden
+#     backlog category (fm-tasks-axi-lib.sh): by default those rows are omitted
+#     from records, counted in hidden_backlogged_count, and summarized in
+#     hidden_backlogged_hint. Pass --include-backlog to keep them in records
+#     (still tagged backlogged:true). Explicit human listing is
+#     bin/fm-backlog-list.sh --backlog.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
@@ -134,14 +142,23 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
 usage() {
   cat <<'EOF'
-usage: fm-fleet-snapshot.sh --json
-       fm-fleet-snapshot.sh --secondmate-home-summary
+usage: fm-fleet-snapshot.sh --json [--include-backlog]
+       fm-fleet-snapshot.sh --secondmate-home-summary [--include-backlog]
 
 Print a read-only structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
+
+--include-backlog keeps structured rows whose hold reason starts with
+"backlog:" in backlog.records (they remain tagged backlogged:true).
+Without that flag those rows are render-hidden from records and counted in
+backlog.hidden_backlogged_count with a list hint; use bin/fm-backlog-list.sh
+--backlog for the human status view.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -165,12 +182,18 @@ EOF
 }
 
 OUTPUT_MODE=json
-case "${1:---json}" in
-  --json) ;;
-  --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
+INCLUDE_BACKLOG=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json) OUTPUT_MODE=json; shift ;;
+    --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary; shift ;;
+    --include-backlog) INCLUDE_BACKLOG=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+# Default when invoked with no args matches the historical --json contract.
+[ $# -eq 0 ] || true
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
@@ -249,13 +272,20 @@ first_pr_url_in_file() {  # <file>
 
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG}
+  local include_backlog_json=false
+  local hint_cmd='bin/fm-backlog-list.sh --backlog'
+  # jq treats numeric 0 as truthy; pass a real JSON boolean.
+  if [ "${INCLUDE_BACKLOG:-0}" -eq 1 ]; then
+    include_backlog_json=true
+  fi
   if [ ! -f "$backlog" ]; then
-    jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
+    jq -n --arg path "$backlog" \
+      '{path:$path,present:false,records:[],hidden_backlogged_count:0,hidden_backlogged_hint:null}'
     return 0
   fi
 
   # shellcheck disable=SC2094
-  jq -Rn --arg path "$backlog" '
+  jq -Rn --arg path "$backlog" --argjson include_backlog "$include_backlog_json" --arg hint_cmd "$hint_cmd" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def section_state:
       if . == "In flight" then "in_flight"
@@ -382,6 +412,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
               | select($resolved_ids[$blocker] != true)
               | $blocker
             ]
+          | .backlogged =
+              (.hold_reason != null and (.hold_reason | startswith("backlog:")))
           | .current_role =
               (if .state == "in_flight" and .hold_reason != null and .hold_kind != null then "held"
                elif .state == "in_flight" and .kind == "program" then "program"
@@ -391,8 +423,20 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .requires_child_metadata = (.current_role == "worker")
           | .captain_actionable =
               (.state == "queued" and .kind == "captain" and .hold_kind == "captain"
-               and .hold_reason != null and (.unresolved_blocker_ids | length) == 0)
-        else . end)
+               and .hold_reason != null and (.unresolved_blocker_ids | length) == 0
+               and (.backlogged | not))
+        else
+          .backlogged = false
+        end)
+    | .hidden_backlogged_count = ([.records[] | select(.backlogged == true)] | length)
+    | .hidden_backlogged_hint =
+        (if .hidden_backlogged_count > 0 and ($include_backlog | not) then
+           "\(.hidden_backlogged_count) backlogged hidden - use \($hint_cmd) to list"
+         else null end)
+    | .records |=
+        (if $include_backlog then .
+         else map(select(.backlogged != true))
+         end)
     | del(.section,.order)
   ' < "$backlog"
 }

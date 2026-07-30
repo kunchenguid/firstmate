@@ -80,6 +80,9 @@
 # this script prints only backlog section headings and item title lines, so
 # title-line hold and blocked-by metadata remain visible while indented bodies
 # stay out of the startup digest.
+# Hold reasons that start with "backlog:" are the hidden backlog category
+# (predicate in fm-tasks-axi-lib.sh): they are omitted from this routine digest
+# with a one-line count hint; list them via bin/fm-backlog-list.sh --backlog.
 # Full bodies are targeted follow-up only: `tasks-axi show <id> --full` when
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
@@ -139,6 +142,68 @@ print_backlog_pointer() {
   printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
 }
 
+# Drop tasks-axi list TOON rows whose id is backlogged; rewrite count/header.
+# Shared predicate/ids come from fm-tasks-axi-lib.sh so the prefix is not forked.
+print_backlog_tasks_axi_filtered() {
+  local path=$1 raw=$2
+  local idfile hidden
+  hidden=$(fm_backlogged_count_from_file "$path")
+  if [ "${hidden:-0}" -eq 0 ]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  idfile=$(mktemp "${TMPDIR:-/tmp}/fm-backlog-hide.XXXXXX")
+  fm_backlogged_ids_from_file "$path" > "$idfile"
+  printf '%s\n' "$raw" | awk -v idfile="$idfile" '
+    BEGIN {
+      while ((getline line < idfile) > 0) {
+        gsub(/[[:space:]]+$/, "", line)
+        if (line != "") hide[line] = 1
+      }
+      close(idfile)
+      in_tasks = 0
+      shown = 0
+      flushed = 0
+    }
+    function flush_tasks(   h, i) {
+      if (flushed || header == "") return
+      h = header
+      sub(/__N__/, shown + 0, h)
+      print "count: " (shown + 0)
+      print h
+      for (i = 0; i < shown; i++) print body[i]
+      flushed = 1
+      header = ""
+    }
+    /^count:[[:space:]]*[0-9]+/ { next }
+    /^tasks\[[0-9]+\]/ {
+      header = $0
+      sub(/^tasks\[[0-9]+\]/, "tasks[__N__]", header)
+      in_tasks = 1
+      next
+    }
+    in_tasks && /^[[:space:]]+[^[:space:]]/ {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      id = line
+      sub(/,.*/, "", id)
+      if (hide[id]) next
+      body[shown++] = $0
+      next
+    }
+    {
+      if (in_tasks) {
+        flush_tasks()
+        in_tasks = 0
+      }
+      print
+    }
+    END { flush_tasks() }
+  '
+  rm -f "$idfile"
+  fm_backlog_hidden_hint "$hidden" "bin/fm-backlog-list.sh --backlog"
+}
+
 print_backlog_manual_compact() {
   local path=$1 reason=$2
   printf 'compact backlog listing (%s; max %s item(s); indented task bodies omitted)\n' "$reason" "$BACKLOG_LIMIT"
@@ -152,14 +217,28 @@ print_backlog_manual_compact() {
       if (heading == "Done") return "done"
       return ""
     }
+    function is_backlogged(line) {
+      return line ~ /\(hold:[[:space:]]*backlog:/
+    }
     /^##[[:space:]]+/ {
       state = state_for_heading($0)
-      if (state != "") print $0
+      if (state != "") {
+        pending_heading = $0
+        heading_pending = 1
+      }
       next
     }
     state != "" && /^[-*][[:space:]]+/ {
+      if (is_backlogged($0)) {
+        hidden++
+        next
+      }
       total++
       if (shown < max) {
+        if (heading_pending) {
+          print pending_heading
+          heading_pending = 0
+        }
         print $0
         shown++
       }
@@ -167,12 +246,19 @@ print_backlog_manual_compact() {
     }
     END {
       if (total == 0) {
-        print "(no backlog item title lines found)"
+        if (hidden > 0) {
+          print "(no non-backlogged item title lines found)"
+        } else {
+          print "(no backlog item title lines found)"
+        }
       } else {
         printf "(shown %d of %d backlog item title line(s))\n", shown, total
         if (total > shown) {
           printf "(truncated %d item(s); increase FM_SESSION_START_BACKLOG_LIMIT for a larger startup listing)\n", total - shown
         }
+      }
+      if (hidden > 0) {
+        printf "%d backlogged hidden - use bin/fm-backlog-list.sh --backlog to list\n", hidden
       }
     }
   ' "$path"
@@ -184,7 +270,7 @@ print_backlog_tasks_axi_compact() {
   out=$(tasks-axi list --file "$path" --limit "$BACKLOG_LIMIT" --fields blocked_by,hold_kind,hold_reason 2>&1)
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    printf '%s\n' "$out"
+    print_backlog_tasks_axi_filtered "$path" "$out"
   else
     printf 'tasks-axi compact listing failed; falling back to title-line rendering.\n'
     printf '%s\n' "$out"

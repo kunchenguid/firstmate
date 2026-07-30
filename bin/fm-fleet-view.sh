@@ -10,23 +10,40 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'EOF'
-usage: fm-fleet-view.sh [--json]
+usage: fm-fleet-view.sh [--json] [--include-backlog]
 
 Render a human fleet view from fm-fleet-snapshot.sh.
 Use --json to print the underlying snapshot.
+Use --include-backlog to keep hidden backlog: holds in the snapshot/view
+(same flag as fm-fleet-snapshot.sh). Default routine view omits them and
+prints the hidden-count hint when any were filtered.
 EOF
 }
 
-case "${1:-}" in
-  -h|--help) usage; exit 0 ;;
-  --json) "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json; exit $? ;;
-  "") ;;
-  *) usage >&2; exit 2 ;;
-esac
+JSON_ONLY=0
+INCLUDE_BACKLOG=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --json) JSON_ONLY=1; shift ;;
+    --include-backlog) INCLUDE_BACKLOG=1; shift ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 1; }
 
-SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
+SNAP_ARGS=(--json)
+if [ "$INCLUDE_BACKLOG" -eq 1 ]; then
+  SNAP_ARGS+=(--include-backlog)
+fi
+
+if [ "$JSON_ONLY" -eq 1 ]; then
+  "$SCRIPT_DIR/fm-fleet-snapshot.sh" "${SNAP_ARGS[@]}"
+  exit $?
+fi
+
+SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" "${SNAP_ARGS[@]}") || exit $?
 
 printf '%s\n' "$SNAPSHOT" | jq -r '
   def dash($v): if $v == null or $v == "" then "-" else $v end;
@@ -81,6 +98,10 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     "| --- | --- | --- | --- | --- | --- |",
     (.backlog.records[] | select(.state == "queued") | backlog_row(.))
    end),
+  (if (.backlog.hidden_backlogged_hint // null) != null then
+    "",
+    .backlog.hidden_backlogged_hint
+   else empty end),
   "",
   "## Done",
   (if ([.backlog.records[]? | select(.state == "done")] | length) == 0 then

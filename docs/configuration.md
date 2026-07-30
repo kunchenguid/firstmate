@@ -36,6 +36,12 @@ This preference is local to each Firstmate home and is not part of secondmate in
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
 When the default backend is selected and compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations.
 Secondmate handoffs are separate and unconditional: `fm-backlog-handoff.sh` keeps only its own fleet-level validation and always delegates the item move to `tasks-axi mv`, the single owner of the backlog format.
+A hold reason that starts with `backlog:` is the hidden backlog triage category.
+Routine session-start, fleet snapshot, fleet view, and bearings surfaces omit those items and print a count hint.
+`bin/fm-backlog-list.sh --backlog` lists only them.
+Pass `--include-backlog` on the snapshot or fleet view to keep them in the structured records.
+The predicate and hint text live in `bin/fm-tasks-axi-lib.sh`.
+Hold with `tasks-axi hold <id> --reason "backlog: <note>"` and revive with `tasks-axi unhold <id>`.
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
 Handoff item bodies must use at least two leading spaces, and the helper refuses a selected item with a single-space or tab-indented continuation rather than risk orphaning it.
 Because bootstrap requires `tasks-axi` on `PATH` on every profile, that delegation works fleet-wide, and the `config/backlog-backend=manual` knob governs firstmate's own hand-editing of its backlog, not this validated helper.
