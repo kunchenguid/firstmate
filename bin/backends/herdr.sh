@@ -457,13 +457,13 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
 }
 
-# Resolve the one verified running named-session socket path as an absolute
-# string. Requires JSON string type and non-empty length (jq -r is never used:
-# it would turn JSON null into the literal string "null"). Canonicalizes the
-# parent directory when that directory exists so symlink parents such as /tmp
-# -> /private/tmp cannot yield two lock identities for the same socket.
+# Resolve the one verified running named-session socket path as the exact
+# absolute string advertised by Herdr. Requires JSON string type and non-empty
+# length (jq -r is never used: it would turn JSON null into the literal string
+# "null"). The lexical path is transport authority because Unix socket clients
+# can reject a physical-path rewrite of Herdr's advertised symlinked path.
 fm_backend_herdr_presentation_session_socket_path() {  # <session>
-  local session=$1 sessions socket sock_dir sock_base
+  local session=$1 sessions socket
   [ -n "$session" ] || return 1
   sessions=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || return 1
   socket=$(printf '%s' "$sessions" | jq -er --arg want "$session" '
@@ -479,24 +479,28 @@ fm_backend_herdr_presentation_session_socket_path() {  # <session>
     /*) ;;
     *) return 1 ;;
   esac
-  sock_dir=$(dirname "$socket")
-  sock_base=$(basename "$socket")
-  [ -n "$sock_dir" ] && [ -n "$sock_base" ] || return 1
-  if [ -d "$sock_dir" ]; then
-    sock_dir=$(cd "$sock_dir" 2>/dev/null && pwd -P) || return 1
-    socket="$sock_dir/$sock_base"
-  fi
   printf '%s' "$socket"
 }
 
 fm_backend_herdr_presentation_session_lock_path() {  # <session>
-  local session=$1 socket key dir hash
+  local session=$1 socket lock_socket sock_dir sock_base key dir hash
   [ -n "$session" ] || return 1
   socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  lock_socket=$socket
+  sock_dir=$(dirname "$socket")
+  sock_base=$(basename "$socket")
+  [ -n "$sock_dir" ] && [ -n "$sock_base" ] || return 1
+  # Canonicalize only the lock identity so aliases such as /tmp and
+  # /private/tmp cannot create two locks for the same socket. The mover keeps
+  # the exact server-advertised path returned above.
+  if [ -d "$sock_dir" ]; then
+    sock_dir=$(cd "$sock_dir" 2>/dev/null && pwd -P) || return 1
+    lock_socket="$sock_dir/$sock_base"
+  fi
   if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s\0%s' "$session" "$socket" | shasum -a 256 2>/dev/null | awk '{print $1}')
+    hash=$(printf '%s\0%s' "$session" "$lock_socket" | shasum -a 256 2>/dev/null | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s\0%s' "$session" "$socket" | sha256sum 2>/dev/null | awk '{print $1}')
+    hash=$(printf '%s\0%s' "$session" "$lock_socket" | sha256sum 2>/dev/null | awk '{print $1}')
   else
     return 1
   fi
@@ -802,15 +806,31 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
   return 0
 }
 
-# fm_backend_herdr_server_ensure: start the herdr server for <session>
-# headless (no TUI client) if not already running, mirroring tmux's `tmux
-# has-session || tmux new-session -d`. Verified: a bare socket CLI call does
-# NOT auto-start the server, so this must run before any workspace/tab/pane
-# call. Bounded poll for the server to report running.
+# fm_backend_herdr_server_ensure: attach to the already-running <session>, or
+# start it headless only when this process is outside Herdr and can be the
+# server owner. A nested process inherits HERDR_ENV=1 and its owning session
+# identity (HERDR_SESSION for a named session, implicit "default" otherwise).
+# It may use only that exact session and never starts a server after a status
+# miss: starting from a pane can replace the shared socket path while the old
+# UI remains attached to its original process, splitting fleet visibility
+# between two servers. A bare socket CLI call does not auto-start the server,
+# so an outside owner still uses the bounded start-and-poll path below before
+# any workspace/tab/pane call.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i
+  local session=$1 running out i nested_session
+  if [ "${HERDR_ENV:-}" = 1 ]; then
+    nested_session=$(fm_backend_herdr_session)
+    if [ "$session" != "$nested_session" ]; then
+      echo "error: Herdr target session '$session' differs from this pane's owning session '$nested_session' (HERDR_ENV=1); refusing cross-session CLI selection" >&2
+      return 1
+    fi
+  fi
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
+  if [ "${HERDR_ENV:-}" = 1 ]; then
+    echo "error: Herdr session '$session' is not reachable as running from inside Herdr session '$nested_session' (pane ${HERDR_PANE_ID:-unknown}, socket ${HERDR_SOCKET_PATH:-unknown}); refusing to start a competing server. Start or repair the named session from its outer Herdr owner, then retry." >&2
+    return 1
+  fi
   ( fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
@@ -2341,8 +2361,8 @@ fm_backend_herdr_events_capable() {  # <session>
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
   schema=$(herdr api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
-  printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
+  grep -Fq 'events.subscribe' <<< "$schema" || return 1
+  grep -Fq 'pane.agent_status_changed' <<< "$schema" || return 1
   return 0
 }
 

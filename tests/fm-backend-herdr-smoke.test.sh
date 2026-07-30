@@ -9,11 +9,8 @@
 # captain's real herdr usage. Skips cleanly when herdr (or jq) is not
 # installed, so CI/dev machines without herdr are unaffected.
 #
-# Safety (2026-07-02 incident, see tests/herdr-test-safety.sh): cleanup uses
-# ONLY herdr_safe_stop_and_delete, never a bare/ambient `herdr server stop` -
-# that command killed the captain's live default herdr server twice in
-# production because HERDR_SESSION-based targeting (env var OR inline prefix)
-# is not reliably honored once another herdr server is already running.
+# Safety (2026-07-02 incident): bin/fm-herdr-lab.sh owns every lifecycle call,
+# refuses the default session, and verifies the default fleet tripwire.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,18 +21,21 @@ pass() { printf 'ok - %s\n' "$1"; }
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
-# shellcheck source=tests/herdr-test-safety.sh
-. "$ROOT/tests/herdr-test-safety.sh"
-
+LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION="fm-lab-backend-smoke-$$"
 export HERDR_SESSION="$SESSION"
+PRIMARY_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-smoke-primary.XXXXXX")
+FM_HOME="$PRIMARY_SCRATCH/primary-home"
+mkdir -p "$FM_HOME"
+export FM_HOME
 SM_SCRATCH=
 cleanup_all() {
   [ -n "$SM_SCRATCH" ] && rm -rf "$SM_SCRATCH"
-  herdr_safe_stop_and_delete "$SESSION"
+  rm -rf "$PRIMARY_SCRATCH"
+  "$LAB_HELPER" teardown "$SESSION"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+"$LAB_HELPER" provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -89,7 +89,7 @@ TARGET="$SESSION:$PANE_ID"
 # The happy path: a fresh workspace's seeded default tab (label "1") must be
 # pruned once the first real task tab is created alongside it, leaving
 # exactly one clean fm-<id> task tab.
-POST_CREATE_TABS=$(herdr tab list --workspace "${CONTAINER#*:}" --session "$SESSION" 2>&1)
+POST_CREATE_TABS=$("$LAB_HELPER" run "$SESSION" tab list --workspace "${CONTAINER#*:}" 2>&1)
 POST_CREATE_COUNT=$(printf '%s' "$POST_CREATE_TABS" | jq -r '.result.tabs? // [] | length')
 [ "$POST_CREATE_COUNT" = 1 ] || fail "expected exactly 1 tab (the seeded default pruned) after the first real task tab, got $POST_CREATE_COUNT: $POST_CREATE_TABS"
 printf '%s' "$POST_CREATE_TABS" | jq -e --arg t "$SEEDED_TAB_ID" '.result.tabs[] | select(.tab_id == $t)' >/dev/null 2>&1 \
@@ -124,12 +124,12 @@ EOF
 if [ -z "$LIVE_DUP_TAB_ID" ] || [ -z "$LIVE_DUP_PANE_ID" ]; then
   fail "live-duplicate scenario tab creation did not return ids"
 fi
-herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
+"$LAB_HELPER" run "$SESSION" pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle >/dev/null 2>&1 \
   || fail "could not register a live agent on the live-duplicate scenario's pane"
 if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp >/dev/null 2>&1; then
   fail "REGRESSION: create_task should refuse a duplicate label whose pane hosts a genuinely live registered agent (idle counts as live)"
 fi
-herdr pane get "$LIVE_DUP_PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
+"$LAB_HELPER" run "$SESSION" pane get "$LIVE_DUP_PANE_ID" >/dev/null 2>&1 \
   || fail "REGRESSION: the live-duplicate scenario's pane should have survived the refused create_task call untouched"
 pass "real herdr: create_task refuses a same-labeled tab whose pane hosts a genuinely live registered agent (unchanged behavior)"
 fm_backend_herdr_kill "$SESSION:$LIVE_DUP_PANE_ID"
@@ -144,7 +144,7 @@ EOF
 if [ -z "$HUSK_TAB_ID" ] || [ -z "$HUSK_PANE_ID" ]; then
   fail "husk-simulation tab creation did not return ids"
 fi
-herdr agent get "$HUSK_PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
+"$LAB_HELPER" run "$SESSION" agent get "$HUSK_PANE_ID" >/dev/null 2>&1 \
   && fail "husk-simulation setup is wrong: this pane should have NO registered agent yet"
 REPLACED_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$HUSK_LABEL" /tmp) \
   || fail "REGRESSION: create_task should close-and-replace a same-labeled tab whose pane hosts no registered agent, not refuse it"
@@ -155,10 +155,10 @@ if [ -z "$NEW_HUSK_TAB_ID" ] || [ -z "$NEW_HUSK_PANE_ID" ]; then
   fail "husk close-and-replace did not return new tab/pane ids"
 fi
 [ "$NEW_HUSK_PANE_ID" != "$HUSK_PANE_ID" ] || fail "husk close-and-replace returned the SAME pane id - it did not actually replace anything"
-if herdr pane get "$HUSK_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+if "$LAB_HELPER" run "$SESSION" pane get "$HUSK_PANE_ID" >/dev/null 2>&1; then
   fail "REGRESSION: the old husk pane should have been closed by close-and-replace, but it still exists"
 fi
-HUSK_WS_TABS=$(herdr tab list --workspace "${CONTAINER#*:}" --session "$SESSION" 2>&1)
+HUSK_WS_TABS=$("$LAB_HELPER" run "$SESSION" tab list --workspace "${CONTAINER#*:}" 2>&1)
 printf '%s' "$HUSK_WS_TABS" | jq -e --arg t "$NEW_HUSK_TAB_ID" '.result.tabs[] | select(.tab_id == $t)' >/dev/null 2>&1 \
   || fail "REGRESSION: the replacement tab is missing from the workspace's own tab list"
 pass "real herdr: create_task closes and replaces a same-labeled tab whose pane hosts no registered agent (the restored-husk shape), leaving the workspace intact"
@@ -189,7 +189,7 @@ esac
 pass "real herdr: a secondmate-shaped home (.fm-secondmate-home) gets its OWN herdr workspace, distinct from the primary's, in the SAME session"
 
 SM_WSID=${SM_CONTAINER#*:}
-SM_LABEL_REAL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$SM_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
+SM_LABEL_REAL=$("$LAB_HELPER" run "$SESSION" workspace list 2>&1 | jq -r --arg id "$SM_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
 [ "$SM_LABEL_REAL" = "2ndmate-smoketest-sm1" ] || fail "the secondmate workspace's real herdr label should be 2ndmate-smoketest-sm1, got '$SM_LABEL_REAL'"
 pass "real herdr: the secondmate-shaped home's workspace is labeled 2ndmate-<secondmate-id> in herdr itself"
 
@@ -224,20 +224,20 @@ pass "real herdr: list_live stays scoped to each home's own workspace - neither 
 # still resolve, unchanged, after a `session stop` + fresh server restart, all
 # scoped to this suite's OWN isolated $SESSION - never the default session.
 
-fm_herdr_lab_stop "$SESSION" >/dev/null 2>&1 \
+"$LAB_HELPER" stop "$SESSION" >/dev/null 2>&1 \
   || fail "could not stop the isolated session for the restart-stability check"
 sleep 0.5
-fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the stop"
+"$LAB_HELPER" provision "$SESSION" || fail "the isolated session's server did not come back up after the stop"
 
-POST_LIST=$(herdr workspace list --session "$SESSION" 2>&1)
+POST_LIST=$("$LAB_HELPER" run "$SESSION" workspace list 2>&1)
 POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "firstmate") | .workspace_id')
 POST_SM_ID=$(printf '%s' "$POST_LIST" | jq -r --arg l "2ndmate-smoketest-sm1" '.result.workspaces[]? | select(.label == $l) | .workspace_id')
-[ "$POST_PRIMARY_ID" = "${CONTAINER#*:}" ] || fail "the primary workspace id did not survive the restart: before=${CONTAINER#*:} after=$POST_PRIMARY_ID"
+[ "$POST_PRIMARY_ID" = "${CONTAINER#*:}" ] || fail "the primary workspace id did not survive the restart: before=${CONTAINER#*:} after=$POST_PRIMARY_ID list=$POST_LIST"
 [ "$POST_SM_ID" = "$SM_WSID" ] || fail "the secondmate workspace id did not survive the restart: before=$SM_WSID after=$POST_SM_ID"
 
-POST_PANE=$(herdr pane get "$PANE_ID" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.pane_id // empty')
+POST_PANE=$("$LAB_HELPER" run "$SESSION" pane get "$PANE_ID" 2>/dev/null | jq -r '.result.pane.pane_id // empty')
 [ "$POST_PANE" = "$PANE_ID" ] || fail "the primary task's pane id did not survive the restart: before=$PANE_ID after=$POST_PANE"
-POST_SM_PANE=$(herdr pane get "$SM_PANE_ID" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.pane_id // empty')
+POST_SM_PANE=$("$LAB_HELPER" run "$SESSION" pane get "$SM_PANE_ID" 2>/dev/null | jq -r '.result.pane.pane_id // empty')
 [ "$POST_SM_PANE" = "$SM_PANE_ID" ] || fail "the secondmate task's pane id did not survive the restart: before=$SM_PANE_ID after=$POST_SM_PANE"
 pass "real herdr: BOTH workspace ids/labels AND both tasks' pane ids survive a session stop + fresh server restart (multi-workspace shape)"
 
@@ -314,7 +314,7 @@ fi
 # --- kill -----------------------------------------------------------------
 
 fm_backend_herdr_kill "$TARGET"
-if herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+if "$LAB_HELPER" run "$SESSION" pane get "$PANE_ID" >/dev/null 2>&1; then
   fail "kill did not remove the pane"
 fi
 # Best-effort contract: killing an already-gone pane must not error.

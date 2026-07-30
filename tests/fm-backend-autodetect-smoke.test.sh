@@ -51,7 +51,7 @@ export FM_GATE_REFUSE_BYPASS=1
 # The dedicated regression is
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
-HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3) || {
   rm -rf "$TMP_ROOT"
   fail "could not generate an isolated Herdr lab session name"
@@ -154,6 +154,84 @@ if "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get "$PANE" >/dev/null 2>&1
 fi
 WT=
 pass "real herdr: teardown completes the auto-detected spawn/teardown cycle (meta cleared, pane closed)"
+
+# --- nested secondmate-watcher environment cannot claim another server -----
+
+NESTED_HOME="$TMP_ROOT/nested-secondmate-home"
+NESTED_FAKEBIN="$TMP_ROOT/nested-fakebin"
+NESTED_LOG="$TMP_ROOT/nested-herdr.log"
+NESTED_ENV_OUT="$TMP_ROOT/nested-env.out"
+NESTED_RESULT="$TMP_ROOT/nested-result.out"
+NESTED_STATUS="$TMP_ROOT/nested-status.out"
+NESTED_PROBE="$TMP_ROOT/nested-probe.sh"
+mkdir -p "$NESTED_HOME" "$NESTED_FAKEBIN"
+printf 'nested-sm\n' > "$NESTED_HOME/.fm-secondmate-home"
+cat > "$NESTED_FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for arg in "$@"; do
+    printf '\037%s' "$arg"
+  done
+  printf '\n'
+} >> "${FM_NESTED_LOG:?}"
+printf '{"server":{"running":false}}\n'
+SH
+chmod +x "$NESTED_FAKEBIN/herdr"
+cat > "$NESTED_PROBE" <<'SH'
+#!/usr/bin/env bash
+set -u
+{
+  printf 'FM_HOME=%s\n' "${FM_HOME:-}"
+  printf 'HERDR_ENV=%s\n' "${HERDR_ENV:-}"
+  printf 'HERDR_SESSION=%s\n' "${HERDR_SESSION:-}"
+  printf 'HERDR_PANE_ID=%s\n' "${HERDR_PANE_ID:-}"
+  printf 'HERDR_WORKSPACE_ID=%s\n' "${HERDR_WORKSPACE_ID:-}"
+  printf 'HERDR_SOCKET_PATH=%s\n' "${HERDR_SOCKET_PATH:-}"
+} > "${FM_NESTED_ENV_OUT:?}"
+PATH="${FM_NESTED_FAKEBIN:?}:$PATH" FM_NESTED_LOG="${FM_NESTED_LOG:?}" \
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure "${HERDR_SESSION:-default}"' \
+    "${FM_NESTED_ROOT:?}" > "${FM_NESTED_RESULT:?}" 2>&1
+printf '%s\n' "$?" > "${FM_NESTED_STATUS:?}"
+SH
+chmod +x "$NESTED_PROBE"
+
+NESTED_CREATE=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" \
+  workspace create --cwd "$ROOT" --label nested-single-server-guard --no-focus) || \
+  fail "could not create the isolated nested-server guard pane"
+NESTED_PANE=$(printf '%s' "$NESTED_CREATE" | jq -r '.result.root_pane.pane_id // empty')
+[ -n "$NESTED_PANE" ] || fail "nested-server guard fixture did not return a pane id"
+sleep 1
+printf -v NESTED_COMMAND \
+  'FM_HOME=%q FM_NESTED_ROOT=%q FM_NESTED_FAKEBIN=%q FM_NESTED_LOG=%q FM_NESTED_ENV_OUT=%q FM_NESTED_RESULT=%q FM_NESTED_STATUS=%q %q' \
+  "$NESTED_HOME" "$ROOT" "$NESTED_FAKEBIN" "$NESTED_LOG" "$NESTED_ENV_OUT" \
+  "$NESTED_RESULT" "$NESTED_STATUS" "$NESTED_PROBE"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane run "$NESTED_PANE" "$NESTED_COMMAND" || \
+  fail "could not run the nested-server guard probe inside the isolated Herdr pane"
+for _ in $(seq 1 100); do
+  [ -s "$NESTED_STATUS" ] && break
+  sleep 0.1
+done
+[ -s "$NESTED_STATUS" ] || fail "nested-server guard probe did not finish"
+[ "$(cat "$NESTED_STATUS")" -ne 0 ] || \
+  fail "nested-server guard probe accepted a competing server start"
+assert_contains_local "$(cat "$NESTED_ENV_OUT")" "FM_HOME=$NESTED_HOME" \
+  "nested probe did not carry the secondmate watcher's home"
+assert_contains_local "$(cat "$NESTED_ENV_OUT")" "HERDR_ENV=1" \
+  "real Herdr pane did not supply the nested-runtime marker"
+assert_contains_local "$(cat "$NESTED_ENV_OUT")" "HERDR_SESSION=$HERDR_LAB_SESSION" \
+  "real Herdr pane did not inherit its exact named session"
+assert_contains_local "$(cat "$NESTED_ENV_OUT")" "HERDR_PANE_ID=$NESTED_PANE" \
+  "real Herdr pane did not inherit its exact pane identity"
+assert_contains_local "$(cat "$NESTED_RESULT")" "refusing to start a competing server" \
+  "nested-server guard did not return its actionable refusal"
+assert_contains_local "$(cat "$NESTED_LOG")" $'\037status\037--json\037--session\037'"$HERDR_LAB_SESSION" \
+  "nested-server guard did not check the exact inherited named session"
+case "$(cat "$NESTED_LOG")" in
+  *$'\037server'*) fail "nested-server guard invoked a competing server after the scoped status miss" ;;
+esac
+pass "real herdr: a secondmate-watcher-shaped process inside a named lab pane refuses a competing same-socket server start"
 
 if ! cleanup_all; then
   trap - EXIT

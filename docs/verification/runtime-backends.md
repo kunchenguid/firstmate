@@ -153,6 +153,41 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Single-server ownership
+
+The nested ownership guard was verified on 2026-07-30 with Herdr 0.7.3 and protocol 16.
+The deterministic adapter suite covered the implicit `default` environment inherited by a secondmate watcher, an already-running named-session attach, a cross-session target mismatch, and a standalone outside owner that remains allowed to start a missing server.
+The real lab suite created an actual named-session pane, confirmed its inherited `HERDR_ENV`, session, pane, workspace, and socket values, then substituted a status-miss CLI and proved the nested process returned a refusal without invoking `server`.
+
+```sh
+tests/fm-backend-herdr.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-autodetect-smoke.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  bin/fm-test-run.sh --family real-herdr-gated \
+  --fail-on-gate-skip 'herdr not found'
+```
+
+Observed ownership output:
+
+```text
+ok - fm_backend_herdr_server_ensure: a secondmate watcher inheriting the implicit default session refuses a competing same-socket server start
+ok - fm_backend_herdr_server_ensure: a nested caller safely attaches to its already-running inherited named session
+ok - fm_backend_herdr_server_ensure: a nested caller refuses a different target session before any CLI selection
+ok - real herdr: a secondmate-watcher-shaped process inside a named lab pane refuses a competing same-socket server start
+ok - real herdr: isolated lab session removed and default fleet session unchanged
+ok - real herdr E2E: a --secondmate spawn by the PRIMARY lands in the SECONDMATE's own labeled workspace, distinct from the primary's
+ok - real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in the secondmate's OWN workspace - falls out of per-home resolution, no glue needed
+FM_TEST_SUMMARY total=10 failed=0 skipped_gate=0
+```
+
+All primary, secondmate, and secondmate-child metadata in the topology test recorded the same generated `herdr_session`.
+The server-start primitive exists only in the shared Herdr adapter and the guarded lab lifecycle owner, so Pi, Claude, Codex, and Grok launch strings cannot bypass the nested ownership decision.
+The mandatory real-Herdr family completed with the default-session tripwire intact.
+The same run also verified that presentation transport preserves Herdr's advertised lexical socket path through the symlinked config directory, while its shared lock uses the canonical socket identity.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

@@ -26,12 +26,8 @@
 # question of whether treehouse itself supports re-acquiring a worktree for
 # an id that already has one checked out (a separate, out-of-scope concern).
 #
-# Safety (tests/herdr-test-safety.sh): cleanup uses ONLY
-# herdr_safe_stop_and_delete, never a bare/inline-prefixed `herdr server
-# stop` - the exact category of unscoped destructive call that caused the
-# 2026-07-02 incident. Every herdr lifecycle call in this file targets this
-# test's own isolated $SESSION explicitly via --session; the live `default`
-# session is never touched.
+# Safety: bin/fm-herdr-lab.sh owns every lifecycle call, refuses the default
+# session, and verifies the default fleet tripwire.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,18 +38,16 @@ pass() { printf 'ok - %s\n' "$1"; }
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
-# shellcheck source=tests/herdr-test-safety.sh
-. "$ROOT/tests/herdr-test-safety.sh"
-
+LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION="fm-lab-respawn-idem-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-respawn-idem.XXXXXX")
 cleanup_all() {
-  herdr_safe_stop_and_delete "$SESSION"
+  "$LAB_HELPER" teardown "$SESSION"
   rm -rf "$SCRATCH"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+"$LAB_HELPER" provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -105,15 +99,15 @@ pass "repro setup: two real fm-<id> task tabs exist (crewmate-shaped and secondm
 # underlying process (a fresh shell) and its agent_status to unknown - the
 # exact husk shape a restored task tab comes back in.
 
-fm_herdr_lab_stop "$SESSION" >/dev/null 2>&1 \
+"$LAB_HELPER" stop "$SESSION" >/dev/null 2>&1 \
   || fail "could not stop the isolated session for the restart"
 sleep 0.5
-fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the restart"
+"$LAB_HELPER" provision "$SESSION" || fail "the isolated session's server did not come back up after the restart"
 
-if ! herdr pane get "$CREW_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+if ! "$LAB_HELPER" run "$SESSION" pane get "$CREW_PANE_ID" >/dev/null 2>&1; then
   fail "repro setup is wrong: the crewmate-shaped pane should survive a session restart alive (docs/herdr-backend.md 'ID stability'), but it is gone"
 fi
-if herdr agent get "$CREW_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+if "$LAB_HELPER" run "$SESSION" agent get "$CREW_PANE_ID" >/dev/null 2>&1; then
   fail "repro setup is wrong: the restored pane should have NO registered agent (agent_not_found expected)"
 fi
 pass "repro confirmed: after a real session restart, both task panes survive alive but with no registered agent - the restored-layout husk"
@@ -129,7 +123,7 @@ if [ -z "$NEW_CREW_TAB_ID" ] || [ -z "$NEW_CREW_PANE_ID" ]; then
   fail "husk respawn (crewmate-shaped) did not return new tab/pane ids"
 fi
 [ "$NEW_CREW_PANE_ID" != "$CREW_PANE_ID" ] || fail "husk respawn (crewmate-shaped) returned the SAME pane id - nothing was actually replaced"
-if herdr pane get "$CREW_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+if "$LAB_HELPER" run "$SESSION" pane get "$CREW_PANE_ID" >/dev/null 2>&1; then
   fail "REGRESSION: the old crewmate-shaped husk pane should have been closed by close-and-replace, but it still exists"
 fi
 pass "fixed: create_task closes and replaces the crewmate-shaped restored husk instead of refusing - no manual pane close needed"
@@ -143,12 +137,12 @@ if [ -z "$NEW_SM_TAB_ID" ] || [ -z "$NEW_SM_PANE_ID" ]; then
   fail "husk respawn (secondmate-shaped) did not return new tab/pane ids"
 fi
 [ "$NEW_SM_PANE_ID" != "$SM_PANE_ID" ] || fail "husk respawn (secondmate-shaped) returned the SAME pane id - nothing was actually replaced"
-if herdr pane get "$SM_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+if "$LAB_HELPER" run "$SESSION" pane get "$SM_PANE_ID" >/dev/null 2>&1; then
   fail "REGRESSION: the old secondmate-shaped husk pane should have been closed by close-and-replace, but it still exists"
 fi
 pass "fixed: create_task closes and replaces the secondmate-shaped restored husk instead of refusing - same fix, same function, both spawn shapes"
 
-WS_TABS=$(herdr tab list --workspace "$WSID" --session "$SESSION" 2>&1)
+WS_TABS=$("$LAB_HELPER" run "$SESSION" tab list --workspace "$WSID" 2>&1)
 WS_COUNT=$(printf '%s' "$WS_TABS" | jq -r '.result.tabs? // [] | length')
 [ "$WS_COUNT" = 2 ] || fail "expected exactly 2 tabs (the two replacements, husks closed, no leaks), got $WS_COUNT: $WS_TABS"
 pass "fixed: the workspace holds exactly the 2 replacement tabs after both respawns - no leaked husk tabs, no destroyed workspace"
@@ -159,13 +153,13 @@ pass "fixed: the workspace holds exactly the 2 replacement tabs after both respa
 # attempt refuses exactly as before - the husk fix must never touch a pane
 # that actually has something registered in it.
 
-herdr pane report-agent "$NEW_CREW_PANE_ID" --source fm-respawn-e2e --agent fm-respawn-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
+"$LAB_HELPER" run "$SESSION" pane report-agent "$NEW_CREW_PANE_ID" --source fm-respawn-e2e --agent fm-respawn-live-agent --state idle >/dev/null 2>&1 \
   || fail "could not register a live agent on the respawned crewmate-shaped pane"
 
 if fm_backend_herdr_create_task "$CONTAINER" "$CREW_LABEL" "$PROJ_CWD" >/dev/null 2>&1; then
   fail "REGRESSION: create_task should refuse a same-labeled tab whose pane hosts a genuinely live registered agent"
 fi
-if ! herdr pane get "$NEW_CREW_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+if ! "$LAB_HELPER" run "$SESSION" pane get "$NEW_CREW_PANE_ID" >/dev/null 2>&1; then
   fail "REGRESSION: the live-agent pane should have survived the refused create_task call untouched"
 fi
 pass "fixed: a genuinely live duplicate (a real registered agent) still refuses exactly as before - the husk fix never closes a live pane"

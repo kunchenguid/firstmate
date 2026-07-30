@@ -27,6 +27,14 @@ An auto-detected Herdr spawn prints an opt-out notice.
 Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
 No separate first-run provisioning is required.
 
+Server startup has one owner.
+A process outside Herdr may start its selected named session through the bounded backend path.
+A process inheriting `HERDR_ENV=1` from a Herdr pane may use only that pane's owning session, which is `HERDR_SESSION` for a named session and implicit `default` when the variable is absent.
+The nested path attaches only when an explicitly scoped status call reports that exact session running.
+A session mismatch is refused before any CLI call, and a scoped status miss is refused before `herdr server` can replace or claim the shared socket.
+The diagnostic names the requested session, inherited owner, pane, and socket as available and directs the operator to repair the session from its outer owner.
+Because this ownership gate is inside the shared backend adapter, it covers Pi, Claude, Codex, Grok, secondmate launches, child spawns, watcher-driven recovery, and away-mode Herdr terminals without harness-specific branches.
+
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
 Those script headers own release assets, checksums, download bounds, and post-install gates.
 Real harness credential tests remain opt-in rather than part of default CI.
@@ -73,6 +81,8 @@ An ambiguous response grants no mutation or cleanup authority.
 
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
+The mover uses the exact absolute socket path advertised by the named session because Herdr 0.7.3 can reject an equivalent physical-path rewrite through a symlinked config directory.
+Only the per-session lock identity canonicalizes the socket parent, which keeps aliases on one lock without changing the transport target.
 Projected children are placed in one contiguous block immediately after their owning home when the session layout, protocol, socket, `python3`, and machine-private per-session lock are all verifiable.
 Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
@@ -89,6 +99,7 @@ If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
+Concurrent exact recoveries wait up to 30 seconds for that shared session lock, while ordinary best-effort ordering keeps its 5-second fallback budget.
 A same-identity version 2 binding may replace one exact agent-free restart husk in place only when the physical home, session, metadata endpoint, unique token match, workspace shape and labels, parent identity and placement, and non-target focus snapshot all agree.
 The replacement tab and pane are created and verified before the old pane is rechecked and closed, then the journal advances atomically to the replacement endpoint before metadata publication.
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
@@ -156,7 +167,8 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 
 ## Current transport behavior
 
-The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
+The adapter attaches to and polls the exact named server before workspace, tab, pane, or agent calls.
+Only an outside owner may start a missing server.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
 
@@ -258,6 +270,9 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ## Active limits
 
 - Herdr remains experimental.
+- Herdr 0.7.3 does not expose a stable server-process identity that lets Firstmate prove which process an already-attached UI client owns.
+  The ownership gate prevents a new split but cannot automatically identify, merge, or repair servers that were already split before the fix.
+  An existing split still requires a separate controlled runtime repair that preserves the chosen owner's live panes before retiring the competing process.
 - Presentation ordering needs protocol 16 and Python and is best-effort only.
 - Mutable labels can collide; they are never destructive authority.
 - Ghost and placeholder recognition depends on ANSI de-emphasis and fails safely to pending when unavailable.

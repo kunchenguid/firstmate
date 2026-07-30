@@ -7,10 +7,9 @@
 # that the watcher's handle_push_transition lands a stale record in a scratch
 # state/.wake-queue. Skips cleanly when herdr, jq, or python3 is missing.
 #
-# Safety (2026-07-02 incident, tests/herdr-test-safety.sh): cleanup uses ONLY
-# herdr_safe_stop_and_delete on a private fm-lab-* session, never a bare/ambient
-# `herdr server stop`. Every lifecycle op goes through bin/fm-herdr-lab.sh, which
-# refuses the default session and verifies the fleet-state tripwire.
+# Safety (2026-07-02 incident): every lifecycle op goes through
+# bin/fm-herdr-lab.sh, which refuses the default session and verifies the
+# fleet-state tripwire.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,18 +21,16 @@ command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required by the event subscriber)"; exit 0; }
 
-# shellcheck source=tests/herdr-test-safety.sh
-. "$ROOT/tests/herdr-test-safety.sh"
-
+LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION="fm-lab-eventwait-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=
 cleanup_all() {
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
-  herdr_safe_stop_and_delete "$SESSION"
+  "$LAB_HELPER" teardown "$SESSION"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare the isolated Herdr lab session"
+"$LAB_HELPER" provision "$SESSION" || fail "could not provision the isolated Herdr lab session"
 
 # The dispatcher is a separately linted production boundary. Its dynamic
 # adapter source edges stop at each independently linted canonical adapter.
@@ -81,7 +78,7 @@ SOCK=$(fm_backend_herdr_socket_path "$SESSION")
 # report-agent is herdr's documented primitive for a non-built-in process to
 # report its own agent state (docs/herdr-backend.md); routed through the lab
 # helper's guarded `run` so it carries the trailing --session.
-fm_herdr_lab_cli "$SESSION" pane report-agent "$PANE_ID" --source fm-evwait-test --agent claude --state idle >/dev/null 2>&1 \
+"$LAB_HELPER" run "$SESSION" pane report-agent "$PANE_ID" --source fm-evwait-test --agent claude --state idle >/dev/null 2>&1 \
   || fail "could not register the pane's agent as idle"
 
 OUT="$SCRATCH/out"; RCF="$SCRATCH/rc"
@@ -93,7 +90,7 @@ WPID=$!
 sleep 0.5   # let it connect, subscribe, and reconcile the idle baseline
 
 START=$(python3 -c 'import time; print(time.time())')
-fm_herdr_lab_cli "$SESSION" pane report-agent "$PANE_ID" --source fm-evwait-test --agent claude --state blocked >/dev/null 2>&1 \
+"$LAB_HELPER" run "$SESSION" pane report-agent "$PANE_ID" --source fm-evwait-test --agent claude --state blocked >/dev/null 2>&1 \
   || fail "could not drive the pane's agent to blocked"
 wait "$WPID"
 END=$(python3 -c 'import time; print(time.time())')

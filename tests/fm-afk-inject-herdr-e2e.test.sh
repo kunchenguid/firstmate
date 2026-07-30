@@ -2,10 +2,9 @@
 # tests/fm-afk-inject-herdr-e2e.test.sh - real-herdr end-to-end test for the
 # away-mode daemon's herdr transport (bin/fm-supervise-daemon.sh), the herdr
 # counterpart of tests/fm-afk-inject-e2e.test.sh's private-socket tmux e2e.
-# Mirrors tests/fm-backend-herdr-smoke.test.sh and tests/herdr-test-safety.sh's
-# isolation patterns: everything runs on a throwaway, named, NEVER-default
-# HERDR_SESSION, torn down with herdr_safe_stop_and_delete. Skips cleanly when
-# herdr or jq is not installed.
+# Mirrors tests/fm-backend-herdr-smoke.test.sh's isolation pattern: everything
+# runs on a throwaway, named, NEVER-default HERDR_SESSION owned by
+# bin/fm-herdr-lab.sh. Skips cleanly when herdr or jq is not installed.
 #
 # Unlike the tmux e2e (which redirects a bare `tmux` PATH shim to a private
 # socket), herdr already supports named-session isolation via --session, so no
@@ -38,12 +37,10 @@ DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
-# shellcheck source=tests/herdr-test-safety.sh
-. "$ROOT/tests/herdr-test-safety.sh"
-
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
+LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION="fm-lab-afk-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
 STATE_DIR=
@@ -60,12 +57,12 @@ cleanup_all() {
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
+  "$LAB_HELPER" teardown "$SESSION" 2>/dev/null || true
   rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+"$LAB_HELPER" provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
 # shellcheck source=/dev/null
@@ -150,10 +147,11 @@ cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
 MARK=$'\xE2\x81\xA3'
 LOG="$1"
+LAB_HELPER="$2"
 AGENT_SOURCE=fm-test-supervisor
 AGENT_LABEL=fm-test-supervisor
 report_agent_state() {  # <idle|working>
-  herdr pane report-agent "$HERDR_PANE_ID" --source "$AGENT_SOURCE" --agent "$AGENT_LABEL" --state "$1" --session "$HERDR_SESSION" >/dev/null 2>&1
+  "$LAB_HELPER" run "$HERDR_SESSION" pane report-agent "$HERDR_PANE_ID" --source "$AGENT_SOURCE" --agent "$AGENT_LABEL" --state "$1" >/dev/null 2>&1
 }
 OLD_STTY=$(stty -g 2>/dev/null || true)
 [ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
@@ -223,7 +221,7 @@ done
 LOOP
 chmod +x "$LOOP_SCRIPT"
 
-fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_FILE'" \
+fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_FILE' '$LAB_HELPER'" \
   || fail "could not start the supervisor-loop script in the scratch herdr pane"
 sleep 1  # let the loop start and settle
 

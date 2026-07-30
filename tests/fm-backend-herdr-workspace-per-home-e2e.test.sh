@@ -13,9 +13,8 @@
 # convention: a private throwaway HERDR_SESSION (never the captain's
 # default), scratch FM_HOME(s), and scratch local-only projects.
 #
-# Safety (2026-07-02 incident, see tests/herdr-test-safety.sh): cleanup uses
-# ONLY herdr_safe_stop_and_delete, never a bare/inline-prefixed `herdr server
-# stop`.
+# Safety (2026-07-02 incident): every direct Herdr operation and all lifecycle
+# ownership use bin/fm-herdr-lab.sh with a trailing non-default named session.
 #
 # Covers, at minimum (per the task brief):
 #   - a primary-shaped home (no .fm-secondmate-home marker) spawning a
@@ -51,9 +50,6 @@ command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
-# shellcheck source=tests/herdr-test-safety.sh
-. "$ROOT/tests/herdr-test-safety.sh"
-
 # TMP_ROOT is physically resolved (mktemp -d "$(pwd -P)"-relative) for the same
 # low-noise scratch fixture shape used by
 # tests/fm-backend-autodetect-smoke.test.sh.
@@ -61,17 +57,21 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 # canonicalized project and backend cwd comparisons in the worktree-discovery
 # poll.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
-SESSION="fm-lab-herdr-e2e-$$"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-workspace-per-home-e2e) || {
+  rm -rf "$TMP_ROOT"
+  fail "could not generate an isolated Herdr lab session name"
+}
 export HERDR_SESSION="$SESSION"
 WT1=; WT2=
 cleanup_all() {
   [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
   [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
-  herdr_safe_stop_and_delete "$SESSION"
+  "$HERDR_LAB_HELPER" teardown "$SESSION"
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -114,6 +114,7 @@ rc=$?
 CM1_META="$PRIMARY_HOME/state/cm1.meta"
 [ -f "$CM1_META" ] || fail "no meta written for cm1"
 assert_contains_local "$(cat "$CM1_META")" "backend=herdr" "cm1 meta missing backend=herdr"
+assert_contains_local "$(cat "$CM1_META")" "herdr_session=$SESSION" "cm1 meta did not retain the fleet's named Herdr session owner"
 WT1=$(grep '^worktree=' "$CM1_META" | cut -d= -f2-)
 CM1_PANE=$(grep '^herdr_pane_id=' "$CM1_META" | cut -d= -f2-)
 [ -n "$CM1_PANE" ] || fail "cm1 meta missing herdr_pane_id"
@@ -123,9 +124,9 @@ sleep 1
 CM1_CAPTURE=$(fm_backend_herdr_capture "$SESSION:$CM1_PANE" 30) || fail "capture failed on cm1's pane"
 assert_contains_local "$CM1_CAPTURE" "primary-crew-ok" "cm1's raw launch command did not run in its herdr pane"
 
-CM1_WSID=$(herdr pane get "$CM1_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
+CM1_WSID=$("$HERDR_LAB_HELPER" run "$SESSION" pane get "$CM1_PANE" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ -n "$CM1_WSID" ] || fail "could not read cm1's pane workspace_id"
-CM1_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$CM1_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
+CM1_WS_LABEL=$("$HERDR_LAB_HELPER" run "$SESSION" workspace list 2>&1 | jq -r --arg id "$CM1_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
 [ "$CM1_WS_LABEL" = "firstmate" ] || fail "a primary-shaped home's crewmate should land in the 'firstmate' workspace, got '$CM1_WS_LABEL'"
 pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmate' workspace"
 
@@ -144,15 +145,16 @@ SM_META="$PRIMARY_HOME/state/e2esm1.meta"
 [ -f "$SM_META" ] || fail "no meta written for e2esm1 (recorded in the PRIMARY's own state dir, since the primary did the spawning)"
 assert_contains_local "$(cat "$SM_META")" "kind=secondmate" "e2esm1 meta missing kind=secondmate"
 assert_contains_local "$(cat "$SM_META")" "backend=herdr" "e2esm1 meta missing backend=herdr"
+assert_contains_local "$(cat "$SM_META")" "herdr_session=$SESSION" "e2esm1 meta did not retain the fleet's named Herdr session owner"
 assert_contains_local "$(cat "$SM_META")" "home=$SM_HOME" "e2esm1 meta does not record its own home"
 SM_PANE=$(grep '^herdr_pane_id=' "$SM_META" | cut -d= -f2-)
 [ -n "$SM_PANE" ] || fail "e2esm1 meta missing herdr_pane_id"
 pass "real herdr E2E: the primary spawns a --secondmate task on the herdr backend"
 
-SM_WSID=$(herdr pane get "$SM_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
+SM_WSID=$("$HERDR_LAB_HELPER" run "$SESSION" pane get "$SM_PANE" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ -n "$SM_WSID" ] || fail "could not read e2esm1's pane workspace_id"
 [ "$SM_WSID" != "$CM1_WSID" ] || fail "the secondmate's tab must NOT land in the primary's workspace, but it shares $CM1_WSID"
-SM_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$SM_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
+SM_WS_LABEL=$("$HERDR_LAB_HELPER" run "$SESSION" workspace list 2>&1 | jq -r --arg id "$SM_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
 [ "$SM_WS_LABEL" = "2ndmate-e2esm1" ] || fail "a --secondmate spawn should land in '2ndmate-<id>', got '$SM_WS_LABEL'"
 pass "real herdr E2E: a --secondmate spawn by the PRIMARY lands in the SECONDMATE's own labeled workspace, distinct from the primary's"
 
@@ -169,6 +171,7 @@ rc=$?
 CM2_META="$SM_HOME/state/cm2.meta"
 [ -f "$CM2_META" ] || fail "no meta written for cm2 (recorded in the SECONDMATE's own state dir - it did its own spawning)"
 assert_contains_local "$(cat "$CM2_META")" "backend=herdr" "cm2 meta missing backend=herdr"
+assert_contains_local "$(cat "$CM2_META")" "herdr_session=$SESSION" "cm2 meta did not retain the fleet's named Herdr session owner"
 WT2=$(grep '^worktree=' "$CM2_META" | cut -d= -f2-)
 CM2_PANE=$(grep '^herdr_pane_id=' "$CM2_META" | cut -d= -f2-)
 [ -n "$CM2_PANE" ] || fail "cm2 meta missing herdr_pane_id"
@@ -178,7 +181,7 @@ sleep 1
 CM2_CAPTURE=$(fm_backend_herdr_capture "$SESSION:$CM2_PANE" 30) || fail "capture failed on cm2's pane"
 assert_contains_local "$CM2_CAPTURE" "sm-crew-ok" "cm2's raw launch command did not run in its herdr pane"
 
-CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
+CM2_WSID=$("$HERDR_LAB_HELPER" run "$SESSION" pane get "$CM2_PANE" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ "$CM2_WSID" = "$SM_WSID" ] || fail "a crewmate spawned FROM the secondmate home should land in the SAME workspace as the secondmate's own task ($SM_WSID), got '$CM2_WSID'"
 [ "$CM2_WSID" != "$CM1_WSID" ] || fail "a crewmate spawned FROM the secondmate home must NOT land in the primary's workspace"
 pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in the secondmate's OWN workspace - falls out of per-home resolution, no glue needed"
@@ -206,13 +209,13 @@ FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRID
 rc=$?
 [ "$rc" -eq 0 ] || fail "fm-teardown.sh failed for the primary-shaped crewmate cm1"$'\n'"$(cat "$TD1_OUT")"
 [ -f "$CM1_META" ] && fail "fm-teardown.sh did not remove cm1's meta"
-if herdr pane get "$CM1_PANE" --session "$SESSION" >/dev/null 2>&1; then
+if "$HERDR_LAB_HELPER" run "$SESSION" pane get "$CM1_PANE" >/dev/null 2>&1; then
   fail "fm-teardown.sh did not close cm1's pane"
 fi
-if ! herdr pane get "$SM_PANE" --session "$SESSION" >/dev/null 2>&1; then
+if ! "$HERDR_LAB_HELPER" run "$SESSION" pane get "$SM_PANE" >/dev/null 2>&1; then
   fail "tearing down cm1 must not have closed the secondmate's OWN pane (wrong tab closed)"
 fi
-if ! herdr pane get "$CM2_PANE" --session "$SESSION" >/dev/null 2>&1; then
+if ! "$HERDR_LAB_HELPER" run "$SESSION" pane get "$CM2_PANE" >/dev/null 2>&1; then
   fail "tearing down cm1 must not have closed cm2's pane (wrong tab closed)"
 fi
 WT1=
@@ -225,10 +228,10 @@ FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$SM_HOME/state" FM_DATA_OVERRIDE="$S
 rc=$?
 [ "$rc" -eq 0 ] || fail "fm-teardown.sh failed for the secondmate-owned crewmate cm2"$'\n'"$(cat "$TD2_OUT")"
 [ -f "$CM2_META" ] && fail "fm-teardown.sh did not remove cm2's meta"
-if herdr pane get "$CM2_PANE" --session "$SESSION" >/dev/null 2>&1; then
+if "$HERDR_LAB_HELPER" run "$SESSION" pane get "$CM2_PANE" >/dev/null 2>&1; then
   fail "fm-teardown.sh did not close cm2's pane"
 fi
-if ! herdr pane get "$SM_PANE" --session "$SESSION" >/dev/null 2>&1; then
+if ! "$HERDR_LAB_HELPER" run "$SESSION" pane get "$SM_PANE" >/dev/null 2>&1; then
   fail "tearing down cm2 must not have closed the secondmate's OWN pane (wrong tab closed)"
 fi
 WT2=

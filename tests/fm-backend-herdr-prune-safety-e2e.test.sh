@@ -16,10 +16,8 @@
 # fm-<id> task tab), mirroring tests/fm-backend-herdr-smoke.test.sh's broader
 # coverage but scoped tightly to this one safety property.
 #
-# Safety (tests/herdr-test-safety.sh): cleanup uses ONLY
-# herdr_safe_stop_and_delete, never a bare/inline-prefixed `herdr server
-# stop` - the exact category of unscoped destructive call that caused the
-# 2026-07-02 incident in the first place.
+# Safety: bin/fm-herdr-lab.sh owns provisioning and teardown and refuses the
+# default session immediately before every destructive lifecycle call.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,18 +28,19 @@ pass() { printf 'ok - %s\n' "$1"; }
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
-# shellcheck source=tests/herdr-test-safety.sh
-. "$ROOT/tests/herdr-test-safety.sh"
-
+LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION="fm-lab-prune-safety-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-prune-safety.XXXXXX")
+FM_HOME="$SCRATCH/primary-home"
+mkdir -p "$FM_HOME"
+export FM_HOME
 cleanup_all() {
-  herdr_safe_stop_and_delete "$SESSION"
+  "$LAB_HELPER" teardown "$SESSION"
   rm -rf "$SCRATCH"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+"$LAB_HELPER" provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -58,8 +57,6 @@ fm_backend_herdr_version_check || fail "version_check failed against the real in
 LIVE_CWD="$SCRATCH/firstmate"
 mkdir -p "$LIVE_CWD"
 
-fm_backend_herdr_server_ensure "$SESSION" || fail "could not start the isolated session's server"
-
 CREATE_OUT=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$LIVE_CWD" --label firstmate --no-focus) \
   || fail "could not create the label-collision startup workspace"
 LIVE_WSID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.workspace.workspace_id // empty')
@@ -69,7 +66,7 @@ if [ -z "$LIVE_WSID" ] || [ -z "$LIVE_TAB_ID" ] || [ -z "$LIVE_PANE_ID" ]; then
   fail "could not parse the startup workspace's ids from workspace create: $CREATE_OUT"
 fi
 
-LIVE_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$LIVE_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
+LIVE_LABEL=$("$LAB_HELPER" run "$SESSION" workspace list 2>&1 | jq -r --arg id "$LIVE_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
 [ "$LIVE_LABEL" = firstmate ] || fail "the startup workspace label should be 'firstmate', got '$LIVE_LABEL' - repro setup is wrong"
 pass "repro setup: a pre-existing workspace labeled 'firstmate' collides with the primary home's own label"
 
@@ -127,7 +124,7 @@ fi
 
 # --- 3. assert the live pane survived untouched -----------------------------
 
-if ! herdr pane get "$LIVE_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+if ! "$LAB_HELPER" run "$SESSION" pane get "$LIVE_PANE_ID" >/dev/null 2>&1; then
   fail "REGRESSION (2026-07-02 self-kill): the live startup-workspace pane was CLOSED by create_task"
 fi
 sleep 2
@@ -136,7 +133,7 @@ AFTER_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
   || fail "REGRESSION: the live heartbeat process stopped writing after create_task ran - it was killed even though its pane object survived"
 pass "fixed: the live pane (and its live process) survived create_task untouched - the exact 2026-07-02 self-kill incident does not reproduce"
 
-LIVE_TABS_AFTER=$(herdr tab list --workspace "$LIVE_WSID" --session "$SESSION" 2>&1)
+LIVE_TABS_AFTER=$("$LAB_HELPER" run "$SESSION" tab list --workspace "$LIVE_WSID" 2>&1)
 printf '%s' "$LIVE_TABS_AFTER" | jq -e --arg t "$LIVE_TAB_ID" '.result.tabs[] | select(.tab_id == $t)' >/dev/null 2>&1 \
   || fail "REGRESSION: the startup workspace's original live tab is gone from tab list"
 pass "fixed: the startup workspace's original live tab is still present in tab list after the spawn"
@@ -162,7 +159,7 @@ EOF
 [ -n "$HAPPY_PANE" ] || fail "happy-path create_task did not return a pane id"
 
 HAPPY_WSID=${HAPPY_CONTAINER#*:}
-HAPPY_TABS=$(herdr tab list --workspace "$HAPPY_WSID" --session "$SESSION" 2>&1)
+HAPPY_TABS=$("$LAB_HELPER" run "$SESSION" tab list --workspace "$HAPPY_WSID" 2>&1)
 HAPPY_COUNT=$(printf '%s' "$HAPPY_TABS" | jq -r '.result.tabs? // [] | length')
 [ "$HAPPY_COUNT" = 1 ] || fail "happy path: expected exactly 1 tab (seeded default pruned) after the first real task tab, got $HAPPY_COUNT: $HAPPY_TABS"
 printf '%s' "$HAPPY_TABS" | jq -e --arg t "$HAPPY_SEEDED" '.result.tabs[] | select(.tab_id == $t)' >/dev/null 2>&1 \

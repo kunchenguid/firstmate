@@ -15,7 +15,14 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
+# Keep standalone server-owner tests independent from the Herdr pane that may
+# be hosting the test runner itself.
+unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SESSION
+
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+TEST_PRIMARY_HOME="$TMP_ROOT/primary-home"
+mkdir -p "$TEST_PRIMARY_HOME"
+export FM_HOME="$TEST_PRIMARY_HOME"
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
@@ -307,6 +314,61 @@ test_container_ensure_starts_server_and_workspace() {
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''firstmate' \
     "container_ensure did not create the firstmate workspace with the given cwd"
   pass "fm_backend_herdr_container_ensure: version-gates, starts the server, ensures the firstmate workspace, echoes session:workspace_id + the seeded default tab id"
+}
+
+test_server_ensure_nested_default_status_miss_refuses_competing_start() {
+  local dir log resp fb out status home
+  dir="$TMP_ROOT/nested-default-status-miss"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/secondmate-home"; mkdir -p "$home"
+  printf 'design\n' > "$home/.fm-secondmate-home"
+  printf '{"server":{"running":false}}\n' > "$resp/1.out"
+  printf '{"server":{"running":true}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_SCRIPT_STATUS=1 HERDR_ENV=1 HERDR_PANE_ID=w1:p7 \
+    HERDR_WORKSPACE_ID=w1 HERDR_SOCKET_PATH=/tmp/herdr.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure default' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate watcher inside the implicit default Herdr session must not start a competing server after a scoped status miss"
+  assert_contains "$out" "refusing to start a competing server" \
+    "nested default-session refusal did not explain the single-server ownership boundary"
+  assert_not_contains "$(cat "$log")" $'\x1f''server' \
+    "nested default-session status miss attempted to start a competing Herdr server"
+  pass "fm_backend_herdr_server_ensure: a secondmate watcher inheriting the implicit default session refuses a competing same-socket server start"
+}
+
+test_server_ensure_nested_named_session_attaches_when_running() {
+  local dir log resp fb
+  dir="$TMP_ROOT/nested-named-running"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"server":{"running":true}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    HERDR_ENV=1 HERDR_SESSION=fm-lab-owned HERDR_PANE_ID=w1:p3 \
+    HERDR_WORKSPACE_ID=w1 HERDR_SOCKET_PATH=/tmp/fm-lab-owned.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fm-lab-owned' "$ROOT" \
+    || fail "a nested caller should attach when its exact inherited named session reports running"
+  assert_not_contains "$(cat "$log")" $'\x1f''server' \
+    "healthy nested named-session attach attempted a server start"
+  pass "fm_backend_herdr_server_ensure: a nested caller safely attaches to its already-running inherited named session"
+}
+
+test_server_ensure_nested_session_mismatch_refuses_cross_session_target() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/nested-session-mismatch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"server":{"running":true}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    HERDR_ENV=1 HERDR_SESSION=owned HERDR_PANE_ID=w1:p4 \
+    HERDR_WORKSPACE_ID=w1 HERDR_SOCKET_PATH=/tmp/owned.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure other' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a nested caller must not silently target a session other than its inherited owner"
+  assert_contains "$out" "target session 'other'" \
+    "nested cross-session refusal did not name the requested session"
+  assert_contains "$out" "owning session 'owned'" \
+    "nested cross-session refusal did not name the inherited owner session"
+  [ ! -s "$log" ] || fail "nested cross-session mismatch should refuse before contacting any Herdr server"
+  pass "fm_backend_herdr_server_ensure: a nested caller refuses a different target session before any CLI selection"
 }
 
 test_container_ensure_reuses_existing_workspace() {
@@ -933,8 +995,8 @@ SH
   status=$?
   [ "$status" -eq 0 ] || fail "best-effort projection ordering must not fail the spawn"
   [ -z "$out" ] || fail "successful projection ordering emitted a warning: $out"
-  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w5"$'\t'"2" ] \
-    || fail "projection ordering did not move only the exact new response id to the owning-parent append index"
+  [ "$(cat "$mover_log")" = "/tmp/fmtest.sock"$'\t'"w5"$'\t'"2" ] \
+    || fail "projection ordering did not preserve the server-advertised socket path or move only the exact new response id"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "projection ordering called workspace close"
   assert_not_contains "$(cat "$log")" $'session\x1fdelete' "projection ordering called session delete"
   assert_not_contains "$(cat "$log")" $'workspace\x1frename' "projection ordering called a label-based workspace mutation"
@@ -965,7 +1027,7 @@ SH
   status=$?
   [ "$status" -eq 0 ] || fail "secondmate parent ordering must not fail the spawn: $out"
   [ -z "$out" ] || fail "successful secondmate ordering emitted a warning: $out"
-  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w6"$'\t'"4" ] \
+  [ "$(cat "$mover_log")" = "/tmp/fmtest.sock"$'\t'"w6"$'\t'"4" ] \
     || fail "secondmate child was not inserted after its parent block: $(cat "$mover_log")"
   assert_not_contains "$(cat "$log")" $'workspace\x1frename' "secondmate ordering renamed a legacy child"
   pass "herdr presentation ordering: secondmate children append under their owning parent block"
@@ -1019,7 +1081,7 @@ SH
   status=$?
   [ "$status" -eq 0 ] || fail "intervening parent ordering must not fail the spawn: $out"
   [ -z "$out" ] || fail "legitimate intervening parent ordering emitted a warning: $out"
-  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w6"$'\t'"2" ] \
+  [ "$(cat "$mover_log")" = "/tmp/fmtest.sock"$'\t'"w6"$'\t'"2" ] \
     || fail "intervening parent block prevented the owning-parent insertion: $(cat "$mover_log")"
   pass "herdr presentation ordering: intervening parent child blocks remain traversable"
 }
@@ -1046,7 +1108,7 @@ SH
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w2\tw2:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3 firstmate' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "human-interleaved ordering must not fail: $out"
-  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w3"$'\t'"2" ] \
+  [ "$(cat "$mover_log")" = "/tmp/fmtest.sock"$'\t'"w3"$'\t'"2" ] \
     || fail "human spaces changed the move target or insert index: $(cat "$mover_log")"
   pass "herdr presentation ordering: only the exact new id moves; human spaces keep relative order"
 }
@@ -2831,6 +2893,9 @@ test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_container_ensure_starts_server_and_workspace
+test_server_ensure_nested_default_status_miss_refuses_competing_start
+test_server_ensure_nested_named_session_attaches_when_running
+test_server_ensure_nested_session_mismatch_refuses_cross_session_target
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
