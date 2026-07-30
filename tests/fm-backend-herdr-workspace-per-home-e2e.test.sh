@@ -27,7 +27,9 @@
 #     running its OWN fm-spawn.sh) landing in the secondmate's own workspace -
 #     this exact path has never run before this test
 #   - teardown closing the right tab (and no other)
-#   - list-live recovery seeing only its own home's tabs, for both homes
+#   - task tabs carrying human-readable display labels while exact endpoint
+#     metadata stays the recovery/teardown authority
+#   - the legacy fm- list-live scan staying scoped to each home's own workspace
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -183,19 +185,38 @@ CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '
 [ "$CM2_WSID" != "$CM1_WSID" ] || fail "a crewmate spawned FROM the secondmate home must NOT land in the primary's workspace"
 pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in the secondmate's OWN workspace - falls out of per-home resolution, no glue needed"
 
-# --- 4. list-live recovery: each home sees only its own tabs ---------------
+# --- 4. display labels + the legacy list-live scan -------------------------
+# Spawned task tabs now carry mutable human-readable display labels; recovery
+# and teardown act only on the exact endpoint metadata recorded in each meta
+# file. fm_backend_herdr_list_live remains the legacy diagnostic scan for
+# pre-label fm- tabs, still scoped to each home's own workspace.
+
+CM1_TAB=$(grep '^herdr_tab_id=' "$CM1_META" | cut -d= -f2-)
+[ -n "$CM1_TAB" ] || fail "cm1 meta missing herdr_tab_id"
+CM1_TAB_LABEL=$(herdr tab get "$CM1_TAB" --session "$SESSION" 2>/dev/null | jq -r '.result.tab.label // empty')
+[ "$CM1_TAB_LABEL" = "cm1" ] || fail "cm1's tab should carry its human-readable display label, got '$CM1_TAB_LABEL'"
+assert_contains_local "$(cat "$CM1_META")" "label=cm1" "cm1 meta does not record its display label"
+pass "real herdr E2E: a spawned task tab carries its human-readable display label and records it in meta"
+
+LEGACY_P_IDS=$(fm_backend_herdr_create_task "$SESSION:$CM1_WSID" fm-legacy-primary /tmp) \
+  || fail "could not seed a legacy fm- tab in the primary's workspace"
+LEGACY_P_PANE=${LEGACY_P_IDS##* }
+LEGACY_S_IDS=$(fm_backend_herdr_create_task "$SESSION:$SM_WSID" fm-legacy-secondmate /tmp) \
+  || fail "could not seed a legacy fm- tab in the secondmate's workspace"
+LEGACY_S_PANE=${LEGACY_S_IDS##* }
 
 PRIMARY_LIVE=$(FM_HOME="$PRIMARY_HOME" fm_backend_herdr_list_live "$SESSION")
-assert_contains_local "$PRIMARY_LIVE" "fm-cm1" "the primary home's list_live did not see its own task"
-assert_not_contains_local "$PRIMARY_LIVE" "fm-e2esm1" "the primary home's list_live must not see the secondmate's own task"
-assert_not_contains_local "$PRIMARY_LIVE" "fm-cm2" "the primary home's list_live must not see the secondmate-owned crewmate's task"
-pass "real herdr E2E: list_live from the primary's own context sees only the primary's own task"
+[ "$PRIMARY_LIVE" = "$SESSION:$LEGACY_P_PANE"$'\t'"fm-legacy-primary" ] \
+  || fail "the primary home's legacy scan should list exactly its own seeded fm- tab (human-labeled tasks are exact-metadata-owned)"$'\n'"--- got ---"$'\n'"$PRIMARY_LIVE"
+pass "real herdr E2E: the primary's legacy list_live scan lists only its own fm- tab - human-labeled tasks stay exact-metadata-owned"
 
 SM_LIVE=$(FM_HOME="$SM_HOME" fm_backend_herdr_list_live "$SESSION")
-assert_contains_local "$SM_LIVE" "fm-e2esm1" "the secondmate home's list_live did not see its own task"
-assert_contains_local "$SM_LIVE" "fm-cm2" "the secondmate home's list_live did not see the crewmate spawned from it"
-assert_not_contains_local "$SM_LIVE" "fm-cm1" "the secondmate home's list_live must not see the primary's task"
-pass "real herdr E2E: list_live from the secondmate's own context sees only tasks in the secondmate's own workspace (both its own tab and its crewmate's)"
+[ "$SM_LIVE" = "$SESSION:$LEGACY_S_PANE"$'\t'"fm-legacy-secondmate" ] \
+  || fail "the secondmate home's legacy scan should list exactly its own seeded fm- tab, never the primary's or a human-labeled task"$'\n'"--- got ---"$'\n'"$SM_LIVE"
+pass "real herdr E2E: the secondmate's legacy list_live scan stays scoped to its own workspace"
+
+fm_backend_herdr_kill "$SESSION:$LEGACY_P_PANE"
+fm_backend_herdr_kill "$SESSION:$LEGACY_S_PANE"
 
 # --- 5. teardown closes the RIGHT tab, and no other ------------------------
 

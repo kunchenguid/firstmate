@@ -268,6 +268,7 @@ case "${1:-}" in
             *) printf '%s\n' "$mode"; exit 0 ;;
           esac
           ;;
+        *window_name*) cat "$(dirname "$0")/.window-label" 2>/dev/null; exit 0 ;;
       esac
     done
     exit 0
@@ -279,11 +280,16 @@ case "${1:-}" in
       *) [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; exit 0 ;;
     esac
     ;;
+  rename-window)
+    printf '%s\n' "${!#}" > "$(dirname "$0")/.window-label"
+    exit 0
+    ;;
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
     [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
     [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && [ "${1:-}" = new-window ] && exit 1
     [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
+    [ "${1:-}" = new-window ] && printf '@1\n'
     exit 0
     ;;
   has-session) exit 0 ;;

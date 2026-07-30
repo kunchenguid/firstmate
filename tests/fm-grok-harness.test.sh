@@ -17,11 +17,14 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{window_name}"*) cat "${FM_FAKE_LABEL_FILE:-/dev/null}" 2>/dev/null; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|kill-window) exit 0 ;;
+  new-window) printf '@1\n'; exit 0 ;;
+  rename-window) printf '%s\n' "${!#}" > "${FM_FAKE_LABEL_FILE:?}"; exit 0 ;;
+  has-session|new-session|send-keys|kill-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -52,6 +55,7 @@ run_grok_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LABEL_FILE="$fakebin/label" \
     GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" grok 2>&1
 }

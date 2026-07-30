@@ -1069,6 +1069,13 @@ case "$BACKEND" in
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
         if [ "${SPAWN_RECOVERY_BACKEND:-}" = herdr ]; then
+          # The recovery inspection above validated the journal only inside a
+          # command substitution, so re-snapshot in this shell to populate the
+          # FM_BACKEND_HERDR_JOURNAL_* globals the reclaim call reads.
+          fm_backend_herdr_projection_journal_snapshot "$HERDR_PRESENTATION_JOURNAL" "$ID" || {
+            echo "error: herdr presentation journal for $ID could not be re-read under the session lock; refusing duplicate launch" >&2
+            exit 1
+          }
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \

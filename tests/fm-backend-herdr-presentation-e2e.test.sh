@@ -547,8 +547,8 @@ PROJECTED_PANES=$(lab pane list --workspace "$PROJECTED_WSID")
 [ "$(printf '%s' "$PROJECTED_PANES" | jq -r '.result.panes | length')" = 1 ] \
   || fail "projected workspace did not contain exactly one task pane"
 printf '%s' "$PROJECTED_TABS" | jq -e --arg tab "$PROJECTED_TAB" \
-  '.result.tabs[0].tab_id == $tab and .result.tabs[0].label == "fm-shape"' >/dev/null 2>&1 \
-  || fail "projected workspace's only tab was not the normal fm-shape task tab"
+  '.result.tabs[0].tab_id == $tab and .result.tabs[0].label == "shape"' >/dev/null 2>&1 \
+  || fail "projected workspace's only tab was not the human-labeled task tab"
 printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
   '.result.panes[0].pane_id == $pane' >/dev/null 2>&1 \
   || fail "projected workspace's only pane was not the exact recorded task pane"
