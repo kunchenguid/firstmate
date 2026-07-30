@@ -83,7 +83,8 @@ Leave the card where the captain put it and comment that the task is paused.
 
 ### `trello-mode-error <message>` - configuration blocker
 
-The poll could not reach or read the board (bad credentials, missing `curl`/`jq`, or a board with no Inbox/Ready lane).
+The poll could not reach or read the board (bad credentials, missing `curl`/`jq`, a board with no Inbox/Ready lane, or a non-2xx board response).
+A transient transport blip (connection refused, DNS hiccup, cold-connection timeout) never reaches this wake: the poll retries it internally and, if still unresolved, defers silently to the next scheduled sweep instead.
 Report the blocker to the captain in plain outcome language and, if it needs a credential or a board fix, ask for it.
 Do not keep retrying blindly; the poll dedupes the error until it recovers.
 
