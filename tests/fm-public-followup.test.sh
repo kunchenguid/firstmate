@@ -417,6 +417,27 @@ test_relay_failure_holds_without_false_completion() {
   pass "a relay transport failure is held as retryable with no false completion, and the retry posts once"
 }
 
+test_dry_run_does_not_close_commitment() {
+  local home log out posts
+  home=$(make_home dry-run)
+  log="$home/curl.log"; : > "$log"
+  seed_commitment "$home" pf-dry req-dry discord main work-dry
+  emit_terminal "$home" "$home" pf-dry main work-dry >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+
+  FMX_DRY_RUN=1 FAKE_CURL_LOG="$log" expect_failure \
+    "a dry-run must not close a public commitment" run_pf "$home" deliver pf-dry
+  assert_contains "$EXPECT_OUT" "recorded as retryable" \
+    "a dry-run must leave a retryable typed state"
+  [ "$(delivery_state "$home" pf-dry)" = retry-due ] \
+    || fail "a dry-run must leave the obligation retryable, got $(delivery_state "$home" pf-dry)"
+  [ "$(task_state "$home" pf-dry)" != 'done' ] \
+    || fail "a dry-run must never close the commitment"
+  posts=$(followup_posts "$log")
+  [ "$posts" -eq 0 ] || fail "a dry-run must not post to the relay, got $posts posts"
+  pass "a dry-run records no public delivery and leaves the commitment retryable"
+}
+
 test_late_receipt_closes_the_exact_attempt_without_reposting() {
   local home log out posts attempt
   home=$(make_home late-receipt)
@@ -595,10 +616,12 @@ SH
     "a relay-disabled home must never get a public-followup directory"
 
   # A child cannot force artifacts into a home that never opted in either.
-  expect_failure "emitting into an unregistered home must be refused" \
-    "$EMIT" --home "$home" --obligation pf-x --relation rel-code \
+  rc=0
+  out=$("$EMIT" --home "$home" --obligation pf-x --relation rel-code \
     --source-home main --work-id w --generation 1 --outcome pr-merged \
-    --outcome-text 'x'
+    --outcome-text 'x' 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "emitting into a relay-disabled home must be a silent no-op (rc=$rc)"
+  [ -z "$out" ] || fail "emitting into a relay-disabled home must produce no output: $out"
   assert_absent "$home/state/public-followup" \
     "a refused emit must not create a public-followup directory"
   pass "a relay-disabled home runs no tasks-axi call, prints nothing, and gains no artifact"
@@ -742,6 +765,7 @@ test_restart_e2e_delivers_exactly_once
 test_duplicate_event_and_replay_are_noops
 test_invalid_events_are_refused_and_quarantined
 test_relay_failure_holds_without_false_completion
+test_dry_run_does_not_close_commitment
 test_late_receipt_closes_the_exact_attempt_without_reposting
 test_interrupted_delivery_refuses_to_repost
 test_outward_delivery_stays_with_the_owning_home

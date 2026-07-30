@@ -144,6 +144,22 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+PUBLIC_FOLLOWUP_HOME=$FM_HOME
+PUBLIC_FOLLOWUP_STATE=$STATE
+PUBLIC_FOLLOWUP_WORK_HOME=main
+if [ "$KIND" = secondmate ]; then
+  PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$ID"
+elif [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ]; then
+  SECOND_MATE_ID=$(sed -n '1p' "$FM_HOME/$SUB_HOME_MARKER")
+  if fm_pf_slug_valid "$SECOND_MATE_ID"; then
+    PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$SECOND_MATE_ID"
+    if [ -n "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" ]; then
+      PUBLIC_FOLLOWUP_HOME=$(CDPATH='' cd -- "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME" 2>/dev/null && pwd -P) || PUBLIC_FOLLOWUP_HOME=
+      [ -n "$PUBLIC_FOLLOWUP_HOME" ] || PUBLIC_FOLLOWUP_STATE=
+      [ -z "$PUBLIC_FOLLOWUP_STATE" ] || PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
+    fi
+  fi
+fi
 
 default_branch() {
   local ref branch
@@ -1101,9 +1117,11 @@ fi
 # work. Both gates live in bin/fm-public-followup-lib.sh, so a home that never
 # opted into the myfirstmate relay runs one [ -f ] test and nothing else here.
 if [ "$FORCE" != "--force" ] \
-  && fm_pf_relay_active "$FM_HOME" && fm_pf_has_registrations "$STATE"; then
-  if ! PUBLIC_FOLLOWUP_BLOCKING=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-public-followup.sh" guard-work main "$ID" 2>/dev/null); then
+  && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
+  && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME" \
+  && fm_pf_has_registrations "$PUBLIC_FOLLOWUP_STATE"; then
+  if ! PUBLIC_FOLLOWUP_BLOCKING=$(FM_HOME="$PUBLIC_FOLLOWUP_HOME" FM_STATE_OVERRIDE="$PUBLIC_FOLLOWUP_STATE" \
+      "$SCRIPT_DIR/fm-public-followup.sh" guard-work "$PUBLIC_FOLLOWUP_WORK_HOME" "$ID" 2>/dev/null); then
     echo "REFUSED: task $ID still owes a public reply through the myfirstmate relay." >&2
     printf '%s\n' "$PUBLIC_FOLLOWUP_BLOCKING" >&2
     echo "Deliver it with bin/fm-public-followup.sh deliver <obligation-id>, waive it with tasks-axi public-followup waive, or use --force after explicit discard approval." >&2

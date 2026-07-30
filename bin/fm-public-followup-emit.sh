@@ -129,8 +129,6 @@ done
 [ -n "$OUTCOME" ]     || { usage; exit 2; }
 [ -n "$TEXT_MODE" ]   || { usage; exit 2; }
 
-command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
-
 fm_pf_slug_valid "$OBLIGATION" || die "unsafe obligation id: $OBLIGATION"
 fm_pf_slug_valid "$RELATION"   || die "unsafe relation id: $RELATION"
 fm_pf_slug_valid "$WORK_ID"    || die "unsafe work id: $WORK_ID"
@@ -166,6 +164,9 @@ case "$HOME_DIR" in
 esac
 [ -d "$HOME_DIR" ] && [ ! -L "$HOME_DIR" ] \
   || die "--home must name an existing directory, got '$HOME_DIR'"
+
+fm_pf_relay_active "$HOME_DIR" || exit 0
+command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
 
 STATE="$HOME_DIR/state"
 REGISTRY="$(fm_pf_registry_dir "$STATE")/$OBLIGATION"
@@ -245,7 +246,9 @@ EVENT_JSON=$(jq -Sc -n \
     occurred_at:$occurred_at, successor:null}') \
   || die "could not build the typed terminal event" 1
 
-[ "${#EVENT_JSON}" -le "$FM_PF_EVENT_BYTES_MAX" ] \
+EVENT_BYTES=$(printf '%s\n' "$EVENT_JSON" | LC_ALL=C wc -c | tr -d ' ') \
+  || die "could not measure the typed terminal event" 1
+[ "$EVENT_BYTES" -le "$FM_PF_EVENT_BYTES_MAX" ] \
   || die "typed terminal event exceeds $FM_PF_EVENT_BYTES_MAX bytes" 2
 
 printf '%s\n' "$EVENT_JSON" \

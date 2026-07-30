@@ -278,15 +278,28 @@ EOF
 # reject_event <file> <event-id> <reason>: quarantine one refused event with an
 # inspectable reason so it is never retried in a loop.
 reject_event() {
-  local file=$1 event_id=$2 reason=$3 rejected
+  local file=$1 event_id=$2 reason=$3 rejected event_payload
   rejected=$(fm_pf_rejected_dir "$STATE")
-  if fmx_private_artifact_dir_prepare "$rejected" >/dev/null; then
-    printf '%s\n' "$reason" \
-      | fmx_private_artifact_publish_stdin "$rejected" "$event_id.reason" 600 2>/dev/null || true
-    cat "$file" 2>/dev/null \
-      | fmx_private_artifact_publish_stdin "$rejected" "$event_id.json" 600 2>/dev/null || true
+  fmx_private_artifact_dir_prepare "$rejected" >/dev/null \
+    || { printf 'rejected %s: %s (quarantine failed; event retained)\n' "$event_id" "$reason"; return 1; }
+  if ! printf '%s\n' "$reason" \
+      | fmx_private_artifact_publish_stdin "$rejected" "$event_id.reason" 600 2>/dev/null; then
+    printf 'rejected %s: %s (quarantine failed; event retained)\n' "$event_id" "$reason"
+    return 1
   fi
-  rm -f -- "$file" 2>/dev/null || true
+  if ! event_payload=$(cat "$file" 2>/dev/null); then
+    printf 'rejected %s: %s (quarantine failed; event retained)\n' "$event_id" "$reason"
+    return 1
+  fi
+  if ! printf '%s' "$event_payload" \
+      | fmx_private_artifact_publish_stdin "$rejected" "$event_id.json" 600 2>/dev/null; then
+    printf 'rejected %s: %s (quarantine failed; event retained)\n' "$event_id" "$reason"
+    return 1
+  fi
+  if ! rm -f -- "$file" 2>/dev/null; then
+    printf 'rejected %s: %s (quarantine cleanup failed; event retained)\n' "$event_id" "$reason"
+    return 1
+  fi
   printf 'rejected %s: %s\n' "$event_id" "$reason"
 }
 
@@ -295,7 +308,7 @@ cmd_consume() {
   fm_pf_has_events "$STATE" || exit 0
   require_tools
 
-  local events_dir consumed_dir stderr_file file event_id payload derived out rc reason
+  local events_dir consumed_dir stderr_file file event_id payload derived out rc reason consume_rc=0
   local obligation delivery request platform
   events_dir=$(fm_pf_events_dir "$STATE")
   consumed_dir=$(fm_pf_consumed_dir "$STATE")
@@ -310,8 +323,8 @@ cmd_consume() {
     event_id=$(basename "$file" .json)
 
     if ! fm_pf_slug_valid "$event_id"; then
-      rm -f -- "$file" 2>/dev/null || true
-      printf 'rejected %s: unsafe event filename\n' "$event_id"
+      printf 'rejected %s: unsafe event filename (event retained)\n' "$event_id"
+      consume_rc=1
       continue
     fi
 
@@ -323,12 +336,12 @@ cmd_consume() {
     fi
 
     if [ "$(wc -c < "$file" 2>/dev/null || echo 0)" -gt "$FM_PF_EVENT_BYTES_MAX" ]; then
-      reject_event "$file" "$event_id" "event exceeds $FM_PF_EVENT_BYTES_MAX bytes"
+      reject_event "$file" "$event_id" "event exceeds $FM_PF_EVENT_BYTES_MAX bytes" || consume_rc=1
       continue
     fi
 
     if ! payload=$(jq -ce . "$file" 2>/dev/null) || [ -z "$payload" ]; then
-      reject_event "$file" "$event_id" "event is not valid JSON"
+      reject_event "$file" "$event_id" "event is not valid JSON" || consume_rc=1
       continue
     fi
 
@@ -336,7 +349,7 @@ cmd_consume() {
     # A mismatch means the file was hand-edited or built by something other than
     # fm-public-followup-emit.sh, so it is refused before tasks-axi sees it.
     if [ "$(pf_field "$payload" '.event_id')" != "$event_id" ]; then
-      reject_event "$file" "$event_id" "declared event_id does not match the filename"
+      reject_event "$file" "$event_id" "declared event_id does not match the filename" || consume_rc=1
       continue
     fi
     derived=$(fm_pf_event_id \
@@ -348,13 +361,13 @@ cmd_consume() {
       "$(pf_field "$payload" '.outcome_type')" \
       "$(printf '%s' "$payload" | jq -Sc '.deliverables // {}' 2>/dev/null)")
     if [ -z "$derived" ] || [ "$derived" != "$event_id" ]; then
-      reject_event "$file" "$event_id" "event id does not match its own identity fields"
+      reject_event "$file" "$event_id" "event id does not match its own identity fields" || consume_rc=1
       continue
     fi
 
     obligation=$(pf_field "$payload" '.obligation_id')
     if ! fm_pf_slug_valid "$obligation"; then
-      reject_event "$file" "$event_id" "unsafe obligation id in event"
+      reject_event "$file" "$event_id" "unsafe obligation id in event" || consume_rc=1
       continue
     fi
 
@@ -370,7 +383,7 @@ cmd_consume() {
     if [ "$rc" -ne 0 ]; then
       reason=$( { cat "$stderr_file" 2>/dev/null; printf '%s\n' "$out"; } \
         | grep -v '^[[:space:]]*$' | head -1 | fm_pf_clean_outcome_text | fm_pf_bound_bytes 400)
-      reject_event "$file" "$event_id" "${reason:-tasks-axi refused the event}"
+      reject_event "$file" "$event_id" "${reason:-tasks-axi refused the event}" || consume_rc=1
       continue
     fi
 
@@ -389,21 +402,29 @@ cmd_consume() {
   # A fresh event must be able to wake firstmate again, so drop the surfaced
   # signature once the inbox has been worked.
   rm -f -- "$(fm_pf_root "$STATE")/$FM_PF_SURFACED_BASENAME" 2>/dev/null || true
+  return "$consume_rc"
 }
 
 # --- subcommand: pending ----------------------------------------------------
 
 cmd_pending() {
   gate_or_exit
-  require_tools
 
   local listing id payload delivery task_state summary platform request printed=0
   # An unreadable backlog with registrations present is exactly the silence this
   # whole path exists to prevent, so say so rather than printing nothing.
-  if ! listing=$(tx public-followup list --json 2>/dev/null) || [ -z "$listing" ]; then
-    fm_pf_has_registrations "$STATE" || exit 0
-    printf 'cannot read this home'\''s public commitments through tasks-axi; %s registration(s) are still recorded under state/%s/registry\n' \
-      "$(fm_pf_registry_ids "$STATE" | grep -c . || true)" "$FM_PF_DIRNAME"
+  if ! command -v jq >/dev/null 2>&1 || ! command -v tasks-axi >/dev/null 2>&1 \
+      || ! listing=$(tx public-followup list --json 2>/dev/null) || [ -z "$listing" ]; then
+    if fm_pf_has_registrations "$STATE"; then
+      printf 'cannot read this home'\''s public commitments through tasks-axi; %s registration(s) are still recorded under state/%s/registry\n' \
+        "$(fm_pf_registry_ids "$STATE" | grep -c . || true)" "$FM_PF_DIRNAME"
+      printed=1
+    fi
+    if fm_pf_has_events "$STATE"; then
+      printf 'unconsumed terminal results are waiting; run %s/bin/fm-public-followup.sh consume\n' "$FM_ROOT"
+      printed=1
+    fi
+    [ "$printed" -eq 1 ] || exit 0
     return 0
   fi
 
@@ -491,7 +512,7 @@ cmd_deliver() {
     || die "this home has not opted into the myfirstmate relay, so it cannot post a public reply" 1
   require_tools
 
-  local payload delivery attempt request platform text tmp_text hash chunks rc receipt
+  local payload delivery attempt request platform text tmp_text hash chunks rc receipt receipt_fields receipt_dry_run
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
   [ -n "$payload" ] || die "no public-followup obligation '$id' in this home's backlog" 1
 
@@ -561,8 +582,22 @@ cmd_deliver() {
     --text-file "$tmp_text" >/dev/null || rc=$?
 
   if [ "$rc" -eq 0 ]; then
-    chunks=$(jq -r '.chunks // 1' "$receipt" 2>/dev/null)
-    case "$chunks" in ''|*[!0-9]*) chunks=1 ;; esac
+    receipt_fields=$(jq -er --arg request "$request" '
+      if type != "object" or .request_id != $request or .endpoint != "followup"
+         or (.chunks | type) != "number" or (.chunks < 1) or (.chunks != (.chunks | floor))
+         or (.dry_run | type) != "boolean" then error("invalid receipt")
+      else [(.chunks | tostring), (.dry_run | tostring)] | @tsv end
+    ' "$receipt" 2>/dev/null) \
+      || die "the public reply for '$id' POSTED but its receipt is missing or invalid; inspect the relay and close it with 'record-posted $id --attempt $attempt --chunks <exact-count>' before any retry" 1
+    IFS=$'\t' read -r chunks receipt_dry_run <<EOF
+$receipt_fields
+EOF
+    if [ "$receipt_dry_run" = true ]; then
+      if ! record_error "$id" "$attempt" retry-due dry_run_no_post "$(next_attempt_rfc3339)"; then
+        die "dry-run for '$id' did not post and its retryable state could not be recorded; the obligation remains mid-delivery and needs explicit reconciliation before retry" 1
+      fi
+      die "dry-run for '$id' did not post; recorded as retryable and left the obligation open" 1
+    fi
     if record_posted "$id" "$attempt" "$request" "$platform" "$chunks"; then
       rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
       printf 'delivered %s request=%s platform=%s chunks=%s\n' "$id" "$request" "$platform" "$chunks"
@@ -572,11 +607,17 @@ cmd_deliver() {
   fi
 
   case "$rc" in
-    8)  record_error "$id" "$attempt" context-blocked reply_context_unresolved "" || true
+    8)  if ! record_error "$id" "$attempt" context-blocked reply_context_unresolved ""; then
+          die "the public reply for '$id' was not posted, and its held state could not be recorded; the obligation remains mid-delivery and needs explicit reconciliation before retry" 1
+        fi
         die "held '$id': the original thread's platform or size budget could not be resolved, so nothing was posted. Retry once the request context is recoverable." 1 ;;
-    9)  record_error "$id" "$attempt" expired-action-required followup_binding_exhausted "" || true
+    9)  if ! record_error "$id" "$attempt" expired-action-required followup_binding_exhausted ""; then
+          die "the relay rejected '$id', and its expired state could not be recorded; the obligation remains mid-delivery and needs explicit reconciliation before retry" 1
+        fi
         die "the relay no longer accepts a follow-up for '$id' (window or cap exhausted); nothing was posted and this needs a captain decision" 1 ;;
-    *)  record_error "$id" "$attempt" retry-due relay_post_failed "$(next_attempt_rfc3339)" || true
+    *)  if ! record_error "$id" "$attempt" retry-due relay_post_failed "$(next_attempt_rfc3339)"; then
+          die "posting the public reply for '$id' failed, and its retryable state could not be recorded; the obligation remains mid-delivery and needs explicit reconciliation before retry" 1
+        fi
         die "posting the public reply for '$id' failed (exit $rc); recorded as retryable, nothing was delivered" 1 ;;
   esac
 }
