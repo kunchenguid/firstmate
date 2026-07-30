@@ -39,7 +39,10 @@ trap cleanup EXIT
 wait_for_text() {
   local file=$1 text=$2 i=0
   while [ "$i" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - >"$file" 2>/dev/null || true
+    # Include recent scrollback: expanding a long restored transcript can move
+    # the asserted tool output above the current viewport while the footer and
+    # editor remain visible.
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$file" 2>/dev/null || true
     grep -Fq "$text" "$file" 2>/dev/null && return 0
     sleep 0.05
     i=$((i + 1))
