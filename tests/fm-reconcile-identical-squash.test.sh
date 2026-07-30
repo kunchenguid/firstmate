@@ -615,6 +615,38 @@ SH
   pass "symbolic branch race cannot write through to its claimant"
 }
 
+test_symbolic_preservation_race_retains_direct_anchor() {
+  local fakebin real_git claimant_ref
+  new_divergent_fixture symbolic-preservation-race
+  fakebin="$CASE_ROOT/fakebin"
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  claimant_ref=refs/heads/preservation-claimant
+  git -C "$REPO" update-ref "$PRESERVE_REF" "$LOCAL_OLD"
+  git -C "$REPO" update-ref "$claimant_ref" "$LOCAL_OLD"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+is_update=0
+for arg in "$@"; do [ "$arg" = update-ref ] && is_update=1; done
+if [ "$is_update" -eq 1 ] && [ "${RACE_INNER:-0}" != 1 ]; then
+  RACE_INNER=1 "${REAL_GIT_FOR_TEST:?}" -C "${RACE_REPO:?}" \
+    symbolic-ref "${RACE_PRESERVE_REF:?}" "${RACE_CLAIMANT_REF:?}" || exit $?
+fi
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  run_helper "$REPO" env PATH="$fakebin:$PATH" REAL_GIT_FOR_TEST="$real_git" \
+    RACE_REPO="$REPO" RACE_PRESERVE_REF="$PRESERVE_REF" \
+    RACE_CLAIMANT_REF="$claimant_ref"
+
+  expect_code 0 "$RUN_RC" "symbolic preservation race"
+  assert_direct_ref "$REPO" refs/heads/main "$REMOTE_NEW" "symbolic preservation race branch"
+  assert_direct_ref "$REPO" "$PRESERVE_REF" "$LOCAL_OLD" "symbolic preservation race anchor"
+  assert_direct_ref "$REPO" "$claimant_ref" "$LOCAL_OLD" "symbolic preservation race claimant"
+  pass "symbolic preservation race cannot commit without a direct anchor"
+}
+
 test_post_commit_claimant_is_never_rolled_back() {
   local fakebin real_git claimant
   new_divergent_fixture post-commit-claimant
@@ -689,5 +721,6 @@ test_fetch_failure_refuses
 test_source_advancement_is_bounded
 test_expected_old_race_is_atomic
 test_symbolic_branch_race_is_atomic
+test_symbolic_preservation_race_retains_direct_anchor
 test_post_commit_claimant_is_never_rolled_back
 test_non_repository_refuses

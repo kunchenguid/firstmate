@@ -575,7 +575,7 @@ observe_remote_default \
     printf 'create %s %s\n' "$PRESERVE_REF" "$LOCAL_OID"
   else
     printf 'option no-deref\n'
-    printf 'verify %s %s\n' "$PRESERVE_REF" "$LOCAL_OID"
+    printf 'update %s %s %s\n' "$PRESERVE_REF" "$LOCAL_OID" "$LOCAL_OID"
   fi
   printf 'option no-deref\n'
   printf 'update %s %s %s\n' "$HEAD_REF" "$REMOTE_OID" "$LOCAL_OID"
