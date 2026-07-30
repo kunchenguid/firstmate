@@ -340,6 +340,37 @@ test_already_current_unchanged() {
   pass "already-current clone is reported unchanged"
 }
 
+# A clone whose `origin` is an upstream it was forked from and whose `fork` remote
+# is the publish target must refresh from fork/<default>. Following origin would
+# report the clone as diverged forever, or pull the upstream's own history.
+test_fork_backed_clone_syncs_from_publish_remote() {
+  local home clone work fork_remote out
+  home=$(new_home)
+  clone=$(build_pair "$home" forked)
+  work="$home/work-forked"
+  fork_remote="$home/remotes/forked-fork.git"
+
+  git clone --quiet --bare "$clone" "$fork_remote"
+  git -C "$clone" remote add fork "file://$(cd "$fork_remote" && pwd)"
+  git -C "$work" remote add fork "file://$(cd "$fork_remote" && pwd)"
+  # The fleet's own commit lands on the publish remote only; the upstream diverges
+  # with an unrelated commit of its own.
+  commit_file "$work" ours.txt v1 OURS1
+  git -C "$work" push -q fork main
+  git -C "$work" reset -q --hard HEAD~1
+  commit_file "$work" upstream.txt v1 UPSTREAM1
+  git -C "$work" push -q origin main
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "forked: synced" "fork-backed clone fast-forwards from its publish remote"
+  assert_not_contains "$out" "STUCK" "fork-backed clone is not reported as drifted"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse fork/main)" ] \
+    || fail "clone was not fast-forwarded to fork/main"
+  [ ! -e "$clone/upstream.txt" ] || fail "clone followed the upstream instead of the publish remote"
+  pass "fork-backed clone syncs from fork, not the diverged upstream"
+}
+
 test_no_origin_skipped() {
   local home clone out
   home=$(new_home)
@@ -611,6 +642,7 @@ test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
+test_fork_backed_clone_syncs_from_publish_remote
 test_no_origin_skipped
 test_local_only_skipped
 test_single_project_by_bare_name_resolves

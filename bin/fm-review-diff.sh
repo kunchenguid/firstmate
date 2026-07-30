@@ -2,8 +2,10 @@
 # Review a crewmate branch against the authoritative base.
 #
 # Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# helper compares remote-backed projects against <publish-remote>/<default> after
+# fetching the default branch, and local-only projects against the local default
+# branch. The publish remote comes from bin/fm-remote-lib.sh, so a fork-backed
+# clone is reviewed against the branch its own work lands on, not its upstream.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -18,6 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-remote-lib.sh
+. "$SCRIPT_DIR/fm-remote-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -92,11 +96,11 @@ pr_number_from_target() {
 }
 
 fetch_pull_head() {
-  local n=$1 resolved
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  local n=$1 resolved remote
+  remote=$(fm_publish_remote "$WT") || return 1
   # Fetch into a private ref so a later base-branch fetch cannot clobber the
   # compare tip via FETCH_HEAD, and so we never review a stale local object.
-  git -C "$WT" fetch --quiet origin \
+  git -C "$WT" fetch --quiet "$remote" \
     "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
   resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
@@ -133,11 +137,11 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+if REMOTE=$(fm_publish_remote "$PROJ"); then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  # <remote>/<default> stale on some Git versions and only refresh FETCH_HEAD.
+  git -C "$WT" fetch "$REMOTE" "+refs/heads/$DEFAULT:refs/remotes/$REMOTE/$DEFAULT" --quiet
+  BASE="$REMOTE/$DEFAULT"
 else
   BASE="$DEFAULT"
 fi
@@ -146,7 +150,7 @@ git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "e
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
 echo "diff base: $BASE"
-if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
+if git -C "$WT" diff --no-ext-diff --quiet "$BASE...$COMPARE_REF" --; then
   echo "no changes vs $BASE"
   exit 0
 fi
@@ -154,5 +158,7 @@ fi
 git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
 if ! "$STAT_ONLY"; then
   echo
-  git -C "$WT" diff "$BASE...$COMPARE_REF" --
+  # --no-ext-diff: review reads the real patch, never an operator's configured
+  # third-party diff renderer (diff.external), same as fm-teardown.sh's patch-id.
+  git -C "$WT" diff --no-ext-diff "$BASE...$COMPARE_REF" --
 fi

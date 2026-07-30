@@ -3,9 +3,11 @@
 # firstmate repo and every registered secondmate home.
 #
 # The guarantees under test mirror fm-fleet-sync.sh and prime directive #3:
-#   - The running firstmate repo (on its default branch) fast-forwards from
-#     origin; a leased secondmate home (detached HEAD on the default branch)
-#     fast-forwards the same way.
+#   - The running firstmate repo (on its default branch) fast-forwards from its
+#     PUBLISH remote (bin/fm-remote-lib.sh: `fork` when that remote exists, else
+#     `origin`); a leased secondmate home (detached HEAD on the default branch)
+#     fast-forwards the same way. A fork-backed checkout whose `origin` upstream
+#     has diverged still receives the fleet's own landed updates.
 #   - FAST-FORWARD ONLY: a dirty, diverged, offline, or wrong-branch target is
 #     skipped and reported, never forced or stashed, so unlanded work survives.
 #   - The update is a single-parent fast-forward (never a merge commit) and a
@@ -90,6 +92,46 @@ bump_origin() {
 run_update() {
   local w=$1
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+}
+
+# Reshape a world into the fork-backed shape this fleet actually runs: a `fork`
+# remote that is the publish target, and an `origin` upstream that has DIVERGED
+# from the fleet's history. Local main gains one commit the upstream never took,
+# and the upstream gains one commit of its own, so a self-update that still
+# followed origin can only report "diverged from origin/main" (or, worse, follow
+# the upstream's history). Call before add_sm so a secondmate leases the reshaped
+# main. Args: world.
+add_publish_fork() {
+  local w=$1
+  git init -q --bare "$w/fork.git"
+  git -C "$w/fork.git" symbolic-ref HEAD refs/heads/main
+  git -C "$w/main" remote add fork "$w/fork.git"
+  git -C "$w/seed" remote add fork "$w/fork.git"
+
+  # One commit that lands on the publish remote and in the local checkout only.
+  printf 'ours\n' >> "$w/seed/README.md"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm ours-1
+  git -C "$w/seed" push -q fork main
+  git -C "$w/main" fetch -q fork
+  git -C "$w/main" merge -q --ff-only fork/main
+
+  # The upstream gains an unrelated commit, so origin/main now diverges and its
+  # UPSTREAM.md is a witness: it must never appear in a checkout this fleet syncs.
+  git clone -q "$w/origin.git" "$w/upseed"
+  printf 'upstream only\n' > "$w/upseed/UPSTREAM.md"
+  git -C "$w/upseed" add -A
+  git -C "$w/upseed" commit -qm upstream-1
+  git -C "$w/upseed" push -q origin main
+}
+
+# Advance the publish remote by one instruction-surface commit. Args: world.
+bump_fork() {
+  local w=$1
+  printf 'v-fork\n' > "$w/seed/AGENTS.md"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm bump-fork
+  git -C "$w/seed" push -q fork main
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -291,6 +333,74 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- T12: fork present resolves the publish remote, not the upstream ---------
+# The pure-fork shape: `fork` is the publish target and `origin` is a diverged
+# upstream. Both the firstmate repo and its leased secondmate must follow fork/main.
+test_fork_present_resolves_publish_remote() {
+  local w out
+  w=$(new_world t12)
+  add_publish_fork "$w"
+  add_sm "$w" sm1
+  bump_fork "$w"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded from the publish remote"
+  assert_contains "$out" "secondmate sm1: updated " "secondmate fast-forwarded from the publish remote"
+  assert_contains "$out" "reread-firstmate: yes" "instruction change on the publish remote triggers reread"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" "advanced secondmate is nudged"
+  assert_not_contains "$out" "diverged from origin/main" "diverged upstream no longer blocks the update"
+
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse fork/main)" ] \
+    || fail "firstmate HEAD not at fork/main"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse fork/main)" ] \
+    || fail "secondmate HEAD not at fork/main"
+  # The upstream's own commit must never be pulled into a fleet checkout.
+  [ ! -e "$w/main/UPSTREAM.md" ] || fail "firstmate followed the upstream instead of the publish remote"
+  [ ! -e "$w/sm1/UPSTREAM.md" ] || fail "secondmate followed the upstream instead of the publish remote"
+  pass "T12 fork-backed checkout fast-forwards from fork, ignoring the diverged upstream"
+}
+
+# --- T13: no fork remote falls back to origin -------------------------------
+test_fork_absent_falls_back_to_origin() {
+  local w out
+  w=$(new_world t13)
+  bump_origin "$w" instr
+
+  git -C "$w/main" remote get-url fork >/dev/null 2>&1 \
+    && fail "fixture unexpectedly has a fork remote"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "single-remote checkout still updates from origin"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "firstmate HEAD not at origin/main when no fork remote exists"
+  pass "T13 checkout with no fork remote falls back to origin unchanged"
+}
+
+# --- T14: diverged from the publish remote is still refused -----------------
+test_diverged_from_publish_remote_skipped() {
+  local w out before
+  w=$(new_world t14)
+  add_publish_fork "$w"
+  # Unlanded local commit on the default branch, plus a new publish-remote commit:
+  # local main and fork/main now diverge, so the update must refuse and preserve it.
+  printf 'unlanded local work\n' > "$w/main/AGENTS.md"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm local-work
+  before=$(git -C "$w/main" rev-parse HEAD)
+  bump_fork "$w"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: diverged from fork/main" "diverged publish remote refuses"
+  assert_contains "$out" "reread-firstmate: no" "no reread when the update was refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "diverged firstmate HEAD moved (unlanded work at risk)"
+  grep -q 'unlanded local work' "$w/main/AGENTS.md" || fail "unlanded local commit was discarded"
+  pass "T14 divergence from the publish remote is still refused, never forced"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -300,5 +410,8 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_fork_present_resolves_publish_remote
+test_fork_absent_falls_back_to_origin
+test_diverged_from_publish_remote_skipped
 
 echo "# all fm-update tests passed"
