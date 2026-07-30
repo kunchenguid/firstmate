@@ -19,3 +19,5 @@ config/x-mode.env
 config/cmux-socket-password
 config/wedge-alarm
 config/herdr-presentation-spaces
+config/ops-inbox.json
+ops-inbox/

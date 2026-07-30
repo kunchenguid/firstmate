@@ -137,6 +137,7 @@ family_for_basename() {
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
+    fm-ops-inbox-watch.test.sh|\
     fm-wake-queue.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
     fm-watcher-lock.test.sh)
       printf '%s\n' watcher-wake-lock
@@ -649,6 +650,14 @@ families_for_changed_path() {
     bin/fm-watch*|bin/fm-wake*|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
+      ;;
+    bin/fm-ops-inbox-*)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-supervision-lib.sh)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' session-bootstrap
       ;;
     bin/fm-afk*)
       printf '%s\n' afk

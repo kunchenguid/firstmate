@@ -264,6 +264,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/ops-inbox-wake.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },

@@ -3,9 +3,12 @@
 # Usage: . bin/fm-supervision-lib.sh
 #
 # Reports whether a firstmate home needs supervision because it has in-flight
-# work (a state/<id>.meta exists) or an X-mode relay poll
-# (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
-# (state/.last-watcher-beat, touched every poll cycle, within the grace window).
+# work (a state/<id>.meta exists) or an armed standing poll - an X-mode relay
+# poll (state/x-watch.check.sh) or the operational alert inbox watch
+# (state/ops-watch.check.sh) - and whether its watcher has a fresh liveness
+# beacon (state/.last-watcher-beat, touched every poll cycle, within the grace
+# window). A standing poll only reaches firstmate through a live watcher, so an
+# armed one is a supervision need even with an empty fleet.
 # bin/fm-guard.sh keeps its task-specific grace-based warning predicate;
 # bin/fm-turnend-guard.sh uses the status fields here for its banner but performs
 # its end-of-turn block decision with the live watcher lock check in
@@ -23,7 +26,9 @@ fm_sup_stat_mtime() {
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
-#   FM_SUP_NEEDED         true/false - in-flight work or an X-mode relay poll
+#   FM_SUP_NEEDED         true/false - in-flight work or an armed standing poll
+#   FM_SUP_STANDING_DESC  plain-language name of the armed standing poll(s), for
+#                         banners; empty when none is armed
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -33,6 +38,7 @@ fm_supervision_status() {
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
+  FM_SUP_STANDING_DESC=
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
@@ -41,7 +47,15 @@ fm_supervision_status() {
     [ -e "$meta" ] || continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
-  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || [ -f "$state/x-watch.check.sh" ]; then
+  [ -f "$state/x-watch.check.sh" ] && FM_SUP_STANDING_DESC="X-mode relay polling"
+  if [ -f "$state/ops-watch.check.sh" ]; then
+    if [ -n "$FM_SUP_STANDING_DESC" ]; then
+      FM_SUP_STANDING_DESC="$FM_SUP_STANDING_DESC and operational alert monitoring"
+    else
+      FM_SUP_STANDING_DESC="operational alert monitoring"
+    fi
+  fi
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || [ -n "$FM_SUP_STANDING_DESC" ]; then
     FM_SUP_NEEDED=true
   fi
 
@@ -64,8 +78,8 @@ fm_supervision_status() {
 }
 
 # fm_supervision_needed <state-dir> [grace-seconds]
-# Exit 0 (true) exactly when in-flight work or an X-mode relay poll needs a
-# watcher. Exit 1 (false) for an idle home.
+# Exit 0 (true) exactly when in-flight work or an armed standing poll needs a
+# watcher. Exit 1 (false) for an idle home with no standing poll.
 fm_supervision_needed() {
   fm_supervision_status "$@"
   [ "$FM_SUP_NEEDED" = true ]
