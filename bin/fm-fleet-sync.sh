@@ -1188,7 +1188,7 @@ sync_project() {
   if ! git -C "$PROJ" merge-base --is-ancestor "$local_rev" "$remote_rev"; then
     # Preserve ordinary unpublished-ahead history and every unequal divergence.
     # Reconcile only genuine divergence (neither side is an ancestor) with exact,
-    # equal root tree identities from the freshly fetched refs.
+    # equal root tree identities from the observed post-fetch refs.
     if git -C "$PROJ" merge-base --is-ancestor "$remote_rev" "$local_rev" 2>/dev/null; then
       report_stuck "diverged $DEFAULT"
       return 0
