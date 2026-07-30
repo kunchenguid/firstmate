@@ -26,10 +26,22 @@
 # through meta - an ad hoc window name with no recorded task. Mirrors the
 # `tmux list-windows -a ... | grep` pipeline that used to live inline in
 # fm-send.sh's and fm-peek.sh's own (until now duplicated) resolve().
+# Display names are mutable human labels and may repeat, so a name matching
+# more than one live window is refused with the candidate list rather than
+# steering an arbitrary first match.
 fm_backend_tmux_resolve_bare_selector() {  # <name>
-  local name=$1
-  tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -m1 ":$name\$" \
+  local name=$1 matches count
+  matches=$(tmux list-windows -a -F '#{session_name}:#{window_name}' | grep ":$name\$") \
     || { echo "error: no window named $name" >&2; return 1; }
+  count=$(printf '%s\n' "$matches" | grep -c .)
+  if [ "$count" -gt 1 ]; then
+    {
+      echo "error: window name $name matches $count live windows; pass an explicit session:window target:"
+      printf '%s\n' "$matches" | sed 's/^/  /'
+    } >&2
+    return 1
+  fi
+  printf '%s\n' "$matches"
 }
 
 # fm_backend_tmux_capture: bounded plain-text pane capture. Mirrors
@@ -163,7 +175,7 @@ fm_backend_tmux_kill() {  # <target>
   esac
   case "$window" in
     @*)
-      windows=$(tmux list-windows -t "$session" -F '#{window_id}' 2>/dev/null) || return 0
+      windows=$(tmux list-windows -t "=$session" -F '#{window_id}' 2>/dev/null) || return 0
       printf '%s\n' "$windows" | grep -Fqx "$window" || return 0
       tmux kill-window -t "$window" 2>/dev/null || true
       ;;

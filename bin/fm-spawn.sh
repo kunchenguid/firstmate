@@ -938,6 +938,10 @@ herdr_existing_meta_allows_spawn() {  # <meta>
   SPAWN_RECOVERY_BACKEND=$old_backend
   SPAWN_RECOVERY_TARGET=$old_target
   if [ "$old_backend" = herdr ]; then
+    fm_backend_source herdr || {
+      echo "error: could not load the herdr backend adapter to inspect the existing endpoint for $ID; refusing duplicate launch" >&2
+      return 1
+    }
     fm_backend_herdr_parse_target "$old_target" || {
       echo "error: existing herdr endpoint for $ID is malformed; refusing duplicate launch" >&2
       return 1
@@ -1005,8 +1009,11 @@ case "$BACKEND" in
     # window id, then replace only the display name. Every operation and the
     # persisted endpoint target use the id, never the mutable human label.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
-    fm_backend_tmux_rename_task "$WID" "$LABEL" || exit 1
     T="$SES:$WID"
+    if ! fm_backend_tmux_rename_task "$WID" "$LABEL"; then
+      fm_backend_tmux_kill "$T" || true
+      exit 1
+    fi
     if [ "$TMUX_REPLACE_OLD" -eq 1 ] \
        && ! fm_backend_tmux_replace_recorded_dead "$SPAWN_RECOVERY_TARGET" "$T"; then
       fm_backend_tmux_kill "$T" || true
@@ -1156,7 +1163,10 @@ case "$BACKEND" in
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
-      fm_backend_herdr_rename_task "$HERDR_SES" "$HERDR_TAB_ID" "$LABEL" || exit 1
+      if ! fm_backend_herdr_rename_task "$HERDR_SES" "$HERDR_TAB_ID" "$LABEL"; then
+        fm_backend_herdr_kill "$HERDR_SES:$HERDR_PANE_ID" || true
+        exit 1
+      fi
       if [ "$HERDR_FLAT_REPLACE_OLD" -eq 1 ] \
          && ! fm_backend_herdr_replace_recorded_husk \
            "$HERDR_SES" "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" \
