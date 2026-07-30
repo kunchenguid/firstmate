@@ -340,6 +340,28 @@ EOF
   pass "fm-verify-delivered.sh: task-id mode extracts acceptance claims"
 }
 
+# Bug 2's class in the other mode. The claim list is truncated for display, and
+# `head` closes the pipe as soon as it has its lines; once the list outgrows the
+# pipe buffer the writer is cut off mid-write and pipefail turns that into a
+# fatal, so a brief with many claims fails while a short one passes. The brief
+# below is sized past the buffer on purpose: at ~40 claims the `head` spelling
+# still passes, so a smaller fixture would assert nothing.
+test_task_mode_long_claim_list_is_truncated_not_fatal() {
+  local home="$TMP_ROOT/home-long-claims"
+  mkdir -p "$home/data/fm-long"
+  awk 'BEGIN {
+    for (i = 1; i <= 1200; i++)
+      printf "%d. Every call site number %d must consult the graph and satisfy the acceptance criteria on this line.\n", i, i
+  }' > "$home/data/fm-long/brief.md"
+
+  run_env "FM_HOME=$home" -- fm-long
+  expect_code 0 "$RC" "a long claim list must not turn a truncated display into a failure"
+  assert_contains "$OUT" "CHECKLIST: 1200 claim line(s) extracted" "the count reports the truncated display, not every claim found"
+  assert_contains "$OUT" "40:40. Every call site number 40 " "the display stopped short of its 40-line cap"
+  assert_not_contains "$OUT" "41:41. Every call site number 41 " "the display printed past its 40-line cap"
+  pass "fm-verify-delivered.sh: a long claim list is truncated for display, not fatal"
+}
+
 # The same no-match hazard in the other mode: a brief whose claims do not parse
 # is an unverified brief, not an approved one.
 test_task_mode_without_claims_reports_inspected_nothing() {
@@ -404,6 +426,7 @@ test_erroring_git_grep_reports_search_failed
 test_unclassified_failure_in_a_mode_function_reports_search_failed
 test_no_match_is_a_result_not_a_fatal
 test_task_mode_extracts_claims
+test_task_mode_long_claim_list_is_truncated_not_fatal
 test_task_mode_without_claims_reports_inspected_nothing
 test_task_mode_missing_brief_is_usage_error
 test_no_mode_is_usage_error
