@@ -252,6 +252,10 @@ It provisions only non-default names beginning with `fm-lab-`, appends an explic
 Immediately before every destructive call it re-queries the named session and refuses empty, missing, literal `default`, or `default:true` identities.
 Its before/after tripwire requires the live default-session snapshot to remain byte-identical.
 
+Because that tripwire needs a running default session, a machine with Herdr installed but no default session running cannot host a lab at all.
+The helper's `gate` command is the single owner of that verdict, so real-Herdr tests skip with the reason instead of failing on a precondition they cannot create.
+The required CI Herdr lane starts a default session and fails on those skip reasons, so the same gate can never turn the lane green by skipping the work.
+
 The helper's header and `--help` own exact commands.
 Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.
 
