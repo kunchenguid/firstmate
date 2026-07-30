@@ -10,7 +10,8 @@
 #
 #   1. Every crewmate/scout/secondmate template composes exactly what it did
 #      before the extraction out of bin/fm-spawn.sh (behavior-preserving pin).
-#   2. bin/fm-spawn.sh defines none of the three functions itself, so there is
+#   2. bin/fm-spawn.sh takes every launch decision from this library - it
+#      cannot launch without it and follows a swapped one - so there is
 #      exactly one copy to keep verified.
 #
 # The `primary` kind (a firstmate PRIMARY session: no task, no worktree, no
@@ -22,7 +23,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LAUNCH_LIB="$ROOT/bin/fm-launch-lib.sh"
-SPAWN="$ROOT/bin/fm-spawn.sh"
+TMP_ROOT=$(fm_test_tmproot fm-launch-lib)
+trap 'rm -rf "$TMP_ROOT"' EXIT
 
 # shellcheck source=/dev/null
 . "$LAUNCH_LIB"
@@ -299,55 +301,88 @@ test_flags_are_shell_quoted() {
 }
 
 # --- one owner --------------------------------------------------------------
+# The guarantee: the launch functions have exactly one live definition,
+# bin/fm-launch-lib.sh, and bin/fm-spawn.sh obtains them from there rather
+# than carrying its own copy. Proven behaviorally: fm-spawn runs from a
+# sandboxed copy of bin/ whose library is swapped or removed, and its
+# observable launch decision must follow that library every time.
 
-test_fm_spawn_defines_none_of_the_three_functions() {
-  local fn
-  for fn in launch_template model_flag_for_harness effort_flag_for_harness shell_quote; do
-    grep -qE "^$fn\(\) \{" "$SPAWN" \
-      && fail "bin/fm-spawn.sh defines $fn again; bin/fm-launch-lib.sh is the single owner"
-  done
-  # shellcheck disable=SC2016  # matching fm-spawn.sh's literal source line, not expanding it
-  grep -Fq '. "$SCRIPT_DIR/fm-launch-lib.sh"' "$SPAWN" \
-    || fail "bin/fm-spawn.sh must source bin/fm-launch-lib.sh"
-  pass "one owner: bin/fm-spawn.sh sources the library and redefines nothing"
+# make_spawn_sandbox <name>: a private copy of bin/ plus a throwaway home, so
+# a test can swap or remove the sandbox's library without touching the
+# tracked tree.
+make_spawn_sandbox() {
+  local dir="$TMP_ROOT/$1"
+  mkdir -p "$dir/home/state" "$dir/home/config"
+  cp -R "$ROOT/bin" "$dir/bin"
+  printf '%s\n' "$dir"
 }
 
-test_no_other_tracked_script_hand_writes_a_launch_command() {
-  # One marker per verified adapter's autonomy, permission, or ghost-text
-  # knowledge, so a hand-copied codex, opencode, grok, or kimi command is caught
-  # too and not just claude's. Each pattern must still match the library itself;
-  # a pattern that matches nothing would pass this guard while checking nothing.
-  #
-  # The two --auto markers are anchored to the binary they belong to. A bare
-  # --auto would also match unrelated legitimate flags - `gh pr merge --auto` in
-  # bin/fm-pr-*.sh is the obvious one - and fail with a misleading "a launch
-  # command is hand-written" message. Double-quoted so the single quote inside
-  # the character class stays literal; it stops the match at the template's own
-  # quoting so the pattern cannot run past the end of a launch string.
-  local markers=(
-    'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION'
-    '--dangerously-skip-permissions'
-    '--dangerously-bypass-approvals-and-sandbox'
-    'OPENCODE_CONFIG_CONTENT='
-    '--always-approve'
-    "opencode [^']*--auto([^-a-z]|$)"
-    "(kimi|__KIMIBIN__)[^']*--auto([^-a-z]|$)"
-  )
-  local marker owners status matches
-  for marker in "${markers[@]}"; do
-    owners=$(git -C "$ROOT" grep -lE -e "$marker" -- bin)
-    status=$?
-    [ "$status" -le 1 ] \
-      || fail "the one-owner guard could not run git grep for '$marker' (git grep exited $status)"
-    case $'\n'"$owners"$'\n' in
-      *$'\n'bin/fm-launch-lib.sh$'\n'*) ;;
-      *) fail "the one-owner guard's '$marker' pattern no longer matches bin/fm-launch-lib.sh, so it checks nothing" ;;
-    esac
-    matches=$(printf '%s\n' "$owners" | grep -v '^bin/fm-launch-lib.sh$' | grep -v '^$')
-    [ -z "$matches" ] \
-      || fail "a launch command is hand-written outside bin/fm-launch-lib.sh ('$marker'): $matches"
-  done
-  pass "one owner: no other script under bin/ hand-writes any verified harness launch command"
+# run_sandboxed_spawn <sandbox> <harness>: drive the sandbox's fm-spawn.sh to
+# its launch-template decision. The project argument never exists, so an
+# accepted harness still stops at project resolution - long before any pane
+# or worktree could be created.
+run_sandboxed_spawn() {
+  local sandbox=$1 harness=$2
+  FM_HOME="$sandbox/home" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux \
+    "$sandbox/bin/fm-spawn.sh" one-owner-probe "$sandbox/no-such-project" \
+    --harness "$harness" 2>&1
+}
+
+# The stub libraries below define the library's whole public surface, so a
+# sandboxed fm-spawn exercises its real call sites against a swapped owner.
+test_fm_spawn_takes_its_launch_decision_from_the_library() {
+  local sandbox out
+  # A verified harness through an untouched copy is accepted: the run gets
+  # past the unverified-adapter refusal to the nonexistent-project failure.
+  sandbox=$(make_spawn_sandbox intact-verified)
+  out=$(run_sandboxed_spawn "$sandbox" claude) \
+    && fail "the probe spawn must stop at its nonexistent project, not succeed: $out"
+  assert_not_contains "$out" "unknown harness" \
+    "an untouched fm-spawn must accept a harness its library verifies"
+
+  # The same harness after the sandbox's library is swapped for one that
+  # verifies nothing: fm-spawn must now refuse claude. Only the library
+  # changed between the two runs, so the launch decision provably lives
+  # there and not in a copy inside fm-spawn.
+  sandbox=$(make_spawn_sandbox swapped-refuse)
+  cat > "$sandbox/bin/fm-launch-lib.sh" <<'LIB'
+launch_template() { return 1; }
+model_flag_for_harness() { :; }
+effort_flag_for_harness() { :; }
+shell_quote() { printf "'%s'" "$1"; }
+LIB
+  out=$(run_sandboxed_spawn "$sandbox" claude) \
+    && fail "fm-spawn must refuse every harness when its library verifies none: $out"
+  assert_contains "$out" "unknown harness 'claude'" \
+    "fm-spawn accepted claude with no library template, so it carries its own copy of the launch knowledge"
+
+  # And the inverse: a library that verifies a harness fm-spawn has never
+  # heard of makes fm-spawn accept it.
+  sandbox=$(make_spawn_sandbox swapped-accept)
+  cat > "$sandbox/bin/fm-launch-lib.sh" <<'LIB'
+launch_template() { [ "$1" = sentinel-harness ] || return 1; printf '%s' 'sentinel-harness __MODELFLAG__'; }
+model_flag_for_harness() { :; }
+effort_flag_for_harness() { :; }
+shell_quote() { printf "'%s'" "$1"; }
+LIB
+  out=$(run_sandboxed_spawn "$sandbox" sentinel-harness) \
+    && fail "the probe spawn must still stop at its nonexistent project: $out"
+  assert_not_contains "$out" "unknown harness" \
+    "fm-spawn refused a harness its library verifies, so the refusal decision is not the library's"
+  pass "one owner: fm-spawn's launch decision follows its library in both directions"
+}
+
+test_fm_spawn_cannot_launch_without_the_library() {
+  local sandbox out
+  sandbox=$(make_spawn_sandbox no-library)
+  rm "$sandbox/bin/fm-launch-lib.sh"
+  out=$(run_sandboxed_spawn "$sandbox" claude) \
+    && fail "fm-spawn ran without bin/fm-launch-lib.sh: $out"
+  assert_contains "$out" "fm-launch-lib.sh" \
+    "the failure must name the missing library"
+  assert_not_contains "$out" "unknown harness" \
+    "fm-spawn reached its launch-template guard without the library, so it carries a fallback copy"
+  pass "one owner: fm-spawn cannot take a launch decision without bin/fm-launch-lib.sh"
 }
 
 test_ship_and_scout_templates_are_pinned
@@ -370,5 +405,5 @@ test_model_flag_is_empty_when_unset_or_default
 test_effort_flag_per_harness_vocabulary
 test_effort_flag_is_empty_when_unset_or_default
 test_flags_are_shell_quoted
-test_fm_spawn_defines_none_of_the_three_functions
-test_no_other_tracked_script_hand_writes_a_launch_command
+test_fm_spawn_takes_its_launch_decision_from_the_library
+test_fm_spawn_cannot_launch_without_the_library
