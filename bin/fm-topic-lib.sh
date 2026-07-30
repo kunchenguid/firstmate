@@ -350,8 +350,32 @@ fm_topic_any_item() {
   return 1
 }
 
+fm_topic_last_wake_age() {
+  local last now
+  last=$(cat "$FM_TOPIC_LAST_WAKE" 2>/dev/null || true)
+  case "$last" in ''|*[!0-9]*) printf '999999\n'; return ;; esac
+  now=$(date +%s)
+  printf '%s\n' "$((now - last))"
+}
+
 fm_topic_unanswered_count() {
-  find "$FM_TOPIC_INBOX" -maxdepth 1 -type f -name 'update-*.json' -print 2>/dev/null | wc -l | tr -d '[:space:]'
+  local claimed_remind_seconds=${1:-14400} wake_age item status count=0
+  case "$claimed_remind_seconds" in ''|*[!0-9]*|0) return 2 ;; esac
+
+  wake_age=$(fm_topic_last_wake_age)
+  # Pending items retain the normal cadence; claimed items reappear every four
+  # hours by default, so active work stays quiet without being silenced forever.
+  for item in "$FM_TOPIC_INBOX"/update-*.json; do
+    [ -f "$item" ] && [ ! -L "$item" ] || continue
+    status=$(jq -r '.status // empty' "$item" 2>/dev/null) || continue
+    case "$status" in
+      pending) count=$((count + 1)) ;;
+      claimed)
+        [ "$wake_age" -ge "$claimed_remind_seconds" ] && count=$((count + 1))
+        ;;
+    esac
+  done
+  printf '%s\n' "$count"
 }
 
 fm_topic_now() {

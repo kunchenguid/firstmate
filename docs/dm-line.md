@@ -13,7 +13,8 @@ Only private-chat messages whose sender and chat both equal the configured capta
 
 Direct-message wakes ride the watcher's existing always-actionable `topic-board` queue key with a payload naming the direct-message inbox, so `bin/fm-watch.sh` needs no new wake vocabulary.
 On such a wake, run `bin/fm-dm-inbox.sh list` in addition to the topic-board inbox; the two stores are separate.
-The listener repeats unanswered notifications on a bounded default 300 second cadence (`FM_DM_REMIND_SECONDS`).
+The listener repeats pending notifications on a bounded default 300 second cadence (`FM_DM_REMIND_SECONDS`).
+Claimed items repeat on a separate default four-hour cadence (`FM_DM_CLAIMED_REMIND_SECONDS`).
 
 `bin/fm-dm-inbox.sh` lists, shows, claims, and releases items (same commands and claimed-versus-pending semantics as `fm-topic-inbox.sh`).
 `bin/fm-dm-reply.sh <update-id>` answers an item with the full topic-board reply semantics, including keyed idempotent intents, the ambiguous-delivery stop, and the `answered/` archive.

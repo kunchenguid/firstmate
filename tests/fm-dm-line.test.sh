@@ -61,6 +61,7 @@ listener_once() {
     FM_ROOT_OVERRIDE="$ROOT" \
     FM_DM_POLL_TIMEOUT=0 \
     FM_DM_REMIND_SECONDS=300 \
+    FM_DM_CLAIMED_REMIND_SECONDS="${FM_DM_CLAIMED_REMIND_SECONDS:-14400}" \
     FM_DM_PLUGIN_PID_FILE="$home/plugin-bot.pid" \
     FM_FAKE_GET_UPDATES="$response" \
     FM_FAKE_CURL_LOG="$log" \
@@ -176,6 +177,33 @@ test_reply_archives_and_standalone_send_records() {
   pass "replies archive the item and standalone sends leave durable records"
 }
 
+test_claimed_item_reminds_on_the_longer_cadence() {
+  local home fakebin response log data now
+  home=$(make_home claimed-reminder)
+  fakebin=$(make_fake_curl "$home")
+  data="$home/data/fm-telegram-dm"
+  response="$home/updates.json"
+  log="$home/curl.log"
+  : > "$log"
+  write_updates "$response" \
+    "{\"update_id\":25,\"message\":{\"message_id\":250,\"chat\":{\"id\":$CAPTAIN_ID,\"type\":\"private\"},\"from\":{\"id\":$CAPTAIN_ID},\"text\":\"long-running direct work\"}}"
+  listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "could not seed claimed direct-message reminder item"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$INBOX" claim 25 main >/dev/null || fail "could not claim direct-message reminder item"
+
+  rm -f "$home/state/.wake-queue"
+  now=$(date +%s)
+  printf '%s\n' "$((now - 300))" > "$data/.last-wake"
+  FM_DM_CLAIMED_REMIND_SECONDS=900 listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 \
+    || fail "direct-message listener failed while checking the pending reminder cadence"
+  assert_absent "$home/state/.wake-queue" "claimed direct-message item re-fired on the pending reminder cadence"
+
+  printf '%s\n' "$((now - 900))" > "$data/.last-wake"
+  FM_DM_CLAIMED_REMIND_SECONDS=900 listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 \
+    || fail "direct-message listener failed while checking the claimed reminder cadence"
+  assert_grep 'unanswered captain direct message' "$home/state/.wake-queue" "claimed direct-message item did not resurface after the longer cadence"
+  pass "claimed direct-message items use the shared longer reminder cadence"
+}
+
 test_service_unit_and_supervision_demand() {
   local home out
   home=$(make_home service)
@@ -197,4 +225,5 @@ test_listener_accepts_only_captain_private_messages
 test_listener_waits_while_plugin_poller_lives
 test_check_config_refuses_board_token_reuse
 test_reply_archives_and_standalone_send_records
+test_claimed_item_reminds_on_the_longer_cadence
 test_service_unit_and_supervision_demand

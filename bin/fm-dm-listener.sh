@@ -109,6 +109,7 @@ trap 'exit 0' HUP INT TERM
 
 POLL_TIMEOUT=${FM_DM_POLL_TIMEOUT:-25}
 REMIND_SECONDS=${FM_DM_REMIND_SECONDS:-300}
+CLAIMED_REMIND_SECONDS=${FM_DM_CLAIMED_REMIND_SECONDS:-14400}
 WATCHER_GRACE=${FM_DM_WATCHER_GRACE:-300}
 CONFLICT_WAIT=${FM_DM_CONFLICT_WAIT:-30}
 WATCH_PATH="$FM_ROOT/bin/fm-watch.sh"
@@ -116,6 +117,7 @@ API="https://api.telegram.org/bot${FM_TOPIC_BOT_TOKEN}"
 
 case "$POLL_TIMEOUT" in ''|*[!0-9]*) echo 'error: FM_DM_POLL_TIMEOUT must be a non-negative integer' >&2; exit 2 ;; esac
 case "$REMIND_SECONDS" in ''|*[!0-9]*|0) echo 'error: FM_DM_REMIND_SECONDS must be a positive integer' >&2; exit 2 ;; esac
+case "$CLAIMED_REMIND_SECONDS" in ''|*[!0-9]*|0) echo 'error: FM_DM_CLAIMED_REMIND_SECONDS must be a positive integer' >&2; exit 2 ;; esac
 case "$CONFLICT_WAIT" in ''|*[!0-9]*|0) echo 'error: FM_DM_CONFLICT_WAIT must be a positive integer' >&2; exit 2 ;; esac
 
 read_offset() {
@@ -142,17 +144,9 @@ dm_wake_is_queued() {
   awk -F '\t' '$3 == "check" && $4 == "topic-board" && $5 ~ /direct message/ { found=1 } END { exit(found ? 0 : 1) }' "$FM_WAKE_QUEUE"
 }
 
-last_wake_age() {
-  local last now
-  last=$(cat "$FM_TOPIC_LAST_WAKE" 2>/dev/null || true)
-  case "$last" in ''|*[!0-9]*) printf '999999\n'; return ;; esac
-  now=$(date +%s)
-  printf '%s\n' "$((now - last))"
-}
-
 notify_firstmate() {
   local pending=$1 force_append=$2 reason pid
-  reason="check: topic-board: ${pending} pending captain direct message(s) - run bin/fm-dm-inbox.sh list"
+  reason="check: topic-board: ${pending} unanswered captain direct message(s) - run bin/fm-dm-inbox.sh list"
   if [ "$force_append" -eq 1 ] || ! dm_wake_is_queued; then
     fm_wake_append check topic-board "$reason" || return 1
   fi
@@ -161,23 +155,23 @@ notify_firstmate() {
     pid=$FM_WATCHER_HEALTHY_PID
     if kill -USR1 "$pid" 2>/dev/null; then
       fm_topic_atomic_text "$FM_TOPIC_LAST_WAKE" "$(date +%s)" || return 1
-      dm_log "queued ${pending} pending direct message(s) and signaled watcher pid ${pid}"
+      dm_log "queued ${pending} unanswered direct message(s) and signaled watcher pid ${pid}"
       return 0
     fi
   fi
-  dm_log "queued ${pending} pending direct message(s); no identity-verified watcher is ready yet"
+  dm_log "queued ${pending} unanswered direct message(s); no identity-verified watcher is ready yet"
   return 1
 }
 
 surface_pending_if_due() {
   local force_append=${1:-0} pending age
-  pending=$(fm_topic_unanswered_count)
+  pending=$(fm_topic_unanswered_count "$CLAIMED_REMIND_SECONDS") || return 1
   [ "$pending" -gt 0 ] || return 0
   if [ "$force_append" -eq 1 ]; then
     notify_firstmate "$pending" 1 || true
     return 0
   fi
-  age=$(last_wake_age)
+  age=$(fm_topic_last_wake_age)
   if [ "$age" -ge "$REMIND_SECONDS" ]; then
     notify_firstmate "$pending" 0 || true
   fi

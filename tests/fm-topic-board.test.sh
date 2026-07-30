@@ -103,6 +103,7 @@ listener_once() {
     FM_ROOT_OVERRIDE="$ROOT" \
     FM_TOPIC_POLL_TIMEOUT=0 \
     FM_TOPIC_REMIND_SECONDS=300 \
+    FM_TOPIC_CLAIMED_REMIND_SECONDS="${FM_TOPIC_CLAIMED_REMIND_SECONDS:-14400}" \
     FM_FAKE_GET_UPDATES="$response" \
     FM_FAKE_CURL_LOG="$log" \
     FM_FAKE_SEND_RESPONSE="$response" \
@@ -407,6 +408,33 @@ test_claim_reply_idempotency_and_ambiguous_delivery() {
   pass "claims persist, keyed replies do not duplicate, and ambiguous delivery requires an explicit decision"
 }
 
+test_claimed_item_reminds_on_the_longer_cadence() {
+  local home fakebin response log data now
+  home=$(make_home claimed-reminder)
+  fakebin=$(make_fake_curl "$home")
+  response="$home/updates.json"
+  log="$home/curl.log"
+  data="$home/data/fm-telegram-topics"
+  : > "$log"
+  write_updates "$response" \
+    '{"update_id":55,"message":{"message_id":551,"message_thread_id":3,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"long-running work"}}'
+  listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "could not seed claimed reminder item"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$INBOX" claim 55 alpha-mate >/dev/null || fail "could not claim reminder item"
+
+  rm -f "$home/state/.wake-queue"
+  now=$(date +%s)
+  printf '%s\n' "$((now - 300))" > "$data/.last-wake"
+  FM_TOPIC_CLAIMED_REMIND_SECONDS=900 listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 \
+    || fail "listener failed while checking the pending reminder cadence"
+  assert_absent "$home/state/.wake-queue" "claimed item re-fired on the pending reminder cadence"
+
+  printf '%s\n' "$((now - 900))" > "$data/.last-wake"
+  FM_TOPIC_CLAIMED_REMIND_SECONDS=900 listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 \
+    || fail "listener failed while checking the claimed reminder cadence"
+  assert_grep 'topic-message 1 unanswered' "$home/state/.wake-queue" "claimed item did not resurface after the longer cadence"
+  pass "claimed topic items skip the pending cadence and resurface on the longer cadence"
+}
+
 test_service_and_supervision_integration() {
   local home fakebin systemctl_log systemd_dir unit out status plugin repo arm_log
   home=$(make_home service)
@@ -484,4 +512,5 @@ test_boundary_offset_and_failed_persistence
 test_fast_wake_signals_only_verified_home_watcher
 test_queued_topic_wake_survives_unhandled_usr1
 test_claim_reply_idempotency_and_ambiguous_delivery
+test_claimed_item_reminds_on_the_longer_cadence
 test_service_and_supervision_integration

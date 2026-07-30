@@ -51,12 +51,14 @@ trap 'exit 0' HUP INT TERM
 CURL_BIN=${FM_TOPIC_CURL_BIN:-curl}
 POLL_TIMEOUT=${FM_TOPIC_POLL_TIMEOUT:-25}
 REMIND_SECONDS=${FM_TOPIC_REMIND_SECONDS:-300}
+CLAIMED_REMIND_SECONDS=${FM_TOPIC_CLAIMED_REMIND_SECONDS:-14400}
 WATCHER_GRACE=${FM_TOPIC_WATCHER_GRACE:-300}
 WATCH_PATH="$FM_ROOT/bin/fm-watch.sh"
 API="https://api.telegram.org/bot${FM_TOPIC_BOT_TOKEN}"
 
 case "$POLL_TIMEOUT" in ''|*[!0-9]*) echo 'error: FM_TOPIC_POLL_TIMEOUT must be a non-negative integer' >&2; exit 2 ;; esac
 case "$REMIND_SECONDS" in ''|*[!0-9]*|0) echo 'error: FM_TOPIC_REMIND_SECONDS must be a positive integer' >&2; exit 2 ;; esac
+case "$CLAIMED_REMIND_SECONDS" in ''|*[!0-9]*|0) echo 'error: FM_TOPIC_CLAIMED_REMIND_SECONDS must be a positive integer' >&2; exit 2 ;; esac
 
 read_offset() {
   local offset
@@ -77,14 +79,6 @@ read_offset() {
 topic_wake_is_queued() {
   [ -s "$FM_WAKE_QUEUE" ] || return 1
   awk -F '\t' '$3 == "check" && $4 == "topic-board" { found=1 } END { exit(found ? 0 : 1) }' "$FM_WAKE_QUEUE"
-}
-
-last_wake_age() {
-  local last now
-  last=$(cat "$FM_TOPIC_LAST_WAKE" 2>/dev/null || true)
-  case "$last" in ''|*[!0-9]*) printf '999999\n'; return ;; esac
-  now=$(date +%s)
-  printf '%s\n' "$((now - last))"
 }
 
 notify_firstmate() {
@@ -108,13 +102,13 @@ notify_firstmate() {
 
 surface_unanswered_if_due() {
   local force_append=${1:-0} pending age
-  pending=$(fm_topic_unanswered_count)
+  pending=$(fm_topic_unanswered_count "$CLAIMED_REMIND_SECONDS") || return 1
   [ "$pending" -gt 0 ] || return 0
   if [ "$force_append" -eq 1 ]; then
     notify_firstmate "$pending" 1 || true
     return 0
   fi
-  age=$(last_wake_age)
+  age=$(fm_topic_last_wake_age)
   if [ "$age" -ge "$REMIND_SECONDS" ]; then
     notify_firstmate "$pending" 0 || true
   fi
