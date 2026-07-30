@@ -456,16 +456,11 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     }'
 }
 
-filter_backlogged_tasks() {  # <backlog-json> <tasks-json>
-  if [ "${INCLUDE_BACKLOG:-0}" -eq 1 ]; then
-    printf '%s\n' "$2"
-    return 0
-  fi
+filter_hidden_id_rows() {
   jq -n \
-    --argjson backlog "$1" \
+    --argjson hidden "$1" \
     --argjson tasks "$2" '
-    $backlog.hidden_backlogged_ids as $hidden
-    | $tasks | map(select(.id as $id | $hidden | index($id) | not))'
+    $tasks | map(select(.id as $id | $hidden | index($id) | not))'
 }
 
 task_json_lines() {
@@ -1141,12 +1136,16 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
        inconclusive:any(($activity_results + $decision_results)[]; .verdict == "inconclusive")}'
 }
 
-secondmate_current_json() {  # <parent-tasks-json>
-  local tasks=$1 registry union rows total_registered total shown truncated
+secondmate_current_json() {  # <parent-tasks-json> <hidden-ids-json>
+  local tasks=$1 hidden_ids=$2 registry registry_records union rows total_registered total shown truncated
   local row id home registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
+  registry_records=$(printf '%s' "$registry" | jq -c '.records // []') || return 1
+  registry_records=$(filter_hidden_id_rows "$hidden_ids" "$registry_records") || return 1
+  registry=$(jq -n --argjson registry "$registry" --argjson records "$registry_records" \
+    '$registry | .records = $records') || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
     ($registry.records // []) as $registered
     | (($registered | map(.id)) // []) as $registered_ids
@@ -1362,8 +1361,13 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+if [ "${INCLUDE_BACKLOG:-0}" -eq 1 ]; then
+  HIDDEN_IDS_JSON='[]'
+else
+  HIDDEN_IDS_JSON=$(printf '%s' "$BACKLOG_JSON" | jq -c '.hidden_backlogged_ids')
+fi
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
-TASKS_JSON=$(filter_backlogged_tasks "$BACKLOG_JSON" "$TASKS_JSON") \
+TASKS_JSON=$(filter_hidden_id_rows "$HIDDEN_IDS_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: backlogged task filtering failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
@@ -1373,9 +1377,11 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
 fi
 
 SCOUT_REPORTS_JSON=$(scout_report_lines)
+SCOUT_REPORTS_JSON=$(filter_hidden_id_rows "$HIDDEN_IDS_JSON" "$SCOUT_REPORTS_JSON") \
+  || { echo "fm-fleet-snapshot: backlogged report filtering failed" >&2; exit 1; }
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
-SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
+SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON" "$HIDDEN_IDS_JSON") \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }

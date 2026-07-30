@@ -44,6 +44,13 @@ new_home() {
   home="$TMP_ROOT/$name"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   write_mixed_backlog "$home/data/backlog.md"
+  mkdir -p "$home/data/backlog-note" "$home/data/defer-later"
+  printf '# Hidden report\n' > "$home/data/backlog-note/report.md"
+  printf '# Visible report\n' > "$home/data/defer-later/report.md"
+  printf '%s\n' \
+    '- cold-storage - fixture (home: ; scope: fixture; projects: alpha; added 2026-07-29)' \
+    '- defer-later - fixture (home: ; scope: fixture; projects: alpha; added 2026-07-29)' \
+    > "$home/data/secondmates.md"
   printf 'kind=ship\nproject=alpha\n' > "$home/state/cold-storage.meta"
   printf 'kind=ship\nproject=alpha\n' > "$home/state/defer-later.meta"
   printf '%s\n' "$home"
@@ -134,6 +141,11 @@ test_fleet_snapshot_hides_backlogged_by_default() {
     and (.backlog.hidden_backlogged_ids == ["backlog-note", "cold-storage"])
     and ([.tasks[] | select(.id == "cold-storage")] | length) == 0
     and ([.tasks[] | select(.id == "defer-later")] | length) == 1
+    and ([.scout_reports[] | select(.id == "backlog-note")] | length) == 0
+    and ([.scout_reports[] | select(.id == "defer-later")] | length) == 1
+    and ([.secondmate_current.records[] | select(.id == "cold-storage")] | length) == 0
+    and ([.secondmate_current.registry.records[] | select(.id == "cold-storage")] | length) == 0
+    and ([.secondmate_current.records[] | select(.id == "defer-later")] | length) == 1
     and (.backlog.records[] | select(.id == "defer-later") | .backlogged == false)
     and (.backlog.records[] | select(.id == "park-vendor") | .hold_kind == "parked")
   ' >/dev/null \
@@ -161,6 +173,10 @@ test_fleet_snapshot_include_backlog_keeps_rows() {
     and ([.backlog.records[] | select(.id == "defer-later" and .backlogged == false)] | length) == 1
     and ([.tasks[] | select(.id == "cold-storage" and .backlog.backlogged == true)] | length) == 1
     and ([.tasks[] | select(.id == "defer-later" and .backlog.backlogged == false)] | length) == 1
+    and ([.scout_reports[] | select(.id == "backlog-note")] | length) == 1
+    and ([.scout_reports[] | select(.id == "defer-later")] | length) == 1
+    and ([.secondmate_current.records[] | select(.id == "cold-storage")] | length) == 1
+    and ([.secondmate_current.registry.records[] | select(.id == "cold-storage")] | length) == 1
     and ((.backlog.records[] | select(.id == "cold-storage") | .hold_reason) | startswith("backlog:"))
   ' >/dev/null \
     || fail "fleet snapshot --include-backlog did not keep tagged backlog: rows"
