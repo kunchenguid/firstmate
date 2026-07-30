@@ -383,6 +383,14 @@ The skill owns the daemon procedure; these safety facts remain inline:
 
 Load `stuck-crewmate-recovery` after a stale wake, looping or confused pane, answered-by-brief question, unresponsive worker, or failed steer.
 
+
+### Usage-limit-parked crews
+
+When a crewmate is parked at a "You've hit your ... limit / wait for limit to reset" dialog, firstmate's own ability to act - responding to the captain, running any tool - is direct proof the account currently has capacity (that usage limit is shared between firstmate and its crews).
+So retry the parked crew immediately: clear the dialog (`bin/fm-send.sh <window> --key Enter`, or Escape) and re-send its resume instruction, then peek to confirm it starts working.
+Never schedule a timer or wait out the reset while firstmate is live and responding - a live, responding firstmate means the limit is not currently blocking, so waiting is pure wasted latency.
+Only if the retry itself re-hits the dialog is the limit still active for that request; back off only then.
+
 ## 9. Escalation and captain etiquette
 
 **Talk in outcomes, not mechanics.**
