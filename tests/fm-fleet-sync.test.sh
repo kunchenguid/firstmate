@@ -134,6 +134,13 @@ install_git_operation_marker() {
   fi
 }
 
+install_rebase_head_name() {
+  local clone=$1 backend=$2 path
+  path=$(git_operation_marker_path "$clone" "$backend/head-name")
+  mkdir -p "${path%/*}"
+  printf 'refs/heads/main\n' >"$path"
+}
+
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
   local home=$1
@@ -510,11 +517,30 @@ if [ "$is_update" = 1 ] && [ "$is_stdin" = 1 ]; then
     printf '%s\n' "$line" >>"$transaction"
   done
   if grep -F 'update refs/heads/main ' "$transaction" >/dev/null; then
-    "$real" -C "${GIT_RACE_CLONE:?}" worktree add --force --quiet \
-      "${GIT_RACE_WORKTREE:?}" main || {
-      rm -f "$transaction"
-      exit 97
-    }
+    if [ "${GIT_RACE_WORKTREE_MODE:-branch}" = rebase ]; then
+      "$real" -C "${GIT_RACE_CLONE:?}" worktree add --detach --quiet \
+        "${GIT_RACE_WORKTREE:?}" main || {
+        rm -f "$transaction"
+        exit 97
+      }
+      marker=$("$real" -C "$GIT_RACE_WORKTREE" rev-parse \
+        --git-path rebase-merge/head-name) || {
+        rm -f "$transaction"
+        exit 97
+      }
+      case "$marker" in
+        /*) ;;
+        *) marker="$GIT_RACE_WORKTREE/$marker" ;;
+      esac
+      mkdir -p "${marker%/*}"
+      printf 'refs/heads/main\n' >"$marker"
+    else
+      "$real" -C "${GIT_RACE_CLONE:?}" worktree add --force --quiet \
+        "${GIT_RACE_WORKTREE:?}" main || {
+        rm -f "$transaction"
+        exit 97
+      }
+    fi
   fi
   printf 'prepare: ok\n'
   IFS= read -r command
@@ -547,6 +573,46 @@ git_audit_staged_fetch_config() {
   cat > "$1/git" <<'SH'
 #!/usr/bin/env bash
 real=${REAL_GIT_FOR_TEST:?}
+is_fetch=0; stage=; previous=
+config_args=()
+for a in "$@"; do
+  [ "$a" = fetch ] && is_fetch=1
+  if [ "$previous" = -c ]; then
+    config_args+=(-c "$a")
+    previous=
+    continue
+  fi
+  [ "$a" = -c ] && previous=-c
+  case "$a" in
+    --git-dir=*/fm-fleet-sync-fetch.*/repository.git) stage=${a#--git-dir=} ;;
+  esac
+done
+if [ "$is_fetch" = 1 ] && [ -n "$stage" ]; then
+  [ "$("$real" "${config_args[@]}" --git-dir="$stage" \
+      config --get "${GIT_EXPECTED_URL_KEY:?}")" \
+      = "${GIT_EXPECTED_URL_VALUE:?}" ] || exit 91
+  [ "$("$real" "${config_args[@]}" --git-dir="$stage" config --get core.sshCommand)" \
+      = "${GIT_EXPECTED_SSH_COMMAND:?}" ] || exit 92
+  [ "$("$real" "${config_args[@]}" --git-dir="$stage" \
+      config --get "${GIT_EXPECTED_HTTP_KEY:?}")" \
+      = "${GIT_EXPECTED_HTTP_VALUE:?}" ] || exit 93
+  [ "$("$real" "${config_args[@]}" --git-dir="$stage" \
+      config --get "${GIT_EXPECTED_CREDENTIAL_KEY:?}")" \
+      = "${GIT_EXPECTED_CREDENTIAL_VALUE:?}" ] || exit 94
+  ! "$real" "${config_args[@]}" --git-dir="$stage" \
+      config --get core.worktree >/dev/null 2>&1 \
+    || exit 95
+  printf 'audited\n' >"${GIT_STAGED_CONFIG_AUDIT:?}"
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+git_audit_valueless_staged_config() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
 is_fetch=0; stage=
 for a in "$@"; do
   [ "$a" = fetch ] && is_fetch=1
@@ -555,17 +621,37 @@ for a in "$@"; do
   esac
 done
 if [ "$is_fetch" = 1 ] && [ -n "$stage" ]; then
-  [ "$("$real" --git-dir="$stage" config --get "${GIT_EXPECTED_URL_KEY:?}")" \
-      = "${GIT_EXPECTED_URL_VALUE:?}" ] || exit 91
-  [ "$("$real" --git-dir="$stage" config --get core.sshCommand)" \
-      = "${GIT_EXPECTED_SSH_COMMAND:?}" ] || exit 92
-  [ "$("$real" --git-dir="$stage" config --get "${GIT_EXPECTED_HTTP_KEY:?}")" \
-      = "${GIT_EXPECTED_HTTP_VALUE:?}" ] || exit 93
-  [ "$("$real" --git-dir="$stage" config --get "${GIT_EXPECTED_CREDENTIAL_KEY:?}")" \
-      = "${GIT_EXPECTED_CREDENTIAL_VALUE:?}" ] || exit 94
-  ! "$real" --git-dir="$stage" config --get core.worktree >/dev/null 2>&1 \
-    || exit 95
-  printf 'audited\n' >"${GIT_STAGED_CONFIG_AUDIT:?}"
+  [ "$("$real" --git-dir="$stage" config --type=bool \
+      --get "${GIT_EXPECTED_VALUELESS_KEY:?}")" = true ] || exit 91
+  printf 'audited\n' >"${GIT_VALUELESS_CONFIG_AUDIT:?}"
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+git_audit_internal_file_override() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_fetch=0; is_internal=0; is_origin=0; previous=; file_override=0
+for a in "$@"; do
+  [ "$a" = fetch ] && is_fetch=1
+  [ "$a" = --refmap= ] && is_internal=1
+  [ "$a" = origin ] && is_origin=1
+  if [ "$previous" = -c ]; then
+    [ "$a" != protocol.file.allow=always ] || file_override=1
+    previous=
+    continue
+  fi
+  [ "$a" = -c ] && previous=-c
+done
+if [ "$is_fetch" = 1 ] && [ "$is_origin" = 1 ] && [ "$file_override" = 1 ]; then
+  exit 91
+fi
+if [ "$is_fetch" = 1 ] && [ "$is_internal" = 1 ]; then
+  [ "$file_override" = 1 ] || exit 92
+  printf 'audited\n' >"${GIT_INTERNAL_FILE_AUDIT:?}"
 fi
 exec "$real" "$@"
 SH
@@ -879,6 +965,31 @@ test_other_default_worktrees_refuse_before_preservation() {
   pass "clean, dirty, and active-operation sibling defaults refuse before preservation"
 }
 
+test_rebasing_sibling_defaults_refuse_before_preservation() {
+  local backend home clone sibling out old
+  for backend in rebase-merge rebase-apply; do
+    home=$(new_home)
+    clone=$(build_tree_identical_squash_pair "$home" "sibling-$backend")
+    old=$(head_sha "$clone")
+    sibling="$home/sibling-$backend"
+    git -C "$clone" worktree add --force --quiet "$sibling" main
+    git -C "$sibling" checkout --detach --quiet
+    install_rebase_head_name "$sibling" "$backend"
+
+    out=$(run_sync "$home" "$clone")
+
+    assert_contains "$out" "a linked worktree is rebasing main" \
+      "$backend sibling did not explain the reconciliation refusal"
+    [ "$(head_sha "$clone")" = "$old" ] \
+      || fail "$backend sibling rebase moved the shared branch"
+    [ "$(head_sha "$sibling")" = "$old" ] \
+      || fail "$backend sibling rebase moved its detached HEAD"
+    [ -z "$(preservation_refs "$clone")" ] \
+      || fail "$backend sibling rebase created a preservation ref"
+  done
+  pass "detached sibling rebase metadata refuses before preservation"
+}
+
 test_operation_starting_after_preservation_refuses_before_transaction() {
   local home clone fakebin out err old anchor
   home=$(new_home)
@@ -922,6 +1033,32 @@ test_other_default_worktree_appearing_before_commit_refuses() {
   [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
     || fail "default worktree race lost its preservation ref"
   pass "a sibling default appearing after preservation blocks transaction commit"
+}
+
+test_sibling_rebase_appearing_before_commit_refuses() {
+  local home clone sibling fakebin out err old anchor
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" sibling-rebase-race)
+  old=$(head_sha "$clone")
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  sibling="$home/sibling-rebase-race"
+  fakebin="$home/fb-sibling-rebase-race"; mkdir -p "$fakebin"
+  git_worktree_after_transaction_prepare "$fakebin"
+  out="$home/out-sibling-rebase-race"
+  err="$home/err-sibling-rebase-race"
+  export GIT_RACE_CLONE="$clone"
+  export GIT_RACE_WORKTREE="$sibling"
+  export GIT_RACE_WORKTREE_MODE=rebase
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" sibling-rebase-race
+  unset GIT_RACE_CLONE GIT_RACE_WORKTREE GIT_RACE_WORKTREE_MODE
+
+  assert_contains "$(cat "$out")" "a linked worktree is rebasing main" \
+    "sibling rebase race was not refused before transaction commit"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "sibling rebase race moved the shared branch"
+  [ "$(head_sha "$sibling")" = "$old" ] || fail "sibling rebase race moved its detached HEAD"
+  [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
+    || fail "sibling rebase race lost its preservation ref"
+  pass "a sibling rebase appearing after preservation blocks transaction commit"
 }
 
 test_prefetch_symbolic_remote_tracking_ref_does_not_write_through() {
@@ -1380,6 +1517,79 @@ test_staged_fetch_preserves_local_transport_config_only() {
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
     || fail "transport-configured staged fetch did not publish and fast-forward"
   pass "staged fetch preserves local URL, SSH, HTTP, and credential config without worktree paths"
+}
+
+test_staged_fetch_preserves_valueless_boolean_config() {
+  local home clone config_path fakebin out err audit
+  home=$(new_home)
+  clone=$(build_pair "$home" valueless-fetch-config)
+  advance_origin "$home" valueless-fetch-config C1
+  config_path=$(git -C "$clone" rev-parse --git-path config)
+  case "$config_path" in
+    /*) ;;
+    *) config_path="$clone/$config_path" ;;
+  esac
+  printf '\n[http]\n\tsslVerify\n' >>"$config_path"
+  fakebin="$home/fb-valueless-fetch-config"; mkdir -p "$fakebin"
+  git_audit_valueless_staged_config "$fakebin"
+  out="$home/out-valueless-fetch-config"
+  err="$home/err-valueless-fetch-config"
+  audit="$home/valueless-fetch-config-audit"
+  export GIT_EXPECTED_VALUELESS_KEY=http.sslVerify
+  export GIT_VALUELESS_CONFIG_AUDIT="$audit"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" valueless-fetch-config
+  unset GIT_EXPECTED_VALUELESS_KEY GIT_VALUELESS_CONFIG_AUDIT
+
+  assert_contains "$(cat "$out")" "valueless-fetch-config: synced" \
+    "valueless true transport config did not survive staging"
+  assert_present "$audit" "staged fetch did not preserve valueless boolean truth"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
+    || fail "valueless-configured staged fetch did not publish and fast-forward"
+  pass "staged fetch preserves valueless boolean configuration as true"
+}
+
+test_staging_clone_forces_origin_remote_name() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" forced-stage-origin)
+  advance_origin "$home" forced-stage-origin C1
+
+  out=$(GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=clone.defaultRemoteName \
+    GIT_CONFIG_VALUE_0=upstream \
+    run_sync "$home" "$clone")
+
+  assert_contains "$out" "forced-stage-origin: synced" \
+    "custom clone default remote name replaced the staging origin"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
+    || fail "explicit staging origin did not publish and fast-forward"
+  pass "staging clone names origin independently of clone defaults"
+}
+
+test_internal_object_fetch_overrides_file_policy_only_locally() {
+  local home clone remote fakebin out err audit
+  home=$(new_home)
+  clone=$(build_pair "$home" internal-file-policy)
+  remote=$(cd "$home/remotes/internal-file-policy.git" && pwd)
+  advance_origin "$home" internal-file-policy C1
+  git -C "$clone" config --local protocol.file.allow never
+  git -C "$clone" config --local protocol.ext.allow always
+  git -C "$clone" remote set-url origin "ext::git-upload-pack $remote"
+  fakebin="$home/fb-internal-file-policy"; mkdir -p "$fakebin"
+  git_audit_internal_file_override "$fakebin"
+  out="$home/out-internal-file-policy"
+  err="$home/err-internal-file-policy"
+  audit="$home/internal-file-policy-audit"
+  export GIT_INTERNAL_FILE_AUDIT="$audit"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" internal-file-policy
+  unset GIT_INTERNAL_FILE_AUDIT
+
+  assert_contains "$(cat "$out")" "internal-file-policy: synced" \
+    "repository file policy blocked the trusted staged-object transfer"
+  assert_present "$audit" "internal staged-object transfer lacked its scoped file override"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
+    || fail "file-policy staged fetch did not publish and fast-forward"
+  pass "file transport override is scoped to trusted staged-object transfer"
 }
 
 test_staged_fetch_origin_removal_failure_is_fatal() {
@@ -1883,8 +2093,10 @@ test_unpublished_ahead_equal_tree_is_not_normalized
 test_tree_identical_conflicting_anchor_refuses
 test_active_git_operations_refuse_before_preservation
 test_other_default_worktrees_refuse_before_preservation
+test_rebasing_sibling_defaults_refuse_before_preservation
 test_operation_starting_after_preservation_refuses_before_transaction
 test_other_default_worktree_appearing_before_commit_refuses
+test_sibling_rebase_appearing_before_commit_refuses
 test_prefetch_symbolic_remote_tracking_ref_does_not_write_through
 test_staged_fetch_symbolic_destination_race_does_not_write_through
 test_symbolic_reconciliation_refs_are_refused
@@ -1900,6 +2112,9 @@ test_single_branch_refspec_preserves_out_of_scope_tracking_refs
 test_negative_refspec_preserves_excluded_tracking_refs
 test_custom_refspec_updates_and_prunes_only_its_destinations
 test_staged_fetch_preserves_local_transport_config_only
+test_staged_fetch_preserves_valueless_boolean_config
+test_staging_clone_forces_origin_remote_name
+test_internal_object_fetch_overrides_file_policy_only_locally
 test_staged_fetch_origin_removal_failure_is_fatal
 test_auto_follow_tags_are_preserved
 test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session

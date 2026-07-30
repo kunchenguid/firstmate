@@ -323,7 +323,11 @@ apply_fetch_config_dump() {
   while IFS= read -r -d '' record; do
     key=${record%%$'\n'*}
     stage_fetch_config_key "$key" || continue
-    value=${record#*$'\n'}
+    if [[ "$record" == *$'\n'* ]]; then
+      value=${record#*$'\n'}
+    else
+      value=true
+    fi
     git --git-dir="$stage" config --add "$key" "$value" || return 1
   done <"$config_dump"
 }
@@ -426,7 +430,8 @@ fetch_and_publish_configured_refs() {
   local_config="$stage_root/local-config"
   worktree_config="$stage_root/worktree-config"
 
-  if ! output=$(git clone --quiet --mirror --shared "$PROJ" "$stage" 2>&1); then
+  if ! output=$(git clone --quiet --mirror --shared --origin origin \
+      "$PROJ" "$stage" 2>&1); then
     FETCH_OUTPUT=$output
     staged_fetch_scope_finish
     return 1
@@ -473,8 +478,9 @@ fetch_and_publish_configured_refs() {
     [ -n "$new_oid" ] && fetched_refs+=("$ref")
   done <"$changes"
   if [ "${#fetched_refs[@]}" -gt 0 ]; then
-    if ! output=$(git -C "$PROJ" fetch --quiet --no-tags --no-write-fetch-head \
-        --refmap= "$stage" "${fetched_refs[@]}" 2>&1); then
+    if ! output=$(git -C "$PROJ" -c protocol.file.allow=always \
+        fetch --quiet --no-tags --no-write-fetch-head --refmap= \
+        "$stage" "${fetched_refs[@]}" 2>&1); then
       FETCH_OUTPUT=$output
       staged_fetch_scope_finish
       return 1
@@ -586,20 +592,69 @@ prune_gone_branches() {
     --format='%(refname:short) %(upstream:track)' refs/heads 2>/dev/null)
 }
 
+linked_worktree_rebase_targets_default() {
+  local worktree=$1 marker path rebase_ref
+  [ -d "$worktree" ] || return 1
+  for marker in rebase-merge/head-name rebase-apply/head-name; do
+    path=$(git -C "$worktree" rev-parse --git-path "$marker" 2>/dev/null) \
+      || return 2
+    case "$path" in
+      /*) ;;
+      *) path="$worktree/$path" ;;
+    esac
+    [ -e "$path" ] || continue
+    [ -f "$path" ] || return 2
+    IFS= read -r rebase_ref <"$path" || return 2
+    [ "$rebase_ref" != "$LOCAL_REF" ] || return 0
+  done
+  return 1
+}
+
 linked_default_worktree_conflict() {
-  local listing current_ref matches
-  if ! listing=$(git -C "$PROJ" worktree list --porcelain 2>/dev/null); then
+  local git_dir listing_file field record_path= record_branch= current_ref
+  local matches=0 rebase_conflict=no unreadable=no rebase_rc
+  git_dir=$(git -C "$PROJ" rev-parse --absolute-git-dir 2>/dev/null) || {
+    printf 'cannot inspect linked worktrees\n'
+    return 0
+  }
+  listing_file=$(mktemp "$git_dir/fm-fleet-sync-worktrees.XXXXXX") || {
+    printf 'cannot inspect linked worktrees\n'
+    return 0
+  }
+  if ! git -C "$PROJ" worktree list --porcelain -z >"$listing_file" 2>/dev/null; then
+    rm -f "$listing_file"
     printf 'cannot inspect linked worktrees\n'
     return 0
   fi
   current_ref=$(git -C "$PROJ" rev-parse --symbolic-full-name HEAD 2>/dev/null || true)
-  matches=$(awk -v target="$LOCAL_REF" '
-    $1 == "branch" && $2 == target { count++ }
-    END { print count + 0 }
-  ' <<<"$listing") || {
+  while IFS= read -r -d '' field; do
+    case "$field" in
+      worktree\ *) record_path=${field#worktree } ;;
+      branch\ *) record_branch=${field#branch } ;;
+      '')
+        [ "$record_branch" != "$LOCAL_REF" ] || matches=$(( matches + 1 ))
+        if [ -n "$record_path" ]; then
+          if linked_worktree_rebase_targets_default "$record_path"; then
+            rebase_conflict=yes
+          else
+            rebase_rc=$?
+            [ "$rebase_rc" -eq 1 ] || unreadable=yes
+          fi
+        fi
+        record_path=
+        record_branch=
+        ;;
+    esac
+  done <"$listing_file"
+  rm -f "$listing_file"
+  if [ "$unreadable" = yes ]; then
     printf 'cannot inspect linked worktrees\n'
     return 0
-  }
+  fi
+  if [ "$rebase_conflict" = yes ]; then
+    printf 'a linked worktree is rebasing %s\n' "$DEFAULT"
+    return 0
+  fi
   if { [ "$current_ref" = "$LOCAL_REF" ] && [ "$matches" -gt 1 ]; } \
       || { [ "$current_ref" != "$LOCAL_REF" ] && [ "$matches" -gt 0 ]; }; then
     printf 'another worktree has %s checked out\n' "$DEFAULT"
