@@ -185,6 +185,7 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 
 Launch with `DEVIN_CLI=1 devin --permission-mode dangerous --respect-workspace-trust true --prompt-file <brief>`.
 Firstmate-launched crewmates add `--config <state-owned-config>` containing the native user configuration plus their task Stop hook, without overwriting the user's file.
+The native user configuration accepts Devin's supported JSONC syntax, including line comments, block comments, trailing commas, and comment-like string content; Firstmate still requires the config root, `read_config_from`, `hooks`, and `hooks.Stop` values to have their documented object or array shapes before composing the state-owned copy.
 That state-owned config disables Claude compatibility import so Devin has exactly one harness-owned Stop path.
 Devin loads the repository configuration through its native project layer alongside that override, so project settings and hooks are not copied or applied twice.
 Secondmates omit that override and load the tracked primary hooks from their Firstmate home.

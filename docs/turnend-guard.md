@@ -44,7 +44,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
   The tracked Claude Stop entries are inert when `GROK_AGENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
-- Devin registers a direct blocking `Stop` hook in `.devin/config.json`, anchored to the hook process working directory, and invokes `bin/fm-turnend-guard.sh`.
+- Devin registers a direct blocking `Stop` hook in `.devin/config.json`, anchors through `DEVIN_PROJECT_DIR` with a quoted Git-root fallback for nested working directories, and invokes `bin/fm-turnend-guard.sh`.
 
 Claude, Codex, and Devin can block a Stop directly with exit status 2 and stderr.
 Their payloads carry `stop_hook_active`.
