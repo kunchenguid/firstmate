@@ -1234,8 +1234,8 @@ fm_backend_herdr_replace_recorded_husk() {  # <session> <old-workspace> <old-tab
 }
 
 # fm_backend_herdr_projection_create_task: create one disposable presentation
-# workspace and its normal fm-<id> task tab without looking up, adopting, or
-# reusing any existing workspace.
+# workspace and its normal task tab (the caller applies the display label)
+# without looking up, adopting, or reusing any existing workspace.
 # The caller must atomically publish the projection journal first.
 # This function sets exact response-derived globals and prints nothing:
 #   FM_BACKEND_HERDR_PROJECTION_SESSION
