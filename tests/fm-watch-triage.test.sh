@@ -792,7 +792,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
 # Both content paths must retain the same throttle until the worker resumes, at
 # which point normal stale-work escalation must take over.
 test_live_paused_content_churn_keeps_throttle_until_resume() {
-  local mode dir state fakebin out capture_file statusf window key pane_hash sig pid round wakes i current target expected_hash
+  local mode dir state fakebin out capture_file statusf window key pane_hash sig pid round wakes i current target expected_hash back rechecks
   for mode in static changing; do
     dir=$(make_case "live-paused-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -854,6 +854,69 @@ test_live_paused_content_churn_keeps_throttle_until_resume() {
     [ -e "$state/.paused-resurfaced-$key" ] || fail "$mode live pause lost its re-surface throttle"
   done
 
+  # The preserved throttle is a finite interval, not a suspension. Still on the
+  # churned case, age the pause and its throttle marker past a 240s window: the
+  # next redrawn pane hash - the same live-agent route the rounds above kept
+  # quiet - must recheck exactly once, as an awaiting-external recheck rather
+  # than a wedge.
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  set_mtime "$back" "$state/.paused-resurfaced-$key"
+  printf 'idle parked pane token 3\n' > "$capture_file"
+  expected_hash=$(hash_text "$(cat "$capture_file")")
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "churned live pause never rechecked after its configured interval expired: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null || fail "expired live pause recheck was not labeled an awaiting-external recheck"
+  grep -F 'possible wedge' "$out" >/dev/null && fail "expired live pause recheck was mislabeled a possible wedge"
+  [ ! -e "$state/.stale-since-$key" ] || fail "expired live pause recheck started the wedge timer"
+  # A watcher exits on the wake it emits, so a still-zero poll count on the
+  # redrawn hash pins the recheck to the live-agent redraw route itself rather
+  # than a later unchanged-hash poll.
+  [ "$(cat "$state/.hash-$key" 2>/dev/null || true)" = "$expected_hash" ] \
+    && [ "$(cat "$state/.count-$key" 2>/dev/null || true)" = 0 ] \
+    || fail "expired live pause recheck did not fire on the redrawn pane's own poll"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 2 ] || fail "expired live pause interval produced $wakes notices, expected the initial notice plus one recheck"
+  rechecks=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 ~ /awaiting external/ { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$rechecks" -eq 1 ] || fail "expired live pause interval queued $rechecks rechecks, expected exactly one"
+
+  # The refreshed throttle re-absorbs the next redraw, so the recheck fires once
+  # per configured interval rather than once per pane change.
+  printf 'idle parked pane token 4\n' > "$capture_file"
+  expected_hash=$(hash_text "$(cat "$capture_file")")
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  current=0
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$pid"; do
+    current=$(cat "$state/.count-$key" 2>/dev/null || echo 0)
+    if [ "$current" -ge 2 ] && [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$expected_hash" ]; then
+      break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! is_live_non_zombie "$pid"; then
+    reap "$pid"
+    fail "refreshed live pause throttle rechecked twice inside one configured interval: $(cat "$out")"
+  fi
+  [ "$current" -ge 2 ] || { reap "$pid"; fail "refreshed live pause throttle did not complete its quiet stale classification"; }
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 2 ] || { reap "$pid"; fail "refreshed live pause throttle emitted $wakes notices across one recheck interval"; }
+  reap "$pid"
+
   # Resume the changing-content case. The pause throttle must clear before this
   # static working pane starts and eventually crosses the ordinary wedge timer.
   printf 'working: upstream landed, resuming\n' > "$statusf"
@@ -867,13 +930,13 @@ test_live_paused_content_churn_keeps_throttle_until_resume() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
-  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$pid"; do
     [ ! -e "$state/.paused-$key" ] && [ ! -e "$state/.paused-rechecked-$key" ] && \
       [ ! -e "$state/.paused-resurfaced-$key" ] && [ -s "$state/.stale-since-$key" ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "resumed worker surfaced before normal stale tracking began: $(cat "$out")"; }
+  is_live_non_zombie "$pid" || { reap "$pid"; fail "resumed worker surfaced before normal stale tracking began: $(cat "$out")"; }
   [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "resumed worker retained its pause marker"; }
   [ ! -e "$state/.paused-rechecked-$key" ] || { reap "$pid"; fail "resumed worker retained its pause-state recheck"; }
   [ ! -e "$state/.paused-resurfaced-$key" ] || { reap "$pid"; fail "resumed worker retained its pause throttle"; }
