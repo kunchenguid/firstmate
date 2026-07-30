@@ -172,7 +172,7 @@ verify_brand_identity() {
     search_failed "cannot resolve rev '$REV' in $repo; nothing was searched"
   fi
 
-  printf '=== files deciding brand identity by STRING, no graph consultation ===\n'
+  printf '=== files referencing a brand-identity helper with NO graph identifier ===\n'
   printf '  repo: %s\n  rev:  %s\n  path: %s\n' "$repo" "$REV" "$BRAND_PATHSPEC"
 
   # Bug 1's shape: a pathspec that matches no files. git grep reports that as an
@@ -225,16 +225,16 @@ verify_brand_identity() {
     case "$st" in
       0) migrated=$((migrated + 1)) ;;
       1)
-        printf '  UNMIGRATED: %s\n' "${f#schema-generator/}"
+        printf '  NO GRAPH IDENTIFIER: %s\n' "${f#schema-generator/}"
         unmigrated=$((unmigrated + 1))
         ;;
-      *) search_failed "git grep for graph consultation failed on $f with status $st: $(tr '\n' ' ' <"$ERRLOG")" ;;
+      *) search_failed "git grep for a graph identifier failed on $f with status $st: $(tr '\n' ' ' <"$ERRLOG")" ;;
     esac
   done
 
   printf '  INSPECTED: %s candidate file(s) out of %s under %s\n' "$cand_n" "$scope_n" "$BRAND_PATHSPEC"
   if [ "$unmigrated" -gt 0 ]; then
-    printf 'VIOLATIONS: %s of %s inspected file(s) decide brand identity by string with no graph consultation.\n' \
+    printf 'VIOLATIONS: %s of %s inspected file(s) reference a brand-identity helper with no graph identifier anywhere in the file.\n' \
       "$unmigrated" "$cand_n"
     printf '  >>> DO NOT report brand-identity work as complete.\n'
     exit 1

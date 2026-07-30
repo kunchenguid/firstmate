@@ -64,13 +64,15 @@ fm_verify_commit() {
 
 # fm_verify_broken_origin <name>: a fixture repo holding one string-only
 # candidate whose 'origin' points at a local path that does not exist, so
-# `git fetch origin` fails without touching the network. Echoes the repo path.
+# `git fetch origin` fails without touching the network. Echoes the repo path;
+# the unfetchable remote is "<repo>-no-such-remote.git", which a caller can
+# derive and assert instead of asserting git's own English failure sentence.
 fm_verify_broken_origin() {
   local name=$1 repo
   repo=$(fm_verify_fixture "$name" schema-generator/app)
   fm_verify_write_source "$repo" schema-generator/app/legacy.py string
   fm_verify_commit "$repo"
-  git -C "$repo" remote add origin "$TMP_ROOT/$name-no-such-remote.git"
+  git -C "$repo" remote add origin "$repo-no-such-remote.git"
   printf '%s\n' "$repo"
 }
 
@@ -141,8 +143,18 @@ test_violation_is_reported_and_fails() {
 
   run_verify "$repo"
   expect_code 1 "$RC" "a known violation must fail"
-  assert_contains "$OUT" "UNMIGRATED: app/legacy.py" "the violating file was not named"
+  assert_contains "$OUT" "NO GRAPH IDENTIFIER: app/legacy.py" "the violating file was not named"
   assert_contains "$OUT" "VIOLATIONS:" "the violation verdict is missing"
+  # The report may only claim what its two greps prove: the file matched the
+  # candidate pattern, and no graph identifier appears in it. "Decides brand
+  # identity by string" is an inference, and the candidate set knowingly holds a
+  # re-export that decides nothing, so no line may state it as fact.
+  assert_contains "$OUT" "reference a brand-identity helper with no graph identifier anywhere in the file" \
+    "the violation verdict does not state what the searches actually proved"
+  assert_not_contains "$OUT" "decide brand identity by string" \
+    "the violation verdict claims more than the candidate grep proves"
+  assert_not_contains "$OUT" "graph consultation" \
+    "the report still asserts the files were checked for consulting the graph"
   assert_contains "$OUT" "DO NOT report brand-identity work as complete" "the refusal line is missing"
   assert_not_contains "$OUT" "CLEAN:" "a tree with a violation printed a clean verdict"
   assert_contains "$OUT" "INSPECTED: 2 candidate file(s)" "the inspected count is missing or wrong"
@@ -166,7 +178,7 @@ test_clean_tree_reports_clean() {
     "the clean verdict is missing or miscounted"
   assert_contains "$OUT" "not proof they consult it" "the clean verdict does not qualify what the search proved"
   assert_not_contains "$OUT" "consult the graph" "the clean verdict claims more than the per-file search proves"
-  assert_not_contains "$OUT" "UNMIGRATED" "a clean tree named a violation"
+  assert_not_contains "$OUT" "NO GRAPH IDENTIFIER" "a clean tree named a violation"
   assert_not_contains "$OUT" "INSPECTED NOTHING" "a clean tree claimed it inspected nothing"
   pass "fm-verify-delivered.sh: a tree with no violation reports clean and exits 0"
 }
@@ -290,7 +302,11 @@ test_failed_fetch_reports_search_failed() {
   expect_code 4 "$RC" "a failed fetch must report a failed search, not a verdict"
   assert_contains "$OUT" "SEARCH FAILED:" "a failed fetch is not reported as a failed search"
   assert_contains "$OUT" "git fetch origin failed" "the failed-fetch reason is missing"
-  assert_contains "$OUT" "does not appear to be a git repository" \
+  # The proof that git's stderr was carried through is the unfetchable remote
+  # path, which appears nowhere in this script's own message. Asserting git's
+  # English sentence instead would make the suite fail under a localised git for
+  # no defect, and a drift-catching suite must not be flaky by construction.
+  assert_contains "$OUT" "$repo-no-such-remote.git" \
     "the failed-fetch report drops git's own stderr, so the reader cannot tell why"
   assert_contains "$OUT" "--no-fetch" "the failed-fetch report does not name the opt-in for a local ref"
   assert_not_contains "$OUT" "CLEAN:" "a failed fetch printed a clean verdict"
@@ -308,7 +324,7 @@ test_no_fetch_still_reaches_a_verdict_on_an_unfetchable_repo() {
 
   run_verify "$repo"
   expect_code 1 "$RC" "--no-fetch must still reach a verdict when origin is unfetchable"
-  assert_contains "$OUT" "UNMIGRATED: app/legacy.py" "--no-fetch did not inspect the local ref"
+  assert_contains "$OUT" "NO GRAPH IDENTIFIER: app/legacy.py" "--no-fetch did not inspect the local ref"
   assert_contains "$OUT" "VIOLATIONS: 1 of 1 inspected file(s)" "--no-fetch did not reach its verdict"
   assert_not_contains "$OUT" "SEARCH FAILED:" "--no-fetch turned an accepted local ref into an error"
   pass "fm-verify-delivered.sh: --no-fetch still reaches a verdict when origin is unfetchable"
@@ -327,7 +343,7 @@ test_registry_recorded_repo_is_inspected() {
   run_env "FM_HOME=$home" FM_VERIFY_REV=checkme -- brand-identity --no-fetch
   expect_code 1 "$RC" "the registry-recorded repo was not inspected"
   assert_contains "$OUT" "repo: $repo" "the path recorded as 'repo at <path>' was not resolved"
-  assert_contains "$OUT" "UNMIGRATED: app/legacy.py" "the resolved path was printed but not inspected"
+  assert_contains "$OUT" "NO GRAPH IDENTIFIER: app/legacy.py" "the resolved path was printed but not inspected"
   pass "fm-verify-delivered.sh: the repo recorded in data/projects.md is resolved and inspected"
 }
 
@@ -434,7 +450,7 @@ test_no_match_is_a_result_not_a_fatal() {
 
   run_verify "$repo"
   expect_code 1 "$RC" "a single unmigrated file must exit 1 as a violation"
-  assert_contains "$OUT" "UNMIGRATED: app/legacy.py" "the run died before classifying the file"
+  assert_contains "$OUT" "NO GRAPH IDENTIFIER: app/legacy.py" "the run died before classifying the file"
   assert_contains "$OUT" "VIOLATIONS: 1 of 1 inspected file(s)" "the run died before its verdict"
   pass "fm-verify-delivered.sh: a git grep no-match is a result, not a fatal under pipefail"
 }
