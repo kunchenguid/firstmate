@@ -124,6 +124,15 @@ snapshot_refs() {
   git -C "$1" for-each-ref --format='%(refname)%09%(objectname)%09%(symref)' > "$2"
 }
 
+test_help_documents_operator_quiescence() {
+  new_case_root help
+  run_helper --help env
+  expect_code 0 "$RUN_RC" "help"
+  assert_grep "quiesce every other Git claimant before invocation" "$RUN_ERR" \
+    "help omitted the operator quiescence prerequisite"
+  pass "help documents the operator quiescence prerequisite"
+}
+
 # The main success regression also proves the empirically selected source-only
 # fetch surface: configured destination refspecs, FETCH_HEAD, tags, and unrelated
 # refs remain untouched while the exact source-backed remote object is acquired.
@@ -696,6 +705,7 @@ test_non_repository_refuses() {
   pass "non-repository target refuses"
 }
 
+test_help_documents_operator_quiescence
 test_divergent_identical_succeeds_and_repeats
 test_submodules_are_not_fetched
 test_configured_pruning_is_suppressed

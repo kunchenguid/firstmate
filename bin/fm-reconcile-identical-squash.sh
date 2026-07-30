@@ -47,6 +47,7 @@ export GIT_TERMINAL_PROMPT=0
 
 usage() {
   printf 'usage: fm-reconcile-identical-squash.sh <repository-directory>\n' >&2
+  printf 'requires: quiesce every other Git claimant before invocation\n' >&2
 }
 
 refuse() {
