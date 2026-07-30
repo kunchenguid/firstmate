@@ -41,7 +41,8 @@ GLOBAL_CLEANUP() {
 trap GLOBAL_CLEANUP EXIT
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts removes the session-scoped delivery and
+# composer-defer diagnostic artifacts, and nothing durable.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -50,6 +51,9 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
+  : > "$st/state/.subsuper-composer-defer-diag"
+  : > "$st/state/.subsuper-composer-defer-streak"
+  : > "$st/state/.subsuper-composer-defer-read"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -57,8 +61,11 @@ unit_clear_stale() {
     bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$st/state"
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
-     && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
-    pass "clear-stale: removes escalations buffer, sidecar, and wedge marker"
+     && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
+     && [ ! -e "$st/state/.subsuper-composer-defer-diag" ] \
+     && [ ! -e "$st/state/.subsuper-composer-defer-streak" ] \
+     && [ ! -e "$st/state/.subsuper-composer-defer-read" ]; then
+    pass "clear-stale: removes escalations buffer, sidecar, wedge marker, and composer-defer diagnostics"
   else
     fail "clear-stale: stale artifacts survived"
   fi
@@ -66,6 +73,32 @@ unit_clear_stale() {
     pass "clear-stale: leaves the durable wake-queue intact (no pending work dropped)"
   else
     fail "clear-stale: removed the durable wake-queue"
+  fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# UNIT 1b: a fresh away ENTRY clears a prior session's composer-defer diagnostic,
+# streak, and read record through the launcher's executable interface. This is
+# the crash / manual-.afk-removal path where bin/fm-afk-return.sh never ran: a
+# stale diagnostic must not be misread as the new session's, and a carried-over
+# mid-wedge streak must not trigger an early record against a prior verdict.
+# ---------------------------------------------------------------------------
+unit_entry_clears_composer_defer_artifacts() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-defer-clear.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'verdict=nonempty reader=tmux streak=17\n' > "$st/state/.subsuper-composer-defer-diag"
+  printf '17\n' > "$st/state/.subsuper-composer-defer-streak"
+  printf 'reader=tmux\n' > "$st/state/.subsuper-composer-defer-read"
+  if ! FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1; then
+    fail "entry defer-clear: fresh native entry failed"
+  elif [ ! -e "$st/state/.subsuper-composer-defer-diag" ] \
+    && [ ! -e "$st/state/.subsuper-composer-defer-streak" ] \
+    && [ ! -e "$st/state/.subsuper-composer-defer-read" ]; then
+    pass "entry defer-clear: fresh entry clears stale composer-defer diagnostic, streak, and read record"
+  else
+    fail "entry defer-clear: a prior session's composer-defer artifact survived a fresh entry"
   fi
   rm -rf "$st"
 }
@@ -217,15 +250,19 @@ unit_failed_start_rolls_back_state() {
   mkdir -p "$st/state"
   printf 'pending\n' > "$st/state/.subsuper-escalations"
   printf 'wedged\n' > "$st/state/.subsuper-inject-wedged"
+  printf 'verdict=nonempty reader=tmux streak=17\n' > "$st/state/.subsuper-composer-defer-diag"
+  printf '17\n' > "$st/state/.subsuper-composer-defer-streak"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
     fail "failed start: unsupported backend unexpectedly succeeded"
   elif [ ! -e "$st/state/.afk" ] \
     && [ "$(cat "$st/state/.subsuper-escalations")" = pending ] \
-    && [ "$(cat "$st/state/.subsuper-inject-wedged")" = wedged ]; then
-    pass "failed start: away flag and delivery artifacts roll back"
+    && [ "$(cat "$st/state/.subsuper-inject-wedged")" = wedged ] \
+    && [ "$(cat "$st/state/.subsuper-composer-defer-streak")" = 17 ] \
+    && [ -s "$st/state/.subsuper-composer-defer-diag" ]; then
+    pass "failed start: away flag, delivery artifacts, and composer-defer diagnostics roll back"
   else
-    fail "failed start: left false away state or discarded delivery artifacts"
+    fail "failed start: left false away state or discarded delivery or diagnostic artifacts"
   fi
   rm -rf "$st"
 }
@@ -909,6 +946,7 @@ e2e_tmux() {
 }
 
 unit_clear_stale
+unit_entry_clears_composer_defer_artifacts
 unit_relative_paths_are_absolute_before_daemon_launch
 unit_fresh_vs_refresh
 unit_stop_ordering

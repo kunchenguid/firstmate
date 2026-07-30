@@ -38,6 +38,7 @@ When the reader found no candidate composer row, there is no offending row and a
 
 The record lands in `state/.subsuper-composer-defer-diag`, in the daemon log as the durable trail, and inside `state/.subsuper-inject-wedged` next to the buffered items the marker already carried.
 `bin/fm-afk-return.sh` surfaces it as return catch-up evidence and clears it with the other delivery artifacts.
+A fresh away entry also clears any record and streak the return never saw (a crash or manual `state/.afk` removal), so a stale diagnostic is never attributed to a later session.
 Row bytes are recorded as hex, so a record read with `cat` can never replay a pane's own escape sequences, and each field is bounded because the row can hold the captain's unsent draft.
 For the same reason the alert summary carries only the verdict, the reader, and the streak: it is passed to an OS notifier or a configured `command:` directive, and composer content must not leave the machine's local records.
 

@@ -7,7 +7,7 @@
 #   state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
-#     - otherwise clears any prior away session's stale escalation artifacts
+#     - otherwise clears any prior away session's stale session-scoped artifacts
 #       (fm_afk_clear_stale_artifacts) for a direct, non-prepared start, then
 #       execs bin/fm-supervise-daemon.sh in the foreground. A prepared start was
 #       already cleared transactionally by bin/fm-afk-launch.sh.
@@ -55,15 +55,23 @@ fm_afk_start_usage() {
 # escalation - the delivery buffer is a transient cache, and any condition still
 # true (a crew still blocked, a check still firing) is re-derived and re-escalated
 # fresh by the daemon's heartbeat catch-all scan and the durable
-# state/.wake-queue replay (see docs/herdr-backend.md "Away-mode stale-artifact
-# lifecycle" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
+# state/.wake-queue replay (see docs/herdr-backend.md "Away-mode supervisor
+# support" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
 # NOT called on a refresh (daemon already alive), so the current session's own
 # buffered escalations are preserved.
+# The composer-defer diagnostic, streak, and read files are session-scoped the
+# same way: bin/fm-afk-return.sh clears them on return, but when the return
+# never ran (crash, manual .afk removal) a fresh entry must drop them too, so a
+# stale diagnostic is never misread as the new session's and a carried-over
+# mid-wedge streak cannot trigger an early record against a prior verdict.
 fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" 2>/dev/null
+        "$state/.subsuper-inject-wedged" \
+        "$state/.subsuper-composer-defer-diag" \
+        "$state/.subsuper-composer-defer-streak" \
+        "$state/.subsuper-composer-defer-read" 2>/dev/null
 }
 
 daemon_lock_owner() {
