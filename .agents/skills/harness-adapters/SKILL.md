@@ -127,6 +127,12 @@ The supported launch-profile flags below are verified locally; each row records 
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 
+Codex's `max` is model-scoped in codex-cli 0.145.0: the bundled catalog advertises it for `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`, while `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2`, and `codex-auto-review` cap at `xhigh`.
+Firstmate accepting `max` harness-wide for codex is therefore a deliberate decision, not a claim that every codex model supports it.
+Codex 0.145.0 also parses `model_reasoning_effort` as a free-form string at config load, unlike `approval_policy` and `sandbox_mode`, which reject an unknown value with `unknown variant`.
+So an unsupported model paired with `max` is accepted silently and its effective effort is undefined rather than loud.
+Pinning `max` on a model outside the `gpt-5.6` family is unvalidated.
+
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 
 ### Model support discovery
