@@ -432,7 +432,8 @@ exit 1
 SH
   cat >"$repo/$a" <<'SH'
 #!/usr/bin/env bash
-sleep 0.5
+# Keep a wide margin over runner bookkeeping on loaded macOS hosts.
+sleep 2
 touch "$SCHED_EVIDENCE/slow-done"
 echo "ok - slow fixture"
 SH

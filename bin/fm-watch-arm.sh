@@ -30,17 +30,20 @@
 #                                                          this arm attaches and follows it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
-#                                                        - a clean cycle ended with no wake and no
-#                                                          verified healthy successor
+#                                                        - a clean cycle ended with no captured or
+#                                                          durably recorded wake and no verified
+#                                                          healthy successor
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
 # reason; on attached it stays live across identity-matched successors. An
-# attached cycle that ends without a healthy successor is a typed nonzero failure,
-# never a clean empty completion. On FAILED it exits non-zero so the failure is
-# loud. A live cycle already present means re-arm attaches - do not start a second
-# watcher.
+# attached cycle that ends without a healthy successor or durable actionable wake
+# evidence is a typed nonzero failure. On FAILED it exits non-zero so the failure is
+# loud. A verified cycle that closes cleanly after advancing the durable wake
+# sequence is an actionable close even if this arm did not capture the reason line;
+# its notification owner carries the wake and subsequent re-arm. A live cycle
+# already present means re-arm attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -99,23 +102,38 @@ lock_snapshot() {
   printf 'pid:%s|identity:%s' "$(cycle_clean_field "${pid:-none}")" "$(cycle_clean_field "${identity:-none}")"
 }
 
+wake_seq_snapshot() {
+  local seq
+  seq=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || true)
+  case "$seq" in
+    ''|*[!0-9]*) printf '0' ;;
+    *) printf '%s' "$seq" ;;
+  esac
+}
+
 cycle_active=0
 cycle_watcher_pid=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
+cycle_wake_seq_before=0
+cycle_verified=0
 
 cycle_begin() {
   cycle_watcher_pid=$1
   cycle_origin=$2
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
+  cycle_wake_seq_before=${3:-$(wake_seq_snapshot)}
+  cycle_verified=0
+  [ "$cycle_origin" != attached ] || cycle_verified=1
   cycle_active=1
 }
 
 cycle_refresh_lock_before() {
   [ "$cycle_active" -eq 1 ] || return 0
   cycle_lock_before=$(lock_snapshot)
+  cycle_verified=1
 }
 
 cycle_signal_name() {
@@ -244,16 +262,28 @@ report_attached() {
 # Give a successor the same bounded confirmation window used for a fresh child.
 # Adapter-owned continuations normally win immediately, but the bound avoids a
 # false failure when process-close delivery and lock publication cross briefly.
+SUCCESSOR_WAKE_SEQ_BEFORE=0
 wait_for_healthy_successor() {
   local deadline
   # date(1) exposes whole seconds. Add one rounding second so a timeout of one
   # second cannot collapse to a few milliseconds when called near a boundary.
   deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
   while :; do
+    SUCCESSOR_WAKE_SEQ_BEFORE=$(wake_seq_snapshot)
     healthy_watcher && return 0
     [ "$(date +%s)" -ge "$deadline" ] && return 1
     sleep 0.2
   done
+}
+
+cycle_has_actionable_close_evidence() {
+  local wake_seq_after beacon_age
+  [ "$cycle_active" -eq 1 ] || return 1
+  [ "$cycle_verified" -eq 1 ] || return 1
+  wake_seq_after=$(wake_seq_snapshot)
+  [ "$wake_seq_after" -gt "$cycle_wake_seq_before" ] || return 1
+  beacon_age=$(fm_path_age "$BEAT")
+  [ "$beacon_age" -lt "$GRACE" ]
 }
 
 fail_unexplained_cycle() {
@@ -265,22 +295,27 @@ fail_unexplained_cycle() {
 # to a verified successor. With no successor, fail loudly instead of returning a
 # clean empty completion that an adapter could mistake for a no-op.
 attach_and_wait() {
-  local attached_pid=$1
+  local attached_pid=$1 healthy_wake_seq_before
   while :; do
+    healthy_wake_seq_before=$(wake_seq_snapshot)
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
-        cycle_begin "$attached_pid" attached
+        cycle_begin "$attached_pid" attached "$healthy_wake_seq_before"
         report_attached
       fi
       sleep "$ATTACH_POLL"
       continue
     fi
+    if cycle_has_actionable_close_evidence; then
+      cycle_log_append 0 none actionable-wake-observed none
+      return 0
+    fi
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
-      cycle_begin "$attached_pid" attached
+      cycle_begin "$attached_pid" attached "$SUCCESSOR_WAKE_SEQ_BEFORE"
       report_attached
       continue
     fi
@@ -355,9 +390,10 @@ fi
 # one - attach to that cycle and wait until it ends so the harness notify fires
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
 # this home's watcher and wants a fresh one.)
+existing_wake_seq_before=$(wake_seq_snapshot)
 if [ "$mode" = arm ] && healthy_watcher; then
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  cycle_begin "$HEALTHY_PID" attached
+  cycle_begin "$HEALTHY_PID" attached "$existing_wake_seq_before"
   report_attached
   attach_and_wait "$HEALTHY_PID"
   exit $?
@@ -399,9 +435,10 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
+child_wake_seq_before=$(wake_seq_snapshot)
 "$WATCH" >"$child_out" &
 child=$!
-cycle_begin "$child" started
+cycle_begin "$child" started "$child_wake_seq_before"
 child_done=0
 
 owned_child_finished() {
@@ -418,6 +455,14 @@ owned_child_finished() {
   fi
 
   if [ "$rc" -eq 0 ]; then
+    if cycle_has_actionable_close_evidence; then
+      cycle_log_append "$rc" "$signal" actionable-wake-observed none
+      print_watch_output "$child_out"
+      rm -f "$child_out" 2>/dev/null || true
+      child=
+      child_out=
+      return 0
+    fi
     if wait_for_healthy_successor; then
       cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
       print_watch_output "$child_out"
@@ -426,7 +471,7 @@ owned_child_finished() {
       child_out=
       cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
       report_attached
-      cycle_begin "$HEALTHY_PID" attached
+      cycle_begin "$HEALTHY_PID" attached "$SUCCESSOR_WAKE_SEQ_BEFORE"
       attach_and_wait "$HEALTHY_PID"
       return $?
     fi

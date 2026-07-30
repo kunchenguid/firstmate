@@ -714,6 +714,98 @@ SH
   pass "arm propagates an immediate watcher wake before confirmation"
 }
 
+test_owned_arm_accepts_durably_recorded_actionable_close() {
+  local dir state fixture armout status
+  dir=$(make_case owned-actionable-close)
+  state="$dir/state"
+  fixture="$dir/fixture"
+  armout="$dir/arm.out"
+  mkdir -p "$fixture/bin"
+  cp "$WATCH_ARM" "$ROOT/bin/fm-wake-lib.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+WATCH_LOCK="$STATE/.watch.lock"
+fm_lock_try_acquire "$WATCH_LOCK" || exit 1
+trap 'fm_lock_release "$WATCH_LOCK"' EXIT
+printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home"
+printf '%s\n' "$SCRIPT_DIR/fm-watch.sh" > "$WATCH_LOCK/watcher-path"
+fm_pid_identity "${BASHPID:-$$}" > "$WATCH_LOCK/pid-identity"
+touch "$STATE/.last-watcher-beat"
+sleep 1
+fm_wake_append signal task.status "signal: $STATE/task.status"
+touch "$STATE/.last-watcher-beat"
+exit 0
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh" "$fixture/bin/fm-watch.sh"
+
+  status=0
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=3 "$fixture/bin/fm-watch-arm.sh" > "$armout" || status=$?
+  [ "$status" -eq 0 ] \
+    || fail "owned arm misclassified a durably recorded actionable close (status $status): $(cat "$armout")"
+  grep -qF 'watcher: started pid=' "$armout" || fail "owned actionable-close watcher was never confirmed healthy"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "owned arm printed a spurious failure after the durably recorded actionable close"
+  grep "$(printf '\tsignal\t')" "$state/.wake-queue" | grep -F "$state/task.status" >/dev/null \
+    || fail "owned watcher fixture did not durably record its actionable close"
+  grep -q 'reason=actionable-wake-observed' "$state/.watch-cycle-exits.log" \
+    || fail "owned actionable close was not classified in the lifecycle ledger"
+  pass "owned arm accepts a verified fresh cycle close backed by a durable actionable wake"
+}
+
+test_attached_arm_accepts_actionable_peer_close() {
+  local dir state fakebin watcher_out armout watcher_pid arm_pid watcher_status arm_status i
+  dir=$(make_case attached-actionable-close)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  watcher_out="$dir/watch.out"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$watcher_out" &
+  watcher_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher_pid" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher_pid" ] \
+    || fail "actionable-close watcher did not become healthy"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  arm_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$watcher_pid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$watcher_pid" "$armout" \
+    || fail "arm did not attach before the actionable peer close"
+
+  printf 'needs-decision: choose the safe route\n' > "$state/task.status"
+  wait_for_exit "$watcher_pid" 80
+  watcher_status=$?
+  [ "$watcher_status" -eq 0 ] || fail "watcher did not close cleanly after its actionable wake (status $watcher_status)"
+  wait_for_exit "$arm_pid" 80
+  arm_status=$?
+  [ "$arm_status" -eq 0 ] || fail "attached arm misclassified an actionable clean close (status $arm_status): $(cat "$armout")"
+  grep -qF "signal: $state/task.status" "$watcher_out" \
+    || fail "peer watcher did not fire the actionable signal"
+  grep "$(printf '\tsignal\t')" "$state/.wake-queue" | grep -F "$state/task.status" >/dev/null \
+    || fail "peer watcher did not durably queue its actionable signal"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "attached arm printed a spurious failure after the actionable peer close"
+  pass "attached arm accepts a clean peer close backed by a fresh beacon and durable actionable wake"
+}
+
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
   local dir state fakebin armout peer identity armpid status i
   dir=$(make_case arm-peer-startup-race)
@@ -1035,6 +1127,8 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
+test_owned_arm_accepts_durably_recorded_actionable_close
+test_attached_arm_accepts_actionable_peer_close
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
