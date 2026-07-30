@@ -2034,7 +2034,9 @@ migrate_firstmate_home_children_endpoint_bindings() {  # <home>
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$(meta_value "$child_meta" worktree)
-      [ -z "$child_home" ] || migrate_firstmate_home_children_endpoint_bindings "$child_home" || return 1
+      [ -n "$child_home" ] || continue
+      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
+      migrate_firstmate_home_children_endpoint_bindings "$child_home" || return 1
       continue
     fi
     [ "$(grep -c '^endpoint_task_id=' "$child_meta" 2>/dev/null || true)" -eq 0 ] || continue

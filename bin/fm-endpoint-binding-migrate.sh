@@ -78,6 +78,16 @@ git_common_dir() {  # <worktree-or-repo>
   esac
 }
 
+record_digest() {  # <path>
+  local digest
+  digest=$(fm_pr_sha256 "$1") || return 1
+  case "$digest" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#digest}" -eq 64 ] || return 1
+  printf '%s\n' "$digest"
+}
+
 meta_required() {  # <key>
   fm_backend_meta_exact_value "$META" "$1"
 }
@@ -269,7 +279,7 @@ LOCK_HELD=1
   && [ "$(grep -c '^endpoint_task_id=' "$META" 2>/dev/null || true)" -eq 0 ] \
   || { refuse "metadata changed while acquiring its task lock"; exit 1; }
 SOURCE_IDENTITY=$(fm_pr_file_identity "$META") || { refuse "metadata identity is unreadable"; exit 1; }
-SOURCE_HASH=$(fm_pr_sha256 "$META") || { refuse "metadata bytes are unreadable"; exit 1; }
+SOURCE_HASH=$(record_digest "$META") || { refuse "metadata bytes have no well-formed digest"; exit 1; }
 
 BACKEND=$(meta_required backend) || { refuse "backend identity is missing or ambiguous"; exit 1; }
 fm_backend_is_known "$BACKEND" && [ "$BACKEND" != tmux ] \
@@ -347,7 +357,7 @@ esac
 
 # Bind publication to the exact bytes and inode that were parsed and proven live.
 [ "$(fm_pr_file_identity "$META")" = "$SOURCE_IDENTITY" ] \
-  && [ "$(fm_pr_sha256 "$META")" = "$SOURCE_HASH" ] \
+  && [ "$(record_digest "$META" || true)" = "$SOURCE_HASH" ] \
   && [ "$(grep -c '^endpoint_task_id=' "$META" 2>/dev/null || true)" -eq 0 ] \
   || { refuse "metadata changed during live identity proof"; exit 1; }
 if ! { [ -n "$TMP" ] && [ -f "$TMP" ] && [ ! -L "$TMP" ] \

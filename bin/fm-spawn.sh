@@ -2639,8 +2639,9 @@ preserve_relaunch_meta() {
     !($1 in owned)
   ' "$RELAUNCH_META"
 }
-# Built in memory first, then written once: a failed open OR a failed write of
-# the record is caught, while set -e still governs every line that builds it.
+# Built in memory first, then written once, so a failed open AND a failed write
+# of the record are both caught. Bash disables set -e inside this command
+# substitution, so any command added to the builder must check its own status.
 META_RECORD=$(
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"

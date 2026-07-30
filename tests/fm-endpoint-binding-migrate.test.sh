@@ -294,6 +294,27 @@ scoped_cmux_title() {  # <id>
     bash -c '. "$1/bin/backends/cmux.sh"; fm_backend_cmux_scoped_title "fm-$2"' _ "$ROOT" "$1"
 }
 
+# Runs a command with a wall-clock budget so a runaway recursion fails this
+# suite instead of hanging it. Returns 124 when the budget is exhausted.
+run_with_deadline() {  # <seconds> <output-file> <command...>
+  local deadline=$1 out_file=$2 pid waited=0 rc
+  shift 2
+  "$@" > "$out_file" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$deadline" ]; then
+      kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
+  rc=$?
+  return "$rc"
+}
+
 herdr_workspace_label_for_home() {  # <home>
   FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" \
     bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' _ "$ROOT"
@@ -705,6 +726,89 @@ test_secondmate_force_retirement_preflights_child_bindings() {
   pass "secondmate force retirement preflights unbound child records home-scoped, then authorizes normally"
 }
 
+test_unusable_metadata_digest_refuses_before_authorizing() {
+  local record id meta digest_bin tool out rc
+  id=digest-unavailable
+  record=$(make_case digest-unavailable "$id" "$TMP_ROOT/external-repos/repo-c")
+  read_case "$record"
+  meta="$HOME_DIR/state/$id.meta"
+  write_legacy_herdr "$meta" "$id"
+  digest_bin="$CASE_DIR/no-digest-bin"
+  mkdir -p "$digest_bin"
+  for tool in shasum sha256sum; do
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$digest_bin/$tool"
+    chmod +x "$digest_bin/$tool"
+  done
+
+  set +e
+  out=$( FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$CASE_DIR/runtime.log" \
+    FM_FAKE_FOREGROUND_CWD="$WORKTREE_DIR" FM_FAKE_TASK_LABEL="fm-$id" \
+    PATH="$digest_bin:$FAKEBIN_DIR:$PATH" "$MIGRATE" "$id" 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a record with no readable digest was migrated"
+  assert_contains "$out" "metadata bytes have no well-formed digest" \
+    "an unusable digest did not refuse on its own terms"
+  assert_not_contains "$out" "is not authorized in" \
+    "an unusable digest still offered an authorization line to paste"
+  assert_unbound "$meta" "metadata whose digest could not be computed"
+  pass "an unreadable or empty metadata digest refuses before it can key an authorization"
+}
+
+test_secondmate_preflight_refuses_unvalidated_nested_home() {
+  local dir home subhome nestedid fakebin out rc
+  dir="$TMP_ROOT/secondmate-preflight-cycle"
+  home="$dir/home"
+  subhome="$dir/subhome"
+  nestedid=nested-domain
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" \
+    "$subhome/state" "$subhome/data" "$subhome/config" "$subhome/projects"
+  touch "$home/state/.last-watcher-beat" "$subhome/state/.last-watcher-beat"
+  : > "$dir/runtime.log"
+  fakebin=$(make_runtime_fakebin "$dir")
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    'window=firstmate:fm-domain' \
+    "worktree=$subhome" \
+    "project=$subhome" \
+    'harness=echo' \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    'yolo=off' \
+    "home=$subhome" \
+    'projects=alpha'
+  printf '%s\n' \
+    "- domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)" \
+    > "$home/data/secondmates.md"
+  # A nested secondmate record naming its own home: unchecked recursion here
+  # re-scans the same state dir forever instead of refusing.
+  fm_write_meta "$subhome/state/$nestedid.meta" \
+    "window=firstmate:fm-$nestedid" \
+    "endpoint_task_id=$nestedid" \
+    "worktree=$subhome" \
+    "project=$subhome" \
+    'harness=echo' \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    'yolo=off' \
+    "home=$subhome" \
+    'projects=alpha'
+
+  set +e
+  run_with_deadline 60 "$dir/teardown.out" \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$fakebin:$PATH" "$TEARDOWN" domain --force
+  rc=$?
+  set -e
+  out=$(cat "$dir/teardown.out")
+  [ "$rc" -ne 124 ] || fail "secondmate retirement did not terminate on a self-referential nested home"
+  [ "$rc" -ne 0 ] || fail "secondmate retirement accepted an unvalidated nested home"
+  assert_contains "$out" "child firstmate home" \
+    "nested home refusal did not come from the removal-safety owner"
+  [ -d "$subhome" ] || fail "a refused retirement removed the secondmate home"
+  pass "the secondmate preflight validates every nested home before recursing into it"
+}
+
 test_legacy_fixture_matches_historical_spawn_schema
 test_cross_version_herdr_cleanup_recovers_before_ordinary_refusal
 test_projected_herdr_identity_recovers_only_with_exact_live_topology
@@ -714,5 +818,7 @@ test_cmux_requires_exact_home_scoped_title_and_surface
 test_orca_and_unsafe_metadata_remain_quarantined_by_refusal
 test_external_project_recovery_needs_exact_replay_safe_authorization
 test_secondmate_force_retirement_preflights_child_bindings
+test_unusable_metadata_digest_refuses_before_authorizing
+test_secondmate_preflight_refuses_unvalidated_nested_home
 
 echo "# all endpoint binding migration tests passed"
