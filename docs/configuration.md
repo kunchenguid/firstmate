@@ -442,6 +442,9 @@ FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh t
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature
 FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=   # legacy alias for FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS when the new variable is unset
+FM_SPAWN_WORKTREE_ATTEMPTS=3       # treehouse get attempts before fm-spawn.sh fails a spawn whose every offered worktree is already claimed by another task's state/<id>.meta worktree= record (docs/architecture.md "Worktrees, not branches in your checkout")
+FM_SPAWN_WORKTREE_POLLS=60         # pane-settle polls per treehouse get attempt before fm-spawn.sh treats the pool as offering nothing further
+FM_SPAWN_WORKTREE_POLL_INTERVAL=1  # seconds between those settle polls
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-fleet-sync.sh hits the orphaned .git/packed-refs.lock signature
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1 # seconds fm-fleet-sync.sh waits before each of those retries
 FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30       # min mtime age before fm-fleet-sync.sh treats a leftover packed-refs.lock as provably stale
