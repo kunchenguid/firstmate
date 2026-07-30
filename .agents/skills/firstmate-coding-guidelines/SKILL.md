@@ -62,6 +62,8 @@ If an addition needs more than a few lines of conditional detail (detail that ma
 `AGENTS.md`'s token cost is paid by every session of every fleet member, every time, whether or not that session ever hits the situation the new lines describe.
 A skill's cost is paid only by the sessions that actually load it.
 When in doubt, write the fact into the skill or doc first, and add only the one-line trigger to `AGENTS.md`.
+`AGENTS.md` must stay at or under 40000 bytes, Claude Code's agent-instruction warning threshold, because it is loaded as `CLAUDE.md` and crossing that threshold warns in every session of every fleet member.
+Check the size with `wc -c AGENTS.md` before proposing an addition, because the file normally sits close to the limit and a new line usually has to be paid for by removing another.
 
 ## Trigger hygiene
 

@@ -399,7 +399,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `ask-user-authority` - load before deciding any ask-user finding, regardless of the project's `yolo` posture.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array.
 - `harness-adapters` - load before spawning or recovering a worker, handling a trust dialog, sending a harness-specific skill invocation, interrupting, exiting, or resuming an agent, or verifying a new adapter.
-- `firstmate-orca` - load before switching to, spawning into, supervising, or reconciling Orca-backed work.
+- `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.
   Cloning or registering a project is add intake and uses the same trigger.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
