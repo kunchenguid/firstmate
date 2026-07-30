@@ -83,7 +83,7 @@ _map_lookup() {
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      "$id$TAB"*) printf '%s' "${line#*$TAB}"; return 0 ;;
+      "$id$TAB"*) printf '%s' "${line#*"$TAB"}"; return 0 ;;
     esac
   done <<EOF
 $map
