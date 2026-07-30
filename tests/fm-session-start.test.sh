@@ -238,6 +238,7 @@ killed=${spawned}.killed
 mate_home=${FM_FAKE_SECOND_MATE_HOME:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
 mate_window="fm-$mate_id"
+label_file="${spawned}.label"
 case "${1:-}" in
   display-message)
     target=
@@ -259,6 +260,7 @@ case "${1:-}" in
     if [ -e "$spawned" ]; then
       case "$format" in
         *pane_current_command*) printf '%s\n' node ;;
+        *window_name*) cat "$label_file" 2>/dev/null ;;
         *) printf '%%1\n' ;;
       esac
       exit 0
@@ -284,11 +286,20 @@ case "${1:-}" in
       exit 1
     fi
     if [ -e "$spawned" ]; then
-      printf '%s\n' "$mate_window"
+      case "$*" in
+        *"#{window_id}"*) printf '@1\n' ;;
+        *) printf '%s\n' "$mate_window" ;;
+      esac
     elif [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; }; then
-      printf '%s\n' "$mate_window"
+      case "$*" in
+        *"#{window_id}"*) printf '@0\n' ;;
+        *) printf '%s\n' "$mate_window" ;;
+      esac
     else
-      printf '%s\n' main
+      case "$*" in
+        *"#{window_id}"*) printf '@9\n' ;;
+        *) printf '%s\n' main ;;
+      esac
     fi
     exit 0
     ;;
@@ -301,7 +312,12 @@ case "${1:-}" in
   new-window)
     printf '%s\n' "$*" >> "$log"
     : > "$spawned"
-    printf '%%1\n'
+    printf '@1\n'
+    exit 0
+    ;;
+  rename-window)
+    printf '%s\n' "$*" >> "$log"
+    printf '%s\n' "${!#}" > "$label_file"
     exit 0
     ;;
   set-window-option|send-keys) exit 0 ;;
@@ -321,6 +337,7 @@ state=${FM_FAKE_HERDR_STATE:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
 killed="${state}.killed"
 spawned="${state}.spawned"
+label_file="${state}.label"
 printf '%s\n' "$*" >> "$log"
 case "${1:-} ${2:-}" in
   "status --json")
@@ -342,6 +359,26 @@ case "${1:-} ${2:-}" in
     : > "$spawned"
     printf '%s\n' '{"result":{"tab":{"tab_id":"t-new"},"root_pane":{"pane_id":"p-new"}}}'
     ;;
+  "tab rename")
+    if [ "${3:-}" = t-new ] && [ -e "$spawned" ]; then
+      printf '%s\n' "${4:-}" > "$label_file"
+      printf '%s\n' '{"result":{}}'
+    else
+      printf '%s\n' '{"error":{"code":"tab_not_found"}}' >&2
+      exit 1
+    fi
+    ;;
+  "tab get")
+    if [ "${3:-}" = t-new ] && [ -e "$spawned" ]; then
+      printf '{"result":{"tab":{"tab_id":"t-new","workspace_id":"ws1","label":"%s"}}}\n' \
+        "$(cat "$label_file" 2>/dev/null)"
+    elif [ "${3:-}" = t-old ] && [ ! -e "$spawned" ] && [ ! -e "$killed" ]; then
+      printf '{"result":{"tab":{"tab_id":"t-old","workspace_id":"ws1","label":"fm-%s"}}}\n' "$mate_id"
+    else
+      printf '%s\n' '{"error":{"code":"tab_not_found"}}' >&2
+      exit 1
+    fi
+    ;;
   "pane list")
     if [ -e "$spawned" ]; then
       printf '%s\n' '{"result":{"panes":[{"pane_id":"p-new","tab_id":"t-new"}]}}'
@@ -354,7 +391,7 @@ case "${1:-} ${2:-}" in
   "pane get")
     pane=${3:-}
     if [ "$pane" = p-new ] && [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new","tab_id":"t-new","workspace_id":"ws1"}}}'
     elif [ "$pane" = p-old ] && [ ! -e "$killed" ]; then
       printf '%s\n' '{"result":{"pane":{"pane_id":"p-old"}}}'
     else
@@ -907,7 +944,7 @@ EOF
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful missing-window recovery should stay non-actionable"
   assert_contains "$(cat "$log")" "new-window" "session start did not relaunch the missing Pi secondmate"
   assert_not_contains "$(cat "$log")" "kill-window" "session start tried to kill an already-absent window"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:@1)" \
     "the later fleet read did not confirm the relaunched window"
   assert_grep 'harness=pi' "$home/state/$SESSION_START_SECOND_MATE_ID.meta" \
     "the real respawn path did not preserve the Pi harness: $(cat "$home/state/$SESSION_START_SECOND_MATE_ID.meta")"
@@ -968,7 +1005,7 @@ EOF
   assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-$SESSION_START_SECOND_MATE_ID" \
     "the proven bare-shell path did not remove its existing dead endpoint"
   assert_contains "$(cat "$log")" "new-window" "the proven bare-shell path did not relaunch"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:@1)" \
     "the later fleet read did not confirm the bare-shell relaunch"
   pass "session start: the proven bare-shell recovery path remains intact"
 }

@@ -377,13 +377,23 @@ test_propagate_lib() {
 # propagates the crew harness into the home's config.
 # ===========================================================================
 
-# A tmux stub that accepts every subcommand and prints nothing, so no window
-# pre-exists and the spawn proceeds to write its meta. Echoes the fakebin dir.
+# A tmux stub that accepts every subcommand, so no window pre-exists and the
+# spawn proceeds to write its meta. new-window returns a stable window id and
+# rename-window/#{window_name} round-trip the display label, satisfying the
+# spawn's rename-and-verify step. Echoes the fakebin dir.
 make_noop_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{window_name}"*) cat "$(dirname "$0")/.window-label" 2>/dev/null; exit 0 ;;
+esac
+case "${1:-}" in
+  new-window) printf '@1\n' ;;
+  rename-window) printf '%s\n' "${!#}" > "$(dirname "$0")/.window-label" ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
