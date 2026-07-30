@@ -10,6 +10,7 @@ EXT="$ROOT/.pi/extensions/fm-calm.ts"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
+WORKING_SHIP="$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
@@ -90,6 +91,7 @@ test_home_resolution() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
@@ -207,6 +209,7 @@ test_pi_compat_degraded_adapter() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
@@ -305,6 +308,7 @@ test_pi_compat_missing_adapter_exports() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
   printf '%s\n' \
@@ -362,6 +366,7 @@ test_rendering_and_session_lifecycle() {
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
@@ -995,7 +1000,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
-  pass "Pi calm centralizes transcript visibility, preserves execution/export data, keeps native working visible, and persists its choice across session starts"
+  pass "Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts"
 }
 
 test_operational_followup_turn_e2e() {
@@ -1017,6 +1022,7 @@ test_operational_followup_turn_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
 
@@ -1379,6 +1385,7 @@ test_hidden_block_geometry_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' on >"$home/config/calm"
   printf '%s\n' '{"hideThinkingBlock":true,"terminal":{"clearOnShrink":false}}' >"$config/settings.json"
@@ -1591,8 +1598,453 @@ TS
   pass "Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering"
 }
 
+test_working_ship_geometry_and_lifecycle() {
+  local fixture out status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi Calm working-ship test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi Calm working-ship assumptions"
+
+  fixture="$TMP_ROOT/working-ship"
+  mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ initTheme, theme }, { visibleWidth, setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+const ship = await import(
+  `${pathToFileURL(`${process.cwd()}/lib/fm-calm-working-ship.ts`).href}?ship=${Date.now()}`
+);
+const {
+  CALM_WORKING_SHIP_WIDGET_KEY,
+  createCalmWorkingShipAnimation,
+} = ship;
+
+const plain = { sail: (t) => t, hull: (t) => t, waves: (t) => t };
+const themed = {
+  sail: (t) => theme.fg("accent", t),
+  hull: (t) => theme.fg("accent", t),
+  waves: (t) => theme.fg("dim", t),
+};
+const stripAnsi = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
+const check = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+
+// --- Exact two-row geometry at a normal width -------------------------------------
+{
+  const animation = createCalmWorkingShipAnimation(plain);
+  animation.render(40);
+  while (animation.position() < 12) animation.advance();
+  const frame = animation.render(40);
+  const expected = ["             |>", "~~~~~~~~~~~~\\__/~~~~~~~~~~~~~~~~~~~~~~~~"];
+  check(frame.length === 2, `normal-width sprite was not two rows: ${frame.length}`);
+  check(
+    JSON.stringify(frame) === JSON.stringify(expected),
+    `normal-width sprite geometry drifted: ${JSON.stringify(frame)}`,
+  );
+}
+
+// --- Full-width waves, ANSI-aware width safety, and a constant sail orientation ----
+for (let width = 4; width <= 120; width += 1) {
+  const animation = createCalmWorkingShipAnimation(themed);
+  animation.render(width);
+  for (let step = 0; step <= width + 4; step += 1) {
+    const frame = animation.render(width);
+    check(frame.length === 2, `width ${width} did not render two rows`);
+    for (const line of frame) {
+      check(
+        visibleWidth(line) <= width,
+        `width ${width} rendered a ${visibleWidth(line)}-cell line and would wrap`,
+      );
+    }
+    // The water row fills the complete usable width so waves never stop short.
+    check(
+      visibleWidth(frame[1]) === width,
+      `width ${width} water row was ${visibleWidth(frame[1])} cells instead of full width`,
+    );
+    const sailRow = stripAnsi(frame[0]);
+    const waterRow = stripAnsi(frame[1]);
+    check(sailRow.trimEnd().endsWith("|>"), `width ${width} lost the open sail: ${sailRow}`);
+    check(!sailRow.includes("<|"), `width ${width} mirrored the SSHHIP sail: ${sailRow}`);
+    check(
+      waterRow.split("\\__/").length === 2,
+      `width ${width} did not place exactly one hull: ${waterRow}`,
+    );
+    check(
+      waterRow.indexOf("\\__/") + 1 === sailRow.indexOf("|>"),
+      `width ${width} separated the sail from the hull: ${sailRow} / ${waterRow}`,
+    );
+    check(
+      /^~*\\__\/~*$/.test(waterRow),
+      `width ${width} water row was not waves plus one hull: ${waterRow}`,
+    );
+    animation.advance();
+  }
+}
+
+// --- Left and right boundary motion -----------------------------------------------
+{
+  const width = 12;
+  const span = width - 4;
+  const animation = createCalmWorkingShipAnimation(plain);
+  animation.render(width);
+  const positions = [];
+  for (let step = 0; step < 40; step += 1) {
+    positions.push(animation.position());
+    animation.advance();
+    animation.render(width);
+  }
+  check(Math.min(...positions) === 0, `boat never reached the left edge: ${positions.join(",")}`);
+  check(
+    Math.max(...positions) === span,
+    `boat never reached the right edge or overshot it: ${positions.join(",")}`,
+  );
+  for (let index = 1; index < positions.length; index += 1) {
+    check(
+      Math.abs(positions[index] - positions[index - 1]) === 1,
+      `boat jumped instead of moving smoothly: ${positions.join(",")}`,
+    );
+  }
+  check(positions.includes(0) && positions.indexOf(0) < positions.lastIndexOf(0), "boat did not bounce back to the left edge");
+  check(positions.indexOf(span) < positions.lastIndexOf(span), "boat did not bounce back off the right edge");
+}
+
+// --- Shrink and grow resize clamping ----------------------------------------------
+{
+  const animation = createCalmWorkingShipAnimation(plain);
+  animation.render(80);
+  while (animation.position() < 76) animation.advance();
+  check(animation.position() === 76, `boat did not reach the wide right edge: ${animation.position()}`);
+
+  const shrunk = animation.render(20);
+  check(
+    animation.position() === 16,
+    `shrink did not clamp the track immediately: ${animation.position()}`,
+  );
+  check(shrunk[1].length === 20, `shrunk water row was ${shrunk[1].length} cells instead of 20`);
+  check(shrunk[0].length <= 20, `shrunk sail row was ${shrunk[0].length} cells and would wrap`);
+
+  animation.advance();
+  const afterShrink = animation.render(20);
+  check(
+    animation.position() >= 0 && animation.position() <= 16,
+    `motion left the shrunken track: ${animation.position()}`,
+  );
+  check(animation.position() !== 16, "boat stalled at the edge after a shrink instead of turning around");
+  check(afterShrink[1].length === 20, "motion after a shrink broke the water row width");
+
+  const grown = animation.render(60);
+  check(grown[1].length === 60, `grown water row was ${grown[1].length} cells instead of 60`);
+  animation.advance();
+  const afterGrow = animation.render(60);
+  check(
+    animation.position() >= 0 && animation.position() <= 56,
+    `motion left the grown track: ${animation.position()}`,
+  );
+  check(afterGrow[1].length === 60, "motion after a grow broke the water row width");
+}
+
+// --- Deterministic fallbacks for widths too narrow for the complete sprite ---------
+{
+  const animation = createCalmWorkingShipAnimation(plain);
+  check(JSON.stringify(animation.render(0)) === "[]", "zero width rendered a line");
+  check(JSON.stringify(animation.render(1)) === JSON.stringify(["~"]), "single-cell fallback drifted");
+  check(JSON.stringify(animation.render(2)) === JSON.stringify(["|>"]), "two-cell fallback drifted");
+
+  const narrow = createCalmWorkingShipAnimation(plain);
+  check(JSON.stringify(narrow.render(3)) === JSON.stringify(["|>~"]), "three-cell fallback drifted");
+  narrow.advance();
+  check(JSON.stringify(narrow.render(3)) === JSON.stringify(["~|>"]), "three-cell fallback did not move");
+  for (const width of [1, 2, 3]) {
+    const fallback = createCalmWorkingShipAnimation(themed);
+    const frame = fallback.render(width);
+    check(frame.length === 1, `width ${width} fallback was not a single row`);
+    check(visibleWidth(frame[0]) === width, `width ${width} fallback was not exactly ${width} cells`);
+  }
+}
+
+// --- Lifecycle through the Calm extension's registered handlers --------------------
+let liveTimers = 0;
+const realSetInterval = globalThis.setInterval;
+const realClearInterval = globalThis.clearInterval;
+globalThis.setInterval = (...args) => {
+  liveTimers += 1;
+  return realSetInterval(...args);
+};
+globalThis.clearInterval = (timer) => {
+  if (timer !== undefined) liveTimers -= 1;
+  return realClearInterval(timer);
+};
+
+const sessionWrites = [];
+const handlers = new Map();
+let calmCommand;
+const pi = {
+  events: { emit() {}, on() {} },
+  on(event, handler) {
+    const existing = handlers.get(event) ?? [];
+    existing.push(handler);
+    handlers.set(event, existing);
+  },
+  registerCommand(name, command) {
+    if (name === "calm") calmCommand = command;
+  },
+  registerEntryRenderer() {},
+  registerTool() {},
+  appendEntry: (...args) => sessionWrites.push(["appendEntry", ...args]),
+  sendMessage: (...args) => sessionWrites.push(["sendMessage", ...args]),
+  sendUserMessage: (...args) => sessionWrites.push(["sendUserMessage", ...args]),
+  setSessionName: (...args) => sessionWrites.push(["setSessionName", ...args]),
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?ship=${Date.now()}`);
+extension.default(pi);
+check(!!calmCommand, "Calm command was not registered");
+for (const event of ["session_start", "agent_start", "agent_settled", "session_shutdown"]) {
+  check(handlers.has(event), `Calm did not register a ${event} handler`);
+}
+
+let renderRequests = 0;
+const tui = { requestRender: () => { renderRequests += 1; } };
+const ui = {
+  workingVisible: [],
+  widgetOps: [],
+  widgets: new Map(),
+  setWorkingVisible(visible) {
+    this.workingVisible.push(visible);
+  },
+  // Mirrors Pi's documented widget contract: the previous component under a key is
+  // disposed before a replacement is installed, and clearing disposes it too.
+  setWidget(key, content, options) {
+    const existing = this.widgets.get(key);
+    if (existing?.dispose) existing.dispose();
+    this.widgets.delete(key);
+    this.widgetOps.push({
+      key,
+      action: content === undefined ? "clear" : "set",
+      placement: options?.placement,
+    });
+    if (content === undefined) return;
+    this.widgets.set(key, typeof content === "function" ? content(tui, theme) : content);
+  },
+  getEditorText: () => "",
+  getToolsExpanded: () => false,
+  onTerminalInput: () => () => {},
+  setHiddenThinkingLabel() {},
+  setStatus() {},
+  setToolsExpanded() {},
+  theme,
+};
+const ctx = { ui };
+const fire = async (event, payload = {}) => {
+  for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
+};
+const reset = () => {
+  ui.workingVisible.length = 0;
+  ui.widgetOps.length = 0;
+};
+const shipWidget = () => ui.widgets.get(CALM_WORKING_SHIP_WIDGET_KEY);
+
+
+// --- Calm off keeps Pi's stock working row and registers no widget ----------------
+await fire("session_start", { reason: "startup" });
+check(
+  ui.workingVisible.every((visible) => visible === true),
+  `Calm off changed stock working visibility: ${ui.workingVisible.join(",")}`,
+);
+reset();
+await fire("agent_start");
+await fire("agent_settled");
+check(ui.widgetOps.length === 0, `Calm off registered a working widget: ${JSON.stringify(ui.widgetOps)}`);
+check(
+  ui.workingVisible.every((visible) => visible === true),
+  `Calm off hid Pi's stock working row: ${ui.workingVisible.join(",")}`,
+);
+check(liveTimers === 0, `Calm off started ${liveTimers} animation timers`);
+
+// --- Turning Calm on while idle shows no boat until a run starts -------------------
+reset();
+await calmCommand.handler("", ctx);
+check(ui.widgetOps.length === 0, "toggling Calm on while idle installed a working widget");
+check(
+  ui.workingVisible.every((visible) => visible === true),
+  "toggling Calm on while idle hid Pi's stock working row",
+);
+check(liveTimers === 0, "toggling Calm on while idle started an animation timer");
+
+// --- Calm on plus an active run shows the boat instead of the stock row -----------
+reset();
+await fire("agent_start");
+check(
+  ui.widgetOps.length === 1 &&
+    ui.widgetOps[0].key === CALM_WORKING_SHIP_WIDGET_KEY &&
+    ui.widgetOps[0].action === "set",
+  `Calm on did not install exactly one working widget: ${JSON.stringify(ui.widgetOps)}`,
+);
+check(
+  ui.widgetOps[0].placement === undefined,
+  "Calm working widget asked for a non-default placement",
+);
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === false,
+  "Calm on did not hide Pi's stock working row",
+);
+check(liveTimers === 1, `Calm on kept ${liveTimers} animation timers instead of one`);
+
+const widget = shipWidget();
+check(!!widget, "Calm on did not install the working-ship widget");
+check(typeof widget.render === "function", "working widget has no render(width)");
+check(typeof widget.invalidate === "function", "working widget has no invalidate()");
+check(typeof widget.dispose === "function", "working widget has no dispose()");
+// A focusable widget could steal input or swallow Escape; this one takes no keys.
+check(widget.handleInput === undefined, "working widget accepts keyboard input");
+check(widget.wantsKeyRelease === undefined, "working widget asked for key release events");
+check(widget.render(60).length === 2, "installed working widget did not render the two-row sprite");
+check(
+  widget.render(60).every((line) => visibleWidth(line) <= 60),
+  "installed working widget rendered a line wider than its viewport",
+);
+
+// --- Repeated low-level starts inside one logical run never duplicate anything -----
+reset();
+for (let repeat = 0; repeat < 5; repeat += 1) await fire("agent_start");
+check(ui.widgetOps.length === 0, `repeated starts churned the working widget: ${JSON.stringify(ui.widgetOps)}`);
+check(liveTimers === 1, `repeated starts left ${liveTimers} animation timers`);
+check(ui.widgets.size === 1, `repeated starts left ${ui.widgets.size} widgets`);
+check(shipWidget() === widget, "repeated starts replaced the running widget");
+
+// --- The animation drives Pi's renderer -------------------------------------------
+{
+  const before = renderRequests;
+  await new Promise((resolve) => setTimeout(resolve, 420));
+  check(renderRequests > before, "the working animation never requested a TUI render");
+}
+
+// --- Settling removes the boat and restores the stock row -------------------------
+reset();
+await fire("agent_settled");
+check(
+  ui.widgetOps.length === 1 &&
+    ui.widgetOps[0].key === CALM_WORKING_SHIP_WIDGET_KEY &&
+    ui.widgetOps[0].action === "clear",
+  `settling did not clear the working widget: ${JSON.stringify(ui.widgetOps)}`,
+);
+check(liveTimers === 0, `settling left ${liveTimers} animation timers`);
+check(ui.widgets.size === 0, "settling left a residual widget");
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === true,
+  "settling did not restore Pi's stock working row",
+);
+
+// --- Abort and failure share Pi's agent_settled path ------------------------------
+// Pi emits agent_settled from a finally block, so an aborted or failed run reaches
+// exactly this handler; the real-TUI regression covers the Escape abort path.
+for (const outcome of ["abort", "failure"]) {
+  reset();
+  await fire("agent_start");
+  check(liveTimers === 1, `${outcome} setup did not start the animation`);
+  await fire("agent_settled");
+  check(liveTimers === 0, `${outcome} left ${liveTimers} animation timers`);
+  check(ui.widgets.size === 0, `${outcome} left a residual widget`);
+  check(
+    ui.workingVisible[ui.workingVisible.length - 1] === true,
+    `${outcome} did not restore Pi's stock working row`,
+  );
+}
+
+// --- Shutdown, reload, and session replacement all clean up -----------------------
+for (const reason of ["quit", "reload", "new", "resume", "fork"]) {
+  reset();
+  await fire("agent_start");
+  check(liveTimers === 1, `${reason} setup did not start the animation`);
+  await fire("session_shutdown", { reason });
+  check(liveTimers === 0, `session_shutdown(${reason}) left ${liveTimers} animation timers`);
+  check(ui.widgets.size === 0, `session_shutdown(${reason}) left a residual widget`);
+  check(
+    ui.workingVisible[ui.workingVisible.length - 1] === true,
+    `session_shutdown(${reason}) did not restore Pi's stock working row`,
+  );
+  if (reason === "quit") continue;
+  reset();
+  await fire("session_start", { reason });
+  check(ui.widgets.size === 0, `session_start(${reason}) installed a stale widget`);
+  check(liveTimers === 0, `session_start(${reason}) left ${liveTimers} animation timers`);
+}
+
+// --- Toggling Calm off during an active run restores the stock row immediately -----
+await fire("session_start", { reason: "startup" });
+reset();
+await fire("agent_start");
+check(liveTimers === 1, "active-run setup did not start the animation");
+await calmCommand.handler("", ctx);
+check(liveTimers === 0, "toggling Calm off during a run left the animation running");
+check(ui.widgets.size === 0, "toggling Calm off during a run left the boat on screen");
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === true,
+  "toggling Calm off during a run did not restore Pi's stock working row",
+);
+
+// Toggling Calm back on during the same run returns the boat.
+reset();
+await calmCommand.handler("", ctx);
+check(liveTimers === 1, "toggling Calm on during a run did not return the boat");
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === false,
+  "toggling Calm on during a run did not hide Pi's stock working row",
+);
+await fire("agent_settled");
+check(liveTimers === 0, "the toggled-on run did not clean up");
+
+// A run started after toggling Calm on while idle uses the boat.
+reset();
+await calmCommand.handler("", ctx);
+await calmCommand.handler("", ctx);
+await fire("agent_start");
+check(liveTimers === 1, "a later run did not use the boat after an idle Calm toggle");
+await fire("agent_settled");
+check(liveTimers === 0, "the later run did not clean up");
+
+// --- The visual-only widget never touches session, transcript, or export data ------
+check(
+  sessionWrites.length === 0,
+  `the working presentation wrote session or transcript data: ${JSON.stringify(sessionWrites)}`,
+);
+
+globalThis.setInterval = realSetInterval;
+globalThis.clearInterval = realClearInterval;
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi Calm working-ship checks failed: $out"
+  [ -z "$out" ] || fail "Pi Calm working-ship test printed output: $out"
+  pass "Pi Calm working ship renders an exact two-row full-width sprite, clamps every resize, bounces at both edges, falls back deterministically when narrow, and installs and removes one timer-owning widget across starts, settle, abort, failure, shutdown, reload, replacement, and Calm toggles"
+}
+
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -1615,6 +2067,11 @@ test_interactive_terminal_e2e() {
   restored_snapshot="$TMP_ROOT/restored.txt"
   working_snapshot="$TMP_ROOT/working.txt"
   working_response_snapshot="$TMP_ROOT/working-response.txt"
+  boat_frame_one="$TMP_ROOT/boat-frame-one.txt"
+  boat_frame_two="$TMP_ROOT/boat-frame-two.txt"
+  boat_resized_snapshot="$TMP_ROOT/boat-resized.txt"
+  boat_focus_snapshot="$TMP_ROOT/boat-focus.txt"
+  boat_cleared_snapshot="$TMP_ROOT/boat-cleared.txt"
   restarted_snapshot="$TMP_ROOT/restarted.txt"
   resumed_restored_snapshot="$TMP_ROOT/resumed-restored.txt"
   mkdir -p "$project/.pi/extensions/lib" "$project/bin" "$project/state" "$config" "$home/config"
@@ -1624,6 +2081,7 @@ test_interactive_terminal_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/fm-primary-turnend-guard.ts"
@@ -1651,6 +2109,15 @@ export default function (pi: ExtensionAPI): void {
       {
         id: "delayed",
         name: "Delayed Calm working-row fixture",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 4096,
+        maxTokens: 128,
+      },
+      {
+        id: "delayed-boat",
+        name: "Long-delay Calm working-ship fixture",
         reasoning: false,
         input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -1695,7 +2162,18 @@ export default function (pi: ExtensionAPI): void {
           stream.end();
           return;
         }
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+        // Wake as soon as the run is aborted so Escape settles the turn promptly.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, model.id === "delayed-boat" ? 30000 : 1500);
+          options?.signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true },
+          );
+        });
         if (options?.signal?.aborted) {
           output.stopReason = "aborted";
           stream.push({ type: "error", reason: "aborted", error: output });
@@ -1742,6 +2220,16 @@ export default function (pi: ExtensionAPI): void {
       await pi.sendUserMessage(encodeFirstmateOperationalInput(kind, body), {
         deliverAs: "followUp",
       });
+    },
+  });
+  pi.registerCommand("calm-boat-e2e", {
+    description: "Start the long-delay working-ship fixture.",
+    handler: async (_args, ctx) => {
+      const model = ctx.modelRegistry.find("calm-e2e", "delayed-boat");
+      if (!model || !(await pi.setModel(model))) {
+        throw new Error("could not select the long-delay Calm E2E model");
+      }
+      await pi.sendUserMessage("CALM_BOAT_E2E_PROMPT");
     },
   });
   pi.registerCommand("calm-working-e2e", {
@@ -1801,8 +2289,13 @@ JSON
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 120 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$hidden_snapshot"
+    # Wait for the redraw this block actually asserts: hidden rows gone AND the
+    # retained genuine rows back on screen. Breaking on the hidden rows alone can
+    # observe a half-redrawn transcript.
     if ! grep -Fq "CALM_E2E_OUTPUT" "$hidden_snapshot" &&
-      ! grep -Fq "/calm" "$hidden_snapshot"; then
+      ! grep -Fq "/calm" "$hidden_snapshot" &&
+      grep -Fq "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "$hidden_snapshot" &&
+      grep -Fq "The deterministic tool example is complete." "$hidden_snapshot"; then
       break
     fi
     sleep 0.05
@@ -2031,10 +2524,135 @@ JS
   done
   [ "$(cat "$home/config/calm")" = on ] || fail "third /calm did not persist the active choice"
 
+  # Calm on plus a genuinely active run replaces Pi's stock working row with the boat.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
+    if grep -Fq '\__/' "$working_snapshot"; then
+      break
+    fi
+    sleep 0.025
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  cp "$working_snapshot" "$boat_frame_one"
+  assert_contains "$(cat "$boat_frame_one")" '\__/' "Calm did not show the working ship during a real provider wait"
+  assert_not_contains "$(cat "$boat_frame_one")" "Working..." "Calm left Pi's stock working row visible while the ship was shown"
+  assert_not_contains "$(cat "$boat_frame_one")" "calm transcript" "the real provider wait showed a persistent Calm status row"
+  assert_not_contains "$(cat "$boat_frame_one")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
+  boat_hull_line=$(grep -F '\__/' "$boat_frame_one" | head -1)
+  boat_sail_line=$(grep -F '|>' "$boat_frame_one" | tail -1)
+  assert_contains "$boat_sail_line" '|>' "the working ship lost its open SSHHIP sail"
+  assert_not_contains "$boat_hull_line" "Working" "the ship row carried extra status copy"
+  case "$boat_hull_line" in
+    *~*) : ;;
+    *) fail "the working ship rendered no waves" ;;
+  esac
+  boat_column_one=$(awk 'index($0,"\\__/"){print index($0,"\\__/"); exit}' "$boat_frame_one")
+
+  # Two frames at different hull columns prove genuine horizontal motion.
+  boat_column_two=""
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_frame_two"
+    boat_column_two=$(awk 'index($0,"\\__/"){print index($0,"\\__/"); exit}' "$boat_frame_two")
+    if [ -n "$boat_column_two" ] && [ "$boat_column_two" != "$boat_column_one" ]; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ -n "$boat_column_two" ] || fail "the working ship disappeared between animation frames"
+  [ "$boat_column_two" != "$boat_column_one" ] \
+    || fail "the working ship never moved horizontally (stuck at column $boat_column_one)"
+
+  # The widget owns its own geometry, so resizing the same running TUI must reflow it.
+  tmux -L "$TMUX_SOCKET" set-option -t "$TMUX_SESSION" window-size manual
+  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 100 -y 30
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resized_snapshot"
+    boat_hull_line=$(grep -F '\__/' "$boat_resized_snapshot" | head -1)
+    if [ -n "$boat_hull_line" ] && [ "${#boat_hull_line}" -eq 100 ]; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_contains "$(cat "$boat_resized_snapshot")" '\__/' "the working ship left the screen after a resize"
+  boat_hull_line=$(grep -F '\__/' "$boat_resized_snapshot" | head -1)
+  [ "${#boat_hull_line}" -eq 100 ] \
+    || fail "after resizing to 100 columns the ship row was ${#boat_hull_line} cells instead of exactly 100"
+  # Exactly one wave row means the sprite reflowed rather than wrapping onto extra rows.
+  [ "$(grep -c -F '~~~' "$boat_resized_snapshot")" -eq 1 ] \
+    || fail "the working ship wrapped onto more than one wave row after the resize"
+  while IFS= read -r boat_line; do
+    [ "${#boat_line}" -le 100 ] \
+      || fail "a rendered line was ${#boat_line} cells after resizing to 100 columns"
+  done <"$boat_resized_snapshot"
+  boat_column_one=$(awk 'index($0,"\\__/"){print index($0,"\\__/"); exit}' "$boat_resized_snapshot")
+  [ "$boat_column_one" -le 97 ] \
+    || fail "the working ship hull started at column $boat_column_one and cannot fit in 100 columns"
+
+  # Motion continues on-screen after the resize instead of jumping offscreen.
+  boat_column_two=""
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resized_snapshot"
+    boat_column_two=$(awk 'index($0,"\\__/"){print index($0,"\\__/"); exit}' "$boat_resized_snapshot")
+    if [ -n "$boat_column_two" ] && [ "$boat_column_two" != "$boat_column_one" ]; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ -n "$boat_column_two" ] && [ "$boat_column_two" != "$boat_column_one" ] \
+    || fail "the working ship stopped moving after the resize"
+  [ "$boat_column_two" -le 97 ] \
+    || fail "the working ship moved offscreen after the resize"
+
+  # Typing still reaches the editor while the animation runs.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "FOCUSPROBE"
+  wait_for_text "$boat_focus_snapshot" "FOCUSPROBE" \
+    || fail "keyboard input did not reach the editor while the working ship animated"
+  i=0
+  while [ "$i" -lt 10 ]; do
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" BSpace
+    i=$((i + 1))
+  done
+
+  # Escape aborts the run, and the abort path removes the ship with no residue.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_cleared_snapshot"
+    if ! grep -Fq '\__/' "$boat_cleared_snapshot"; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" '\__/' "Escape did not remove the working ship"
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" "CALM_WORKING_E2E_RESPONSE" "the long-delay fixture settled instead of aborting on Escape"
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" "FOCUSPROBE" "the editor kept the focus probe text after Escape"
+
+  # Calm off restores Pi's stock working row and never shows the ship.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    if [ "$(cat "$home/config/calm")" = off ]; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ "$(cat "$home/config/calm")" = off ] || fail "the Calm-off working-row probe did not turn Calm off"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-working-e2e"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   active_screen_wait=0
-  while [ "$active_screen_wait" -lt 120 ]; do
+  while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
     if grep -Fq "Working..." "$working_snapshot"; then
       break
@@ -2042,11 +2660,28 @@ JS
     sleep 0.025
     active_screen_wait=$((active_screen_wait + 1))
   done
-  assert_contains "$(cat "$working_snapshot")" "Working..." "Calm hid Pi's built-in Working row during a real provider wait"
-  assert_not_contains "$(cat "$working_snapshot")" "calm transcript" "the real provider wait showed a persistent Calm status row"
-  assert_not_contains "$(cat "$working_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
+  assert_contains "$(cat "$working_snapshot")" "Working..." "Calm off did not keep Pi's stock working row"
+  assert_not_contains "$(cat "$working_snapshot")" '\__/' "Calm off showed the working ship"
   wait_for_text "$working_response_snapshot" "CALM_WORKING_E2E_RESPONSE" \
-    || fail "the deterministic provider did not settle after proving Pi's Working row"
+    || fail "the deterministic provider did not settle after proving Pi's stock working row"
+
+  # No blank-row residue: settling returns to the same layout Calm off started from.
+  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_cleared_snapshot"
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" '\__/' "a settled run left the working ship on screen"
+
+  # Restore Calm for the persistence restart below.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    if [ "$(cat "$home/config/calm")" = on ]; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ "$(cat "$home/config/calm")" = on ] || fail "Calm was not restored before the persistence restart"
+  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 180 -y 44
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
@@ -2082,7 +2717,7 @@ JS
   [ "$(cat "$home/config/calm")" = off ] || fail "/calm after restart did not persist the inactive choice"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  pass "Pi calm native E2E keeps Working and captain turns visible, hides exact operational user rows without changing persistence, restores them Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
+  pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
 test_home_resolution
@@ -2092,4 +2727,5 @@ test_pi_compat_missing_adapter_exports
 test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
+test_working_ship_geometry_and_lifecycle
 test_interactive_terminal_e2e
