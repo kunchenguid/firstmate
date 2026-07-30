@@ -1880,8 +1880,13 @@ await fire("agent_start");
 await fire("agent_settled");
 check(ui.widgetOps.length === 0, `Calm off registered a working widget: ${JSON.stringify(ui.widgetOps)}`);
 check(
-  ui.workingVisible.every((visible) => visible === true),
-  `Calm off hid Pi's stock working row: ${ui.workingVisible.join(",")}`,
+  ui.workingVisible.length === 0,
+  `Calm-off agent lifecycle touched stock working visibility: ${ui.workingVisible.join(",")}`,
+);
+await fire("session_shutdown", { reason: "calm-off" });
+check(
+  ui.workingVisible.length === 0,
+  `Calm-off session shutdown touched stock working visibility: ${ui.workingVisible.join(",")}`,
 );
 check(liveTimers === 0, `Calm off started ${liveTimers} animation timers`);
 

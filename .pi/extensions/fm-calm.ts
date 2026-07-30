@@ -107,9 +107,11 @@ export default function (pi: ExtensionAPI) {
   let workingShipShown = false;
 
   // Single owner of Calm's working-row presentation choice. The widget is only created
-  // or removed on a real transition, so repeated starts cannot duplicate its timer,
-  // while stock working visibility is reasserted every time.
-  const applyWorkingPresentation = (ui: ExtensionUIContext): void => {
+  // or removed on a real transition, so repeated starts cannot duplicate its timer.
+  const applyWorkingPresentation = (
+    ui: ExtensionUIContext,
+    forceStockVisibility = false,
+  ): void => {
     const showShip = agentRunActive && calmPresentationIsActive();
     if (showShip !== workingShipShown) {
       workingShipShown = showShip;
@@ -117,8 +119,10 @@ export default function (pi: ExtensionAPI) {
         CALM_WORKING_SHIP_WIDGET_KEY,
         showShip ? createCalmWorkingShipWidget : undefined,
       );
+      ui.setWorkingVisible(!showShip);
+    } else if (forceStockVisibility && !showShip) {
+      ui.setWorkingVisible(true);
     }
-    ui.setWorkingVisible(!showShip);
   };
 
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
@@ -270,7 +274,7 @@ export default function (pi: ExtensionAPI) {
     publishPresentationState();
     agentRunActive = false;
     workingShipShown = false;
-    applyWorkingPresentation(ctx.ui);
+    applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
     ctx.ui.setStatus("firstmate-calm", undefined);
     removeTerminalInputHandler?.();
@@ -323,7 +327,7 @@ export default function (pi: ExtensionAPI) {
       persistCalmPreference(active);
       setCalmPresentation(active);
       publishPresentationState();
-      applyWorkingPresentation(ctx.ui);
+      applyWorkingPresentation(ctx.ui, true);
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
       ctx.ui.setStatus("firstmate-calm", undefined);
 
