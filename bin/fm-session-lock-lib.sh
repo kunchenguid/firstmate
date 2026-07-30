@@ -129,7 +129,7 @@ for($i=0;$i -lt 24;$i++){
   if(-not $p){break}
   $n=$p.Name; $hit=$false; $isc=$false
   if($n -match "^$h(\.exe)?$"){ $hit=$true; if($n -match "^claude"){$isc=$true} }
-  elseif($n -match "^(node|python|python3)(\.exe)?$" -and $p.CommandLine -match $h){ $hit=$true; if($p.CommandLine -match "claude"){$isc=$true} }
+  elseif($n -match "^(node|python|python3)(\.exe)?$" -and $p.CommandLine -match "\b$h\b"){ $hit=$true; if($p.CommandLine -match "claude"){$isc=$true} }
   if($hit){ $best=$p.ProcessId; if($isc){$ext=$true} else {break} }
   elseif($ext){ break }
   $id=[int]$p.ParentProcessId
@@ -149,7 +149,7 @@ $p=Get-CimInstance Win32_Process -Filter "ProcessId=$id"
 if(-not $p){exit 1}
 $n=$p.Name
 if($n -match "^$h(\.exe)?$"){exit 0}
-if($n -match "^(node|python|python3)(\.exe)?$" -and $p.CommandLine -match $h){exit 0}
+if($n -match "^(node|python|python3)(\.exe)?$" -and $p.CommandLine -match "\b$h\b"){exit 0}
 exit 1
 '
 
