@@ -672,6 +672,58 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
   pass "fm-brief.sh: ship and scout share one browser-as-a-user rule"
 }
 
+# The captain's standing no-agent-co-author order binds the agent that writes
+# the commits, and that agent reads its brief rather than firstmate's AGENTS.md.
+# Asserted on the generated briefs - what the worker actually reads - because
+# proving the string exists in the script proves only that the string exists.
+# Every scaffold that can produce a commit carries it: ship in all three
+# delivery modes, scout (scratch commits), and the secondmate charter.
+commit_authorship_block() {
+  awk '/^# Commit authorship$/{inside=1} inside && /^$/{exit} inside' "$1"
+}
+
+test_every_scaffold_forbids_agent_co_author() {
+  local home id proj brief first block
+  home="$TMP_ROOT/co-author-home"
+  write_registry "$home"
+  first=""
+  for id_proj in \
+    "brief-coauthor-nm:no-registry-proj" \
+    "brief-coauthor-dpr:direct-proj" \
+    "brief-coauthor-lo:local-proj" \
+    "brief-coauthor-scout:no-registry-proj" \
+    "brief-coauthor-mate:-"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    case "$id" in
+      *-scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --scout >/dev/null 2>&1 ;;
+      *-mate) FM_HOME="$home" FM_SECONDMATE_CHARTER='x' \
+        "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "Never add an agent name as a git commit co-author." "$brief" \
+      "$id: generated brief does not tell the worker the no-agent-co-author rule"
+    assert_grep "This is absolute and has no exceptions" "$brief" \
+      "$id: generated brief states the co-author rule with an exception clause"
+    assert_grep 'Co-Authored-By:' "$brief" \
+      "$id: generated brief does not name the trailer the worker must not write"
+    commit_authorship_block "$brief" > "$TMP_ROOT/$id.block"
+    assert_no_grep "unless" "$TMP_ROOT/$id.block" \
+      "$id: co-author rule acquired a conditional exception"
+    block=$(cat "$TMP_ROOT/$id.block")
+    assert_block_non_empty "$block" "$id: generated brief has no commit-authorship section"
+    if [ -z "$first" ]; then
+      first=$block
+    else
+      [ "$block" = "$first" ] \
+        || fail "$id: commit-authorship section diverged from the other scaffolds; it must share one owner"
+    fi
+  done
+  pass "fm-brief.sh: every generated scaffold forbids an agent commit co-author"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -710,4 +762,5 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_ship_briefs_carry_test_discipline
 test_ship_and_scout_carry_cwd_rule
 test_browser_as_user_rule_reaches_ship_and_scout
+test_every_scaffold_forbids_agent_co_author
 test_scout_and_secondmate_scaffold

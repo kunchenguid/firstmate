@@ -50,6 +50,10 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Every scaffold - ship, scout, and secondmate - carries the captain's standing
+# no-agent-co-author order beside its commit and delivery instructions, because
+# the agent that writes the commits reads this brief and not firstmate's
+# AGENTS.md; the COMMIT_AUTHORSHIP heredoc in this script owns that text.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -112,6 +116,20 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+
+# The captain's standing no-agent-co-author order reaches the agent that writes
+# the commits only through the brief: a crewmate in a project worktree reads
+# this file and the project's own AGENTS.md, never firstmate's. Every scaffold
+# carries it, next to that scaffold's commit and delivery instructions, because
+# ship, scout, and secondmate work can all produce commits. One owner here so
+# the three variants cannot drift.
+IFS= read -r -d '' COMMIT_AUTHORSHIP <<'EOF' || true
+# Commit authorship
+Never add an agent name as a git commit co-author.
+This is absolute and has no exceptions: no commit you make in any repository may carry a `Co-Authored-By:` trailer naming an agent, model, or tool, including scratch commits.
+If your harness adds such a trailer by default, remove it before the commit lands.
+EOF
+COMMIT_AUTHORSHIP=${COMMIT_AUTHORSHIP%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -182,6 +200,8 @@ If its first reportable event is \`working [key=<work-slug>]: {material phase}\`
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
 When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
+
+$COMMIT_AUTHORSHIP
 
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
@@ -293,6 +313,8 @@ $BROWSER_RULE
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$COMMIT_AUTHORSHIP
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -434,6 +456,8 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+$COMMIT_AUTHORSHIP
 
 $DOD
 EOF
