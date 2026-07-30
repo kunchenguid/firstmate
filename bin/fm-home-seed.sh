@@ -7,8 +7,10 @@
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
-#       from the active home into the secondmate home's projects/ directory.
+#       "treehouse return". Projects are cloned from the active home into the
+#       secondmate home's projects/ directory. Remote-backed projects clone their
+#       existing origin; local-only projects clone only committed state from the
+#       active home's authoritative checkout and use that checkout as origin.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
 #       subject is the firstmate repo itself; it is mutually exclusive with a
@@ -452,6 +454,10 @@ normalize_origin_url() {
 
 source_origin_url() {
   local project=$1 mode=$2 src=$3 url
+  if [ "$mode" = local-only ]; then
+    resolved_path "$src"
+    return
+  fi
   url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
   normalize_origin_url "$src" "$url"
@@ -542,10 +548,6 @@ clone_project() {
   read -r mode _ <<EOF
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
-  if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
-    return 1
-  fi
   if [ -e "$dst" ]; then
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
     git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
@@ -558,7 +560,11 @@ EOF
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
-  git clone --quiet "$url" "$dst"
+  if [ "$mode" = local-only ]; then
+    git clone --quiet --no-hardlinks "$url" "$dst"
+  else
+    git clone --quiet "$url" "$dst"
+  fi
 }
 
 validate_seed_project() {
@@ -569,10 +575,7 @@ validate_seed_project() {
   read -r mode _ <<EOF
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
-  if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
-    return 1
-  fi
+  [ "$mode" != local-only ] || return 0
   url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
 }

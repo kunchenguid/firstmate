@@ -38,17 +38,19 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (r) secondmate local-only ready branch before main landing  -> REFUSE across restart
+#       and ALLOW only after the authoritative checkout contains it
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
-#   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
-#   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
-#   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
-#   (v) non-linked repo index.lock                            -> lock removed, ALLOW
-#   (w) index.lock mtime read failure                         -> lock kept, REFUSE
-#   (x) transient lock cleared after first failed return      -> retry ALLOW
-#   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (s) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (t) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (u) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (v) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (w) non-linked repo index.lock                            -> lock removed, ALLOW
+#   (x) index.lock mtime read failure                         -> lock kept, REFUSE
+#   (y) transient lock cleared after first failed return      -> retry ALLOW
+#   (z) persistent lock (never clears, not provably stale)    -> REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -587,6 +589,51 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+test_secondmate_local_only_ready_survives_restart_until_authoritative_landing() {
+  local case_dir auth ready rc
+  case_dir=$(make_case secondmate-local-ready)
+  auth="$case_dir/authoritative"
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" ready.txt 'ready content' 'secondmate ready work'
+  ready=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    "ready_commit=$ready" \
+    'ready_branch=fm/task-x1' \
+    'validation_evidence=focused test passed' >> "$case_dir/state/task-x1.meta"
+
+  git clone -q "$case_dir/origin.git" "$auth"
+  git -C "$case_dir/project" remote set-url origin "$auth"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "secondmate-ready: cleanup should refuse before authoritative landing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "secondmate-ready: first refusal removed task metadata"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$ready" ] \
+    || fail "secondmate-ready: first refusal changed the ready commit"
+
+  # Simulate a restarted secondmate reconciling the same durable task.
+  set +e
+  run_teardown "$case_dir" > "$case_dir/restart.stdout" 2> "$case_dir/restart.stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "secondmate-ready: restarted reconciliation should still refuse cleanup"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "secondmate-ready: restarted refusal removed task metadata"
+  [ "$(git -C "$case_dir/wt" symbolic-ref --short HEAD)" = fm/task-x1 ] \
+    || fail "secondmate-ready: restarted refusal detached or changed the ready branch"
+
+  git -C "$auth" fetch -q "$case_dir/project" refs/heads/fm/task-x1
+  git -C "$auth" merge -q --ff-only "$ready"
+  run_teardown "$case_dir" > "$case_dir/landed.stdout" 2> "$case_dir/landed.stderr" \
+    || fail "secondmate-ready: cleanup refused after authoritative landing"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "secondmate-ready: landed cleanup retained task metadata"
+  pass "secondmate local-only ready work survives restart and cleans up only after authoritative landing"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -1382,6 +1429,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_secondmate_local_only_ready_survives_restart_until_authoritative_landing
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

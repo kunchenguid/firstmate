@@ -237,6 +237,24 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+test_secondmate_local_only_brief_records_exact_ready_evidence() {
+  local home brief
+  home="$TMP_ROOT/secondmate-local-only-brief"
+  write_registry "$home"
+  printf '%s\n' design > "$home/.fm-secondmate-home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" local-ready-a5 local-proj >/dev/null 2>&1 \
+    || fail "secondmate-home local-only brief failed"
+  brief="$home/data/local-ready-a5/brief.md"
+  assert_grep 'done: ready commit=<full 40-character HEAD> branch=fm/local-ready-a5 validation=<commands and outcome>' "$brief" \
+    "secondmate local-only brief did not require exact commit plus validation evidence"
+  assert_grep 'Only the main firstmate may run the guarded local landing.' "$brief" \
+    "secondmate local-only brief lost the main-only landing boundary"
+  assert_no_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\`" "$brief" \
+    "secondmate local-only brief retained the main-home landing wording"
+  pass "fm-brief.sh: secondmate local-only tasks report an exact validated ready commit"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -623,6 +641,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
+test_secondmate_local_only_brief_records_exact_ready_evidence
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

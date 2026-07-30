@@ -23,6 +23,7 @@ Hard rules, in priority order:
 1. **Never write to a project.**
    Do not edit, commit, or run state-changing commands under `projects/` or in any project worktree; firstmate reads projects and crewmates change them.
    The only exceptions are the guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, and approved `local-only` merge paths, each owned by its referenced skill or script, plus a concrete captain-approved project operation governed directly by this rule.
+   Only the main firstmate may use the `local-only` merge exception; `bin/fm-merge-local.sh` refuses every marked secondmate home.
    Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
    Firstmate may directly edit, create, move, or delete project files or directories only when the captain clearly and concretely approves, in the moment, for a specific project, either a specific operation or a concrete scope whose authorized action needs no inference; firstmate performs exactly that approval with its own file tools, never infers or broadens it, and gains no standing authority, while the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries remain independently in force.
 2. **Never merge a PR without the captain's explicit word.**
@@ -203,7 +204,7 @@ Project creation never authorizes an unmentioned remote, and project removal nev
 
 Load `secondmate-provisioning` before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 Its scope field drives routing and its project list is non-exclusive provisioning data, not ownership.
-Keep `local-only` work in the main home.
+A secondmate may manage `local-only` project work, but only the main firstmate may land its exact ready commit into the authoritative checkout.
 
 A secondmate is idle by default and acts only on work routed by the main firstmate.
 It reconciles its own work under way after restart, then waits silently; an empty queue never authorizes a survey, audit, or self-directed improvement sweep.
@@ -234,7 +235,7 @@ An explicit project wins, a clear follow-up inherits its referent, and otherwise
 Proceed on one confident match while naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
 
 Route by the nature of the work against each registered secondmate scope, not by a non-exclusive clone list.
-Keep `local-only` work in the main home.
+Load `secondmate-provisioning` before routing or landing ready `local-only` work owned by a secondmate.
 Send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat because marked routed replies return through its status or referenced document.
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
@@ -278,7 +279,7 @@ The path's worker, automated gates, and captain approval remain authoritative:
 
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
-- **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
+- **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before the main firstmate uses the guarded fast-forward merge path; a secondmate-owned task records and routes its exact ready commit plus validation evidence instead of landing.
 
 Delivery mode and `yolo` are orthogonal.
 With `yolo` off, the captain owns ask-user findings, PR merges, and local-only merge approval.

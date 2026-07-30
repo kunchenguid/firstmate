@@ -410,6 +410,19 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
+ready_commit_in_origin_default() {
+  local ready evidence current name
+  ready=$(meta_value "$META" ready_commit)
+  evidence=$(meta_value "$META" validation_evidence)
+  [ -n "$ready" ] && [ -n "$evidence" ] || return 1
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  [ "$current" = "$ready" ] || return 1
+  name=$(default_branch) || return 1
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+  git -C "$WT" merge-base --is-ancestor "$ready" "refs/remotes/origin/$name" 2>/dev/null
+}
+
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
@@ -705,7 +718,15 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+    # A secondmate local-only clone points origin at the main home's
+    # authoritative checkout. After main-firstmate landing, refresh that
+    # committed default and accept only the exact recorded ready commit.
+    # Before landing, this remains false and cleanup refuses.
+    landed_in_authoritative=0
+    if [ -n "$unmerged" ] && ready_commit_in_origin_default; then
+      landed_in_authoritative=1
+    fi
+    if [ -n "$dirty" ] || { [ -n "$unmerged" ] && [ "$landed_in_authoritative" != 1 ]; }; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2

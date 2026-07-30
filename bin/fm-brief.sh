@@ -31,8 +31,9 @@
 # and AGENTS.md task lifecycle):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
-#   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                captain approves, firstmate merges to local main
+#   local-only   implement on branch, stop and report ready (no push/PR);
+#                a secondmate-owned task includes exact commit + validation
+#                evidence and routes it to the main firstmate for landing
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
@@ -81,6 +82,8 @@ resolve_directory_input() {
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
+IS_SECOND_MATE_HOME=0
+[ ! -f "$FM_HOME/.fm-secondmate-home" ] || IS_SECOND_MATE_HOME=1
 if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
   DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
 else
@@ -317,7 +320,19 @@ EOF
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    IFS= read -r -d '' DOD <<EOF || true
+    if [ "$IS_SECOND_MATE_HOME" = 1 ]; then
+      IFS= read -r -d '' DOD <<EOF || true
+# Definition of done
+This project ships **local-only**: no remote, no PR, no pipeline.
+The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+Keep your branch a clean fast-forward onto the current default branch - if the default branch has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Run the validation required by the task and project instructions.
+When it is implemented, committed, clean, and validated, append \`done: ready commit=<full 40-character HEAD> branch=fm/$ID validation=<commands and outcome>\` to the status file and stop.
+Your second mate records that exact ready commit and validation evidence, then routes it to the main firstmate.
+Only the main firstmate may run the guarded local landing.
+EOF
+    else
+      IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
@@ -325,6 +340,7 @@ Keep your branch a clean fast-forward onto the current default branch - if \`mai
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
+    fi
     ;;
   *)  # no-mistakes (default)
     SETUP2="

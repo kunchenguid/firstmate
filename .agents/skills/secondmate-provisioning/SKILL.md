@@ -13,7 +13,7 @@ metadata:
 
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
-Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, only the main firstmate lands `local-only` work, and secondmates are idle by default.
 
 ## Routing table
 
@@ -121,9 +121,38 @@ Run `bin/fm-home-seed.sh validate` when checking registry integrity; it refuses 
 Seeding is transactional.
 If validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 
-Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
-`local-only` projects stay with the main firstmate.
+Secondmate project lists may include `no-mistakes`, `direct-PR`, and `local-only` projects.
+For `local-only`, seeding makes a normal local clone from the main home's authoritative checkout and records that checkout as the clone's `origin`.
+The clone checks out only committed Git state: tracked working-tree changes, untracked files, and ignored assets are not copied, stash refs are not exposed, and none of that state becomes a worker baseline.
+Project-owned ignored-asset staging and verification remain governed by that project's own instructions and tools.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
+
+## Local-only ready work and landing
+
+A secondmate owns its `local-only` queue, briefs, workers, validation evidence, and restart recovery, but never the authoritative landing.
+Its worker stops on a clean `fm/<task-id>` branch and reports the full 40-character commit plus the validation commands and outcome required by the task and project instructions.
+Before routing that result to the main firstmate, record and validate it through the existing correlated parent path:
+
+```sh
+bin/fm-secondmate-report.sh --local-ready <parent-status-file> <corr-id> state/<task-id>.meta "<validation evidence>"
+```
+
+The helper verifies the marked secondmate home, `mode=local-only`, `kind=ship`, expected branch, exact branch and worktree HEAD, clean worktree, and non-empty single-line validation evidence.
+It records `ready_commit=`, `ready_branch=`, and `validation_evidence=` in the task's existing secondmate-home metadata, then appends one correlated result to the parent status route.
+This is the existing pending-reply contract, not a second coordination mechanism.
+Keep the worker, branch, metadata, and worktree intact after that report.
+
+After the configured merge authority approves, the main firstmate lands from its own home:
+
+```sh
+bin/fm-merge-local.sh <task-id> --secondmate <secondmate-id>
+```
+
+The landing helper resolves and validates the secondmate home from the main registry, reads the task metadata in place, re-verifies the exact ready branch, commit, worktree, and evidence, imports only that branch into the authoritative repository, and fast-forwards the authoritative default branch to that exact commit.
+It refuses immediately when the active home carries `.fm-secondmate-home`, so a secondmate cannot use the landing exception.
+It preserves the existing default-branch, clean-checkout, and strict-fast-forward refusals.
+When the authoritative checkout is dirty, the helper reports `ready, waiting`, leaves the ready task intact, and performs no fetch, checkout, stash, clean, commit, merge, or other project mutation.
+After landing, the secondmate clone's authoritative-path `origin` lets ordinary teardown verify that the exact content reached the authoritative default before cleanup.
 
 ## Backlog handoff
 
@@ -145,7 +174,7 @@ It accepts in-scope `## Queued` entries only and refuses `## In flight` and hist
 Done records stay with their home for pruning or archiving.
 It is idempotent; an item already in the secondmate backlog is skipped.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
-Do not hand off `local-only` items.
+In-scope queued `local-only` items use the same handoff path as PR-based items; their landing authority does not move with the backlog item.
 
 ## Recovery
 
@@ -165,6 +194,8 @@ The main firstmate reconciles only direct reports.
 Each secondmate is a firstmate in its own home, so it runs recovery on startup and reconciles its own crewmates.
 A secondmate's recovery reconciles only work that is already its own and then idles.
 It never initiates a survey or audit during recovery.
+A ready but unlanded `local-only` task remains owned work after restart.
+Do not tear it down or report it landed until the main firstmate confirms the authoritative default contains its exact ready commit.
 
 ## Retirement and teardown
 

@@ -537,6 +537,30 @@ EOF
   pass "registry entry without (home: ...) fails cleanly with has no home"
 }
 
+test_local_only_item_uses_normal_handoff_path() {
+  local home="$TMP_ROOT/local-only-main"
+  local sub="$TMP_ROOT/local-only-sub"
+  setup_homes "$home" "$sub" local-domain
+  printf '%s\n' '- alpha [local-only] - local project (added 2026-07-29)' > "$home/data/projects.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] local-feature - ready for isolated local work (repo: alpha)
+  Preserve this task body.
+
+## Done
+EOF
+
+  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" local-domain local-feature >/dev/null \
+    || fail "local-only queued item was refused by the normal handoff path"
+  assert_no_grep 'local-feature' "$home/data/backlog.md" \
+    "local-only item remained in the main backlog"
+  assert_grep 'local-feature' "$sub/data/backlog.md" \
+    "local-only item did not arrive in the secondmate backlog"
+  assert_grep '  Preserve this task body.' "$sub/data/backlog.md" \
+    "local-only item body did not move intact"
+  pass "local-only queued items use the existing secondmate handoff path"
+}
+
 test_body_moves_when_followed_by_another_item
 test_body_moves_when_followed_by_section_heading
 test_multi_paragraph_body_with_internal_blanks_moves_whole
@@ -548,5 +572,6 @@ test_noncanonical_indented_continuations_refuse_without_changes
 test_indented_heading_is_not_section_boundary
 test_registry_home_with_pre_home_parentheses
 test_registry_home_missing_field_fails_cleanly
+test_local_only_item_uses_normal_handoff_path
 
 echo "ALL TESTS PASSED"

@@ -25,6 +25,9 @@
 #   - the multi-key classification and idempotent per-key reporting: a key
 #     already present in the secondmate backlog is reported and skipped, and if
 #     any key matches neither backlog nothing is moved.
+# Delivery mode does not change backlog ownership. In-scope queued local-only
+# items move through this same path, while main-only landing remains owned by
+# bin/fm-merge-local.sh and the secondmate-provisioning skill.
 #
 # What `tasks-axi mv <id>... --to <dest>` owns: moving each full item BLOCK
 # byte-exact (header, body lines, blank separators, and indented pseudo-headings

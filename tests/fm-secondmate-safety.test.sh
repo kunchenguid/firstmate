@@ -2,7 +2,8 @@
 # tests/fm-secondmate-safety.test.sh - secondmate home safety invariants:
 # the path-boundary matrices (seed/spawn/teardown), registry/charter/origin
 # validation, treehouse lease handling, no-mistakes initialization of new
-# clones, child-worktree protection, and backlog-handoff safety. The happy-path
+# clones, local-only ready routing and main-only landing, child-worktree
+# protection, and backlog-handoff safety. The happy-path
 # operator flow lives in fm-secondmate-lifecycle-e2e.test.sh; this file keeps the
 # destructive-invariant coverage that an e2e run cannot deterministically reach.
 set -u
@@ -684,22 +685,183 @@ test_home_seed_refuses_missing_projects_without_signal() {
   pass "home seeding fails loudly on accidental project omission and rejects mixed --no-projects"
 }
 
-test_home_seed_refuses_local_only_project() {
-  local home subhome err
+test_home_seed_allows_local_only_project_without_copying_dirty_state() {
+  local home subhome source status_before head_before tracked_before untracked_before origin
   home="$TMP_ROOT/local-only-seed-home"
   subhome="$TMP_ROOT/local-only-seed-subhome"
-  err="$TMP_ROOT/local-only-seed.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
+  source="$home/projects/alpha"
+  printf '%s\n' 'committed baseline' > "$source/tracked.txt"
+  git -C "$source" add tracked.txt
+  git -C "$source" commit -qm 'add tracked baseline'
+  printf '%s\n' 'intentional tracked edit' > "$source/tracked.txt"
+  mkdir -p "$source/godot/assets/extracted"
+  printf '%s\n' 'intentional untracked bytes' > "$source/untracked.bin"
+  printf '%s\n' 'ignored-style overlay bytes' > "$source/godot/assets/extracted/overlay.bin"
   printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
 
-  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed a local-only project into a secondmate home"
+  status_before=$(git -C "$source" status --porcelain=v1 -uall)
+  head_before=$(git -C "$source" rev-parse HEAD)
+  tracked_before=$(git hash-object "$source/tracked.txt")
+  untracked_before=$(git hash-object "$source/untracked.bin")
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='local-only feature work' \
+    FM_SECONDMATE_SCOPE='local-only feature work' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "seed refused a local-only project"
+
+  origin=$(git -C "$subhome/projects/alpha" remote get-url origin)
+  [ "$origin" = "$(cd "$source" && pwd -P)" ] \
+    || fail "local-only clone origin did not point at the authoritative checkout"
+  [ "$(cat "$subhome/projects/alpha/tracked.txt")" = 'committed baseline' ] \
+    || fail "local-only seed copied the authoritative checkout's tracked working-tree edit"
+  assert_absent "$subhome/projects/alpha/untracked.bin" \
+    "local-only seed copied an authoritative untracked file"
+  assert_absent "$subhome/projects/alpha/godot/assets/extracted/overlay.bin" \
+    "local-only seed copied an authoritative ignored-style overlay"
+  [ "$(git -C "$source" status --porcelain=v1 -uall)" = "$status_before" ] \
+    || fail "local-only seed changed authoritative dirty status"
+  [ "$(git -C "$source" rev-parse HEAD)" = "$head_before" ] \
+    || fail "local-only seed changed the authoritative commit"
+  [ "$(git hash-object "$source/tracked.txt")" = "$tracked_before" ] \
+    || fail "local-only seed changed tracked working-tree bytes"
+  [ "$(git hash-object "$source/untracked.bin")" = "$untracked_before" ] \
+    || fail "local-only seed changed untracked bytes"
+  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" alpha)" = 'local-only off' ] \
+    || fail "local-only delivery mode was not preserved in the secondmate home"
+  pass "home seeding clones committed local-only state without touching authoritative dirt"
+}
+
+test_secondmate_home_cannot_land_local_only_work() {
+  local home err
+  home="$TMP_ROOT/local-only-direct-landing-subhome"
+  err="$TMP_ROOT/local-only-direct-landing.err"
+  mkdir -p "$home"
+  printf '%s\n' design > "$home/.fm-secondmate-home"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" task-a 2>"$err"; then
+    fail "marked secondmate home landed local-only work directly"
   fi
-  grep -F 'project alpha is local-only; secondmate routes support only no-mistakes and direct-PR projects' "$err" >/dev/null \
-    || fail "seed did not explain local-only project rejection"
-  [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
-  pass "home seeding refuses local-only projects"
+  assert_grep 'local landing is main-firstmate-only' "$err" \
+    "direct secondmate landing refusal did not explain the main-only boundary"
+  pass "marked secondmate homes cannot invoke the local landing path"
+}
+
+test_secondmate_ready_route_and_main_exact_landing_wait_on_dirty_checkout() {
+  local main sub source wt meta corr rec ready out rc
+  local status_before head_before dirty_hash stash_before
+  main="$TMP_ROOT/local-ready-main"
+  sub="$TMP_ROOT/local-ready-sub"
+  source="$main/projects/alpha"
+  wt="$TMP_ROOT/local-ready-worktree"
+  meta="$sub/state/feature-a.meta"
+  mkdir -p "$main/projects" "$main/data" "$main/state" "$sub/projects" "$sub/state"
+  touch "$main/state/.last-watcher-beat"
+  fm_git_init_commit "$source"
+  git -C "$source" branch -m main
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-07-29)' > "$main/data/projects.md"
+  git clone --quiet --no-hardlinks "$source" "$sub/projects/alpha"
+  printf '%s\n' design > "$sub/.fm-secondmate-home"
+  printf -- '- design - local work (home: %s; scope: local work; projects: alpha; added 2026-07-29)\n' \
+    "$(cd "$sub" && pwd -P)" > "$main/data/secondmates.md"
+
+  git -C "$sub/projects/alpha" worktree add --quiet -b fm/feature-a "$wt" main
+  printf '%s\n' 'ready change' > "$wt/feature.txt"
+  git -C "$wt" add feature.txt
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'add ready change'
+  fm_write_meta "$meta" \
+    'window=firstmate:fm-feature-a' \
+    'endpoint_task_id=feature-a' \
+    "worktree=$wt" \
+    "project=$sub/projects/alpha" \
+    'harness=echo' \
+    'kind=ship' \
+    'mode=local-only' \
+    'yolo=off'
+
+  # shellcheck source=bin/fm-pending-reply-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+  corr=$(fm_pending_reply_create "$main" "$main/state" design 'implement feature-a')
+  fm_pending_reply_mark_delivered "$main/state" "$corr" \
+    || fail "could not mark the routed request delivered"
+  "$ROOT/bin/fm-secondmate-report.sh" --local-ready \
+    "$main/state/design.status" "$corr" "$meta" 'dotnet test tests/: passed' \
+    || fail "local-ready result did not route through the existing report helper"
+  fm_pending_reply_try_resolve "$main/state" "$corr" \
+    || fail "correlated local-ready result did not resolve the parent pending reply"
+  rec=$(fm_pending_reply_path "$main/state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" resolved_via)" = helper ] \
+    || fail "local-ready route did not resolve through the existing helper path"
+
+  ready=$(git -C "$wt" rev-parse HEAD)
+  assert_grep "ready_commit=$ready" "$meta" "local-ready metadata did not record the exact commit"
+  assert_grep 'ready_branch=fm/feature-a' "$meta" "local-ready metadata did not record the branch"
+  assert_grep 'validation_evidence=dotnet test tests/: passed' "$meta" \
+    "local-ready metadata did not record validation evidence"
+  assert_grep "local-only ready task=feature-a commit=$ready" "$main/state/design.status" \
+    "local-ready result was not routed to the main status channel"
+
+  printf '%s\n' 'intentional untracked state' > "$source/keep-untracked.bin"
+  status_before=$(git -C "$source" status --porcelain=v1 -uall)
+  head_before=$(git -C "$source" rev-parse HEAD)
+  dirty_hash=$(git hash-object "$source/keep-untracked.bin")
+  stash_before=$(git -C "$source" stash list)
+  rc=0
+  out=$(FM_HOME="$main" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-merge-local.sh" feature-a --secondmate design 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "cross-home local landing ignored the authoritative dirty checkout"
+  assert_contains "$out" 'ready, waiting:' \
+    "dirty authoritative checkout did not surface the ready-waiting outcome"
+  [ "$(git -C "$source" status --porcelain=v1 -uall)" = "$status_before" ] \
+    || fail "dirty landing refusal changed authoritative status"
+  [ "$(git -C "$source" rev-parse HEAD)" = "$head_before" ] \
+    || fail "dirty landing refusal changed authoritative HEAD"
+  [ "$(git hash-object "$source/keep-untracked.bin")" = "$dirty_hash" ] \
+    || fail "dirty landing refusal changed intentional untracked bytes"
+  [ "$(git -C "$source" stash list)" = "$stash_before" ] \
+    || fail "dirty landing refusal changed the authoritative stash"
+
+  rm "$source/keep-untracked.bin"
+  out=$(FM_HOME="$main" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-merge-local.sh" feature-a --secondmate design 2>&1) \
+    || fail "main firstmate could not land the secondmate's exact ready commit"
+  assert_contains "$out" "merged exact ready commit $ready" \
+    "cross-home landing did not report the exact commit"
+  [ "$(git -C "$source" rev-parse main)" = "$ready" ] \
+    || fail "authoritative main did not fast-forward to the exact ready commit"
+  pass "local-ready work routes through pending reply and main-only landing waits cleanly on dirt"
+}
+
+test_main_home_local_only_landing_keeps_historical_path() {
+  local home project wt ready
+  home="$TMP_ROOT/local-ready-main-home-legacy"
+  project="$home/projects/alpha"
+  wt="$TMP_ROOT/local-ready-main-home-worktree"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  touch "$home/state/.last-watcher-beat"
+  fm_git_init_commit "$project"
+  git -C "$project" branch -m main
+  git -C "$project" worktree add --quiet -b fm/main-task "$wt" main
+  printf '%s\n' 'main-home change' > "$wt/main-home.txt"
+  git -C "$wt" add main-home.txt
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'add main-home change'
+  ready=$(git -C "$wt" rev-parse HEAD)
+  fm_write_meta "$home/state/main-task.meta" \
+    "worktree=$wt" \
+    "project=$project" \
+    'kind=ship' \
+    'mode=local-only' \
+    'yolo=off'
+
+  FM_HOME="$home" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-merge-local.sh" main-task >/dev/null \
+    || fail "historical main-home local-only landing path regressed"
+  [ "$(git -C "$project" rev-parse main)" = "$ready" ] \
+    || fail "main-home local-only landing did not fast-forward to the ready branch"
+  pass "main-home local-only tasks retain the historical one-argument landing path"
 }
 
 test_home_seed_refuses_registry_delimiter_home() {
@@ -2186,7 +2348,10 @@ test_home_seed_refuses_projectless_home_with_symlinked_projects
 test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
-test_home_seed_refuses_local_only_project
+test_home_seed_allows_local_only_project_without_copying_dirty_state
+test_secondmate_home_cannot_land_local_only_work
+test_secondmate_ready_route_and_main_exact_landing_wait_on_dirty_checkout
+test_main_home_local_only_landing_keeps_historical_path
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id
