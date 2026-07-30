@@ -295,6 +295,57 @@ ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
 
+test_forge_auth_mode_controls_github_auth_probe() {
+  local label mode github_tools expected case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label mode github_tools expected; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/forge-auth-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    if [ "$mode" != absent ]; then
+      printf '%s\n' "$mode" > "$case_dir/home/config/forge-auth"
+    fi
+    fakebin=$(make_fake_toolchain "$case_dir")
+    if [ "$github_tools" = absent ]; then
+      rm -f "$fakebin/gh" "$fakebin/gh-axi"
+    fi
+    cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
+  exit 1
+fi
+exit 0
+SH
+    chmod +x "$fakebin/gh"
+    if [ "$github_tools" = absent ]; then
+      rm -f "$fakebin/gh"
+    fi
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    case "$expected" in
+      required)
+        [ "$out" = "NEEDS_GH_AUTH" ] || fail "$label: expected NEEDS_GH_AUTH, got: $out" ;;
+      skipped)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      missing-gh)
+        [ "$out" = "MISSING: gh (install: brew install gh  # or the platform's package manager)
+MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)" ] || fail "$label: expected missing GitHub tools only, got: $out" ;;
+    esac
+  done <<'ROWS'
+absent config keeps GitHub auth required^absent^present^required
+github config keeps GitHub auth required^github^present^required
+github config without GitHub tools reports missing gh first^github^absent^missing-gh
+gitlab config skips GitHub auth^gitlab^present^skipped
+none config skips GitHub auth^none^present^skipped
+gitlab config does not require GitHub tools^gitlab^absent^skipped
+none config does not require GitHub tools^none^absent^skipped
+unknown config falls back to GitHub auth^gitea^present^required
+ROWS
+  pass "bootstrap lets config/forge-auth opt out of the GitHub auth probe"
+}
+
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
   missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
@@ -833,6 +884,7 @@ ROWS
 }
 
 test_bootstrap_reporting
+test_forge_auth_mode_controls_github_auth_probe
 test_no_mistakes_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction

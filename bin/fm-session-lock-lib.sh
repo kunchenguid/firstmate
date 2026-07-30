@@ -74,6 +74,32 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# Print a stable marker identity for harnesses whose tool environment exposes
+# one even when sandboxing hides process ancestry from `ps`.
+fm_harness_marker_identity() {
+  if [ -n "${CODEX_THREAD_ID:-}" ]; then
+    printf 'codex:%s\n' "$CODEX_THREAD_ID"
+    return 0
+  fi
+  if [ -n "${CURSOR_AGENT_SESSION_ID:-}" ]; then
+    printf 'cursor:%s\n' "$CURSOR_AGENT_SESSION_ID"
+    return 0
+  fi
+  if [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then
+    printf 'cursor:%s\n' "$CURSOR_CONVERSATION_ID"
+    return 0
+  fi
+  if [ -n "${CURSOR_TRACE_ID:-}" ]; then
+    printf 'cursor:%s\n' "$CURSOR_TRACE_ID"
+    return 0
+  fi
+  if [ "${TERM_PROGRAM:-}" = "vscode" ] && [ -n "${VSCODE_PID:-}" ]; then
+    printf 'cursor-vscode:%s\n' "$VSCODE_PID"
+    return 0
+  fi
+  return 1
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -119,7 +145,7 @@ fm_harness_ancestry_pids() {
 # innermost match unchanged.
 fm_harness_ancestry_pid() {
   local pids pid outermost=''
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids) || { fm_harness_marker_identity; return $?; }
   while IFS= read -r pid; do
     [ -n "$pid" ] && outermost=$pid
   done <<EOF
@@ -129,9 +155,23 @@ EOF
   printf '%s\n' "$outermost"
 }
 
+fm_harness_identity_alive() {
+  local ident=$1 current
+  case "$ident" in
+    *:*)
+      current=$(fm_harness_marker_identity 2>/dev/null) || return 1
+      [ "$ident" = "$current" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
+  case "$pid" in
+    ''|*[!0-9]*) fm_harness_identity_alive "$pid"; return $? ;;
+  esac
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -149,8 +189,9 @@ fm_harness_pid_alive() {
 fm_session_lock_owned_by_self() {
   local state=$1 lock_pid pids pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  [ -n "$lock_pid" ] || return 1
   case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
+    *[!0-9]*) fm_harness_identity_alive "$lock_pid"; return $? ;;
   esac
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do

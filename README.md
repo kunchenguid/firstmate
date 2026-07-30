@@ -59,7 +59,8 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ### Requirements
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, or OpenCode.
-- Git and the GitHub CLI, authenticated through `gh auth login`.
+- Git.
+- GitHub homes should install the GitHub CLI and authenticate with `gh auth login`; GitLab-first or non-GitHub homes can opt out with `config/forge-auth`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
 The first mate detects and offers to install supported missing tools after you approve.
@@ -80,6 +81,13 @@ Codex and OpenCode are also verified and supported as primary harnesses; Codex u
 gh auth login
 git clone https://github.com/kunchenguid/firstmate
 cd firstmate
+```
+
+For a GitLab-first or non-GitHub home, skip `gh auth login` and create the local opt-out after cloning:
+
+```sh
+mkdir -p config
+printf 'gitlab\n' > config/forge-auth
 ```
 
 Then launch one of the co-primary harnesses; AGENTS.md takes over from there:

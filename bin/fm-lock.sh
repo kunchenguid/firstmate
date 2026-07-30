@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Writes the harness (agent) process identity found by walking the shell's
+# ancestry, or by reading a verified host marker when ancestry is sandboxed.
+# A PID identity lives as long as the firstmate session - unlike the transient
+# subshell PID of any one tool call, which is dead moments after it is written.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -29,11 +30,18 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  case "$old" in
+    *:*)
+      if fm_harness_pid_alive "$old"; then echo "lock: held by current harness marker $old"; else echo "lock: held by different or unverifiable harness marker $old"; fi
+      ;;
+    *)
+      if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+      ;;
+  esac
   exit 0
 fi
 
-me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry or verified host marker" >&2; exit 1; }
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -66,9 +74,19 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
-    exit 1
+  if [ "$old" != "$me" ]; then
+    case "$old" in
+      *:*)
+        echo "error: another firstmate session holds an unverifiable marker lock ($old); operate read-only until resolved" >&2
+        exit 1
+        ;;
+      *)
+        if fm_harness_pid_alive "$old"; then
+          echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+          exit 1
+        fi
+        ;;
+    esac
   fi
 fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
@@ -84,4 +102,4 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   exit 1
 fi
 release_claim_lock
-echo "lock acquired: harness pid $me"
+echo "lock acquired: harness identity $me"

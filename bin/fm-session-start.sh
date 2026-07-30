@@ -62,7 +62,7 @@
 #
 # The tradeoff this ordering accepts: a refused (read-only) session must not
 # go dark. So on refusal, bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1
-# mode) for its read-only detect lines - missing tools, gh auth, the
+# mode) for its read-only detect lines - missing tools, configured forge auth, the
 # worktree-tangle check, the harness override, crew-dispatch validation,
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute without

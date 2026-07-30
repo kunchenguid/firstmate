@@ -530,7 +530,8 @@ esac
 SH
   chmod +x "$fakebin/ps"
 
-  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  out=$(env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT_SESSION_ID \
+    -u CURSOR_CONVERSATION_ID -u CURSOR_TRACE_ID -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
   out=$(CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")

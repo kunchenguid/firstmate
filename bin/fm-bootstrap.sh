@@ -50,6 +50,10 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
+#          GitHub CLI and authentication are required only when
+#          config/forge-auth is absent or says "github"; values "gitlab" and
+#          "none" skip the gh/gh-axi tool and auth checks for homes whose
+#          primary forge does not use GitHub.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
@@ -641,12 +645,27 @@ missing_tool_diagnostic() {
   echo "MISSING: $tool (install: $(install_cmd "$tool"))"
 }
 
-# Required-tool detection follows the RESOLVED backend, not a one-size default:
+forge_auth_mode() {
+  local file="$CONFIG/forge-auth" mode
+  [ -f "$file" ] || { echo github; return 0; }
+  mode=$(sed -n '1{s/[[:space:]]//g;p;q;}' "$file" 2>/dev/null || true)
+  case "$mode" in
+    gitlab|none) echo "$mode" ;;
+    *) echo github ;;
+  esac
+}
+
+# Required-tool detection follows the RESOLVED backend and configured forge auth
+# mode, not a one-size default:
 # a universal toolchain every home needs plus the backend-specific delta owned by
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+FORGE_AUTH_MODE=$(forge_auth_mode)
+COMMON_TOOLS="node git no-mistakes chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+if [ "$FORGE_AUTH_MODE" = github ]; then
+  COMMON_TOOLS="$COMMON_TOOLS gh gh-axi"
+fi
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -1000,7 +1019,9 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+if [ "$FORGE_AUTH_MODE" = github ] && command -v gh >/dev/null 2>&1; then
+  gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+fi
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.
