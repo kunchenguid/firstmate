@@ -1190,7 +1190,7 @@ handle_wake() {  # <reason> <state>
   case "$reason" in
     signal:*) kind=signal; arg="${reason#signal: }"
               decision=$(classify_signal "$arg" "$state") ;;
-    stale:*)  kind=stale; arg="${reason#stale: }"
+    stale:*)  kind=stale; arg="${reason#stale: }"; arg="${arg%% \(*}"
               decision=$(classify_stale "$arg" "$state") ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
