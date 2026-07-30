@@ -31,6 +31,14 @@ unset NO_MISTAKES_GATE
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 RUN="$ROOT/bin/fm-sessionstart-run.sh"
+
+# A fake harness (a bash symlink named "claude") whose pid can be recorded as a
+# genuine session-lock owner. The nudge's ownership check resolves the harness
+# ancestry of the running process and treats the lock as owned only when its pid
+# equals that harness pid, so an owned-lock fixture must run under this harness.
+FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
+ln -s /bin/bash "$FAKEBIN/claude"
+FAKE_CLAUDE="$FAKEBIN/claude"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
@@ -124,10 +132,20 @@ test_missing_state_is_silent() {
 }
 
 test_owned_lock_is_silent() {
-  local root="$TMP_ROOT/already-ran"
+  local root="$TMP_ROOT/already-ran" out status=0
   make_primary "$root"
-  printf '%s\n' "$$" > "$root/state/.lock"
-  expect_silent_zero "owned lock nudge" run_nudge "$root"
+  # Run the nudge as a child of the fake 'claude' harness and record THAT
+  # harness pid as the lock owner, so the harness ancestry resolves to the
+  # lock-owning pid and the nudge recognizes the session already ran.
+  # FM_LOCK_OS_OVERRIDE=posix pins the working-ps ancestry contract for
+  # determinism across hosts.
+  out=$(FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" \
+    FM_LOCK_OS_OVERRIDE=posix "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$0"
+      ' "$NUDGE" 2>&1) || status=$?
+  expect_code 0 "$status" "owned lock nudge must exit 0"
+  [ -z "$out" ] || fail "owned lock nudge must be silent, got: $out"
   pass "fm-sessionstart-nudge: a lock holder in process ancestry is already run"
 }
 
