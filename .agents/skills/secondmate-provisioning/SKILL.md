@@ -1,9 +1,9 @@
 ---
 name: secondmate-provisioning
 description: >-
-  Agent-only reference for persistent secondmate setup and retirement.
-  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
-  Covers home leases, transactional seeding, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
+  Agent-only reference for persistent secondmate lifecycle and routed work.
+  Use when creating, seeding, validating, launching, handing backlog to, routing or landing secondmate-owned local-only work, recovering, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
+  Covers home leases, transactional seeding, project clone restrictions, local-only ready work and landing, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
 user-invocable: false
 metadata:
   internal: true
@@ -11,7 +11,7 @@ metadata:
 
 # secondmate-provisioning
 
-Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
+Use this reference before creating, seeding, validating, launching, handing backlog to, routing or landing secondmate-owned `local-only` work, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, only the main firstmate lands `local-only` work, and secondmates are idle by default.
 
