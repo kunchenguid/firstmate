@@ -320,11 +320,13 @@ EOF
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    if [ "$IS_SECOND_MATE_HOME" = 1 ]; then
-      IFS= read -r -d '' DOD <<EOF || true
+    IFS= read -r -d '' DOD_HEAD <<EOF || true
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+EOF
+    if [ "$IS_SECOND_MATE_HOME" = 1 ]; then
+      IFS= read -r -d '' DOD_TAIL <<EOF || true
 Keep your branch a clean fast-forward onto the current default branch - if the default branch has advanced, rebase onto it so the eventual merge stays a fast-forward.
 Run the validation required by the task and project instructions.
 When it is implemented, committed, clean, and validated, append \`done: ready commit=<full 40-character HEAD> branch=fm/$ID validation=<commands and outcome>\` to the status file and stop.
@@ -332,15 +334,13 @@ Your second mate records that exact ready commit and validation evidence, then r
 Only the main firstmate may run the guarded local landing.
 EOF
     else
-      IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-This project ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+      IFS= read -r -d '' DOD_TAIL <<EOF || true
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     fi
+    DOD="$DOD_HEAD$DOD_TAIL"
     ;;
   *)  # no-mistakes (default)
     SETUP2="

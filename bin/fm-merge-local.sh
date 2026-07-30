@@ -142,10 +142,11 @@ if [ -n "$SECOND_MATE_ID" ]; then
     echo "error: secondmate project $PROJECT_NAME is missing under $SOURCE_HOME/projects" >&2
     exit 1
   }
-  SOURCE_PROJ=$(canonical_dir "$SOURCE_PROJ") || {
-    echo "error: task $ID project is missing: $SOURCE_PROJ" >&2
+  RESOLVED_SOURCE_PROJ=$(canonical_dir "$SOURCE_PROJ") || {
+    echo "error: task $ID project is missing: ${SOURCE_PROJ:-<empty>}" >&2
     exit 1
   }
+  SOURCE_PROJ=$RESOLVED_SOURCE_PROJ
   [ "$SOURCE_PROJ" = "$EXPECTED_SOURCE" ] || {
     echo "error: task $ID project $SOURCE_PROJ is not the registered secondmate clone $EXPECTED_SOURCE" >&2
     exit 1
@@ -197,6 +198,11 @@ EOF
     exit 1
   }
 else
+  RESOLVED_PROJ=$(canonical_dir "$PROJ") || {
+    echo "error: task $ID project is missing: ${PROJ:-<empty>}" >&2
+    exit 1
+  }
+  PROJ=$RESOLVED_PROJ
   git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || {
     echo "error: branch $BRANCH does not exist in $PROJ" >&2
     exit 1

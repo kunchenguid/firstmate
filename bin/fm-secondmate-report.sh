@@ -134,19 +134,20 @@ if [ "$LOCAL_READY_MODE" = 1 ]; then
   [ -z "$DIRTY" ] \
     || { echo "error: local-ready worktree is dirty: $WORKTREE" >&2; exit 1; }
 
-  META_TMP="$TASK_META.local-ready.tmp.$$"
-  awk -v commit="$READY_COMMIT" -v branch="$BRANCH" -v evidence="$VALIDATION_EVIDENCE" '
-    /^ready_commit=/ { next }
-    /^ready_branch=/ { next }
-    /^validation_evidence=/ { next }
-    { print }
-    END {
-      print "ready_commit=" commit
-      print "ready_branch=" branch
-      print "validation_evidence=" evidence
-    }
-  ' "$TASK_META" > "$META_TMP"
-  mv -f "$META_TMP" "$TASK_META"
+  META_TMP=
+  meta_tmp_cleanup() {
+    [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  }
+  trap meta_tmp_cleanup EXIT
+  META_TMP=$(mktemp "$STATE_DIR/.$(basename "$TASK_META").local-ready.XXXXXX") \
+    || { echo "error: cannot stage local-ready metadata in $STATE_DIR" >&2; exit 1; }
+  { grep -vE '^ready_commit=|^ready_branch=|^validation_evidence=' "$TASK_META" || true; } > "$META_TMP" \
+    || { echo "error: cannot stage local-ready metadata for $TASK_META" >&2; exit 1; }
+  printf 'ready_commit=%s\n' "$READY_COMMIT" >> "$META_TMP" || exit 1
+  printf 'ready_branch=%s\n' "$BRANCH" >> "$META_TMP" || exit 1
+  printf 'validation_evidence=%s\n' "$VALIDATION_EVIDENCE" >> "$META_TMP" || exit 1
+  mv -f -- "$META_TMP" "$TASK_META" || exit 1
+  META_TMP=
   printf '%s [%s]: local-only ready task=%s commit=%s branch=%s validation=%s (via-helper)\n' \
     "$VERB" "$token" "$TASK_ID" "$READY_COMMIT" "$BRANCH" "$VALIDATION_EVIDENCE" >> "$STATUS_FILE"
 elif [ "$DOC_MODE" = 1 ]; then

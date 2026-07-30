@@ -363,6 +363,10 @@ select_lane() {
 run_coverage_guard() {
   local tmp missing extra a b
   local -a saved_scripts=()
+  # Every listing below is sorted in the C collation, so the comparisons must
+  # read them in the same collation or comm/uniq reject them as unsorted.
+  local LC_ALL=C
+  export LC_ALL
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
   all_repo_tests | LC_ALL=C sort -u >"$tmp/all"
@@ -653,7 +657,13 @@ families_for_changed_path() {
     bin/fm-gate-refuse*|bin/fm-lock*)
       printf '%s\n' session-bootstrap
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-merge-local.sh|bin/fm-teardown.sh)
+      printf '%s\n' pr-forge
+      # Their cross-home landing and secondmate-home safety paths are covered by
+      # the secondmate family, not by pr-forge.
+      printf '%s\n' secondmate
+      ;;
+    bin/fm-pr-*|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
