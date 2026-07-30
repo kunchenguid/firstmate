@@ -380,17 +380,34 @@ SH
   # token then fails here instead of silently going green in the Herdr CI lane.
   # An unsafe probe name is the one refusal that is deterministic everywhere,
   # including the CI Herdr lane where a default session really is running.
-  local real_reason
+  # The token is taken from the gate's own gate-token interface, exactly as the
+  # CI lane takes it, so neither side can be renamed without the other.
+  local real_reason real_token
   real_reason=$("$ROOT/bin/fm-herdr-lab.sh" gate default) \
     && fail "the lab gate must refuse an unsafe probe session name"
   [ -n "$real_reason" ] || fail "the lab gate printed no reason to enforce"
+  real_token=$("$ROOT/bin/fm-herdr-lab.sh" gate-token) \
+    || fail "the lab gate must publish its skip token"
   printf '#!/usr/bin/env bash\necho %s\nexit 0\n' "$(printf '%q' "skip: $real_reason")" >"$skip_f"
   set +e
-  "$RUNNER" --fail-on-gate-skip "$(printf '%s' "$real_reason" | cut -d: -f1)" "$skip_f" \
-    >"$out" 2>"$tmp/err.txt"
+  "$RUNNER" --fail-on-gate-skip "$real_token" "$skip_f" >"$out" 2>"$tmp/err.txt"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "the real gate reason escaped the runner's required-token guard"
+  # An empty token matches nothing, so accepting one would turn the CI lane's
+  # guard off without a word. It must be a loud argument error instead.
+  set +e
+  "$RUNNER" --fail-on-gate-skip '' "$skip_f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an empty --fail-on-gate-skip token must not silently disable the guard"
+  grep -q 'non-empty token' "$tmp/err.txt" \
+    || fail "the runner must say why an empty gate-skip token is refused: $(cat "$tmp/err.txt")"
+  set +e
+  "$RUNNER" --fail-on-gate-skip= "$skip_f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the equals form of an empty gate-skip token must be refused too"
   rm -rf "$tmp"
   pass "fail-on-gate-skip is repeatable and catches the real lab-gate reason"
 }

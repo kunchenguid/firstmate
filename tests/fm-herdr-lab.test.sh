@@ -108,13 +108,18 @@ run_with_fake() {
 # lab is actually provisionable, and that its verdict always agrees with what
 # provisioning would really do.
 test_gate_tracks_actual_lab_availability() {
-  local status=0 reason nobin jqless name
+  local status=0 reason nobin jqless name token
 
   # Direction 1: a running default session - gate passes silently AND provision
   # really succeeds, so nothing skips when the precondition is met.
+  : > "$FAKE_LOG"
   reason=$(run_with_fake fm_herdr_lab_gate) || status=$?
   expect_code 0 "$status" "gate must pass when a running default session exists"
   [ -z "$reason" ] || fail "a passing gate must print nothing, got: $reason"
+  # One Herdr call per verdict: a second probe could disagree with the first and
+  # report the wrong cause when the fleet changes between them.
+  [ "$(wc -l < "$FAKE_LOG" | tr -d ' ')" = 1 ] \
+    || fail "gate must reach Herdr exactly once: $(cat "$FAKE_LOG")"
   name="fm-lab-gate-agrees-$$"
   run_with_fake fm_herdr_lab_provision "$name" \
     || fail "gate passed but provision failed; the gate and the tripwire disagree"
@@ -122,8 +127,11 @@ test_gate_tracks_actual_lab_availability() {
 
   # Direction 2: the ordinary machine - herdr installed, default session stopped.
   status=0
+  : > "$FAKE_LOG"
   reason=$(FM_FAKE_HERDR_DEFAULT_RUNNING=false run_with_fake fm_herdr_lab_gate) || status=$?
   expect_code 1 "$status" "gate must refuse when the default session is stopped"
+  [ "$(wc -l < "$FAKE_LOG" | tr -d ' ')" = 1 ] \
+    || fail "a refusing gate must also reach Herdr exactly once: $(cat "$FAKE_LOG")"
   assert_contains "$reason" "herdr lab unavailable" "gate reason lost its stable skip token"
   assert_contains "$reason" "no running default Herdr session" "gate reason did not name the missing precondition"
   [ "$(printf '%s\n' "$reason" | wc -l | tr -d ' ')" = 1 ] || fail "gate must print exactly one reason line, got: $reason"
@@ -163,10 +171,21 @@ test_gate_tracks_actual_lab_availability() {
   expect_code 1 "$status" "gate must refuse an unsafe probe session name"
   assert_contains "$reason" "invalid lab session name" "unsafe probe name produced the wrong reason"
 
-  # Every reason shares the one token the required CI Herdr lane keys on, so a
-  # renamed cause can never escape that lane's over-skip guard. The runner-side
-  # enforcement of the token is proven behaviorally in tests/fm-test-run.test.sh.
-  [ -n "$FM_HERDR_LAB_GATE_TOKEN" ] || fail "the gate token must be a named constant"
+  # Every reason shares the one token the required CI Herdr lane keys on, and the
+  # lane asks this helper for that token instead of hardcoding a copy, so a
+  # rename cannot silently decouple the two. Both sides come from the executable
+  # here: gate-token must be exactly the prefix of a real refusal's reason line.
+  # The runner-side enforcement of that token is proven behaviorally in
+  # tests/fm-test-run.test.sh.
+  token=$("$ROOT/bin/fm-herdr-lab.sh" gate-token) || fail "gate-token must succeed"
+  [ -n "$token" ] || fail "gate-token must print a non-empty token"
+  status=0
+  reason=$("$ROOT/bin/fm-herdr-lab.sh" gate default) || status=$?
+  expect_code 1 "$status" "the refusing gate subprocess must exit 1"
+  case "$reason" in
+    "$token: "?*) : ;;
+    *) fail "gate-token '$token' is not the prefix of the real gate reason: $reason" ;;
+  esac
 
   pass "fm-herdr-lab: the gate mirrors real lab availability in both directions"
 }

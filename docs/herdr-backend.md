@@ -255,6 +255,7 @@ Its before/after tripwire requires the live default-session snapshot to remain b
 Because that tripwire needs a running default session, a machine with Herdr installed but no default session running cannot host a lab at all.
 The helper's `gate` command is the single owner of that verdict, so real-Herdr tests skip with the reason instead of failing on a precondition they cannot create.
 The required CI Herdr lane starts a default session and fails on those skip reasons, so the same gate can never turn the lane green by skipping the work.
+That lane reads the skip token from `bin/fm-herdr-lab.sh gate-token` rather than repeating a copy of it, so renaming the token can never leave the lane guarding a string the gate no longer prints.
 
 The helper's header and `--help` own exact commands.
 Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.

@@ -245,9 +245,16 @@ jobs:
           # the default session started above. Without this a gate could go green
           # by skipping everything. Live harness credential tests stay outside
           # this family (opt-in env only).
+          # The lab token comes from the helper that owns it, so renaming the
+          # constant propagates here instead of silently decoupling this guard.
+          lab_token=$(bin/fm-herdr-lab.sh gate-token)
+          [ -n "$lab_token" ] || {
+            echo "::error::fm-herdr-lab.sh gate-token printed no token; refusing to run with an unguarded gate"
+            exit 1
+          }
           bin/fm-test-run.sh --family real-herdr-gated \
             --fail-on-gate-skip 'herdr not found' \
-            --fail-on-gate-skip 'herdr lab unavailable' \
+            --fail-on-gate-skip "$lab_token" \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
       - name: Cleanup job-owned Herdr lab sessions
         if: always()

@@ -35,10 +35,13 @@
 #                   after each script, fail the run if any output line contains
 #                   "skip: <token>" (e.g. --fail-on-gate-skip 'herdr lab
 #                   unavailable'). Repeatable; any listed token fails the run.
+#                   The token must be non-empty: an empty one matches nothing and
+#                   would silently disable the guard the caller asked for.
 #                   The required Herdr CI lane lists every token that means a
 #                   real-Herdr precondition went unmet, so neither a missing pin
 #                   nor a lab it could not provision can silently pass as a gate
-#                   skip.
+#                   skip. It derives the lab token from the gate's own owner
+#                   (bin/fm-herdr-lab.sh gate-token) so the two cannot drift.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
 #                   Default is 1 (serial). N>1 is allowed only when every
 #                   selected script is in the proven-isolated set
@@ -795,6 +798,13 @@ detect_gate_skip_token() {
   grep -F -q "skip: $token" "$file" 2>/dev/null
 }
 
+# An empty token matches nothing, so accepting one would silently disable the
+# guard the caller asked for. Callers derive tokens from other commands (the CI
+# Herdr lane uses bin/fm-herdr-lab.sh gate-token), so refuse it here instead.
+require_gate_skip_token() {
+  [ -n "$1" ] || die "--fail-on-gate-skip requires a non-empty token; an empty token would silently disable the guard"
+}
+
 apply_exclude_families() {
   local s fam keep ex
   local -a kept=()
@@ -990,10 +1000,12 @@ while [ "$#" -gt 0 ]; do
       ;;
     --fail-on-gate-skip)
       [ "$#" -gt 1 ] || die "--fail-on-gate-skip requires a token (e.g. 'herdr lab unavailable')"
+      require_gate_skip_token "$2"
       FAIL_ON_GATE_SKIP_TOKENS+=("$2")
       shift 2
       ;;
     --fail-on-gate-skip=*)
+      require_gate_skip_token "${1#--fail-on-gate-skip=}"
       FAIL_ON_GATE_SKIP_TOKENS+=("${1#--fail-on-gate-skip=}")
       shift
       ;;
