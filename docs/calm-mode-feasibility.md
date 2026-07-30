@@ -59,7 +59,7 @@ Serialized session entries are never modified by a presentation toggle.
 
 ## Compatibility review
 
-Pi 0.82.1 additionally exposes the `BashExecutionComponent`, `SkillInvocationMessageComponent`, `CompactionSummaryMessageComponent`, `BranchSummaryMessageComponent`, and `CustomMessageComponent` exports and the `InteractiveMode.addMessageToChat`, `addCustomEntryToChat`, and `addCacheMissNotice` seams the non-conversation adapters patch.
+Pi 0.82.1 additionally exposes the `BashExecutionComponent`, `SkillInvocationMessageComponent`, `CompactionSummaryMessageComponent`, `BranchSummaryMessageComponent`, and `CustomMessageComponent` exports and the `InteractiveMode.addMessageToChat`, `addCustomEntryToChat`, and `addCacheMissNotice` seams the non-conversation adapters patch, along with pi-tui's `Spacer` class the spacer adapter needs to recognize a standalone spacer.
 Pi 0.81.1 introduced the evidence baseline, Pi 0.82.0 preserved the original assistant and operational-user seams, and Pi 0.82.1 preserves those seams plus the exported `ToolExecutionComponent.render`, `ToolExecutionComponent.updateResult`, and `AssistantMessageComponent.updateContent` seams used for complete tool-row suppression and its actionable-error surface, and pi-tui's `visibleWidth`, `truncateToWidth`, and `wrapTextWithAnsi` column helpers used to keep every emitted error line inside the terminal width Pi enforces.
 Version strings are evidence rather than compatibility gates.
 A future version with a missing method degrades only that adapter.
