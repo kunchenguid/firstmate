@@ -1285,6 +1285,48 @@ unit_missing_identity_daemon_death_alarms_on_guard() {
   rm -rf "$home"
 }
 
+unit_missing_evidence_published_intent_alarms_on_guard() {
+  local home publisher_pid marker alarm_count
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-missing-evidence.XXXXXX")
+  marker="$home/state/.supervise-daemon.unexpected-exit"
+  death_test_configure_alarm "$home"
+  mkdir -p "$home/state" "$home/root"
+  : > "$home/state/.afk"
+  mkfifo "$home/publisher-hold"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    . "$2"
+    publisher_pid=${BASHPID:-$$}
+    publisher_identity=$(fm_pid_identity "$publisher_pid") || exit 1
+    fm_afk_stop_intent_publish "$3" 424242 unseen-daemon-cycle \
+      "$publisher_pid" "$publisher_identity" || exit 1
+    : > "$4"
+    read -r _ < "$5"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-afk-death-lib.sh" \
+    "$home/state" "$home/intent-published" "$home/publisher-hold" &
+  publisher_pid=$!
+  for _ in $(seq 1 100); do [ -e "$home/intent-published" ] && break; sleep 0.05; done
+  FM_ROOT_OVERRIDE="$home/root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_WEDGE_ALARM_EXEC="$home/record-alarm" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1
+  FM_ROOT_OVERRIDE="$home/root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_WEDGE_ALARM_EXEC="$home/record-alarm" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1
+  kill -KILL "$publisher_pid" 2>/dev/null || true
+  wait "$publisher_pid" 2>/dev/null || true
+  alarm_count=0
+  [ ! -f "$home/alarms" ] || alarm_count=$(wc -l < "$home/alarms" | tr -d ' ')
+  if [ -s "$marker" ] \
+    && grep -F 'signal=UNTRAPPABLE' "$marker" >/dev/null \
+    && grep -F 'pid=MISSING' "$marker" >/dev/null \
+    && grep -F 'pid_identity=MISSING' "$marker" >/dev/null \
+    && grep -F 'phase=published' "$home/state/.supervise-daemon.stop-intent" >/dev/null \
+    && [ "${alarm_count:-0}" = 1 ]; then
+    pass "daemon death: missing evidence cannot promote publication into suppression"
+  else
+    fail "daemon death: published intent suppressed a missing-evidence alarm"
+  fi
+  rm -rf "$home"
+}
+
 unit_abandoned_published_intent_does_not_suppress_death() {
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (abandoned daemon stop)"; return 0; }
   local home captain_session captain_pane pid identity publisher_pid marker alarm_count
@@ -1506,6 +1548,7 @@ unit_untrappable_daemon_death_alarms_on_guard
 unit_stop_reconciles_untrappable_death_before_clear
 unit_stop_reconciles_expired_native_pending_before_clear
 unit_missing_identity_daemon_death_alarms_on_guard
+unit_missing_evidence_published_intent_alarms_on_guard
 unit_abandoned_published_intent_does_not_suppress_death
 unit_dead_publisher_cannot_be_consumed_at_death
 unit_unreadable_stop_intent_cannot_suppress_death

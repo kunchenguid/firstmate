@@ -436,7 +436,8 @@ fm_afk_launch_check_dead_daemon() {
     if { [ "$identity" != MISSING ] \
       && [ "$FM_AFK_STOP_INTENT_PID" = "$pid" ] \
       && [ "$FM_AFK_STOP_INTENT_IDENTITY" = "$identity" ]; } \
-      || { [ -z "$owner" ] && [ "$pid" = MISSING ]; }; then
+      || { [ -z "$owner" ] && [ "$pid" = MISSING ] \
+        && [ "$FM_AFK_STOP_INTENT_PHASE" = consumed ]; }; then
       intent_applies=1
     fi
     if [ "$intent_applies" -eq 1 ]; then
@@ -452,7 +453,9 @@ fm_afk_launch_check_dead_daemon() {
           fm_afk_stop_intent_abandon "$FM_AFK_LAUNCH_STATE" \
             "$FM_AFK_STOP_INTENT_PID" "$FM_AFK_STOP_INTENT_IDENTITY" || true
           if fm_afk_stop_intent_read "$FM_AFK_LAUNCH_STATE" \
-            && [ "$FM_AFK_STOP_INTENT_PHASE" = consumed ]; then
+            && [ "$FM_AFK_STOP_INTENT_PHASE" = consumed ] \
+            && [ "$FM_AFK_STOP_INTENT_PID" = "$pid" ] \
+            && [ "$FM_AFK_STOP_INTENT_IDENTITY" = "$identity" ]; then
             fm_afk_launch_log "expected daemon loss observed (pid=$FM_AFK_STOP_INTENT_PID)"
             return 0
           fi
