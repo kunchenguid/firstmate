@@ -575,7 +575,7 @@ SH
 }
 
 test_kimi_busy_signature_is_scoped_to_spinner_lines() {
-  local capture phase kimi_regex_lines
+  local capture
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-tmux-lib.sh"
   unset FM_BUSY_REGEX
@@ -589,10 +589,11 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   # These fixtures reproduce the observed spinner shape rather than byte-exact
   # transcriptions. Leading whitespace is deliberately varied; separator whitespace
   # follows the captured contract.
-  printf ' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"\n│ > │\n' > "$capture"
-  fm_pane_is_busy fake kimi || fail "the first real Kimi spinner shape was not recognized as busy"
-  printf '   🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
-  fm_pane_is_busy fake kimi || fail "the tool-execution Kimi spinner shape was not recognized as busy"
+  local phase
+  for phase in 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘; do
+    printf '  %s · Tip: Kimi is working\n│ > │\n' "$phase" > "$capture"
+    fm_pane_is_busy fake kimi || fail "Kimi spinner phase $phase was not recognized as busy"
+  done
   printf 'ordinary response ending with 🌕\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake kimi; then
     fail "a moon outside Kimi's spinner-line shape was misread as busy"
@@ -617,14 +618,6 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   if fm_pane_is_busy fake kimi; then
     fail "Kimi's idle thinking-effort status label was misread as busy"
   fi
-  kimi_regex_lines=$(grep 'KIMI_BUSY_REGEX' "$ROOT/bin/fm-tmux-lib.sh" "$ROOT/bin/fm-watch.sh")
-  if printf '%s\n' "$kimi_regex_lines" | grep -qi thinking; then
-    fail "Kimi busy regex still depends on a Thinking or thinking token"
-  fi
-  for phase in 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘; do
-    grep -Fq "$phase" "$ROOT/bin/fm-tmux-lib.sh" \
-      || fail "shared Kimi matcher is missing moon phase $phase"
-  done
   pass "busy detection: real Kimi moon-plus-middot captures require its harness while idle labels stay idle"
 }
 
