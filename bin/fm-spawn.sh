@@ -622,6 +622,7 @@ spawn_remote_secondmate() {
 }
 
 BACKEND=
+TREEHOUSE_ABORT_CLEANUP=0
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -706,6 +707,13 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+  fi
+  if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
+    TREEHOUSE_ABORT_CLEANUP=0
+    if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
+      echo "warning: failed to return aborted spawn worktree $WT" >&2
+    fi
+    fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -2113,6 +2121,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
+          TREEHOUSE_ABORT_CLEANUP=1
           break
         fi
         candidate="$p_real"
@@ -2574,7 +2583,8 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+TREEHOUSE_ABORT_CLEANUP=0
+ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
