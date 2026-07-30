@@ -311,7 +311,7 @@ stage_fetch_config_key() {
     remote.origin.*|url.*.insteadof|core.sshcommand|core.gitproxy|core.askpass)
       return 0
       ;;
-    ssh.variant|http.*|credential.*|protocol.*.allow)
+    ssh.variant|http.*|credential.*|protocol.*.allow|fetch.prunetags)
       return 0
       ;;
   esac
@@ -430,8 +430,8 @@ fetch_and_publish_configured_refs() {
   local_config="$stage_root/local-config"
   worktree_config="$stage_root/worktree-config"
 
-  if ! output=$(git clone --quiet --mirror --shared --origin origin \
-      "$PROJ" "$stage" 2>&1); then
+  if ! output=$(git -c protocol.file.allow=always \
+      clone --quiet --mirror --shared --origin origin "$PROJ" "$stage" 2>&1); then
     FETCH_OUTPUT=$output
     staged_fetch_scope_finish
     return 1

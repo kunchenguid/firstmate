@@ -658,6 +658,34 @@ SH
   chmod +x "$1/git"
 }
 
+git_audit_staging_clone_file_override() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_clone=0; is_fetch=0; is_origin=0; previous=; file_override=0
+for a in "$@"; do
+  [ "$a" = clone ] && is_clone=1
+  [ "$a" = fetch ] && is_fetch=1
+  [ "$a" = origin ] && is_origin=1
+  if [ "$previous" = -c ]; then
+    [ "$a" != protocol.file.allow=always ] || file_override=1
+    previous=
+    continue
+  fi
+  [ "$a" = -c ] && previous=-c
+done
+if [ "$is_clone" = 1 ]; then
+  [ "$file_override" = 1 ] || exit 91
+  printf 'audited\n' >"${GIT_STAGING_CLONE_FILE_AUDIT:?}"
+fi
+if [ "$is_fetch" = 1 ] && [ "$is_origin" = 1 ] && [ "$file_override" = 1 ]; then
+  exit 92
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
 git_fail_stage_origin_removal() {
   cat > "$1/git" <<'SH'
 #!/usr/bin/env bash
@@ -1566,6 +1594,35 @@ test_staging_clone_forces_origin_remote_name() {
   pass "staging clone names origin independently of clone defaults"
 }
 
+test_staging_clone_overrides_file_policy_only_locally() {
+  local home clone remote fakebin out err audit
+  home=$(new_home)
+  clone=$(build_pair "$home" staging-clone-file-policy)
+  remote=$(cd "$home/remotes/staging-clone-file-policy.git" && pwd)
+  advance_origin "$home" staging-clone-file-policy C1
+  git -C "$clone" config --local protocol.ext.allow always
+  git -C "$clone" remote set-url origin "ext::git-upload-pack $remote"
+  fakebin="$home/fb-staging-clone-file-policy"; mkdir -p "$fakebin"
+  git_audit_staging_clone_file_override "$fakebin"
+  out="$home/out-staging-clone-file-policy"
+  err="$home/err-staging-clone-file-policy"
+  audit="$home/staging-clone-file-policy-audit"
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0=protocol.file.allow
+  export GIT_CONFIG_VALUE_0=never
+  export GIT_STAGING_CLONE_FILE_AUDIT="$audit"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" staging-clone-file-policy
+  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+  unset GIT_STAGING_CLONE_FILE_AUDIT
+
+  assert_contains "$(cat "$out")" "staging-clone-file-policy: synced" \
+    "caller file policy blocked the trusted local staging clone"
+  assert_present "$audit" "trusted local staging clone lacked its scoped file override"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
+    || fail "staging clone file-policy fetch did not publish and fast-forward"
+  pass "file transport override is scoped to the trusted staging clone"
+}
+
 test_internal_object_fetch_overrides_file_policy_only_locally() {
   local home clone remote fakebin out err audit
   home=$(new_home)
@@ -1618,6 +1675,34 @@ test_staged_fetch_origin_removal_failure_is_fatal() {
   [ -z "$(preservation_refs "$clone")" ] \
     || fail "origin removal failure created a preservation ref"
   pass "failure to remove the mirror-generated origin aborts staged fetch"
+}
+
+test_fetch_prune_tags_config_publishes_tag_deletions() {
+  local home clone work config_path out
+  home=$(new_home)
+  clone=$(build_pair "$home" fetch-prune-tags)
+  work="$home/work-fetch-prune-tags"
+  git -C "$work" tag release
+  git -C "$work" push -q origin refs/tags/release
+  git -C "$clone" fetch -q origin
+  git -C "$clone" show-ref --verify --quiet refs/tags/release \
+    || fail "fetch-prune-tags fixture did not fetch its tag"
+  config_path=$(git -C "$clone" rev-parse --git-path config)
+  case "$config_path" in
+    /*) ;;
+    *) config_path="$clone/$config_path" ;;
+  esac
+  printf '\n[fetch]\n\tpruneTags\n' >>"$config_path"
+  git -C "$work" push -q origin --delete refs/tags/release
+  advance_origin "$home" fetch-prune-tags C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "fetch-prune-tags: synced" \
+    "fetch.pruneTags fixture did not sync its default branch"
+  ! git -C "$clone" show-ref --verify --quiet refs/tags/release \
+    || fail "staged fetch did not publish fetch.pruneTags deletion"
+  pass "valueless fetch.pruneTags publishes configured tag deletions"
 }
 
 test_auto_follow_tags_are_preserved() {
@@ -2114,8 +2199,10 @@ test_custom_refspec_updates_and_prunes_only_its_destinations
 test_staged_fetch_preserves_local_transport_config_only
 test_staged_fetch_preserves_valueless_boolean_config
 test_staging_clone_forces_origin_remote_name
+test_staging_clone_overrides_file_policy_only_locally
 test_internal_object_fetch_overrides_file_policy_only_locally
 test_staged_fetch_origin_removal_failure_is_fatal
+test_fetch_prune_tags_config_publishes_tag_deletions
 test_auto_follow_tags_are_preserved
 test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session
 test_staged_fetch_signals_clean_scope_and_preserve_caller_traps
