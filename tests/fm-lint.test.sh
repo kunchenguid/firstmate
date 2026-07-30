@@ -46,11 +46,76 @@ test_pins_an_explicit_version() {
   pass "fm-lint.sh pins an explicit ShellCheck version ($REQUIRED)"
 }
 
+# The installer's asset-and-checksum choice for one platform, exercised without
+# network access. Echoes "<archive> <sha256>".
+resolve_asset() {  # <uname-s> <uname-m>
+  "$INSTALLER" --resolve "$1" "$2"
+}
+
+test_installer_selects_a_verified_asset_per_platform() {
+  # Every supported platform must map to its own upstream archive AND its own
+  # upstream digest. Regression origin: one hardcoded linux.x86_64 archive plus
+  # one global checksum constant made the installer unusable off Linux x86_64,
+  # so a Mac contributor could not install the pin and the lint tests below
+  # silently degraded to SKIP instead of checking what CI enforces.
+  local expected actual os arch platform sha
+  # Digests confirmed against the upstream v0.11.0 release assets by direct
+  # download, so this table is the executable owner of that pairing. Bumping the
+  # pin must re-verify and update both this table and the installer's, which is
+  # exactly the coupling that keeps a new version from landing unverified.
+  while read -r os arch platform sha; do
+    [ -n "$os" ] || continue
+    expected="shellcheck-v$REQUIRED.$platform.tar.xz $sha"
+    actual=$(resolve_asset "$os" "$arch") \
+      || fail "installer refused supported platform $os/$arch"
+    [ "$actual" = "$expected" ] \
+      || fail "installer resolved $os/$arch to '$actual', expected '$expected'"
+    # A digest must never be reused across platforms, which is what a single
+    # global constant would look like.
+    [ "$(printf '%s\n' "$actual" | awk '{print $2}')" = "$sha" ] \
+      || fail "installer did not carry $platform's own checksum"
+  done <<EOF
+Darwin arm64 darwin.aarch64 56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
+Darwin x86_64 darwin.x86_64 3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6
+Linux aarch64 linux.aarch64 12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
+Linux x86_64 linux.x86_64 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+EOF
+  pass "ShellCheck installer selects each supported platform's own verified asset"
+}
+
+test_installer_resolves_the_ci_platform_unchanged() {
+  # CI runs Linux x86_64. That exact archive name and digest predate the
+  # multi-platform selection and must survive it byte for byte.
+  local actual
+  actual=$(resolve_asset Linux x86_64)
+  [ "$actual" = "shellcheck-v$REQUIRED.linux.x86_64.tar.xz 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198" ] \
+    || fail "the Linux x86_64 CI path changed behaviour: $actual"
+  pass "ShellCheck installer leaves the Linux x86_64 CI path unchanged"
+}
+
+test_installer_refuses_an_unsupported_platform() {
+  # Refusing loudly is the point: a platform upstream does not publish must not
+  # silently download some other architecture's binary.
+  local out rc combo
+  for combo in "Linux riscv64" "Darwin ppc64" "FreeBSD x86_64" "Windows x86_64"; do
+    rc=0
+    # shellcheck disable=SC2086 # Deliberate word split into os and arch.
+    out=$(resolve_asset $combo 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "installer accepted unsupported platform $combo: $out"
+    assert_contains "$out" "unsupported platform" \
+      "installer did not name the refusal for $combo"
+  done
+  pass "ShellCheck installer refuses unsupported platforms instead of mis-downloading"
+}
+
 test_installer_retries_transient_download_failure() {
-  local tmp fakebin destination out
+  local tmp fakebin destination out host_sha
   tmp=$(fm_test_tmproot fm-shellcheck-download)
   fakebin=$(fm_fakebin "$tmp")
   destination="$tmp/bin"
+  # The fake must answer with the digest the installer expects on THIS host, so
+  # the test exercises the retry path on every supported platform.
+  host_sha=$(resolve_asset "$(uname -s)" "$(uname -m)" | awk '{print $2}')
 
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
@@ -70,7 +135,7 @@ exit 2
 SH
   cat > "$fakebin/sha256sum" <<'SH'
 #!/usr/bin/env bash
-printf '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  %s\n' "$1"
+printf '%s  %s\n' "$FM_TEST_EXPECTED_SHA" "$1"
 SH
   cat > "$fakebin/tar" <<'SH'
 #!/usr/bin/env bash
@@ -94,12 +159,91 @@ exit 0
 SH
   chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
 
-  out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
+  out=$(CURL_COUNT="$tmp/curl-count" FM_TEST_EXPECTED_SHA="$host_sha" \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
     || fail "installer did not recover from a transient download failure"$'\n'"$out"
   [ "$(cat "$tmp/curl-count")" -eq 2 ] || fail "installer did not retry exactly once after recovery"
   assert_contains "$out" "download attempt 1 failed; retrying" "installer did not disclose its retry"
   [ -x "$destination/shellcheck" ] || fail "installer did not install ShellCheck after retrying"
   pass "ShellCheck installer retries a transient download failure"
+}
+
+# A sandbox PATH holding only the tools the installer needs, so a checksum tool
+# can be withheld. Echoes the sandbox bin directory.
+installer_sandbox_path() {  # <tmp>
+  local sandbox tool resolved
+  sandbox="$1/sandbox-bin"
+  mkdir -p "$sandbox"
+  for tool in bash dirname mktemp awk install mkdir rm chmod cat; do
+    resolved=$(command -v "$tool") || fail "host is missing $tool"
+    ln -sf "$resolved" "$sandbox/$tool"
+  done
+  cat > "$sandbox/uname" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" != "-m" ] || { printf '%s\n' "$(uname -m)"; exit 0; }
+printf '%s\n' "$(uname -s)"
+SH
+  cat > "$sandbox/curl" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  [ "$1" != "-o" ] || { : > "$2"; exit 0; }
+  shift
+done
+exit 2
+SH
+  cat > "$sandbox/tar" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-C" ]; then
+    mkdir -p "$2/shellcheck-v$FM_TEST_VERSION"
+    printf '#!/usr/bin/env bash\nprintf %s\n' "ok" \
+      > "$2/shellcheck-v$FM_TEST_VERSION/shellcheck"
+    chmod +x "$2/shellcheck-v$FM_TEST_VERSION/shellcheck"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  chmod +x "$sandbox/uname" "$sandbox/curl" "$sandbox/tar"
+  printf '%s\n' "$sandbox"
+}
+
+test_installer_never_skips_checksum_verification() {
+  # The portable checksum tool must never become an excuse to skip the check.
+  # Three cases: sha256sum absent but shasum present still verifies; a wrong
+  # digest is refused; and no checksum tool at all refuses rather than installing.
+  local tmp sandbox host_sha out rc
+  tmp=$(fm_test_tmproot fm-shellcheck-checksum)
+  sandbox=$(installer_sandbox_path "$tmp")
+  host_sha=$(resolve_asset "$(uname -s)" "$(uname -m)" | awk '{print $2}')
+
+  cat > "$sandbox/shasum" <<'SH'
+#!/usr/bin/env bash
+printf '%s  -\n' "$FM_TEST_SHASUM_ANSWER"
+SH
+  chmod +x "$sandbox/shasum"
+
+  rc=0
+  out=$(FM_TEST_VERSION="$REQUIRED" FM_TEST_SHASUM_ANSWER="$host_sha" \
+    PATH="$sandbox" "$INSTALLER" "$tmp/ok" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "installer did not fall back to shasum without sha256sum"$'\n'"$out"
+  [ -x "$tmp/ok/shellcheck" ] || fail "shasum fallback did not install ShellCheck"
+
+  rc=0
+  out=$(FM_TEST_VERSION="$REQUIRED" FM_TEST_SHASUM_ANSWER=deadbeef \
+    PATH="$sandbox" "$INSTALLER" "$tmp/bad" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted a mismatched checksum via shasum"$'\n'"$out"
+  assert_contains "$out" "checksum mismatch" "installer did not report the mismatch"
+  [ ! -e "$tmp/bad/shellcheck" ] || fail "installer installed a checksum-mismatched binary"
+
+  rm -f "$sandbox/shasum"
+  rc=0
+  out=$(FM_TEST_VERSION="$REQUIRED" PATH="$sandbox" "$INSTALLER" "$tmp/none" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer installed without any checksum tool"$'\n'"$out"
+  assert_contains "$out" "no SHA-256 tool found" "installer did not name the missing checksum tool"
+  [ ! -e "$tmp/none/shellcheck" ] || fail "installer installed an unverified binary"
+  pass "ShellCheck installer verifies through either checksum tool and never skips the check"
 }
 
 test_rejects_wrong_shellcheck_version() {
@@ -428,6 +572,10 @@ SH
 
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
+test_installer_selects_a_verified_asset_per_platform
+test_installer_resolves_the_ci_platform_unchanged
+test_installer_refuses_an_unsupported_platform
+test_installer_never_skips_checksum_verification
 test_installer_retries_transient_download_failure
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
