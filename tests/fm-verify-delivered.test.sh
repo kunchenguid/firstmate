@@ -544,6 +544,13 @@ test_help_prints_the_outcome_contract() {
   assert_contains "$OUT" "INSPECTED NOTHING" "--help does not document the empty-search outcome"
   assert_contains "$OUT" "SEARCH FAILED" "--help does not document the failed-search outcome"
   assert_contains "$OUT" "only 0 may be read as delivered" "--help does not state the exit-status contract"
+  # --help is generated from the header block, so it is also where an overclaim
+  # survives longest. It must describe what the two searches establish, never
+  # assert that a candidate decides brand identity by string.
+  assert_contains "$OUT" "which files reference a brand-identity helper with no graph identifier" \
+    "--help does not describe brand-identity mode by what its searches establish"
+  assert_not_contains "$OUT" "decides brand identity by string" \
+    "--help states the inference as fact"
   pass "fm-verify-delivered.sh: --help documents the four outcomes"
 }
 

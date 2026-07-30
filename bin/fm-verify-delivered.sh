@@ -11,15 +11,17 @@
 #
 # Usage:
 #   fm-verify-delivered.sh brand-identity [--no-fetch]
-#                                    who still decides brand identity by string
+#      which files reference a brand-identity helper with no graph identifier
 #   fm-verify-delivered.sh <task-id>  acceptance claims in a brief, to check by hand
 #   fm-verify-delivered.sh --help     print this header
 #
 # The exit status is the verdict, and only 0 may be read as delivered:
-#   0  CLEAN              inspected one or more files and found no violation
+#   0  CLEAN              inspected one or more files, every one of them
+#                         referencing a graph identifier
 #                         (in task-id mode: acceptance claims were extracted,
 #                         which is a checklist to work through, not a verdict)
-#   1  VIOLATIONS         found violations, listed above the verdict line
+#   1  VIOLATIONS         inspected files with no graph identifier anywhere in
+#                         them, listed above the verdict line
 #   2  USAGE              bad invocation
 #   3  INSPECTED NOTHING  the search matched no files, so it proves nothing
 #   4  SEARCH FAILED      the search itself errored, so the answer is unknown
@@ -59,7 +61,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REV="${FM_VERIFY_REV:-origin/main}"
 
 # brand-identity's definition of the migration: which files are candidates, who
-# is allowed to own string comparison, and what counts as consulting the graph.
+# is allowed to own string comparison, and which identifiers count as a graph
+# reference.
 BRAND_PATHSPEC="schema-generator/app"
 BRAND_CANDIDATE_RE='is_same_brand|normalize_entity|is_competitor_reference'
 BRAND_GRAPH_RE='graph_directives|brand_relations|ns_comparison|brand_graph|referability'
