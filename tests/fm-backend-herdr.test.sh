@@ -1795,6 +1795,43 @@ test_composer_state_claude_unbordered_prompt_is_pending() {
   pass "fm_backend_herdr_composer_state: a real-claude unbordered '❯ <text>' prompt row reads pending"
 }
 
+# THE NBSP WEDGE regression (task composer-nbsp-fix). The two fixtures above
+# claim to be captured verbatim from a real session, and their STRUCTURE is - but
+# their composer CONTENT is `❯` alone, while real Claude Code 2.1.220 pads its
+# empty composer row with U+00A0: the byte-exact row is
+# `\xe2\x9d\xaf\xc2\xa0\r` (`❯` + NBSP + CR), verified read-only on four separate
+# live panes and reproduced against real claude through tmux's independent
+# reader. bash's [[:space:]] does not match U+00A0, so the adapter's trim below
+# could not remove it and the shared owner read a lone NBSP as real unsubmitted
+# text -> `pending`, stably, on every 15s poll. Away-mode injection proceeds only
+# on an affirmative `empty`, so escalations sat undelivered for ~9.5h in each of
+# three stretches. That byte pair appeared NOWHERE under tests/, which is exactly
+# why all three wedges passed CI; it is pinned here and in
+# tests/fm-composer-lib.test.sh so the shape can never go uncovered again.
+test_composer_state_claude_unbordered_nbsp_padded_prompt_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-bare-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  20\n  21\n\n\xe2\x9c\xbb Worked for 2s\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0\r\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Opus 4.8 (1M context)   \xe2\x96\x8d               3%%\n  \xe2\x86\x90 for agents\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "the real-claude 2.1.220 idle row '❯'+U+00A0 must read empty, got '$out' (regression: this stable false 'pending' wedged away-mode escalation delivery for ~9.5h, three times)"
+  pass "fm_backend_herdr_composer_state: a real-claude NBSP-padded '❯' idle row reads empty (the NBSP wedge shape)"
+}
+
+# Same NBSP-padded row with REAL text on it: normalizing blank padding must never
+# weaken real-input protection, so this stays pending.
+test_composer_state_claude_nbsp_padded_row_with_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-bare-nbsp-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  20\n  21\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0still typing captain\r\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real text on an NBSP-padded claude prompt row must still read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real typed text on an NBSP-padded '❯' row still reads pending"
+}
+
 # The exact incident shape: a bordered decorative box (claude's own startup
 # welcome banner) is STILL in the capture window, sitting ABOVE the live,
 # unbordered "❯" prompt. Before the fix, the bordered branch was the ONLY one
@@ -2901,6 +2938,8 @@ test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
+test_composer_state_claude_unbordered_nbsp_padded_prompt_is_empty
+test_composer_state_claude_nbsp_padded_row_with_real_text_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending

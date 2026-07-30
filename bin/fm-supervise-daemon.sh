@@ -784,8 +784,18 @@ wedge_alarm_via_osascript() {  # <summary>
 
 # Post a herdr UI notification - herdr's own surface, separate from the pane and
 # its status-line. Best-effort: logs and returns 1 on failure.
+#
+# EXIT 0 IS NOT DELIVERY. `herdr notification show` reports its own outcome in
+# the payload and exits 0 either way: it answers `"shown":true` with
+# `"reason":"shown"` when it really posted, and `"shown":false` with a reason
+# such as `"disabled"` when herdr's `[ui.toast] delivery` is off - which is
+# herdr's default, so a captain who configures this channel today gets a healthy
+# log line and no alert. That is exactly the failure mode this alarm exists to
+# rule out, so an explicit `"shown":false` is a channel failure and the reason is
+# logged. A payload that carries no `shown` field (an older herdr, or an
+# unreadable capture) keeps its exit-status verdict rather than inventing one.
 wedge_alarm_via_herdr() {  # <summary>
-  local summary=$1 rc
+  local summary=$1 rc payload="" out="" reason=""
   wedge_alarm_os_notifier_override herdr "$summary"
   rc=$?
   case "$rc" in
@@ -794,10 +804,35 @@ wedge_alarm_via_herdr() {  # <summary>
   esac
   command -v herdr >/dev/null 2>&1 || {
     log "wedge alarm: herdr not found; cannot post a herdr notification"; return 1; }
-  wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
-    --body "$summary" --sound request >/dev/null 2>&1 && return 0
-  log "wedge alarm: herdr notification failed"
-  return 1
+  # The payload is captured through a file, not a command substitution, so the
+  # notifier stays a direct child of this shell and wedge_alarm_run_bounded keeps
+  # its process-group timeout and WEDGE_ALARM_NOTIFIER_PID cleanup.
+  out=$(mktemp "${TMPDIR:-/tmp}/fm-wedge-herdr.XXXXXX" 2>/dev/null) || out=
+  if [ -n "$out" ]; then
+    wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
+      --body "$summary" --sound request >"$out" 2>/dev/null
+    rc=$?
+    payload=$(tr '\n' ' ' < "$out" 2>/dev/null)
+    rm -f "$out"
+  else
+    wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
+      --body "$summary" --sound request >/dev/null 2>&1
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    log "wedge alarm: herdr notification failed"
+    return 1
+  fi
+  if [[ $payload =~ \"shown\"[[:space:]]*:[[:space:]]*false ]]; then
+    if [[ $payload =~ \"reason\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
+      reason=${BASH_REMATCH[1]}
+      reason=${reason//[^A-Za-z0-9 ._-]/}
+      reason=${reason:0:60}
+    fi
+    log "wedge alarm: herdr accepted the notification but did not show it (reason: ${reason:-unreported}); this channel reached nobody"
+    return 1
+  fi
+  return 0
 }
 
 # Run a captain-supplied command with the summary on $1 and on stdin, so an

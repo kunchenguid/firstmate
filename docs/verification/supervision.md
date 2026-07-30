@@ -195,4 +195,13 @@ Observed output:
 {"id":"cli:notification:show","result":{"reason":"shown","shown":true,"type":"notification_show"}}
 ```
 
-The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+The same command was re-run on 2026-07-29 with Herdr 0.7.5 on Linux 6.18 (WSL2), where `[ui.toast] delivery` is unset and therefore off:
+
+```json
+{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}
+```
+
+Exit status was 0 in both cases, so exit 0 alone does not prove delivery.
+The herdr channel therefore reads the payload and treats an explicit `"shown":false` as a channel failure, logging the reported reason; a build that reports no outcome keeps its exit-status verdict.
+
+The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, a failed channel falls through, and an exit-0 unshown herdr payload is recorded as a failure.

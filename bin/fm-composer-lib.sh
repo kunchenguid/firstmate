@@ -45,9 +45,11 @@
 # fm_composer_strip_ghost for the real-typed-content extraction, strips the box
 # borders, trims, and hands the result plus a <bordered> flag to
 # fm_composer_classify_content for the shared
-# empty|pending|unknown verdict. orca/cmux read a plain (unstyled) screen so
-# they have no ghost styling to strip and rely on the idle-placeholder match
-# below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
+# empty|pending|unknown verdict. An adapter's own ASCII trim is deliberately not
+# enough: the shared verdict re-normalizes non-ASCII blank padding first, which
+# is what fm_composer_normalize_blanks exists for. orca/cmux read a plain
+# (unstyled) screen so they have no ghost styling to strip and rely on the
+# idle-placeholder match below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
 
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
@@ -160,6 +162,40 @@ fm_composer_strip_ghost() {
   '
 }
 
+# fm_composer_normalize_blanks: map the non-ASCII blanks a TUI can emit as
+# composer PADDING onto an ASCII space, and drop the zero-width ones, so the
+# `[[:space:]]` trims below - and the ones every adapter already ran before
+# calling - can see an otherwise-blank row as blank. Takes the text as an
+# argument and prints the normalized text.
+#
+# WHY THIS EXISTS (task composer-nbsp-fix): real Claude Code 2.1.220 pads its
+# EMPTY composer row with U+00A0 NBSP, so the captured row is exactly
+# `❯` + `\xc2\xa0`. bash's `[[:space:]]` does not match U+00A0, so no trim could
+# remove it, the leading-glyph strip below left a lone NBSP behind, and this
+# owner concluded "real, unsubmitted content remains" -> `pending` on a
+# genuinely idle pane, stably, on every poll. Away-mode escalation injection
+# (bin/fm-supervise-daemon.sh) and verified submit both proceed only on an
+# affirmative `empty`, so that one byte pair wedged escalation delivery for
+# ~9.5 hours at a stretch. The defect was reader-independent: both the herdr
+# ANSI reader and tmux `capture-pane -e` surface the NBSP faithfully because it
+# originates in claude's own output.
+#
+# WHY IT IS SAFE: every character mapped here RENDERS AS BLANK, and nothing else
+# is touched, so this can only ever make an OTHERWISE-BLANK row read as blank. A
+# row holding any visible glyph keeps that glyph byte for byte and can never
+# become `empty`; NBSP-joined real text stays `pending`. Normalizing in this one
+# fleet-wide owner covers both ANSI readers and all four adapters at once, which
+# is why no adapter carries its own copy.
+fm_composer_normalize_blanks() {  # <text> -> normalized text on stdout
+  local s=$1
+  s=${s//$'\xc2\xa0'/ }      # U+00A0 no-break space (claude's composer padding)
+  s=${s//$'\xe2\x80\x87'/ }  # U+2007 figure space
+  s=${s//$'\xe2\x80\xaf'/ }  # U+202F narrow no-break space
+  s=${s//$'\xe2\x80\x8b'/}   # U+200B zero-width space
+  s=${s//$'\xef\xbb\xbf'/}   # U+FEFF zero-width no-break space / BOM
+  printf '%s' "$s"
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
@@ -183,6 +219,16 @@ fm_composer_idle_matches() {
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # Non-ASCII blanks first: a harness pads an EMPTY composer row with them and
+  # neither the caller's trims nor the ones here can see them (see
+  # fm_composer_normalize_blanks). Re-trim afterwards so the rest of this
+  # function keeps the trimmed inputs it documents.
+  content=$(fm_composer_normalize_blanks "$content")
+  plain_content=$(fm_composer_normalize_blanks "$plain_content")
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"
+  plain_content="${plain_content%"${plain_content##*[![:space:]]}"}"
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;

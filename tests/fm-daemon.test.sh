@@ -1188,10 +1188,13 @@ SH
 printf '%s\n' osascript >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
 exit 0
 SH
+  # FM_FAKE_HERDR_PAYLOAD lets a case reproduce herdr's own outcome payload
+  # (`notification show` exits 0 whether or not it actually showed anything).
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' herdr >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
-exit 0
+[ -z "${FM_FAKE_HERDR_PAYLOAD:-}" ] || printf '%s\n' "$FM_FAKE_HERDR_PAYLOAD"
+exit "${FM_FAKE_HERDR_EXIT:-0}"
 SH
   chmod +x "$fakebin/uname" "$fakebin/osascript" "$fakebin/herdr"
   : > "$dir/alert.log"
@@ -1280,6 +1283,57 @@ test_wedge_alarm_herdr_channel_selected() {
   grep -F 'WEDGED 800s undelivered' "$log" >/dev/null || fail "herdr channel did not carry the summary"
   grep -F 'osascript' "$log" >/dev/null && fail "herdr-only config also selected osascript"
   pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
+}
+
+# A "delivered" channel must prove it delivered. `herdr notification show` exits
+# 0 even when herdr showed nothing - with `[ui.toast] delivery` off (herdr's
+# default) it answers {"shown":false,"reason":"disabled"} - so before this the
+# captain could configure the herdr channel, read a clean daemon log, and still
+# be reached by nobody while escalations sat wedged. The real payload envelope is
+# in docs/verification/supervision.md.
+test_wedge_alarm_herdr_unshown_payload_is_a_failure() {
+  local dir daemon_log real_log rc
+  dir=$(make_wedge_case wedge-herdr-unshown)
+  daemon_log="$dir/daemon.log"; real_log="$dir/real.log"
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    FM_WEDGE_ALARM_REAL_LOG="$real_log" \
+    FM_FAKE_HERDR_PAYLOAD='{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "herdr answering \"shown\":false must be a channel failure, got rc $rc (regression: a disabled channel looked healthy)"
+  grep -F 'did not show it (reason: disabled)' "$daemon_log" >/dev/null \
+    || fail "an unshown herdr notification did not log its reason: $(cat "$daemon_log" 2>/dev/null)"
+  pass "herdr channel: an exit-0 \"shown\":false payload is logged as a failure, not silent success"
+}
+
+test_wedge_alarm_herdr_shown_payload_succeeds() {
+  local dir daemon_log real_log rc
+  dir=$(make_wedge_case wedge-herdr-shown)
+  daemon_log="$dir/daemon.log"; real_log="$dir/real.log"
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    FM_WEDGE_ALARM_REAL_LOG="$real_log" \
+    FM_FAKE_HERDR_PAYLOAD='{"id":"cli:notification:show","result":{"reason":"shown","shown":true,"type":"notification_show"}}' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a genuinely shown herdr notification must succeed, got rc $rc"
+  # An older herdr that reports no outcome at all keeps its exit-status verdict.
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    FM_WEDGE_ALARM_REAL_LOG="$real_log" wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a herdr build reporting no outcome payload must keep its exit-0 verdict, got rc $rc"
+  [ ! -s "$daemon_log" ] \
+    || fail "a successful herdr notification logged a failure: $(cat "$daemon_log")"
+  grep -q herdr "$real_log" || fail "the herdr notifier never ran"
+  # And a herdr that exits non-zero still fails loudly on its exit status alone.
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    FM_WEDGE_ALARM_REAL_LOG="$real_log" FM_FAKE_HERDR_EXIT=3 \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a non-zero herdr exit must remain a channel failure, got rc $rc"
+  grep -F 'herdr notification failed' "$daemon_log" >/dev/null \
+    || fail "a non-zero herdr exit did not log its failure: $(cat "$daemon_log" 2>/dev/null)"
+  pass "herdr channel: a \"shown\":true payload and a payload-less herdr succeed silently, a non-zero exit still fails"
 }
 
 test_wedge_alarm_command_channel_receives_summary() {
@@ -1834,6 +1888,8 @@ test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
 test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
+test_wedge_alarm_herdr_unshown_payload_is_a_failure
+test_wedge_alarm_herdr_shown_payload_succeeds
 test_wedge_alarm_command_channel_receives_summary
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
