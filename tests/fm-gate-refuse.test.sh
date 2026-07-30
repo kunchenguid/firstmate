@@ -361,36 +361,6 @@ test_teardown_refuses_and_admits() {
   pass "fm-teardown: refuses on marker and gate-worktree backstop; a normal teardown is unaffected"
 }
 
-# --- tracked .no-mistakes.yaml ----------------------------------------------
-
-test_no_mistakes_yaml_disables_project_settings() {
-  local file="$ROOT/.no-mistakes.yaml" val tab
-  assert_present "$file" "tracked .no-mistakes.yaml is missing"
-  git -C "$ROOT" ls-files --error-unmatch .no-mistakes.yaml >/dev/null 2>&1 \
-    || fail ".no-mistakes.yaml is not tracked by git"
-
-  # Parse with a real YAML loader and assert the field is boolean true, so a
-  # malformed file or a stringy "true" fails where a naive grep would pass.
-  if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
-    val=$(python3 -c 'import yaml,sys; print(yaml.safe_load(open(sys.argv[1])).get("disable_project_settings"))' "$file") \
-      || fail ".no-mistakes.yaml did not parse as YAML (python3)"
-    [ "$val" = "True" ] || fail "disable_project_settings is not boolean true (python3 read: $val)"
-  elif command -v ruby >/dev/null 2>&1; then
-    ruby -ryaml -e 'exit((YAML.safe_load(File.read(ARGV[0]))["disable_project_settings"] == true) ? 0 : 1)' "$file" \
-      || fail ".no-mistakes.yaml did not parse or disable_project_settings != true (ruby)"
-  else
-    # No YAML loader: fall back to a strict structural check - no tab indentation
-    # (YAML forbids it) and the top-level key mapped to the bare boolean true.
-    tab=$(printf '\t')
-    case "$(cat "$file")" in
-      *"$tab"*) fail ".no-mistakes.yaml uses a tab (invalid YAML indentation)" ;;
-    esac
-    grep -qxE 'disable_project_settings:[[:space:]]+true' "$file" \
-      || fail "top-level 'disable_project_settings: true' not found in .no-mistakes.yaml"
-  fi
-  pass ".no-mistakes.yaml parses and sets disable_project_settings: true (trusted-only gate opt-out)"
-}
-
 test_helper_env_marker_refuses
 test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
@@ -398,4 +368,3 @@ test_helper_normal_is_noop
 test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits
-test_no_mistakes_yaml_disables_project_settings

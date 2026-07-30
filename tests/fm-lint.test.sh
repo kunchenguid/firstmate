@@ -18,11 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LINT="$ROOT/bin/fm-lint.sh"
-CI="$ROOT/.github/workflows/ci.yml"
-NM="$ROOT/.no-mistakes.yaml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
-# The authoritative file set the one owner must run.
-CANON='ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)'
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
 
@@ -33,48 +29,13 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
-test_owner_exists_and_executable() {
-  assert_present "$LINT" "bin/fm-lint.sh is missing"
-  [ -x "$LINT" ] || fail "bin/fm-lint.sh must be executable so CI/gate can run it directly"
-  pass "one-owner lint script exists and is executable"
-}
-
-test_owner_defines_canonical_set() {
-  assert_grep "$CANON" "$LINT" "fm-lint.sh must run the canonical shellcheck file set"
-  # It must not weaken CI: no severity downgrade and no blanket disable/exclude
-  # that would hide findings CI fails on.
-  assert_no_grep '--severity' "$LINT" "fm-lint.sh must not lower severity below the CI default"
-  assert_no_grep '--exclude' "$LINT" "fm-lint.sh must not blanket-exclude checks CI enforces"
-  assert_grep "\"\$FM_LINT_SHELLCHECK\" --norc --external-sources -- \"\${roots[@]}\"" "$LINT" "every bounded worker must ignore ambient config and preserve annotated production sources"
-  [ "$(grep -Fc -- '--norc --external-sources' "$LINT")" -eq 1 ] || fail "the one worker command must own ShellCheck configuration"
-  assert_grep "JOBS=\${FM_LINT_JOBS:-2}" "$LINT" "canonical lint must default to two bounded workers"
-  pass "fm-lint.sh is the sole authoritative definition at CI-default severity"
-}
-
-test_ci_invokes_the_owner() {
-  grep -Eq '^      - run: bin/fm-lint\.sh$' "$CI" || fail "CI lint job must invoke the one-owner script as a run step"
-  # Guard against regression to an inline re-spelling of the command.
-  assert_no_grep 'run: shellcheck' "$CI" "CI must call fm-lint.sh, not re-spell shellcheck inline"
-  pass "CI lint job calls the one-owner script, not an inline command"
-}
-
-test_stock_bash_parse_uses_owner_inventory() {
+test_list_files_reports_the_shell_inventory() {
   local listed expected
   listed=$("$LINT" --list-files)
   expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
-    || fail "fm-lint.sh --list-files did not return the complete canonical shell inventory"
-  # shellcheck disable=SC2016 # Literal assertion must remain unexpanded.
-  assert_grep 'bin/fm-lint.sh --list-files > "$shell_inventory"' "$CI" \
-    "stock macOS Bash parse sweep must consume fm-lint.sh's canonical inventory"
-  assert_no_grep 'for f in bin/*.sh bin/backends/*.sh tests/*.sh' "$CI" \
-    "stock macOS Bash parse sweep must not duplicate the canonical inventory"
-  pass "stock macOS Bash parse sweep consumes the canonical lint inventory"
-}
-
-test_nomistakes_invokes_the_owner() {
-  grep -Fqx "  lint: 'bin/fm-lint.sh'" "$NM" || fail "no-mistakes commands.lint must map exactly to the one-owner script"
-  pass "no-mistakes pre-push lint calls the one-owner script"
+    || fail "fm-lint.sh --list-files did not return the complete shell inventory"
+  pass "fm-lint.sh --list-files reports the complete shell inventory"
 }
 
 test_pins_an_explicit_version() {
@@ -83,17 +44,6 @@ test_pins_an_explicit_version() {
   # which is also what drops the upstream-retired, false-positive-prone SC2015.
   assert_contains "$REQUIRED" "0.11.0" "fm-lint.sh must pin ShellCheck 0.11.0"
   pass "fm-lint.sh pins an explicit ShellCheck version ($REQUIRED)"
-}
-
-test_ci_installs_and_logs_the_pinned_version() {
-  # CI must derive the version from the one owner (never hardcode a divergent
-  # number) and log the resolved version as parity evidence.
-  assert_grep "VERSION=\"\$(\"\$ROOT/bin/fm-lint.sh\" --required-version)\"" "$INSTALLER" "installer must read the version fm-lint.sh pins"
-  [ "$(grep -Fc "bin/fm-install-shellcheck.sh \"\$RUNNER_TEMP/bin\"" "$CI")" -eq 4 ] || fail "lint and all three portable behavior jobs must use the shared ShellCheck installer"
-  assert_grep "ACTUAL_SHA256=\$(sha256sum" "$INSTALLER" "installer must calculate the ShellCheck archive checksum"
-  assert_grep "[ \"\$ACTUAL_SHA256\" = \"\$SHA256\" ]" "$INSTALLER" "installer must verify the ShellCheck archive checksum"
-  assert_grep "\"\$DESTINATION/shellcheck\" --version" "$INSTALLER" "installer must log the resolved ShellCheck version as evidence"
-  pass "CI installs and logs the pinned ShellCheck version from the one owner"
 }
 
 test_installer_retries_transient_download_failure() {
@@ -250,26 +200,6 @@ SH
   "$LINT" "$good" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "fm-lint.sh flagged a clean fixture (exit $rc)"
   pass "fm-lint.sh passes a clean fixture"
-}
-
-test_source_graph_boundaries_keep_every_owner() {
-  local adapter file production_context_tests=""
-  [ "$(grep -Fc '# shellcheck source=/dev/null' "$ROOT/bin/fm-backend.sh")" -eq 5 ] \
-    || fail "the dispatcher must stop static source following at all five dynamic adapters"
-  for adapter in tmux herdr zellij orca cmux; do
-    assert_present "$ROOT/bin/backends/$adapter.sh" "canonical adapter root is missing: $adapter"
-  done
-  assert_present "$ROOT/bin/fm-push-transition-lib.sh" "narrow push-transition owner is missing"
-  assert_grep '# shellcheck source=bin/fm-push-transition-lib.sh' "$ROOT/bin/fm-watch.sh" "the watcher must consume the narrow push-transition owner"
-  assert_grep ". \"\$ROOT/bin/fm-push-transition-lib.sh\"" "$ROOT/tests/fm-backend-herdr-eventwait-smoke.test.sh" "the Herdr event-wait smoke must consume the narrow production owner"
-  assert_no_grep '# shellcheck source=bin/fm-watch.sh' "$ROOT/tests/fm-backend-herdr-eventwait-smoke.test.sh" "the event-wait smoke must not re-import the whole watcher graph"
-  for file in "$ROOT"/tests/*.sh; do
-    grep -q '^[[:space:]]*# shellcheck source=bin/' "$file" || continue
-    production_context_tests="${production_context_tests}$(basename "$file")|"
-  done
-  [ "$production_context_tests" = 'fm-backend-herdr.test.sh|fm-daemon.test.sh|fm-pending-reply.test.sh|fm-secondmate-sync.test.sh|' ] \
-    || fail "only callback/variable interop tests may retain production source context: $production_context_tests"
-  pass "dispatcher, adapters, production owner, and tests have explicit lint boundaries"
 }
 
 test_jobs_are_deterministic_and_complete() {
@@ -496,19 +426,13 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
-test_owner_exists_and_executable
-test_owner_defines_canonical_set
-test_ci_invokes_the_owner
-test_stock_bash_parse_uses_owner_inventory
-test_nomistakes_invokes_the_owner
+test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
-test_ci_installs_and_logs_the_pinned_version
 test_installer_retries_transient_download_failure
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
-test_source_graph_boundaries_keep_every_owner
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity

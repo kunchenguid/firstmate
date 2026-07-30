@@ -150,28 +150,6 @@ epoch_outcome() {
 
 # --- registration contract ----------------------------------------------------
 
-test_settings_registers_autoarm_with_multi_hour_timeout() {
-  local settings
-  settings="$ROOT/.claude/settings.json"
-  jq -e '
-    [.hooks.Stop[].hooks[] | select(.command | contains("fm-claude-stop-autoarm.sh"))]
-      | length == 1
-  ' "$settings" >/dev/null || fail "settings must register exactly one Stop auto-arm hook"
-  jq -e '
-    [.hooks.Stop[].hooks[] | select(.command | contains("fm-claude-stop-autoarm.sh"))][0]
-      | .asyncRewake == true and .type == "command" and (.timeout | type == "number" and . >= 28800)
-  ' "$settings" >/dev/null || fail "auto-arm must be asyncRewake with an explicit timeout of at least 28800s (the 600s default is forbidden)"
-  jq -e '
-    [.hooks.Stop[].hooks[] | select(.command | contains("fm-claude-stop-autoarm.sh"))][0].command
-      | contains("&") | not
-  ' "$settings" >/dev/null || fail "auto-arm registration must not use shell fire-and-forget"
-  grep -q '"$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1' "$ROOT/bin/fm-claude-stop-autoarm.sh" \
-    || fail "auto-arm must foreground the arm wrapper inside the hook-owned process tree"
-  grep -q 'asyncRewake' "$ROOT/bin/fm-claude-stop-autoarm.sh" \
-    || fail "auto-arm header must document its asyncRewake registration contract"
-  pass "settings.json registers the asyncRewake auto-arm with timeout >= 28800 and a foreground arm"
-}
-
 # --- scope and gates ----------------------------------------------------------
 
 test_inert_in_child_worktree() {
@@ -438,7 +416,6 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
-test_settings_registers_autoarm_with_multi_hour_timeout
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming

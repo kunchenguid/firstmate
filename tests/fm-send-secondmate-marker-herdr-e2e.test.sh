@@ -27,7 +27,7 @@ if [ "${FM_SEND_MARKER_HERDR_E2E:-0}" != 1 ]; then
   exit 0
 fi
 
-for tool in git herdr jq pi python3; do
+for tool in git herdr jq pi; do
   command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
 done
 
@@ -39,6 +39,7 @@ SECOND_HOME="$TMP_ROOT/secondmate-home"
 CAPTURE="$TMP_ROOT/pi-before-agent.jsonl"
 FAKEBIN="$TMP_ROOT/fakebin"
 ORIGINAL_PATH=$PATH
+REAL_PI=$(command -v pi)
 ID='marker-pi-sm'
 REQUEST='FM_MARKER_HERDR_E2E exact-id request'
 DIRECT='FM_MARKER_HERDR_DIRECT captain input'
@@ -93,38 +94,25 @@ You are a task-local secondmate used only for the marker transport regression.
 Stay idle and do not initiate work.
 EOF
 
-# The extension is already an explicit Pi -e resource in the real secondmate
-# launch template, so its project_trust hook can grant session-only trust before
-# project resources load. before_agent_start records the exact prompt bytes and
-# aborts before any provider request, keeping this transport regression local.
+# A separate explicit Pi extension grants session-only project trust, records
+# before_agent_start prompt bytes, and aborts before any provider request.
+# The PATH wrapper adds only that test resource while preserving the production
+# secondmate launch and its own extension arguments unchanged.
 CAPTURE_JSON=$(printf '%s' "$CAPTURE" | jq -Rs .)
-python3 - "$SECOND_HOME/.pi/extensions/fm-primary-turnend-guard.ts" "$CAPTURE_JSON" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-capture_json = sys.argv[2]
-source = path.read_text()
-import_anchor = 'import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\n'
-source = source.replace(
-    import_anchor,
-    import_anchor
-    + 'import { appendFileSync as fmAppendFileSync } from "node:fs";\n'
-    + f'const fmCapturePath = {capture_json};\n',
-    1,
-)
-factory_anchor = 'export default function (pi: ExtensionAPI) {\n'
-replacement = '''export default function (pi: ExtensionAPI) {
+CAPTURE_EXTENSION="$TMP_ROOT/fm-send-marker-capture.ts"
+cat > "$CAPTURE_EXTENSION" <<EOF
+import { appendFileSync } from "node:fs";
+const capturePath = $CAPTURE_JSON;
+export default function (pi: any) {
   pi.on("project_trust", () => ({ trusted: "yes", remember: false }));
   pi.on("before_agent_start", (event, ctx) => {
-    fmAppendFileSync(fmCapturePath, `${JSON.stringify({ prompt: event.prompt, hex: Buffer.from(event.prompt, "utf8").toString("hex") })}\\n`);
+    appendFileSync(capturePath, \`\${JSON.stringify({ prompt: event.prompt, hex: Buffer.from(event.prompt, "utf8").toString("hex") })}\\n\`);
     ctx.abort();
   });
-'''
-if import_anchor not in source or factory_anchor not in source:
-    raise SystemExit("Pi extension insertion point missing")
-path.write_text(source.replace(factory_anchor, replacement, 1))
-PY
+}
+EOF
+printf '#!/usr/bin/env bash\nexec %q -e %q "$@"\n' "$REAL_PI" "$CAPTURE_EXTENSION" > "$FAKEBIN/pi"
+chmod +x "$FAKEBIN/pi"
 
 "$LAB_HELPER" provision "$SESSION"
 PATH="$FAKEBIN:$ORIGINAL_PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$SENDER_HOME" HERDR_SESSION="$SESSION" \

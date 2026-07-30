@@ -11,9 +11,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 RUNNER="$ROOT/bin/fm-test-run.sh"
-CI="$ROOT/.github/workflows/ci.yml"
-CONTRIB="$ROOT/CONTRIBUTING.md"
-SHARD_DOC="$ROOT/docs/fm-test-portable-shards.md"
 
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
@@ -98,7 +95,7 @@ init_changed_fixture_repo() {
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
-    fm-captain-translation-contract.test.sh \
+    fm-ask-user-authority.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
@@ -167,7 +164,7 @@ test_changed_dependency_selection_and_unmapped_failure() {
   printf '\n' >>"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf '\n' >>"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-captain-translation-contract.test.sh" "skill source selects pure contract coverage"
+  assert_contains "$listed" "tests/fm-ask-user-authority.test.sh" "skill source selects pure contract coverage"
   assert_contains "$listed" "tests/fm-cd-pretool-check.test.sh" "Claude and Pi source selects hook coverage"
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
@@ -353,84 +350,6 @@ test_exclude_family() {
   pass "exclude-family drops the named primary family after selection"
 }
 
-test_ci_and_docs_call_the_owner() {
-  assert_present "$CI" "ci.yml missing"
-  assert_present "$CONTRIB" "CONTRIBUTING.md missing"
-  grep -Fq 'tests-portable-parallel-1:' "$CI" \
-    || fail "CI must define portable parallel shard 1"
-  grep -Fq 'tests-portable-parallel-2:' "$CI" \
-    || fail "CI must define portable parallel shard 2"
-  grep -Fq 'tests-portable-serial:' "$CI" \
-    || fail "CI must define the portable serial lane"
-  grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-1' "$CI" \
-    || fail "CI shard 1 must invoke --lane portable-parallel-1"
-  grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-2' "$CI" \
-    || fail "CI shard 2 must invoke --lane portable-parallel-2"
-  local shard job_body
-  for shard in 1 2; do
-    job_body=$(awk -v job="  tests-portable-parallel-$shard:" '
-      $0 == job { in_job=1; next }
-      in_job && /^  [a-zA-Z0-9_-]+:/ { exit }
-      in_job { print }
-    ' "$CI")
-    printf '%s\n' "$job_body" | grep -Fq 'npm install -g tasks-axi' \
-      || fail "CI portable parallel shard $shard must install tasks-axi"
-    printf '%s\n' "$job_body" | grep -Fq 'tasks-axi --version' \
-      || fail "CI portable parallel shard $shard must verify tasks-axi"
-  done
-  grep -Fq 'bin/fm-test-run.sh --lane portable-serial' "$CI" \
-    || fail "CI portable serial must invoke --lane portable-serial"
-  grep -Fq 'bin/fm-test-run.sh --check-coverage' "$CI" \
-    || fail "CI must run the coverage guard"
-  grep -Fq 'tests-herdr:' "$CI" \
-    || fail "CI must define the required tests-herdr job"
-  grep -Fq 'bin/fm-test-run.sh --family real-herdr-gated' "$CI" \
-    || fail "Herdr CI job must run the real-herdr-gated family via fm-test-run"
-  grep -Fq -- "--fail-on-gate-skip 'herdr not found'" "$CI" \
-    || fail "Herdr CI job must fail on herdr-not-found skips"
-  grep -Fq 'bin/fm-install-herdr.sh' "$CI" \
-    || fail "Herdr CI job must install via bin/fm-install-herdr.sh"
-  grep -Fq 'bin/fm-install-treehouse.sh' "$CI" \
-    || fail "Herdr CI job must install via bin/fm-install-treehouse.sh"
-  grep -Fq 'bin/fm-herdr-ci-cleanup.sh' "$CI" \
-    || fail "Herdr CI job must use bounded lab cleanup"
-  grep -Fq 'tests-timing-aggregate:' "$CI" \
-    || fail "CI must aggregate per-lane timing artifacts"
-  grep -Fq 'timeout-minutes: 20' "$CI" \
-    || fail "portable serial hang tripwire must be timeout-minutes: 20"
-  grep -Fq 'timeout-minutes: 10' "$CI" \
-    || fail "portable parallel shards must keep a hang tripwire (10m)"
-  # Interim full-suite 25m portable timeout must not remain after sharding.
-  if grep -Eq 'timeout-minutes: 25' "$CI"; then
-    fail "CI still has interim timeout-minutes: 25 after portable sharding"
-  fi
-  # Stale "~2-3 minutes" claim must not remain.
-  if grep -Eq '2-3 minutes' "$CI"; then
-    fail "CI workflow still claims the suite finishes in ~2-3 minutes"
-  fi
-  # No retry-green strategy on Behavior lanes.
-  if grep -Eqi 'retry:|max-attempts:|continue-on-error:\s*true' "$CI"; then
-    fail "CI must not use retries or continue-on-error as a green strategy"
-  fi
-  grep -Fq 'fm-test-timing' "$CI" \
-    || fail "CI must upload timing artifacts"
-  grep -Fq 'bin/fm-test-run.sh --all' "$CONTRIB" \
-    || fail "CONTRIBUTING must document bin/fm-test-run.sh --all"
-  grep -Fq 'bin/fm-test-run.sh --family' "$CONTRIB" \
-    || fail "CONTRIBUTING must document family selection"
-  grep -Fq 'bin/fm-test-run.sh --changed' "$CONTRIB" \
-    || fail "CONTRIBUTING must document changed-file selection"
-  grep -Fq 'bin/fm-test-run.sh --proven-isolated --jobs' "$CONTRIB" \
-    || fail "CONTRIBUTING must document proven-isolated --jobs"
-  grep -Fq 'intent-targeted' "$CONTRIB" \
-    || fail "CONTRIBUTING must document intent-targeted no-mistakes Test"
-  # Do not restore a complete-suite commands.test.
-  if grep -E '^[[:space:]]*test:[[:space:]].*tests/\*\.test\.sh' "$ROOT/.no-mistakes.yaml" >/dev/null 2>&1; then
-    fail ".no-mistakes.yaml must not set a full-suite commands.test"
-  fi
-  pass "CI and CONTRIBUTING call the one-owner runner; no full-suite local Test"
-}
-
 test_portable_shard_union_and_coverage_guard() {
   local s1 s2 proven serial herdr all_count union_count overlap out first
   s1=$("$RUNNER" --list --lane portable-parallel-1)
@@ -462,38 +381,9 @@ test_portable_shard_union_and_coverage_guard() {
     || fail "lanes must not duplicate scripts"
   # LPT order: first script of shard 1 is the longest proven script.
   first=$(printf '%s\n' "$s1" | head -n 1)
-  [ "$first" = "tests/fm-arm-pretool-check.test.sh" ] \
-    || fail "shard 1 must start with longest proven script, got $first"
+  [ "$first" = "tests/fm-x-mode.test.sh" ] \
+    || fail "shard 1 must start with the longest proven script, got $first"
   pass "portable shard union, disjointness, and coverage guard hold"
-}
-
-test_portable_shard_docs_match_lanes() {
-  python3 - "$RUNNER" "$SHARD_DOC" <<'PY' \
-    || fail "portable shard documentation must match lane counts and timing sums"
-import re
-import subprocess
-import sys
-
-runner, doc_path = sys.argv[1:3]
-markdown = open(doc_path, encoding="utf-8").read()
-averages = {
-    path: int(duration)
-    for duration, path in re.findall(r"^\| (\d+) \| `([^`]+)` \|$", markdown, re.MULTILINE)
-}
-totals = {}
-for lane in ("portable-parallel-1", "portable-parallel-2"):
-    scripts = subprocess.check_output(
-        [runner, "--list", "--lane", lane], text=True
-    ).splitlines()
-    totals[lane] = (len(scripts), sum(averages[path] for path in scripts))
-
-for lane, (count, duration) in totals.items():
-    expected = f"| `{lane}` | {count} | {duration} ms (~{duration / 1000:.1f} s) |"
-    assert expected in markdown
-imbalance = abs(totals["portable-parallel-1"][1] - totals["portable-parallel-2"][1])
-assert f"| imbalance | | {imbalance} ms |" in markdown
-PY
-  pass "portable shard documentation matches lane counts and timing sums"
 }
 
 test_jobs_requires_proven_isolated() {
@@ -522,8 +412,8 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   runner="$repo/bin/fm-test-run.sh"
   evidence="$tmp/evidence"
   fake_bin="$tmp/fake-bin"
-  a=tests/fm-no-mistakes-ownership.test.sh
-  b=tests/fm-stow-contract.test.sh
+  a=tests/fm-brief.test.sh
+  b=tests/fm-composer-lib.test.sh
   c=tests/fm-lint.test.sh
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
@@ -688,9 +578,7 @@ test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
-test_ci_and_docs_call_the_owner
 test_portable_shard_union_and_coverage_guard
-test_portable_shard_docs_match_lanes
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json

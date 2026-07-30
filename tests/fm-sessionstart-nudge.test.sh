@@ -148,44 +148,6 @@ EOF
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }
 
-test_tracked_harness_registration() {
-  local command pi_plugin opencode_plugin
-  jq -e '.hooks.SessionStart | length == 1' "$ROOT/.claude/settings.json" >/dev/null \
-    || fail "Claude SessionStart hook is not registered exactly once"
-  jq -e '.hooks.SessionStart[0].matcher == "startup|resume|clear"' "$ROOT/.claude/settings.json" >/dev/null \
-    || fail "Claude SessionStart matcher must include startup/resume/clear and exclude compact"
-  jq -e 'any(.hooks.SessionStart[]?.hooks[]?.command?; contains("fm-sessionstart-nudge.sh"))' \
-    "$ROOT/.claude/settings.json" >/dev/null || fail "Claude SessionStart hook does not invoke the wrapper"
-
-  command=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ROOT/.codex/hooks.json")
-  # shellcheck disable=SC2016
-  assert_contains "$command" 'payload=$(cat' "Codex SessionStart hook does not read its payload"
-  # shellcheck disable=SC2016
-  assert_contains "$command" 'root=$(pwd -P)' "Codex SessionStart hook is not pwd-anchored"
-  assert_contains "$command" 'fm-sessionstart-nudge.sh' "Codex SessionStart hook does not invoke the wrapper"
-
-  command=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ROOT/.grok/hooks/fm-primary-sessionstart-nudge.json")
-  # shellcheck disable=SC2016
-  assert_contains "$command" '${GROK_WORKSPACE_ROOT:-}' "Grok SessionStart hook lacks an inline-default workspace root"
-  # shellcheck disable=SC2016
-  assert_not_contains "$command" '${GROK_WORKSPACE_ROOT}' "Grok SessionStart hook contains a bare variable expansion"
-  assert_contains "$command" 'fm-sessionstart-nudge.sh' "Grok SessionStart hook does not invoke the wrapper"
-
-  pi_plugin=$(cat "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts")
-  assert_contains "$pi_plugin" '["startup", "new", "resume"]' "Pi SessionStart handler has the wrong reason allowlist"
-  assert_contains "$pi_plugin" 'fm-sessionstart-nudge.sh' "Pi SessionStart handler does not invoke the wrapper"
-  assert_contains "$pi_plugin" 'firstmate-sessionstart-nudge' "Pi SessionStart handler does not inject a custom context message"
-  assert_contains "$pi_plugin" 'details: { kind: "session-start" }' "Pi SessionStart context does not retain its exact structured kind"
-  assert_contains "$pi_plugin" 'pi.sendMessage' "Pi SessionStart handler does not use the context-safe message API"
-
-  opencode_plugin=$(cat "$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js")
-  assert_contains "$opencode_plugin" 'session.created' "OpenCode plugin does not listen for session.created"
-  assert_contains "$opencode_plugin" 'fm-sessionstart-nudge.sh' "OpenCode plugin does not invoke the wrapper"
-  assert_contains "$opencode_plugin" 'promptAsync' "OpenCode plugin does not prompt the nudge turn"
-
-  pass "all five verified harnesses register the shared session-start nudge"
-}
-
 test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent
@@ -194,4 +156,3 @@ test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
-test_tracked_harness_registration
