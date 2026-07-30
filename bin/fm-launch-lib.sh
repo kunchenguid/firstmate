@@ -36,7 +36,7 @@ shell_quote() {
 #   2. the harness is verified but this kind is deliberately unsupported for it -
 #      today only kimi with kind=primary, whose remedy is a different harness,
 #      NOT the raw-launch escape hatch.
-# Never add a permissive default arm to either case. bin/fm-spawn.sh:446 and :450
+# Never add a permissive default arm to either case. bin/fm-spawn.sh:466 and :470
 # name only cause 1 because fm-spawn never passes kind=primary; a consumer that
 # does pass it owes the user the cause-2 wording.
 #
@@ -103,16 +103,16 @@ shell_quote() {
 #   codex     --dangerously-bypass-approvals-and-sandbox
 #   opencode  OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}', which
 #             pre-allows every permission before the TUI starts
-#   grok      --always-approve, which .agents/skills/harness-adapters/SKILL.md:304
+#   grok      --always-approve, which .agents/skills/harness-adapters/SKILL.md:314
 #             records as auto-approving every tool execution, verified to run
 #             fully unattended and equivalent to --permission-mode bypassPermissions
 #   pi        (and pi-signed, which shares its arm) no flag, because none exists
-#             to pass: SKILL.md:272 records that pi has no permission system at
+#             to pass: SKILL.md:277 records that pi has no permission system at
 #             all, so a pi session is autonomous by construction. Its template -
 #             the bare selected binary plus the FM_PI_HARNESS identity marker,
 #             which changes no permission posture - is complete, NOT missing an
 #             autonomy flag its siblings carry - do not add one.
-# Pi's first-run project trust dialog (SKILL.md:276-278) is folder trust, not a
+# Pi's first-run project trust dialog (SKILL.md:286) is folder trust, not a
 # permission prompt, and is a separate concern that neither satisfies nor softens
 # this obligation.
 launch_template() {
@@ -160,13 +160,13 @@ launch_template() {
         opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--auto' ;;
         # Bare `pi` is the documented primary launch (README.md:102); the project
         # trust prompt approved once per clone is what makes the tracked
-        # .pi/extensions/*.ts auto-load (README.md:106), so a primary needs no
+        # .pi/extensions/*.ts auto-load (README.md:108), so a primary needs no
         # explicit -e flag. tests/fm-pi-primary-live-e2e.test.sh:266 adds
         # --approve --no-session --no-context-files --no-extensions with explicit
         # -e paths, but those are that test's isolation scaffolding - it runs
         # against a throwaway clone - not the verified primary form, so they are
         # deliberately not copied here. This template carries no autonomy flag
-        # because pi has none to carry: SKILL.md:272 records that pi has no
+        # because pi has none to carry: SKILL.md:277 records that pi has no
         # permission system, so the session is autonomous by construction. The
         # header's CONSUMER OBLIGATION therefore covers this arm like every other -
         # a pi primary runs without permission prompts too, it just gets there
@@ -179,20 +179,20 @@ launch_template() {
         pi|pi-signed) printf '%s%s' "FM_PI_HARNESS=$harness $harness" ' __MODELFLAG____EFFORTFLAG__' ;;
         # --trust is supervision-safety knowledge, not one-time setup trivia:
         # without folder trust the primary turn-end guard FAILS OPEN
-        # (.agents/skills/harness-adapters/SKILL.md:345), and because trust is
+        # (.agents/skills/harness-adapters/SKILL.md:355), and because trust is
         # granted once per clone a fresh clone is exactly when its absence bites
-        # (README.md:105, docs/turnend-guard.md:63). The empirical primary launch
+        # (README.md:107, docs/turnend-guard.md:71). The empirical primary launch
         # is tests/fm-grok-continuity-live-e2e.test.sh:76,
         # `grok --trust --always-approve --reasoning-effort low`, where
         # --reasoning-effort is what __EFFORTFLAG__ resolves to; README.md:96
         # documents the same `grok --trust`. --always-approve auto-approves every
-        # tool execution (.agents/skills/harness-adapters/SKILL.md:304), so the
+        # tool execution (.agents/skills/harness-adapters/SKILL.md:314), so the
         # header's CONSUMER OBLIGATION covers this arm: a consumer must tell the
         # captain this session has no permission prompts.
         grok) printf '%s' 'grok --trust --always-approve __MODELFLAG____EFFORTFLAG__' ;;
         # kimi refuses rather than emitting an unsubstitutable command: README.md:61
         # lists only Claude Code, Grok, Pi, pi-signed, Codex, and OpenCode as verified
-        # primary harnesses (docs/configuration.md:177 defers that narrower set to README),
+        # primary harnesses (docs/configuration.md:191 defers that narrower set to README),
         # and only bin/fm-spawn.sh can resolve __KIMIBIN__ (see the header above).
         # A non-zero return is the same refusal an unverified adapter gets.
         kimi) return 1 ;;

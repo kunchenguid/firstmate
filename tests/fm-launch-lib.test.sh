@@ -125,7 +125,7 @@ test_primary_opencode_template_is_pinned() {
 }
 
 test_primary_pi_template_is_pinned() {
-  # README.md:102 documents the primary launch as bare `pi`, and README.md:106
+  # README.md:102 documents the primary launch as bare `pi`, and README.md:108
   # records that the once-per-clone project trust prompt is what auto-loads the
   # tracked .pi/extensions/*.ts. tests/fm-pi-primary-live-e2e.test.sh:266 adds
   # --approve --no-session --no-context-files --no-extensions plus explicit -e
@@ -145,9 +145,9 @@ test_primary_grok_template_is_pinned() {
   # `grok --trust --always-approve --reasoning-effort low`, where
   # --reasoning-effort is what __EFFORTFLAG__ resolves to; README.md:96 documents
   # `grok --trust` too. --trust is load-bearing, not setup trivia:
-  # .agents/skills/harness-adapters/SKILL.md:345 records that without folder trust
-  # the primary turn-end guard fails open, README.md:105 and
-  # docs/turnend-guard.md:63 say the same, and trust being granted once per clone
+  # .agents/skills/harness-adapters/SKILL.md:355 records that without folder trust
+  # the primary turn-end guard fails open, README.md:107 and
+  # docs/turnend-guard.md:71 say the same, and trust being granted once per clone
   # means a fresh clone is exactly when dropping it bites.
   assert_template primary grok 'grok --trust --always-approve __MODELFLAG____EFFORTFLAG__'
   pass "launch_template: the grok primary template is pinned, --trust included"
@@ -155,7 +155,7 @@ test_primary_grok_template_is_pinned() {
 
 test_primary_kimi_refuses() {
   # README.md:61 lists only Claude Code, Grok, Pi, pi-signed, Codex, and OpenCode
-  # as verified primary harnesses (docs/configuration.md:177 defers that narrower
+  # as verified primary harnesses (docs/configuration.md:191 defers that narrower
   # set to README), and __KIMIBIN__ is resolvable by bin/fm-spawn.sh alone, which never
   # launches a primary. Refusing beats handing back an unsubstitutable command.
   launch_template kimi primary >/dev/null 2>&1 \
