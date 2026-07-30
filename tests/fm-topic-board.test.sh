@@ -471,6 +471,26 @@ test_claimed_item_cadence_survives_concurrent_wake_clock_resets() {
   pass "claimed-item cadence uses each item's own claimed_at and ignores concurrent wake-clock resets"
 }
 
+test_claimed_item_with_missing_claimed_at_surfaces_immediately() {
+  local home data count
+  home=$(make_home claimed-missing-timestamp)
+  data="$home/data/fm-telegram-topics"
+  mkdir -p "$data/inbox"
+
+  jq -n \
+    '{update_id:88, status:"claimed", claimed_by:"alpha-mate", topic:"AlphaDev", project:"Alpha'"'"'s Place", route:"alpha-mate", text:"corrupted claim", group:"Example Dev Group", from_id:"700000001", chat_id:"-1001234567890", thread_id:3}' \
+    > "$data/inbox/update-88.json"
+
+  (
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT"
+    . "$ROOT/bin/fm-topic-lib.sh"
+    printf '%s\n' "$(date +%s)" > "$FM_TOPIC_LAST_WAKE"
+    count=$(fm_topic_unanswered_count 14400) || exit 1
+    [ "$count" -eq 1 ] || { echo "expected a claimed item with no claimed_at to surface immediately, got $count" >&2; exit 1; }
+  ) || fail "a claimed item with a missing claimed_at stayed silently invisible instead of surfacing"
+  pass "claimed items with a missing or unparseable claimed_at fail open and surface immediately"
+}
+
 test_service_and_supervision_integration() {
   local home fakebin systemctl_log systemd_dir unit out status plugin repo arm_log
   home=$(make_home service)
@@ -550,4 +570,5 @@ test_queued_topic_wake_survives_unhandled_usr1
 test_claim_reply_idempotency_and_ambiguous_delivery
 test_claimed_item_reminds_on_the_longer_cadence
 test_claimed_item_cadence_survives_concurrent_wake_clock_resets
+test_claimed_item_with_missing_claimed_at_surfaces_immediately
 test_service_and_supervision_integration

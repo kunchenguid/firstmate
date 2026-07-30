@@ -360,6 +360,7 @@ fm_topic_last_wake_age() {
 
 fm_topic_parse_iso8601_epoch() {
   local stamp=$1 epoch
+  [ -n "$stamp" ] || return 1
   epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$stamp" +%s 2>/dev/null \
     || date -u -d "$stamp" +%s 2>/dev/null) || return 1
   case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
@@ -381,8 +382,11 @@ fm_topic_unanswered_count() {
       pending) count=$((count + 1)) ;;
       claimed)
         claimed_at=$(jq -r '.claimed_at // empty' "$item" 2>/dev/null) || continue
-        claimed_epoch=$(fm_topic_parse_iso8601_epoch "$claimed_at") || continue
-        [ "$((now - claimed_epoch))" -ge "$claimed_remind_seconds" ] && count=$((count + 1))
+        if claimed_epoch=$(fm_topic_parse_iso8601_epoch "$claimed_at"); then
+          [ "$((now - claimed_epoch))" -ge "$claimed_remind_seconds" ] && count=$((count + 1))
+        else
+          count=$((count + 1))
+        fi
         ;;
     esac
   done
