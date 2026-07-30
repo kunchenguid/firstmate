@@ -18,12 +18,17 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and X-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
+`bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
+`docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
+`AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
+Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
 ## Task telemetry
 
 `fm-spawn.sh` estimates task difficulty from the launch brief before handoff and records `difficulty=simple`, `difficulty=intermediate`, `difficulty=complex`, or `difficulty=unknown` beside the selected `harness=`, `model=`, and `effort=` fields in `state/<id>.meta`.
 The heuristic is intentionally local and deterministic: brief size, lifecycle keywords, investigation language, and explicit "small" wording determine the bucket.
 Only the task-specific part of a brief is scored, so the generated `fm-brief.sh` scaffold sections cannot decide the bucket on their own.
-`bin/fm-brief.sh` owns the `<!-- fm-brief:task-begin -->` and `<!-- fm-brief:task-end -->` markers that delimit the firstmate-filled text a scaffolded brief is scored on.
+`bin/fm-brief.sh` owns the `<!-- fm-brief:task-begin -->` and `<!-- fm-brief:task-end -->` markers that delimit the firstmate-filled text a scaffolded brief is scored on; a brief carrying only one of the pair is scored by the older scaffold-heading path instead.
 The exact scoring and usage-log mechanics live in `bin/fm-task-telemetry.sh`, which is the owner of this telemetry contract.
 `fm-spawn.sh` also drops an empty `state/<id>.spawn-ref` marker at launch; its mtime is the stable lower bound for the task's own harness session logs, because `state/<id>.meta` is rewritten later by helpers such as `fm-pr-check.sh`.
 `fm-teardown.sh` runs `fm-task-telemetry.sh collect <id>` before volatile task state or worktree files are removed, and removes the marker with the rest of that task's state.
@@ -37,11 +42,6 @@ The completed-task ledger is local and gitignored at `data/task-telemetry.tsv`.
 Rows record task id, completion timestamp, kind, difficulty, harness, model, effort, prompt tokens, completion tokens, total tokens, difficulty points, tokens per difficulty point, and usage source.
 Run `bin/fm-task-telemetry.sh summary` to group completed rows by difficulty, harness, model, and usage source; source is part of the grouping so a `<harness>-generic` fallback row never averages into a normalized harness reading.
 Use that output with `config/crew-dispatch.json` by lowering the default profile or individual rule profile when a cheaper harness/model repeatedly clears a difficulty bucket with acceptable token use.
-
-`bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
-`docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
-`AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
-Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
 ## Pi Calm preference (config/calm)
 

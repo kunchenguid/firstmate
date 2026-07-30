@@ -155,6 +155,26 @@ test_estimate_ignores_unknown_scaffold_sections() {
   pass "task telemetry scores marked task text, not new scaffold sections"
 }
 
+test_estimate_survives_unterminated_task_marker() {
+  local home ship unterminated filled
+  home=$(make_home estimate-unterminated)
+  ship=$(scaffold_brief "$home" scaffold-unterminated)
+
+  unterminated="$ship.unterminated"
+  grep -Fv '<!-- fm-brief:task-end -->' "$ship" > "$unterminated"
+  [ "$(run_telemetry "$home" estimate "$unterminated")" = simple ] \
+    || fail "a brief that lost its task-end marker must not score the whole scaffold"
+
+  filled=$(fill_task "$unterminated" 'Fix the broken relative link in the README quickstart section.')
+  [ "$(run_telemetry "$home" estimate "$filled")" = simple ] \
+    || fail "a small task must stay simple when the task-end marker is missing"
+
+  filled=$(fill_task "$unterminated" 'Add a backend migration with authentication and concurrency safety, a recovery path, dispatch and teardown changes, telemetry for token quota accounting, and no-mistakes CI plus e2e integration coverage across the lifecycle scripts, tests, and configuration docs.')
+  [ "$(run_telemetry "$home" estimate "$filled")" = complex ] \
+    || fail "real task content must still score when the task-end marker is missing"
+  pass "task telemetry falls back safely when a brief loses its task-end marker"
+}
+
 test_collect_explicit_usage_sidecar() {
   local home ledger summary
   home=$(make_home sidecar)
@@ -500,6 +520,7 @@ test_estimate_keywords_match_words_not_substrings
 test_estimate_counts_spelled_out_auth_words
 test_estimate_ignores_scaffold_boilerplate
 test_estimate_ignores_unknown_scaffold_sections
+test_estimate_survives_unterminated_task_marker
 test_generic_fallback_for_harness_log_without_token_events
 test_generic_fallback_does_not_double_count_sibling_usage
 test_generic_fallback_excludes_cache_read

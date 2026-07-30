@@ -9,9 +9,10 @@
 # `estimate` scores only task-specific brief content, so template text alone cannot
 # decide the bucket. bin/fm-brief.sh owns the `<!-- fm-brief:task-begin -->` and
 # `<!-- fm-brief:task-end -->` markers that delimit the firstmate-filled text, and
-# those markers are preferred whenever present. A brief scaffolded before the
-# markers existed falls back to dropping the fixed preamble and the generated
-# section headings; a brief that is not a scaffold at all is scored whole. The
+# those markers are preferred whenever both are present. A brief scaffolded before
+# the markers existed, or one that lost a marker to hand-editing, falls back to
+# dropping the fixed preamble and the generated section headings; a brief that is
+# not a scaffold at all is scored whole. The
 # `{TASK}` placeholder never contributes either way.
 # Teardown calls `collect` before volatile task state and worktree files are removed.
 # `collect` appends usage_* fields to the live meta for immediate inspection, then
@@ -97,7 +98,8 @@ TELEMETRY_KEYWORDS=(
 TASK_MARKER_BEGIN='<!-- fm-brief:task-begin -->'
 TASK_MARKER_END='<!-- fm-brief:task-end -->'
 
-# Heading fallback for briefs scaffolded before fm-brief.sh emitted the markers.
+# Heading fallback for briefs scaffolded before fm-brief.sh emitted the markers, and
+# for a scaffold that lost one of the pair while its task text was edited.
 SCAFFOLD_SECTIONS='^# (Herdr |(Setup|Rules|Project memory|Project clones|Operating model|Requests from the main firstmate|Escalation to main firstmate|Definition of done)[[:space:]]*$)'
 
 # Task-specific brief text: the scaffold's own boilerplate carries enough size and
@@ -105,7 +107,8 @@ SCAFFOLD_SECTIONS='^# (Herdr |(Setup|Rules|Project memory|Project clones|Operati
 # fills in is scored. bin/fm-brief.sh owns the markers that delimit that region.
 scored_content() {
   local brief=$1
-  if grep -Fq "$TASK_MARKER_BEGIN" "$brief" 2>/dev/null; then
+  if grep -Fq "$TASK_MARKER_BEGIN" "$brief" 2>/dev/null \
+    && grep -Fq "$TASK_MARKER_END" "$brief" 2>/dev/null; then
     awk -v begin="$TASK_MARKER_BEGIN" -v end="$TASK_MARKER_END" '
       index($0, begin) { inside = 1; next }
       index($0, end) { inside = 0; next }
