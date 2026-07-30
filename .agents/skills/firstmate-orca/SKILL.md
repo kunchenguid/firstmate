@@ -13,10 +13,11 @@ It does not replace `AGENTS.md`, `docs/orca-backend.md`, or `harness-adapters`.
 
 Orca is a runtime backend, not an agent harness.
 The runtime backend owns the task endpoint and, for Orca, the task worktree.
-The harness is the agent process launched inside that endpoint, such as `claude`, `codex`, `opencode`, `pi`, or `grok`.
+The harness is the agent process launched inside that endpoint, such as `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`.
 Load `harness-adapters` for harness-specific launch, interrupt, resume, trust-dialog, and skill-invocation facts.
 
-Implementation details, metadata fields, teardown guarantees, limitations, and smoke evidence live in `docs/orca-backend.md`.
+Implementation details, metadata fields, teardown guarantees, and limitations live in `docs/orca-backend.md`.
+`docs/verification/runtime-backends.md` "Orca" owns active smoke evidence.
 Prefer the `bin/fm-*` helpers over raw `orca` commands.
 Use raw `orca` only when the helper surface cannot answer the inspection question, and keep the recorded firstmate metadata as the task identity.
 

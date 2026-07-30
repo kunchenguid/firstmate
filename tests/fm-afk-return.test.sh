@@ -66,7 +66,10 @@ test_return_gate_orders_catchup_before_bearings() {
   date +%s > "$dir/home/state/.afk"
   printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
   printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
-  printf '1784074271\t2\tsignal\trepair-task.status\tsignal: synthetic status\n' > "$dir/home/state/.fake-drain"
+  {
+    printf '1784074271\t2\tsignal\trepair-task.status\tsignal: synthetic status\n'
+    printf 'wake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency\n'
+  } > "$dir/home/state/.fake-drain"
 
   set +e
   out=$(run_return "$dir" begin)
@@ -77,6 +80,8 @@ test_return_gate_orders_catchup_before_bearings() {
   [ -s "$gate" ] || fail "return begin did not persist its fail-closed catch-up gate"
   assert_contains "$out" 'firstmate-actionable blocker: repair-task [key=synthetic-dependency]' "return output did not assign blocker remediation to Firstmate"
   grep -F $'evidence\twake\t1784074271' "$gate" >/dev/null || fail "drained wake evidence was not retained in the durable gate"
+  grep -F $'evidence\twake\twake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency' "$gate" >/dev/null \
+    || fail "the separate drain annotation was not retained as away-return evidence"
   grep -F $'evidence\twedge\tfm away-mode inject WEDGED: 4555s undelivered' "$gate" >/dev/null || fail "wedge evidence was not retained in the durable gate"
   grep -F $'evidence\tescalation\trepair-task.status: blocked synthetic dependency' "$gate" >/dev/null || fail "buffered escalation evidence was not retained in the durable gate"
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "return begin did not stop away mode exactly once"
@@ -158,10 +163,10 @@ EOF
   printf 'needs-decision [key=api-shape]: captain must choose the synthetic API shape\n' > "$dir/home/state/decision-task.status"
   date +%s > "$dir/home/state/.afk"
   printf '1784074271\t1\tsignal\tdecision-task.status\tsignal: synthetic decision\n' > "$dir/home/state/.fake-drain"
-  out=$(run_return "$dir" begin) || fail "captain-owned decision should not be treated as a firstmate blocker: $out"
-  assert_contains "$out" 'catch-up wake:' "captain-owned decision wake was not surfaced in catch-up"
-  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "captain-owned decision incorrectly opened a firstmate blocker gate"
-  pass "captain-owned needs-decision remains reportable without masquerading as a firstmate-actionable blocker"
+  out=$(run_return "$dir" begin) || fail "approval decision should not be treated as a firstmate blocker: $out"
+  assert_contains "$out" 'catch-up wake:' "approval decision notification was not surfaced in catch-up"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "approval decision incorrectly opened a firstmate blocker gate"
+  pass "needs-decision remains reportable without masquerading as a firstmate-actionable blocker"
 }
 
 test_away_reentry_refuses_pending_return_gate() {

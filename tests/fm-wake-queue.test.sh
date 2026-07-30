@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-wake-queue.test.sh - wake-queue losslessness (the queue safety matrix):
-# concurrent append/drain, signal catch-up while no watcher runs, stale/check
-# enqueue-before-suppressor ordering, atomic double-drain, duplicate collapse,
-# and the drain-time watcher-liveness assertion.
+# concurrent append/drain, bounded structural enrichment, interruption safety,
+# signal catch-up while no watcher runs, stale/check enqueue-before-suppressor
+# ordering, atomic double-drain, duplicate collapse, and liveness assertion.
 # Nothing is lost and nothing is double-consumed. General watcher/lock liveness
 # lives in fm-watcher-lock.test.sh; daemon classification/injection in
 # fm-daemon.test.sh.
@@ -234,6 +234,201 @@ test_drain_asserts_watcher_liveness() {
   pass "drain asserts watcher liveness: warns on a lapse, stays silent right after a fire"
 }
 
+test_structural_signal_enrichment_preserves_raw_rows() {
+  local dir state out expected actual annotation_count outside perl_bin
+  dir=$(make_case enrichment)
+  state="$dir/state"
+  out="$dir/drain.out"
+  expected="$dir/expected.out"
+  actual="$dir/actual.out"
+  outside="$dir/outside-secret"
+  printf 'working: first\n\ndone: latest event\n' > "$state/task.status"
+  printf 'working: old turn-end context\n' > "$state/turn-only.status"
+  printf 'must-not-be-read\n' > "$outside"
+  ln -s "$outside" "$state/escape.status"
+  perl_bin=$(command -v perl) || fail "perl is required for safe status reads"
+  cat > "$dir/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -MFcntl=:DEFAULT ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "${FM_WAKE_ENRICH_SWAP_PATH:-}" ]; then
+      rm -f "$arg"
+      ln -s "$FM_WAKE_ENRICH_SWAP_TARGET" "$arg"
+      break
+    fi
+  done
+fi
+exec "$FM_WAKE_ENRICH_REAL_PERL" "$@"
+SH
+  chmod +x "$dir/fakebin/perl"
+
+  append_wake "$state" signal task.status "signal: $outside" || fail "direct status wake append failed"
+  append_wake "$state" signal task.turn-ended "signal: $outside" || fail "coalesced turn-end wake append failed"
+  append_wake "$state" signal turn-only.turn-ended "signal: $outside" || fail "bare turn-end wake append failed"
+  append_wake "$state" signal escape.status "signal: $outside" || fail "symlink status wake append failed"
+  append_wake "$state" signal arbitrary-key "signal: $outside" || fail "non-status signal wake append failed"
+  append_wake "$state" check task.check.sh "check: complete payload" || fail "check wake append failed"
+  append_wake "$state" stale test:fm-task "stale: test:fm-task" || fail "stale wake append failed"
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "heartbeat wake append failed"
+
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_print_deduped "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue" > "$expected"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_SWAP_PATH="$state/task.status" \
+    FM_WAKE_ENRICH_SWAP_TARGET="$outside" FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
+    || fail "structural enrichment drain failed"
+  awk -F '\t' 'NF == 5 { print }' "$out" > "$actual"
+  cmp -s "$expected" "$actual" || fail "enrichment changed or reordered an authoritative raw row"
+
+  annotation_count=$(grep -c '^wake annotation:' "$out" || true)
+  [ "$annotation_count" -eq 1 ] || fail "expected only the unreadable-race-safe status annotation, got $annotation_count"
+  if grep -E '^wake annotation:.*: task\.status:' "$out" >/dev/null; then
+    fail "replaced status file produced an annotation"
+  fi
+  grep -F 'latest wake-EVENT observed at drain, not current state; historical / not necessarily the triggering event: turn-only.status:' "$out" >/dev/null \
+    || fail "bare turn-end mapping did not carry the historical warning"
+  if grep -F 'must-not-be-read' "$out" >/dev/null; then
+    fail "drain trusted a payload path or followed an out-of-state status symlink"
+  fi
+  pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
+}
+
+test_enrichment_caps_and_status_file_failures() {
+  local dir state out fake_perl_log perl_bin i raw_count annotation_bytes annotation_count oversized_lines perl_reads
+  dir=$(make_case caps)
+  state="$dir/state"
+  out="$dir/drain.out"
+  fake_perl_log="$dir/perl.log"
+  perl_bin=$(command -v perl) || fail "perl is required for safe status reads"
+  cat > "$dir/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -MFcntl=:DEFAULT ]; then
+  printf 'read\n' >> "$FM_WAKE_ENRICH_PERL_LOG"
+fi
+exec "$FM_WAKE_ENRICH_REAL_PERL" "$@"
+SH
+  chmod +x "$dir/fakebin/perl"
+  awk 'BEGIN { printf "done: "; for (i = 0; i < 20000; i++) printf "x"; printf "\n" }' > "$state/huge.status"
+  append_wake "$state" signal huge.status "signal: huge" || fail "huge status wake append failed"
+  i=1
+  while [ "$i" -le 8 ]; do
+    awk -v n="$i" 'BEGIN { printf "working-%d: ", n; for (j = 0; j < 3000; j++) printf "y"; printf "\n" }' > "$state/many-$i.status"
+    append_wake "$state" signal "many-$i.status" "signal: many-$i" || fail "many-status wake append failed"
+    i=$((i + 1))
+  done
+  : > "$state/empty.status"
+  append_wake "$state" signal empty.status "signal: empty" || fail "empty status wake append failed"
+  append_wake "$state" signal missing.status "signal: missing" || fail "missing status wake append failed"
+  mkdir "$state/malformed.status"
+  append_wake "$state" signal malformed.status "signal: malformed" || fail "malformed status wake append failed"
+  printf 'done: unreadable\n' > "$state/unreadable.status"
+  chmod 000 "$state/unreadable.status"
+  append_wake "$state" signal unreadable.status "signal: unreadable" || fail "unreadable status wake append failed"
+
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_PERL_LOG="$fake_perl_log" \
+    FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
+    || fail "capped enrichment drain failed"
+  raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
+  [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
+  grep '^wake annotation:.*\[truncated\]$' "$out" >/dev/null || fail "per-item/input truncation marker was not emitted"
+  grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(global enrichment byte cap\)$' "$out" >/dev/null \
+    || fail "global omitted-annotation marker was not emitted"
+  annotation_bytes=$(LC_ALL=C awk '/^wake annotation:/ { bytes += length($0) + 1 } END { print bytes + 0 }' "$out")
+  [ "$annotation_bytes" -le 8192 ] || fail "global annotation output exceeded 8192 bytes ($annotation_bytes)"
+  oversized_lines=$(LC_ALL=C awk '/^wake annotation: latest/ && length($0) + 1 > 2048 { count++ } END { print count + 0 }' "$out")
+  [ "$oversized_lines" -eq 0 ] || fail "a per-item annotation exceeded 2048 bytes"
+  annotation_count=$(grep -c '^wake annotation: latest' "$out" || true)
+  [ "$annotation_count" -lt 9 ] || fail "global cap did not omit any of the nine readable status annotations"
+  perl_reads=$(wc -l < "$fake_perl_log" | tr -d ' ')
+  [ "$perl_reads" -eq 8 ] || fail "enrichment read cap allowed $perl_reads safe reads instead of 8"
+  grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(enrichment read cap\)$' "$out" >/dev/null \
+    || fail "enrichment read-cap omission marker was not emitted"
+  if grep -E ': (empty|missing|malformed|unreadable)\.status:' "$out" >/dev/null; then
+    fail "missing, unreadable, malformed, or empty status file produced an annotation"
+  fi
+  pass "bounded reads and per-item/global caps fail open with explicit truncation and omission markers"
+}
+
+wait_for_file_text() {  # <file> <fixed-text>
+  local file=$1 expected=$2 i=0
+  while [ "$i" -lt 100 ]; do
+    grep -F "$expected" "$file" >/dev/null 2>&1 && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
+  local dir state out1 out2 pid
+  dir=$(make_case slow-annotation)
+  state="$dir/state"
+  out1="$dir/drain-one.out"
+  out2="$dir/drain-two.out"
+  printf 'done: disappears before bounded read\n' > "$state/slow.status"
+  append_wake "$state" signal slow.status "signal: slow" || fail "slow status wake append failed"
+
+  FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=3 "$DRAIN" > "$out1" &
+  pid=$!
+  wait_for_file_text "$out1" "$(printf '\tsignal\tslow.status\t')" \
+    || { kill "$pid" 2>/dev/null || true; fail "slow drain did not commit its raw row"; }
+  printf 'done: appended while first drain annotates\n' > "$state/next.status"
+  append_wake "$state" signal next.status "signal: next" || fail "append blocked or failed during annotation"
+  kill -0 "$pid" 2>/dev/null || fail "slow annotation finished before the concurrent append proved lock independence"
+  rm -f "$state/slow.status"
+  wait "$pid" || fail "deleted status file made the committed drain fail"
+  grep -F "$(printf '\tsignal\tslow.status\t')" "$out1" >/dev/null || fail "deleted status file hid the committed raw row"
+  if grep -F ': slow.status:' "$out1" >/dev/null; then
+    fail "status deleted during annotation still produced an annotation"
+  fi
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" || fail "follow-up drain after concurrent append failed"
+  grep -F "$(printf '\tsignal\tnext.status\t')" "$out2" >/dev/null || fail "concurrent append was not left for the next drain"
+  pass "slow annotation releases the append lock and a deleted status file fails open"
+}
+
+test_interruption_before_and_after_raw_commit() {
+  local dir state before_out after_out replay_out empty_out pid rc count i
+  dir=$(make_case interruption)
+  state="$dir/state"
+  before_out="$dir/before.out"
+  after_out="$dir/after.out"
+  replay_out="$dir/replay.out"
+  empty_out="$dir/empty.out"
+  printf 'done: interruption fixture\n' > "$state/task.status"
+  append_wake "$state" signal task.status "signal: task" || fail "pre-commit interruption wake append failed"
+
+  FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=5 "$DRAIN" > "$before_out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && ! compgen -G "$state/.wake-queue.drain.*" >/dev/null; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  compgen -G "$state/.wake-queue.drain.*" >/dev/null || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never rotated the queue"; }
+  kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain before raw commitment"
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" || fail "restored pre-commit wake did not drain"
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
+  [ "$count" -eq 1 ] || fail "pre-commit interruption lost or duplicated the restored row"
+
+  append_wake "$state" signal task.status "signal: task after commit" || fail "post-commit interruption wake append failed"
+  FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=5 "$DRAIN" > "$after_out" &
+  pid=$!
+  wait_for_file_text "$after_out" "$(printf '\tsignal\ttask.status\t')" \
+    || { kill "$pid" 2>/dev/null || true; fail "post-commit drain did not print its raw row"; }
+  kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain after raw commitment"
+  set +e
+  wait "$pid"
+  set -e
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$empty_out" || fail "drain after post-commit interruption failed"
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$after_out" "$empty_out")
+  [ "$count" -eq 1 ] || fail "post-commit interruption restored or duplicated the consumed row"
+  pass "interruptions restore before commitment and never replay after raw commitment"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -242,3 +437,7 @@ test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
+test_structural_signal_enrichment_preserves_raw_rows
+test_enrichment_caps_and_status_file_failures
+test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
+test_interruption_before_and_after_raw_commit

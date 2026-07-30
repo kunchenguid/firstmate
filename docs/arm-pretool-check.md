@@ -24,7 +24,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 
 - Stdin JSON at `.tool_input.command` for Claude and Codex.
 - Stdin JSON at `.toolInput.command` for Grok.
-- `--command <exact string>` for OpenCode and Pi.
+- `--command <exact string>` for OpenCode, Pi, and pi-signed.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
 
@@ -151,7 +151,7 @@ Prose may improve without changing adapter behavior.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
-- Pi returns `{block: true}` only when the checker exits 2.
+- Pi and pi-signed return `{block: true}` only when the checker exits 2.
 
 ## Harness wiring
 
@@ -161,7 +161,7 @@ Prose may improve without changing adapter behavior.
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
-| Pi | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
+| Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
 
 Grok project hooks require folder trust.
 Every shell variable reference in a Grok hook command must carry an inline default such as `${GROK_WORKSPACE_ROOT:-}` because Grok expands the raw hook command before `bash -lc` runs it.
@@ -239,5 +239,5 @@ bash -n bin/fm-arm-pretool-check.sh
 shellcheck bin/fm-arm-pretool-check.sh tests/fm-arm-pretool-check.test.sh
 node --check bin/fm-arm-command-policy.mjs
 tests/fm-arm-pretool-check.test.sh
-for test_script in tests/*.test.sh; do bash "$test_script"; done
+bin/fm-test-run.sh --all
 ```

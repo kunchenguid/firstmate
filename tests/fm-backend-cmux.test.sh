@@ -317,7 +317,7 @@ test_dispatch_routes_cmux_backend() {
 }
 
 test_dispatch_busy_state_unknown_for_cmux() {
-  # shellcheck source=bin/fm-backend.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
   [ "$(fm_backend_busy_state cmux '11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222')" = unknown ] \
     || fail "fm_backend_busy_state should report unknown for cmux (no native agent-state primitive)"
@@ -387,7 +387,7 @@ test_ping_state_down() {
   dir="$TMP_ROOT/ping-down"; mkdir -p "$dir/responses"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" FM_CMUX_FAKE_PING_EXIT=1 \
-    FM_CMUX_FAKE_PING="Error: Socket not found at /Users/x/.local/state/cmux/cmux.sock" \
+    FM_CMUX_FAKE_PING="Error: Socket not found at /home/x/.local/state/cmux/cmux.sock" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_ping_state' "$ROOT" )
   [ "$out" = down ] || fail "ping_state should report down when the socket does not exist yet, got '$out'"
   pass "fm_backend_cmux_ping_state: reports 'down' when the app is not running yet"
@@ -657,11 +657,11 @@ test_current_path_probes_with_marker() {
   cmux_panes_response "$dir" 2 "bbbbbbbb-1111-1111-1111-111111111111"
   cmux_panes_response "$dir" 4 "bbbbbbbb-1111-1111-1111-111111111111"
   cmux_panes_response "$dir" 6 "bbbbbbbb-1111-1111-1111-111111111111"
-  cmux_read_screen_response "$dir" 7 $'/tmp/proj\n❯ printf marker\n__FM_CMUX_CWD_BEGIN__\n/Users/kunchen/.treehouse/fake-worktree\n__FM_CMUX_CWD_END__\n/Users/kunchen/.treehouse/fake-worktree ❯'
+  cmux_read_screen_response "$dir" 7 $'/tmp/proj\n❯ printf marker\n__FM_CMUX_CWD_BEGIN__\n/home/fixture/.treehouse/fake-worktree\n__FM_CMUX_CWD_END__\n/home/fixture/.treehouse/fake-worktree ❯'
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_current_path "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
-  [ "$out" = "/Users/kunchen/.treehouse/fake-worktree" ] || fail "current_path should read only the marked cwd line, got '$out'"
+  [ "$out" = "/home/fixture/.treehouse/fake-worktree" ] || fail "current_path should read only the marked cwd line, got '$out'"
   assert_contains "$(cat "$dir/log")" "__FM_CMUX_CWD_BEGIN__" "current_path did not send the cwd begin marker"
   assert_contains "$(cat "$dir/log")" "pwd;" "current_path did not send the pwd probe"
   assert_contains "$(cat "$dir/log")" $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000'$'\x1f''--surface'$'\x1f''bbbbbbbb-1111-1111-1111-111111111111'$'\x1f''enter' \
@@ -1003,7 +1003,7 @@ test_secondmate_spawn_refuses_cmux_backend() {
   pass "fm-spawn.sh: refuses backend=cmux for --secondmate spawns (mirrors Orca's refusal; no secondmate launch design exists yet)"
 }
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
 test_version_check_accepts_current_version

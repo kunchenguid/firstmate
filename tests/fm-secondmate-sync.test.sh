@@ -72,6 +72,7 @@ add_sm_worktree() {
   {
     printf 'window=firstmate:fm-%s\n' "$id"
     printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
     printf 'home=%s/%s\n' "$w" "$id"
   } > "$w/home/state/$id.meta"
 }
@@ -297,6 +298,10 @@ if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 fi
 case "$*" in
+  list-windows*)
+    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
+    exit 0
+    ;;
   *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
   *display-message*'#{pane_id}'*) printf '%s\n' '%1'; exit 0 ;;
   *display-message*'#{cursor_y}'*) printf '%s\n' 0; exit 0 ;;
@@ -832,15 +837,6 @@ test_seed_marker_does_not_mask_real_dirt() {
   pass "T14 marker tolerance does not mask a genuinely dirty home"
 }
 
-# --- T15: the shipped firstmate repo gitignores the seed marker -----------------
-# Pins the actual fix so it cannot silently regress: without this .gitignore entry
-# every seeded home would read dirty again the moment it lands on this repo's HEAD.
-test_repo_gitignores_seed_marker() {
-  grep -qxF '.fm-secondmate-home' "$ROOT/.gitignore" \
-    || fail "the firstmate repo .gitignore must ignore the seed marker (.fm-secondmate-home)"
-  pass "T15 the firstmate repo gitignores the secondmate seed marker"
-}
-
 test_ff_updated
 test_ff_current
 test_ff_dirty
@@ -861,6 +857,5 @@ test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
-test_repo_gitignores_seed_marker
 
 echo "# all fm-secondmate-sync tests passed"

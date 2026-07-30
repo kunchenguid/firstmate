@@ -43,7 +43,7 @@ mkdir -p "$LONG_CWD" || fail "could not create long cwd fixture: $LONG_CWD"
 LONG_CWD=$(cd "$LONG_CWD" && pwd -P) || fail "could not resolve long cwd fixture: $LONG_CWD"
 printf -v LONG_CWD_Q '%q' "$LONG_CWD"
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source zellij || fail "fm_backend_source zellij failed"
 

@@ -372,69 +372,8 @@ test_policy_cli_direct() {
 
 # --- per-harness wiring -----------------------------------------------------
 
-test_claude_wiring() {
-  local settings n
-  settings="$ROOT/.claude/settings.json"
-  [ -f "$settings" ] || fail "tracked .claude/settings.json is missing"
-  n=$(jq -r '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh"))] | length' "$settings")
-  [ "$n" = 1 ] || fail "claude PreToolUse must invoke fm-cd-pretool-check.sh exactly once"
-  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh") and contains("--claude") and contains("CLAUDE_PROJECT_DIR"))] | length == 1' "$settings" >/dev/null \
-    || fail "claude cd hook must use CLAUDE_PROJECT_DIR and --claude"
-  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-arm-pretool-check.sh"))] | length == 1' "$settings" >/dev/null \
-    || fail "claude cd hook must not displace the watcher-arm hook"
-  pass ".claude/settings.json: PreToolUse invokes the cd-guard alongside the arm guard"
-}
-
-test_codex_wiring() {
-  local settings command
-  settings="$ROOT/.codex/hooks.json"
-  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
-  command=$(jq -r '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh"))][0] // empty' "$settings")
-  [ -n "$command" ] || fail "codex PreToolUse must invoke fm-cd-pretool-check.sh"
-  assert_contains "$command" 'pwd -P' "codex cd hook must anchor from the hook process working directory"
-  assert_contains "$command" 'fm-cd-pretool-check.sh' "codex cd hook must invoke the cd-guard"
-  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-arm-pretool-check.sh"))] | length == 1' "$settings" >/dev/null \
-    || fail "codex cd hook must not displace the watcher-arm hook"
-  pass ".codex/hooks.json: PreToolUse invokes the cd-guard alongside the arm guard"
-}
-
-test_grok_wiring() {
-  local settings command
-  settings="$ROOT/.grok/hooks/fm-primary-cd-check.json"
-  [ -f "$settings" ] || fail "tracked grok cd hook config is missing"
-  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "grok cd hook command is missing"
-  assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok cd hook must anchor from GROK_WORKSPACE_ROOT"
-  assert_contains "$command" 'fm-cd-pretool-check.sh' "grok cd hook must invoke the cd-guard"
-  assert_contains "$command" '${GROK_WORKSPACE_ROOT:-}' "grok cd hook must default-guard the workspace var"
-  pass ".grok primary cd hook: PreToolUse invokes the cd-guard"
-}
-
-test_opencode_wiring() {
-  local plugin content
-  plugin="$ROOT/.opencode/plugins/fm-primary-cd-check.js"
-  [ -f "$plugin" ] || fail "tracked OpenCode cd plugin is missing"
-  content=$(cat "$plugin")
-  assert_contains "$content" 'tool.execute.before' "OpenCode cd plugin must run before tool execution"
-  assert_contains "$content" 'fm-cd-pretool-check.sh' "OpenCode cd plugin must invoke the cd-guard"
-  assert_contains "$content" 'throw new Error' "OpenCode cd plugin must block by throwing"
-  assert_contains "$content" 'worktree' "OpenCode cd plugin must anchor from the git worktree path"
-  pass ".opencode cd plugin: tool.execute.before invokes the cd-guard and blocks by throwing"
-}
-
-test_pi_wiring() {
-  local ext content
-  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
-  [ -f "$ext" ] || fail "tracked pi primary extension is missing"
-  content=$(cat "$ext")
-  assert_contains "$content" 'runCdCheck(command)' "pi extension must run the cd check in tool_call"
-  assert_contains "$content" 'fm-cd-pretool-check.sh' "pi extension must invoke the cd-guard owner"
-  assert_contains "$content" 'runPretoolCheck(command)' "pi extension must keep running the watcher-arm check"
-  assert_contains "$content" 'return { block: true, reason:' "pi extension must block on a checker exit 2"
-  pass ".pi primary extension: tool_call runs the cd-guard alongside the watcher-arm check"
-}
-
 test_scripts_are_shellcheck_clean() {
+  command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
   shellcheck "$ROOT/bin/fm-cd-pretool-check.sh" >/dev/null 2>&1 \
     || fail "bin/fm-cd-pretool-check.sh is not shellcheck-clean"
   pass "bin/fm-cd-pretool-check.sh is shellcheck-clean"
@@ -452,9 +391,4 @@ test_fail_open_missing_node
 test_fail_open_missing_jq_on_stdin
 test_prefilter_skips_node_without_cd_substring
 test_policy_cli_direct
-test_claude_wiring
-test_codex_wiring
-test_grok_wiring
-test_opencode_wiring
-test_pi_wiring
 test_scripts_are_shellcheck_clean

@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Tests for bin/fm-review-diff.sh: when a task has an open PR recorded in meta,
-# the review diff must compare the authoritative base against the PR head, not a
-# stale local branch left behind after no-mistakes fix rounds push to the PR.
+# the review diff must compare the authoritative base against a freshly fetched
+# PR head, not a stale local branch or a stale recorded pr_head= left behind
+# after no-mistakes fix rounds push to the PR.
 #
 # Matrix:
-#   (a) pr= + reachable pr_head= -> diff uses PR head, not the lagging local branch
+#   (a) pr= + reachable pr_head=, no remote pull ref -> offline fallback to recorded SHA
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
+#   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
+#       (this is the class that bit reviewers holding merges over "missing" fixes)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -76,6 +79,7 @@ test_pr_meta_uses_pr_head_not_stale_local() {
   local case_dir out
   case_dir=$(make_case pr-head-sha)
   stale_and_pr_commits "$case_dir"
+  # No remote pull ref: fetch fails, recorded pr_head is the offline fallback.
   write_task_meta "$case_dir" \
     "pr=https://github.com/example/repo/pull/9" \
     "pr_head=$PR_SHA"
@@ -85,8 +89,32 @@ test_pr_meta_uses_pr_head_not_stale_local() {
   assert_contains "$out" '+pr-fixed' "pr-head-sha: diff should show the PR head content"
   assert_not_contains "$out" 'stale-local' "pr-head-sha: diff must not use the stale local branch"
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
-    "pr-head-sha: should not warn when pr_head is reachable"
-  pass "fm-review-diff uses recorded pr_head instead of the lagging local branch"
+    "pr-head-sha: should not warn when recorded pr_head is reachable offline"
+  pass "fm-review-diff falls back to recorded pr_head when pull head cannot be fetched"
+}
+
+test_stale_recorded_pr_head_loses_to_fetched_pull_head() {
+  local case_dir out stale_sha
+  case_dir=$(make_case stale-recorded)
+  stale_and_pr_commits "$case_dir"
+  stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+  # Remote PR head is newer (pipeline fix); meta still points at the older local tip.
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  write_task_meta "$case_dir" \
+    "pr=https://github.com/example/repo/pull/9" \
+    "pr_head=$stale_sha"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' \
+    "stale-recorded: diff must show the fetched PR head, not the recorded stale SHA"
+  assert_not_contains "$out" 'stale-local' \
+    "stale-recorded: diff must not use the stale local/recorded content"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "stale-recorded: fetch of refs/pull/<n>/head should succeed"
+  # Pre-fix behavior preferred reachable recorded pr_head= and would show stale-local.
+  [ "$stale_sha" != "$PR_SHA" ] || fail "stale-recorded: fixture did not diverge recorded vs PR head"
+  pass "fm-review-diff prefers freshly fetched PR head over a stale recorded pr_head="
 }
 
 test_pr_meta_fetches_pull_head_without_recorded_sha() {
@@ -143,5 +171,6 @@ test_unreachable_pr_head_falls_back_with_warning() {
 
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
+test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning

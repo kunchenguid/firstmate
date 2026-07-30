@@ -69,7 +69,7 @@ LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
 
 # Source the daemon to get FM_INJECT_MARK, afk_enter, afk_exit.
-# shellcheck source=bin/fm-supervise-daemon.sh
+# shellcheck source=/dev/null
 . "$DAEMON"
 
 # Private tmux server with a supervisor session.

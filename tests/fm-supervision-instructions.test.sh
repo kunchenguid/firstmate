@@ -14,7 +14,7 @@ test_selected_harness_block_only() {
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" "codex heading missing"
   assert_contains "$out" "Mode: Codex foreground checkpoint." "codex snippet missing"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex checkpoint helper missing"
-  assert_not_contains "$out" "Mode: Claude background-notify supervision." "renderer printed the claude snippet too"
+  assert_not_contains "$out" "Mode: Claude Stop-hook-owned supervision." "renderer printed the claude snippet too"
   assert_not_contains "$out" "Mode: Pi extension background wake." "renderer printed the pi snippet too"
   pass "renderer prints exactly the selected harness block"
 }
@@ -67,6 +67,70 @@ test_repair_lines() {
   pass "renderer repair-line mode is harness-aware and honors conditional state"
 }
 
+test_cross_harness_ordinary_continuation_and_repair_matrix() {
+  local ordinary out
+
+  out=$("$RENDER" --harness pi)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "Pi extension already owns watcher continuity" "pi ordinary-wake line does not leave continuity to the extension"
+  assert_not_contains "$ordinary" "fm_watch_arm_pi" "pi ordinary-wake line incorrectly calls the recovery tool"
+  out=$("$RENDER" --harness pi --repair-line)
+  assert_contains "$out" "fm_watch_arm_pi" "pi recovery line lost the extension-owned repair tool"
+
+  out=$("$RENDER" --harness opencode)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "plugin already owns watcher continuity" "opencode ordinary-wake line does not leave continuity to the plugin"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "opencode ordinary-wake line incorrectly calls the recovery probe"
+  out=$("$RENDER" --harness opencode --repair-line)
+  assert_contains "$out" "manual recovery probe" "opencode recovery line lost its manual probe"
+
+  out=$("$RENDER" --harness claude)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "Stop-owned auto-arm" "claude ordinary-wake line does not leave continuity to the Stop hook"
+  assert_contains "$ordinary" "bin/fm-claude-stop-autoarm.sh" "claude ordinary-wake line lost the auto-arm script name"
+  assert_contains "$ordinary" "do not arm another cycle" "claude ordinary-wake line does not forbid a model re-arm"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "claude ordinary-wake line incorrectly calls the manual arm"
+  out=$("$RENDER" --harness claude --repair-line)
+  assert_contains "$out" "Claude Code background task" "claude recovery line lost its tracked background repair"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line lost the arm command"
+
+  out=$("$RENDER" --harness grok)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "re-arm" "grok ordinary-wake line does not tell the model to re-arm"
+  assert_contains "$ordinary" "Grok tracked background task" "grok ordinary-wake line lost tracked background ownership"
+  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "grok ordinary-wake line lost the background arm command"
+  out=$("$RENDER" --harness grok --repair-line)
+  assert_contains "$out" "Grok tracked background task" "grok recovery line lost its tracked background repair"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "grok recovery line lost the arm command"
+
+  out=$("$RENDER" --harness codex)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "next foreground" "codex ordinary-wake line lost its foreground checkpoint"
+  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "codex ordinary-wake line lost the checkpoint command"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "codex ordinary-wake line incorrectly uses a background arm"
+  out=$("$RENDER" --harness codex --repair-line)
+  assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
+
+  pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
+}
+
+test_pi_signed_preserves_identity_with_pi_supervision_protocol() {
+  local out ordinary
+  out=$("$RENDER" --harness pi-signed)
+  assert_contains "$out" "primary harness: pi-signed" \
+    "pi-signed supervision normalized the visible runtime identity to pi"
+  assert_contains "$out" "Mode: Pi extension background wake." \
+    "pi-signed did not reuse Pi's authoritative supervision protocol"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "Pi extension already owns watcher continuity" \
+    "pi-signed ordinary-wake semantics diverged from Pi"
+  out=$("$RENDER" --harness pi-signed --repair-line)
+  assert_contains "$out" "Pi tool fm_watch_arm_pi" \
+    "pi-signed repair semantics diverged from Pi"
+  pass "pi-signed keeps its identity while sharing Pi's supervision protocol"
+}
+
 test_grok_is_background_notify() {
   local out
   out=$("$RENDER" --harness grok)
@@ -111,6 +175,8 @@ test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
+test_cross_harness_ordinary_continuation_and_repair_matrix
+test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path

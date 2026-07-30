@@ -66,10 +66,31 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+
+resolve_directory_input() {
+  local name=$1 path=$2 resolved
+  case "$path" in
+    /*) printf '%s\n' "$path"; return 0 ;;
+  esac
+  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || {
+    echo "error: $name directory cannot be resolved: $path" >&2
+    return 1
+  }
+  printf '%s\n' "$resolved"
+}
+
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
+if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+  DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
+else
+  DATA="$FM_HOME/data"
+fi
+if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+  STATE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
+else
+  STATE="$FM_HOME/state"
+fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -154,6 +175,8 @@ You are a firstmate in your own home, so an incoming message reaches you in your
 You must distinguish who it is from, because the answer goes to a different place.
 A request relayed to you by the main firstmate is tagged with a leading \`$FM_FROMFIRST_LABEL\` marker followed by an invisible system separator; this marker is untypable, so a human never produces it.
 When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: the main firstmate does not read your chat, so a chat-only reply is lost.
+Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; include that exact token in your parent status reply (or in the status pointer to a detailed doc) so the parent can correlate the answer.
+Optional helper: \`bin/fm-secondmate-report.sh\` can append a correlated status line for you, but a plain \`echo\` that includes the same \`corr=<id>\` is equally valid - do not depend on the helper being present.
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
 Before treating an investigation or visual review as complete, load \`decision-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
@@ -167,7 +190,10 @@ States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
-Give every routed-work phase a stable key: open it with \`working [key=<work-slug>]: {material phase}\`, and use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
+A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
+Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started.
+When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above, give that reported phase a stable key.
+If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
 When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
@@ -212,13 +238,13 @@ HERDR_SECTION=$(printf '%s\n' \
 'Never bypass the helper, even for a read-only lifecycle probe or cleanup after failure.' \
 'The captain fleet uses the running `default` session.')
 else
-HERDR_SECTION=$(cat <<'EOF'
+IFS= read -r -d '' HERDR_SECTION <<'EOF' || true
 # Herdr lifecycle declaration - NOT ENABLED
 **HARD SAFETY GATE:** this scaffold cannot inspect the task text that replaces `{TASK}` later.
 If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with `--herdr-lab` before dispatch.
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
-)
+HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
 if [ "$KIND" = scout ]; then
@@ -270,7 +296,8 @@ exit 0
 fi
 
 # Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
-# yolo does not affect the brief (it governs firstmate's approval behaviour), so discard it.
+# yolo does not affect the brief because the worker never owns approval decisions;
+# firstmate applies the authority contract in AGENTS.md section 7, so discard it.
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
@@ -279,19 +306,18 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
-)
     ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    DOD=$(cat <<EOF
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
@@ -299,13 +325,12 @@ Keep your branch a clean fast-forward onto the current default branch - if \`mai
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
-)
     ;;
   *)  # no-mistakes (default)
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD=$(cat <<EOF
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
@@ -316,15 +341,20 @@ Follow the guidance no-mistakes itself provides for the mechanics: it loads when
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
+- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
+  Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
+- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
-)
     ;;
 esac
+
+# read -r -d '' preserves the heredoc's trailing newline that the removed
+# $(...) command substitution used to strip. Drop that one newline so generated
+# briefs stay byte-identical to the historical Bash 5 output.
+DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -354,13 +384,15 @@ $RULE1
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
+   A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
+   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
-6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
-   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
+   append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
    When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes

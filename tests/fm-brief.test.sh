@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-brief.sh.
 #
-# Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# Regression coverage for the heredoc-in-command-substitution parse bug (issues
+# #166, #958, #1069). Building a variable with `VAR=$(cat <<EOF ... EOF)` is
+# unsafe on Bash 3.2 (macOS /bin/bash): the lexer scans for the matching `)` of
+# the command substitution textually and tracks quote state through the heredoc
+# body, so a single apostrophe, unbalanced quote, or unbalanced paren anywhere
+# in that body breaks parsing of the *entire rest of the script* - `bash -n`
+# fails, not just the generated brief. The DOD and Herdr-section builders now
+# use `IFS= read -r -d '' VAR <<EOF || true` instead, which removes the `$(...)`
+# wrapper and eliminates the whole defect class regardless of future prose.
+# test_no_heredoc_in_command_substitution guards that structure directly.
+# Ambient `bash -n` here is Bash 5 and cannot see the bug, so the real
+# cross-version enforcement lives in the macos-stock-bash CI job.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -18,15 +22,152 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# The script itself must always parse under the ambient bash. That is Bash 5 in
+# CI and locally, where the issue #958/#1069 parser bug does not fire, so this
+# is a weak guard on its own; test_no_heredoc_in_command_substitution and the
+# macos-stock-bash CI job carry the real cross-version enforcement.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
   pass "fm-brief.sh: bash -n succeeds"
+}
+
+# Structural class guard (issues #166, #958, #1069): never build a variable by
+# wrapping a heredoc in a command substitution (`VAR=$(cat <<EOF ... EOF)`).
+# That construct is what breaks Bash 3.2 parsing, and pinning one historical
+# apostrophe phrase (as the old test did) missed the #945 reintroduction. This
+# guards the *shape* directly against the whole file, so any future DOD or
+# section builder that reintroduces the class fails here regardless of prose.
+test_no_heredoc_in_command_substitution() {
+  local unsafe safe
+  unsafe="$TMP_ROOT/heredoc-in-substitution.sh"
+  safe="$TMP_ROOT/plain-heredoc.sh"
+  # shellcheck disable=SC2016 # Literal shell fixtures must remain unexpanded.
+  printf '%s\n' 'value=$(' '  cat <<EOF' 'body' 'EOF' ')' > "$unsafe"
+  # shellcheck disable=SC2016 # Literal shell fixtures must remain unexpanded.
+  printf '%s\n' 'cat <<EOF' '$(' '  cat <<INNER' 'INNER' ')' 'EOF' > "$safe"
+  if no_heredoc_in_command_substitution "$unsafe"; then
+    fail "structural guard accepted a multiline heredoc nested in a command substitution"
+  fi
+  no_heredoc_in_command_substitution "$safe" \
+    || fail "structural guard treated heredoc body prose as shell structure"
+  no_heredoc_in_command_substitution "$ROOT/bin/fm-brief.sh" \
+    || fail "fm-brief.sh wraps a heredoc in a command substitution (breaks Bash 3.2 parsing)"
+  pass "fm-brief.sh: no heredoc is nested inside a command substitution (Bash 3.2 parse-safe)"
+}
+
+no_heredoc_in_command_substitution() {
+  perl - "$1" <<'PERL'
+use strict;
+use warnings;
+
+my $path = shift;
+open my $source, '<', $path or die "$path: $!\n";
+my @frames;
+my @heredocs;
+my $quote = '';
+my $line_number = 0;
+
+while (my $line = <$source>) {
+  $line_number++;
+  if (@heredocs) {
+    my $candidate = $line;
+    $candidate =~ s/\r?\n\z//;
+    $candidate =~ s/^\t+// if $heredocs[0]{strip_tabs};
+    shift @heredocs if $candidate eq $heredocs[0]{delimiter};
+    next;
+  }
+
+  my $length = length $line;
+  for (my $i = 0; $i < $length; $i++) {
+    my $char = substr($line, $i, 1);
+    if ($quote eq "'") {
+      $quote = '' if $char eq "'";
+      next;
+    }
+    if ($char eq '\\') {
+      $i++;
+      next;
+    }
+    if ($quote eq '"' && $char eq '"') {
+      $quote = '';
+      next;
+    }
+    if ($char eq "'" && $quote eq '') {
+      $quote = "'";
+      next;
+    }
+    if ($char eq '"' && $quote eq '') {
+      $quote = '"';
+      next;
+    }
+    if ($char eq '#' && $quote eq '' && ($i == 0 || substr($line, $i - 1, 1) =~ /[\s;|&()]/)) {
+      last;
+    }
+    if ($char eq '$' && substr($line, $i + 1, 1) eq '(') {
+      push @frames, { depth => 1, quote => $quote };
+      $quote = '';
+      $i++;
+      next;
+    }
+    if (@frames && $quote eq '' && $char eq '(') {
+      $frames[-1]{depth}++;
+      next;
+    }
+    if (@frames && $quote eq '' && $char eq ')') {
+      $frames[-1]{depth}--;
+      if ($frames[-1]{depth} == 0) {
+        my $frame = pop @frames;
+        $quote = $frame->{quote};
+      }
+      next;
+    }
+    next unless $quote eq '' && $char eq '<' && substr($line, $i + 1, 1) eq '<';
+    if (@frames) {
+      print STDERR "$path:$line_number\n";
+      exit 1;
+    }
+
+    my $j = $i + 2;
+    my $strip_tabs = substr($line, $j, 1) eq '-';
+    $j++ if $strip_tabs;
+    $j++ while substr($line, $j, 1) =~ /[ \t]/;
+    my $delimiter = '';
+    my $delimiter_quote = '';
+    for (; $j < $length; $j++) {
+      my $token = substr($line, $j, 1);
+      if ($delimiter_quote) {
+        if ($token eq $delimiter_quote) {
+          $delimiter_quote = '';
+        } elsif ($token eq '\\' && $delimiter_quote eq '"') {
+          $j++;
+          $delimiter .= substr($line, $j, 1);
+        } else {
+          $delimiter .= $token;
+        }
+        next;
+      }
+      if ($token eq "'" || $token eq '"') {
+        $delimiter_quote = $token;
+        next;
+      }
+      if ($token eq '\\') {
+        $j++;
+        $delimiter .= substr($line, $j, 1);
+        next;
+      }
+      last if $token =~ /[\s;|&()<>]/;
+      $delimiter .= $token;
+    }
+    push @heredocs, { delimiter => $delimiter, strip_tabs => $strip_tabs };
+    $i = $j - 1;
+  }
+}
+
+exit 0;
+PERL
 }
 
 test_help_includes_entire_header() {
@@ -66,6 +207,8 @@ test_ship_modes_generate_clean_briefs() {
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
+    assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
+      "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -112,9 +255,13 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_no_grep "no-mistakes' own guidance" "$brief" \
-    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+  # The apostrophe in "firstmate's authority check" is now structurally safe
+  # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
+  # being reworded or escaped away. test_no_heredoc_in_command_substitution
+  # guards the structure that makes it safe.
+  assert_grep "firstmate's authority check" "$brief" \
+    "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
+  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
 test_ship_project_memory_wording() {
@@ -248,6 +395,138 @@ test_secondmate_no_projects_charter() {
   pass "fm-brief.sh: --no-projects scaffolds a project-less charter and guards misuse"
 }
 
+test_secondmate_marked_request_reporting_contract() {
+  local home brief
+  home="$TMP_ROOT/marked-request-reporting-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=paused \
+    FM_SECONDMATE_CHARTER='Handle routed domain work.' \
+    "$ROOT/bin/fm-brief.sh" marked-request-reporting --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/marked-request-reporting/brief.md"
+
+  assert_grep 'A marked request requires one correlated answer after the work' "$brief" \
+    "secondmate charter did not require the correlated answer after the work"
+  assert_grep 'does not require a separate receipt or start acknowledgement' "$brief" \
+    "secondmate charter did not reject a separate receipt/start acknowledgement"
+  assert_grep "Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started." "$brief" \
+    "secondmate charter did not forbid a generic working acknowledgement"
+  assert_no_grep "Give every routed-work phase a stable key: open it with \`working" "$brief" \
+    "secondmate charter retained the unconditional working opener"
+  assert_grep 'When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above' "$brief" \
+    "secondmate charter did not limit keyed phases to reportable material changes"
+  assert_grep "If its first reportable event is \`working [key=<work-slug>]: {material phase}\`" "$brief" \
+    "secondmate charter lost keyed working syntax for a reportable material phase"
+  assert_grep "use the same key on its later \`paused\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event" "$brief" \
+    "secondmate charter lost same-key closure for a reportable material phase"
+  assert_grep 'resolved [key=<work-slug>]' "$brief" \
+    "secondmate charter lost resolved closure for a keyed material phase"
+
+  assert_grep 'include that exact token in your parent status reply' "$brief" \
+    "secondmate charter lost correlated parent results"
+  assert_grep 'For a terse result, a status line is the whole answer.' "$brief" \
+    "secondmate charter lost terse result reporting"
+  assert_grep 'append a status line that points to that doc' "$brief" \
+    "secondmate charter lost detailed document pointers"
+  assert_grep 'Report only true captain-relevant outcomes or a declared external wait' "$brief" \
+    "secondmate charter lost declared external waits"
+  assert_grep 'a captain decision, a real blocker, a failure, or work ready for review' "$brief" \
+    "secondmate charter lost decisions, blockers, failures, or ready outcomes"
+  assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
+    "secondmate charter changed the preserved status vocabulary"
+  pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
+}
+
+test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
+  local root home data_override state_override brief baseline err status
+  root="$TMP_ROOT/relative-directory-inputs"
+  mkdir -p "$root"
+  root=$(cd "$root" && pwd -P)
+  home="$root/home"
+  data_override="$root/data-override"
+  state_override="$root/state-override"
+  mkdir -p "$home/data" "$home/state" "$data_override" "$state_override" \
+    "$root/cdpath/home/data" "$root/cdpath/home/state" \
+    "$root/cdpath/data-override" "$root/cdpath/state-override"
+
+  brief="$home/data/relative-home/brief.md"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=x \
+    "$ROOT/bin/fm-brief.sh" relative-home --secondmate --no-projects >/dev/null 2>&1
+  baseline="$root/absolute-home-charter"
+  cp "$brief" "$baseline"
+  rm -f "$brief"
+  (
+    cd "$root" || exit 1
+    CDPATH="$root/cdpath" FM_HOME=home FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" relative-home --secondmate --no-projects >/dev/null 2>&1
+  )
+  cmp -s "$baseline" "$brief" \
+    || fail "relative FM_HOME changed charter bytes compared with the same absolute home"
+  assert_grep ">> '$home/state/relative-home.status'" "$brief" \
+    "relative FM_HOME did not render an absolute secondmate status path"
+
+  brief="$home/data/relative-state/brief.md"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state_override" FM_SECONDMATE_CHARTER=x \
+    "$ROOT/bin/fm-brief.sh" relative-state --secondmate --no-projects >/dev/null 2>&1
+  baseline="$root/absolute-state-charter"
+  cp "$brief" "$baseline"
+  rm -f "$brief"
+  (
+    cd "$root" || exit 1
+    CDPATH="$root/cdpath" FM_HOME="$home" FM_STATE_OVERRIDE=state-override FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" relative-state --secondmate --no-projects >/dev/null 2>&1
+  )
+  cmp -s "$baseline" "$brief" \
+    || fail "relative FM_STATE_OVERRIDE changed charter bytes compared with the same absolute state directory"
+  assert_grep ">> '$state_override/relative-state.status'" "$brief" \
+    "relative FM_STATE_OVERRIDE did not render an absolute secondmate status path"
+
+  brief="$data_override/relative-data/brief.md"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data_override" FM_SECONDMATE_CHARTER=x \
+    "$ROOT/bin/fm-brief.sh" relative-data --secondmate --no-projects >/dev/null 2>&1
+  baseline="$root/absolute-data-charter"
+  cp "$brief" "$baseline"
+  rm -f "$brief"
+  (
+    cd "$root" || exit 1
+    CDPATH="$root/cdpath" FM_HOME="$home" FM_DATA_OVERRIDE=data-override FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" relative-data --secondmate --no-projects >/dev/null 2>&1
+  )
+  cmp -s "$baseline" "$brief" \
+    || fail "relative FM_DATA_OVERRIDE changed charter bytes compared with the same absolute data directory"
+  assert_grep ">> '$home/state/relative-data.status'" "$brief" \
+    "relative FM_DATA_OVERRIDE changed the absolute default status path"
+
+  err="$root/unresolved.err"
+  (
+    cd "$root" || exit 1
+    FM_HOME=missing-home FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" unresolved-home --secondmate --no-projects >/dev/null 2>"$err"
+  ); status=$?
+  expect_code 1 "$status" "an unresolved relative FM_HOME must fail"
+  assert_grep "FM_HOME directory cannot be resolved: missing-home" "$err" \
+    "unresolved relative FM_HOME did not fail loudly"
+
+  (
+    cd "$root" || exit 1
+    FM_HOME="$home" FM_STATE_OVERRIDE=missing-state FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" unresolved-state --secondmate --no-projects >/dev/null 2>"$err"
+  ); status=$?
+  expect_code 1 "$status" "an unresolved relative FM_STATE_OVERRIDE must fail"
+  assert_grep "FM_STATE_OVERRIDE directory cannot be resolved: missing-state" "$err" \
+    "unresolved relative FM_STATE_OVERRIDE did not fail loudly"
+
+  (
+    cd "$root" || exit 1
+    FM_HOME="$home" FM_DATA_OVERRIDE=missing-data FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" unresolved-data --secondmate --no-projects >/dev/null 2>"$err"
+  ); status=$?
+  expect_code 1 "$status" "an unresolved relative FM_DATA_OVERRIDE must fail"
+  assert_grep "FM_DATA_OVERRIDE directory cannot be resolved: missing-data" "$err" \
+    "unresolved relative FM_DATA_OVERRIDE did not fail loudly"
+
+  pass "fm-brief.sh: relative directory inputs ignore CDPATH, render stable absolute charter paths, or fail loudly"
+}
+
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   local home brief status=0
   home="$TMP_ROOT/herdr-kind-home"
@@ -340,6 +619,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
@@ -350,6 +630,8 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
+test_secondmate_marked_request_reporting_contract
+test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
