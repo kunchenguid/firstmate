@@ -79,6 +79,8 @@ test_record_format_for_all_three_kinds() {
 
   [ "$(field_of "$file" outcome outcome)" = steered ] || fail "format: outcome token not recorded"
   [ "$(field_of "$file" outcome task)" = alpha ] || fail "format: outcome task not resolved from its wake"
+  [ "$(field_of "$file" outcome queued)" = "$((now - 12))" ] \
+    || fail "format: outcome queued not copied from its wake record"
 
   [ "$(field_of "$file" task harness)" = pi ] || fail "format: task harness not recorded"
   [ "$(field_of "$file" task model)" = sol ] || fail "format: task model not recorded"
@@ -141,7 +143,7 @@ test_sanitization_keeps_one_record_per_line() {
     || fail "sanitize: outcome with control characters should still record"
   lines=$(wc -l < "$file" | tr -d ' ')
   [ "$lines" -eq 1 ] || fail "sanitize: embedded newline split the record into $lines lines"
-  LC_ALL=C awk -F '\t' 'NF != 8 { bad = 1 } END { exit bad + 0 }' "$file" \
+  LC_ALL=C awk -F '\t' 'NF != 9 { bad = 1 } END { exit bad + 0 }' "$file" \
     || fail "sanitize: embedded tabs added fields to the record"
   grep -q "note=first second third fourth" "$file" \
     || fail "sanitize: control characters were not collapsed to spaces"
@@ -305,7 +307,7 @@ test_concurrent_appends_stay_whole_lines() {
     wait "$pid" || fail "concurrent: an append failed"
   done
   [ "$(wc -l < "$file" | tr -d ' ')" -eq 30 ] || fail "concurrent: expected 30 records"
-  LC_ALL=C awk -F '\t' '$1 != "v1" || $2 != "outcome" || NF != 8 { bad = 1 } END { exit bad + 0 }' "$file" \
+  LC_ALL=C awk -F '\t' '$1 != "v1" || $2 != "outcome" || NF != 9 { bad = 1 } END { exit bad + 0 }' "$file" \
     || fail "concurrent: appends interleaved into a malformed record"
   pass "concurrent appends from many writers stay whole, well-formed lines"
 }
@@ -354,6 +356,36 @@ test_report_counts_coverage_and_the_model_join() {
   pass "the report counts distinct wakes, states coverage, and joins outcomes to profiles"
 }
 
+test_seq_reuse_across_a_state_reset_never_collapses_records() {
+  local home file out
+  home=$(make_home seq-reset)
+  file=$(ledger_file "$home")
+
+  # An outcome whose wake record is unresolvable must say so explicitly.
+  ledger "$home" outcome absorbed 9 || fail "seq reset: unmatched outcome failed"
+  [ "$(field_of "$file" outcome queued)" = unknown ] \
+    || fail "seq reset: an unmatched outcome must record queued=unknown"
+  : > "$file"
+
+  # A state wipe restarts the wake-queue sequence while the ledger survives,
+  # so the same seq arrives twice with different queue epochs.
+  printf '1000\t1\tsignal\talpha.status\tsignal\n' | ledger "$home" drain-record \
+    || fail "seq reset: first drain-record failed"
+  ledger "$home" outcome steered 1 || fail "seq reset: first outcome failed"
+  printf '2000\t1\tsignal\talpha.status\tsignal\n' | ledger "$home" drain-record \
+    || fail "seq reset: second drain-record failed"
+  ledger "$home" outcome absorbed 1 || fail "seq reset: second outcome failed"
+
+  out=$(ledger "$home" report) || fail "seq reset: report failed"
+  printf '%s\n' "$out" | grep -q "wakes: 2 total" \
+    || fail "seq reset: distinct wakes sharing a seq were collapsed:"$'\n'"$out"
+  printf '%s\n' "$out" | grep -q "2 with a recorded outcome, 0 unrecorded" \
+    || fail "seq reset: coverage did not join on the (seq, queued) pair:"$'\n'"$out"
+  printf '%s\n' "$out" | grep -q "outcomes: 2 recorded" \
+    || fail "seq reset: distinct outcomes sharing a seq were collapsed:"$'\n'"$out"
+  pass "a reused wake-queue sequence never collapses distinct wakes or outcomes"
+}
+
 
 test_record_format_for_all_three_kinds
 test_outcome_vocabulary_is_closed
@@ -365,3 +397,4 @@ test_unwritable_ledger_cannot_change_the_drain
 test_slow_ledger_never_blocks_a_wake_append
 test_concurrent_appends_stay_whole_lines
 test_report_counts_coverage_and_the_model_join
+test_seq_reuse_across_a_state_reset_never_collapses_records

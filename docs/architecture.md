@@ -45,7 +45,7 @@ The script header owns the exact JSON schema.
 
 `data/wake-ledger.tsv` is the durable record of what supervision actually costs, so coordinator attention is measured rather than estimated.
 `bin/fm-wake-ledger.sh` is its single owner: record format, the closed outcome vocabulary, and append semantics all live in that script's header and `--help`.
-It carries three record kinds - one `wake` record per drained wake, one `outcome` record per handled wake joined to it on the wake-queue sequence, and one terminal `task` record per finished task.
+It carries three record kinds - one `wake` record per drained wake, one `outcome` record per handled wake joined to it on the (seq, queued) pair, and one terminal `task` record per finished task.
 It lives under `data/` rather than `state/` because teardown clears `state/<id>.*` and this evidence must outlive the tasks it describes.
 
 The wake half is written deterministically by `bin/fm-wake-drain.sh` and the outcome half by the first mate.

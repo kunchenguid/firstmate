@@ -25,14 +25,21 @@
 #
 #   wake     one per deduped drained wake-queue row, written by
 #            bin/fm-wake-drain.sh. Deterministic - no judgment involved.
-#            Fields: seq (the wake-queue sequence, and the join key), kind,
-#            key, task, queued (epoch the watcher enqueued), latency (seconds
-#            the wake waited for the coordinator).
+#            Fields: seq (the wake-queue sequence), kind, key, task, queued
+#            (epoch the watcher enqueued), latency (seconds the wake waited
+#            for the coordinator).
 #
 #   outcome  one per handled wake, written by the coordinator through this
 #            script's `outcome` subcommand and joined to its wake record on
-#            seq. Fields: seq, outcome, task, after (seconds since the wake
-#            record), and optional defect and note.
+#            the (seq, queued) pair. Fields: seq, queued (copied from the
+#            matching wake record, or unknown when none is resolvable),
+#            outcome, task, after (seconds since the wake record), and
+#            optional defect and note.
+#
+# The durable join identity is the (seq, queued) pair, not seq alone: seq
+# comes from state/.wake-queue.seq, which restarts when state/ is wiped or a
+# home is rebuilt while this file survives, so queued disambiguates a reused
+# sequence.
 #
 #   task     one terminal line per task, written by bin/fm-teardown.sh
 #            immediately before the task metadata is deleted - the last moment
@@ -266,7 +273,8 @@ cmd_drain_record() {
   return 0
 }
 
-# The wake record for <seq>, as "<epoch><TAB><task>", from a bounded tail read.
+# The wake record for <seq>, as "<epoch><TAB><task><TAB><queued>", from a
+# bounded tail read.
 ledger_lookup_wake() {  # <seq>
   local seq=$1 found
   [ -f "$LEDGER" ] || return 1
@@ -275,20 +283,22 @@ ledger_lookup_wake() {  # <seq>
     $1 == schema && $2 == "wake" {
       match_seq = 0
       row_task = "-"
+      row_queued = ""
       for (i = 4; i <= NF; i++) {
         if ($i == want) match_seq = 1
         else if (substr($i, 1, 5) == "task=") row_task = substr($i, 6)
+        else if (substr($i, 1, 7) == "queued=") row_queued = substr($i, 8)
       }
-      if (match_seq) { ts = $3; task = row_task; hit = 1 }
+      if (match_seq) { ts = $3; task = row_task; queued = row_queued; hit = 1 }
     }
-    END { if (hit) printf "%s\t%s", ts, task }
+    END { if (hit) printf "%s\t%s\t%s", ts, task, queued }
   ') || return 1
   [ -n "$found" ] || return 1
   printf '%s' "$found"
 }
 
 cmd_outcome() {
-  local token='' task='' defect='' note='' now seq wake_row wake_ts wake_task after
+  local token='' task='' defect='' note='' now seq wake_row wake_rest wake_ts wake_task wake_queued after
   local -a seqs=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -330,15 +340,21 @@ cmd_outcome() {
   now=$(date +%s)
   for seq in "${seqs[@]}"; do
     wake_task=$task
+    wake_queued=unknown
     after=unknown
     if wake_row=$(ledger_lookup_wake "$seq"); then
       wake_ts=${wake_row%%"$TAB"*}
       case "$wake_ts" in
         ''|*[!0-9]*) wake_ts= ;;
       esac
+      wake_rest=${wake_row#*"$TAB"}
       if [ -z "$wake_task" ]; then
-        wake_task=${wake_row#*"$TAB"}
+        wake_task=${wake_rest%%"$TAB"*}
       fi
+      wake_queued=${wake_rest#*"$TAB"}
+      case "$wake_queued" in
+        ''|*[!0-9]*) wake_queued=unknown ;;
+      esac
       if [ -n "$wake_ts" ]; then
         after=$((now - wake_ts))
         [ "$after" -ge 0 ] || after=0
@@ -347,6 +363,7 @@ cmd_outcome() {
     [ -n "$wake_task" ] || wake_task=-
     set -- \
       "seq=$seq" \
+      "queued=$wake_queued" \
       "outcome=$token" \
       "task=$(ledger_sanitize "$wake_task" "$LEDGER_ID_MAX")" \
       "after=$after"
@@ -477,10 +494,18 @@ cmd_report() {
     }
     $2 == "wake" {
       seq = f["seq"]
+      q = f["queued"]
+      if (q == "") q = "unknown"
       # A drain crash inside its at-least-once micro-gap can replay a wake, so
-      # count distinct sequences rather than lines.
-      if (seq in wake_seen) next
-      wake_seen[seq] = 1
+      # count distinct (seq, queued) pairs rather than lines. seq alone is not
+      # identity: state/.wake-queue.seq restarts across a state wipe while this
+      # file survives, so a reused seq needs queued to disambiguate. An unknown
+      # queued cannot identify a record, so it never dedups - silently merging
+      # unidentifiable records is exactly the undercount this guards against.
+      if (q != "unknown") {
+        if ((seq, q) in wake_seen) next
+        wake_seen[seq, q] = 1
+      }
       wakes++
       by_kind[f["kind"]]++
       t = f["task"]
@@ -490,8 +515,13 @@ cmd_report() {
     }
     $2 == "outcome" {
       seq = f["seq"]
-      if (seq in outcome_seen) next
-      outcome_seen[seq] = 1
+      q = f["queued"]
+      if (q == "") q = "unknown"
+      # Same pair identity and same unknown rule as the wake records above.
+      if (q != "unknown") {
+        if ((seq, q) in outcome_seen) next
+        outcome_seen[seq, q] = 1
+      }
       outcomes++
       by_outcome[f["outcome"]]++
       t = f["task"]
