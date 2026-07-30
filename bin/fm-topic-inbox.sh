@@ -71,7 +71,7 @@ case "$command" in
     ;;
   count)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
-    fm_topic_unanswered_count
+    fm_topic_unanswered_count "${FM_TOPIC_CLAIMED_REMIND_SECONDS:-14400}"
     ;;
   -h|--help|help)
     usage

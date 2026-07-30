@@ -358,20 +358,31 @@ fm_topic_last_wake_age() {
   printf '%s\n' "$((now - last))"
 }
 
+fm_topic_parse_iso8601_epoch() {
+  local stamp=$1 epoch
+  epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$stamp" +%s 2>/dev/null \
+    || date -u -d "$stamp" +%s 2>/dev/null) || return 1
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$epoch"
+}
+
 fm_topic_unanswered_count() {
-  local claimed_remind_seconds=${1:-14400} wake_age item status count=0
+  local claimed_remind_seconds=${1:-14400} now item status claimed_at claimed_epoch count=0
   case "$claimed_remind_seconds" in ''|*[!0-9]*|0) return 2 ;; esac
 
-  wake_age=$(fm_topic_last_wake_age)
-  # Pending items retain the normal cadence; claimed items reappear every four
-  # hours by default, so active work stays quiet without being silenced forever.
+  now=$(date +%s)
+  # Pending items retain the normal cadence; claimed items reappear once their
+  # own claimed_at timestamp is at least claimed_remind_seconds old (four hours
+  # by default), so active work stays quiet without being silenced forever.
   for item in "$FM_TOPIC_INBOX"/update-*.json; do
     [ -f "$item" ] && [ ! -L "$item" ] || continue
     status=$(jq -r '.status // empty' "$item" 2>/dev/null) || continue
     case "$status" in
       pending) count=$((count + 1)) ;;
       claimed)
-        [ "$wake_age" -ge "$claimed_remind_seconds" ] && count=$((count + 1))
+        claimed_at=$(jq -r '.claimed_at // empty' "$item" 2>/dev/null) || continue
+        claimed_epoch=$(fm_topic_parse_iso8601_epoch "$claimed_at") || continue
+        [ "$((now - claimed_epoch))" -ge "$claimed_remind_seconds" ] && count=$((count + 1))
         ;;
     esac
   done

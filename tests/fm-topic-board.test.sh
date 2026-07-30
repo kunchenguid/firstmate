@@ -408,8 +408,19 @@ test_claim_reply_idempotency_and_ambiguous_delivery() {
   pass "claims persist, keyed replies do not duplicate, and ambiguous delivery requires an explicit decision"
 }
 
+epoch_to_iso8601() {
+  date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+backdate_claimed_at() {
+  local item=$1 epoch=$2 stamp tmp
+  stamp=$(epoch_to_iso8601 "$epoch") || fail "could not compute a backdated claimed_at stamp"
+  tmp="$item.tmp"
+  jq --arg claimed_at "$stamp" '.claimed_at = $claimed_at' "$item" > "$tmp" && mv "$tmp" "$item"
+}
+
 test_claimed_item_reminds_on_the_longer_cadence() {
-  local home fakebin response log data now
+  local home fakebin response log data now item
   home=$(make_home claimed-reminder)
   fakebin=$(make_fake_curl "$home")
   response="$home/updates.json"
@@ -420,6 +431,7 @@ test_claimed_item_reminds_on_the_longer_cadence() {
     '{"update_id":55,"message":{"message_id":551,"message_thread_id":3,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"long-running work"}}'
   listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "could not seed claimed reminder item"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$INBOX" claim 55 alpha-mate >/dev/null || fail "could not claim reminder item"
+  item="$data/inbox/update-55.json"
 
   rm -f "$home/state/.wake-queue"
   now=$(date +%s)
@@ -428,11 +440,35 @@ test_claimed_item_reminds_on_the_longer_cadence() {
     || fail "listener failed while checking the pending reminder cadence"
   assert_absent "$home/state/.wake-queue" "claimed item re-fired on the pending reminder cadence"
 
+  backdate_claimed_at "$item" "$((now - 900))"
   printf '%s\n' "$((now - 900))" > "$data/.last-wake"
   FM_TOPIC_CLAIMED_REMIND_SECONDS=900 listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 \
     || fail "listener failed while checking the claimed reminder cadence"
   assert_grep 'topic-message 1 unanswered' "$home/state/.wake-queue" "claimed item did not resurface after the longer cadence"
   pass "claimed topic items skip the pending cadence and resurface on the longer cadence"
+}
+
+test_claimed_item_cadence_survives_concurrent_wake_clock_resets() {
+  local home data now stale_claim_epoch fresh_claim_epoch count
+  home=$(make_home claimed-cadence-decoupling)
+  data="$home/data/fm-telegram-topics"
+  mkdir -p "$data/inbox"
+  now=$(date +%s)
+  stale_claim_epoch=$((now - 1000))
+  fresh_claim_epoch=$((now - 5))
+
+  jq -n --arg claimed_at "$(epoch_to_iso8601 "$stale_claim_epoch")" \
+    '{update_id:77, status:"claimed", claimed_by:"alpha-mate", claimed_at:$claimed_at, topic:"AlphaDev", project:"Alpha'"'"'s Place", route:"alpha-mate", text:"old claim", group:"Example Dev Group", from_id:"700000001", chat_id:"-1001234567890", thread_id:3}' \
+    > "$data/inbox/update-77.json"
+
+  (
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT"
+    . "$ROOT/bin/fm-topic-lib.sh"
+    printf '%s\n' "$fresh_claim_epoch" > "$FM_TOPIC_LAST_WAKE"
+    count=$(fm_topic_unanswered_count 900) || exit 1
+    [ "$count" -eq 1 ] || { echo "expected claimed item aged past claimed_at threshold to count despite a fresh shared wake clock, got $count" >&2; exit 1; }
+  ) || fail "claimed-item cadence stayed coupled to the shared wake clock instead of the item's own claimed_at"
+  pass "claimed-item cadence uses each item's own claimed_at and ignores concurrent wake-clock resets"
 }
 
 test_service_and_supervision_integration() {
@@ -513,4 +549,5 @@ test_fast_wake_signals_only_verified_home_watcher
 test_queued_topic_wake_survives_unhandled_usr1
 test_claim_reply_idempotency_and_ambiguous_delivery
 test_claimed_item_reminds_on_the_longer_cadence
+test_claimed_item_cadence_survives_concurrent_wake_clock_resets
 test_service_and_supervision_integration

@@ -177,8 +177,19 @@ test_reply_archives_and_standalone_send_records() {
   pass "replies archive the item and standalone sends leave durable records"
 }
 
+epoch_to_iso8601() {
+  date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+backdate_claimed_at() {
+  local item=$1 epoch=$2 stamp tmp
+  stamp=$(epoch_to_iso8601 "$epoch") || fail "could not compute a backdated claimed_at stamp"
+  tmp="$item.tmp"
+  jq --arg claimed_at "$stamp" '.claimed_at = $claimed_at' "$item" > "$tmp" && mv "$tmp" "$item"
+}
+
 test_claimed_item_reminds_on_the_longer_cadence() {
-  local home fakebin response log data now
+  local home fakebin response log data now item
   home=$(make_home claimed-reminder)
   fakebin=$(make_fake_curl "$home")
   data="$home/data/fm-telegram-dm"
@@ -189,6 +200,7 @@ test_claimed_item_reminds_on_the_longer_cadence() {
     "{\"update_id\":25,\"message\":{\"message_id\":250,\"chat\":{\"id\":$CAPTAIN_ID,\"type\":\"private\"},\"from\":{\"id\":$CAPTAIN_ID},\"text\":\"long-running direct work\"}}"
   listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "could not seed claimed direct-message reminder item"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$INBOX" claim 25 main >/dev/null || fail "could not claim direct-message reminder item"
+  item="$data/inbox/update-25.json"
 
   rm -f "$home/state/.wake-queue"
   now=$(date +%s)
@@ -197,11 +209,41 @@ test_claimed_item_reminds_on_the_longer_cadence() {
     || fail "direct-message listener failed while checking the pending reminder cadence"
   assert_absent "$home/state/.wake-queue" "claimed direct-message item re-fired on the pending reminder cadence"
 
+  backdate_claimed_at "$item" "$((now - 900))"
   printf '%s\n' "$((now - 900))" > "$data/.last-wake"
   FM_DM_CLAIMED_REMIND_SECONDS=900 listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 \
     || fail "direct-message listener failed while checking the claimed reminder cadence"
   assert_grep 'unanswered captain direct message' "$home/state/.wake-queue" "claimed direct-message item did not resurface after the longer cadence"
   pass "claimed direct-message items use the shared longer reminder cadence"
+}
+
+test_count_subcommand_uses_configured_dm_claimed_cadence() {
+  local home fakebin response log data now item count
+  home=$(make_home count-cadence)
+  fakebin=$(make_fake_curl "$home")
+  data="$home/data/fm-telegram-dm"
+  response="$home/updates.json"
+  log="$home/curl.log"
+  : > "$log"
+  write_updates "$response" \
+    "{\"update_id\":30,\"message\":{\"message_id\":300,\"chat\":{\"id\":$CAPTAIN_ID,\"type\":\"private\"},\"from\":{\"id\":$CAPTAIN_ID},\"text\":\"count cadence check\"}}"
+  listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "could not seed count-cadence item"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$INBOX" claim 30 main >/dev/null || fail "could not claim count-cadence item"
+  item="$data/inbox/update-30.json"
+  now=$(date +%s)
+  backdate_claimed_at "$item" "$((now - 500))"
+
+  count=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$INBOX" count) || fail "count subcommand failed with the default cadence"
+  [ "$count" -eq 0 ] || fail "count used a shorter cadence than the listener's 14400s default: $count"
+
+  count=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DM_CLAIMED_REMIND_SECONDS=600 "$INBOX" count) \
+    || fail "count subcommand failed with a configured cadence shorter than the claim age"
+  [ "$count" -eq 0 ] || fail "count fired before the configured direct-message claimed cadence elapsed: $count"
+
+  count=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DM_CLAIMED_REMIND_SECONDS=400 "$INBOX" count) \
+    || fail "count subcommand failed with a configured cadence shorter than the claim age"
+  [ "$count" -eq 1 ] || fail "count did not honor FM_DM_CLAIMED_REMIND_SECONDS: $count"
+  pass "count subcommand tracks the direct-message listener's configured claimed cadence"
 }
 
 test_service_unit_and_supervision_demand() {
@@ -226,4 +268,5 @@ test_listener_waits_while_plugin_poller_lives
 test_check_config_refuses_board_token_reuse
 test_reply_archives_and_standalone_send_records
 test_claimed_item_reminds_on_the_longer_cadence
+test_count_subcommand_uses_configured_dm_claimed_cadence
 test_service_unit_and_supervision_demand
