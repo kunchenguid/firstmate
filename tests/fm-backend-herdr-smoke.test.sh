@@ -30,8 +30,10 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 SESSION="fm-lab-backend-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SM_SCRATCH=
+NEUTRAL_CONFIG=$(herdr_test_neutral_config) || { echo "skip: could not create a scratch config dir"; exit 0; }
 cleanup_all() {
   [ -n "$SM_SCRATCH" ] && rm -rf "$SM_SCRATCH"
+  rm -rf "$NEUTRAL_CONFIG"
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT

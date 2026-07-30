@@ -13,9 +13,12 @@
 #
 # Default container shape (D4, decided empirically - see
 # herdr-verification-p2.md "Task container shape", refined by
-# docs/herdr-backend.md "Default task container shape"): ONE herdr workspace PER
+# docs/herdr-backend.md "Watching and task containers"): ONE herdr workspace PER
 # FIRSTMATE HOME (the primary, and each secondmate, gets its own), ONE herdr TAB
-# per task inside its home's workspace. An optional, default-off presentation
+# per task inside its home's workspace. A second PRIMARY home sharing one herdr
+# session opts out of the shared default label through its own gitignored
+# config/herdr-workspace-label (fm_backend_herdr_workspace_label). An optional,
+# default-off presentation
 # flag creates a disposable workspace for a clean fresh task instead. That
 # workspace is a non-authoritative visual projection containing only the normal
 # task pane. Its random token and mutable label never authorize lookup,
@@ -58,6 +61,9 @@
 # default (the firstmate repo root - never a secondmate home, so
 # fm_backend_herdr_workspace_label falls through to "firstmate" exactly like
 # pre-P3 behavior when a test does not care about home-specific labeling).
+# A test running from a real home that configures its own workspace label
+# should set FM_CONFIG_OVERRIDE to a scratch directory so that home's
+# config/herdr-workspace-label cannot reach it.
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -100,6 +106,17 @@ FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
 # The primary firstmate home never carries this marker.
 FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
+# Optional, opt-in per-PRIMARY-home workspace label
+# (docs/configuration.md "Runtime backend"). Absent means the constant
+# "firstmate", so no existing home migrates. Deliberately NOT in
+# bin/fm-config-inherit-lib.sh's FM_INHERITABLE_CONFIG allowlist: two homes
+# sharing one label is the collision this file exists to avoid, so each home
+# must set its own.
+FM_BACKEND_HERDR_WORKSPACE_LABEL_CONFIG="herdr-workspace-label"
+# Bounded length for that configured label. 64 is generous for a sidebar
+# label and short enough that a truncated, corrupt, or accidentally-catted
+# file is refused rather than sent to the Herdr CLI.
+FM_BACKEND_HERDR_WORKSPACE_LABEL_MAX=64
 # The default-off presentation projection is intentionally separate from the
 # authoritative task endpoint record.
 # A per-task journal lives under state/ as <id>.herdr-presentation.
@@ -110,25 +127,93 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 
+# fm_backend_herdr_workspace_label_config_path: this home's optional workspace
+# label file. FM_CONFIG_OVERRIDE wins where it is set, mirroring the rest of
+# backend config resolution (fm_backend_cmux_password), and otherwise the file
+# lives under the effective FM_HOME - the same home identity the secondmate
+# marker is read from.
+fm_backend_herdr_workspace_label_config_path() {
+  printf '%s/%s' "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_BACKEND_HERDR_WORKSPACE_LABEL_CONFIG"
+}
+
+# fm_backend_herdr_workspace_label_valid: the conservative accepted shape for a
+# configured workspace label. One line, 1 to
+# FM_BACKEND_HERDR_WORKSPACE_LABEL_MAX characters, drawn only from ASCII
+# letters, digits, ".", "_", and "-", starting with a letter or digit.
+# That excludes every control character, every byte of whitespace, and "/" -
+# "/" is what the legacy "<owner>/<task> · p:<token>" presentation-child labels
+# use, and a leading "-" would be read as a flag by the Herdr CLI.
+# "2ndmate-" is refused because that namespace belongs to secondmate homes:
+# a primary home claiming it would recreate exactly the cross-home collision
+# this configuration exists to remove.
+fm_backend_herdr_workspace_label_valid() {  # <candidate>
+  local value=$1
+  case "$value" in
+    '') return 1 ;;
+    *[!A-Za-z0-9._-]*) return 1 ;;
+    [!A-Za-z0-9]*) return 1 ;;
+    2ndmate-*) return 1 ;;
+  esac
+  [ "${#value}" -le "$FM_BACKEND_HERDR_WORKSPACE_LABEL_MAX" ]
+}
+
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
-# label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
-# secondmate marker) resolves to the constant "firstmate", byte-identical to
-# every pre-existing task's recorded label - no forced migration. A SECONDMATE
+# label (docs/herdr-backend.md "Watching and task containers"). A SECONDMATE
 # home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
 # workspace, obviously distinguishable from the primary's (and from every
-# other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
-# every call rather than cached at source time: FM_HOME is the home's own
-# durable identity, not env plumbing threaded through a call chain, so the
-# label is automatically stable across every respawn/recovery for the life of
-# that home. fm-spawn.sh briefly shadows FM_HOME to a secondmate's own home
-# when the PRIMARY spawns that secondmate (its own process's FM_HOME still
-# names the primary at that point) - see fm-spawn.sh's herdr case arm.
-fm_backend_herdr_workspace_label() {
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
+# other secondmate's) in herdr's spaces sidebar. That marker keeps precedence
+# over the configuration file below, so the secondmate guarantee cannot be
+# configured away - and so fm-spawn.sh's FM_HOME shadow (which does not shadow
+# FM_CONFIG_OVERRIDE) can never resolve a secondmate to another home's
+# configured label.
+#
+# A PRIMARY home (no secondmate marker) resolves to the constant "firstmate"
+# unless its own config/herdr-workspace-label names something else. An absent,
+# empty, or whitespace-only file is byte-identical to every pre-existing task's
+# recorded label - no forced migration, and a second primary home on one Herdr
+# session opts in explicitly rather than silently sharing the first home's
+# workspace. An unusable value REFUSES instead of falling back to "firstmate",
+# because that fallback would recreate the very collision the file was written
+# to remove.
+#
+# Read fresh on every call rather than cached at source time: FM_HOME is the
+# home's own durable identity, not env plumbing threaded through a call chain,
+# so the label is automatically stable across every respawn/recovery for the
+# life of that home. fm-spawn.sh briefly shadows FM_HOME to a secondmate's own
+# home when the PRIMARY spawns that secondmate (its own process's FM_HOME
+# still names the primary at that point) - see fm-spawn.sh's herdr case arm.
+fm_backend_herdr_workspace_label() {  # -> label on stdout, or 1 + a diagnostic
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id file raw value
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
     if [ -n "$id" ]; then
       printf '2ndmate-%s' "$id"
+      return 0
+    fi
+  fi
+  file=$(fm_backend_herdr_workspace_label_config_path)
+  if [ -f "$file" ]; then
+    # Command substitution strips trailing newlines, so an ordinary one-line
+    # file never trips the multi-line refusal below.
+    raw=$(cat "$file" 2>/dev/null) || {
+      echo "error: could not read $file; refusing to guess this home's herdr workspace label" >&2
+      return 1
+    }
+    case "$raw" in
+      *$'\n'*)
+        echo "error: $file must hold a single line, but contains more than one; write one workspace label or remove the file to use the default 'firstmate'" >&2
+        return 1
+        ;;
+    esac
+    value=$raw
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    if [ -n "$value" ]; then
+      if ! fm_backend_herdr_workspace_label_valid "$value"; then
+        echo "error: $file holds an unusable herdr workspace label; use 1-$FM_BACKEND_HERDR_WORKSPACE_LABEL_MAX characters from A-Z a-z 0-9 . _ - starting with a letter or digit and not with the reserved '2ndmate-' prefix, or remove the file to use the default 'firstmate'" >&2
+        return 1
+      fi
+      printf '%s' "$value"
       return 0
     fi
   fi
@@ -823,14 +908,17 @@ fm_backend_herdr_server_ensure() {  # <session>
 
 # fm_backend_herdr_workspace_find: this HOME's own workspace id inside
 # <session> (fm_backend_herdr_workspace_label), or empty (never creates).
-# Read-only, safe for recovery/list paths. Label-collision semantics
+# Read-only, safe for recovery/list paths. Returns non-zero, with no label at
+# all, when this home's configured label is unusable, so no caller can turn a
+# refused label into a lookup against the default "firstmate" workspace.
+# Label-collision semantics
 # (docs/herdr-backend.md "Label collisions"): herdr enforces no label
 # uniqueness at all, so this adopts the FIRST matching workspace `jq` returns
 # (list order, normally creation order/oldest) rather than disambiguating -
 # identical in spirit to the pre-existing tab duplicate-label check below.
 fm_backend_herdr_workspace_find() {  # <session>
   local session=$1 label list
-  label=$(fm_backend_herdr_workspace_label)
+  label=$(fm_backend_herdr_workspace_label) || return 1
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
   # keyword (label/break), so declaring a jq variable named "label" is a
@@ -944,13 +1032,13 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   local session=$1 cwd=$2 wsid out label
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
-  wsid=$(fm_backend_herdr_workspace_find "$session")
+  wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
   if [ -n "$wsid" ]; then
     FM_BACKEND_HERDR_WS_ID=$wsid
     printf '%s' "$wsid"
     return 0
   fi
-  label=$(fm_backend_herdr_workspace_label)
+  label=$(fm_backend_herdr_workspace_label) || return 1
   out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   [ -n "$wsid" ] || return 1
@@ -977,11 +1065,14 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
 fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
   local cwd=${1:-$PWD} session label
   fm_backend_herdr_version_check || return 1
+  # Resolved once, before the server is touched: an unusable configured label
+  # is a spawn refusal, not a reason to start a server and then report a
+  # workspace with no name.
+  label=$(fm_backend_herdr_workspace_label) || return 1
   session=$(fm_backend_herdr_session)
   fm_backend_herdr_server_ensure "$session" || return 1
-  fm_backend_herdr_workspace_ensure "$session" "$cwd" >/dev/null || { label=$(fm_backend_herdr_workspace_label); echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2; return 1; }
+  fm_backend_herdr_workspace_ensure "$session" "$cwd" >/dev/null || { echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2; return 1; }
   if [ -z "$FM_BACKEND_HERDR_WS_ID" ]; then
-    label=$(fm_backend_herdr_workspace_label)
     echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2
     return 1
   fi
@@ -2282,7 +2373,10 @@ EOF
 # "<session>:<pane_id>\t<label>" line per live task tab.
 fm_backend_herdr_list_live() {  # <session>
   local session=$1 wsid tabs tab_id label pane_id
-  wsid=$(fm_backend_herdr_workspace_find "$session") || return 0
+  # An unusable configured label refuses here too: reporting "no live tasks"
+  # from a home whose own label cannot be resolved would read as a fleet with
+  # nothing running.
+  wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
   [ -n "$wsid" ] || return 0
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
   while IFS=$'\t' read -r tab_id label; do

@@ -164,6 +164,15 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: a pre-existing captain-owned workspace with a seed-shaped tab was adopted for routing but its tab was never eligible for prune because the current create call did not return that seed id.
 
+That gate was re-verified on 2026-07-30 against Herdr 0.7.5 protocol 17 on Linux x86_64, extended to a home whose label comes from `config/herdr-workspace-label`, because a configured label points Firstmate at a workspace the captain is likely to have created by hand:
+
+```text
+ok - real herdr: a configured workspace label adopts the pre-existing workspace and reports NO seeded default tab
+ok - real herdr: adopting a workspace under a CONFIGURED label never prunes any of its tabs - the created-vs-adopted gate is label-independent
+```
+
+Observed guarantee: adoption stays safe for any label, not only the derived ones, because only the workspace the current create call returned carries a seed id at all; the adopted workspace kept its original tab alongside the new task tab.
+
 Restart-husk replacement is owned by:
 
 ```sh
@@ -183,6 +192,16 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 ```
 
 Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
+
+The same suite covered a second primary home on 2026-07-30 against Herdr 0.7.5 protocol 17 on Linux x86_64:
+
+```text
+ok - real herdr E2E: a second PRIMARY home with config/herdr-workspace-label spawns its crew into its OWN workspace, not the first home's 'firstmate'
+ok - real herdr E2E: recovery discovery from the second primary home stays scoped to its own configured workspace
+ok - real herdr E2E: the second primary home's own cleanup closes its own task
+```
+
+Observed guarantee: a configured primary label separates two primary homes sharing one Herdr session across spawn, recovery discovery, and cleanup, exactly as the derived secondmate label already did.
 
 The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
 

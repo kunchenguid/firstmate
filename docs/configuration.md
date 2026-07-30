@@ -83,6 +83,10 @@ Missing, empty, duplicate, malformed, backend-inconsistent, or task-mismatched e
 Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>`; opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
 By default, Herdr workspaces are derived from `FM_HOME`: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
 The default-container spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
+A primary home that shares one Herdr session with another primary home names its own workspace in local gitignored `config/herdr-workspace-label`, which holds one line of 1 to 64 characters drawn from `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-`, starting with a letter or digit and never with the reserved `2ndmate-` prefix.
+An absent, empty, or whitespace-only file leaves `firstmate` unchanged, surrounding whitespace is trimmed, and any other value refuses the spawn or lookup with the exact accepted shape rather than falling back to the shared default and recreating the collision.
+The `.fm-secondmate-home` marker still wins over that file, so a secondmate home cannot be configured out of its own workspace.
+That file is deliberately not inherited into secondmate homes, because two homes sharing one label is precisely the collision it exists to remove.
 The optional local `config/herdr-presentation-spaces` presence flag instead enables Herdr's default-off disposable single-task visual projection; [Optional presentation spaces](herdr-backend.md#optional-presentation-spaces) owns its behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
 The flag is default-off and inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.

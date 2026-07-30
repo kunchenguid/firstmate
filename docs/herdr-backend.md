@@ -35,6 +35,7 @@ Real harness credential tests remain opt-in rather than part of default CI.
 
 Each Firstmate home gets one durable workspace with one task tab per endpoint.
 The primary workspace is `firstmate`.
+Two primary homes on one Herdr session would otherwise share that single workspace, so a second primary home names its own with local `config/herdr-workspace-label`; [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns that file's accepted shape, default, and refusal behavior.
 A secondmate home uses `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
 The secondmate process and every child it launches resolve the same home label; a secondmate launched by the primary receives a narrowly scoped home override during container creation.
 
@@ -46,7 +47,8 @@ The first workspace in a completely empty Herdr session must become focused beca
 
 Herdr does not enforce workspace or tab label uniqueness.
 Firstmate adopts the first workspace matching its derived home label and refuses duplicate task tabs inside it.
-Avoid naming a personal workspace `firstmate` or `2ndmate-<id>` because the adapter cannot distinguish that label collision from its own container.
+Avoid naming a personal workspace `firstmate`, `2ndmate-<id>`, or any label a home configures for itself, because the adapter cannot distinguish that label collision from its own container.
+Adopting such a workspace is safe for its contents: only a workspace Firstmate created in the same call is ever a default-tab prune candidate, so an adopted workspace keeps every tab it already had.
 An older secondmate workspace using `firstmate-<id>` is not migrated automatically; rename it manually before expecting new tasks or recovery to use it.
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
@@ -76,6 +78,7 @@ Protocol 16 exposes `workspace.move` over the named session socket but no CLI su
 Projected children are placed in one contiguous block immediately after their owning home when the session layout, protocol, socket, `python3`, and machine-private per-session lock are all verifiable.
 Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
+A workspace whose label a home configured for itself is not recognized as a top-level home by the other homes on that session, so when one sits between another home's block and its new child, that placement step skips with a warning and leaves every worker running in Herdr's current order.
 
 Ordering failure never fails the task spawn.
 Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.

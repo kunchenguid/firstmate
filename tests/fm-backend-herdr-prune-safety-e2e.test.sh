@@ -36,9 +36,10 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 SESSION="fm-lab-prune-safety-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-prune-safety.XXXXXX")
+NEUTRAL_CONFIG=$(herdr_test_neutral_config) || { echo "skip: could not create a scratch config dir"; exit 0; }
 cleanup_all() {
   herdr_safe_stop_and_delete "$SESSION"
-  rm -rf "$SCRATCH"
+  rm -rf "$SCRATCH" "$NEUTRAL_CONFIG"
 }
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
@@ -170,6 +171,61 @@ printf '%s' "$HAPPY_TABS" | jq -e --arg t "$HAPPY_SEEDED" '.result.tabs[] | sele
 pass "happy path: a genuinely fresh workspace's seeded default tab is still pruned, leaving exactly one clean fm-<id> task tab"
 
 fm_backend_herdr_kill "$SESSION:$HAPPY_PANE"
+
+# --- 5. same guarantee for a CONFIGURED workspace label --------------------
+# A second primary home setting config/herdr-workspace-label deliberately
+# points Firstmate at a workspace the captain may well have created by hand,
+# which is the exact adoption shape of the 2026-07-02 incident. The
+# created-vs-adopted gate is structural rather than label-derived, so this
+# must hold for any label, not only "firstmate".
+
+CUSTOM_LABEL="firstmate-sweepdrop"
+CUSTOM_HOME="$SCRATCH/custom-label-home"
+mkdir -p "$CUSTOM_HOME/config"
+printf '%s\n' "$CUSTOM_LABEL" > "$CUSTOM_HOME/config/herdr-workspace-label"
+
+CUSTOM_CWD="$SCRATCH/custom-label-project"
+mkdir -p "$CUSTOM_CWD"
+CUSTOM_CREATE=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$CUSTOM_CWD" --label "$CUSTOM_LABEL" --no-focus) \
+  || fail "could not create the captain-shaped workspace carrying the configured label"
+CUSTOM_WSID=$(printf '%s' "$CUSTOM_CREATE" | jq -r '.result.workspace.workspace_id // empty')
+CUSTOM_TAB_ID=$(printf '%s' "$CUSTOM_CREATE" | jq -r '.result.tab.tab_id // empty')
+CUSTOM_PANE_ID=$(printf '%s' "$CUSTOM_CREATE" | jq -r '.result.root_pane.pane_id // empty')
+if [ -z "$CUSTOM_WSID" ] || [ -z "$CUSTOM_TAB_ID" ] || [ -z "$CUSTOM_PANE_ID" ]; then
+  fail "could not parse the configured-label workspace's ids from workspace create: $CUSTOM_CREATE"
+fi
+
+CUSTOM_RAW=$(FM_HOME="$CUSTOM_HOME" FM_CONFIG_OVERRIDE="$CUSTOM_HOME/config" fm_backend_herdr_container_ensure "$CUSTOM_CWD") \
+  || fail "container_ensure failed for the configured-label home"
+CUSTOM_CONTAINER=${CUSTOM_RAW%%$'\t'*}
+CUSTOM_SEEDED=${CUSTOM_RAW#*$'\t'}
+[ "$CUSTOM_CONTAINER" = "$SESSION:$CUSTOM_WSID" ] \
+  || fail "container_ensure should have adopted the workspace carrying the configured label ($CUSTOM_WSID), got '$CUSTOM_CONTAINER'"
+[ -z "$CUSTOM_SEEDED" ] \
+  || fail "an ADOPTED configured-label workspace must report an EMPTY seeded default tab id, got '$CUSTOM_SEEDED'"
+pass "real herdr: a configured workspace label adopts the pre-existing workspace and reports NO seeded default tab"
+
+CUSTOM_TASK_IDS=$(FM_HOME="$CUSTOM_HOME" FM_CONFIG_OVERRIDE="$CUSTOM_HOME/config" \
+  fm_backend_herdr_create_task "$CUSTOM_CONTAINER" fm-prunesafety-custom "$CUSTOM_CWD" "$CUSTOM_SEEDED") \
+  || fail "create_task failed in the adopted configured-label workspace"
+read -r _CUSTOM_TAB CUSTOM_TASK_PANE <<EOF
+$CUSTOM_TASK_IDS
+EOF
+[ -n "$CUSTOM_TASK_PANE" ] || fail "create_task did not return a pane id for the configured-label home"
+
+CUSTOM_TABS_AFTER=$(herdr tab list --workspace "$CUSTOM_WSID" --session "$SESSION" 2>&1)
+printf '%s' "$CUSTOM_TABS_AFTER" | jq -e --arg t "$CUSTOM_TAB_ID" '.result.tabs[] | select(.tab_id == $t)' >/dev/null 2>&1 \
+  || fail "REGRESSION: adopting a configured-label workspace pruned its pre-existing tab"
+if ! herdr pane get "$CUSTOM_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+  fail "REGRESSION: adopting a configured-label workspace closed its pre-existing pane"
+fi
+CUSTOM_TAB_COUNT=$(printf '%s' "$CUSTOM_TABS_AFTER" | jq -r '.result.tabs? // [] | length')
+[ "$CUSTOM_TAB_COUNT" = 2 ] \
+  || fail "the adopted configured-label workspace should hold its original tab plus the new task tab, got $CUSTOM_TAB_COUNT: $CUSTOM_TABS_AFTER"
+pass "real herdr: adopting a workspace under a CONFIGURED label never prunes any of its tabs - the created-vs-adopted gate is label-independent"
+
+fm_backend_herdr_kill "$SESSION:$CUSTOM_TASK_PANE"
+fm_backend_herdr_kill "$SESSION:$CUSTOM_PANE_ID"
 
 cleanup_all
 trap - EXIT

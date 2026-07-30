@@ -32,7 +32,9 @@
 # convergence point inherits it - no other change needed. config/secondmate-harness
 # is deliberately NOT in the list: it is the primary's own setting for launching
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
-# downstream.
+# downstream. config/herdr-workspace-label is deliberately NOT in the list
+# either: it names one home's own Herdr workspace, and propagating it would put
+# two homes back in one workspace - the exact collision it exists to remove.
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"

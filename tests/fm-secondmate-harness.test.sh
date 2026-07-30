@@ -22,7 +22,9 @@
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
 #      config push).
 #      config/secondmate-harness is deliberately NOT inherited (secondmates do
-#      not spawn secondmates). After a successful push that changes allowlisted
+#      not spawn secondmates), and neither is config/herdr-workspace-label (two
+#      homes sharing one Herdr workspace label is the collision it exists to
+#      remove). After a successful push that changes allowlisted
 #      config under an already-running home, a literal-content reread instruction
 #      is written to the secondmate home and only its pointer is sent via the
 #      routed secondmate path (exact destination bytes, no summaries); unchanged
@@ -329,8 +331,10 @@ test_propagate_lib() {
   [ -d "$dest/crew-harness" ] || fail "failed absence mirror removed the wrong path"
   rm -rf "$dest/crew-harness"
 
-  # 5. secondmate-harness is never inherited; backend still is
+  # 5. secondmate-harness and herdr-workspace-label are never inherited;
+  #    backend still is
   printf 'grok\n' > "$src/secondmate-harness"
+  printf 'firstmate-sweepdrop\n' > "$src/herdr-workspace-label"
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
   printf 'manual\n' > "$src/backlog-backend"
@@ -339,6 +343,7 @@ test_propagate_lib() {
   mkdir -p "$d/home2/config" "$d/home2/state"
   propagate_inheritable_config "$src" "$d/home2/config"
   [ -e "$d/home2/config/secondmate-harness" ] && fail "secondmate-harness was inherited (must not be)"
+  [ -e "$d/home2/config/herdr-workspace-label" ] && fail "herdr-workspace-label was inherited (must not be: sharing one label is the collision it exists to remove)"
   [ "$(cat "$d/home2/config/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated alongside"
   [ "$(cat "$d/home2/config/crew-harness")" = codex ] || fail "crew-harness not propagated alongside"
   [ "$(cat "$d/home2/config/backlog-backend")" = manual ] || fail "backlog-backend not propagated alongside"

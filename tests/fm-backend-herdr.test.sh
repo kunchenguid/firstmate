@@ -18,6 +18,14 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
+# Most tests below source the adapter without setting FM_HOME, which resolves
+# it to this repo root. When that root is also a live firstmate home, its own
+# config/herdr-workspace-label would change the workspace label every one of
+# those tests asserts, so point the whole file at an empty scratch config dir.
+# Tests that exercise the configured label set FM_CONFIG_OVERRIDE themselves.
+export FM_CONFIG_OVERRIDE="$TMP_ROOT/neutral-config"
+mkdir -p "$FM_CONFIG_OVERRIDE"
+
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
 # unit-separated args, to $FM_HERDR_LOG) and returns the canned response for
 # that call read from $FM_HERDR_RESPONSES/<n>.out, consumed IN ORDER (call 1
@@ -264,6 +272,189 @@ test_workspace_label_different_secondmates_get_different_labels() {
   [ "$out2" = "2ndmate-bravo-b2" ] || fail "secondmate home2 label mismatch: $out2"
   [ "$out1" != "$out2" ] || fail "two different secondmate homes must not collide on the same label"
   pass "fm_backend_herdr_workspace_label: two different secondmate homes get two different, non-colliding labels"
+}
+
+# --- workspace_label: opt-in per-primary-home config/herdr-workspace-label ---
+#
+# Every case drives the public function through a real home directory, so the
+# no-migration property (an absent or blank file is byte-identical to the
+# pre-existing constant) is asserted as behavior, not as source text.
+
+# label_home <name> [config-body...] -> echoes a scratch primary home dir.
+# With no body argument the home has a config dir but no label file at all.
+label_home() {  # <name> [body]
+  local name=$1 home
+  home="$TMP_ROOT/label-cfg-$name"
+  mkdir -p "$home/config"
+  if [ "$#" -gt 1 ]; then
+    printf '%s' "$2" > "$home/config/herdr-workspace-label"
+  fi
+  printf '%s' "$home"
+}
+
+# resolve_label <home> sets RESOLVE_OUT, RESOLVE_STATUS, and RESOLVE_ERR in the
+# CURRENT shell - the exit status and the stderr diagnostic are as much of the
+# contract here as the label itself, and a command substitution would discard
+# both.
+RESOLVE_OUT=""; RESOLVE_STATUS=0; RESOLVE_ERR=""
+resolve_label() {  # <home>
+  local home=$1
+  RESOLVE_OUT=$( FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" 2>"$TMP_ROOT/label-err" )
+  RESOLVE_STATUS=$?
+  RESOLVE_ERR=$(cat "$TMP_ROOT/label-err")
+}
+
+test_workspace_label_absent_config_is_unchanged() {
+  resolve_label "$(label_home absent)"
+  [ "$RESOLVE_STATUS" -eq 0 ] || fail "an absent config file must not make label resolution fail: $RESOLVE_ERR"
+  [ "$RESOLVE_OUT" = "firstmate" ] || fail "an absent config/herdr-workspace-label must keep 'firstmate', got '$RESOLVE_OUT'"
+  pass "fm_backend_herdr_workspace_label: an absent config/herdr-workspace-label leaves a primary home on 'firstmate'"
+}
+
+test_workspace_label_blank_config_is_unchanged() {
+  local body n=0
+  for body in '' $'\n' '   ' $'  \t \n\n'; do
+    n=$((n + 1))
+    resolve_label "$(label_home "blank-$n" "$body")"
+    [ "$RESOLVE_STATUS" -eq 0 ] || fail "a blank config file must not make label resolution fail: $RESOLVE_ERR"
+    [ "$RESOLVE_OUT" = "firstmate" ] || fail "an empty or whitespace-only config/herdr-workspace-label must keep 'firstmate', got '$RESOLVE_OUT'"
+  done
+  pass "fm_backend_herdr_workspace_label: an empty or whitespace-only config/herdr-workspace-label leaves a primary home on 'firstmate'"
+}
+
+test_workspace_label_config_value_wins_for_a_primary_home() {
+  resolve_label "$(label_home value $'firstmate-sweepdrop\n')"
+  [ "$RESOLVE_STATUS" -eq 0 ] || fail "a valid configured label must resolve: $RESOLVE_ERR"
+  [ "$RESOLVE_OUT" = "firstmate-sweepdrop" ] || fail "a configured label should win for a primary home, got '$RESOLVE_OUT'"
+  pass "fm_backend_herdr_workspace_label: a primary home's configured label wins over the default 'firstmate'"
+}
+
+test_workspace_label_config_value_is_trimmed() {
+  resolve_label "$(label_home trim $'  second.home_2 \t\n\n')"
+  [ "$RESOLVE_STATUS" -eq 0 ] || fail "surrounding whitespace must not make a configured label unusable: $RESOLVE_ERR"
+  [ "$RESOLVE_OUT" = "second.home_2" ] || fail "a configured label should be trimmed of surrounding whitespace, got '$RESOLVE_OUT'"
+  pass "fm_backend_herdr_workspace_label: trims surrounding whitespace around a configured label"
+}
+
+test_workspace_label_two_primary_homes_do_not_collide() {
+  local a b
+  resolve_label "$(label_home home-a)"; a=$RESOLVE_OUT
+  resolve_label "$(label_home home-b $'firstmate-sweepdrop\n')"; b=$RESOLVE_OUT
+  [ "$a" = "firstmate" ] || fail "the unconfigured primary home should stay on 'firstmate', got '$a'"
+  [ "$b" = "firstmate-sweepdrop" ] || fail "the configured primary home should use its own label, got '$b'"
+  [ "$a" != "$b" ] || fail "two primary homes on one herdr session must not resolve to the same workspace label"
+  pass "fm_backend_herdr_workspace_label: a second primary home opts into its own workspace instead of the first home's"
+}
+
+test_workspace_label_secondmate_marker_beats_config() {
+  local home
+  home=$(label_home sm-precedence $'firstmate-sweepdrop\n')
+  printf 'sshhip-h7\n' > "$home/.fm-secondmate-home"
+  resolve_label "$home"
+  [ "$RESOLVE_STATUS" -eq 0 ] || fail "a secondmate home must still resolve: $RESOLVE_ERR"
+  [ "$RESOLVE_OUT" = "2ndmate-sshhip-h7" ] || fail "the secondmate marker must win over a configured label, got '$RESOLVE_OUT'"
+  pass "fm_backend_herdr_workspace_label: a secondmate home keeps '2ndmate-<id>' even with a configured label present"
+}
+
+test_workspace_label_invalid_config_refuses_loudly() {
+  local entry case_name body
+  # One case per rejected shape: two lines, an inner space, a control
+  # character, a path separator, a leading dash, a leading dot, over the
+  # length bound, and the reserved secondmate namespace.
+  for entry in \
+    "two-lines:$(printf 'one\ntwo')" \
+    "inner-space:my home" \
+    "control-char:$(printf 'bad\tlabel')" \
+    "slash:firstmate/sweepdrop" \
+    "leading-dash:-sweepdrop" \
+    "leading-dot:.sweepdrop" \
+    "too-long:$(printf 'a%.0s' $(seq 1 65))" \
+    "reserved-secondmate:2ndmate-sweepdrop"; do
+    case_name=${entry%%:*}
+    body=${entry#*:}
+    resolve_label "$(label_home "invalid-$case_name" "$body")"
+    [ "$RESOLVE_STATUS" -ne 0 ] || fail "an invalid configured label ($case_name) must refuse, but resolved to '$RESOLVE_OUT'"
+    [ "$RESOLVE_OUT" != "firstmate" ] || fail "an invalid configured label ($case_name) must never fall back to 'firstmate' - that recreates the collision it was written to remove"
+    [ -z "$RESOLVE_OUT" ] || fail "an invalid configured label ($case_name) must print no label at all, got '$RESOLVE_OUT'"
+    assert_contains "$RESOLVE_ERR" "herdr-workspace-label" "the refusal for $case_name should name the offending file"
+  done
+  assert_contains "$RESOLVE_ERR" "remove the file to use the default 'firstmate'" \
+    "the refusal should tell the captain how to get back to the default"
+  pass "fm_backend_herdr_workspace_label: an unusable configured label refuses loudly and never falls back to 'firstmate'"
+}
+
+test_workspace_label_accepts_the_default_value_explicitly() {
+  resolve_label "$(label_home explicit-default $'firstmate\n')"
+  [ "$RESOLVE_STATUS" -eq 0 ] || fail "explicitly configuring the default label must be accepted: $RESOLVE_ERR"
+  [ "$RESOLVE_OUT" = "firstmate" ] || fail "explicitly configuring 'firstmate' should resolve to 'firstmate', got '$RESOLVE_OUT'"
+  pass "fm_backend_herdr_workspace_label: explicitly configuring the default 'firstmate' is accepted, not a collision refusal"
+}
+
+test_container_ensure_uses_configured_primary_label() {
+  local dir log resp fb home out
+  dir="$TMP_ROOT/container-cfg-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home=$(label_home container $'firstmate-sweepdrop\n')
+  printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
+  printf '{"server":{"running":true}}\n' > "$resp/2.out"
+  # A workspace labeled with the DEFAULT is present and must not be adopted.
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"workspace":{"workspace_id":"w7","label":"firstmate-sweepdrop"},"tab":{"tab_id":"w7:t1"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
+    FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
+  [ "$out" = $'fmtest:w7\tw7:t1' ] || fail "container_ensure should create the CONFIGURED home workspace, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''firstmate-sweepdrop' \
+    "container_ensure did not create the workspace under the configured label"
+  pass "fm_backend_herdr_container_ensure: creates and looks up the CONFIGURED primary label, never adopting the other home's 'firstmate' workspace"
+}
+
+test_container_ensure_adopts_configured_primary_label() {
+  local dir log resp fb home out
+  dir="$TMP_ROOT/container-cfg-adopt"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home=$(label_home adopt $'firstmate-sweepdrop\n')
+  printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
+  printf '{"server":{"running":true}}\n' > "$resp/2.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w4","label":"firstmate-sweepdrop"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
+    FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
+  [ "$out" = $'fmtest:w4\t' ] || fail "container_ensure should adopt the workspace matching the configured label with an empty seeded-tab field, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "container_ensure should not create a workspace that already carries the configured label"
+  pass "fm_backend_herdr_container_ensure: adopts the pre-existing workspace carrying the configured label, and reports it as adopted (never a prune candidate)"
+}
+
+test_container_ensure_refuses_invalid_configured_label() {
+  local dir log resp fb home out status
+  dir="$TMP_ROOT/container-cfg-invalid"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home=$(label_home container-invalid $'my home\n')
+  printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
+    FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "container_ensure must refuse an unusable configured label, got '$out'"
+  assert_contains "$out" "herdr-workspace-label" "the container_ensure refusal should name the offending file"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "an unusable configured label must not create any workspace"
+  assert_not_contains "$(cat "$log")" "HERDR_SESSION=fmtest"$'\x1f''server' "an unusable configured label must refuse before starting a herdr server"
+  pass "fm_backend_herdr_container_ensure: refuses an unusable configured label before touching herdr, instead of falling back to 'firstmate'"
+}
+
+test_list_live_refuses_invalid_configured_label() {
+  local dir log resp fb home out status
+  dir="$TMP_ROOT/list-live-cfg-invalid"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home=$(label_home list-live-invalid $'my home\n')
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" 2>/dev/null )
+  status=$?
+  [ "$status" -ne 0 ] || fail "list_live must refuse an unusable configured label rather than report an empty fleet"
+  [ -z "$out" ] || fail "list_live must list nothing when the label is unusable, got '$out'"
+  pass "fm_backend_herdr_list_live: refuses an unusable configured label instead of reporting a home with no live tasks"
 }
 
 # --- fm_backend_herdr_cli: session targeting (2026-07-02 incident fix) -------
@@ -2829,6 +3020,18 @@ test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
+test_workspace_label_absent_config_is_unchanged
+test_workspace_label_blank_config_is_unchanged
+test_workspace_label_config_value_wins_for_a_primary_home
+test_workspace_label_config_value_is_trimmed
+test_workspace_label_two_primary_homes_do_not_collide
+test_workspace_label_secondmate_marker_beats_config
+test_workspace_label_invalid_config_refuses_loudly
+test_workspace_label_accepts_the_default_value_explicitly
+test_container_ensure_uses_configured_primary_label
+test_container_ensure_adopts_configured_primary_label
+test_container_ensure_refuses_invalid_configured_label
+test_list_live_refuses_invalid_configured_label
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
