@@ -97,7 +97,17 @@ fm_harness_process_matches() {  # <comm> <args>
 # claiming ownership.
 _FM_LOCK_UNAME=$(uname -s 2>/dev/null || echo unknown)
 
+# True on Git Bash/MSYS/Cygwin, where the Windows ancestry path is needed.
+# FM_LOCK_OS_OVERRIDE forces the answer (posix|unix -> false, windows -> true)
+# so the POSIX ancestry contract can be exercised on a Windows box and in CI;
+# it only affects harness-ancestry resolution, never the real-filesystem
+# symlink-mode decision in fm-wake-lib.sh, so a forced-posix run on Windows
+# still creates working locks. Unset (the default) uses the real platform.
 _fm_is_windows() {
+  case "${FM_LOCK_OS_OVERRIDE:-}" in
+    posix|unix) return 1 ;;
+    windows) return 0 ;;
+  esac
   case "$_FM_LOCK_UNAME" in
     MINGW*|MSYS*|CYGWIN*) return 0 ;;
     *) return 1 ;;
