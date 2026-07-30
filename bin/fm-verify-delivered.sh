@@ -34,11 +34,21 @@
 # exit status, and every count of what was actually inspected is checked before
 # any clean verdict is allowed to print.
 #
+# A rev nobody could refresh is unknown for the same reason. brand-identity
+# fetches origin before it reads $REV, and a fetch that was asked for and failed
+# is outcome 4, not a warning: the verdict would otherwise be computed against
+# whatever origin/main happens to be locally. --no-fetch is the honest opt-in for
+# inspecting a local ref on purpose, and it never errors.
+#
 # tests/fm-verify-delivered.test.sh holds one regression test per outcome.
 #
 # Environment:
-#   FM_VERIFY_REPO  repo brand-identity inspects; overrides the repo path
-#                   recorded for inception in data/projects.md
+#   FM_VERIFY_REPO  repo brand-identity inspects. Resolution order: this
+#                   variable, then the path data/projects.md records for
+#                   inception as `repo at <path>` on its `- inception ...` line
+#                   (this script parses that form directly; the registry's mode
+#                   field is fm-project-mode.sh's business), then
+#                   $FM_HOME/projects/inception. A miss is outcome 4, never clean.
 #   FM_VERIFY_REV   rev brand-identity inspects (default: origin/main)
 set -Eeuo pipefail
 
@@ -54,7 +64,7 @@ BRAND_PATHSPEC="schema-generator/app"
 BRAND_CANDIDATE_RE='is_same_brand|normalize_entity|is_competitor_reference'
 BRAND_GRAPH_RE='graph_directives|brand_relations|ns_comparison|brand_graph|referability'
 
-SELF="$SCRIPT_DIR/fm-verify-delivered.sh"
+SELF="${BASH_SOURCE[0]}"
 ERRLOG=""
 # shellcheck disable=SC2329 # Registered by the EXIT trap below.
 cleanup() { [ -z "$ERRLOG" ] || rm -f "$ERRLOG"; }
@@ -150,9 +160,12 @@ verify_brand_identity() {
   if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>"$ERRLOG"; then
     search_failed "$repo is not a git repository ($(tr '\n' ' ' <"$ERRLOG")); set FM_VERIFY_REPO"
   fi
+  # A fetch that was asked for and failed leaves $REV at whatever is already on
+  # disk, so any verdict below would be about an unknown rev. That is outcome 4,
+  # not a warning; --no-fetch is how a caller accepts a local ref on purpose.
   if [ "$fetch" -eq 1 ]; then
     if ! git -C "$repo" fetch origin -q 2>"$ERRLOG"; then
-      printf 'WARNING: could not fetch origin in %s; %s may be stale.\n' "$repo" "$REV"
+      search_failed "git fetch origin failed in $repo ($(tr '\n' ' ' <"$ERRLOG")); '$REV' may be stale, so nothing was searched; pass --no-fetch to inspect the local ref on purpose"
     fi
   fi
   if ! git -C "$repo" rev-parse --verify --quiet "$REV^{commit}" >/dev/null 2>"$ERRLOG"; then
@@ -226,7 +239,12 @@ verify_brand_identity() {
     printf '  >>> DO NOT report brand-identity work as complete.\n'
     exit 1
   fi
-  printf 'CLEAN: all %s inspected file(s) consult the graph; %s migrated, 0 unmigrated.\n' "$cand_n" "$migrated"
+  # Wording limited to what the per-file grep above actually proves: a graph
+  # identifier appears in the file. It can appear in a comment or a docstring,
+  # and a file can still decide by string in some other branch, so this is not a
+  # claim that the file consults the graph.
+  printf 'CLEAN: all %s inspected file(s) reference a graph identifier somewhere in the file, comments and docstrings included, which is not proof they consult it; %s referencing, 0 with no graph reference.\n' \
+    "$cand_n" "$migrated"
   exit 0
 }
 

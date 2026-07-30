@@ -62,6 +62,34 @@ fm_verify_commit() {
   git -C "$repo" branch -f checkme main
 }
 
+# fm_verify_broken_origin <name>: a fixture repo holding one string-only
+# candidate whose 'origin' points at a local path that does not exist, so
+# `git fetch origin` fails without touching the network. Echoes the repo path.
+fm_verify_broken_origin() {
+  local name=$1 repo
+  repo=$(fm_verify_fixture "$name" schema-generator/app)
+  fm_verify_write_source "$repo" schema-generator/app/legacy.py string
+  fm_verify_commit "$repo"
+  git -C "$repo" remote add origin "$TMP_ROOT/$name-no-such-remote.git"
+  printf '%s\n' "$repo"
+}
+
+# fm_verify_registry_home <name> <repo>: an FM_HOME whose data/projects.md
+# records <repo> for inception in the `repo at <path>` form this script parses.
+# The line shape is the coupling under test: if the registry format moves, the
+# tests that use this helper fail instead of the parse silently going dead.
+fm_verify_registry_home() {
+  local name=$1 repo=$2
+  local home="$TMP_ROOT/$name"
+  fm_verify_assert_tmp "$home"
+  mkdir -p "$home/data"
+  {
+    printf '# Projects\n\n'
+    printf -- '- inception [build] - SEO schema tool (repo at %s, added 2026-07-01)\n' "$repo"
+  } > "$home/data/projects.md"
+  printf '%s\n' "$home"
+}
+
 # fm_verify_write_source <repo> <path> graph|string: a candidate file that
 # decides brand identity, consulting the graph only when told to.
 fm_verify_write_source() {
@@ -132,7 +160,12 @@ test_clean_tree_reports_clean() {
 
   run_verify "$repo"
   expect_code 0 "$RC" "a tree with no violation must pass"
-  assert_contains "$OUT" "CLEAN: all 2 inspected file(s) consult the graph" "the clean verdict is missing or miscounted"
+  # The fixture's own graph marker is a comment, which is why the verdict may
+  # only claim the identifier appears in the file, not that the file consults it.
+  assert_contains "$OUT" "CLEAN: all 2 inspected file(s) reference a graph identifier somewhere in the file" \
+    "the clean verdict is missing or miscounted"
+  assert_contains "$OUT" "not proof they consult it" "the clean verdict does not qualify what the search proved"
+  assert_not_contains "$OUT" "consult the graph" "the clean verdict claims more than the per-file search proves"
   assert_not_contains "$OUT" "UNMIGRATED" "a clean tree named a violation"
   assert_not_contains "$OUT" "INSPECTED NOTHING" "a clean tree claimed it inspected nothing"
   pass "fm-verify-delivered.sh: a tree with no violation reports clean and exits 0"
@@ -240,8 +273,92 @@ test_missing_repo_reports_search_failed() {
   expect_code 4 "$RC" "a missing repo must report a failed search"
   assert_contains "$OUT" "SEARCH FAILED:" "a missing repo is not reported as a failed search"
   assert_contains "$OUT" "is not a git repository" "the missing-repo reason is missing"
+  assert_contains "$OUT" "set FM_VERIFY_REPO" "the missing-repo report is not actionable"
   assert_not_contains "$OUT" "CLEAN:" "a missing repo printed a clean verdict"
   pass "fm-verify-delivered.sh: a missing repo reports a failed search, not clean"
+}
+
+# A fetch that was asked for and failed leaves the rev at whatever is on disk, so
+# any verdict below it would be about an unknown rev. That is the same
+# "unknown reads as clean" collapse the outcome table exists to prevent, so it is
+# outcome 4 and not a warning. The broken origin is a local path, so no network.
+test_failed_fetch_reports_search_failed() {
+  local repo
+  repo=$(fm_verify_broken_origin failed-fetch)
+
+  run_env "FM_VERIFY_REPO=$repo" FM_VERIFY_REV=checkme -- brand-identity
+  expect_code 4 "$RC" "a failed fetch must report a failed search, not a verdict"
+  assert_contains "$OUT" "SEARCH FAILED:" "a failed fetch is not reported as a failed search"
+  assert_contains "$OUT" "git fetch origin failed" "the failed-fetch reason is missing"
+  assert_contains "$OUT" "does not appear to be a git repository" \
+    "the failed-fetch report drops git's own stderr, so the reader cannot tell why"
+  assert_contains "$OUT" "--no-fetch" "the failed-fetch report does not name the opt-in for a local ref"
+  assert_not_contains "$OUT" "CLEAN:" "a failed fetch printed a clean verdict"
+  assert_not_contains "$OUT" "VIOLATIONS:" "a failed fetch reached a violations verdict against a stale rev"
+  assert_not_contains "$OUT" "WARNING" "a failed fetch was downgraded to a warning"
+  pass "fm-verify-delivered.sh: a failed fetch reports a failed search, not a verdict"
+}
+
+# The other half of that contract: --no-fetch is the deliberate escape hatch for
+# inspecting a local ref, so on the very same unfetchable repo it must still
+# reach a real verdict rather than becoming an error.
+test_no_fetch_still_reaches_a_verdict_on_an_unfetchable_repo() {
+  local repo
+  repo=$(fm_verify_broken_origin no-fetch-hatch)
+
+  run_verify "$repo"
+  expect_code 1 "$RC" "--no-fetch must still reach a verdict when origin is unfetchable"
+  assert_contains "$OUT" "UNMIGRATED: app/legacy.py" "--no-fetch did not inspect the local ref"
+  assert_contains "$OUT" "VIOLATIONS: 1 of 1 inspected file(s)" "--no-fetch did not reach its verdict"
+  assert_not_contains "$OUT" "SEARCH FAILED:" "--no-fetch turned an accepted local ref into an error"
+  pass "fm-verify-delivered.sh: --no-fetch still reaches a verdict when origin is unfetchable"
+}
+
+# --- repo resolution --------------------------------------------------------
+
+# The script parses data/projects.md for `repo at <path>` itself. data/ is
+# gitignored, so nothing in-repo would notice that form drifting; this test is
+# what notices. It fails if the recorded form changes or the parse is removed.
+test_registry_recorded_repo_is_inspected() {
+  local repo home
+  repo=$(fm_verify_broken_origin registry-repo)
+  home=$(fm_verify_registry_home home-registry "$repo")
+
+  run_env "FM_HOME=$home" FM_VERIFY_REV=checkme -- brand-identity --no-fetch
+  expect_code 1 "$RC" "the registry-recorded repo was not inspected"
+  assert_contains "$OUT" "repo: $repo" "the path recorded as 'repo at <path>' was not resolved"
+  assert_contains "$OUT" "UNMIGRATED: app/legacy.py" "the resolved path was printed but not inspected"
+  pass "fm-verify-delivered.sh: the repo recorded in data/projects.md is resolved and inspected"
+}
+
+test_explicit_repo_overrides_the_registry() {
+  local registry_repo clean_repo home
+  registry_repo=$(fm_verify_broken_origin registry-loser)
+  clean_repo=$(fm_verify_fixture registry-winner schema-generator/app)
+  fm_verify_write_source "$clean_repo" schema-generator/app/one.py graph
+  fm_verify_commit "$clean_repo"
+  home=$(fm_verify_registry_home home-precedence "$registry_repo")
+
+  run_env "FM_HOME=$home" "FM_VERIFY_REPO=$clean_repo" FM_VERIFY_REV=checkme -- brand-identity --no-fetch
+  expect_code 0 "$RC" "FM_VERIFY_REPO must win over the registry-recorded path"
+  assert_contains "$OUT" "repo: $clean_repo" "FM_VERIFY_REPO was not the repo inspected"
+  assert_not_contains "$OUT" "$registry_repo" "the registry-recorded path outranked the explicit override"
+  pass "fm-verify-delivered.sh: FM_VERIFY_REPO outranks the registry-recorded path"
+}
+
+# No override and no registry: resolution falls through to the standard clone
+# location, and a miss there is still outcome 4 with an actionable message.
+test_unresolvable_repo_falls_through_to_search_failed() {
+  local home="$TMP_ROOT/home-no-registry"
+  mkdir -p "$home/data"
+
+  run_env "FM_HOME=$home" FM_VERIFY_REV=checkme -- brand-identity --no-fetch
+  expect_code 4 "$RC" "an unresolvable repo must not exit 0"
+  assert_contains "$OUT" "$home/projects/inception is not a git repository" \
+    "resolution did not fall through to the standard clone location"
+  assert_contains "$OUT" "set FM_VERIFY_REPO" "the fall-through report is not actionable"
+  assert_not_contains "$OUT" "CLEAN:" "an unresolvable repo printed a clean verdict"
+  pass "fm-verify-delivered.sh: an unresolvable repo falls through to a failed search"
 }
 
 # git grep itself erroring mid-search, not a pre-check refusing to start. The
@@ -422,6 +539,11 @@ test_zero_candidates_reports_inspected_nothing
 test_only_owner_candidates_reports_inspected_nothing
 test_unresolvable_rev_reports_search_failed
 test_missing_repo_reports_search_failed
+test_failed_fetch_reports_search_failed
+test_no_fetch_still_reaches_a_verdict_on_an_unfetchable_repo
+test_registry_recorded_repo_is_inspected
+test_explicit_repo_overrides_the_registry
+test_unresolvable_repo_falls_through_to_search_failed
 test_erroring_git_grep_reports_search_failed
 test_unclassified_failure_in_a_mode_function_reports_search_failed
 test_no_match_is_a_result_not_a_fatal
