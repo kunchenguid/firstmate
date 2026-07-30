@@ -101,7 +101,7 @@ fm_afk_launch_stop_tracking_clear() {
   FM_AFK_LAUNCH_STOP_INTENT_ACTIVE=0
 }
 
-fm_afk_launch_stop_intent_retract_if_live() {
+fm_afk_launch_stop_intent_abandon_if_live() {
   local current_identity
   [ "$FM_AFK_LAUNCH_STOP_INTENT_ACTIVE" -eq 1 ] || return 0
   fm_pid_alive "$FM_AFK_LAUNCH_STOP_PID" || return 0
@@ -110,7 +110,7 @@ fm_afk_launch_stop_intent_retract_if_live() {
     && [ "$current_identity" != "$FM_AFK_LAUNCH_STOP_IDENTITY" ]; then
     return 0
   fi
-  if fm_afk_stop_intent_retire "$FM_AFK_LAUNCH_STATE" \
+  if fm_afk_stop_intent_abandon "$FM_AFK_LAUNCH_STATE" \
     "$FM_AFK_LAUNCH_STOP_PID" "$FM_AFK_LAUNCH_STOP_IDENTITY"; then
     fm_afk_launch_stop_tracking_clear
   fi
@@ -118,13 +118,20 @@ fm_afk_launch_stop_intent_retract_if_live() {
 
 fm_afk_launch_signal_exit() {
   local code=$1
-  fm_afk_launch_stop_intent_retract_if_live || true
+  fm_afk_launch_stop_intent_abandon_if_live || true
   exit "$code"
 }
 
 fm_afk_launch_exit_cleanup() {
-  fm_afk_launch_stop_intent_retract_if_live || true
+  fm_afk_launch_stop_intent_abandon_if_live || true
   fm_afk_launch_lock_release
+}
+
+fm_afk_launch_stop_publisher_alive() {
+  local current_identity
+  fm_pid_alive "$FM_AFK_STOP_INTENT_PUBLISHER_PID" || return 1
+  current_identity=$(fm_pid_identity "$FM_AFK_STOP_INTENT_PUBLISHER_PID" 2>/dev/null) || return 1
+  [ "$current_identity" = "$FM_AFK_STOP_INTENT_PUBLISHER_IDENTITY" ]
 }
 
 fm_afk_launch_lock_owned() {
@@ -396,10 +403,11 @@ fm_afk_launch_herdr_recover_created() {  # <session> <label>
 }
 
 fm_afk_launch_check_dead_daemon() {
-  local owner pid identity current_identity marker record_result
+  local owner pid identity current_identity marker record_result intent_applies=0
   [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] || return 0
   fm_afk_unexpected_exit_read "$FM_AFK_LAUNCH_STATE" && return 0
   daemon_lock_held_by_live_daemon && return 0
+  fm_afk_start_pending_active "$FM_AFK_LAUNCH_STATE" && return 0
   owner=$(daemon_lock_owner 2>/dev/null || true)
   pid=
   identity=MISSING
@@ -423,8 +431,27 @@ fm_afk_launch_check_dead_daemon() {
       && [ "$FM_AFK_STOP_INTENT_PID" = "$pid" ] \
       && [ "$FM_AFK_STOP_INTENT_IDENTITY" = "$identity" ]; } \
       || { [ -z "$owner" ] && [ "$pid" = MISSING ]; }; then
-      fm_afk_launch_log "expected daemon loss observed (pid=$FM_AFK_STOP_INTENT_PID)"
-      return 0
+      intent_applies=1
+    fi
+    if [ "$intent_applies" -eq 1 ]; then
+      case "$FM_AFK_STOP_INTENT_PHASE" in
+        consumed)
+          fm_afk_launch_log "expected daemon loss observed (pid=$FM_AFK_STOP_INTENT_PID)"
+          return 0
+          ;;
+        published)
+          if fm_afk_launch_stop_publisher_alive; then
+            return 0
+          fi
+          fm_afk_stop_intent_abandon "$FM_AFK_LAUNCH_STATE" \
+            "$FM_AFK_STOP_INTENT_PID" "$FM_AFK_STOP_INTENT_IDENTITY" || true
+          if fm_afk_stop_intent_read "$FM_AFK_LAUNCH_STATE" \
+            && [ "$FM_AFK_STOP_INTENT_PHASE" = consumed ]; then
+            fm_afk_launch_log "expected daemon loss observed (pid=$FM_AFK_STOP_INTENT_PID)"
+            return 0
+          fi
+          ;;
+      esac
     fi
   fi
   marker=$(fm_afk_unexpected_exit_path "$FM_AFK_LAUNCH_STATE")
@@ -472,13 +499,15 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
+    "$FM_AFK_LAUNCH_STATE/.supervise-daemon.start-pending" \
     "$FM_AFK_LAUNCH_STATE/.supervise-daemon.stop-intent" \
     "$FM_AFK_LAUNCH_STATE/.supervise-daemon.unexpected-exit" || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged \
-    .supervise-daemon.stop-intent .supervise-daemon.unexpected-exit; do
+    .supervise-daemon.start-pending .supervise-daemon.stop-intent \
+    .supervise-daemon.unexpected-exit; do
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -599,7 +628,8 @@ fm_afk_launch_start() {
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged \
-    .supervise-daemon.stop-intent .supervise-daemon.unexpected-exit; do
+    .supervise-daemon.start-pending .supervise-daemon.stop-intent \
+    .supervise-daemon.unexpected-exit; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -659,7 +689,8 @@ fm_afk_launch_start_native() {
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged \
-    .supervise-daemon.stop-intent .supervise-daemon.unexpected-exit; do
+    .supervise-daemon.start-pending .supervise-daemon.stop-intent \
+    .supervise-daemon.unexpected-exit; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -668,6 +699,8 @@ fm_afk_launch_start_native() {
   if [ "$result" -eq 0 ]; then
     if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       fm_afk_launch_log "failed to clear stale away-mode artifacts"
+      result=1
+    elif ! fm_afk_start_pending_publish "$FM_AFK_LAUNCH_STATE"; then
       result=1
     elif ! fm_afk_launch_flag_write; then
       result=1
@@ -685,7 +718,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result afk_cleared=0
+  local pid pid_identity current_identity publisher_pid publisher_identity result=0 read_result afk_cleared=0
   fm_afk_launch_stop_tracking_clear
   fm_afk_launch_record_read
   read_result=$?
@@ -706,7 +739,13 @@ fm_afk_launch_stop() {
     FM_AFK_LAUNCH_STOP_PID=$pid
     FM_AFK_LAUNCH_STOP_IDENTITY=$pid_identity
     FM_AFK_LAUNCH_STOP_INTENT_ACTIVE=1
-    if ! fm_afk_stop_intent_publish "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity"; then
+    publisher_pid=${BASHPID:-$$}
+    publisher_identity=$(fm_pid_identity "$publisher_pid" 2>/dev/null) || {
+      fm_afk_launch_stop_tracking_clear
+      return 1
+    }
+    if ! fm_afk_stop_intent_publish "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity" \
+      "$publisher_pid" "$publisher_identity"; then
       fm_afk_launch_stop_tracking_clear
       fm_afk_launch_log "failed to publish the exact daemon stop intent; preserving lifecycle state"
       return 1
@@ -722,12 +761,12 @@ fm_afk_launch_stop() {
   fi
   if [ -n "$pid" ] && fm_pid_alive "$pid"; then
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
-      fm_afk_launch_stop_intent_retract_if_live || true
+      fm_afk_launch_stop_intent_abandon_if_live || true
       fm_afk_launch_log "could not confirm away-mode daemon exit; preserving lifecycle state"
       return 1
     }
     if [ "$current_identity" = "$pid_identity" ]; then
-      fm_afk_launch_stop_intent_retract_if_live || true
+      fm_afk_launch_stop_intent_abandon_if_live || true
       fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
       return 1
     fi
@@ -742,6 +781,9 @@ fm_afk_launch_stop() {
     result=1
   else
     afk_cleared=1
+  fi
+  if [ "$afk_cleared" -eq 1 ]; then
+    fm_afk_start_pending_clear "$FM_AFK_LAUNCH_STATE" || result=1
   fi
   if [ "$afk_cleared" -eq 1 ] && [ -n "$pid" ] \
     && fm_afk_stop_intent_matches "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity"; then
@@ -773,7 +815,7 @@ fm_afk_launch_main() {
     *) fm_afk_launch_usage >&2; return 2 ;;
   esac
   result=$?
-  fm_afk_launch_stop_intent_retract_if_live || result=1
+  fm_afk_launch_stop_intent_abandon_if_live || result=1
   fm_afk_launch_lock_release || result=1
   trap - EXIT HUP INT TERM
   return "$result"

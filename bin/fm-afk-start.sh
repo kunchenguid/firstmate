@@ -64,6 +64,7 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
         "$state/.subsuper-inject-wedged" \
+        "$state/.supervise-daemon.start-pending" \
         "$state/.supervise-daemon.stop-intent" \
         "$state/.supervise-daemon.unexpected-exit" 2>/dev/null
 }

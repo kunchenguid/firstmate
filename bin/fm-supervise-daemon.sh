@@ -1345,6 +1345,12 @@ fm_super_main() {
     fm_lock_release "$LOCK" 2>/dev/null || true
     exit 1
   fi
+  if ! fm_afk_start_pending_clear "$STATE"; then
+    echo "error: cannot clear away-mode daemon pending-start state" >&2
+    rm -f "$PIDFILE" 2>/dev/null || true
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    exit 1
+  fi
 
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
@@ -1431,7 +1437,7 @@ fm_super_main() {
     local signal=$1 marker record_result
     afk_active "$STATE" || return 0
     if [ -n "$DAEMON_IDENTITY" ] \
-      && fm_afk_stop_intent_matches "$STATE" "$DAEMON_PID" "$DAEMON_IDENTITY"; then
+      && fm_afk_stop_intent_consume "$STATE" "$DAEMON_PID" "$DAEMON_IDENTITY"; then
       log "daemon expected stop observed (signal=$signal pid=$DAEMON_PID)"
       return 0
     fi
