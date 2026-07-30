@@ -63,6 +63,7 @@ pass() {
 
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_PIDS=()
+FM_TEST_CLEANUP_PID_IDENTITIES=()
 
 # Install fm_test_cleanup for every way a suite can end, once per shell.
 # A bare EXIT trap does not run for a signalled shell, and timeout(1) stops a
@@ -86,18 +87,32 @@ fm_test_cleanup_on_signal() {  # <signal-number>
   exit "$((128 + $1))"
 }
 
+# Read a process identity through the production primitive. It runs in a
+# throwaway bash rather than being sourced here: bin/fm-wake-lib.sh defines
+# every fm_ function and mkdirs its state dir at source time, and injecting
+# that into every shell that sources this harness could change unrelated
+# suites. Failure prints nothing and returns nonzero.
+fm_test_pid_identity() {  # <pid>
+  FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c '. "$1" && fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$1" 2>/dev/null
+}
+
 # fm_test_reap <pid> ...: register background processes for teardown on every
 # exit path - a clean pass, a fail() abort, or an abrupt signal. Register a pid
 # as soon as it is known, BEFORE the assertions that could abort: a case that
-# only kills on its happy path leaks on every other path.
+# only kills on its happy path leaks on every other path. Each pid's identity
+# is recorded alongside it: the registry lives for the whole suite, so by
+# teardown a short-lived helper's pid can have been recycled to an unrelated
+# process, and a root is only killed when its identity still matches.
 fm_test_reap() {
-  local pid
+  local pid identity
   fm_test_install_cleanup_trap
   for pid in "$@"; do
     case "$pid" in
       ''|*[!0-9]*) continue ;;
     esac
+    identity=$(fm_test_pid_identity "$pid") || identity=
     FM_TEST_CLEANUP_PIDS+=("$pid")
+    FM_TEST_CLEANUP_PID_IDENTITIES+=("$identity")
   done
 }
 
@@ -110,7 +125,14 @@ fm_test_reap() {
 fm_test_process_tree() {  # <pid> ...
   local rows generation next depth=0
   [ "$#" -gt 0 ] || return 0
-  rows=$(ps -axo pid=,ppid= 2>/dev/null) || return 0
+  # A ps that cannot render the pid/ppid table (MSYS/Cygwin, some busybox
+  # builds) must not turn the reaper into a no-op: the identity-verified roots
+  # are still known good, so emit them even when their descendants cannot be
+  # discovered.
+  if ! rows=$(ps -axo pid=,ppid= 2>/dev/null); then
+    printf '%s\n' "$@"
+    return 0
+  fi
   generation="$*"
   while [ -n "$generation" ] && [ "$depth" -lt 8 ]; do
     printf '%s\n' "$generation" | tr ' ' '\n' | grep -v '^$' || true
@@ -141,13 +163,26 @@ fm_test_kill_tree() {  # <pid> ...
 }
 
 fm_test_cleanup() {
-  local d
+  local d i pid verified=()
   # Processes first: a live child must not keep writing into a directory that is
-  # about to be removed.
+  # about to be removed. Never kill what cannot be proven ours: a registered
+  # root is killed only when its identity read now matches the one recorded at
+  # registration, so a recycled pid belonging to an unrelated process is
+  # skipped and never enumerated as a tree root. Descendants found under a
+  # verified root need no gate - they are that live process's current children.
   if [ "${#FM_TEST_CLEANUP_PIDS[@]}" -gt 0 ]; then
-    fm_test_kill_tree "${FM_TEST_CLEANUP_PIDS[@]}"
+    for i in "${!FM_TEST_CLEANUP_PIDS[@]}"; do
+      pid=${FM_TEST_CLEANUP_PIDS[$i]}
+      [ -n "${FM_TEST_CLEANUP_PID_IDENTITIES[$i]:-}" ] || continue
+      [ "$(fm_test_pid_identity "$pid")" = "${FM_TEST_CLEANUP_PID_IDENTITIES[$i]}" ] || continue
+      verified+=("$pid")
+    done
+    if [ "${#verified[@]}" -gt 0 ]; then
+      fm_test_kill_tree "${verified[@]}"
+    fi
   fi
   FM_TEST_CLEANUP_PIDS=()
+  FM_TEST_CLEANUP_PID_IDENTITIES=()
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done

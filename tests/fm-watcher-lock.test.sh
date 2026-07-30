@@ -525,7 +525,7 @@ done
 [ -s "$FM_REAPER_KID_FILE" ] || { printf 'fixture child never started\n' >&2; exit 3; }
 case "$FM_REAPER_MODE" in
   abort) fail "deliberate abort with a registered process still live" ;;
-  hang) sleep 300 ;;
+  hang) sleep 300 & fm_test_reap "$!"; wait ;;
 esac
 SH
   chmod +x "$script"
