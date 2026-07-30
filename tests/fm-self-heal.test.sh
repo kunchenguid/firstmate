@@ -512,6 +512,81 @@ SH
   pass "self-heal: a recovered secondmate resets the crash-loop damper"
 }
 
+test_loop_damper_isolates_per_id() {
+  local w fb tmuxfb log out respawns sm1 sm2
+  w=$(new_primary loop-damper-per-id)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  add_sm_home "$w" sm2 firstmate:fm-sm2
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # Both secondmates are dead (zsh) in every inventory, so each should be
+  # respawned independently up to the per-id bound. A shared (non-per-id)
+  # counter would collapse both ids into one slot and cap the COMBINED respawn
+  # count at the bound - the exact failure of the bash-3.2 associative-array
+  # break. With bound=2 and enough passes, correct per-id isolation yields 2
+  # respawns per id (4 total); a collapsed counter would yield only 2 total.
+  cat > "$tmuxfb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+log="${FM_TMUX_CALL_LOG:?}"
+# Per-window kill markers: a killed window is omitted from list-windows until
+# it is respawned, so create_task's "already exists" guard lets new-window run.
+win_from_target() { local t=$1; t=${t##*:}; printf '%s' "${t//=/}"; }
+case "${1:-}" in
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *pane_current_command*) printf '%s\n' zsh; exit 0 ;;
+      esac
+    done
+    exit 0
+    ;;
+  list-windows)
+    for wn in fm-sm1 fm-sm2; do
+      [ -e "$log.killed.$wn" ] || printf '%s\n' "$wn"
+    done
+    exit 0
+    ;;
+  new-window)
+    printf '%s\n' "$*" >> "$log"
+    prev=''
+    for a in "$@"; do
+      case "$prev" in -n) rm -f "$log.killed.$a" ;; esac
+      prev=$a
+    done
+    exit 0
+    ;;
+  kill-window)
+    printf '%s\n' "$*" >> "$log"
+    prev=''
+    for a in "$@"; do
+      case "$prev" in -t) : > "$log.killed.$(win_from_target "$a")" ;; esac
+      prev=$a
+    done
+    exit 0
+    ;;
+  has-session) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$tmuxfb/tmux"
+  rm -f "$log".killed.*
+
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/home" FM_TMUX_CALL_LOG="$log" \
+    FM_SELF_HEAL_MAX_RESPAWNS=2 FM_SELF_HEAL_MAX_PASSES=5 FM_SELF_HEAL_INTERVAL=1 \
+    "$ROOT/bin/fm-self-heal.sh" --all --loop 2>&1)
+
+  respawns=$(grep -c 'new-window' "$log")
+  sm1=$(grep 'new-window' "$log" | grep -c 'fm-sm1')
+  sm2=$(grep 'new-window' "$log" | grep -c 'fm-sm2')
+  [ "$respawns" -eq 4 ] || fail "per-id damper should allow 2 respawns per id (4 total), got $respawns: $(cat "$log")"
+  [ "$sm1" -eq 2 ] || fail "sm1 should be respawned exactly twice, got $sm1"
+  [ "$sm2" -eq 2 ] || fail "sm2 should be respawned exactly twice, got $sm2"
+  pass "self-heal: the crash-loop damper counts respawns per id, not globally"
+}
+
 test_heals_no_meta_secondmate() {
   local w fb tmuxfb log out
   w=$(new_primary heal-no-meta)
@@ -551,6 +626,7 @@ test_status_verb_not_captain_relevant
 test_loop_damper_bounds_respawns
 test_loop_damper_status_file_does_not_grow
 test_loop_damper_resets_on_recovery
+test_loop_damper_isolates_per_id
 test_heals_no_meta_secondmate
 
 echo "# all fm-self-heal tests passed"

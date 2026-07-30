@@ -59,16 +59,69 @@ INTERVAL="${FM_SELF_HEAL_INTERVAL:-60}"
 
 # Crash-loop damper. In --loop mode a secondmate that dies immediately after
 # every launch would otherwise be respawned forever, and each respawn would
-# append an identical line to the primary's status file. RESPAWN_COUNT tracks
-# consecutive respawns per id; once it reaches FM_SELF_HEAL_MAX_RESPAWNS the
-# script stops respawning that id until a check reads alive (which resets it).
-# LAST_STATUS_KEY de-duplicates status writes so an ongoing failure records at
-# most one line. One-shot invocations start with empty maps, so a single
-# respawn always proceeds and one status line is written - behavior unchanged.
+# append an identical line to the primary's status file. RESPAWN_COUNT_MAP
+# tracks consecutive respawns per id; once it reaches FM_SELF_HEAL_MAX_RESPAWNS
+# the script stops respawning that id until a check reads alive (which resets
+# it). LAST_STATUS_KEY_MAP de-duplicates status writes so an ongoing failure
+# records at most one line. One-shot invocations start with empty maps, so a
+# single respawn always proceeds and one status line is written - unchanged.
+#
+# The maps are newline-terminated "<id><TAB><value>" strings, not associative
+# arrays: this file is parse-swept under stock macOS bash 3.2 (the
+# macos-stock-bash CI job over bin/fm-lint.sh's file set), which predates
+# `declare -A`. bin/fm-classify-lib.sh keeps the same no-associative-arrays
+# discipline for the same reason.
 FM_SELF_HEAL_MAX_RESPAWNS="${FM_SELF_HEAL_MAX_RESPAWNS:-5}"
-declare -A RESPAWN_COUNT=()
-declare -A DAMPED_ANNOUNCED=()
-declare -A LAST_STATUS_KEY=()
+TAB=$(printf '\t')
+RESPAWN_COUNT_MAP=''
+DAMPED_ANNOUNCED_MAP=''
+LAST_STATUS_KEY_MAP=''
+
+# _map_lookup <map> <id>: print the value bound to <id>, empty if unbound.
+_map_lookup() {
+  local map=$1 id=$2 line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$id$TAB"*) printf '%s' "${line#*$TAB}"; return 0 ;;
+    esac
+  done <<EOF
+$map
+EOF
+  return 1
+}
+
+# _map_set <map> <id> <value>: print <map> with <id> (re)bound to <value>.
+_map_set() {
+  local map=$1 id=$2 value=$3 line out=''
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$id$TAB"*) ;;
+      *) out="$out$line
+" ;;
+    esac
+  done <<EOF
+$map
+EOF
+  printf '%s%s%s%s\n' "$out" "$id" "$TAB" "$value"
+}
+
+# _map_drop <map> <id>: print <map> with any binding for <id> removed.
+_map_drop() {
+  local map=$1 id=$2 line out=''
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$id$TAB"*) ;;
+      *) out="$out$line
+" ;;
+    esac
+  done <<EOF
+$map
+EOF
+  printf '%s' "$out"
+}
 
 usage() {
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
@@ -138,12 +191,12 @@ report_status() {  # <primary-state-dir> <id> <message>
   # iteration; record it once rather than growing the status file without bound.
   # The key resets when the id next reads alive (damper_reset), so a genuine
   # later re-heal after recovery is recorded again.
-  [ "${LAST_STATUS_KEY[$id]:-}" = "$msg" ] && return 0
+  [ "$(_map_lookup "$LAST_STATUS_KEY_MAP" "$id")" = "$msg" ] && return 0
   status_file="$state_dir/$id.status"
   mkdir -p "$state_dir" 2>/dev/null || true
   [ -d "$state_dir" ] || return 0
   printf 'self-healed: %s (fm-self-heal watchdog, no corr)\n' "$msg" >> "$status_file" 2>/dev/null || true
-  LAST_STATUS_KEY[$id]=$msg
+  LAST_STATUS_KEY_MAP=$(_map_set "$LAST_STATUS_KEY_MAP" "$id" "$msg")
 }
 
 # --- crash-loop damper (loop mode) ------------------------------------------
@@ -156,11 +209,11 @@ report_status() {  # <primary-state-dir> <id> <message>
 # suppression once per id on stderr with a non-captain-relevant "skipped" verb.
 damper_allow_respawn() {  # <id>
   local id=$1 count
-  count=${RESPAWN_COUNT[$id]:-0}
+  count=$(_map_lookup "$RESPAWN_COUNT_MAP" "$id") || count=0
   if [ "$count" -ge "$FM_SELF_HEAL_MAX_RESPAWNS" ]; then
-    if [ -z "${DAMPED_ANNOUNCED[$id]:-}" ]; then
+    if [ -z "$(_map_lookup "$DAMPED_ANNOUNCED_MAP" "$id")" ]; then
       echo "self-heal: secondmate $id: skipped: crash-loop damper engaged after $count consecutive respawns" >&2
-      DAMPED_ANNOUNCED[$id]=1
+      DAMPED_ANNOUNCED_MAP=$(_map_set "$DAMPED_ANNOUNCED_MAP" "$id" 1)
     fi
     return 1
   fi
@@ -169,12 +222,17 @@ damper_allow_respawn() {  # <id>
 
 # damper_note_respawn: record one successful respawn attempt for <id>.
 damper_note_respawn() {  # <id>
-  RESPAWN_COUNT[$id]=$(( ${RESPAWN_COUNT[$id]:-0} + 1 ))
+  local id=$1 count
+  count=$(_map_lookup "$RESPAWN_COUNT_MAP" "$id") || count=0
+  RESPAWN_COUNT_MAP=$(_map_set "$RESPAWN_COUNT_MAP" "$id" "$((count + 1))")
 }
 
 # damper_reset: clear all crash-loop state for <id> once it reads alive.
 damper_reset() {  # <id>
-  unset 'RESPAWN_COUNT[$id]' 'DAMPED_ANNOUNCED[$id]' 'LAST_STATUS_KEY[$id]'
+  local id=$1
+  RESPAWN_COUNT_MAP=$(_map_drop "$RESPAWN_COUNT_MAP" "$id")
+  DAMPED_ANNOUNCED_MAP=$(_map_drop "$DAMPED_ANNOUNCED_MAP" "$id")
+  LAST_STATUS_KEY_MAP=$(_map_drop "$LAST_STATUS_KEY_MAP" "$id")
 }
 
 # do_respawn: the single gated respawn path shared by every recovery branch.
