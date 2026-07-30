@@ -139,33 +139,54 @@ test_stale_transient_self_records_marker() {
 }
 
 test_stale_diagnostic_wedge_survives_busy_housekeeping() {
-  local dir state fakebin key win pane reason log
-  dir=$(make_supercase stale-diagnostic-suffix)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  win="sess:fm-suffix-w4"
-  pane="$dir/pane.txt"
-  log="$dir/daemon.log"
-  reason="stale: $win (idle 500s, possible wedge, escalation 2)"
-  fm_write_meta "$state/suffix-w4.meta" "window=$win" "backend=tmux"
-  printf 'working: building\n' > "$state/suffix-w4.status"
-  printf 'Working...\n' > "$pane"
-  key=$(printf '%s' "suffix-w4" | tr ':/.' '___')
-  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  local case_name dir state fakebin key task win pane reason status_line action_log
+  for case_name in working prior-terminal paused; do
+    dir=$(make_supercase "stale-diagnostic-$case_name")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    task="suffix-$case_name"
+    win="sess:fm-$task"
+    pane="$dir/pane.txt"
+    action_log="$dir/actions.log"
+    reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone)"
+    fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+    case "$case_name" in
+      working) status_line='working: building' ;;
+      prior-terminal) status_line='done: already surfaced' ;;
+      paused) status_line='paused: awaiting an external dependency' ;;
+    esac
+    printf '%s\n' "$status_line" > "$state/$task.status"
+    printf 'Working...\n' > "$pane"
+    key=$(printf '%s' "$task" | tr ':/.' '___')
+    echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+    [ "$case_name" = prior-terminal ] \
+      && printf '%s' "$status_line" > "$state/.subsuper-seen-status-$key"
+    [ "$case_name" = paused ] \
+      && echo $(( $(date +%s) - 500 )) > "$state/.subsuper-paused-$key"
 
-  LOG="$log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
-  [ ! -e "$state/.subsuper-stale-$key" ] \
-    || fail "enriched wedge retained an ordinary stale marker for busy housekeeping"
-  grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
-    || fail "enriched wedge did not reach the existing escalation buffer"
-  grep -F "$reason" "$log" >/dev/null \
-    || fail "daemon log did not preserve the stale diagnostic suffix"
-
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
-  grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
-    || fail "busy-pane housekeeping absorbed the enriched wedge escalation"
-  pass "enriched stale wedges reach the existing buffer despite a still-busy pane"
+    (
+      kill() { printf 'kill %s\n' "$*" >> "$action_log"; }
+      fm_backend_send_text_submit() { printf 'interrupt %s\n' "$*" >> "$action_log"; }
+      LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+        FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+    )
+    [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+      || fail "$case_name enriched wedge did not produce exactly one escalation"
+    grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+      || fail "$case_name enriched wedge lost its demand-deep-inspection detail"
+    [ ! -e "$state/.subsuper-stale-$key" ] \
+      || fail "$case_name enriched wedge retained ordinary stale tracking"
+    case "$case_name" in
+      paused) [ -e "$state/.subsuper-paused-$key" ] \
+        || fail "paused enriched wedge erased ordinary pause tracking" ;;
+      *) [ ! -e "$state/.subsuper-paused-$key" ] \
+        || fail "$case_name enriched wedge created pause tracking" ;;
+    esac
+    [ ! -s "$action_log" ] \
+      || fail "$case_name enriched wedge interrupted or killed the busy worker"
+  done
+  pass "enriched stale wedges bypass status absorption without disturbing busy workers"
 }
 
 test_stale_terminal_escalates() {
