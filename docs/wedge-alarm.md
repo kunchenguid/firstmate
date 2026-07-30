@@ -28,6 +28,19 @@ On timeout or daemon shutdown, the notifier process group is terminated and the 
 AppleScript receives the summary as an argv item rather than interpolated source, so summary text cannot alter the script.
 See [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Recurring composer verdict diagnostic
+
+The max-defer retry re-runs the same guarded delivery path, so it can clear a transient stall but never a systematic composer misclassification that returns the same verdict on every poll.
+That case previously produced an alarm reporting only how long delivery had been stuck, which is why a 9.5-hour wedge left its follow-up investigation with no starting point.
+After `FM_COMPOSER_DEFER_DIAG_COUNT` consecutive identical non-empty verdicts the daemon records the recurring verdict, the offending composer row's bytes, the reader that produced it, and the backend's own busy state.
+Every deferral reaching that point has already been proven not busy by both the backend's native busy state and the harness busy footer, so the recorded native state is evidence rather than a gate; that matters because only some backends expose a native busy state at all.
+When the reader found no candidate composer row, there is no offending row and a bounded pane tail is recorded instead, which is what makes the dead-shell and unreadable-pane class self-diagnosing.
+
+The record lands in `state/.subsuper-composer-defer-diag`, in the daemon log as the durable trail, and inside `state/.subsuper-inject-wedged` next to the buffered items the marker already carried.
+`bin/fm-afk-return.sh` surfaces it as return catch-up evidence and clears it with the other delivery artifacts.
+Row bytes are recorded as hex, so a record read with `cat` can never replay a pane's own escape sequences, and each field is bounded because the row can hold the captain's unsent draft.
+For the same reason the alert summary carries only the verdict, the reader, and the streak: it is passed to an OS notifier or a configured `command:` directive, and composer content must not leave the machine's local records.
+
 ## Test safety
 
 Every notifier routes through `FM_WEDGE_ALARM_EXEC` in `wedge_alarm_emit`.

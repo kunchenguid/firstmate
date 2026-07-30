@@ -1111,6 +1111,255 @@ test_max_defer_pending_composer_alarms_without_typing() {
   pass "max-defer on a pending composer alarms without typing"
 }
 
+# --- recurring-deferral diagnostic (task composer-defer-diagnostic-fallback) --
+# A SYSTEMATIC composer misclassification defers delivery identically forever, so
+# the max-defer escape's retry cannot clear it and the 2026-07-28/29 wedge left no
+# record of which verdict recurred or what the offending row held. These cover the
+# escape's diagnostic: the trigger, the record's content, and the safety
+# properties (nothing typed, no exposure of row bytes to a notifier).
+
+# defer_case: a supervisor pane whose composer holds <text> forever, with the
+# escalation buffer primed and away mode active. The fixture text is deliberately
+# NOT the U+00A0 that caused the diagnosed wedge: R1 normalises Unicode blanks in
+# the shared classifier, so an NBSP row will read `empty` once that lands and this
+# fixture would silently stop reproducing the condition. Stable non-blank content
+# models what R2 actually targets - the NEXT systematic misclassification.
+defer_case() {  # <name> <composer-text> -> <dir>
+  local name=$1 text=$2 dir state width border i=0
+  dir=$(make_bordered_case "$name"); state="$dir/state"
+  width=$(( ${#text} + 4 ))
+  border=
+  while [ "$i" -lt "$width" ]; do border="${border}─"; i=$((i + 1)); done
+  printf '╭%s╮\n│ > %s │\n╰%s╯\n' "$border" "$text" "$border" > "$dir/composer"
+  : > "$dir/sent.log"
+  escalate_add "$state" "needs-decision: pick A"
+  afk_enter "$state"
+  printf '%s\n' "$dir"
+}
+
+# defer_reads_present: did an instrumented composer read leak a temp file?
+defer_reads_present() {  # <state>
+  [ -e "$1/.subsuper-composer-defer-read" ]
+}
+
+# defer_poll: one inject attempt against that pane, as the daemon makes it.
+defer_poll() {  # <dir> <threshold>
+  local dir=$1 threshold=$2
+  PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$dir/sent.log" \
+    FM_COMPOSER_DEFER_DIAG_COUNT="$threshold" FM_INJECT_CONFIRM_SLEEP=0.05 \
+    inject_msg "the digest" "$dir/state" >/dev/null 2>&1
+}
+
+test_identical_verdict_streak_records_diagnostic_at_threshold() {
+  local dir state diag i
+  dir=$(defer_case defer-diag-threshold 'human draft'); state="$dir/state"
+  diag="$state/.subsuper-composer-defer-diag"
+
+  i=1
+  while [ "$i" -lt 5 ]; do
+    defer_poll "$dir" 5
+    [ ! -e "$diag" ] \
+      || fail "diagnostic recorded after only $i identical deferrals (threshold 5)"
+    [ "$(_composer_defer_streak_read "$state" count)" -eq "$i" ] \
+      || fail "streak count is $(_composer_defer_streak_read "$state" count), expected $i"
+    i=$((i + 1))
+  done
+
+  defer_poll "$dir" 5
+  [ -s "$diag" ] || fail "no diagnostic recorded once the identical verdict reached the threshold"
+  grep -Fq 'verdict=pending streak=5/5' "$diag" \
+    || fail "record did not name the recurring verdict and streak: $(cat "$diag")"
+  grep -Fq 'reader=fm_tmux_composer_row_state' "$diag" \
+    || fail "record did not name the reader that produced the verdict: $(cat "$diag")"
+  grep -Fq 'content_hex=3e 20 68 75 6d 61 6e 20 64 72 61 66 74' "$diag" \
+    || fail "record did not carry the offending row's bytes: $(cat "$diag")"
+  grep -Fq 'native_busy=' "$diag" \
+    || fail "record did not carry the backend's independent busy state: $(cat "$diag")"
+  [ ! -s "$dir/sent.log" ] || fail "the diagnostic path typed into a pane holding real input"
+  grep -Fq 'human draft' "$dir/composer" || fail "composer content changed"
+  pass "recurring identical composer verdicts record the verdict, offending bytes, and reader at the threshold"
+}
+
+test_identical_verdict_streak_refreshes_every_threshold() {
+  local dir state diag first i
+  dir=$(defer_case defer-diag-refresh 'human draft'); state="$dir/state"
+  diag="$state/.subsuper-composer-defer-diag"
+  i=0
+  while [ "$i" -lt 3 ]; do defer_poll "$dir" 3; i=$((i + 1)); done
+  first=$(cat "$diag")
+  grep -Fq 'streak=3/3' "$diag" || fail "expected the first record at the threshold: $first"
+  defer_poll "$dir" 3
+  [ "$(cat "$diag")" = "$first" ] || fail "record rewritten between threshold multiples"
+  defer_poll "$dir" 3
+  defer_poll "$dir" 3
+  grep -Fq 'streak=6/3' "$diag" \
+    || fail "a continuing wedge did not refresh its record at the next multiple: $(cat "$diag")"
+  pass "a long identical-verdict wedge refreshes its record once per threshold, not per deferral"
+}
+
+test_changed_verdict_resets_the_streak() {
+  local dir state
+  dir=$(defer_case defer-diag-reset 'human draft'); state="$dir/state"
+  defer_poll "$dir" 3
+  defer_poll "$dir" 3
+  [ "$(_composer_defer_streak_read "$state" count)" -eq 2 ] || fail "streak did not accumulate"
+  # An unreadable/structurally-ambiguous pane reads unknown: a DIFFERENT non-empty
+  # verdict, so the identical-verdict streak restarts rather than carrying the
+  # pending count over.
+  printf 'plain output line\n──────\n$ \n' > "$dir/composer"
+  defer_poll "$dir" 3
+  [ "$(_composer_defer_streak_read "$state" count)" -eq 1 ] \
+    || fail "a different verdict did not reset the streak to 1"
+  [ "$(_composer_defer_streak_read "$state" verdict)" = unknown ] \
+    || fail "streak did not record the new verdict: $(_composer_defer_streak_read "$state" verdict)"
+  [ ! -e "$state/.subsuper-composer-defer-diag" ] \
+    || fail "a reset streak still reached the diagnostic threshold"
+  pass "a changed composer verdict resets the identical-verdict streak"
+}
+
+test_streak_survives_a_daemon_restart() {
+  # The streak is durable so a restart mid-wedge cannot hide an ongoing
+  # systematic misclassification by restarting the count.
+  local dir state
+  dir=$(defer_case defer-diag-restart 'human draft'); state="$dir/state"
+  printf '4\tpending\n' > "$state/.subsuper-composer-defer-streak"
+  defer_poll "$dir" 5
+  [ -s "$state/.subsuper-composer-defer-diag" ] \
+    || fail "a streak inherited from before a restart did not reach the threshold"
+  grep -Fq 'streak=5/5' "$state/.subsuper-composer-defer-diag" \
+    || fail "inherited streak was not continued: $(cat "$state/.subsuper-composer-defer-diag")"
+  pass "the identical-verdict streak is durable across a daemon restart"
+}
+
+test_empty_composer_clears_the_streak() {
+  local dir state
+  dir=$(defer_case defer-diag-cleared 'human draft'); state="$dir/state"
+  defer_poll "$dir" 5
+  defer_poll "$dir" 5
+  [ -e "$state/.subsuper-composer-defer-streak" ] || fail "no streak recorded"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
+  defer_poll "$dir" 5
+  [ ! -e "$state/.subsuper-composer-defer-streak" ] \
+    || fail "streak survived a composer that read empty (delivery is no longer deferring)"
+  pass "a composer that reads empty clears the identical-verdict streak"
+}
+
+test_defer_diagnostic_can_be_disabled() {
+  local dir state i
+  dir=$(defer_case defer-diag-off 'human draft'); state="$dir/state"
+  i=0
+  while [ "$i" -lt 4 ]; do defer_poll "$dir" 0; i=$((i + 1)); done
+  [ ! -e "$state/.subsuper-composer-defer-diag" ] \
+    || fail "FM_COMPOSER_DEFER_DIAG_COUNT=0 still recorded a diagnostic"
+  if defer_reads_present "$state"; then
+    fail "the disabled diagnostic still armed the reader's sink"
+  fi
+  [ ! -e "$state/.subsuper-composer-defer-streak" ] \
+    || fail "the disabled diagnostic still kept streak bookkeeping"
+  pass "FM_COMPOSER_DEFER_DIAG_COUNT=0 disables the diagnostic entirely"
+}
+
+test_defer_diagnostic_leaves_no_temporary_reads() {
+  local dir state i
+  dir=$(defer_case defer-diag-tmp 'human draft'); state="$dir/state"
+  i=0
+  while [ "$i" -lt 6 ]; do defer_poll "$dir" 3; i=$((i + 1)); done
+  if defer_reads_present "$state"; then
+    fail "instrumented reads leaked temporary files into the state dir"
+  fi
+  pass "instrumented composer reads leave no temporary files behind"
+}
+
+test_unreadable_composer_records_a_bounded_pane_tail() {
+  # The dead-shell / unreadable class has no offending row at all, so the
+  # informative analogue is a bounded, sanitised tail of what IS on the pane.
+  local dir state diag
+  dir=$(defer_case defer-diag-norow 'human draft'); state="$dir/state"
+  diag="$state/.subsuper-composer-defer-diag"
+  printf 'plain output line\n──────\n$ \n' > "$dir/composer"
+  defer_poll "$dir" 2
+  defer_poll "$dir" 2
+  [ -s "$diag" ] || fail "a recurring unreadable composer recorded no diagnostic"
+  grep -Fq 'verdict=unknown' "$diag" || fail "record did not name the unknown verdict: $(cat "$diag")"
+  grep -Fq 'rows_evaluated=0' "$diag" || fail "record did not report that no candidate row was found"
+  grep -Fq 'tail[' "$diag" || fail "record carried no pane tail for the no-candidate-row case"
+  grep -Fq 'row_hex=70 6c 61 69 6e' "$diag" \
+    || fail "pane tail did not carry sanitised row bytes: $(cat "$diag")"
+  pass "a recurring unreadable composer records a bounded sanitised pane tail instead of a row"
+}
+
+test_recorded_pane_tail_is_row_bounded() {
+  # The tail must stay bounded: a long transcript cannot turn one diagnostic into
+  # an unbounded dump of the pane's scrollback. The recording path is covered
+  # above through inject_msg; this pins the bound itself, which needs a pane
+  # deeper than the fake reader's whole-capture fallback can represent.
+  local dir out i
+  dir=$(defer_case defer-diag-tail-bound 'human draft')
+  : > "$dir/composer"
+  i=0
+  while [ "$i" -lt 30 ]; do
+    printf 'transcript row %s\n' "$i" >> "$dir/composer"
+    printf '\n' >> "$dir/composer"
+    i=$((i + 1))
+  done
+  out=$(PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" \
+    composer_defer_diag_tail tmux fakepane)
+  [ "$(printf '%s\n' "$out" | grep -c '  tail\[')" -eq 12 ] \
+    || fail "expected exactly 12 bounded tail rows, got $(printf '%s\n' "$out" | grep -c '  tail\[')"
+  printf '%s\n' "$out" | grep -Fq 'row_text=transcript row 29' \
+    || fail "the bounded tail dropped the most recent row: $out"
+  printf '%s\n' "$out" | grep -Fq 'row_text=transcript row 0' \
+    && fail "the bounded tail reached back to the oldest transcript row"
+  printf '%s\n' "$out" | grep -Fq 'row_hex=74 72 61 6e 73 63 72 69 70 74' \
+    || fail "bounded tail rows were not recorded as sanitised bytes: $out"
+  pass "the recorded pane tail is bounded to the most recent rows and skips blank ones"
+}
+
+test_wedge_marker_carries_the_diagnostic() {
+  local dir state marker
+  dir=$(defer_case defer-diag-marker 'human draft'); state="$dir/state"
+  marker="$state/.subsuper-inject-wedged"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  defer_poll "$dir" 2
+  defer_poll "$dir" 2
+  PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$dir/sent.log" \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_COMPOSER_DEFER_DIAG_COUNT=2 \
+    FM_INJECT_CONFIRM_SLEEP=0.05 housekeeping "$state"
+  [ -s "$marker" ] || fail "no wedge marker raised"
+  grep -Fq 'Recurring composer verdict diagnostic:' "$marker" \
+    || fail "the wedge marker did not carry the diagnostic: $(cat "$marker")"
+  grep -Fq 'content_hex=3e 20 68 75 6d 61 6e' "$marker" \
+    || fail "the wedge marker did not carry the offending row's bytes: $(cat "$marker")"
+  grep -Fq 'needs-decision: pick A' "$marker" \
+    || fail "the wedge marker lost the buffered items it already carried"
+  pass "the wedge marker carries the recurring-verdict diagnostic alongside the buffered items"
+}
+
+test_wedge_alarm_summary_excludes_row_bytes() {
+  # The summary reaches an OS notifier or a configured command: directive, and the
+  # row can hold the captain's draft, so only identifiers may appear in it.
+  local dir state summary
+  dir=$(defer_case defer-diag-summary 'secret draft'); state="$dir/state"
+  defer_poll "$dir" 2
+  defer_poll "$dir" 2
+  summary=$(composer_defer_diag_summary "$state")
+  case "$summary" in
+    *'verdict=pending'*) : ;;
+    *) fail "alarm summary omitted the recurring verdict: '$summary'" ;;
+  esac
+  case "$summary" in
+    *'reader=fm_tmux_composer_row_state'*) : ;;
+    *) fail "alarm summary omitted the reader: '$summary'" ;;
+  esac
+  case "$summary" in
+    *secret*|*73\ 65\ 63*) fail "alarm summary leaked composer row content: '$summary'" ;;
+  esac
+  case "$summary" in
+    *$'\n'*) fail "alarm summary spans more than one line: '$summary'" ;;
+  esac
+  pass "the wedge alarm summary carries the verdict and reader but never the row's bytes"
+}
+
 test_normal_flush_clears_stale_wedge_marker() {
   local dir state fakebin sent
   dir=$(make_bordered_case normal-clears-wedge)
@@ -1825,6 +2074,17 @@ test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
+test_identical_verdict_streak_records_diagnostic_at_threshold
+test_identical_verdict_streak_refreshes_every_threshold
+test_changed_verdict_resets_the_streak
+test_streak_survives_a_daemon_restart
+test_empty_composer_clears_the_streak
+test_defer_diagnostic_can_be_disabled
+test_defer_diagnostic_leaves_no_temporary_reads
+test_unreadable_composer_records_a_bounded_pane_tail
+test_recorded_pane_tail_is_row_bounded
+test_wedge_marker_carries_the_diagnostic
+test_wedge_alarm_summary_excludes_row_bytes
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm

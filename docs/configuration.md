@@ -116,6 +116,12 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+A max-defer retry uses the same guarded delivery path, so it cannot clear a systematic composer misclassification that reports the same verdict on every poll.
+After `FM_COMPOSER_DEFER_DIAG_COUNT` consecutive identical non-empty verdicts, the daemon therefore records the recurring verdict, the offending composer row's sanitized bounded bytes, and the reader that produced it, so a wedge names its own cause instead of only its duration.
+The default is about one max-defer window of housekeeping ticks, so a record is in place by the time the first wedge alarm fires and the alarm can carry it.
+Bytes are recorded as hex and never reach an alert channel, because the row can hold the captain's own unsent draft; the alert summary carries only the verdict, the reader, and the streak.
+See [`wedge-alarm.md`](wedge-alarm.md) for where that record is surfaced.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
@@ -459,6 +465,7 @@ FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; t
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
+FM_COMPOSER_DEFER_DIAG_COUNT=20    # consecutive identical non-empty composer verdicts before the deferral records a diagnostic (verdict, offending row's sanitized bytes, reader) to state/.subsuper-composer-defer-diag, the daemon log, and the wedge marker; 0 disables
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10

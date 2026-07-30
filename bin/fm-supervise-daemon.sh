@@ -50,7 +50,10 @@
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
-#     alert if submit still cannot be confirmed.
+#     alert if submit still cannot be confirmed. That retry uses the same guarded
+#     path, so it cannot clear a SYSTEMATIC composer misclassification; the
+#     recurring-deferral diagnostic below is what makes such a wedge name its own
+#     cause instead of only its duration.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -104,6 +107,19 @@
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge
 #                                   alarm fires (default 300; 0 disables)
+#          FM_COMPOSER_DEFER_DIAG_COUNT  consecutive IDENTICAL non-empty composer
+#                                   verdicts before the deferral is recorded as a
+#                                   distinguishable diagnostic - the verdict, the
+#                                   offending row's sanitised bytes, and the
+#                                   reader that produced it - in
+#                                   state/.subsuper-composer-defer-diag, the
+#                                   daemon log, and the wedge marker (default 20,
+#                                   about one FM_MAX_DEFER_SECS window of ticks,
+#                                   so a record is in place by the time the first
+#                                   wedge alarm fires; 0 disables). A retry cannot
+#                                   clear a systematic misclassification, so this
+#                                   is what stops the escape from being a bare
+#                                   alarm. See composer_defer_note below.
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
@@ -873,7 +889,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer now notify=1 diag_summary
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
@@ -881,16 +897,23 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     return 0
   fi
   now=$(_now)
+  diag_summary=$(composer_defer_diag_summary "$state")
   if [ "$WEDGE_ALARM_LAST_EPOCH" -gt 0 ] && [ $((now - WEDGE_ALARM_LAST_EPOCH)) -lt "$max_defer" ]; then
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode escalation undelivered ${age}s${diag_summary}; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
   fi
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
+    # The marker already carried WHAT was stuck; this is WHY, for the recurring
+    # composer-verdict case that no retry can clear.
+    if [ -s "$state/.subsuper-composer-defer-diag" ]; then
+      printf 'Recurring composer verdict diagnostic:\n'
+      cat "$state/.subsuper-composer-defer-diag" 2>/dev/null
+    fi
   } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
@@ -907,7 +930,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered${diag_summary} - see $marker" "$marker"
   fi
 }
 
@@ -1071,6 +1094,140 @@ window_for_task() {  # <task-key> [state]
   return 1
 }
 
+# --- recurring-deferral diagnostic ------------------------------------------
+# The max-defer escape below retries the SAME guarded path, so a systematic
+# composer misclassification defers identically forever and the escape can only
+# alarm. The 2026-07-28/29 wedge deferred 9.5 hours on one U+00A0 and recorded
+# neither the recurring verdict nor the offending row, so the follow-up
+# investigation started from zero. These helpers make that class self-diagnosing:
+# after COMPOSER_DEFER_DIAG_COUNT consecutive IDENTICAL non-empty verdicts they
+# record the verdict, the offending row's sanitised bytes, and the reader that
+# produced it.
+#
+# The pane is already proven not-busy by BOTH available signals before any of
+# this runs: inject_msg returns early on pane_is_busy, which consults the
+# backend's native busy state first and then the harness busy footer. The native
+# state is therefore RECORDED rather than gated on - it is only meaningful on
+# herdr, and requiring an affirmative native `idle` would make this diagnostic
+# never fire on tmux, which the diagnosed defect affected identically.
+#
+# Every non-`empty` verdict is eligible, including `unknown`: a dead-shell or
+# unreadable supervisor pane wedges delivery just as permanently as pending text.
+COMPOSER_DEFER_DIAG_COUNT_DEFAULT=20
+COMPOSER_DEFER_DIAG_TAIL_ROWS=12
+
+composer_defer_diag_threshold() {  # -> N (0 disables)
+  local n=${FM_COMPOSER_DEFER_DIAG_COUNT:-$COMPOSER_DEFER_DIAG_COUNT_DEFAULT}
+  case "$n" in ''|*[!0-9]*) n=$COMPOSER_DEFER_DIAG_COUNT_DEFAULT ;; esac
+  printf '%s' "$n"
+}
+
+# Streak state is durable (<count>TAB<verdict>) so a daemon restart mid-wedge
+# does not restart the count and hide an ongoing systematic misclassification.
+_composer_defer_streak_file() { printf '%s/.subsuper-composer-defer-streak' "$1"; }
+
+_composer_defer_streak_read() {  # <state> <field: count|verdict>
+  local count='' verdict=''
+  IFS=$'\t' read -r count verdict < "$(_composer_defer_streak_file "$1")" 2>/dev/null || true
+  case "$2" in
+    count)
+      case "$count" in ''|*[!0-9]*) count=0 ;; esac
+      printf '%s' "$count" ;;
+    *) printf '%s' "$verdict" ;;
+  esac
+}
+
+composer_defer_streak_reset() {  # <state>
+  rm -f "$(_composer_defer_streak_file "$1")"
+}
+
+# Bounded, sanitised pane tail for the case where the reader found NO candidate
+# composer row at all (the dead-shell / unreadable class). There is no offending
+# row to record, so the informative analogue is what IS on the pane.
+composer_defer_diag_tail() {  # <backend> <target>
+  local backend=$1 target=$2 cap line i=0 n
+  local -a tail_rows=()
+  cap=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+    printf '  tail=unreadable\n'; return 0; }
+  while IFS= read -r line; do
+    [ -n "$(printf '%s' "$line" | tr -d '[:space:]')" ] || continue
+    tail_rows+=("$line")
+  done < <(printf '%s\n' "$cap")
+  n=${#tail_rows[@]}
+  [ "$n" -gt 0 ] || { printf '  tail=empty\n'; return 0; }
+  i=$((n - COMPOSER_DEFER_DIAG_TAIL_ROWS))
+  [ "$i" -lt 0 ] && i=0
+  while [ "$i" -lt "$n" ]; do
+    printf '  tail[%s] %s\n' "$i" "$(fm_composer_diag_field row "${tail_rows[$i]}")"
+    i=$((i + 1))
+  done
+}
+
+composer_defer_diag_write() {  # <state> <verdict> <count> <threshold> <target> <backend> <read-file>
+  local state=$1 verdict=$2 count=$3 threshold=$4 target=$5 backend=$6 read_file=$7
+  local out native rows=0 line
+  out="$state/.subsuper-composer-defer-diag"
+  native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+  if [ -n "$read_file" ] && [ -s "$read_file" ]; then
+    rows=$(wc -l < "$read_file" 2>/dev/null | tr -d ' ')
+  fi
+  {
+    printf 'composer-defer-diag %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf '  target=%s backend=%s verdict=%s streak=%s/%s native_busy=%s\n' \
+      "$target" "$backend" "$verdict" "$count" "$threshold" "${native:-unreadable}"
+    if [ "$rows" -gt 0 ]; then
+      printf '  rows_evaluated=%s %s\n' "$rows" "$(tail -1 "$read_file")"
+    else
+      printf '  rows_evaluated=0 reader=none no candidate composer row was found; pane tail follows\n'
+      composer_defer_diag_tail "$backend" "$target"
+    fi
+  } > "$out" 2>/dev/null || true
+  # Mirror into the daemon log line by line: the log is the durable trail that
+  # outlives this volatile state file, and stays greppable and timestamped. An
+  # unwritable state dir loses the record but must never break the daemon loop.
+  [ -s "$out" ] || return 0
+  while IFS= read -r line; do
+    log "$line"
+  done < "$out"
+}
+
+# composer_defer_note: fold one composer deferral into the streak, and record the
+# diagnostic when the streak first reaches the threshold and every N deferrals
+# after that, so a multi-hour wedge refreshes the bytes at a bounded cost instead
+# of writing thousands of records.
+composer_defer_note() {  # <state> <verdict> <target> <backend> <read-file>
+  local state=$1 verdict=$2 target=$3 backend=$4 read_file=$5 threshold count
+  threshold=$(composer_defer_diag_threshold)
+  # 0 disables the diagnostic entirely, streak bookkeeping included.
+  [ "$threshold" -gt 0 ] || return 0
+  count=$(_composer_defer_streak_read "$state" count)
+  if [ "$verdict" = "$(_composer_defer_streak_read "$state" verdict)" ]; then
+    count=$((count + 1))
+  else
+    count=1
+  fi
+  printf '%s\t%s\n' "$count" "$verdict" > "$(_composer_defer_streak_file "$state")" 2>/dev/null || true
+  [ "$count" -ge "$threshold" ] || return 0
+  [ $((count % threshold)) -eq 0 ] || return 0
+  composer_defer_diag_write "$state" "$verdict" "$count" "$threshold" "$target" "$backend" "$read_file"
+}
+
+# composer_defer_diag_summary: the ALARM-SAFE excerpt. The wedge alarm summary is
+# passed to an OS notifier or a configured command: directive, and the offending
+# row can hold the captain's own draft, so only the recurring verdict, the reader,
+# and the streak are ever exposed - never the row bytes. The character classes
+# keep the excerpt to internal identifiers, so no pane content, newline, or shell
+# metacharacter can reach a notifier argument through it.
+composer_defer_diag_summary() {  # <state> -> "" or " (composer verdict=X reader=Y streak=N/M)"
+  local f=$1/.subsuper-composer-defer-diag verdict streak reader
+  [ -s "$f" ] || return 0
+  verdict=$(grep -o 'verdict=[A-Za-z-]*' "$f" 2>/dev/null | head -1)
+  [ -n "$verdict" ] || return 0
+  reader=$(grep -o 'reader=[A-Za-z_]*' "$f" 2>/dev/null | head -1)
+  streak=$(grep -o 'streak=[0-9]*/[0-9]*' "$f" 2>/dev/null | head -1)
+  printf ' (composer %s %s %s)' "$verdict" "${reader:-reader=none}" "${streak:-streak=unknown}"
+}
+
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
 # Returns 0 on successful inject (or empty buffer), non-zero if the pane is
@@ -1093,6 +1250,7 @@ window_for_task() {  # <task-key> [state]
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local diag_threshold diag_read
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1128,11 +1286,32 @@ inject_msg() {  # <message> [state]
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
-  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  #      A recurring identical verdict is the systematic-misclassification case
+  #      that wedged delivery for 9.5 hours, so instrument the read ONCE the
+  #      streak is already deep enough that this deferral could reach the
+  #      diagnostic threshold. Instrumenting here rather than re-reading later is
+  #      what makes the recorded row come from the same read as the recorded
+  #      verdict; on a healthy fleet the sink is never even armed.
+  #      The sink target is a FIXED name, not a mktemp: the daemon is a singleton,
+  #      so there is no concurrent writer, and a SIGKILL mid-read can then leave at
+  #      most that one known file, truncated by the next armed read, instead of
+  #      accumulating one leaked temp file per crash.
+  diag_threshold=$(composer_defer_diag_threshold)
+  diag_read=
+  if [ "$diag_threshold" -gt 0 ] \
+     && [ $(( $(_composer_defer_streak_read "$state" count) + 1 )) -ge "$diag_threshold" ]; then
+    diag_read="$state/.subsuper-composer-defer-read"
+    : > "$diag_read" 2>/dev/null || diag_read=
+  fi
+  composer=$(FM_COMPOSER_DIAG_FILE="$diag_read" fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
+    composer_defer_note "$state" "$composer" "$target" "$backend" "$diag_read"
+    [ -n "$diag_read" ] && rm -f "$diag_read"
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
   fi
+  [ -n "$diag_read" ] && rm -f "$diag_read"
+  composer_defer_streak_reset "$state"
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
   # retype) via the shared submit primitive. Success = the backend confirms
   # submit. An unconfirmed/unknown pane does NOT count as delivered, so the

@@ -124,7 +124,10 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.subsuper-composer-defer-diag" \
+    "$STATE/.subsuper-composer-defer-streak" \
+    "$STATE/.subsuper-composer-defer-read"
 }
 
 return_guard() {
@@ -141,7 +144,7 @@ return_guard() {
 }
 
 return_reconcile() {
-  local evidence blockers drained wedge escalations lifecycle_ok=1
+  local evidence blockers drained wedge escalations defer_diag lifecycle_ok=1
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   preserve_evidence "$evidence"
@@ -163,6 +166,14 @@ return_reconcile() {
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
     wedge=$(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)
     append_evidence wedge "$wedge" "$evidence"
+  fi
+  # A wedge whose cause was a recurring composer verdict already named that cause
+  # durably, so surface it here rather than leaving the return to rediscover it.
+  # The header plus the offending row is the actionable part; the full record,
+  # including any pane tail, stays in the wedge marker and the daemon log.
+  if [ -s "$STATE/.subsuper-composer-defer-diag" ]; then
+    defer_diag=$(head -3 "$STATE/.subsuper-composer-defer-diag" 2>/dev/null || true)
+    append_evidence composer-defer "$defer_diag" "$evidence"
   fi
   if [ -s "$STATE/.subsuper-escalations" ]; then
     escalations=$(cat "$STATE/.subsuper-escalations" 2>/dev/null || true)

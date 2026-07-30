@@ -209,7 +209,51 @@ test_check_retries_recorded_terminal_teardown() {
   pass "check retries recorded terminal teardown and keeps catch-up gated until success"
 }
 
+# Task composer-defer-diagnostic-fallback: when delivery wedged on a recurring
+# composer verdict, the daemon named that cause durably. The return must surface
+# it rather than leave the captain's next investigation to rediscover it, and must
+# clear it with the other delivery artifacts so it cannot be misattributed to a
+# later away session.
+test_return_surfaces_and_clears_the_composer_defer_diagnostic() {
+  local dir out gate diag
+  dir="$TMP_ROOT/composer-defer-diag"
+  install_runner "$dir"
+  seed_live_blocker "$dir" tmux synthetic-dependency
+  diag="$dir/home/state/.subsuper-composer-defer-diag"
+  date +%s > "$dir/home/state/.afk"
+  printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
+  printf 'fm away-mode inject WEDGED: 34115s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
+  printf '20\tpending\n' > "$dir/home/state/.subsuper-composer-defer-streak"
+  {
+    printf 'composer-defer-diag 2026-07-29T17:13:54-0400\n'
+    printf '  target=default:w11:p1 backend=herdr verdict=pending streak=20/20 native_busy=idle\n'
+    printf '  rows_evaluated=1 reader=fm_backend_herdr_composer_state content_hex=c2 a0\n'
+    printf '  tail[0] row_len=1 row_hex=24 row_text=$\n'
+  } > "$diag"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  set -e
+  gate="$dir/home/state/.afk-return-catchup"
+  [ -s "$gate" ] || fail "return begin did not persist its catch-up gate"
+  grep -F $'evidence\tcomposer-defer\tcomposer-defer-diag 2026-07-29T17:13:54-0400' "$gate" >/dev/null \
+    || fail "the recurring-verdict diagnostic was not retained as return evidence"
+  grep -F 'verdict=pending streak=20/20' "$gate" >/dev/null \
+    || fail "return evidence lost the recurring verdict and streak"
+  grep -F 'reader=fm_backend_herdr_composer_state' "$gate" >/dev/null \
+    || fail "return evidence lost the reader that produced the verdict"
+  assert_contains "$out" 'catch-up composer-defer' "the return did not print the diagnostic to the captain's catch-up"
+
+  printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token\n' >> "$dir/home/state/repair-task.status"
+  out=$(run_return "$dir" check) || fail "resolved blocker did not clear return catch-up: $out"
+  [ ! -e "$diag" ] || fail "successful check left the composer-defer diagnostic behind"
+  [ ! -e "$dir/home/state/.subsuper-composer-defer-streak" ] \
+    || fail "successful check left the identical-verdict streak behind"
+  pass "return catch-up surfaces the recurring-verdict diagnostic and clears it with the other delivery artifacts"
+}
+
 test_return_gate_orders_catchup_before_bearings
+test_return_surfaces_and_clears_the_composer_defer_diagnostic
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_away_reentry_refuses_pending_return_gate

@@ -45,7 +45,9 @@
 # fm_composer_strip_ghost for the real-typed-content extraction, strips the box
 # borders, trims, and hands the result plus a <bordered> flag to
 # fm_composer_classify_content for the shared
-# empty|pending|unknown verdict. orca/cmux read a plain (unstyled) screen so
+# empty|pending|unknown verdict, optionally recording that row through
+# fm_composer_diag_record (the opt-in recurring-deferral diagnostic sink at the
+# foot of this file). orca/cmux read a plain (unstyled) screen so
 # they have no ghost styling to strip and rely on the idle-placeholder match
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
@@ -221,4 +223,62 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   fi
   # Real, unsubmitted content remains.
   printf 'pending'; return 0
+}
+
+# --- recurring-deferral diagnostic sink -------------------------------------
+# WHY THIS EXISTS (task composer-defer-diagnostic-fallback): a SYSTEMATIC
+# misclassification here defers away-mode escalation delivery forever, and the
+# away-mode daemon's max-defer escape can only retry the same guarded path and
+# alarm. The 2026-07-28/29 wedge deferred for 9.5 hours on one U+00A0 without
+# ever recording WHICH verdict recurred or WHAT the offending row held, so the
+# investigation had to start from scratch. This sink is what makes the next such
+# wedge self-diagnosing.
+#
+# It is OPT-IN: a no-op unless the caller exports FM_COMPOSER_DIAG_FILE, so every
+# production composer read on a healthy fleet costs nothing. The away-mode daemon
+# sets it only once it is already deep in an identical-verdict streak
+# (bin/fm-supervise-daemon.sh), which is also why the recorded row always comes
+# from the same read as the recorded verdict rather than a second one.
+#
+# Each adapter calls this once, where it already holds both the raw styled row
+# and the ghost-stripped content, immediately before delegating to
+# fm_composer_classify_content. This file owns the record format and the
+# sanitisation so neither can drift across adapters.
+FM_COMPOSER_DIAG_MAX_BYTES_DEFAULT=120
+
+# fm_composer_diag_field: one sanitised, bounded field triple for <text>.
+# Bytes are rendered as HEX because a composer row can contain the terminal's own
+# escape sequences, and a diagnostic record is read with `cat`: hex can never
+# replay an escape into the reader's terminal. The parallel printable-only
+# rendering (everything outside printable ASCII becomes '.') is for readability
+# and carries no escapes either. Both are bounded, because the row can hold the
+# captain's own draft text.
+fm_composer_diag_field() {  # <label> <text> -> "<label>_len=N <label>_hex=H <label>_text=T"
+  local label=$1 text=$2 max len bounded hex printable more=''
+  max=${FM_COMPOSER_DIAG_MAX_BYTES:-$FM_COMPOSER_DIAG_MAX_BYTES_DEFAULT}
+  case "$max" in ''|*[!0-9]*) max=$FM_COMPOSER_DIAG_MAX_BYTES_DEFAULT ;; esac
+  len=$(printf '%s' "$text" | LC_ALL=C wc -c | tr -d ' ')
+  bounded=$(printf '%s' "$text" | LC_ALL=C head -c "$max")
+  [ "$len" -gt "$max" ] && more=" (+$((len - max))_more)"
+  # -v is load-bearing: without it od collapses repeated 16-byte runs to a bare
+  # '*', which would silently elide bytes from a padded or repetitive row.
+  hex=$(printf '%s' "$bounded" | od -An -tx1 -v | tr -d '\n' | tr -s ' ' | sed 's/^ //;s/ *$//')
+  printable=$(printf '%s' "$bounded" | LC_ALL=C tr -c '\40-\176' '.')
+  printf '%s_len=%s %s_hex=%s%s %s_text=%s' \
+    "$label" "$len" "$label" "${hex:-none}" "$more" "$label" "${printable:-none}"
+}
+
+# fm_composer_diag_record: append ONE candidate row's sanitised record. Adapters
+# that evaluate several rows per read (a bordered box) append one line each; the
+# daemon reports the LAST one, which is the deciding row because the readers
+# return on the first row that classifies non-empty.
+fm_composer_diag_record() {  # <reader> <raw-row> <content>
+  local reader=$1 raw=$2 content=$3
+  [ -n "${FM_COMPOSER_DIAG_FILE:-}" ] || return 0
+  printf 'reader=%s %s %s\n' \
+    "$reader" \
+    "$(fm_composer_diag_field raw "$raw")" \
+    "$(fm_composer_diag_field content "$content")" \
+    >> "$FM_COMPOSER_DIAG_FILE" 2>/dev/null || true
+  return 0
 }
