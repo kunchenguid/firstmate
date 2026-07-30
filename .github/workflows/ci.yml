@@ -148,7 +148,9 @@ jobs:
           if-no-files-found: warn
 
   # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
-  # hard-fail on "skip: herdr not found". Starts on Linux x86_64; if a genuine
+  # hard-fail on the lab gate's skip token (derived from bin/fm-herdr-lab.sh
+  # gate-token), which covers every unmet real-Herdr precondition including a
+  # missing binary. Starts on Linux x86_64; if a genuine
   # platform invariant fails (focus, cleanup, default-session tripwire), keep
   # the failure evidence and move the job to macOS rather than skip assertions.
   tests-herdr:
@@ -253,7 +255,6 @@ jobs:
             exit 1
           }
           bin/fm-test-run.sh --family real-herdr-gated \
-            --fail-on-gate-skip 'herdr not found' \
             --fail-on-gate-skip "$lab_token" \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
       - name: Cleanup job-owned Herdr lab sessions
