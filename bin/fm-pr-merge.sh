@@ -7,7 +7,9 @@
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# A one-shot GitHub CI snapshot must contain only SUCCESS, SKIPPED, or NEUTRAL.
+# A PR with no reported CI checks requires the explicit --no-ci-verified attestation.
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--no-ci-verified] [-- <extra gh-axi pr merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +39,11 @@ PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
+NO_CI_VERIFIED=0
+if [ "${1:-}" = --no-ci-verified ]; then
+  NO_CI_VERIFIED=1
+  shift
+fi
 [ "${1:-}" = "--" ] && shift
 
 caller_has_merge_method() {
@@ -61,7 +68,18 @@ reject_repo_overrides() {
   done
 }
 
+reject_no_ci_attestation() {
+  local arg
+  for arg in "$@"; do
+    if [ "$arg" = --no-ci-verified ]; then
+      echo "error: --no-ci-verified must appear before --" >&2
+      return 1
+    fi
+  done
+}
+
 reject_repo_overrides "$@" || exit 1
+reject_no_ci_attestation "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -75,6 +93,44 @@ grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+
+CI_STATE_PREFIX='fm-pr-merge-ci-state:'
+if ! check_states=$(gh pr view "$URL" --json statusCheckRollup --jq '
+  if .statusCheckRollup == null then
+    error("PR status check rollup is unavailable")
+  elif (.statusCheckRollup | type) != "array" then
+    error("PR status check rollup is invalid")
+  else
+    .statusCheckRollup[] |
+    "fm-pr-merge-ci-state:" +
+      (if .__typename == "CheckRun" then (.conclusion // .status // "")
+      else (.state // "") end)
+  end
+'); then
+  echo "error: cannot verify PR CI status" >&2
+  exit 1
+fi
+
+if [ -z "$check_states" ]; then
+  [ "$NO_CI_VERIFIED" -eq 1 ] || {
+    echo "error: PR reports no CI checks; verify focused local checks and rerun with --no-ci-verified" >&2
+    exit 1
+  }
+else
+  while IFS= read -r check_state; do
+    case "$check_state" in
+      "$CI_STATE_PREFIX"*) check_state=${check_state#"$CI_STATE_PREFIX"} ;;
+      *) echo "error: cannot verify PR CI status" >&2; exit 1 ;;
+    esac
+    case "$check_state" in
+      SUCCESS|SKIPPED|NEUTRAL) ;;
+      '') echo "error: PR CI returned an empty state" >&2; exit 1 ;;
+      *) echo "error: PR CI is not green: $check_state" >&2; exit 1 ;;
+    esac
+  done <<EOF
+$check_states
+EOF
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then

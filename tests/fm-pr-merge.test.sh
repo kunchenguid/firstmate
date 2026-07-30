@@ -2,8 +2,7 @@
 # Tests for bin/fm-pr-merge.sh: the one path firstmate uses to merge a task's
 # PR, which must always record pr= and any available pr_head= into the task's
 # meta before merging so fm-teardown.sh's landed-check has a PR reference to
-# verify against, even on repos with no PR CI where the usual "checks green"
-# fm-pr-check.sh trigger never fires.
+# verify against, and refuses unsafe or unavailable CI before invoking gh-axi.
 #
 # Matrix:
 #   (a) merge records pr= and pr_head= before merging, and merges
@@ -14,6 +13,7 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) CI must be green, with explicit focused-check attestation for no-CI PRs
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -22,6 +22,7 @@ fm_git_identity fmtest fmtest@example.invalid
 
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
+CI_STATE_PREFIX='fm-pr-merge-ci-state:'
 
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
 # fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
@@ -43,7 +44,8 @@ make_case() {
 }
 
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# headRefOid for fm-pr-check.sh's pr_head lookup and CI state lookups.
+# Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -53,10 +55,21 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+: "\${FM_TEST_HEAD:=$head}"
 case "\${1:-} \${2:-}" in
   "pr view")
+    if [ "\${FM_TEST_GH_VIEW_FAIL:-0}" = 1 ]; then
+      exit 1
+    fi
     case " \$* " in
-      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *headRefOid*) printf '%s\n' "\$FM_TEST_HEAD" ;;
+      *statusCheckRollup*)
+        if [ "\${FM_TEST_ROLLUP_UNAVAILABLE:-0}" = 1 ]; then
+          exit 1
+        fi
+        [ "\${FM_TEST_EMPTY_ROLLUP:-0}" = 1 ] || \
+          printf '%s\n' "\${FM_TEST_CHECK_STATES:-fm-pr-merge-ci-state:SUCCESS}"
+        ;;
     esac
     ;;
 esac
@@ -79,7 +92,10 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-exit 0
+case " $* " in
+  *headRefOid*) printf '%s\n' "${FM_TEST_HEAD:-deadbeefcafefeed0000000000000000deadbeef}" ;;
+  *statusCheckRollup*) printf '%s\n' "${FM_TEST_CHECK_STATES:-fm-pr-merge-ci-state:SUCCESS}" ;;
+esac
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
@@ -301,6 +317,188 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_green_ci_states_allow_merge() {
+  local case_dir rc
+  case_dir=$(make_case green-ci-states)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_CHECK_STATES="${CI_STATE_PREFIX}SUCCESS"$'\n'"${CI_STATE_PREFIX}SKIPPED"$'\n'"${CI_STATE_PREFIX}NEUTRAL" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "green-ci-states: fm-pr-merge should merge with green CI states"
+  assert_grep 'pr merge 31' "$case_dir/gh-axi.log" \
+    "green-ci-states: gh-axi pr merge was not invoked"
+  pass "fm-pr-merge merges only when every reported CI state is green"
+}
+
+assert_ci_refusal() {
+  local name=$1 states=$2 expected_error=$3 case_dir rc
+  shift 3
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_CHECK_STATES="$states" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/32 "$@" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "$name: fm-pr-merge should refuse unsafe CI"
+  assert_grep "$expected_error" "$case_dir/stderr" \
+    "$name: refusal did not explain the CI state"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "$name: gh-axi pr merge was invoked despite unsafe CI"
+}
+
+test_failure_ci_refuses_before_merge() {
+  assert_ci_refusal failure-ci "${CI_STATE_PREFIX}FAILURE" 'error: PR CI is not green: FAILURE'
+  pass "fm-pr-merge refuses failed CI before invoking gh-axi pr merge"
+}
+
+test_pending_ci_refuses_before_merge() {
+  assert_ci_refusal pending-ci "${CI_STATE_PREFIX}IN_PROGRESS" 'error: PR CI is not green: IN_PROGRESS'
+  pass "fm-pr-merge refuses pending CI before invoking gh-axi pr merge"
+}
+
+test_cancelled_ci_refuses_before_merge() {
+  assert_ci_refusal cancelled-ci "${CI_STATE_PREFIX}CANCELLED" 'error: PR CI is not green: CANCELLED'
+  pass "fm-pr-merge refuses cancelled CI before invoking gh-axi pr merge"
+}
+
+test_unknown_ci_refuses_before_merge() {
+  assert_ci_refusal unknown-ci "${CI_STATE_PREFIX}UNKNOWN_STATE" 'error: PR CI is not green: UNKNOWN_STATE'
+  pass "fm-pr-merge refuses unrecognized CI states before invoking gh-axi pr merge"
+}
+
+test_empty_ci_state_refuses_even_with_attestation() {
+  assert_ci_refusal empty-ci-state "$CI_STATE_PREFIX" 'error: PR CI returned an empty state' --no-ci-verified
+  pass "fm-pr-merge refuses a reported empty CI state despite the no-CI attestation"
+}
+
+test_trailing_empty_ci_state_refuses_even_with_attestation() {
+  assert_ci_refusal trailing-empty-ci-state "${CI_STATE_PREFIX}SUCCESS"$'\n'"$CI_STATE_PREFIX" \
+    'error: PR CI returned an empty state' --no-ci-verified
+  pass "fm-pr-merge preserves and refuses a trailing reported empty CI state"
+}
+
+test_ci_lookup_failure_refuses_before_merge() {
+  local case_dir rc
+  case_dir=$(make_case ci-lookup-failure)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_GH_VIEW_FAIL=1 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/33 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ci-lookup-failure: fm-pr-merge should refuse unavailable CI"
+  assert_grep 'error: cannot verify PR CI status' "$case_dir/stderr" \
+    "ci-lookup-failure: refusal did not explain unavailable CI"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "ci-lookup-failure: gh-axi pr merge was invoked despite unavailable CI"
+  pass "fm-pr-merge refuses when the CI status lookup fails"
+}
+
+test_null_ci_rollup_refuses_before_merge() {
+  local case_dir rc
+  case_dir=$(make_case null-ci-rollup)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_ROLLUP_UNAVAILABLE=1 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/37 --no-ci-verified \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "null-ci-rollup: fm-pr-merge should refuse unavailable rollups"
+  assert_grep 'error: cannot verify PR CI status' "$case_dir/stderr" \
+    "null-ci-rollup: refusal did not explain the unavailable rollup"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "null-ci-rollup: gh-axi pr merge was invoked despite unavailable rollup"
+  pass "fm-pr-merge refuses a null or unavailable CI rollup before merging"
+}
+
+test_no_ci_requires_explicit_attestation() {
+  local case_dir rc
+  case_dir=$(make_case no-ci-unattested)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" dddddddddddddddddddddddddddddddddddddddd
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_EMPTY_ROLLUP=1 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/34 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-ci-unattested: fm-pr-merge should refuse no-CI PRs"
+  assert_grep 'error: PR reports no CI checks; verify focused local checks and rerun with --no-ci-verified' "$case_dir/stderr" \
+    "no-ci-unattested: refusal did not require the focused-check attestation"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "no-ci-unattested: gh-axi pr merge was invoked without CI attestation"
+  pass "fm-pr-merge requires a focused-check attestation when the PR has no CI"
+}
+
+test_no_ci_attestation_allows_merge() {
+  local case_dir rc
+  case_dir=$(make_case no-ci-attested)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_EMPTY_ROLLUP=1 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/35 --no-ci-verified \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-ci-attested: fm-pr-merge should accept explicit attestation"
+  assert_grep 'pr merge 35' "$case_dir/gh-axi.log" \
+    "no-ci-attested: gh-axi pr merge was not invoked after attestation"
+  assert_no_grep '--no-ci-verified' "$case_dir/gh-axi.log" \
+    "no-ci-attested: attestation leaked into gh-axi arguments"
+  pass "fm-pr-merge permits no-CI PRs only with the explicit focused-check attestation"
+}
+
+test_no_ci_attestation_is_not_a_forwarded_merge_argument() {
+  local case_dir rc
+  case_dir=$(make_case no-ci-forwarded)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" ffffffffffffffffffffffffffffffffffffffff
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/36 -- --no-ci-verified \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-ci-forwarded: fm-pr-merge should reject forwarded attestation"
+  assert_grep 'error: --no-ci-verified must appear before --' "$case_dir/stderr" \
+    "no-ci-forwarded: refusal did not explain the attestation position"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "no-ci-forwarded: gh-axi pr merge was invoked with attestation"
+  pass "fm-pr-merge keeps the no-CI attestation out of forwarded gh-axi arguments"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +509,15 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_green_ci_states_allow_merge
+test_failure_ci_refuses_before_merge
+test_pending_ci_refuses_before_merge
+test_cancelled_ci_refuses_before_merge
+test_unknown_ci_refuses_before_merge
+test_empty_ci_state_refuses_even_with_attestation
+test_trailing_empty_ci_state_refuses_even_with_attestation
+test_ci_lookup_failure_refuses_before_merge
+test_null_ci_rollup_refuses_before_merge
+test_no_ci_requires_explicit_attestation
+test_no_ci_attestation_allows_merge
+test_no_ci_attestation_is_not_a_forwarded_merge_argument
