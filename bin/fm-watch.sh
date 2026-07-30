@@ -701,6 +701,12 @@ WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+FM_WATCH_CYCLE_PID=$WATCHER_PID
+FM_WATCH_CYCLE_IDENTITY=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+[ -n "$FM_WATCH_CYCLE_IDENTITY" ] || {
+  echo "watcher: FAILED - could not establish cycle result identity" >&2
+  exit 1
+}
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 

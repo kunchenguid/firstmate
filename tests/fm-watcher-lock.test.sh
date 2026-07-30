@@ -12,6 +12,9 @@ WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
+CYCLE_LIB="$ROOT/bin/fm-watch-cycle-lib.sh"
+# shellcheck source=bin/fm-watch-cycle-lib.sh
+. "$CYCLE_LIB"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
@@ -575,6 +578,120 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   pass "arm attaches to a live fresh watcher and fails loudly when that cycle has no successor"
 }
 
+# Two arms following one watcher is the ordinary overlap that exposed #863.
+# Drive one real actionable close and one real killed-watcher close so the
+# attached observer must agree with the owner without weakening failures.
+run_two_arms_on_one_watcher() {  # <case-name>
+  local name=$1 dir state fakebin i
+  dir=$(make_case "$name")
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  printf 'project=fixture\nwindow=w\n' > "$state/t1.meta"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=2 \
+    "$WATCH_ARM" > "$dir/owner.out" 2>&1 &
+  TWO_ARM_OWNER_PID=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q 'watcher: started pid=' "$dir/owner.out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  TWO_ARM_WATCHER_PID=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$dir/owner.out" | head -1)
+  [ -n "$TWO_ARM_WATCHER_PID" ] \
+    || fail "owner arm never started a confirmed watcher: $(cat "$dir/owner.out")"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=2 \
+    "$WATCH_ARM" > "$dir/attached.out" 2>&1 &
+  TWO_ARM_ATTACHED_PID=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$TWO_ARM_WATCHER_PID" "$dir/attached.out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$TWO_ARM_WATCHER_PID" "$dir/attached.out" \
+    || fail "second arm did not attach to the owner's watcher: $(cat "$dir/attached.out")"
+  TWO_ARM_DIR=$dir
+  TWO_ARM_STATE=$state
+}
+
+test_cycle_result_preserves_every_actionable_reason() {
+  local dir state reason observed
+  dir=$(make_case cycle-result-reasons)
+  state="$dir/state"
+  for reason in \
+    'signal: /tmp/task.status' \
+    'stale: fixture-window' \
+    'check: /tmp/task.check.sh: merged' \
+    'heartbeat'; do
+    fm_watch_cycle_result_publish_actionable "$state" 4242 'fixture process identity' "$reason" \
+      || fail "could not publish actionable cycle result '$reason'"
+    observed=$(fm_watch_cycle_result_read_actionable "$state" 4242 'fixture process identity') \
+      || fail "could not read actionable cycle result '$reason'"
+    [ "$observed" = "$reason" ] \
+      || fail "cycle result changed '$reason' to '$observed'"
+  done
+  if fm_watch_cycle_result_read_actionable "$state" 4242 'different process identity' >/dev/null; then
+    fail "cycle result accepted a different watcher process identity"
+  fi
+  if fm_watch_cycle_result_read_actionable "$state" 4343 'fixture process identity' >/dev/null; then
+    fail "cycle result accepted a different watcher PID"
+  fi
+  pass "cycle result preserves every actionable reason and rejects wrong-instance records"
+}
+
+test_attached_arm_surfaces_the_same_actionable_reason() {
+  local owner_status attached_status owner_reason attached_reason
+  run_two_arms_on_one_watcher attached-actionable-close
+
+  # Keep the best-effort lifecycle ledger unavailable during close.
+  # The correctness handoff must not depend on waiting and hoping for that
+  # diagnostic writer to win its separate post-exit race.
+  mkdir "$TWO_ARM_STATE/.watch-cycle-exits.lock"
+  printf '%s\n' "$$" > "$TWO_ARM_STATE/.watch-cycle-exits.lock/pid"
+  printf 'done: PR opened\n' >> "$TWO_ARM_STATE/t1.status"
+
+  wait_for_exit "$TWO_ARM_OWNER_PID" 150
+  owner_status=$?
+  wait_for_exit "$TWO_ARM_ATTACHED_PID" 150
+  attached_status=$?
+
+  [ "$owner_status" -eq 0 ] \
+    || fail "owner arm did not return its wake cleanly (status $owner_status): $(cat "$TWO_ARM_DIR/owner.out")"
+  [ "$attached_status" -eq 0 ] \
+    || fail "attached arm did not return the wake cleanly (status $attached_status): $(cat "$TWO_ARM_DIR/attached.out")"
+  owner_reason=$(grep '^signal:' "$TWO_ARM_DIR/owner.out" | head -1)
+  attached_reason=$(grep '^signal:' "$TWO_ARM_DIR/attached.out" | head -1)
+  [ -n "$owner_reason" ] || fail "owner arm did not surface the real wake: $(cat "$TWO_ARM_DIR/owner.out")"
+  [ "$attached_reason" = "$owner_reason" ] \
+    || fail "attached arm surfaced '$attached_reason' instead of owner reason '$owner_reason'"
+  ! grep -qF 'watcher: FAILED' "$TWO_ARM_DIR/attached.out" \
+    || fail "attached arm disguised an actionable wake as failure: $(cat "$TWO_ARM_DIR/attached.out")"
+  pass "attached arm surfaces the owner's actionable reason and exits zero without the diagnostic ledger"
+}
+
+test_attached_arm_still_fails_when_watcher_dies() {
+  local attached_status
+  run_two_arms_on_one_watcher attached-failed-close
+
+  kill "$TWO_ARM_WATCHER_PID" 2>/dev/null || fail "could not stop the watcher under test"
+  wait_for_exit "$TWO_ARM_OWNER_PID" 150 || true
+  wait_for_exit "$TWO_ARM_ATTACHED_PID" 150
+  attached_status=$?
+
+  [ "$attached_status" -ne 0 ] && [ "$attached_status" -ne 124 ] \
+    || fail "attached arm did not exit non-zero after watcher death (status $attached_status)"
+  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$TWO_ARM_DIR/attached.out" \
+    || fail "attached arm swallowed a genuine watcher failure: $(cat "$TWO_ARM_DIR/attached.out")"
+  ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$TWO_ARM_DIR/attached.out" \
+    || fail "attached arm manufactured an actionable reason after watcher death"
+  pass "attached arm still fails loudly when the watcher dies"
+}
+
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   local dir state fakebin out armout i wpid armpid status
   dir=$(make_case attached-arm-signal-ledger)
@@ -1031,6 +1148,9 @@ test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
+test_cycle_result_preserves_every_actionable_reason
+test_attached_arm_surfaces_the_same_actionable_reason
+test_attached_arm_still_fails_when_watcher_dies
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output

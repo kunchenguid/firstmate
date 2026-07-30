@@ -164,6 +164,20 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+The attached-arm cycle-result handoff was verified on 2026-07-30 with the real watcher and two real arm processes while the diagnostic lifecycle ledger was deliberately unavailable.
+
+```sh
+tests/fm-watcher-lock.test.sh
+```
+
+Observed output:
+
+```text
+ok - cycle result preserves every actionable reason and rejects wrong-instance records
+ok - attached arm surfaces the owner's actionable reason and exits zero without the diagnostic ledger
+ok - attached arm still fails loudly when the watcher dies
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

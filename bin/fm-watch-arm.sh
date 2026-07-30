@@ -28,6 +28,8 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   signal:|stale:|check:|heartbeat...                   - the cycle ended actionably; owning and
+#                                                          attached arms surface the same reason
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -36,18 +38,22 @@
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. An
-# attached cycle that ends without a healthy successor is a typed nonzero failure,
-# never a clean empty completion. On FAILED it exits non-zero so the failure is
-# loud. A live cycle already present means re-arm attaches - do not start a second
-# watcher.
+# reason; on attached it stays live across identity-matched successors. The
+# watcher publishes an exact-instance actionable result before releasing its
+# singleton lock, so every arm following that cycle returns the same reason and
+# exits zero. A missing, malformed, or identity-mismatched result keeps the typed
+# nonzero failure. On FAILED it exits non-zero so the failure is loud.
+# A live cycle already present means re-arm attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
-# lock identity before and after close, and successor disposition. The separate
-# state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
-# log and is never written here.
+# lock identity before and after close, and successor disposition. The ledger is
+# diagnostic and best-effort, not the attached-result handoff: its owning arm
+# cannot write until after the watcher has exited and released its lock.
+# state/.watch-cycle-result is the fixed atomic handoff owned by
+# bin/fm-watch-cycle-lib.sh. The separate state/.watch-triage.log remains
+# exclusively the watcher's absorbed-wake debug log and is never written here.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
@@ -61,6 +67,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-watch-cycle-lib.sh
+. "$SCRIPT_DIR/fm-watch-cycle-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
@@ -104,18 +112,21 @@ cycle_watcher_pid=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
+cycle_watcher_identity=
 
 cycle_begin() {
   cycle_watcher_pid=$1
   cycle_origin=$2
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
+  cycle_watcher_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
   cycle_active=1
 }
 
 cycle_refresh_lock_before() {
   [ "$cycle_active" -eq 1 ] || return 0
   cycle_lock_before=$(lock_snapshot)
+  cycle_watcher_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
 }
 
 cycle_signal_name() {
@@ -261,14 +272,38 @@ fail_unexplained_cycle() {
   return 1
 }
 
+watch_reason_type() {
+  case "$1" in
+    signal:*) printf 'actionable-signal' ;;
+    stale:*) printf 'actionable-stale' ;;
+    check:*) printf 'actionable-check' ;;
+    heartbeat*) printf 'actionable-heartbeat' ;;
+    *) printf 'none' ;;
+  esac
+}
+
+attached_cycle_actionable() {  # <watcher-pid> <pid-identity>
+  local actionable_reason reason_type
+  if ! actionable_reason=$(fm_watch_cycle_result_read_actionable "$STATE" "$1" "$2"); then
+    return 1
+  fi
+  reason_type=$(watch_reason_type "$actionable_reason")
+  cycle_log_append 0 none "$reason_type" none
+  printf '%s\n' "$actionable_reason"
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, fail loudly instead of returning a
 # clean empty completion that an adapter could mistake for a no-op.
 attach_and_wait() {
-  local attached_pid=$1
+  local attached_pid=$1 followed_identity
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
+        followed_identity=$cycle_watcher_identity
+        if attached_cycle_actionable "$attached_pid" "$followed_identity"; then
+          return 0
+        fi
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
         cycle_begin "$attached_pid" attached
@@ -277,12 +312,22 @@ attach_and_wait() {
       sleep "$ATTACH_POLL"
       continue
     fi
+    followed_identity=$cycle_watcher_identity
+    if attached_cycle_actionable "$attached_pid" "$followed_identity"; then
+      return 0
+    fi
     if wait_for_healthy_successor; then
+      if attached_cycle_actionable "$attached_pid" "$followed_identity"; then
+        return 0
+      fi
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
       cycle_begin "$attached_pid" attached
       report_attached
       continue
+    fi
+    if attached_cycle_actionable "$attached_pid" "$followed_identity"; then
+      return 0
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
     fail_unexplained_cycle
@@ -310,13 +355,7 @@ watch_output_has_wake() {
 watch_output_reason_type() {
   local out=$1 line
   line=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null | head -1 || true)
-  case "$line" in
-    signal:*) printf 'actionable-signal' ;;
-    stale:*) printf 'actionable-stale' ;;
-    check:*) printf 'actionable-check' ;;
-    heartbeat*) printf 'actionable-heartbeat' ;;
-    *) printf 'none' ;;
-  esac
+  watch_reason_type "$line"
 }
 
 print_watch_output() {

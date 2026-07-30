@@ -9,6 +9,8 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-watch-cycle-lib.sh
+. "$FM_PUSH_TRANSITION_LIB_DIR/fm-watch-cycle-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -33,6 +35,13 @@ triage_log() {
 
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
+  if [ -n "${FM_WATCH_CYCLE_PID:-}" ]; then
+    fm_watch_cycle_result_publish_actionable \
+      "$STATE" "$FM_WATCH_CYCLE_PID" "${FM_WATCH_CYCLE_IDENTITY:-}" "$1" || {
+      echo "watcher: FAILED - could not publish actionable cycle result handoff" >&2
+      exit 1
+    }
+  fi
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
