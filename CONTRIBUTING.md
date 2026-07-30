@@ -1,35 +1,24 @@
 # Contributing
 
 Thanks for wanting to contribute.
-One rule up front:
-
-**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes).**
-We require this to reduce the maintainer's burden of reviewing and merging contributions.
-
-`no-mistakes` puts a local git proxy in front of your real remote.
-Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
-
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
-It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+Ordinary contributions use focused local validation plus repository CI.
 
 ## Workflow
 
-1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
-2. Create a branch and make your changes.
-3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.31.2+**; without a fork, plain `no-mistakes init` still works for maintainers with push access).
-4. Commit your changes.
-5. Push through the gate instead of pushing to `origin`:
+1. Create a feature branch.
+2. Make the smallest complete change.
+3. Run the focused check that proves the changed behavior.
+4. Record the command and outcome under `## Validation` in the PR body.
+5. Push the branch and open the PR.
+6. Wait for repository CI and do not merge red or pending checks.
 
-   ```sh
-   git push no-mistakes
-   ```
+Choose the smallest existing project check that is materially capable of failing when the change is wrong.
+Do not run the whole local behavior suite for a narrow change unless it is the only supported relevant check or the change affects shared infrastructure.
 
-6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
-   Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
-7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
+## Optional no-mistakes
 
-See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
+Use [`no-mistakes`](https://github.com/kunchenguid/no-mistakes) only when explicitly requested or for high-risk changes involving security, sensitive data, money, migrations, production infrastructure, or irreversible operations.
+When selected, follow the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) and the installed version's live guidance.
 
 ## Repo conventions
 
@@ -56,19 +45,15 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 ## Development
 
-Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - ordinarily ship through direct PRs on a feature branch and require explicit merge approval.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
 There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.
 A crewmate picking up such a brief should load the skill even if the brief predates this instruction.
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
-Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
-Firstmate's wrapper still matters: crewmates route every `ask-user` finding to firstmate, which applies the authority contract in `AGENTS.md`, and crewmates avoid `--yes` because it would bypass that check and any required captain escalation.
-Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's lint command to `bin/fm-lint.sh`, matching the Linux CI lint job.
-Local no-mistakes Test is intent-targeted and must not re-run every `tests/*.test.sh`; `.github/workflows/ci.yml` owns the broad behavior suite plus platform-specific compatibility lanes.
-That is firstmate-specific; do not commit `.no-mistakes/evidence/` here even when another no-mistakes-managed target project keeps committed PR evidence.
+When no-mistakes is explicitly selected, its local state and test evidence stay out of this repo, and `.no-mistakes.yaml` keeps its lint command aligned with `bin/fm-lint.sh`.
 
-Check and test the toolbelt before pushing:
+Choose relevant checks from these available toolbelt commands before pushing:
 
 ```sh
 while IFS= read -r script; do /bin/bash -n "$script" || exit; done < <(bin/fm-lint.sh --list-files)   # syntax-check the canonical shell surface

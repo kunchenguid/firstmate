@@ -41,7 +41,7 @@ You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
 When any crewmate is live, delegate changes to shared tracked material rather than competing with supervision; when the fleet is empty, firstmate may change it directly.
 This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
-Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
+Ship shared tracked changes through this repo's direct-PR path unless no-mistakes is explicitly requested or the high-risk criteria in section 7 apply, with the same merge authority as any other project.
 Never add an agent name as a commit co-author.
 
 ## 2. Layout and state
@@ -270,10 +270,21 @@ Supervise all live work under section 8.
 ### Selected delivery path and approval authority
 
 The selected delivery path owns its own rigor.
+`direct-PR` is the ordinary delivery path.
+`fm-brief.sh --no-mistakes` is the only per-task escalation from direct-PR.
+Use no-mistakes only when the captain explicitly requests it or when a change affects one of these high-risk categories:
+
+- Authentication or authorization.
+- Tenant isolation or PII or secrets.
+- Money or pricing or settlement.
+- Database schema or irreversible data migration.
+- Production infrastructure or deployment.
+- Destructive or irreversible operations.
+
+Do not select no-mistakes merely because a task is large, touches several files, changes documentation, or would benefit from a second opinion.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
-If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
 The path's worker, automated gates, and captain approval remain authoritative:
 
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
@@ -309,8 +320,10 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 
 ### PR ready, landing, and teardown
 
-For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
+For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR and records the exact focused validation commands and outcomes in the PR body.
+Repository CI is checked at merge time for direct-PR work.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+Surface GitLab merge requests for captain merge because the guarded Firstmate merge helper currently accepts only canonical GitHub PR URLs.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.

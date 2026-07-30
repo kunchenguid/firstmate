@@ -272,6 +272,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/superpowers/plans/2026-07-30-lean-validation-delivery.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/supervision-protocols/claude.md",
       "audience": "agent-runtime"
     },

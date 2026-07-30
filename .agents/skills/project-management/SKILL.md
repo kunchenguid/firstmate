@@ -37,8 +37,8 @@ Do not overwrite or repurpose an existing path.
 
 Choose the delivery mode when adding or creating the project:
 
-- `no-mistakes` runs the full validation pipeline before a PR and is the default when the captain does not specify a mode.
-- `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
+- `direct-PR` is the default when the captain does not specify a mode; it pushes and opens a PR without the no-mistakes pipeline.
+- `no-mistakes` runs the full validation pipeline before a PR and is an explicit project posture; a direct-PR project can still escalate one high-risk task through `fm-brief.sh --no-mistakes`.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
 
 The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
@@ -56,7 +56,7 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
-Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `no-mistakes`, then obtain the captain's explicit consent for those values.
+Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `direct-PR`, then obtain the captain's explicit consent for those values.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery mode.
 
