@@ -756,6 +756,7 @@ SH
 codex_owned_by_self() {
   local state=$1
   shift
+  # shellcheck disable=SC2016 # Variables must expand in the child shell, not this test shell.
   env "$@" HOME_STATE="$state" ROOT_UNDER_TEST="$ROOT" \
     bash -c '. "$ROOT_UNDER_TEST/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$HOME_STATE"'
 }
