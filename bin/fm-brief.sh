@@ -40,9 +40,13 @@
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
 # Ship and scout scaffolds share one commit-discipline section: expensive-to-
-# reproduce evidence is committed the moment it exists, ahead of any analysis
+# reproduce evidence is preserved the moment it exists, ahead of any analysis
 # drawn from it, and changed files never sit longer than about 15 minutes
 # without a checkpoint commit. It is judged by cost to reproduce, not task size.
+# Only the destination sentence varies, because preservation must name a place
+# that outlives the task: a ship task commits to its surviving branch, while a
+# scout's worktree is discarded at teardown, so its raw evidence is copied into
+# the report directory that survives instead.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -252,17 +256,35 @@ HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
 # One owner for the commit-discipline contract, rendered into both the ship and
-# scout scaffolds. Quoted delimiter: the body is literal brief prose.
-IFS= read -r -d '' COMMIT_DISCIPLINE <<'EOF' || true
+# scout scaffolds. Only the destination sentence varies, because preservation
+# has to name a place that outlives the task: a ship task's branch does, while a
+# scout's worktree and every commit in it are discarded at teardown, so a scout
+# that "commits" raw evidence has not preserved it at all.
+if [ "$KIND" = scout ]; then
+  COMMIT_DESTINATION="Your worktree is not that place, because it and every commit in it are discarded at cleanup, so copy raw evidence into \`$DATA/$ID/\` and have the report cite it by name."
+else
+  COMMIT_DESTINATION='Your task branch is that place, so give raw evidence its own commit ahead of any analysis drawn from it.'
+fi
+
+# Quoted delimiters: the head and tail are literal brief prose.
+IFS= read -r -d '' COMMIT_DISCIPLINE_HEAD <<'EOF' || true
 # Commit discipline
-Commit at moments of value, not only at completion.
-Commit anything expensive to reproduce - a long measurement, a captured fixture, probe output, hours of compute - as raw evidence the moment it exists, in its own commit, before any analysis or polishing drawn from it.
+Preserve value the moment it appears, not only at completion.
+Anything expensive to reproduce - a long measurement, a captured fixture, probe output, hours of compute - is raw evidence: preserve it the moment it exists, in a place that outlives this task, before any analysis or polishing drawn from it.
+EOF
+COMMIT_DISCIPLINE_HEAD=${COMMIT_DISCIPLINE_HEAD%$'\n'}
+
+IFS= read -r -d '' COMMIT_DISCIPLINE_TAIL <<'EOF' || true
 Never go more than about 15 minutes of changed files without a checkpoint commit; a `wip` commit is fine, and you can amend or squash it later.
 The distinction that matters is cost to reproduce, not task size: a 30-second script fed by two hours of compute is expensive, while a 400-line refactor is not.
-The reason is handoff, not just crashes: an uncommitted file survives a crash but dies at handoff, because a successor will not trust loose output it does not remember producing, while a commit carries provenance.
+The reason is handoff, not just crashes: loose output survives a crash but dies at handoff, because a successor will not trust material it does not remember producing, while a preserved artifact carries provenance.
 The one exception is an active automated validation run: while a pipeline owns your branch, follow Definition of done and do not commit into the run.
 EOF
-COMMIT_DISCIPLINE=${COMMIT_DISCIPLINE%$'\n'}
+COMMIT_DISCIPLINE_TAIL=${COMMIT_DISCIPLINE_TAIL%$'\n'}
+
+COMMIT_DISCIPLINE="$COMMIT_DISCIPLINE_HEAD
+$COMMIT_DESTINATION
+$COMMIT_DISCIPLINE_TAIL"
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
@@ -281,7 +303,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; the only files you may write outside it are the status file below and the contents of your report directory \`$DATA/$ID/\`, which holds the report and any raw evidence you preserve.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
