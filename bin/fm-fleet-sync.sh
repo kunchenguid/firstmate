@@ -306,14 +306,34 @@ delete $ref $old_oid
   return 1
 }
 
-copy_origin_config_to_stage() {
+stage_fetch_config_key() {
+  case "$1" in
+    remote.origin.*|url.*.insteadof|core.sshcommand|core.gitproxy|core.askpass)
+      return 0
+      ;;
+    ssh.variant|http.*|credential.*|protocol.*.allow)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+apply_fetch_config_dump() {
   local stage=$1 config_dump=$2 record key value
-  git --git-dir="$stage" config --remove-section remote.origin >/dev/null 2>&1 || true
   while IFS= read -r -d '' record; do
     key=${record%%$'\n'*}
+    stage_fetch_config_key "$key" || continue
     value=${record#*$'\n'}
     git --git-dir="$stage" config --add "$key" "$value" || return 1
   done <"$config_dump"
+}
+
+copy_fetch_config_to_stage() {
+  local stage=$1 local_config=$2 worktree_config=$3
+  git --git-dir="$stage" config --remove-section remote.origin >/dev/null 2>&1 \
+    || return 1
+  apply_fetch_config_dump "$stage" "$local_config" \
+    && apply_fetch_config_dump "$stage" "$worktree_config"
 }
 
 staged_fetch_scope_cleanup() {
@@ -371,7 +391,7 @@ staged_fetch_scope_signal() {
 }
 
 fetch_and_publish_configured_refs() {
-  local git_dir stage_root stage before after changes config_dump
+  local git_dir stage_root stage before after changes local_config worktree_config
   local output rc old_oid new_oid ref
   local saved_exit_trap saved_exit_action saved_term_trap saved_int_trap
   local -a fetched_refs=()
@@ -403,20 +423,30 @@ fetch_and_publish_configured_refs() {
   before="$stage_root/refs-before"
   after="$stage_root/refs-after"
   changes="$stage_root/ref-changes"
-  config_dump="$stage_root/origin-config"
+  local_config="$stage_root/local-config"
+  worktree_config="$stage_root/worktree-config"
 
   if ! output=$(git clone --quiet --mirror --shared "$PROJ" "$stage" 2>&1); then
     FETCH_OUTPUT=$output
     staged_fetch_scope_finish
     return 1
   fi
-  if ! git -C "$PROJ" config --null --get-regexp '^remote\.origin\.' >"$config_dump"; then
-    FETCH_OUTPUT="cannot read origin configuration"
+  if ! git -C "$PROJ" config --includes --local --null --list >"$local_config"; then
+    FETCH_OUTPUT="cannot read repository fetch configuration"
     staged_fetch_scope_finish
     return 1
   fi
-  if ! copy_origin_config_to_stage "$stage" "$config_dump"; then
-    FETCH_OUTPUT="cannot stage origin configuration"
+  : >"$worktree_config"
+  if [ "$(git -C "$PROJ" config --local --type=bool \
+      --get extensions.worktreeConfig 2>/dev/null || true)" = true ] \
+      && ! git -C "$PROJ" config --includes --worktree --null \
+        --list >"$worktree_config"; then
+    FETCH_OUTPUT="cannot read worktree fetch configuration"
+    staged_fetch_scope_finish
+    return 1
+  fi
+  if ! copy_fetch_config_to_stage "$stage" "$local_config" "$worktree_config"; then
+    FETCH_OUTPUT="cannot stage repository fetch configuration"
     staged_fetch_scope_finish
     return 1
   fi
@@ -556,13 +586,30 @@ prune_gone_branches() {
     --format='%(refname:short) %(upstream:track)' refs/heads 2>/dev/null)
 }
 
-# True when some worktree of $PROJ has $DEFAULT checked out (so we cannot attach
-# to it here). The current worktree is detached when this is consulted, so any
-# match is necessarily another worktree.
+linked_default_worktree_conflict() {
+  local listing current_ref matches
+  if ! listing=$(git -C "$PROJ" worktree list --porcelain 2>/dev/null); then
+    printf 'cannot inspect linked worktrees\n'
+    return 0
+  fi
+  current_ref=$(git -C "$PROJ" rev-parse --symbolic-full-name HEAD 2>/dev/null || true)
+  matches=$(awk -v target="$LOCAL_REF" '
+    $1 == "branch" && $2 == target { count++ }
+    END { print count + 0 }
+  ' <<<"$listing") || {
+    printf 'cannot inspect linked worktrees\n'
+    return 0
+  }
+  if { [ "$current_ref" = "$LOCAL_REF" ] && [ "$matches" -gt 1 ]; } \
+      || { [ "$current_ref" != "$LOCAL_REF" ] && [ "$matches" -gt 0 ]; }; then
+    printf 'another worktree has %s checked out\n' "$DEFAULT"
+    return 0
+  fi
+  return 1
+}
+
 default_checked_out_elsewhere() {
-  git -C "$PROJ" worktree list --porcelain 2>/dev/null \
-    | sed -n 's#^branch refs/heads/##p' \
-    | grep -Fxq -- "$DEFAULT"
+  linked_default_worktree_conflict >/dev/null
 }
 
 local_default_safe_for_recovery() {
@@ -643,7 +690,12 @@ git_operation_in_progress() {
 
 direct_ref_transaction() {
   local commands=$1 git_dir txn_dir input_pipe output_pipe error_file pid response ref rc
+  local guard_default_worktree=no worktree_conflict
   shift
+  if [ "${1:-}" = "--guard-default-worktree" ]; then
+    guard_default_worktree=yes
+    shift
+  fi
   REF_TRANSACTION_OUTPUT=
 
   git_dir=$(git -C "$PROJ" rev-parse --absolute-git-dir 2>/dev/null) || {
@@ -692,6 +744,19 @@ direct_ref_transaction() {
       return 2
     fi
   done
+
+  if [ "$guard_default_worktree" = yes ] \
+      && worktree_conflict=$(linked_default_worktree_conflict); then
+    printf 'abort\n' >&8
+    IFS= read -r response <&9 || true
+    exec 8>&-
+    exec 9<&-
+    wait "$pid" 2>/dev/null || true
+    REF_TRANSACTION_OUTPUT=$worktree_conflict
+    rm -f "$input_pipe" "$output_pipe" "$error_file"
+    rmdir "$txn_dir" 2>/dev/null || true
+    return 4
+  fi
 
   response=
   if printf 'commit\n' >&8; then
@@ -767,7 +832,7 @@ reconcile_tree_identical_divergence() {
   local remote_tree_now common_base_now worktree_status update_input update_output
   local transaction_rc=0 post_branch post_head post_local post_remote post_tree post_status
   local rollback_output rollback_branch rollback_head rollback_local rollback_remote
-  local rollback_tree rollback_anchor rollback_status
+  local rollback_tree rollback_anchor rollback_status worktree_conflict
 
   PRESERVE_REF="refs/fm-fleet-sync/squash-preserved/$DEFAULT/$local_rev"
   if ! git check-ref-format "$PRESERVE_REF" >/dev/null 2>&1; then
@@ -776,6 +841,10 @@ reconcile_tree_identical_divergence() {
   fi
   if operation=$(git_operation_in_progress); then
     reconciliation_refusal "active $operation operation"
+    return 0
+  fi
+  if worktree_conflict=$(linked_default_worktree_conflict); then
+    reconciliation_refusal "$worktree_conflict"
     return 0
   fi
   if ref_is_symbolic "$LOCAL_REF"; then
@@ -845,11 +914,16 @@ reconcile_tree_identical_divergence() {
   update_input=$(printf 'option no-deref\nverify %s %s\noption no-deref\nverify %s %s\noption no-deref\nupdate %s %s %s\n' \
     "$PRESERVE_REF" "$local_rev" "$REMOTE_REF" "$remote_rev" \
     "$LOCAL_REF" "$remote_rev" "$local_rev")
-  if direct_ref_transaction "$update_input" "$PRESERVE_REF" "$REMOTE_REF" "$LOCAL_REF"; then
+  if direct_ref_transaction "$update_input" --guard-default-worktree \
+      "$PRESERVE_REF" "$REMOTE_REF" "$LOCAL_REF"; then
     :
   else
     transaction_rc=$?
     update_output=$REF_TRANSACTION_OUTPUT
+    if [ "$transaction_rc" -eq 4 ]; then
+      reconciliation_refusal "$update_output; preserved $PRESERVE_REF"
+      return 0
+    fi
     if [ "$transaction_rc" -ne 3 ]; then
       reconciliation_refusal "atomic update rejected; preserved $PRESERVE_REF$(if [ -n "$update_output" ]; then printf ': %s' "$(first_line "$update_output")"; fi)"
       return 0

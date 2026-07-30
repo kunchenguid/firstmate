@@ -494,6 +494,107 @@ SH
   chmod +x "$1/git"
 }
 
+git_worktree_after_transaction_prepare() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_update=0; is_stdin=0
+for a in "$@"; do
+  [ "$a" = update-ref ] && is_update=1
+  [ "$a" = --stdin ] && is_stdin=1
+done
+if [ "$is_update" = 1 ] && [ "$is_stdin" = 1 ]; then
+  transaction=$(mktemp)
+  while IFS= read -r line; do
+    [ "$line" = prepare ] && break
+    printf '%s\n' "$line" >>"$transaction"
+  done
+  if grep -F 'update refs/heads/main ' "$transaction" >/dev/null; then
+    "$real" -C "${GIT_RACE_CLONE:?}" worktree add --force --quiet \
+      "${GIT_RACE_WORKTREE:?}" main || {
+      rm -f "$transaction"
+      exit 97
+    }
+  fi
+  printf 'prepare: ok\n'
+  IFS= read -r command
+  case "$command" in
+    abort)
+      rm -f "$transaction"
+      printf 'abort: ok\n'
+      exit 0
+      ;;
+    commit)
+      if "$real" "$@" <"$transaction" >/dev/null 2>&1; then
+        rm -f "$transaction"
+        printf 'commit: ok\n'
+        exit 0
+      fi
+      rc=$?
+      rm -f "$transaction"
+      exit "$rc"
+      ;;
+  esac
+  rm -f "$transaction"
+  exit 98
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+git_audit_staged_fetch_config() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_fetch=0; stage=
+for a in "$@"; do
+  [ "$a" = fetch ] && is_fetch=1
+  case "$a" in
+    --git-dir=*/fm-fleet-sync-fetch.*/repository.git) stage=${a#--git-dir=} ;;
+  esac
+done
+if [ "$is_fetch" = 1 ] && [ -n "$stage" ]; then
+  [ "$("$real" --git-dir="$stage" config --get "${GIT_EXPECTED_URL_KEY:?}")" \
+      = "${GIT_EXPECTED_URL_VALUE:?}" ] || exit 91
+  [ "$("$real" --git-dir="$stage" config --get core.sshCommand)" \
+      = "${GIT_EXPECTED_SSH_COMMAND:?}" ] || exit 92
+  [ "$("$real" --git-dir="$stage" config --get "${GIT_EXPECTED_HTTP_KEY:?}")" \
+      = "${GIT_EXPECTED_HTTP_VALUE:?}" ] || exit 93
+  [ "$("$real" --git-dir="$stage" config --get "${GIT_EXPECTED_CREDENTIAL_KEY:?}")" \
+      = "${GIT_EXPECTED_CREDENTIAL_VALUE:?}" ] || exit 94
+  ! "$real" --git-dir="$stage" config --get core.worktree >/dev/null 2>&1 \
+    || exit 95
+  printf 'audited\n' >"${GIT_STAGED_CONFIG_AUDIT:?}"
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+git_fail_stage_origin_removal() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+stage=; is_config=0; is_remove=0; is_origin=0
+for a in "$@"; do
+  [ "$a" = config ] && is_config=1
+  [ "$a" = --remove-section ] && is_remove=1
+  [ "$a" = remote.origin ] && is_origin=1
+  case "$a" in
+    --git-dir=*/fm-fleet-sync-fetch.*/repository.git) stage=${a#--git-dir=} ;;
+  esac
+done
+if [ -n "$stage" ] && [ "$is_config" = 1 ] && [ "$is_remove" = 1 ] \
+    && [ "$is_origin" = 1 ]; then
+  printf 'attempted\n' >"${GIT_ORIGIN_REMOVAL_MARKER:?}"
+  exit 96
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
 # run_sync_guarded <home> <fakebin> <outfile> <errfile> [args...]: run fleet-sync
 # with the fakebin on PATH and stdout/stderr captured separately. Per-test knobs
 # (FM_FLEET_SYNC_PACKED_REFS_LOCK_*, GIT_FETCH_COUNTER) are read from the caller's
@@ -751,6 +852,33 @@ test_active_git_operations_refuse_before_preservation() {
   pass "all active Git operation states refuse before preservation"
 }
 
+test_other_default_worktrees_refuse_before_preservation() {
+  local state home clone sibling out old
+  for state in clean dirty operation; do
+    home=$(new_home)
+    clone=$(build_tree_identical_squash_pair "$home" "other-worktree-$state")
+    old=$(head_sha "$clone")
+    sibling="$home/other-worktree-$state"
+    git -C "$clone" worktree add --force --quiet "$sibling" main
+    case "$state" in
+      dirty) printf 'dirty\n' >"$sibling/uncommitted.txt" ;;
+      operation) install_git_operation_marker "$sibling" MERGE_HEAD file ;;
+    esac
+
+    out=$(run_sync "$home" "$clone")
+
+    assert_contains "$out" "another worktree has main checked out" \
+      "$state sibling default worktree did not explain the refusal"
+    [ "$(head_sha "$clone")" = "$old" ] \
+      || fail "$state sibling default worktree moved the shared branch"
+    [ "$(head_sha "$sibling")" = "$old" ] \
+      || fail "$state sibling default worktree moved its HEAD"
+    [ -z "$(preservation_refs "$clone")" ] \
+      || fail "$state sibling default worktree created a preservation ref"
+  done
+  pass "clean, dirty, and active-operation sibling defaults refuse before preservation"
+}
+
 test_operation_starting_after_preservation_refuses_before_transaction() {
   local home clone fakebin out err old anchor
   home=$(new_home)
@@ -770,6 +898,30 @@ test_operation_starting_after_preservation_refuses_before_transaction() {
   [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
     || fail "operation race lost the preservation ref"
   pass "an operation starting after preservation still blocks the transaction"
+}
+
+test_other_default_worktree_appearing_before_commit_refuses() {
+  local home clone sibling fakebin out err old anchor
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" worktree-race)
+  old=$(head_sha "$clone")
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  sibling="$home/worktree-race-sibling"
+  fakebin="$home/fb-worktree-race"; mkdir -p "$fakebin"
+  git_worktree_after_transaction_prepare "$fakebin"
+  out="$home/out-worktree-race"; err="$home/err-worktree-race"
+  export GIT_RACE_CLONE="$clone"
+  export GIT_RACE_WORKTREE="$sibling"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" worktree-race
+  unset GIT_RACE_CLONE GIT_RACE_WORKTREE
+
+  assert_contains "$(cat "$out")" "another worktree has main checked out" \
+    "default worktree race was not refused before transaction commit"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "default worktree race moved the shared branch"
+  [ "$(head_sha "$sibling")" = "$old" ] || fail "default worktree race moved the sibling HEAD"
+  [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
+    || fail "default worktree race lost its preservation ref"
+  pass "a sibling default appearing after preservation blocks transaction commit"
 }
 
 test_prefetch_symbolic_remote_tracking_ref_does_not_write_through() {
@@ -1183,6 +1335,79 @@ test_custom_refspec_updates_and_prunes_only_its_destinations() {
   ! git -C "$clone" show-ref --verify --quiet refs/heads/pr-one \
     || fail "branch tracking a pruned custom destination was retained"
   pass "custom refspec destinations update and prune with configured semantics"
+}
+
+test_staged_fetch_preserves_local_transport_config_only() {
+  local home clone remote fakebin out err audit rewrite_key http_key credential_key
+  local ssh_command http_value credential_value
+  home=$(new_home)
+  clone=$(build_pair "$home" staged-transport-config)
+  remote=$(cd "$home/remotes/staged-transport-config.git" && pwd)
+  advance_origin "$home" staged-transport-config C1
+  rewrite_key="url.file://$remote.insteadof"
+  http_key=http.https://example.invalid/.extraheader
+  credential_key=credential.https://example.invalid.helper
+  ssh_command='ssh -F ./fleet-test-ssh-config'
+  http_value='X-Fleet-Test: transport-config'
+  credential_value='fleet-test-helper'
+  git -C "$clone" config --local "$rewrite_key" fleet-config:
+  git -C "$clone" remote set-url origin fleet-config:
+  git -C "$clone" config --local core.sshCommand "$ssh_command"
+  git -C "$clone" config --local "$http_key" "$http_value"
+  git -C "$clone" config --local "$credential_key" "$credential_value"
+  git -C "$clone" config --local core.worktree "$clone"
+  fakebin="$home/fb-staged-transport-config"; mkdir -p "$fakebin"
+  git_audit_staged_fetch_config "$fakebin"
+  out="$home/out-staged-transport-config"
+  err="$home/err-staged-transport-config"
+  audit="$home/staged-transport-config-audit"
+  export GIT_EXPECTED_URL_KEY="$rewrite_key"
+  export GIT_EXPECTED_URL_VALUE=fleet-config:
+  export GIT_EXPECTED_SSH_COMMAND="$ssh_command"
+  export GIT_EXPECTED_HTTP_KEY="$http_key"
+  export GIT_EXPECTED_HTTP_VALUE="$http_value"
+  export GIT_EXPECTED_CREDENTIAL_KEY="$credential_key"
+  export GIT_EXPECTED_CREDENTIAL_VALUE="$credential_value"
+  export GIT_STAGED_CONFIG_AUDIT="$audit"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" staged-transport-config
+  unset GIT_EXPECTED_URL_KEY GIT_EXPECTED_URL_VALUE GIT_EXPECTED_SSH_COMMAND
+  unset GIT_EXPECTED_HTTP_KEY GIT_EXPECTED_HTTP_VALUE GIT_EXPECTED_CREDENTIAL_KEY
+  unset GIT_EXPECTED_CREDENTIAL_VALUE GIT_STAGED_CONFIG_AUDIT
+
+  assert_contains "$(cat "$out")" "staged-transport-config: synced" \
+    "repository-local URL rewrite did not support the staged fetch"
+  assert_present "$audit" "staged fetch did not receive the local transport configuration"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
+    || fail "transport-configured staged fetch did not publish and fast-forward"
+  pass "staged fetch preserves local URL, SSH, HTTP, and credential config without worktree paths"
+}
+
+test_staged_fetch_origin_removal_failure_is_fatal() {
+  local home clone fakebin out err marker old tracking
+  home=$(new_home)
+  clone=$(build_pair "$home" origin-removal-failure)
+  advance_origin "$home" origin-removal-failure C1
+  old=$(head_sha "$clone")
+  tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+  fakebin="$home/fb-origin-removal-failure"; mkdir -p "$fakebin"
+  git_fail_stage_origin_removal "$fakebin"
+  out="$home/out-origin-removal-failure"
+  err="$home/err-origin-removal-failure"
+  marker="$home/origin-removal-attempted"
+  export GIT_ORIGIN_REMOVAL_MARKER="$marker"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" origin-removal-failure
+  unset GIT_ORIGIN_REMOVAL_MARKER
+
+  assert_present "$marker" "stage origin removal was not attempted"
+  assert_contains "$(cat "$out")" \
+    "origin-removal-failure: skipped: fetch failed: cannot stage repository fetch configuration" \
+    "stage origin removal failure was not fatal"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "origin removal failure moved the local branch"
+  [ "$(git -C "$clone" rev-parse refs/remotes/origin/main)" = "$tracking" ] \
+    || fail "origin removal failure published a fetched remote ref"
+  [ -z "$(preservation_refs "$clone")" ] \
+    || fail "origin removal failure created a preservation ref"
+  pass "failure to remove the mirror-generated origin aborts staged fetch"
 }
 
 test_auto_follow_tags_are_preserved() {
@@ -1657,7 +1882,9 @@ test_unrelated_equal_tree_is_not_normalized
 test_unpublished_ahead_equal_tree_is_not_normalized
 test_tree_identical_conflicting_anchor_refuses
 test_active_git_operations_refuse_before_preservation
+test_other_default_worktrees_refuse_before_preservation
 test_operation_starting_after_preservation_refuses_before_transaction
+test_other_default_worktree_appearing_before_commit_refuses
 test_prefetch_symbolic_remote_tracking_ref_does_not_write_through
 test_staged_fetch_symbolic_destination_race_does_not_write_through
 test_symbolic_reconciliation_refs_are_refused
@@ -1672,6 +1899,8 @@ test_prunes_gone_branch_during_ordinary_sync
 test_single_branch_refspec_preserves_out_of_scope_tracking_refs
 test_negative_refspec_preserves_excluded_tracking_refs
 test_custom_refspec_updates_and_prunes_only_its_destinations
+test_staged_fetch_preserves_local_transport_config_only
+test_staged_fetch_origin_removal_failure_is_fatal
 test_auto_follow_tags_are_preserved
 test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session
 test_staged_fetch_signals_clean_scope_and_preserve_caller_traps
