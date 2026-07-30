@@ -177,7 +177,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch pointer brief_real meta task_tmp output_contract
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -200,8 +200,9 @@ test_kimi_launch_then_send_is_verified() {
 
   brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
   pointer=$(cat "$CASE_DIR/pointer.log")
-  [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
-    || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
+  output_contract="Default non-UI engineering work to plain Markdown reports and chat. Report complexity, technical structure, or multiple sections do not justify opening Lavish. Use Lavish only when the task explicitly requests an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review."
+  [ "$pointer" = "$output_contract Read the brief at $brief_real and follow it exactly." ] \
+    || fail "kimi pointer did not combine the shared output contract with the exact absolute brief path: $pointer"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"

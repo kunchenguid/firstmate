@@ -117,7 +117,7 @@ assert_meta_profile() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch output_contract
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
@@ -129,9 +129,45 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  output_contract="Default non-UI engineering work to plain Markdown reports and chat. Report complexity, technical structure, or multiple sections do not justify opening Lavish. Use Lavish only when the task explicitly requests an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review."
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$({ printf '%s\\n\\n' '$output_contract'; cat '$HOME_DIR/data/$id/brief.md'; } | '${ROOT}/bin/fm-operational-input.sh' encode launch-brief)\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
+}
+
+test_verified_streaming_harnesses_receive_non_ui_markdown_default() {
+  local harness rec id out status launch brief
+  for harness in claude codex opencode pi pi-signed grok; do
+    id="output-contract-${harness}-z1"
+    rec=$(make_spawn_case "output-contract-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    brief="$HOME_DIR/data/$id/brief.md"
+    cat > "$brief" <<'EOF'
+# Task
+
+Diagnose a non-UI engineering failure and write a technically structured report with multiple sections.
+EOF
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    status=$?
+    expect_code 0 "$status" "$harness non-UI scout spawn should succeed"
+    assert_contains "$out" "spawned $id harness=$harness kind=scout" \
+      "$harness non-UI scout spawn did not report the expected adapter and kind"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "Default non-UI engineering work to plain Markdown reports and chat." \
+      "$harness launch did not receive the Markdown default"
+    assert_contains "$launch" "Report complexity, technical structure, or multiple sections do not justify opening Lavish." \
+      "$harness launch treated report structure as a Lavish trigger"
+    assert_contains "$launch" "Use Lavish only when the task explicitly requests an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review." \
+      "$harness launch did not preserve explicit and genuinely visual Lavish use"
+    assert_not_contains "$launch" "lavish-axi for structured decisions or reports" \
+      "$harness launch retained the broad structured-report Lavish trigger"
+    assert_contains "$launch" "cat '$brief'" \
+      "$harness launch did not combine the output contract with its exact task brief"
+    assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+      "$harness launch did not use the canonical launch-brief encoder"
+  done
+  pass "every verified streaming harness receives the shared non-UI Markdown launch default"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -158,7 +194,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
     "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
+  assert_contains "$launch" "cat '$home_real/data/$id/brief.md'" \
     "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
   pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
 }
@@ -187,7 +223,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
     "relative FM_HOME leaked into Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
+  assert_contains "$launch" "cat '$home_real/data/$relative_id/brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
   linked_home="$CASE_DIR/home-link"
@@ -207,7 +243,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
     "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$absolute_id/brief.md'" \
+  assert_contains "$launch" "cat '$linked_home/data/$absolute_id/brief.md'" \
     "absolute FM_HOME spelling changed in the default cross-process brief path"
   pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
 }
@@ -235,7 +271,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
     "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$id/brief.md'" \
+  assert_contains "$launch" "cat '$linked_home/data/$id/brief.md'" \
     "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
   pass "absolute override spellings are preserved in spawn launch paths"
 }
@@ -443,8 +479,10 @@ test_grok_omits_invalid_max_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
-    "grok launch did not preserve the model flag and typed brief when max effort was omitted"
+  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$({ printf" \
+    "grok launch did not preserve the model flag and shared launch contract when max effort was omitted"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "grok launch did not preserve the typed brief when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported max reasoning effort"
@@ -462,8 +500,10 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported xhigh reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
-    "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
+  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$({ printf" \
+    "grok launch did not preserve the model flag and shared launch contract when xhigh effort was omitted"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "grok launch did not preserve the typed brief when xhigh effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported xhigh reasoning effort"
@@ -674,6 +714,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_verified_streaming_harnesses_receive_non_ui_markdown_default
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
