@@ -1897,6 +1897,28 @@ test_shell_readiness_timeout_does_not_submit_a_command() {
   pass "fm_backend_herdr_wait_for_shell_ready: times out without submitting a command"
 }
 
+test_shell_readiness_stalled_cli_obeys_wall_clock_timeout() {
+  local dir fb status started elapsed
+  dir="$TMP_ROOT/shell-ready-stalled"; mkdir -p "$dir/fakebin"; fb="$dir/fakebin"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+  chmod +x "$fb/herdr"
+  started=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')
+  if PATH="$fb:$PATH" FM_BACKEND_HERDR_READY_TIMEOUT_SECONDS=0.5 \
+    bash -c '. "$0/bin/backends/herdr.sh"; if fm_backend_herdr_wait_for_shell_ready fmtest w1:p2; then exit 1; else exit 0; fi' "$ROOT"; then
+    status=0
+  else
+    status=$?
+  fi
+  elapsed=$(perl -MTime::HiRes=time -e 'printf "%.3f", time - $ARGV[0]' "$started")
+  expect_code 0 "$status" "a stalled Herdr query should end at the readiness wall-clock deadline"
+  awk -v elapsed="$elapsed" 'BEGIN { exit !(elapsed < 2) }' \
+    || fail "a stalled Herdr query exceeded its 0.5-second readiness deadline: ${elapsed}s"
+  pass "fm_backend_herdr_wait_for_shell_ready: bounds a stalled CLI query by the wall clock"
+}
+
 test_spawn_timeout_skips_treehouse_get() {
   local dir home project log resp fb out status n treehouse_log id
   id=herdr-ready-timeout-spawn
@@ -3270,6 +3292,7 @@ test_current_path_reads_cwd
 test_shell_readiness_waits_for_not_ready_to_ready
 test_shell_readiness_resets_after_unstable_sample
 test_shell_readiness_timeout_does_not_submit_a_command
+test_shell_readiness_stalled_cli_obeys_wall_clock_timeout
 test_spawn_timeout_skips_treehouse_get
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle

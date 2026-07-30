@@ -156,6 +156,30 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   HERDR_SESSION="$session" herdr "$@" --session "$session"
 }
 
+fm_backend_herdr_cli_timeout() {  # <timeout-seconds> <session> <herdr-subcommand-and-args...>
+  local timeout_seconds=$1 session=$2
+  shift 2
+  perl -MTime::HiRes=alarm -e '
+    my $timeout = shift;
+    my $pid = fork;
+    die "fork failed" unless defined $pid;
+    if (!$pid) {
+      setpgrp(0, 0);
+      exec @ARGV;
+    }
+    local $SIG{ALRM} = sub {
+      kill "TERM", -$pid;
+      kill "KILL", -$pid;
+      waitpid $pid, 0;
+      exit 124;
+    };
+    alarm $timeout;
+    waitpid $pid, 0;
+    alarm 0;
+    exit($? >> 8);
+  ' "$timeout_seconds" env HERDR_SESSION="$session" herdr "$@" --session "$session"
+}
+
 # fm_backend_herdr_tool_check: refuse loudly if herdr or jq is missing.
 fm_backend_herdr_tool_check() {
   command -v herdr >/dev/null 2>&1 || { echo "error: backend=herdr selected but the 'herdr' CLI is not installed (https://herdr.dev) (dual-licensed AGPL-3.0-or-later/commercial)" >&2; return 1; }
@@ -1877,15 +1901,21 @@ fm_backend_herdr_target_ready() {  # <target>
 # Herdr can return a pane before that shell accepts Enter, so a command sent
 # earlier can remain in the shell buffer without running. Require ten
 # consecutive process-info samples whose sole foreground process is the shell,
-# sampled approximately 100ms apart, for a bounded 100-sample (10-second) wait.
+# sampled approximately 100ms apart, within one ten-second wall-clock deadline.
 # This is intentionally separate from target_ready: the caller already proved
 # the named Herdr server while creating this exact pane, and this read must not
 # substitute another pane or infer one from a label.
 fm_backend_herdr_wait_for_shell_ready() {  # <session> <pane-id>
   local session=$1 pane_id=$2 process_info ready_samples=0 poll
+  local timeout_seconds=${FM_BACKEND_HERDR_READY_TIMEOUT_SECONDS:-10}
+  local started_at now remaining
   [ -n "$session" ] && [ -n "$pane_id" ] || return 1
+  started_at=$(perl -MTime::HiRes=time -e 'printf "%.6f", time') || return 1
   for poll in $(seq 1 100); do
-    process_info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null || true)
+    now=$(perl -MTime::HiRes=time -e 'printf "%.6f", time') || return 1
+    remaining=$(awk -v start="$started_at" -v now="$now" -v limit="$timeout_seconds" 'BEGIN { printf "%.6f", limit - (now - start) }')
+    awk -v remaining="$remaining" 'BEGIN { exit !(remaining > 0) }' || return 1
+    process_info=$(fm_backend_herdr_cli_timeout "$remaining" "$session" pane process-info --pane "$pane_id" 2>/dev/null || true)
     if printf '%s' "$process_info" | jq -e --arg pane "$pane_id" '
       .result.type == "pane_process_info"
       and .result.process_info.pane_id == $pane
@@ -1898,7 +1928,12 @@ fm_backend_herdr_wait_for_shell_ready() {  # <session> <pane-id>
     else
       ready_samples=0
     fi
-    [ "$poll" -ge 100 ] || sleep 0.1
+    if [ "$poll" -lt 100 ]; then
+      now=$(perl -MTime::HiRes=time -e 'printf "%.6f", time') || return 1
+      remaining=$(awk -v start="$started_at" -v now="$now" -v limit="$timeout_seconds" 'BEGIN { printf "%.6f", limit - (now - start) }')
+      awk -v remaining="$remaining" 'BEGIN { exit !(remaining >= 0.1) }' || return 1
+      sleep 0.1
+    fi
   done
   return 1
 }
