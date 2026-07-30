@@ -230,7 +230,7 @@ The checkpoint is deliberately foreground and bounded so Codex regains control r
 
 **Session-lock fact (verified 2026-07-29, codex-cli 0.146.0).**
 Each command shell is its own POSIX session and process-group leader, but remains a direct child of the Codex process in the same PID namespace.
-Codex injects one stable `CODEX_THREAD_ID` into command children, including a distinct value for a nested Codex session.
+Codex injects one stable lowercase-UUID `CODEX_THREAD_ID` into command children, including a distinct value for a nested Codex session.
 A nested Codex process can retain the outer thread id in its own inherited environment while its command children receive the nested id, so the child value rather than the parent environment is authoritative for the active thread.
 `bin/fm-session-lock-lib.sh` owns the resulting Codex thread-identity sidecar and fail-closed ownership contract while preserving the numeric harness pid used by every other verified adapter.
 Because the command child's parent link does resolve, the sidecar narrows harness ancestry rather than replacing it: ownership needs the thread id to match and any resolvable ancestry to still name the lock pid, so another harness nested inside a Codex session never inherits ownership from the environment.

@@ -32,8 +32,9 @@ Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] 
 A stale beacon blocks even when a watcher pid is live.
 A fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
 
-Primary session-lock ownership is a separate decision this guard predicate never makes: `bin/fm-session-lock-lib.sh` owns it for every tracked shell caller, so no hook script repeats that ancestry walk itself.
-That owner includes the Codex 0.146.0 thread-identity path used by session start and the native session-start nudge.
+Primary session-lock ownership is a separate decision this guard predicate never makes: `bin/fm-session-lock-lib.sh` owns it for every tracked shell caller, so no shell hook repeats that ancestry walk itself.
+Pi's two tracked extensions and OpenCode's watch-arm plugin still resolve ownership in their own process rather than sourcing that library, and [`watcher-continuity.md`](watcher-continuity.md#ownership) owns their contract.
+That shared owner includes the Codex 0.146.0 thread-identity path used by session start and the native session-start nudge.
 [`verification/supervision.md`](verification/supervision.md#codex-01460-session-lock-identity) owns the dated empirical evidence.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
