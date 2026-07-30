@@ -1043,10 +1043,12 @@ case "$BACKEND" in
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_FLAT_REPLACE_OLD=0
-    if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] \
-       && [ ! -e "$HERDR_PRESENTATION_JOURNAL" ] && [ ! -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+    if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
       herdr_existing_meta_allows_spawn "$STATE/$ID.meta" || exit 1
-      [ "${SPAWN_RECOVERY_BACKEND:-}" = herdr ] && HERDR_FLAT_REPLACE_OLD=1
+      if [ ! -e "$HERDR_PRESENTATION_JOURNAL" ] && [ ! -L "$HERDR_PRESENTATION_JOURNAL" ] \
+         && [ "${SPAWN_RECOVERY_BACKEND:-}" = herdr ]; then
+        HERDR_FLAT_REPLACE_OLD=1
+      fi
     fi
     HERDR_PROJECTED=0
     if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
@@ -1167,6 +1169,10 @@ case "$BACKEND" in
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+      if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+        echo "error: herdr did not return a tab/pane id for $W" >&2
+        exit 1
+      fi
       if ! fm_backend_herdr_rename_task "$HERDR_SES" "$HERDR_TAB_ID" "$LABEL"; then
         fm_backend_herdr_kill "$HERDR_SES:$HERDR_PANE_ID" || true
         exit 1
