@@ -187,8 +187,35 @@ test_zero_candidates_reports_inspected_nothing() {
   expect_code 3 "$RC" "zero candidate files must not exit 0"
   assert_contains "$OUT" "INSPECTED NOTHING:" "the zero-candidate outcome is not distinguishable"
   assert_contains "$OUT" "found nothing to check" "the zero-candidate reason is missing"
+  assert_contains "$OUT" "matched nothing in scope" "the zero-candidate reason does not say the pattern itself matched nothing"
+  assert_not_contains "$OUT" "allowed string-matching owner" "a tree with no pattern match blamed the owner exclusion"
   assert_not_contains "$OUT" "CLEAN:" "zero candidate files printed a clean verdict"
   pass "fm-verify-delivered.sh: zero candidate files reports inspected nothing, not clean"
+}
+
+# Same outcome, different cause, and the report has to tell them apart. Here the
+# pattern did match files; every one of them is an owner allowed to compare
+# strings, so the exclusion emptied the candidate list. Saying "the pattern
+# matched nothing" here would be a false statement from a script whose only job
+# is honest reporting of what it inspected.
+test_only_owner_candidates_reports_inspected_nothing() {
+  local repo
+  repo=$(fm_verify_fixture owners-only schema-generator/app)
+  fm_verify_write_source "$repo" schema-generator/app/name_matching.py string
+  fm_verify_write_source "$repo" schema-generator/app/competitor_guards.py string
+  printf 'def unrelated():\n    return 1\n' > "$repo/schema-generator/app/unrelated.py"
+  fm_verify_commit "$repo"
+
+  run_verify "$repo"
+  expect_code 3 "$RC" "an owners-only tree must not exit 0"
+  assert_contains "$OUT" "INSPECTED NOTHING:" "the owners-only outcome is not distinguishable"
+  assert_contains "$OUT" "every file it matched is an allowed string-matching owner" \
+    "the owners-only reason does not say the exclusion emptied the candidate list"
+  assert_contains "$OUT" "all 2 file(s)" "the owners-only reason does not count the pre-exclusion matches"
+  assert_not_contains "$OUT" "matched nothing in scope" \
+    "an owners-only tree falsely claimed the candidate pattern matched nothing"
+  assert_not_contains "$OUT" "CLEAN:" "an owners-only tree printed a clean verdict"
+  pass "fm-verify-delivered.sh: an owners-only tree says the exclusion emptied the candidates"
 }
 
 # --- outcome 4: search failed -----------------------------------------------
@@ -247,6 +274,33 @@ SH
   assert_not_contains "$OUT" "CLEAN:" "an erroring search printed a clean verdict"
   assert_not_contains "$OUT" "INSPECTED NOTHING" "an erroring search was reported as an empty search"
   pass "fm-verify-delivered.sh: an erroring git grep reports a failed search, not clean"
+}
+
+# The ERR trap, which is the catch-all the other three outcome-4 tests bypass by
+# exercising branches the script classifies for itself. A failure nobody wrote a
+# branch for must still land on "unknown", never on exit 1, which in this
+# script's vocabulary means "violations found".
+#
+# The failure is forced with an unusable TMPDIR, so the run dies on its own
+# mktemp inside verify_brand_identity with the repo, rev and pathspec all valid.
+# That location is the point: bash does not carry an ERR trap into a function
+# without `set -E`, so without it this exits 1 with no SEARCH FAILED line at all.
+test_unclassified_failure_in_a_mode_function_reports_search_failed() {
+  local repo
+  repo=$(fm_verify_fixture errtrace schema-generator/app)
+  fm_verify_write_source "$repo" schema-generator/app/legacy.py string
+  fm_verify_commit "$repo"
+
+  run_env "TMPDIR=$TMP_ROOT/errtrace-no-such-tmpdir" "FM_VERIFY_REPO=$repo" FM_VERIFY_REV=checkme \
+    -- brand-identity --no-fetch
+  expect_code 4 "$RC" "an unclassified failure must report a failed search, not violations"
+  assert_contains "$OUT" "SEARCH FAILED:" "the ERR trap did not fire inside the mode function"
+  assert_contains "$OUT" "unhandled command failure" "the unclassified-failure reason is missing"
+  assert_contains "$OUT" "in verify_brand_identity" "the report does not name the function that failed"
+  assert_contains "$OUT" "ERRLOG=" "the report does not name the command that actually failed"
+  assert_not_contains "$OUT" "CLEAN:" "an unclassified failure printed a clean verdict"
+  assert_not_contains "$OUT" "VIOLATIONS:" "an unclassified failure was reported as violations"
+  pass "fm-verify-delivered.sh: an unclassified failure inside a mode function reports a failed search"
 }
 
 # --- bug 2 regression: a no-match must survive `set -o pipefail` ------------
@@ -343,9 +397,11 @@ test_clean_tree_reports_clean
 test_owner_files_are_excluded_from_candidates
 test_zero_file_pathspec_reports_inspected_nothing
 test_zero_candidates_reports_inspected_nothing
+test_only_owner_candidates_reports_inspected_nothing
 test_unresolvable_rev_reports_search_failed
 test_missing_repo_reports_search_failed
 test_erroring_git_grep_reports_search_failed
+test_unclassified_failure_in_a_mode_function_reports_search_failed
 test_no_match_is_a_result_not_a_fatal
 test_task_mode_extracts_claims
 test_task_mode_without_claims_reports_inspected_nothing

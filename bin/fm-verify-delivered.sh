@@ -40,7 +40,7 @@
 #   FM_VERIFY_REPO  repo brand-identity inspects; overrides the repo path
 #                   recorded for inception in data/projects.md
 #   FM_VERIFY_REV   rev brand-identity inspects (default: origin/main)
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -87,7 +87,19 @@ search_failed() {
 
 # Any failure this script did not classify itself lands here rather than
 # escaping as some other status. An unhandled failure is an unknown answer.
-trap 'search_failed "unhandled command failure at line $LINENO"' ERR
+# `-E` above is what carries this trap into the mode functions, where all the
+# work happens; without it bash would drop the trap at the function boundary and
+# an unclassified failure would escape as exit 1, which here means "violations".
+# BASH_COMMAND names the command that actually failed: LINENO inside a trap
+# resolves to the enclosing function's definition line, not the failing one.
+#
+# Only the top-level shell turns a failure into outcome 4. `-E` carries the trap
+# into command substitutions as well, and the searches below read a subshell's
+# exit status to tell a legitimate git grep no-match from a real error; firing
+# there would rewrite every no-match as a failure. Standing aside loses nothing:
+# a subshell that dies under `-e` still hands its status to the command that
+# captured it, which is either classified there or caught here.
+trap '[ "${BASH_SUBSHELL:-0}" -ne 0 ] || search_failed "unhandled command failure in ${FUNCNAME[0]:-main} (called at line ${BASH_LINENO[0]}): $BASH_COMMAND"' ERR
 
 # --- helpers ---------------------------------------------------------------
 
@@ -120,7 +132,7 @@ resolve_brand_repo() {
 # --- brand-identity mode ---------------------------------------------------
 
 verify_brand_identity() {
-  local fetch=1 repo candidate_out st scope_out scope_n cand_n
+  local fetch=1 repo candidate_out st scope_out scope_n cand_n matched_n
   local unmigrated=0 migrated=0 line f
   local -a candidates=()
 
@@ -171,6 +183,11 @@ verify_brand_identity() {
     *) search_failed "git grep for candidates failed with status $st: $(tr '\n' ' ' <"$ERRLOG")" ;;
   esac
 
+  # Counted before the owner exclusion below, so an empty candidate list can say
+  # which of the two ways it got there: the pattern matched nothing at all, or
+  # everything it matched is a file allowed to compare strings.
+  matched_n=$(count_lines "$candidate_out")
+
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     f=${line#"$REV:"}
@@ -182,8 +199,11 @@ verify_brand_identity() {
   done <<<"$candidate_out"
 
   cand_n=${#candidates[@]}
+  if [ "$cand_n" -eq 0 ] && [ "$matched_n" -eq 0 ]; then
+    inspected_nothing "no file among the $scope_n under '$BRAND_PATHSPEC' matches /$BRAND_CANDIDATE_RE/; the candidate pattern matched nothing in scope, so it found nothing to check"
+  fi
   if [ "$cand_n" -eq 0 ]; then
-    inspected_nothing "no file among the $scope_n under '$BRAND_PATHSPEC' matches /$BRAND_CANDIDATE_RE/; the candidate pattern found nothing to check"
+    inspected_nothing "all $matched_n file(s) under '$BRAND_PATHSPEC' matching /$BRAND_CANDIDATE_RE/ are name_matching.py or competitor_guards.py; every file it matched is an allowed string-matching owner, so it found nothing to check"
   fi
 
   for f in "${candidates[@]}"; do
