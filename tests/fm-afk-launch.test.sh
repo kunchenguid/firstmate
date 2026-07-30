@@ -1487,22 +1487,43 @@ unit_stop_intent_wins_exit_race() {
 
 unit_refresh_and_reconcile_do_not_refire_death_alarm() {
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon death reconcile)"; return 0; }
-  local home captain_session captain_pane pid alarm_count
+  local home captain_session captain_pane pid new_pid old_session new_session alarm_count old_exited=0
   home=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-reconcile.XXXXXX")
   captain_session="fm-afk-death-reconcile-cap-$$"
   tmux new-session -d -s "$captain_session" 2>/dev/null || { fail "daemon death reconcile: captain session creation failed"; rm -rf "$home"; return 0; }
   captain_pane=$(tmux display-message -p -t "$captain_session" '#{pane_id}')
+  new_pid=
+  old_session=
+  new_session=
   if death_test_start_daemon "$home" "$captain_session" "$captain_pane"; then
     pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
+    old_session=$(cut -f2 "$home/state/.afk-daemon-terminal" 2>/dev/null || true)
     kill -TERM "$pid" 2>/dev/null || true
     for _ in $(seq 1 100); do [ -s "$home/alarms" ] && break; sleep 0.05; done
     alarm_count=$(wc -l < "$home/alarms" 2>/dev/null | tr -d ' ')
-    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_SUPERVISOR_TARGET="$captain_pane" \
-      FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" start >/dev/null 2>&1 || true
+    for _ in $(seq 1 200); do
+      if ! kill -0 "$pid" 2>/dev/null && [ ! -e "$home/state/.supervise-daemon.pid" ]; then
+        old_exited=1
+        break
+      fi
+      sleep 0.05
+    done
+    if [ "$old_exited" -eq 1 ]; then
+      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_SUPERVISOR_TARGET="$captain_pane" \
+        FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" start >/dev/null 2>&1 || true
+      new_pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
+      new_session=$(cut -f2 "$home/state/.afk-daemon-terminal" 2>/dev/null || true)
+    fi
   fi
   if [ "${alarm_count:-0}" = 1 ] \
     && [ "$(wc -l < "$home/alarms" 2>/dev/null | tr -d ' ')" = 1 ] \
-    && [ -s "$home/state/.supervise-daemon.pid" ]; then
+    && [ "$old_exited" -eq 1 ] \
+    && [ -n "$new_pid" ] \
+    && [ "$new_pid" != "$pid" ] \
+    && kill -0 "$new_pid" 2>/dev/null \
+    && [ -n "$new_session" ] \
+    && [ "$new_session" != "$old_session" ] \
+    && ! tmux has-session -t "$old_session" 2>/dev/null; then
     pass "daemon death: refresh reconciles its terminal and starts a replacement without refiring"
   else
     fail "daemon death: refresh or terminal reconciliation refired the prior death alarm"

@@ -5,6 +5,8 @@
 # The stop intent is exact to one daemon process: pid plus fm_pid_identity.
 # A matching intent wins an exit race, because it was atomically published
 # before the lifecycle owner asked that exact daemon to stop.
+# An unexpected-exit record durably captures signal, timestamp, pid, and
+# identity before the existing wedge-alarm channel is invoked.
 
 FM_AFK_STOP_INTENT_NAME=".supervise-daemon.stop-intent"
 FM_AFK_UNEXPECTED_EXIT_NAME=".supervise-daemon.unexpected-exit"

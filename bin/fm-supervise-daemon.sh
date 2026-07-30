@@ -51,6 +51,9 @@
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
 #     alert if submit still cannot be confirmed.
+#   - Durable daemon-death alarm: while state/.afk remains present, any exit
+#     without an exact consumed lifecycle stop intent records signal, timestamp,
+#     PID, and process identity before using the same active-alert channel.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -105,7 +108,7 @@
 #                                   if that cannot confirm a submit, a wedge
 #                                   alarm fires (default 300; 0 disables)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
-#                                   active-alert directive for that wedge alarm
+#                                   active-alert directive for away-mode alarms
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
 #                                   absent file/var means auto: on macOS that is
 #                                   an OS-level notification, so the alarm is
@@ -137,9 +140,10 @@
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
 #          instance via portable lock on state/.supervise-daemon.lock. Trapped
-#          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the
-#          lock. A crashing fm-watch.sh is logged and restarted, never killing
-#          the daemon; a tight crash-restart spin is detected and backed off.
+#          SIGTERM/SIGINT/SIGHUP record the exit outcome, shut down within ~1s,
+#          flush escalations, and release the lock. A crashing fm-watch.sh is
+#          logged and restarted, never killing the daemon; a tight crash-restart
+#          spin is detected and backed off.
 set -u
 
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

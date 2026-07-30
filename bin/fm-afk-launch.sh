@@ -20,21 +20,18 @@
 # FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
 #
 # Usage:
-#   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
-#                              is already running) launch the daemon in a fresh
-#                              non-visible terminal for the detected backend and
-#                              record it. Idempotent: an already-running daemon
-#                              just refreshes state/.afk; a recorded-but-dead
-#                              terminal is reconciled (closed by id) first.
+#   fm-afk-launch.sh start     Refresh a live daemon or reconcile a dead one,
+#                              then launch a fresh non-visible backend terminal.
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
-#   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
-#                              cleanup flushes WHILE state/.afk is still present,
-#                              wait for it, close the recorded terminal by exact
-#                              id, then clear state/.afk last.
+#   fm-afk-launch.sh stop      Publish exact stop intent, SIGTERM the daemon,
+#                              flush while state/.afk remains, close the exact
+#                              terminal, then clear state/.afk last.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
+#   fm-afk-launch.sh check-death
+#                              Reconcile and alert on daemon loss while afk.
 #
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.

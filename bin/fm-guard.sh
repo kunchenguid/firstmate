@@ -12,6 +12,9 @@
 # doing - the one channel every harness has. The full banner is emitted once per
 # distinct staleness episode in this FM_HOME (keyed to beacon mtime or absence);
 # later guarded commands in the same episode print a one-line reminder instead.
+# While away mode remains active, normal mode also reconciles daemon liveness
+# and durably alerts on an unexpected loss; read-only mode only reports an
+# existing death marker.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
 # suppressed by that dedup. Normal wake handling (watcher briefly down between a

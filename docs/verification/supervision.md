@@ -196,3 +196,4 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+The daemon-loss lifecycle is covered by `tests/fm-afk-launch.test.sh`: deliberate launcher stop stays quiet, external `TERM` and untrappable loss record and alert once, exact consumed stop intent wins the exit race, and refresh reconciliation starts a replacement without repeating the alarm.
