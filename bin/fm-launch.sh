@@ -43,6 +43,11 @@
 #   state/.launch-last          the last-used entry id, written atomically
 #                               (temp + mv) so a killed launcher can never
 #                               corrupt the Enter default.
+#   state/.launch.lock          the home-scoped launch lock (bin/fm-wake-lib.sh's
+#                               primitives, the same ones bin/fm-spawn.sh uses
+#                               for its per-task spawn lock), held from the
+#                               reattach check through the launch-line send. See
+#                               the launch-lock note above launch_lock_release().
 #
 # Test seams (documented so the suite does not reach into internals):
 #   FM_LAUNCH_PRESETS        override the presets path
@@ -511,6 +516,11 @@ select_entry_pipe() {
     # starts a real unattended session nobody chose. A scripted selection must
     # be explicit - that is the refuse-don't-reprompt law this path preserves.
     '') refuse "No selection was made." "Choose 1-${#ENTRIES[@]}, or q to quit." ;;
+    # A 0-prefixed number must refuse HERE: it would pass the decimal range
+    # check below (`test` parses 08 as eight) and then reach $((n - 1)), where
+    # bash parses the leading zero as octal and dies under set -eu instead of
+    # refusing with guidance like every other invalid input.
+    0[0-9]) refuse "'$line' is not one of the menu choices." "Choose 1-${#ENTRIES[@]}, or q to quit." ;;
     [0-9]|[0-9][0-9]) n=$line ;;
     *) refuse "'$line' is not one of the menu choices." "Choose 1-${#ENTRIES[@]}, or q to quit." ;;
   esac
@@ -536,6 +546,29 @@ remember_choice() {  # <id>
   printf '%s\n' "$id" > "$tmp" 2>/dev/null || return 0
   mv -f "$tmp" "$LAST_USED" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
 }
+
+# The launch lock closes the reattach guard's startup window. Between this
+# launcher's tab creation and the harness TUI registering as a herdr agent, the
+# new primary's pane still reads no-agent, so an unlocked second launch would
+# pass live_primary_pane and then have fm_backend_herdr_create_task replace the
+# just-started tab as a husk, silently killing it. The lock - not any pane
+# state - is what distinguishes "no agent YET, a launch is in flight" from "no
+# agent because that session died": a dead session's launcher no longer holds
+# it, so crash-husk replacement on the next launch stays intact. It is held
+# from before the reattach check through the launch-line send and released on
+# every exit path by the EXIT trap; attach() releases it explicitly because
+# exec never reaches that trap. A killed launcher cannot wedge the home:
+# fm_lock_try_acquire reclaims a lock whose recorded pid is dead.
+LAUNCH_LOCK=""
+LAUNCH_LOCK_HELD=0
+
+launch_lock_release() {
+  if [ "$LAUNCH_LOCK_HELD" = 1 ]; then
+    LAUNCH_LOCK_HELD=0
+    fm_lock_release "$LAUNCH_LOCK" || true
+  fi
+}
+trap launch_lock_release EXIT
 
 # herdr_gate: Herdr is MANDATORY and there is no silent fallback to a bare
 # shell. Absence is this launcher's own condition and gets the front door's
@@ -573,12 +606,19 @@ live_primary_pane() {  # <session>
   printf '%s' "$pane"
 }
 
+# attach <session>: `herdr session attach <NAME>` is the verified attach form.
+# Empirical, herdr 0.7.1: `herdr session --help` lists an `attach` subcommand
+# ("Attach to a session"), and `herdr session attach --help` reports exactly
+# `Usage: herdr session attach <NAME>` with a single required NAME argument.
+# The exec replaces this process, so the EXIT trap can never run past it; the
+# launch lock is released explicitly first.
 attach() {  # <session>
   local session=$1
   if [ -n "${FM_LAUNCH_NO_ATTACH:-}" ]; then
     vlog "attach suppressed by FM_LAUNCH_NO_ATTACH"
     return 0
   fi
+  launch_lock_release
   exec herdr session attach "$session"
 }
 
@@ -608,9 +648,19 @@ launch_entry() {  # <record>
   printf '  %s · %s\n' "$E_LABEL" "$E_DETAIL"
 
   fm_backend_source herdr || refuse "The Herdr runtime could not be loaded." "Reinstall firstmate, then relaunch."
+  # The lock primitives. Sourced here, after selection, because fm-wake-lib.sh
+  # creates $STATE at source time and nothing may touch the home before a choice.
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
 
   herdr_gate
   session=$(fm_backend_herdr_session)
+
+  LAUNCH_LOCK="$STATE/.launch.lock"
+  fm_lock_try_acquire "$LAUNCH_LOCK" \
+    || refuse "Another launch is already starting a session here." \
+              "Wait for it to finish, then reattach or retry."
+  LAUNCH_LOCK_HELD=1
 
   pane=$(live_primary_pane "$session") \
     || refuse "Herdr could not confirm whether a session is already running here." \
