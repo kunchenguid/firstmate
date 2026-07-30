@@ -220,9 +220,14 @@ INJECT_CONFIRM_SLEEP_DEFAULT=0.5
 # command returns, so a signal landing early in a wait cannot be honored for
 # nearly a full poll. A tighter bound would make SIGKILL the routine path and skip
 # the watcher's own cleanup trap, leaving a stale state/.watch.lock after every
-# clean stop. The ~14s worst case fits inside the 40s away-mode stop budget that
-# FM_AFK_LAUNCH_STOP_POLLS grants in bin/fm-afk-launch.sh, so the graceful path is
-# reachable and the hard kill is back to being the backstop.
+# clean stop.
+# INVARIANT (named here, pointed at from bin/fm-afk-launch.sh): the away-mode stop
+# budget must outlast a full graceful reap plus the rest of this shutdown trap, so
+# FM_AFK_LAUNCH_STOP_POLLS is DERIVED from watcher_reap_secs below instead of being
+# a second hand-tuned constant. Two independent constants held only at the stock
+# poll: a fixed 40s stop window is already too small at FM_POLL=36, where this
+# bound alone reaches 41s. Deriving both from the same number is what keeps the
+# graceful path reachable and the hard kill a backstop rather than the routine path.
 WATCHER_POLL_SECS_FALLBACK=15   # bin/fm-watch.sh's own FM_POLL default
 WATCHER_REAP_SLACK_SECS=5
 WATCHER_REAP_FLOOR_SECS=20
@@ -1327,20 +1332,31 @@ trim_log() {
 }
 
 # --- bounded child reap -----------------------------------------------------
-# reap_watcher: end the watcher child within a bounded time and return once it is
-# gone. TERM first, then poll for up to the budget so the watcher's own trap can
-# run once its blocking wait returns, then KILL as the backstop. See
-# WATCHER_REAP_SECS_DEFAULT for why the bound exists and why it sits above one
-# watcher poll; an invalid override falls back to that default rather than
-# turning the bound off.
-reap_watcher() {  # <pid>
-  local pid=$1 secs tenths=0 limit
-  [ -n "$pid" ] || return 0
-  secs=${FM_WATCHER_REAP_SECS:-$WATCHER_REAP_SECS_DEFAULT}
+# watcher_reap_secs: the effective graceful-reap budget in whole seconds, and the
+# SINGLE OWNER of that number - bin/fm-afk-launch.sh reads it from here to size its
+# own stop budget, per the INVARIANT at WATCHER_REAP_SECS_DEFAULT. An explicit
+# FM_WATCHER_REAP_SECS wins verbatim (no floor); a non-numeric or zero value falls
+# back to the derived default rather than turning the bound off. The value is
+# normalized to base 10 because bash reads a zero-padded 08 as invalid octal, which
+# would abort the shutdown trap before it releases the daemon lock.
+watcher_reap_secs() {
+  local secs=${FM_WATCHER_REAP_SECS:-$WATCHER_REAP_SECS_DEFAULT}
   case "$secs" in
     ''|*[!0-9]*) secs=$WATCHER_REAP_SECS_DEFAULT ;;
     *) [ "$secs" -gt 0 ] 2>/dev/null || secs=$WATCHER_REAP_SECS_DEFAULT ;;
   esac
+  printf '%s\n' "$((10#$secs))"
+}
+
+# reap_watcher: end the watcher child within a bounded time and return once it is
+# gone. TERM first, then poll for up to the budget so the watcher's own trap can
+# run once its blocking wait returns, then KILL as the backstop. See
+# WATCHER_REAP_SECS_DEFAULT for why the bound exists and why it sits above one
+# watcher poll.
+reap_watcher() {  # <pid>
+  local pid=$1 secs tenths=0 limit
+  [ -n "$pid" ] || return 0
+  secs=$(watcher_reap_secs)
   limit=$((secs * 10))
   kill "$pid" 2>/dev/null || true
   while kill -0 "$pid" 2>/dev/null; do

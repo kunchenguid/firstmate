@@ -74,15 +74,51 @@ FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
-# Polls of 0.25s the stop path waits for the daemon to exit after SIGTERM.
+# Polls of 0.25s the stop path waits for the daemon to exit after SIGTERM, i.e.
+# four polls per second of budget.
 # WHY (task afk-wedge-noc, overnight away-mode wedge 2026-07-29/30): the daemon's
 # shutdown trap flushes escalations and then reaps its watcher child, and that
 # reap can legitimately outlast a signal that lands mid poll-cycle. The old 10s
 # budget expired first, so a correct shutdown was reported as "did not exit after
 # SIGTERM" and lifecycle state was preserved for a retry that was never needed.
-# This is deliberate slack above the daemon's own bounded reap, not the bound
-# itself - the daemon owns that (WATCHER_REAP_SECS_DEFAULT there).
-FM_AFK_LAUNCH_STOP_POLLS=160
+# A hand-tuned replacement constant would fail the same way again as soon as the
+# watcher poll or the reap override grows, so this budget is DERIVED from the
+# daemon's own reap budget instead of restating it: bin/fm-supervise-daemon.sh is
+# the single owner (watcher_reap_secs), and the ordering rule between the two
+# budgets is the INVARIANT stated there at WATCHER_REAP_SECS_DEFAULT. The daemon
+# is read in a SUBSHELL because sourcing it in library mode exports a notifier
+# seam and defines ~150 functions that must not leak into this lifecycle script.
+# The headroom covers the rest of the shutdown trap (escalation flush, notifier
+# stop, lock and pidfile release). The floor keeps the stock poll at exactly the
+# 160 polls this path already used, so only a longer poll widens the window; an
+# unreadable daemon leaves the floor standing.
+FM_AFK_LAUNCH_STOP_POLLS_FLOOR=160
+FM_AFK_LAUNCH_STOP_HEADROOM_SECS=10
+
+fm_afk_launch_daemon_reap_secs() {
+  (
+    # shellcheck source=bin/fm-supervise-daemon.sh
+    . "$FM_AFK_LAUNCH_DIR/fm-supervise-daemon.sh" >/dev/null 2>&1 \
+      && watcher_reap_secs
+  ) 2>/dev/null
+}
+
+fm_afk_launch_stop_polls() {
+  local reap polls
+  reap=$(fm_afk_launch_daemon_reap_secs) || reap=
+  case "$reap" in
+    ''|*[!0-9]*)
+      printf '%s\n' "$FM_AFK_LAUNCH_STOP_POLLS_FLOOR"
+      return 0
+      ;;
+  esac
+  polls=$(((reap + FM_AFK_LAUNCH_STOP_HEADROOM_SECS) * 4))
+  [ "$polls" -ge "$FM_AFK_LAUNCH_STOP_POLLS_FLOOR" ] \
+    || polls=$FM_AFK_LAUNCH_STOP_POLLS_FLOOR
+  printf '%s\n' "$polls"
+}
+
+FM_AFK_LAUNCH_STOP_POLLS=$(fm_afk_launch_stop_polls)
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"

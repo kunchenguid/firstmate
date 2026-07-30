@@ -752,6 +752,41 @@ unit_stop_waits_out_a_slow_daemon_shutdown() {
   rm -rf "$st"
 }
 
+# The stop budget and the daemon's own graceful-reap budget are ONE invariant, not
+# two constants that happen to be ordered at the stock poll (task afk-wedge-noc,
+# the invariant is stated at WATCHER_REAP_SECS_DEFAULT in the daemon): the stop
+# window must always outlast a full reap plus the rest of the shutdown trap, or a
+# correct shutdown is reported as "did not exit after SIGTERM" again. Both knobs
+# that move the reap budget are covered - FM_POLL, which the daemon derives its
+# default from (at 36 the reap bound alone reaches 41s, which the fixed 160-poll
+# 40s window could not outlast), and an explicit FM_WATCHER_REAP_SECS, which wins
+# verbatim. Pure arithmetic over both derivations, so the guard costs no wall time.
+unit_stop_budget_outlasts_the_daemon_reap_budget() {
+  local spec poll wreap reap polls broke=""
+  for spec in 15: 36: 120: 15:45 15:08; do
+    poll=${spec%%:*}
+    wreap=${spec##*:}
+    reap=$(FM_POLL="$poll" FM_WATCHER_REAP_SECS="$wreap" \
+      bash -c '. "$1" >/dev/null 2>&1; watcher_reap_secs' _ "$ROOT/bin/fm-supervise-daemon.sh")
+    polls=$(FM_POLL="$poll" FM_WATCHER_REAP_SECS="$wreap" \
+      bash -c '. "$1"; printf "%s\n" "$FM_AFK_LAUNCH_STOP_POLLS"' _ "$LAUNCH")
+    case "$reap" in ''|*[!0-9]*) broke="reap budget unreadable at FM_POLL=$poll FM_WATCHER_REAP_SECS=$wreap"; break ;; esac
+    case "$polls" in ''|*[!0-9]*) broke="stop budget unreadable at FM_POLL=$poll FM_WATCHER_REAP_SECS=$wreap"; break ;; esac
+    [ "$((polls * 25))" -gt "$((reap * 100))" ] || {
+      broke="stop budget ${polls} polls does not outlast a ${reap}s reap at FM_POLL=$poll FM_WATCHER_REAP_SECS=$wreap"
+      break
+    }
+  done
+  polls=$(FM_POLL=15 bash -c '. "$1"; printf "%s\n" "$FM_AFK_LAUNCH_STOP_POLLS"' _ "$LAUNCH")
+  if [ -z "$broke" ] && [ "$polls" = 160 ]; then
+    pass "stop budget: derived from the daemon's reap budget, so it outlasts it at every poll and override"
+  elif [ -n "$broke" ]; then
+    fail "stop budget: $broke"
+  else
+    fail "stop budget: the stock FM_POLL=15 window changed from 160 polls to $polls"
+  fi
+}
+
 unit_refresh_validates_record() {
   local st daemon_pid
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-record.XXXXXX")
@@ -970,6 +1005,7 @@ unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
 unit_stop_waits_out_a_slow_daemon_shutdown
+unit_stop_budget_outlasts_the_daemon_reap_budget
 unit_refresh_validates_record
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
