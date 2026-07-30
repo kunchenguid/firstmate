@@ -106,6 +106,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-public-followup-lib.sh
+. "$SCRIPT_DIR/fm-public-followup-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1089,6 +1091,22 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
     echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
     echo "Inventory its report and any visual review through bin/fm-decision-hold.sh before teardown." >&2
+    exit 1
+  fi
+fi
+
+# A public commitment is not kept until its final reply lands in the ORIGINAL
+# thread, and this cleanup removes the task records that make the promise
+# reconcilable. Refuse while this home still owes a public reply for exactly this
+# work. Both gates live in bin/fm-public-followup-lib.sh, so a home that never
+# opted into the myfirstmate relay runs one [ -f ] test and nothing else here.
+if [ "$FORCE" != "--force" ] \
+  && fm_pf_relay_active "$FM_HOME" && fm_pf_has_registrations "$STATE"; then
+  if ! PUBLIC_FOLLOWUP_BLOCKING=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-public-followup.sh" guard-work main "$ID" 2>/dev/null); then
+    echo "REFUSED: task $ID still owes a public reply through the myfirstmate relay." >&2
+    printf '%s\n' "$PUBLIC_FOLLOWUP_BLOCKING" >&2
+    echo "Deliver it with bin/fm-public-followup.sh deliver <obligation-id>, waive it with tasks-axi public-followup waive, or use --force after explicit discard approval." >&2
     exit 1
   fi
 fi

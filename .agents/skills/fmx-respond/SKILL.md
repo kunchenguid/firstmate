@@ -5,6 +5,7 @@ description: >-
   Use on an "x-mention <request_id>" check wake to read the stashed mention, classify it, act autonomously on eligible requests, reply or dismiss, and link spawned work.
   Also use on an "x-mode-error ..." check wake to report the X-mode configuration blocker instead of answering a mention.
   Also use on milestone and terminal wakes for an X-mode-linked task before posting completion follow-ups, ending terminal outcomes with --final.
+  Also use on a "public-followup ..." check wake, and whenever a promised final public reply must be created, reconciled, or delivered.
   Loaded only when X mode is enabled.
 user-invocable: false
 metadata:
@@ -201,6 +202,41 @@ This skill's own responsibility during the mention-handling turn is linking the 
 - On a terminal wake (PR merged / scout report / local merge / failed), firstmate posts the task's **final** outcome ("done, here's the result"; for a failure, an honest "this one didn't pan out") with `bin/fm-x-followup.sh <task-id> --final --text-file <path>`, which always clears the link after that post regardless of how many follow-ups remain under the cap.
 - Every follow-up is held to the exact same public-safety bar as every reply here: outcomes only, no task ids, internals, captain-private material, or secrets. Past the window, past the cap, or on the relay's own rejection of an exhausted binding, a follow-up attempt is skipped silently and the link is cleared - never treated as a failure worth retrying.
 - If either a follow-up's platform or explicit budget cannot be authoritatively resolved from per-request context, inbox payload, or relay answer, `bin/fm-x-followup.sh` does NOT post it: the fail-safe holds it (the link is kept, exit non-zero) rather than use a local default. This is a retryable hold - a later milestone wake retries it once both values are recoverable.
+
+## Promised final replies (the commitment that must survive compaction)
+
+The follow-up budget above is a courtesy.
+A **promised final reply** - "I'll report back when this lands" - is a commitment, and forgetting it is publicly visible.
+Never carry one in your head: the moment you promise a specific outcome in a public thread, turn it into durable state and let the scripts reconcile it.
+This section is the sole owner of that procedure.
+`tasks-axi public-followup --help` owns the typed obligation, its states, and its file contracts; `bin/fm-public-followup.sh --help` owns firstmate's flags; do not restate either here.
+
+**When you promise a final:**
+
+1. Create the typed obligation with `tasks-axi public-followup add` and bind the work with `bind-work`, keeping the public-safe summary and the opaque thread binding in the obligation and the full request context where the poll already put it.
+2. Register it with `bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home <main|secondmate:<id>> --work-id <task-id> --generation <n>`.
+   This is what makes the commitment reconcilable without you.
+3. Put `bin/fm-public-followup.sh brief <obligation-id>` output straight into the worker's brief.
+   It prints the exact reporting command for that binding.
+   Never ask a worker to find the thread or post the reply: only this home holds the relay consent and the thread binding.
+
+**When work reports back, or on a `public-followup ...` check wake, or when the session-start digest lists a public commitment:**
+
+1. Run `bin/fm-public-followup.sh consume`.
+   It reconciles every typed terminal result from disk and prints `ready <obligation-id> <request-id> <platform>` for each commitment that became deliverable.
+   A refusal prints `rejected <event-id>: <reason>` and quarantines that event; read the reason rather than re-emitting blindly.
+2. For each ready commitment, run `bin/fm-public-followup.sh deliver <obligation-id>`.
+   With no `--text-file` it reuses the accepted terminal outcome exactly, which is the preferred path for a landed result.
+   Only pass `--text-file` when the outcome genuinely needs composing, and hold it to the same public-safety bar as every other reply here.
+3. Read the outcome and stop guessing at anything it refuses:
+   - "still waiting on its bound work" means the work has not reported a typed terminal result yet - do not post.
+   - "recorded as retryable" means nothing was posted; retry on a later wake.
+   - "held" means the thread's platform or budget is unresolvable right now; retry once it is recoverable.
+   - "mid-delivery" means a previous post started and its outcome was never recorded. Do NOT deliver again. Establish whether that post landed, then either close it with `record-posted <id> --attempt <n>` or escalate. Posting again would put a second reply in a public thread.
+   - "the relay no longer accepts a follow-up" is a captain decision, not a retry.
+
+Cleanup refuses while a commitment is still owed for that exact work, so never reach for `--force` to get past it.
+Treat a commitment as kept only after a validated posted receipt or an explicit captain waiver.
 
 ## Notes
 
