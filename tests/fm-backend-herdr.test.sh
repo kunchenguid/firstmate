@@ -1829,6 +1829,109 @@ test_current_path_reads_cwd() {
   pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
 }
 
+# --- spawn shell readiness ----------------------------------------------------
+
+write_shell_ready_response() {  # <file> <ready|not-ready>
+  local file=$1 state=$2
+  if [ "$state" = ready ]; then
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_processes":[{"pid":42}]}}}' > "$file"
+  else
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":42,"foreground_processes":[{"pid":99}]}}}' > "$file"
+  fi
+}
+
+make_shell_ready_fake_sleep() {
+  local fb=$1
+  cat > "$fb/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fb/sleep"
+}
+
+test_shell_readiness_waits_for_not_ready_to_ready() {
+  local dir log resp fb out n
+  dir="$TMP_ROOT/shell-ready-transition"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  write_shell_ready_response "$resp/1.out" not-ready
+  for n in $(seq 2 11); do write_shell_ready_response "$resp/$n.out" ready; done
+  fb=$(make_herdr_fakebin "$dir"); make_shell_ready_fake_sleep "$fb"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_for_shell_ready fmtest w1:p2' "$ROOT" )
+  [ -z "$out" ] || fail "shell readiness should not print output, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''process-info'$'\x1f''--pane'$'\x1f''w1:p2' "$log")" = 11 ] \
+    || fail "shell readiness did not query the exact pane for each scripted sample"
+  pass "fm_backend_herdr_wait_for_shell_ready: waits through a not-ready sample and accepts ten ready samples"
+}
+
+test_shell_readiness_resets_after_unstable_sample() {
+  local dir log resp fb status n
+  dir="$TMP_ROOT/shell-ready-reset"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  for n in $(seq 1 9); do write_shell_ready_response "$resp/$n.out" ready; done
+  write_shell_ready_response "$resp/10.out" not-ready
+  for n in $(seq 11 20); do write_shell_ready_response "$resp/$n.out" ready; done
+  fb=$(make_herdr_fakebin "$dir"); make_shell_ready_fake_sleep "$fb"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_for_shell_ready fmtest w1:p2' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "a not-ready sample should reset the consecutive readiness count"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''process-info'$'\x1f''--pane'$'\x1f''w1:p2' "$log")" = 20 ] \
+    || fail "shell readiness accepted nine samples before the required reset and ten new samples"
+  pass "fm_backend_herdr_wait_for_shell_ready: resets consecutive samples after a readiness regression"
+}
+
+test_shell_readiness_timeout_does_not_submit_a_command() {
+  local dir log resp fb status n
+  dir="$TMP_ROOT/shell-ready-timeout"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  for n in $(seq 1 100); do write_shell_ready_response "$resp/$n.out" not-ready; done
+  fb=$(make_herdr_fakebin "$dir"); make_shell_ready_fake_sleep "$fb"
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; if fm_backend_herdr_wait_for_shell_ready fmtest w1:p2; then exit 1; else exit 0; fi' "$ROOT"; then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 0 "$status" "shell readiness should time out after the bounded sample count"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''process-info'$'\x1f''--pane'$'\x1f''w1:p2' "$log")" = 100 ] \
+    || fail "shell readiness did not stop at the bounded ten-second sample count"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''run' "a readiness timeout must not submit a pane command"
+  pass "fm_backend_herdr_wait_for_shell_ready: times out without submitting a command"
+}
+
+test_spawn_timeout_skips_treehouse_get() {
+  local dir home project log resp fb out status n treehouse_log id
+  id=herdr-ready-timeout-spawn
+  dir="$TMP_ROOT/spawn-shell-ready-timeout"; home="$dir/home"; project="$dir/project"
+  log="$dir/herdr.log"; resp="$dir/responses"; treehouse_log="$dir/treehouse.log"
+  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects" "$resp"
+  printf 'test brief\n' > "$home/data/$id/brief.md"
+  git init -q "$project"
+  git -C "$project" config user.email test@example.invalid
+  git -C "$project" config user.name test
+  git -C "$project" commit --allow-empty -qm initial
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}' > "$resp/3.out"
+  for n in $(seq 4 103); do write_shell_ready_response "$resp/$n.out" not-ready; done
+  fb=$(make_herdr_fakebin "$dir"); make_shell_ready_fake_sleep "$fb"
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$treehouse_log"
+exit 0
+SH
+  chmod +x "$fb/treehouse"
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    PATH="$fb:$PATH" "$ROOT/bin/fm-spawn.sh" "$id" "$project" codex --backend herdr 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn should refuse when the exact Herdr pane never becomes shell-ready"
+  assert_contains "$out" "did not reach shell-ready state" "spawn timeout did not explain the Herdr readiness refusal"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''run' "spawn submitted a pane command before Herdr shell readiness"
+  [ ! -s "$treehouse_log" ] || fail "spawn invoked treehouse after Herdr shell readiness timed out"
+  [ ! -e "$home/state/$id.meta" ] || fail "spawn wrote task metadata after Herdr shell readiness timed out"
+  pass "fm-spawn: a Herdr readiness timeout submits no treehouse command"
+}
+
 # --- busy_state (semantic agent state) ---------------------------------------
 
 test_busy_state_working_maps_to_busy() {
@@ -3164,6 +3267,10 @@ test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
+test_shell_readiness_waits_for_not_ready_to_ready
+test_shell_readiness_resets_after_unstable_sample
+test_shell_readiness_timeout_does_not_submit_a_command
+test_spawn_timeout_skips_treehouse_get
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent

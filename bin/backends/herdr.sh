@@ -1872,6 +1872,37 @@ fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
 }
 
+# fm_backend_herdr_wait_for_shell_ready: wait for the exact newly-created pane
+# to expose its interactive shell before a spawn-time command is submitted.
+# Herdr can return a pane before that shell accepts Enter, so a command sent
+# earlier can remain in the shell buffer without running. Require ten
+# consecutive process-info samples whose sole foreground process is the shell,
+# sampled approximately 100ms apart, for a bounded 100-sample (10-second) wait.
+# This is intentionally separate from target_ready: the caller already proved
+# the named Herdr server while creating this exact pane, and this read must not
+# substitute another pane or infer one from a label.
+fm_backend_herdr_wait_for_shell_ready() {  # <session> <pane-id>
+  local session=$1 pane_id=$2 process_info ready_samples=0 poll
+  [ -n "$session" ] && [ -n "$pane_id" ] || return 1
+  for poll in $(seq 1 100); do
+    process_info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null || true)
+    if printf '%s' "$process_info" | jq -e --arg pane "$pane_id" '
+      .result.type == "pane_process_info"
+      and .result.process_info.pane_id == $pane
+      and (.result.process_info.foreground_processes | type) == "array"
+      and (.result.process_info.foreground_processes | length) == 1
+      and .result.process_info.foreground_processes[0].pid == .result.process_info.shell_pid
+    ' >/dev/null 2>&1; then
+      ready_samples=$((ready_samples + 1))
+      [ "$ready_samples" -ge 10 ] && return 0
+    else
+      ready_samples=0
+    fi
+    [ "$poll" -ge 100 ] || sleep 0.1
+  done
+  return 1
+}
+
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.

@@ -1199,6 +1199,15 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
+  if ! fm_backend_herdr_wait_for_shell_ready "$HERDR_SES" "$HERDR_PANE_ID"; then
+    # Preserve the exact new pane for diagnosis rather than invoking the
+    # presentation abort cleanup before any project command was submitted.
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    echo "error: herdr pane $HERDR_SES:$HERDR_PANE_ID did not reach shell-ready state within 10s; inspect window $T" >&2
+    exit 1
+  fi
+fi
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
 # Every other backend addresses its pane/surface by the id already in $T, so default

@@ -186,6 +186,11 @@ On an already active or unreadable baseline, it falls back to conservative compo
 A fully unreadable target stops retrying and reports unknown.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.
 
+At project spawn, Firstmate waits on the exact pane returned by tab creation before submitting `treehouse get`.
+It queries `pane process-info` and requires exactly one foreground process whose PID equals the reported shell PID for ten consecutive samples approximately 100ms apart, with a bounded ten-second timeout.
+A timeout preserves the newly-created pane for diagnosis and submits no project-allocation command.
+This barrier covers the verified Herdr startup race in which tab creation can precede an interactive shell accepting Enter; `tests/fm-afk-inject-herdr-e2e.test.sh` carries the corresponding real-Herdr readiness evidence, and `tests/fm-backend-herdr.test.sh` covers the unit regression.
+
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for small composer and peek reads.
