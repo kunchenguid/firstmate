@@ -1403,7 +1403,7 @@ fm_super_main() {
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
   record_daemon_exit() {  # <signal-or-exit>
-    local signal=$1 marker
+    local signal=$1 marker record_result
     afk_active "$STATE" || return 0
     if [ -n "$DAEMON_IDENTITY" ] \
       && fm_afk_stop_intent_matches "$STATE" "$DAEMON_PID" "$DAEMON_IDENTITY"; then
@@ -1412,13 +1412,21 @@ fm_super_main() {
       return 0
     fi
     marker=$(fm_afk_unexpected_exit_path "$STATE")
-    if fm_afk_unexpected_exit_record "$STATE" "$signal" "$DAEMON_PID" "$DAEMON_IDENTITY"; then
-      log "ERROR: away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID identity=$DAEMON_IDENTITY); alarm marker written"
-      wedge_alarm_notify "away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID) - see $marker" "$marker"
-    else
-      log "ERROR: away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID); failed to write alarm marker"
-      wedge_alarm_notify "away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID) - durable marker write failed" "$marker"
-    fi
+    fm_afk_unexpected_exit_record "$STATE" "$signal" "$DAEMON_PID" "$DAEMON_IDENTITY"
+    record_result=$?
+    case "$record_result" in
+      0)
+        log "ERROR: away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID identity=$DAEMON_IDENTITY); alarm marker written"
+        wedge_alarm_notify "away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID) - see $marker" "$marker"
+        ;;
+      2)
+        log "daemon unexpected exit already recorded (signal=$signal pid=$DAEMON_PID)"
+        ;;
+      *)
+        log "ERROR: away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID); failed to write alarm marker"
+        wedge_alarm_notify "away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID) - durable marker write failed" "$marker"
+        ;;
+    esac
   }
   cleanup() {
     local signal=${1:-EXIT}
@@ -1547,9 +1555,21 @@ fm_super_main() {
   done
 }
 
+fm_super_wedge_alarm_notify() {
+  [ "$#" -eq 2 ] || return 2
+  LOG="$(_state_root)/.supervise-daemon.log"
+  mkdir -p "$(dirname "$LOG")" || return 1
+  wedge_alarm_notify "$1" "$2"
+}
+
 # Run only when executed, not when sourced (tests source the classifiers).
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-  fm_super_main "$@"
+  if [ "${1:-}" = --wedge-alarm-notify ]; then
+    shift
+    fm_super_wedge_alarm_notify "$@"
+  else
+    fm_super_main "$@"
+  fi
 else
   # Library mode: these functions were SOURCED (only tests do this - production
   # execs the daemon, see bin/fm-afk-start.sh). Make it structurally impossible

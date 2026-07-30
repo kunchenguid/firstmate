@@ -47,8 +47,8 @@ fm_afk_start_usage() {
 }
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
-# already running), drop the previous away session's leftover escalation-delivery
-# artifacts so they cannot surface as stale escalations under the new session.
+# already running), drop the previous away session's delivery and daemon
+# lifecycle artifacts so they cannot surface under the new session.
 # These are session-scoped by timing: a fresh entry owns a new supervision
 # session and the new daemon has not produced anything yet, so anything present
 # here belongs to a PRIOR session. This never drops a genuinely-pending
@@ -63,7 +63,9 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" 2>/dev/null
+        "$state/.subsuper-inject-wedged" \
+        "$state/.supervise-daemon.stop-intent" \
+        "$state/.supervise-daemon.unexpected-exit" 2>/dev/null
 }
 
 daemon_lock_owner() {

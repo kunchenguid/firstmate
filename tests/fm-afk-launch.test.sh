@@ -41,7 +41,7 @@ GLOBAL_CLEANUP() {
 trap GLOBAL_CLEANUP EXIT
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts removes prior-session artifacts.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -50,6 +50,8 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
+  : > "$st/state/.supervise-daemon.stop-intent"
+  : > "$st/state/.supervise-daemon.unexpected-exit"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -57,8 +59,10 @@ unit_clear_stale() {
     bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$st/state"
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
-     && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
-    pass "clear-stale: removes escalations buffer, sidecar, and wedge marker"
+     && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
+     && [ ! -e "$st/state/.supervise-daemon.stop-intent" ] \
+     && [ ! -e "$st/state/.supervise-daemon.unexpected-exit" ]; then
+    pass "clear-stale: removes prior-session delivery and daemon lifecycle artifacts"
   else
     fail "clear-stale: stale artifacts survived"
   fi
@@ -306,6 +310,27 @@ unit_signal_exits_with_lock_cleanup() {
     pass "launcher signal: TERM exits and releases the lifecycle lock"
   else
     fail "launcher signal: interrupted lifecycle resumed or retained its lock"
+  fi
+  rm -rf "$st"
+}
+
+unit_herdr_command_failure_creates_no_workspace() {
+  local st created
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-command.XXXXXX")
+  created="$st/workspace-created"
+  mkdir -p "$st/state"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    CREATED=$2
+    . "$1"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_afk_launch_daemon_cmd() { return 1; }
+    fm_backend_herdr_cli() { : > "$CREATED"; return 1; }
+    ! fm_afk_launch_create_herdr "isolated:%1" herdr
+  ' _ "$LAUNCH" "$created" && [ ! -e "$created" ]; then
+    pass "herdr launch: command construction failure creates no workspace"
+  else
+    fail "herdr launch: command construction failure leaked a workspace"
   fi
   rm -rf "$st"
 }
@@ -708,8 +733,9 @@ unit_stop_confirms_daemon_exit() {
     ! fm_afk_launch_stop
   ' _ "$LAUNCH" && kill -0 "$daemon_pid" 2>/dev/null \
     && [ ! -e "$st/state/.supervise-daemon.lock" ] \
+    && [ ! -e "$st/state/.supervise-daemon.stop-intent" ] \
     && [ -e "$st/state/.afk" ] && [ -e "$st/state/.afk-daemon-terminal" ]; then
-    pass "stop liveness: captured live daemon preserves lifecycle state after lock release"
+    pass "stop liveness: failed stop retracts intent and preserves lifecycle state"
   else
     fail "stop liveness: lock release was mistaken for captured daemon exit"
   fi
@@ -964,7 +990,7 @@ unit_expected_stop_does_not_alarm() {
 
 unit_external_daemon_term_alarms() {
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon death TERM)"; return 0; }
-  local home captain_session captain_pane pid marker
+  local home captain_session captain_pane pid marker alarm_count
   home=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-term.XXXXXX")
   captain_session="fm-afk-death-term-cap-$$"
   tmux new-session -d -s "$captain_session" 2>/dev/null || { fail "daemon death TERM: captain session creation failed"; rm -rf "$home"; return 0; }
@@ -973,16 +999,55 @@ unit_external_daemon_term_alarms() {
   if death_test_start_daemon "$home" "$captain_session" "$captain_pane"; then
     pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
     kill -TERM "$pid" 2>/dev/null || true
-    for _ in $(seq 1 100); do [ -s "$marker" ] && break; sleep 0.05; done
+    for _ in $(seq 1 100); do
+      [ -s "$marker" ] && [ -s "$home/alarms" ] && break
+      sleep 0.05
+    done
   fi
+  alarm_count=0
+  [ ! -f "$home/alarms" ] || alarm_count=$(wc -l < "$home/alarms" | tr -d ' ')
   if [ -s "$marker" ] \
     && grep -F 'signal=TERM' "$marker" >/dev/null \
     && grep -Eq '^recorded_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T' "$marker" \
     && grep -F "pid=$pid" "$marker" >/dev/null \
-    && grep -F 'pid_identity=' "$marker" >/dev/null; then
+    && grep -F 'pid_identity=' "$marker" >/dev/null \
+    && [ "${alarm_count:-0}" = 1 ]; then
     pass "daemon death: external TERM while afk writes identity marker and fires wedge alarm channel"
   else
     fail "daemon death: external TERM did not leave a durable active alarm"
+  fi
+  death_test_stop_home "$home" "$captain_session"
+}
+
+unit_untrappable_daemon_death_alarms_on_guard() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon death KILL)"; return 0; }
+  local home captain_session captain_pane pid identity marker alarm_count
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-kill.XXXXXX")
+  captain_session="fm-afk-death-kill-cap-$$"
+  tmux new-session -d -s "$captain_session" 2>/dev/null || { fail "daemon death KILL: captain session creation failed"; rm -rf "$home"; return 0; }
+  captain_pane=$(tmux display-message -p -t "$captain_session" '#{pane_id}')
+  marker="$home/state/.supervise-daemon.unexpected-exit"
+  if death_test_start_daemon "$home" "$captain_session" "$captain_pane"; then
+    pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
+    identity=$(cat "$home/state/.supervise-daemon.lock/pid-identity" 2>/dev/null || true)
+    kill -KILL "$pid" 2>/dev/null || true
+    for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+    mkdir -p "$home/root"
+    FM_ROOT_OVERRIDE="$home/root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_WEDGE_ALARM_EXEC="$home/record-alarm" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1
+    FM_ROOT_OVERRIDE="$home/root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_WEDGE_ALARM_EXEC="$home/record-alarm" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1
+  fi
+  alarm_count=0
+  [ ! -f "$home/alarms" ] || alarm_count=$(wc -l < "$home/alarms" | tr -d ' ')
+  if [ -s "$marker" ] \
+    && grep -F 'signal=UNTRAPPABLE' "$marker" >/dev/null \
+    && grep -F "pid=$pid" "$marker" >/dev/null \
+    && grep -F "pid_identity=$identity" "$marker" >/dev/null \
+    && [ "${alarm_count:-0}" = 1 ]; then
+    pass "daemon death: guard records and alarms once after untrappable loss"
+  else
+    fail "daemon death: guard missed or repeated an untrappable daemon alarm"
   fi
   death_test_stop_home "$home" "$captain_session"
 }
@@ -1047,6 +1112,7 @@ unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
+unit_herdr_command_failure_creates_no_workspace
 unit_herdr_partial_create_recovery
 unit_herdr_error_with_exact_ids_closes_exact
 unit_herdr_run_failure_preserves_unconfirmed_record
@@ -1067,6 +1133,7 @@ unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
 unit_expected_stop_does_not_alarm
 unit_external_daemon_term_alarms
+unit_untrappable_daemon_death_alarms_on_guard
 unit_stop_intent_wins_exit_race
 unit_refresh_and_reconcile_do_not_refire_death_alarm
 unit_refresh_validates_record

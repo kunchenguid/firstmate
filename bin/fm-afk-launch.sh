@@ -161,14 +161,15 @@ fm_afk_launch_entry_cmd() {
 # A short-lived native resetter restores the normal disposition before execing
 # the shell daemon, so its TERM/HUP cleanup traps remain observable.
 fm_afk_launch_daemon_cmd() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 entry resetter
+  local captain_target=$1 captain_backend=$2 entry resetter perl_program
   entry=$(fm_afk_launch_entry_cmd)
   resetter=$(command -v perl 2>/dev/null) || {
     fm_afk_launch_log "perl is required to reset inherited daemon signal dispositions"
     return 1
   }
+  perl_program="\$SIG{TERM} = \"DEFAULT\"; \$SIG{INT} = \"DEFAULT\"; \$SIG{HUP} = \"DEFAULT\"; exec @ARGV or die \"exec: \$!\\n\";"
   printf 'exec %q -e %q -- env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_WEDGE_ALARM_CHANNEL=%q FM_WEDGE_ALARM_EXEC=%q FM_WEDGE_ALARM_TIMEOUT_SECS=%q %q' \
-    "$resetter" '$SIG{TERM} = "DEFAULT"; $SIG{INT} = "DEFAULT"; $SIG{HUP} = "DEFAULT"; exec @ARGV or die "exec: $!\n";' \
+    "$resetter" "$perl_program" \
     "$FM_HOME" "$captain_target" "$captain_backend" "${FM_WEDGE_ALARM_CHANNEL:-}" \
     "${FM_WEDGE_ALARM_EXEC:-}" "${FM_WEDGE_ALARM_TIMEOUT_SECS:-}" "$entry"
 }
@@ -358,6 +359,45 @@ fm_afk_launch_herdr_recover_created() {  # <session> <label>
   return 1
 }
 
+fm_afk_launch_check_dead_daemon() {
+  local owner pid identity current_identity marker record_result
+  [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] || return 0
+  daemon_lock_held_by_live_daemon && return 0
+  owner=$(daemon_lock_owner 2>/dev/null) || return 0
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  fm_afk_death_valid_identity "$identity" || return 0
+  if fm_pid_alive "$pid"; then
+    current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 0
+    [ "$current_identity" != "$identity" ] || return 0
+  fi
+  if fm_afk_stop_intent_matches "$FM_AFK_LAUNCH_STATE" "$pid" "$identity"; then
+    fm_afk_stop_intent_retire "$FM_AFK_LAUNCH_STATE" "$pid" "$identity" || return 1
+    fm_afk_launch_log "expected daemon loss observed (pid=$pid)"
+    return 0
+  fi
+  marker=$(fm_afk_unexpected_exit_path "$FM_AFK_LAUNCH_STATE")
+  fm_afk_unexpected_exit_record "$FM_AFK_LAUNCH_STATE" UNTRAPPABLE "$pid" "$identity"
+  record_result=$?
+  case "$record_result" in
+    0)
+      fm_afk_launch_log "away-mode daemon loss detected (pid=$pid); alarm marker written"
+      "$FM_AFK_LAUNCH_DIR/fm-supervise-daemon.sh" --wedge-alarm-notify \
+        "away-mode daemon exited unexpectedly (signal=UNTRAPPABLE pid=$pid) - see $marker" "$marker"
+      ;;
+    2)
+      return 0
+      ;;
+    *)
+      fm_afk_launch_log "away-mode daemon loss detected (pid=$pid); failed to write alarm marker"
+      "$FM_AFK_LAUNCH_DIR/fm-supervise-daemon.sh" --wedge-alarm-notify \
+        "away-mode daemon exited unexpectedly (signal=UNTRAPPABLE pid=$pid) - durable marker write failed" "$marker"
+      return 1
+      ;;
+  esac
+}
+
 # Reconcile a recorded-but-dead terminal: if a record exists and no live daemon
 # owns it, close the leaked terminal by exact id and drop the record.
 fm_afk_launch_reconcile() {
@@ -365,6 +405,7 @@ fm_afk_launch_reconcile() {
   if daemon_lock_held_by_live_daemon; then
     return 0
   fi
+  fm_afk_launch_check_dead_daemon || return 1
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 0 ]; then
@@ -380,11 +421,14 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" || result=1
+    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
+    "$FM_AFK_LAUNCH_STATE/.supervise-daemon.stop-intent" \
+    "$FM_AFK_LAUNCH_STATE/.supervise-daemon.unexpected-exit" || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged \
+    .supervise-daemon.stop-intent .supervise-daemon.unexpected-exit; do
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -410,6 +454,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   fi
   fm_backend_source herdr || return 1
   fm_backend_herdr_server_ensure "$session" || { fm_afk_launch_log "herdr server not ready for session '$session'"; return 1; }
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend") || return 1
   label=${FM_AFK_LAUNCH_LABEL:-"$FM_AFK_LAUNCH_WS_LABEL-$$-${RANDOM:-0}-$(date '+%s')"}
   out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$FM_HOME" --label "$label" --no-focus 2>/dev/null)
   create_result=$?
@@ -433,7 +478,6 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     }
     IFS=$'\t' read -r wsid pane <<< "$recovered"
   fi
-  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend") || return 1
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
     fm_afk_launch_close_terminal herdr "$session:$pane"
@@ -498,12 +542,14 @@ fm_afk_launch_start() {
     return 0
   fi
 
+  fm_afk_launch_check_dead_daemon || return 1
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
   if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged \
+    .supervise-daemon.stop-intent .supervise-daemon.unexpected-exit; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -556,12 +602,14 @@ fm_afk_launch_start_native() {
     fm_afk_launch_log "daemon already running; refreshed away-mode flag"
     return 0
   fi
+  fm_afk_launch_check_dead_daemon || return 1
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
   if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged \
+    .supervise-daemon.stop-intent .supervise-daemon.unexpected-exit; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -609,7 +657,6 @@ fm_afk_launch_stop() {
       return 1
     fi
     if ! kill -TERM "$pid" 2>/dev/null; then
-      fm_afk_stop_intent_retire "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity" || true
       fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
       result=1
     fi
@@ -624,9 +671,14 @@ fm_afk_launch_stop() {
       return 1
     }
     if [ "$current_identity" = "$pid_identity" ]; then
+      fm_afk_stop_intent_retire "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity" || true
       fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
       return 1
     fi
+  fi
+  if [ -n "$pid" ] \
+    && fm_afk_stop_intent_matches "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity"; then
+    fm_afk_stop_intent_retire "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity" || result=1
   fi
   # (2) Close the daemon's own terminal by exact id.
   if [ "$read_result" -eq 0 ]; then
@@ -656,6 +708,7 @@ fm_afk_launch_main() {
     start-native) fm_afk_launch_start_native ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;
+    check-death) fm_afk_launch_check_dead_daemon ;;
     -h|--help|help) fm_afk_launch_usage ;;
     *) fm_afk_launch_usage >&2; return 2 ;;
   esac

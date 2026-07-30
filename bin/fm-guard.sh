@@ -41,6 +41,18 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 
+if [ -e "$STATE/.afk" ]; then
+  if [ "$READ_ONLY" -eq 1 ]; then
+    if [ -s "$STATE/.supervise-daemon.unexpected-exit" ]; then
+      printf 'CRITICAL: away-mode daemon death alarm is active - see %s\n' \
+        "$STATE/.supervise-daemon.unexpected-exit" >&2
+    fi
+  elif ! "$SCRIPT_DIR/fm-afk-launch.sh" check-death; then
+    printf 'CRITICAL: away-mode daemon liveness reconciliation failed; preserving %s\n' \
+      "$STATE/.afk" >&2
+  fi
+fi
+
 # Deterministic episode key from beacon state: same continuous stale beacon
 # (or continuous absence) shares a key; a recovered-then-restale beacon gets a
 # new mtime and therefore a new episode.
