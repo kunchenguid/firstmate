@@ -17,6 +17,13 @@
 # a terminal handle to its named worktree, so legacy Orca records remain
 # quarantined by refusal rather than receiving an invented binding.
 #
+# A recorded project outside this home's projects directory (FM_PROJECTS_OVERRIDE
+# when set) stays refused unless config/endpoint-binding-recovery-allow holds the
+# exact "<task-id> <metadata-sha256> <canonical-project-path>" line for this
+# unchanged record. That authorization names one record's exact bytes, so it
+# cannot be replayed against a different, later, or edited record, and it
+# relaxes nothing else: every other proof below still has to pass.
+#
 # Usage: fm-endpoint-binding-migrate.sh <task-id>
 set -eu
 
@@ -25,6 +32,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+RECOVERY_ALLOW="$CONFIG/endpoint-binding-recovery-allow"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -82,8 +92,8 @@ meta_core_shape_valid() {
   [ "$(meta_required kind)" != secondmate ]
 }
 
-metadata_endpoint_unique_in_home() {  # <backend> <window> <worktree-id> <terminal>
-  local backend=$1 window=$2 worktree_id=$3 terminal=$4 other
+metadata_endpoint_unique_in_home() {  # <window>
+  local window=$1 other
   for other in "$STATE"/*.meta; do
     [ -e "$other" ] || continue
     [ "$other" != "$META" ] || continue
@@ -91,11 +101,17 @@ metadata_endpoint_unique_in_home() {  # <backend> <window> <worktree-id> <termin
     if grep -Fqx "window=$window" "$other" 2>/dev/null; then
       return 1
     fi
-    if [ "$backend" = orca ]; then
-      [ -z "$worktree_id" ] || ! grep -Fqx "orca_worktree_id=$worktree_id" "$other" 2>/dev/null || return 1
-      [ -z "$terminal" ] || ! grep -Fqx "terminal=$terminal" "$other" 2>/dev/null || return 1
-    fi
   done
+}
+
+# Exactly one unchanged record, named by its own bytes, may recover from a
+# project this home does not contain. Nothing here is remembered or generalized.
+external_project_recovery_authorized() {  # <project-real> <metadata-sha256>
+  [ -d "$CONFIG" ] && [ ! -L "$CONFIG" ] || return 1
+  [ -f "$RECOVERY_ALLOW" ] && [ ! -L "$RECOVERY_ALLOW" ] || return 1
+  [ "$(fm_pr_file_link_count "$RECOVERY_ALLOW")" = 1 ] || return 1
+  case "$(fm_pr_file_mode "$RECOVERY_ALLOW")" in 600|640|644) ;; *) return 1 ;; esac
+  grep -Fqx "$ID $2 $1" "$RECOVERY_ALLOW" 2>/dev/null
 }
 
 legacy_shape_valid_with_binding() {  # <mode>
@@ -268,14 +284,19 @@ PROJECT=$(meta_required project) || { refuse "project identity is missing or amb
 WORKTREE_REAL=$(canonical_dir "$WORKTREE") || { refuse "recorded worktree is unavailable"; exit 1; }
 PROJECT_REAL=$(canonical_dir "$PROJECT") || { refuse "recorded project is unavailable"; exit 1; }
 ROOT_REAL=$(canonical_dir "$FM_ROOT") || { refuse "firstmate code root is unavailable"; exit 1; }
+PROJECTS_REAL=$(canonical_dir "$PROJECTS") || PROJECTS_REAL=
 if [ "$PROJECT_REAL" = "$ROOT_REAL" ]; then
   [ "$HOME_REAL" = "$ROOT_REAL" ] \
     || { refuse "shared code root is not this firstmate home's own project"; exit 1; }
 else
-  case "$PROJECT_REAL" in
-    "$HOME_REAL/projects/"*) ;;
-    *) refuse "recorded project is outside this firstmate home"; exit 1 ;;
-  esac
+  PROJECT_CONTAINED=0
+  if [ -n "$PROJECTS_REAL" ]; then
+    case "$PROJECT_REAL" in "$PROJECTS_REAL"/*) PROJECT_CONTAINED=1 ;; esac
+  fi
+  if [ "$PROJECT_CONTAINED" -ne 1 ]; then
+    external_project_recovery_authorized "$PROJECT_REAL" "$SOURCE_HASH" \
+      || { refuse "recorded project is outside this firstmate home and this exact record is not authorized in $RECOVERY_ALLOW by the line \"$ID $SOURCE_HASH $PROJECT_REAL\""; exit 1; }
+  fi
 fi
 [ "$WORKTREE_REAL" != "$PROJECT_REAL" ] || { refuse "recorded worktree is not isolated from its project"; exit 1; }
 WT_TOP=$(git -C "$WORKTREE_REAL" rev-parse --show-toplevel 2>/dev/null) \
@@ -293,9 +314,7 @@ BRIEF="$DATA/$ID/brief.md"
   || { refuse "task instructions are unavailable or unsafe"; exit 1; }
 
 WINDOW=$(meta_required window) || { refuse "window identity is missing or ambiguous"; exit 1; }
-ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
-ORCA_TERMINAL=$(fm_meta_get "$META" terminal)
-metadata_endpoint_unique_in_home "$BACKEND" "$WINDOW" "$ORCA_WORKTREE_ID" "$ORCA_TERMINAL" \
+metadata_endpoint_unique_in_home "$WINDOW" \
   || { refuse "another local record references the same endpoint"; exit 1; }
 legacy_shape_valid_with_binding "$MODE" \
   || { refuse "record is malformed or backend-inconsistent"; exit 1; }
