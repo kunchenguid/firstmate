@@ -118,6 +118,8 @@ fm_afk_launch_stop_intent_abandon_if_live() {
 
 fm_afk_launch_signal_exit() {
   local code=$1
+  trap - HUP INT TERM
+  fm_lock_release "$FM_AFK_LAUNCH_STATE/${FM_AFK_STOP_INTENT_NAME}.transition.lock" 2>/dev/null || true
   fm_afk_launch_stop_intent_abandon_if_live || true
   exit "$code"
 }
@@ -125,13 +127,6 @@ fm_afk_launch_signal_exit() {
 fm_afk_launch_exit_cleanup() {
   fm_afk_launch_stop_intent_abandon_if_live || true
   fm_afk_launch_lock_release
-}
-
-fm_afk_launch_stop_publisher_alive() {
-  local current_identity
-  fm_pid_alive "$FM_AFK_STOP_INTENT_PUBLISHER_PID" || return 1
-  current_identity=$(fm_pid_identity "$FM_AFK_STOP_INTENT_PUBLISHER_PID" 2>/dev/null) || return 1
-  [ "$current_identity" = "$FM_AFK_STOP_INTENT_PUBLISHER_IDENTITY" ]
 }
 
 fm_afk_launch_lock_owned() {
@@ -406,7 +401,18 @@ fm_afk_launch_check_dead_daemon() {
   local owner pid identity current_identity marker record_result intent_applies=0
   [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] || return 0
   fm_afk_unexpected_exit_read "$FM_AFK_LAUNCH_STATE" && return 0
-  daemon_lock_held_by_live_daemon && return 0
+  if daemon_lock_held_by_live_daemon; then
+    pid=$(daemon_lock_pid 2>/dev/null) || return 1
+    identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+    if fm_afk_stop_intent_read "$FM_AFK_LAUNCH_STATE" \
+      && [ "$FM_AFK_STOP_INTENT_PHASE" = published ] \
+      && [ "$FM_AFK_STOP_INTENT_PID" = "$pid" ] \
+      && [ "$FM_AFK_STOP_INTENT_IDENTITY" = "$identity" ] \
+      && ! fm_afk_stop_intent_publisher_alive; then
+      fm_afk_stop_intent_abandon "$FM_AFK_LAUNCH_STATE" "$pid" "$identity" || return 1
+    fi
+    return 0
+  fi
   fm_afk_start_pending_active "$FM_AFK_LAUNCH_STATE" && return 0
   owner=$(daemon_lock_owner 2>/dev/null || true)
   pid=
@@ -440,7 +446,7 @@ fm_afk_launch_check_dead_daemon() {
           return 0
           ;;
         published)
-          if fm_afk_launch_stop_publisher_alive; then
+          if fm_afk_stop_intent_publisher_alive; then
             return 0
           fi
           fm_afk_stop_intent_abandon "$FM_AFK_LAUNCH_STATE" \
@@ -479,10 +485,10 @@ fm_afk_launch_check_dead_daemon() {
 # owns it, close the leaked terminal by exact id and drop the record.
 fm_afk_launch_reconcile() {
   local read_result
+  fm_afk_launch_check_dead_daemon || return 1
   if daemon_lock_held_by_live_daemon; then
     return 0
   fi
-  fm_afk_launch_check_dead_daemon || return 1
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 0 ]; then
@@ -611,6 +617,7 @@ fm_afk_launch_start() {
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
+  fm_afk_launch_check_dead_daemon || return 1
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     if ! fm_afk_launch_flag_write; then
@@ -621,7 +628,6 @@ fm_afk_launch_start() {
     return 0
   fi
 
-  fm_afk_launch_check_dead_daemon || return 1
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
   if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
     had_afk=1
@@ -676,13 +682,13 @@ fm_afk_launch_start_native() {
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
+  fm_afk_launch_check_dead_daemon || return 1
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
     fm_afk_launch_log "daemon already running; refreshed away-mode flag"
     return 0
   fi
-  fm_afk_launch_check_dead_daemon || return 1
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
   if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
     had_afk=1
@@ -720,6 +726,7 @@ fm_afk_launch_start_native() {
 fm_afk_launch_stop() {
   local pid pid_identity current_identity publisher_pid publisher_identity result=0 read_result afk_cleared=0
   fm_afk_launch_stop_tracking_clear
+  fm_afk_launch_check_dead_daemon || return 1
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then

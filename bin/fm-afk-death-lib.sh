@@ -103,6 +103,13 @@ fm_afk_stop_intent_matches() {  # <state> <pid> <pid-identity>
     && [ "$FM_AFK_STOP_INTENT_IDENTITY" = "$identity" ]
 }
 
+fm_afk_stop_intent_publisher_alive() {
+  local current_identity
+  fm_pid_alive "$FM_AFK_STOP_INTENT_PUBLISHER_PID" || return 1
+  current_identity=$(fm_pid_identity "$FM_AFK_STOP_INTENT_PUBLISHER_PID" 2>/dev/null) || return 1
+  [ "$current_identity" = "$FM_AFK_STOP_INTENT_PUBLISHER_IDENTITY" ]
+}
+
 fm_afk_stop_intent_transition() {  # <state> <pid> <pid-identity> <from-phase> <to-phase>
   local state=$1 pid=$2 identity=$3 from_phase=$4 to_phase=$5 lock result=1
   lock="$state/${FM_AFK_STOP_INTENT_NAME}.transition.lock"
@@ -124,7 +131,28 @@ fm_afk_stop_intent_transition() {  # <state> <pid> <pid-identity> <from-phase> <
 }
 
 fm_afk_stop_intent_consume() {  # <state> <pid> <pid-identity>
-  fm_afk_stop_intent_transition "$1" "$2" "$3" published consumed
+  local state=$1 pid=$2 identity=$3 lock result=1 target_phase=abandoned
+  lock="$state/${FM_AFK_STOP_INTENT_NAME}.transition.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if fm_afk_stop_intent_read "$state" \
+    && [ "$FM_AFK_STOP_INTENT_PID" = "$pid" ] \
+    && [ "$FM_AFK_STOP_INTENT_IDENTITY" = "$identity" ]; then
+    if [ "$FM_AFK_STOP_INTENT_PHASE" = consumed ]; then
+      result=0
+    elif [ "$FM_AFK_STOP_INTENT_PHASE" = published ]; then
+      if fm_afk_stop_intent_publisher_alive; then
+        target_phase=consumed
+      fi
+      if fm_afk_stop_intent_write "$state" "$target_phase" "$pid" "$identity" \
+        "$FM_AFK_STOP_INTENT_PUBLISHER_PID" "$FM_AFK_STOP_INTENT_PUBLISHER_IDENTITY" \
+        "$FM_AFK_STOP_INTENT_RECORDED_AT" \
+        && [ "$target_phase" = consumed ]; then
+        result=0
+      fi
+    fi
+  fi
+  fm_lock_release "$lock" 2>/dev/null || result=1
+  return "$result"
 }
 
 fm_afk_stop_intent_abandon() {  # <state> <pid> <pid-identity>
