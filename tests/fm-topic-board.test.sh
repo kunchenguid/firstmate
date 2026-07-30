@@ -482,6 +482,7 @@ test_claimed_item_with_missing_claimed_at_surfaces_immediately() {
     > "$data/inbox/update-88.json"
 
   (
+    # shellcheck disable=SC2030 # Scoped to this subshell on purpose; read below via the sourced lib.
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT"
     . "$ROOT/bin/fm-topic-lib.sh"
     printf '%s\n' "$(date +%s)" > "$FM_TOPIC_LAST_WAKE"
