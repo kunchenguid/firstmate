@@ -287,6 +287,35 @@ SH
   chmod +x "$1/git"
 }
 
+git_signal_during_staged_fetch() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_fetch=0
+stage=
+for a in "$@"; do
+  [ "$a" = fetch ] && is_fetch=1
+  case "$a" in
+    --git-dir=*/fm-fleet-sync-fetch.*/repository.git)
+      stage=${a#--git-dir=}
+      stage=${stage%/repository.git}
+      ;;
+  esac
+done
+if [ "$is_fetch" = 1 ] && [ -n "$stage" ]; then
+  [ -d "$stage" ] || exit 99
+  printf '%s\n' "$stage" >"${GIT_STAGED_FETCH_SIGNAL_MARKER:?}"
+  kill "-${GIT_STAGED_FETCH_SIGNAL:?}" "${FLEET_SYNC_SIGNAL_TARGET:?}"
+  case "$GIT_STAGED_FETCH_SIGNAL" in
+    INT) exit 130 ;;
+    TERM) exit 143 ;;
+  esac
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
 # Refuse the multi-ref expected-old transaction while recording its exact input.
 # All other git commands, including preservation-ref creation, delegate unchanged.
 git_ref_transaction_refusal() {
@@ -1205,6 +1234,53 @@ test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session() {
   pass "staged fetch avoids newer porcelain and uses one remote session"
 }
 
+test_staged_fetch_signals_clean_scope_and_preserve_caller_traps() {
+  local signal expected home clone fakebin out err marker trap_log stage rc realgit
+  for signal in TERM INT; do
+    case "$signal" in
+      TERM) expected=143 ;;
+      INT) expected=130 ;;
+    esac
+    home=$(new_home)
+    clone=$(build_pair "$home" "staged-fetch-signal-$signal")
+    advance_origin "$home" "staged-fetch-signal-$signal" C1
+    fakebin="$home/fb-staged-fetch-signal"; mkdir -p "$fakebin"
+    git_signal_during_staged_fetch "$fakebin"
+    out="$home/out-staged-fetch-signal"
+    err="$home/err-staged-fetch-signal"
+    marker="$home/staged-fetch-path"
+    trap_log="$home/caller-traps"
+    realgit=$(command -v git)
+
+    set +e
+    PATH="$fakebin:$PATH" REAL_GIT_FOR_TEST="$realgit" \
+    GIT_STAGED_FETCH_SIGNAL="$signal" \
+    GIT_STAGED_FETCH_SIGNAL_MARKER="$marker" \
+    CALLER_TRAP_LOG="$trap_log" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      bash -c '
+        export FLEET_SYNC_SIGNAL_TARGET=$$
+        trap '"'"'printf "TERM\n" >>"$CALLER_TRAP_LOG"; exit 143'"'"' TERM
+        trap '"'"'printf "INT\n" >>"$CALLER_TRAP_LOG"; exit 130'"'"' INT
+        trap '"'"'printf "EXIT\n" >>"$CALLER_TRAP_LOG"'"'"' EXIT
+        . "$1" "$2"
+      ' _ "$ROOT/bin/fm-fleet-sync.sh" "$clone" >"$out" 2>"$err"
+    rc=$?
+    set -e
+
+    [ "$rc" -eq "$expected" ] \
+      || fail "$signal during staged fetch exited $rc instead of $expected"
+    assert_present "$marker" "$signal staged fetch did not expose its scoped directory"
+    stage=$(cat "$marker")
+    [ ! -e "$stage" ] || fail "$signal left staged fetch directory $stage"
+    assert_grep "$signal" "$trap_log" \
+      "$signal staged cleanup replaced the caller's signal trap"
+    assert_grep "EXIT" "$trap_log" \
+      "$signal staged cleanup replaced the caller's EXIT trap"
+  done
+  pass "TERM and INT clean staged fetch scope and preserve caller traps"
+}
+
 test_on_default_clean_behind_fast_forwards() {
   local home clone out
   home=$(new_home)
@@ -1543,6 +1619,7 @@ test_negative_refspec_preserves_excluded_tracking_refs
 test_custom_refspec_updates_and_prunes_only_its_destinations
 test_auto_follow_tags_are_preserved
 test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session
+test_staged_fetch_signals_clean_scope_and_preserve_caller_traps
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped

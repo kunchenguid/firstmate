@@ -316,9 +316,54 @@ copy_origin_config_to_stage() {
   done <"$config_dump"
 }
 
+staged_fetch_scope_cleanup() {
+  if [ -n "${stage_root:-}" ]; then
+    rm -rf -- "$stage_root" 2>/dev/null || true
+    stage_root=
+  fi
+}
+
+staged_fetch_scope_restore_traps() {
+  trap - EXIT TERM INT
+  [ -z "$saved_exit_trap" ] || eval "$saved_exit_trap"
+  [ -z "$saved_term_trap" ] || eval "$saved_term_trap"
+  [ -z "$saved_int_trap" ] || eval "$saved_int_trap"
+}
+
+staged_fetch_scope_finish() {
+  staged_fetch_scope_cleanup
+  staged_fetch_scope_restore_traps
+}
+
+staged_fetch_scope_exit() {
+  local exit_rc=$1
+  staged_fetch_scope_cleanup
+  trap - EXIT TERM INT
+  if [ -n "$saved_exit_trap" ]; then
+    if (
+      eval "$saved_exit_trap"
+      exit "$exit_rc"
+    ); then
+      :
+    else
+      :
+    fi
+  fi
+  exit "$exit_rc"
+}
+
+staged_fetch_scope_signal() {
+  local signal=$1 signal_rc=$2
+  staged_fetch_scope_cleanup
+  staged_fetch_scope_restore_traps
+  kill -s "$signal" "$$"
+  return "$signal_rc"
+}
+
 fetch_and_publish_configured_refs() {
   local git_dir stage_root stage before after changes config_dump
   local output rc old_oid new_oid ref
+  local saved_exit_trap saved_term_trap saved_int_trap
   local -a fetched_refs=()
 
   FETCH_OUTPUT=
@@ -327,8 +372,16 @@ fetch_and_publish_configured_refs() {
     FETCH_OUTPUT="cannot resolve Git directory"
     return 1
   }
+  stage_root=
+  saved_exit_trap=$(trap -p EXIT)
+  saved_term_trap=$(trap -p TERM)
+  saved_int_trap=$(trap -p INT)
+  trap 'staged_fetch_scope_exit "$?"' EXIT
+  trap 'staged_fetch_scope_signal TERM 143' TERM
+  trap 'staged_fetch_scope_signal INT 130' INT
   stage_root=$(mktemp -d "$git_dir/fm-fleet-sync-fetch.XXXXXX") || {
     FETCH_OUTPUT="cannot create staged fetch repository"
+    staged_fetch_scope_finish
     return 1
   }
   stage="$stage_root/repository.git"
@@ -339,33 +392,33 @@ fetch_and_publish_configured_refs() {
 
   if ! output=$(git clone --quiet --mirror --shared "$PROJ" "$stage" 2>&1); then
     FETCH_OUTPUT=$output
-    rm -rf -- "$stage_root"
+    staged_fetch_scope_finish
     return 1
   fi
   if ! git -C "$PROJ" config --null --get-regexp '^remote\.origin\.' >"$config_dump"; then
     FETCH_OUTPUT="cannot read origin configuration"
-    rm -rf -- "$stage_root"
+    staged_fetch_scope_finish
     return 1
   fi
   if ! copy_origin_config_to_stage "$stage" "$config_dump"; then
     FETCH_OUTPUT="cannot stage origin configuration"
-    rm -rf -- "$stage_root"
+    staged_fetch_scope_finish
     return 1
   fi
   if ! snapshot_staged_refs "$stage" >"$before"; then
     FETCH_OUTPUT="cannot snapshot refs before staged fetch"
-    rm -rf -- "$stage_root"
+    staged_fetch_scope_finish
     return 1
   fi
   if ! output=$(git -C "$PROJ" --git-dir="$stage" fetch --quiet --prune origin 2>&1); then
     FETCH_OUTPUT=$output
-    rm -rf -- "$stage_root"
+    staged_fetch_scope_finish
     return 1
   fi
   if ! snapshot_staged_refs "$stage" >"$after" \
       || ! build_staged_ref_changes "$before" "$after" "$changes"; then
     FETCH_OUTPUT="cannot inspect staged fetch result"
-    rm -rf -- "$stage_root"
+    staged_fetch_scope_finish
     return 1
   fi
 
@@ -378,7 +431,7 @@ fetch_and_publish_configured_refs() {
     if ! output=$(git -C "$PROJ" fetch --quiet --no-tags --no-write-fetch-head \
         --refmap= "$stage" "${fetched_refs[@]}" 2>&1); then
       FETCH_OUTPUT=$output
-      rm -rf -- "$stage_root"
+      staged_fetch_scope_finish
       return 1
     fi
   fi
@@ -388,7 +441,7 @@ fetch_and_publish_configured_refs() {
   else
     rc=$?
   fi
-  rm -rf -- "$stage_root"
+  staged_fetch_scope_finish
   return "$rc"
 }
 
