@@ -1235,11 +1235,11 @@ test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session() {
 }
 
 test_staged_fetch_signals_clean_scope_and_preserve_caller_traps() {
-  local signal expected home clone fakebin out err marker trap_log stage rc realgit
+  local signal signal_status home clone fakebin out err marker trap_log stage rc realgit
   for signal in TERM INT; do
     case "$signal" in
-      TERM) expected=143 ;;
-      INT) expected=130 ;;
+      TERM) signal_status=143 ;;
+      INT) signal_status=130 ;;
     esac
     home=$(new_home)
     clone=$(build_pair "$home" "staged-fetch-signal-$signal")
@@ -1260,21 +1260,38 @@ test_staged_fetch_signals_clean_scope_and_preserve_caller_traps() {
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
       bash -c '
         export FLEET_SYNC_SIGNAL_TARGET=$$
+        sleep 1 &
+        caller_child=$!
         trap '"'"'printf "TERM\n" >>"$CALLER_TRAP_LOG"; exit 143'"'"' TERM
         trap '"'"'printf "INT\n" >>"$CALLER_TRAP_LOG"; exit 130'"'"' INT
-        trap '"'"'printf "EXIT\n" >>"$CALLER_TRAP_LOG"'"'"' EXIT
+        trap '"'"'
+          printf "STATUS:%s\n" "$?" >>"$CALLER_TRAP_LOG"
+          if wait "$caller_child"; then
+            printf "WAITED\n" >>"$CALLER_TRAP_LOG"
+          else
+            printf "WAIT-FAILED\n" >>"$CALLER_TRAP_LOG"
+          fi
+          printf "EXIT\n" >>"$CALLER_TRAP_LOG"
+          exit 77
+        '"'"' EXIT
         . "$1" "$2"
       ' _ "$ROOT/bin/fm-fleet-sync.sh" "$clone" >"$out" 2>"$err"
     rc=$?
     set -e
 
-    [ "$rc" -eq "$expected" ] \
-      || fail "$signal during staged fetch exited $rc instead of $expected"
+    [ "$rc" -eq 77 ] \
+      || fail "$signal during staged fetch discarded caller EXIT status 77 (got $rc)"
     assert_present "$marker" "$signal staged fetch did not expose its scoped directory"
     stage=$(cat "$marker")
     [ ! -e "$stage" ] || fail "$signal left staged fetch directory $stage"
     assert_grep "$signal" "$trap_log" \
       "$signal staged cleanup replaced the caller's signal trap"
+    assert_grep "STATUS:$signal_status" "$trap_log" \
+      "$signal staged cleanup changed caller EXIT status input"
+    assert_grep "WAITED" "$trap_log" \
+      "$signal caller EXIT trap could not wait on its current-shell child"
+    assert_no_grep "WAIT-FAILED" "$trap_log" \
+      "$signal caller EXIT trap ran outside the current shell"
     assert_grep "EXIT" "$trap_log" \
       "$signal staged cleanup replaced the caller's EXIT trap"
   done

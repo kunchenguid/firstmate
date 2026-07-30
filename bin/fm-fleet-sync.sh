@@ -330,32 +330,41 @@ staged_fetch_scope_restore_traps() {
   [ -z "$saved_int_trap" ] || eval "$saved_int_trap"
 }
 
+staged_fetch_scope_restore_signal_traps() {
+  trap - TERM INT
+  [ -z "$saved_term_trap" ] || eval "$saved_term_trap"
+  [ -z "$saved_int_trap" ] || eval "$saved_int_trap"
+}
+
 staged_fetch_scope_finish() {
   staged_fetch_scope_cleanup
   staged_fetch_scope_restore_traps
+}
+
+staged_fetch_scope_status() {
+  return "$1"
 }
 
 staged_fetch_scope_exit() {
   local exit_rc=$1
   staged_fetch_scope_cleanup
   trap - EXIT TERM INT
+  [ -z "$saved_term_trap" ] || eval "$saved_term_trap"
+  [ -z "$saved_int_trap" ] || eval "$saved_int_trap"
   if [ -n "$saved_exit_trap" ]; then
-    if (
-      eval "$saved_exit_trap"
-      exit "$exit_rc"
-    ); then
-      :
+    eval "$saved_exit_trap"
+    if staged_fetch_scope_status "$exit_rc"; then
+      eval "$saved_exit_action"
     else
-      :
+      eval "$saved_exit_action"
     fi
   fi
-  exit "$exit_rc"
+  return "$exit_rc"
 }
 
 staged_fetch_scope_signal() {
   local signal=$1 signal_rc=$2
-  staged_fetch_scope_cleanup
-  staged_fetch_scope_restore_traps
+  staged_fetch_scope_restore_signal_traps
   kill -s "$signal" "$$"
   return "$signal_rc"
 }
@@ -363,7 +372,7 @@ staged_fetch_scope_signal() {
 fetch_and_publish_configured_refs() {
   local git_dir stage_root stage before after changes config_dump
   local output rc old_oid new_oid ref
-  local saved_exit_trap saved_term_trap saved_int_trap
+  local saved_exit_trap saved_exit_action saved_term_trap saved_int_trap
   local -a fetched_refs=()
 
   FETCH_OUTPUT=
@@ -376,6 +385,11 @@ fetch_and_publish_configured_refs() {
   saved_exit_trap=$(trap -p EXIT)
   saved_term_trap=$(trap -p TERM)
   saved_int_trap=$(trap -p INT)
+  saved_exit_action=
+  if [ -n "$saved_exit_trap" ]; then
+    eval "set -- ${saved_exit_trap#trap -- }"
+    saved_exit_action=$1
+  fi
   trap 'staged_fetch_scope_exit "$?"' EXIT
   trap 'staged_fetch_scope_signal TERM 143' TERM
   trap 'staged_fetch_scope_signal INT 130' INT
