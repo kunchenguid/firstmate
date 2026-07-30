@@ -1011,6 +1011,13 @@ EOF
         rm -f "$ssf" "$ewf"
       fi
       task=$(window_to_task "$w" "$STATE")
+      # Reconcile a redrawn pane that still declares the wait. A still-live parked
+      # crew classifies as none rather than paused (pause_state_class recovers the
+      # paused class only for a confidently dead agent), so the fallthrough keeps
+      # existing pause tracking instead of clearing it: dropping the re-surface
+      # throttle on a redraw would let each new hash hand the next stable stale
+      # another notice inside the same PAUSE_RESURFACE_SECS window. A crew that is
+      # working again, no longer parked, or busy still clears its tracking.
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused)  handle_paused_stale "$w" "$task" "$h" ;;
