@@ -65,12 +65,11 @@
 #       An already-posted obligation is a silent success; an obligation left in
 #       delivery-posting by a crash is REFUSED rather than posted again.
 #
-#   fm-public-followup.sh record-posted <obligation-id> --attempt <n>
-#         [--chunks <n>]
+#   fm-public-followup.sh record-posted <obligation-id> --attempt <n> --chunks <n>
 #       Close an obligation whose post is known to have landed on exactly
-#       attempt <n>, without posting anything. This is the late-receipt path: use
-#       it when a post succeeded but its receipt was lost, never to paper over an
-#       unknown outcome.
+#       attempt <n> with exactly <n> messages, without posting anything. This is
+#       the late-receipt path: use it when a post succeeded but its receipt was
+#       lost, never to paper over an unknown outcome.
 #
 #   fm-public-followup.sh guard-work <work-home-id> <work-id>
 #       Exit 3 when this home has an unresolved public commitment bound to that
@@ -387,9 +386,17 @@ cmd_consume() {
       continue
     fi
 
-    printf 'accepted %s\n' "$(now_rfc3339)" \
-      | fmx_private_artifact_publish_stdin "$consumed_dir" "$event_id" 600 2>/dev/null || true
-    rm -f -- "$file" 2>/dev/null || true
+    if ! printf 'accepted %s\n' "$(now_rfc3339)" \
+        | fmx_private_artifact_publish_stdin "$consumed_dir" "$event_id" 600 2>/dev/null; then
+      printf 'accepted %s: consumed ledger could not be recorded; event retained for reconciliation\n' "$event_id"
+      consume_rc=1
+      continue
+    fi
+    if ! rm -f -- "$file" 2>/dev/null; then
+      printf 'accepted %s: consumed ledger recorded but event could not be removed; event retained for reconciliation\n' "$event_id"
+      consume_rc=1
+      continue
+    fi
 
     delivery=$(printf '%s' "$out" | jq -r '.task.public_followup.delivery.state // empty' 2>/dev/null)
     if [ "$delivery" = ready ]; then
@@ -529,7 +536,7 @@ cmd_deliver() {
       ;;
     ready|retry-due|context-blocked|unknown|partial) ;;
     delivery-posting)
-      die "obligation '$id' is mid-delivery on attempt $attempt: a previous post was started and its outcome was never recorded. Confirm whether that post landed, then close it with 'record-posted $id --attempt $attempt' or reopen it for retry. Posting again here could duplicate the public reply." 1
+      die "obligation '$id' is mid-delivery on attempt $attempt: a previous post was started and its outcome was never recorded. Confirm whether that post landed, then close it with 'record-posted $id --attempt $attempt --chunks <exact-count>' or reopen it for retry. Posting again here could duplicate the public reply." 1
       ;;
     pending-work)
       die "obligation '$id' is still waiting on its bound work; nothing to deliver yet" 1
@@ -603,7 +610,7 @@ EOF
       printf 'delivered %s request=%s platform=%s chunks=%s\n' "$id" "$request" "$platform" "$chunks"
       return 0
     fi
-    die "the public reply for '$id' POSTED but its receipt could not be recorded; close it with 'record-posted $id --attempt $attempt' before any retry, or the thread will get a second reply" 1
+    die "the public reply for '$id' POSTED but its receipt could not be recorded; close it with 'record-posted $id --attempt $attempt --chunks <exact-count>' before any retry, or the thread will get a second reply" 1
   fi
 
   case "$rc" in
@@ -625,7 +632,7 @@ EOF
 # --- subcommand: record-posted ---------------------------------------------
 
 cmd_record_posted() {
-  local id=${1:-} attempt='' chunks=1
+  local id=${1:-} attempt='' chunks=''
   [ -n "$id" ] || { usage; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -638,7 +645,8 @@ cmd_record_posted() {
   done
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
   case "$attempt" in ''|*[!0-9]*) die "--attempt <n> is required and must be an integer" ;; esac
-  case "$chunks" in ''|*[!0-9]*|0) chunks=1 ;; esac
+  case "$chunks" in ''|*[!0-9]*) die "--chunks <n> is required and must be a positive integer" ;; esac
+  [ "$chunks" -ge 1 ] 2>/dev/null || die "--chunks <n> is required and must be a positive integer"
   fm_pf_relay_active "$FM_HOME" || die "the relay is not active for this home" 1
   require_tools
 

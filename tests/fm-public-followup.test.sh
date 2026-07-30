@@ -452,10 +452,15 @@ test_late_receipt_closes_the_exact_attempt_without_reposting() {
              | .[0].public_followup.delivery.attempt_count')
   [ "$attempt" = 1 ] || fail "the failed attempt must be recorded as attempt 1, got '$attempt'"
 
+  expect_failure "a late receipt must include its exact message count" \
+    run_pf "$home" record-posted pf-late --attempt 1
+  assert_contains "$EXPECT_OUT" "--chunks <n> is required" \
+    "a late receipt without a message count must be refused"
+
   # The post actually landed; its receipt was simply lost. Close the exact attempt
   # without sending anything else.
   : > "$log"
-  out=$(FAKE_CURL_LOG="$log" run_pf "$home" record-posted pf-late --attempt 1) \
+  out=$(FAKE_CURL_LOG="$log" run_pf "$home" record-posted pf-late --attempt 1 --chunks 1) \
     || fail "recording a late receipt for the exact attempt must succeed"
   assert_contains "$out" "recorded pf-late attempt=1" "the late receipt must name its attempt"
   posts=$(followup_posts "$log")
@@ -463,8 +468,26 @@ test_late_receipt_closes_the_exact_attempt_without_reposting() {
   [ "$(task_state "$home" pf-late)" = 'done' ] || fail "a validated late receipt must close the commitment"
 
   FAKE_CURL_LOG="$log" expect_failure "a receipt for a different attempt must be refused" \
-    run_pf "$home" record-posted pf-late --attempt 9
+    run_pf "$home" record-posted pf-late --attempt 9 --chunks 1
   pass "a late success receipt closes the exact attempt with no second post, and a mismatched attempt is refused"
+}
+
+test_typed_terminal_clear_only_removes_legacy_link() {
+  local home meta out
+  home=$(make_home typed-clear)
+  meta="$home/state/work-clear.meta"
+  printf '%s\n' 'status=working' 'x_request=req-clear' 'x_request_ts=1700000000' \
+    'x_followups=2' 'x_platform=discord' 'x_reply_max_chars=1900' > "$meta"
+
+  out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-x-followup.sh" --clear work-clear) \
+    || fail "the typed terminal clear transition must succeed"
+  [ "$out" = work-clear ] || fail "the clear-only transition must identify the task"
+  assert_grep 'status=working' "$meta" "clear-only transition must preserve unrelated task metadata"
+  assert_no_grep '^x_request=' "$meta" "clear-only transition must remove the request link"
+  assert_no_grep '^x_followups=' "$meta" "clear-only transition must remove the follow-up counter"
+  assert_no_grep '^x_platform=' "$meta" "clear-only transition must remove platform metadata"
+  pass "typed terminal cleanup clears the legacy link without posting"
 }
 
 # A crash between the post and its receipt is the one case where we cannot know
@@ -767,6 +790,7 @@ test_invalid_events_are_refused_and_quarantined
 test_relay_failure_holds_without_false_completion
 test_dry_run_does_not_close_commitment
 test_late_receipt_closes_the_exact_attempt_without_reposting
+test_typed_terminal_clear_only_removes_legacy_link
 test_interrupted_delivery_refuses_to_repost
 test_outward_delivery_stays_with_the_owning_home
 test_private_context_survives_inbox_cleanup
