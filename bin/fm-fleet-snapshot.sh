@@ -837,7 +837,7 @@ else
 fi
 
 registry_secondmates_json() {
-  local reg="$DATA/secondmates.md" out rc reason mode script parse_filter output_filter
+  local hidden_ids=${1:-'[]'} reg="$DATA/secondmates.md" out rc reason mode script parse_filter output_filter
   if [ ! -f "$reg" ]; then
     jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
       '{present:false,available:true,complete:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
@@ -859,6 +859,7 @@ registry_secondmates_json() {
     observed=$6
     parse_filter=$7
     output_filter=$8
+    hidden_ids=$9
     content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f" || exit 3; printf "\036") || exit 3
     content=${content%$'\036'}
     bytes=$(printf "%s" "$content" | LC_ALL=C wc -c | tr -d " ")
@@ -886,7 +887,7 @@ registry_secondmates_json() {
     else
       lines_in_window=0
     fi
-    records=$(printf "%s\n" "$window" | jq -Rn "$parse_filter") || exit 3
+    records=$(printf "%s\n" "$window" | jq -Rn --argjson hidden "$hidden_ids" "$parse_filter") || exit 3
     records_in_window=$(printf "%s" "$records" | jq "length") || exit 3
     records_truncated=false
     if [ "$records_in_window" -gt "$max_records" ]; then records_truncated=true; fi
@@ -910,6 +911,7 @@ BASH
            registry_error:(if $home == null or ($home.home | length) == 0 then "registry entry has no home" else null end)} ]
       | group_by(.id)
       | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
+      | map(select(.id as $id | $hidden | index($id) | not))
 JQ
   )
   output_filter=$(cat <<'JQ'
@@ -928,7 +930,7 @@ JQ
   out=$(run_timed "$FM_SNAPSHOT_REGISTRY_TIMEOUT" bash -c "$script" \
     fm-secondmate-registry "$reg" "$FM_SNAPSHOT_REGISTRY_LINES" \
     "$FM_SNAPSHOT_REGISTRY_BYTES" "$FM_SNAPSHOT_REGISTRY_RECORDS" "$reg" "$SNAPSHOT_NOW" \
-    "$parse_filter" "$output_filter" 2>/dev/null)
+    "$parse_filter" "$output_filter" "$hidden_ids" 2>/dev/null)
   rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e '
     .available == true and (.records | type) == "array"
@@ -1137,15 +1139,11 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 }
 
 secondmate_current_json() {  # <parent-tasks-json> <hidden-ids-json>
-  local tasks=$1 hidden_ids=$2 registry registry_records union rows total_registered total shown truncated
+  local tasks=$1 hidden_ids=$2 registry union rows total_registered total shown truncated
   local row id home registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
-  registry=$(registry_secondmates_json) || return 1
-  registry_records=$(printf '%s' "$registry" | jq -c '.records // []') || return 1
-  registry_records=$(filter_hidden_id_rows "$hidden_ids" "$registry_records") || return 1
-  registry=$(jq -n --argjson registry "$registry" --argjson records "$registry_records" \
-    '$registry | .records = $records') || return 1
+  registry=$(registry_secondmates_json "$hidden_ids") || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
     ($registry.records // []) as $registered
     | (($registered | map(.id)) // []) as $registered_ids

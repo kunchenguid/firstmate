@@ -184,6 +184,23 @@ test_fleet_snapshot_include_backlog_keeps_rows() {
   pass "fleet snapshot --include-backlog retains backlogged rows with tags"
 }
 
+test_hidden_secondmates_do_not_consume_registry_cap() {
+  local home snap
+  home=$(new_home registry-cap)
+  snap=$(FM_HOME="$home" FM_SNAPSHOT_REGISTRY_RECORDS=1 "$SNAPSHOT" --json)
+
+  printf '%s' "$snap" | jq -e '
+    (.secondmate_current.registry.records | map(.id)) == ["defer-later"]
+    and (.secondmate_current.registry.records_in_window == 1)
+    and (.secondmate_current.registry.records_truncated == false)
+    and (.secondmate_current.registry.complete == true)
+    and (.secondmate_current.records | map(.id)) == ["defer-later"]
+  ' >/dev/null \
+    || fail "hidden secondmate consumed the visible registry cap or truncation accounting"
+
+  pass "hidden secondmates are filtered before registry bounds and accounting"
+}
+
 test_lib_predicate_helpers() {
   # shellcheck source=bin/fm-tasks-axi-lib.sh
   . "$ROOT/bin/fm-tasks-axi-lib.sh"
@@ -222,6 +239,7 @@ test_include_backlog_shows_everything
 test_empty_backlog_mode_is_explicit
 test_fleet_snapshot_hides_backlogged_by_default
 test_fleet_snapshot_include_backlog_keeps_rows
+test_hidden_secondmates_do_not_consume_registry_cap
 test_lib_predicate_helpers
 
 echo "ALL PASS: fm-backlog-list / hidden backlog category"
