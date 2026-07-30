@@ -16,27 +16,19 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
-lock_is_in_ancestry() {
-  local lock_pid pid=$$ _
-  [ -f "$STATE/.lock" ] || return 1
-  IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
-  case "$lock_pid" in
-    ''|*[!0-9]*|1) return 1 ;;
-  esac
-  kill -0 "$lock_pid" 2>/dev/null || return 1
-  for _ in 1 2 3 4 5 6 7 8; do
-    [ "$pid" = "$lock_pid" ] && return 0
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
-  done
-  return 1
-}
-
-lock_is_in_ancestry && exit 0
+# Suppress the nudge once this harness session already owns the home lock.
+# Delegates to the shared session-lock identity contract so this hook, the
+# lock acquirer, and the Stop auto-arm all resolve "does this process descend
+# from the lock-owning harness?" identically across platforms (the prior
+# inline ps/kill walk silently failed closed on Git Bash/MSYS, where the
+# harness is a native Windows process the POSIX ancestry walk cannot reach).
+fm_session_lock_owned_by_self "$STATE" && exit 0
 nudge=
 fm_operational_input_encode session-start \
   "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \

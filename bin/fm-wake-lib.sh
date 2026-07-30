@@ -13,6 +13,22 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
+# The lock protocol below publishes ownership with `ln -s` and reads it back
+# with readlink / -L. On Git Bash/MSYS/Cygwin, `ln -s` silently creates a
+# directory COPY (not a symlink) unless MSYS requests symlink emulation, which
+# turns fm_lock_try_create into a spin that never converges. Native symlinks
+# need admin or Developer Mode (denied here as "Operation not permitted"), but
+# the privilege-free `.lnk` shortcut emulation works and MSYS readers resolve
+# it transparently, so default to it when the operator has not chosen a mode.
+# Only the creator needs this; readers resolve either style regardless.
+case "$_FM_UNAME" in
+  MINGW*|MSYS*|CYGWIN*)
+    case " ${MSYS:-} " in
+      *" winsymlinks:"*) : ;;  # respect an explicitly chosen mode
+      *) export MSYS="${MSYS:+$MSYS }winsymlinks:lnk" ;;
+    esac
+    ;;
+esac
 mkdir -p "$STATE"
 
 fm_current_pid() {
