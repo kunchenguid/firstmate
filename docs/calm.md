@@ -4,7 +4,10 @@ Calm is a Pi-only conversation presentation toggle.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place, and no separate Calm status row is added.
-The waves fill the usable width, the boat travels between both edges, every resize reflows it without wrapping, and it disappears when the run settles, aborts, or fails.
+The water fills the usable width in standard ANSI blue and the complete boat is standard ANSI yellow.
+The boat is deliberately calm: it moves one column every 880ms, while the water ripples on its own faster cadence so the surface stays alive between boat steps.
+Its mainsail is directional, showing `<|` while travelling right and `|>` while travelling left, and it flips on the exact frame the boat turns at either edge.
+Every resize reflows the sprite without wrapping, and it disappears when the run settles, aborts, or fails.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, the shells for Pi's seven built-in tools, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
