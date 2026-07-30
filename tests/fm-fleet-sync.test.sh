@@ -14,7 +14,11 @@
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
-# It also pins the orphaned .git/packed-refs.lock recovery in remote publication
+# It also pins configured fetch mappings and pruning through isolated staged
+# fetches, compatibility with Git versions that predate fetch --porcelain, one
+# remote fetch session per project, and tag auto-follow behavior.
+#
+# The orphaned .git/packed-refs.lock recovery in fetched-ref publication
 # (fetch_with_packed_refs_lock_guard, backed by bin/fm-lock-lib.sh's shared
 # staleness proof): a provably-stale lock is retried then removed and the clone
 # syncs (with a "recovered:" summary on stdout so a session-start refresh, which
@@ -141,7 +145,7 @@ run_sync() {
 
 # build_packed_prunable <home> <name>: like build_pair, but the clone has PACKED
 # refs plus a local `feature` branch tracking a since-deleted origin/feature, so
-# safe remote-head publication must rewrite packed-refs, which an orphaned
+# safe fetched-ref publication must rewrite packed-refs, which an orphaned
 # .git/packed-refs.lock blocks with Git's "Unable to create
 # '...packed-refs.lock': File exists". origin/main is advanced by one commit so a
 # successful sync fast-forwards. Echoes the clone path.
@@ -249,6 +253,34 @@ if [ "$is_fetch" = 1 ] && [ "$has_empty_refmap" = 1 ]; then
       refs/remotes/origin/main refs/heads/main
   fi
   exit "$rc"
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+git_staged_fetch_compatibility_audit() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_fetch=0
+for a in "$@"; do
+  [ "$a" = --porcelain ] && {
+    echo "fetch --porcelain is unavailable" >&2
+    exit 129
+  }
+  [ "$a" = ls-remote ] && {
+    echo "ls-remote adds an unexpected remote session" >&2
+    exit 129
+  }
+  [ "$a" = fetch ] && is_fetch=1
+done
+if [ "$is_fetch" = 1 ]; then
+  kind=local
+  for a in "$@"; do
+    [ "$a" = origin ] && kind=remote
+  done
+  printf 'fetch\t%s\t%s\n' "$kind" "$*" >> "${GIT_FETCH_AUDIT_LOG:?}"
 fi
 exec "$real" "$@"
 SH
@@ -726,7 +758,7 @@ test_prefetch_symbolic_remote_tracking_ref_does_not_write_through() {
   assert_contains "$out" "symbolic remote-tracking ref refs/remotes/origin/main" \
     "pre-fetch symbolic remote-tracking ref was not refused"
   [ "$(head_sha "$clone")" = "$old" ] \
-    || fail "destination-free fetch wrote through the symbolic remote-tracking ref"
+    || fail "isolated staged fetch wrote through the symbolic remote-tracking ref"
   [ "$(git -C "$clone" symbolic-ref refs/remotes/origin/main)" = refs/heads/main ] \
     || fail "symbolic remote-tracking ref was replaced"
   [ "$(git -C "$clone" rev-parse refs/heads/main)" != "$remote" ] \
@@ -1039,6 +1071,138 @@ test_prunes_gone_branch_during_ordinary_sync() {
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
     || fail "ordinary pruning path did not retain fast-forward behavior"
   pass "ordinary gone-branch pruning still works"
+}
+
+test_single_branch_refspec_preserves_out_of_scope_tracking_refs() {
+  local home clone work out
+  home=$(new_home)
+  clone=$(build_pair "$home" single-branch-refspec)
+  work="$home/work-single-branch-refspec"
+  git -C "$work" push -q origin main:refs/heads/feature
+  git -C "$clone" fetch -q origin
+  git -C "$clone" branch -q --track retained-feature origin/feature
+  git -C "$clone" config --unset-all remote.origin.fetch
+  git -C "$clone" config --add remote.origin.fetch \
+    '+refs/heads/main:refs/remotes/origin/main'
+  git -C "$work" push -q origin --delete feature
+  advance_origin "$home" single-branch-refspec C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "single-branch-refspec: synced" \
+    "single-branch configured fetch did not update main"
+  git -C "$clone" show-ref --verify --quiet refs/remotes/origin/feature \
+    || fail "single-branch fetch pruned an out-of-scope remote-tracking ref"
+  git -C "$clone" show-ref --verify --quiet refs/heads/retained-feature \
+    || fail "single-branch fetch pruned a branch whose upstream was out of scope"
+  pass "single-branch refspecs preserve out-of-scope tracking refs"
+}
+
+test_negative_refspec_preserves_excluded_tracking_refs() {
+  local home clone work out
+  home=$(new_home)
+  clone=$(build_pair "$home" negative-refspec)
+  work="$home/work-negative-refspec"
+  git -C "$work" push -q origin main:refs/heads/private
+  git -C "$clone" fetch -q origin
+  git -C "$clone" branch -q --track retained-private origin/private
+  git -C "$clone" config --unset-all remote.origin.fetch
+  git -C "$clone" config --add remote.origin.fetch \
+    '+refs/heads/*:refs/remotes/origin/*'
+  git -C "$clone" config --add remote.origin.fetch '^refs/heads/private'
+  git -C "$work" push -q origin --delete private
+  advance_origin "$home" negative-refspec C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "negative-refspec: synced" \
+    "negative configured fetch did not update included refs"
+  git -C "$clone" show-ref --verify --quiet refs/remotes/origin/private \
+    || fail "negative refspec did not protect its excluded remote-tracking ref"
+  git -C "$clone" show-ref --verify --quiet refs/heads/retained-private \
+    || fail "negative refspec allowed an excluded upstream branch to be pruned"
+  pass "negative refspecs protect excluded tracking refs from pruning"
+}
+
+test_custom_refspec_updates_and_prunes_only_its_destinations() {
+  local home clone work remote out first
+  home=$(new_home)
+  clone=$(build_pair "$home" custom-refspec)
+  work="$home/work-custom-refspec"
+  remote="$home/remotes/custom-refspec.git"
+  first=$(git -C "$work" rev-parse main)
+  git -C "$remote" update-ref refs/pull/1/head "$first"
+  git -C "$clone" config --add remote.origin.fetch \
+    '+refs/pull/*/head:refs/remotes/origin/pr/*'
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "custom-refspec: already current" \
+    "custom refspec fetch changed the default-branch outcome"
+  [ "$(git -C "$clone" rev-parse refs/remotes/origin/pr/1)" = "$first" ] \
+    || fail "custom pull-request refspec was not published"
+  git -C "$clone" branch -q --track pr-one origin/pr/1
+  git -C "$remote" update-ref -d refs/pull/1/head
+  advance_origin "$home" custom-refspec C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "custom-refspec: pruned pr-one" \
+    "custom refspec deletion did not drive ordinary gone-upstream pruning"
+  ! git -C "$clone" show-ref --verify --quiet refs/remotes/origin/pr/1 \
+    || fail "custom refspec destination was not pruned"
+  ! git -C "$clone" show-ref --verify --quiet refs/heads/pr-one \
+    || fail "branch tracking a pruned custom destination was retained"
+  pass "custom refspec destinations update and prune with configured semantics"
+}
+
+test_auto_follow_tags_are_preserved() {
+  local home clone work out tag_oid
+  home=$(new_home)
+  clone=$(build_pair "$home" auto-follow-tags)
+  work="$home/work-auto-follow-tags"
+  advance_origin "$home" auto-follow-tags C1
+  git -C "$work" tag release
+  git -C "$work" push -q origin refs/tags/release
+  tag_oid=$(git -C "$work" rev-parse refs/tags/release)
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "auto-follow-tags: synced" \
+    "tag auto-follow fixture did not sync its default branch"
+  [ "$(git -C "$clone" rev-parse refs/tags/release)" = "$tag_oid" ] \
+    || fail "configured fetch lost ordinary tag auto-follow behavior"
+  git -C "$work" push -q origin --delete refs/tags/release
+
+  run_sync "$home" "$clone" >/dev/null
+
+  git -C "$clone" show-ref --verify --quiet refs/tags/release \
+    || fail "ordinary --prune unexpectedly pruned an auto-followed tag"
+  pass "staged fetch preserves ordinary tag auto-follow and prune behavior"
+}
+
+test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session() {
+  local home clone fakebin out err log
+  home=$(new_home)
+  clone=$(build_pair "$home" git-240-fetch)
+  advance_origin "$home" git-240-fetch C1
+  fakebin="$home/fb-git-240-fetch"; mkdir -p "$fakebin"
+  git_staged_fetch_compatibility_audit "$fakebin"
+  out="$home/out-git-240-fetch"
+  err="$home/err-git-240-fetch"
+  log="$home/git-fetch-audit"
+  : >"$log"
+
+  GIT_FETCH_AUDIT_LOG="$log" \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" git-240-fetch
+
+  assert_contains "$(cat "$out")" "git-240-fetch: synced" \
+    "Git 2.40-compatible staged fetch did not fast-forward"
+  [ "$(grep -c $'^fetch\tremote\t' "$log")" -eq 1 ] \
+    || fail "staged fetch did not use exactly one origin fetch session"
+  [ "$(grep -c $'^fetch\tlocal\t' "$log")" -eq 1 ] \
+    || fail "staged fetch object transfer was not one local fetch"
+  pass "staged fetch avoids newer porcelain and uses one remote session"
 }
 
 test_on_default_clean_behind_fast_forwards() {
@@ -1374,6 +1538,11 @@ test_uncommitted_transaction_with_lost_ack_is_reconciled
 test_symbolic_transaction_races_do_not_write_through
 test_symbolic_rollback_race_does_not_write_through
 test_prunes_gone_branch_during_ordinary_sync
+test_single_branch_refspec_preserves_out_of_scope_tracking_refs
+test_negative_refspec_preserves_excluded_tracking_refs
+test_custom_refspec_updates_and_prunes_only_its_destinations
+test_auto_follow_tags_are_preserved
+test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped

@@ -7,10 +7,10 @@
 # ancestor of origin/<default>) and whose <default> branch is free to check out by
 # re-attaching it before the normal fast-forward ("recovered:"). One additional
 # narrow recovery handles a clean, checked-out default branch after a successful
-# destination-free fetch whose observed remote heads are published through an
+# isolated mirror fetch whose configured ref updates are published through an
 # expected-old no-dereference transaction, when the local and remote commits
-# genuinely diverged with one unambiguous common base but resolve to the same root
-# tree: create and verify the deterministic
+# genuinely diverged with one unambiguous common base but resolve to the same
+# root tree: create and verify the deterministic
 # direct ref refs/fm-fleet-sync/squash-preserved/<default>/<old-oid> without
 # dereferencing it or overwriting a conflict, then atomically move the local
 # branch to the observed remote commit with no-dereference expected-old checks on
@@ -29,7 +29,7 @@
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
-# When remote-head publication fails on an orphaned .git/packed-refs.lock (left
+# When fetched-ref publication fails on an orphaned .git/packed-refs.lock (left
 # by a ref rewrite killed mid-write - e.g. a timed-out bootstrap sync or a
 # teardown process kill), it is retried with a bounded wait and removed only when
 # provably stale; see fetch_with_packed_refs_lock_guard and the
@@ -163,104 +163,121 @@ packed_refs_lock_path() {
   esac
 }
 
-remote_tracking_refs() {
-  local refs_dir path
-  git -C "$PROJ" for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null || return 1
-  refs_dir=$(git -C "$PROJ" rev-parse --git-path refs/remotes/origin 2>/dev/null) || return 1
-  case "$refs_dir" in
-    /*) ;;
-    *) refs_dir="$PROJ/$refs_dir" ;;
+# Snapshot direct ref identities in an isolated bare repository.
+snapshot_staged_refs() {
+  git --git-dir="$1" for-each-ref --sort=refname \
+    --format='%(refname)%09%(objectname)'
+}
+
+build_staged_ref_changes() {
+  local before=$1 after=$2 changes=$3 unsorted filtered
+  unsorted="$changes.unsorted"
+  filtered="$changes.filtered"
+  awk -F '\t' '
+    FILENAME == ARGV[1] {
+      before[$1] = $2
+      before_seen[$1] = 1
+      refs[$1] = 1
+      next
+    }
+    {
+      after[$1] = $2
+      after_seen[$1] = 1
+      refs[$1] = 1
+    }
+    END {
+      for (ref in refs) {
+        old = before_seen[ref] ? before[ref] : "-"
+        new = after_seen[ref] ? after[ref] : "-"
+        if (old != new)
+          print old "\t" new "\t" ref
+      }
+    }
+  ' "$before" "$after" >"$unsorted" || return 1
+  awk -F '\t' '!($2 == "-" && $3 == "refs/remotes/origin/HEAD")' \
+    "$unsorted" >"$filtered" \
+    || return 1
+  LC_ALL=C sort -t $'\t' -k3,3 "$filtered" >"$changes"
+}
+
+symbolic_fetch_refusal() {
+  case "$1" in
+    refs/remotes/*) printf 'symbolic remote-tracking ref %s\n' "$1" ;;
+    refs/heads/*) printf 'symbolic local ref %s\n' "$1" ;;
+    refs/fm-fleet-sync/squash-preserved/*)
+      printf 'symbolic preservation ref %s\n' "$1"
+      ;;
+    *) printf 'symbolic fetch destination ref %s\n' "$1" ;;
   esac
-  [ -d "$refs_dir" ] || return 0
-  while IFS= read -r -d '' path; do
-    printf 'refs/remotes/origin/%s\n' "${path#"$refs_dir"/}"
-  done < <(find "$refs_dir" -type f -print0 2>/dev/null)
 }
 
-remote_tracking_state() {
-  local refs ref oid
-  refs=$(remote_tracking_refs) || return 1
-  refs=$(printf '%s\n' "$refs" | LC_ALL=C sort -u)
-  while IFS= read -r ref; do
+staged_ref_changes_match() {
+  local changes=$1 state=$2 old_oid new_oid ref expected actual
+  while IFS=$'\t' read -r old_oid new_oid ref; do
     [ -n "$ref" ] || continue
-    [ "$ref" != refs/remotes/origin/HEAD ] || continue
+    [ "$old_oid" != - ] || old_oid=
+    [ "$new_oid" != - ] || new_oid=
     ref_is_symbolic "$ref" && return 1
-    oid=$(direct_ref_oid "$ref" 2>/dev/null) || return 1
-    printf '%s\t%s\n' "$oid" "$ref"
-  done <<<"$refs"
+    if [ "$state" = before ]; then
+      expected=$old_oid
+    else
+      expected=$new_oid
+    fi
+    actual=$(direct_ref_oid "$ref" 2>/dev/null || true)
+    [ "$actual" = "$expected" ] || return 1
+  done <"$changes"
 }
 
-remote_tracking_state_matches() {
-  local desired=$1 actual
-  actual=$(remote_tracking_state) || return 1
-  [ "$actual" = "$desired" ]
-}
-
-publish_remote_tracking_refs() {
-  local fetched=$1 null_source null_oid source_ref dest_ref new_oid old_oid
-  local existing_refs existing_ref commands= transaction_rc transaction_output desired actual
+publish_staged_ref_changes() {
+  local changes=$1 null_source null_oid old_oid new_oid ref actual commands=
+  local transaction_rc transaction_output raced_ref
   local -a protected_refs=()
-  local -a desired_lines=()
 
+  [ -s "$changes" ] || return 0
   null_source=$(git -C "$PROJ" hash-object --stdin </dev/null) || {
     FETCH_OUTPUT="cannot determine repository object format"
     return 1
   }
   printf -v null_oid '%0*d' "${#null_source}" 0
 
-  while IFS=$'\t' read -r new_oid source_ref; do
-    [ -n "$new_oid" ] || continue
-    dest_ref="refs/remotes/origin/${source_ref#refs/heads/}"
-    if ! git check-ref-format "$dest_ref" >/dev/null 2>&1; then
-      FETCH_OUTPUT="invalid remote-tracking destination $dest_ref"
+  while IFS=$'\t' read -r old_oid new_oid ref; do
+    [ -n "$ref" ] || continue
+    [ "$old_oid" != - ] || old_oid=
+    [ "$new_oid" != - ] || new_oid=
+    if ! git check-ref-format "$ref" >/dev/null 2>&1; then
+      FETCH_OUTPUT="invalid fetch destination $ref"
       return 1
     fi
-    if ref_is_symbolic "$dest_ref"; then
-      FETCH_REFUSAL="symbolic remote-tracking ref $dest_ref"
+    case "$ref" in
+      refs/heads/*)
+        FETCH_OUTPUT="configured fetch would update local branch $ref"
+        return 1
+        ;;
+      refs/fm-fleet-sync/squash-preserved/*)
+        FETCH_OUTPUT="configured fetch would update preservation ref $ref"
+        return 1
+        ;;
+    esac
+    if ref_is_symbolic "$ref"; then
+      FETCH_REFUSAL=$(symbolic_fetch_refusal "$ref")
       return 2
     fi
-    old_oid=$(direct_ref_oid "$dest_ref" 2>/dev/null || true)
-    [ -n "$old_oid" ] || old_oid=$null_oid
-    commands="${commands}option no-deref
-update $dest_ref $new_oid $old_oid
-"
-    protected_refs+=("$dest_ref")
-    desired_lines+=("$new_oid"$'\t'"$dest_ref")
-  done <<<"$fetched"
-
-  desired=$(printf '%s\n' "${desired_lines[@]}" | sed '/^$/d' | LC_ALL=C sort -k2,2)
-  existing_refs=$(remote_tracking_refs) || {
-    FETCH_OUTPUT="cannot enumerate remote-tracking refs"
-    return 1
-  }
-  existing_refs=$(printf '%s\n' "$existing_refs" | LC_ALL=C sort -u)
-  while IFS= read -r existing_ref; do
-    [ -n "$existing_ref" ] || continue
-    [ "$existing_ref" != refs/remotes/origin/HEAD ] || continue
-    if printf '%s\n' "$desired" | cut -f2 | grep -Fxq -- "$existing_ref"; then
-      continue
-    fi
-    if ref_is_symbolic "$existing_ref"; then
-      FETCH_REFUSAL="symbolic remote-tracking ref $existing_ref"
-      return 2
-    fi
-    old_oid=$(direct_ref_oid "$existing_ref" 2>/dev/null) || {
-      FETCH_OUTPUT="cannot read remote-tracking ref $existing_ref"
+    actual=$(direct_ref_oid "$ref" 2>/dev/null || true)
+    if [ "$actual" != "$old_oid" ]; then
+      FETCH_OUTPUT="fetch destination changed during staged fetch: $ref"
       return 1
-    }
-    commands="${commands}option no-deref
-delete $existing_ref $old_oid
+    fi
+    if [ -n "$new_oid" ]; then
+      commands="${commands}option no-deref
+update $ref $new_oid ${old_oid:-$null_oid}
 "
-    protected_refs+=("$existing_ref")
-  done <<<"$existing_refs"
-
-  if [ -z "$commands" ]; then
-    remote_tracking_state_matches "$desired" || {
-      FETCH_OUTPUT="remote-tracking refs changed during publication"
-      return 1
-    }
-    return 0
-  fi
+    else
+      commands="${commands}option no-deref
+delete $ref $old_oid
+"
+    fi
+    protected_refs+=("$ref")
+  done <"$changes"
 
   commands=${commands%$'\n'}
   if direct_ref_transaction "$commands" "${protected_refs[@]}"; then
@@ -269,103 +286,119 @@ delete $existing_ref $old_oid
     transaction_rc=$?
   fi
   transaction_output=$REF_TRANSACTION_OUTPUT
-  if remote_tracking_state_matches "$desired"; then
+  if staged_ref_changes_match "$changes" after; then
     return 0
   fi
   if [ "$transaction_rc" -eq 2 ]; then
-    FETCH_REFUSAL="symbolic remote-tracking ${transaction_output#symbolic }"
+    raced_ref=${transaction_output#symbolic ref at }
+    FETCH_REFUSAL=$(symbolic_fetch_refusal "$raced_ref")
     return 2
   fi
   if [ "$transaction_rc" -eq 3 ]; then
-    FETCH_OUTPUT="remote-tracking transaction outcome is indeterminate"
+    if staged_ref_changes_match "$changes" before; then
+      FETCH_OUTPUT="fetched-ref transaction did not commit after acknowledgement loss"
+    else
+      FETCH_OUTPUT="fetched-ref transaction outcome is indeterminate"
+    fi
   else
-    FETCH_OUTPUT=${transaction_output:-remote-tracking transaction rejected}
+    FETCH_OUTPUT=${transaction_output:-fetched-ref transaction rejected}
   fi
-  actual=$(remote_tracking_state 2>/dev/null || true)
-  [ "$actual" != "$desired" ] || return 0
   return 1
 }
 
-fetch_and_publish_remote_heads() {
-  local remote_before remote_after fetch_porcelain fetched fetched_oids
-  local attempt fetch_rc publish_rc i
-  local -a source_refs=()
-  local -a oid_lines=()
+copy_origin_config_to_stage() {
+  local stage=$1 config_dump=$2 record key value
+  git --git-dir="$stage" config --remove-section remote.origin >/dev/null 2>&1 || true
+  while IFS= read -r -d '' record; do
+    key=${record%%$'\n'*}
+    value=${record#*$'\n'}
+    git --git-dir="$stage" config --add "$key" "$value" || return 1
+  done <"$config_dump"
+}
+
+fetch_and_publish_configured_refs() {
+  local git_dir stage_root stage before after changes config_dump
+  local output rc old_oid new_oid ref
+  local -a fetched_refs=()
 
   FETCH_OUTPUT=
   FETCH_REFUSAL=
-  attempt=0
-  while [ "$attempt" -lt 3 ]; do
-    attempt=$(( attempt + 1 ))
-    if ! remote_before=$(git -C "$PROJ" ls-remote --refs --heads origin 2>&1); then
-      FETCH_OUTPUT=$remote_before
-      return 1
-    fi
-    remote_before=$(printf '%s\n' "$remote_before" \
-      | awk '$1 ~ /^[0-9a-f]+$/ && index($2, "refs/heads/") == 1 { print $1 "\t" $2 }' \
-      | LC_ALL=C sort -k2,2)
-    source_refs=()
-    while IFS=$'\t' read -r _oid source_ref; do
-      [ -n "${source_ref:-}" ] && source_refs+=("$source_ref")
-    done <<<"$remote_before"
+  git_dir=$(git -C "$PROJ" rev-parse --absolute-git-dir 2>/dev/null) || {
+    FETCH_OUTPUT="cannot resolve Git directory"
+    return 1
+  }
+  stage_root=$(mktemp -d "$git_dir/fm-fleet-sync-fetch.XXXXXX") || {
+    FETCH_OUTPUT="cannot create staged fetch repository"
+    return 1
+  }
+  stage="$stage_root/repository.git"
+  before="$stage_root/refs-before"
+  after="$stage_root/refs-after"
+  changes="$stage_root/ref-changes"
+  config_dump="$stage_root/origin-config"
 
-    fetch_porcelain=
-    if [ "${#source_refs[@]}" -gt 0 ]; then
-      if fetch_porcelain=$(printf '%s\n' "${source_refs[@]}" \
-          | git -C "$PROJ" fetch --porcelain --no-tags --refmap= --stdin origin 2>&1); then
-        :
-      else
-        fetch_rc=$?
-        FETCH_OUTPUT=$fetch_porcelain
-        return "$fetch_rc"
-      fi
-    fi
-
-    fetched_oids=$(printf '%s\n' "$fetch_porcelain" \
-      | awk '$4 == "FETCH_HEAD" { print $3 }')
-    oid_lines=()
-    while IFS= read -r fetched_oid; do
-      [ -n "$fetched_oid" ] && oid_lines+=("$fetched_oid")
-    done <<<"$fetched_oids"
-    if [ "${#oid_lines[@]}" -ne "${#source_refs[@]}" ]; then
-      FETCH_OUTPUT="cannot parse staged fetch result"
-      return 1
-    fi
-
-    fetched=
-    for (( i=0; i<${#source_refs[@]}; i++ )); do
-      fetched="${fetched}${oid_lines[$i]}"$'\t'"${source_refs[$i]}"$'\n'
-    done
-    fetched=${fetched%$'\n'}
-    if ! remote_after=$(git -C "$PROJ" ls-remote --refs --heads origin 2>&1); then
-      FETCH_OUTPUT=$remote_after
-      return 1
-    fi
-    remote_after=$(printf '%s\n' "$remote_after" \
-      | awk '$1 ~ /^[0-9a-f]+$/ && index($2, "refs/heads/") == 1 { print $1 "\t" $2 }' \
-      | LC_ALL=C sort -k2,2)
-    [ "$fetched" = "$remote_after" ] && break
-  done
-  if [ "$fetched" != "$remote_after" ]; then
-    FETCH_OUTPUT="remote heads changed during staged fetch"
+  if ! output=$(git clone --quiet --mirror --shared "$PROJ" "$stage" 2>&1); then
+    FETCH_OUTPUT=$output
+    rm -rf -- "$stage_root"
+    return 1
+  fi
+  if ! git -C "$PROJ" config --null --get-regexp '^remote\.origin\.' >"$config_dump"; then
+    FETCH_OUTPUT="cannot read origin configuration"
+    rm -rf -- "$stage_root"
+    return 1
+  fi
+  if ! copy_origin_config_to_stage "$stage" "$config_dump"; then
+    FETCH_OUTPUT="cannot stage origin configuration"
+    rm -rf -- "$stage_root"
+    return 1
+  fi
+  if ! snapshot_staged_refs "$stage" >"$before"; then
+    FETCH_OUTPUT="cannot snapshot refs before staged fetch"
+    rm -rf -- "$stage_root"
+    return 1
+  fi
+  if ! output=$(git -C "$PROJ" --git-dir="$stage" fetch --quiet --prune origin 2>&1); then
+    FETCH_OUTPUT=$output
+    rm -rf -- "$stage_root"
+    return 1
+  fi
+  if ! snapshot_staged_refs "$stage" >"$after" \
+      || ! build_staged_ref_changes "$before" "$after" "$changes"; then
+    FETCH_OUTPUT="cannot inspect staged fetch result"
+    rm -rf -- "$stage_root"
     return 1
   fi
 
-  if publish_remote_tracking_refs "$fetched"; then
-    return 0
-  else
-    publish_rc=$?
-    return "$publish_rc"
+  while IFS=$'\t' read -r old_oid new_oid ref; do
+    [ "$old_oid" != - ] || old_oid=
+    [ "$new_oid" != - ] || new_oid=
+    [ -n "$new_oid" ] && fetched_refs+=("$ref")
+  done <"$changes"
+  if [ "${#fetched_refs[@]}" -gt 0 ]; then
+    if ! output=$(git -C "$PROJ" fetch --quiet --no-tags --no-write-fetch-head \
+        --refmap= "$stage" "${fetched_refs[@]}" 2>&1); then
+      FETCH_OUTPUT=$output
+      rm -rf -- "$stage_root"
+      return 1
+    fi
   fi
+
+  if publish_staged_ref_changes "$changes"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  rm -rf -- "$stage_root"
+  return "$rc"
 }
 
-# Fetch remote heads without ref destinations, then publish and prune
-# refs/remotes/origin through one no-dereference transaction. On a
+# Fetch through an isolated mirror using origin's configured mappings, then
+# publish only Git's changed refs through one no-dereference transaction. On a
 # packed-refs.lock signature, retry up to FLEET_SYNC_PACKED_REFS_LOCK_RETRIES
 # times, then remove only a lock proven stale by fm-lock-lib.sh and retry once.
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
-  if fetch_and_publish_remote_heads; then
+  if fetch_and_publish_configured_refs; then
     rc=0
   else
     rc=$?
@@ -380,7 +413,7 @@ fetch_with_packed_refs_lock_guard() {
     attempt=$(( attempt + 1 ))
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
-    if fetch_and_publish_remote_heads; then
+    if fetch_and_publish_configured_refs; then
       rc=0
     else
       rc=$?
@@ -402,7 +435,7 @@ fetch_with_packed_refs_lock_guard() {
         return "$rc"
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
-      if fetch_and_publish_remote_heads; then
+      if fetch_and_publish_configured_refs; then
         rc=0
       else
         rc=$?

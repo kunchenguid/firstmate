@@ -566,7 +566,7 @@ test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin")
 
   assert_contains "$out" $'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote' "bootstrap timeout should relay partial fleet-sync output first"
-  assert_timeout_report "$out" 59
+  assert_timeout_report "$out" 95
   pass "bootstrap computes a fleet-size-aware default timeout and preserves partial fleet-sync output"
 }
 
@@ -599,7 +599,7 @@ test_fleet_sync_timeout_explicit_override_wins() {
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" 7)
 
   assert_timeout_report "$out" 7
-  assert_not_contains "$out" "timeout=59s" "explicit override should not be replaced by the computed timeout"
+  assert_not_contains "$out" "timeout=95s" "explicit override should not be replaced by the computed timeout"
   pass "bootstrap preserves FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT as an explicit override"
 }
 
@@ -615,7 +615,7 @@ test_fleet_sync_timeout_empty_override_uses_default() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" "")
 
-  assert_timeout_report "$out" 59
+  assert_timeout_report "$out" 95
   assert_not_contains "$out" "timeout=20s" "blank timeout env should not force the legacy floor on a large fleet"
   pass "bootstrap treats a blank timeout override as unset"
 }
