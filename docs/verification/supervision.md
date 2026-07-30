@@ -60,6 +60,46 @@ The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and 
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
 The detailed reconciliation and task chronology stay in the private audit report and PR evidence.
 
+## Codex 0.146.0 session-lock identity
+
+Codex 0.146.0 release notes did not identify a Unix command-process isolation change, so the installed binary and a real nested scratch session were treated as authoritative.
+The live pass ran on Linux on 2026-07-29 from a Codex parent session.
+
+```sh
+codex --version
+FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh
+```
+
+Observed command output:
+
+```text
+codex-cli 0.146.0
+ok - codex-cli 0.146.0 live E2E verified isolated-command lock ownership, stale recovery, and the one-second foreground checkpoint path
+```
+
+The generated scratch command transcript contained these bounded stable results:
+
+```text
+CODEX_THREAD_ID is set: yes
+CODEX_THREAD_ID differs from outer session: yes
+probe is its own PGID leader: yes
+probe is its own SID leader: yes
+probe parent is codex: yes
+probe PID namespace matches parent: yes
+fresh ownership verified: yes
+fresh sidecar pid matches lock: yes
+fresh sidecar thread matches command: yes
+lock: stale (pid 99999999 dead or not a harness)
+stale ownership verified after reacquisition: yes
+checkpoint: no actionable wake within 1s
+```
+
+The process shape is therefore a new POSIX session and process group for each command, not a separate PID namespace or a broken parent link.
+The command remains a direct child of `codex`, while the child-scoped `CODEX_THREAD_ID` distinguishes a nested session from its outer session.
+An additional `/proc/<parent>/environ` probe showed that the nested Codex parent retained the outer thread id while its command child received the nested id.
+This is why `bin/fm-session-lock-lib.sh` uses the command child's validated thread id as the Codex sidecar authority and retains the numeric Codex pid for liveness.
+The test also seeds a dead numeric holder and mismatched old sidecar before proving status reports it stale, acquisition replaces it, and the new thread verifies ownership.
+
 ## Turn-end guard
 
 The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
@@ -134,7 +174,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
-| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
+| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The isolated command acquired and verified a thread-bound session lock, replaced a stale dead holder, and returned from the one-second foreground checkpoint without switching to the arm wrapper. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |

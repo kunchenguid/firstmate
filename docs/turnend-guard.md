@@ -32,6 +32,10 @@ Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] 
 A stale beacon blocks even when a watcher pid is live.
 A fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
 
+Primary session-lock ownership is a separate shared decision owned by `bin/fm-session-lock-lib.sh`, never by a harness hook or this guard predicate.
+That owner includes the Codex 0.146.0 thread-identity path used by session start and the native session-start nudge.
+[`verification/supervision.md`](verification/supervision.md#codex-01460-session-lock-identity) owns the dated empirical evidence.
+
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot safely read loop-guard fields.

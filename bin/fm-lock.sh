@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Writes the live harness process PID resolved by the shared session-lock
+# identity contract. Codex also writes a thread-identity sidecar because its
+# command children have isolated POSIX sessions/process groups.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -17,9 +17,8 @@ mkdir -p "$STATE" 2>/dev/null || {
   exit 1
 }
 
-# Harness identity (FM_HARNESS_RE, ancestry walk, holder liveness) is owned by
-# the shared session-lock lib so the Claude Stop auto-arm applies the exact
-# same identity contract.
+# Harness identity, Codex's thread sidecar, holder liveness, and self-ownership
+# are owned by the shared session-lock lib so every caller applies one contract.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
@@ -70,6 +69,16 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
+  if [ "$old" = "$me" ] \
+    && { [ -e "$STATE/.lock.codex-thread" ] || [ -L "$STATE/.lock.codex-thread" ]; } \
+    && ! fm_codex_lock_identity_matches "$STATE" "$old"; then
+    echo "error: live session lock has a different or malformed Codex thread identity; operate read-only until resolved" >&2
+    exit 1
+  fi
+fi
+if ! fm_session_lock_publish_identity "$STATE" "$me"; then
+  echo "error: cannot publish session lock identity; operate read-only until resolved" >&2
+  exit 1
 fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
@@ -81,6 +90,10 @@ written=$(cat "$LOCK" 2>/dev/null) || {
 }
 if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
+  exit 1
+fi
+if ! fm_session_lock_owned_by_self "$STATE"; then
+  echo "error: session lock identity verification failed; operate read-only until resolved" >&2
   exit 1
 fi
 release_claim_lock

@@ -197,7 +197,7 @@ A project-level `.claude/settings.json` only takes effect when Claude Code's pro
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked commands anchored through `"$CLAUDE_PROJECT_DIR"/bin/...` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on every Stop and foregrounds `bin/fm-watch-arm.sh` when the home is eligible and still needs supervision, and its exit-2 `asyncRewake` rewake is the wake; the model drains and handles wakes but never runs a routine re-arm command.
 
-## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
+## codex (VERIFIED 2026-07-29, codex-cli 0.146.0)
 
 | Fact | Value |
 |---|---|
@@ -227,6 +227,13 @@ Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to
 The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
 Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
 The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
+
+**Session-lock fact (verified 2026-07-29, codex-cli 0.146.0).**
+Each command shell is its own POSIX session and process-group leader, but remains a direct child of the Codex process in the same PID namespace.
+Codex injects one stable `CODEX_THREAD_ID` into command children, including a distinct value for a nested Codex session.
+A nested Codex process can retain the outer thread id in its own inherited environment while its command children receive the nested id, so the child value rather than the parent environment is authoritative for the active thread.
+`bin/fm-session-lock-lib.sh` owns the resulting Codex thread-identity sidecar and fail-closed ownership contract while preserving the numeric harness pid used by every other verified adapter.
+[`docs/verification/supervision.md`](../../../docs/verification/supervision.md#codex-01460-session-lock-identity) records the exact live probe and scratch lock evidence.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 

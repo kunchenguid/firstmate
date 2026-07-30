@@ -102,11 +102,85 @@ test_missing_state_is_silent() {
 }
 
 test_owned_lock_is_silent() {
-  local root="$TMP_ROOT/already-ran"
+  local root="$TMP_ROOT/already-ran" fakebin
   make_primary "$root"
   printf '%s\n' "$$" > "$root/state/.lock"
-  expect_silent_zero "owned lock nudge" run_nudge "$root"
+  fakebin=$(fm_fakebin "$root/fake")
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+pid=
+field=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -p) pid=\$2; shift 2 ;;
+    -o) field=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$pid:\$field" in
+  "$$:comm=") printf '%s\n' claude ;;
+  "$$:args=") printf '%s\n' claude ;;
+  *:ppid=) printf '%s\n' "$$" ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  expect_silent_zero "owned lock nudge" env PATH="$fakebin:/usr/bin:/bin" \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
   pass "fm-sessionstart-nudge: a lock holder in process ancestry is already run"
+}
+
+test_codex_thread_identity_is_silent_without_lock_ancestry() {
+  local root="$TMP_ROOT/codex-thread-owned" fakebin holder out status=0
+  local thread_id=019fb044-acd6-7c20-97a2-f3e227def5d2
+  local other_thread_id=019fb041-9ca2-76c1-a272-358bd63dfe7a
+  make_primary "$root"
+  fakebin=$(fm_fakebin "$root/fake")
+  sleep 300 &
+  holder=$!
+  printf '%s\n' "$holder" > "$root/state/.lock"
+  printf '%s:%s\n' "$holder" "$thread_id" > "$root/state/.lock.codex-thread"
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+pid=
+field=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -p) pid=\$2; shift 2 ;;
+    -o) field=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$pid:\$field" in
+  "$holder:comm=") printf '%s\n' codex ;;
+  "$holder:args=") printf '%s\n' codex ;;
+  *:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(CODEX_THREAD_ID="$thread_id" PATH="$fakebin:/usr/bin:/bin" \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE" 2>&1) \
+    || status=$?
+  expect_code 0 "$status" "Codex thread-owned nudge"
+  [ -z "$out" ] || fail "matching Codex thread identity must stay silent without lock ancestry: $out"
+
+  out=$(CODEX_THREAD_ID="$other_thread_id" PATH="$fakebin:/usr/bin:/bin" \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE" 2>&1) \
+    || status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 0 "$status" "mismatched Codex thread nudge"
+  [ "$out" = "$NUDGE_LINE" ] \
+    || fail "mismatched Codex thread identity did not fail closed to a nudge: $out"
+  pass "fm-sessionstart-nudge: Codex thread identity replaces ancestry without admitting another thread"
 }
 
 test_opencode_plugin_delivers_exact_nudge_once() {
@@ -155,4 +229,5 @@ test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
+test_codex_thread_identity_is_silent_without_lock_ancestry
 test_opencode_plugin_delivers_exact_nudge_once

@@ -751,10 +751,89 @@ SH
   pass "concurrent session-lock acquisition admits exactly one live harness"
 }
 
+test_codex_session_lock_uses_thread_identity() {
+  local rec root home fakebin codex_pid out status=0 lock_pid
+  local thread_id=019fb044-acd6-7c20-97a2-f3e227def5d2
+  local other_thread_id=019fb041-9ca2-76c1-a272-358bd63dfe7a
+  rec=$(new_world codex-thread-lock)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  sleep 300 &
+  codex_pid=$!
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+pid=
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p) pid=$2; shift 2 ;;
+    -o) field=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  "$FM_FAKE_CODEX_PID:comm=") printf '%s\n' codex ;;
+  "$FM_FAKE_CODEX_PID:args=") printf '%s\n' codex ;;
+  *:ppid=)
+    if [ "${FM_FAKE_CODEX_ISOLATED:-0}" = 1 ]; then
+      printf '%s\n' 1
+    else
+      printf '%s\n' "$FM_FAKE_CODEX_PID"
+    fi
+    ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  printf '%s\n' 9999999 > "$home/state/.lock"
+  printf '%s\n' "9999999:$other_thread_id" > "$home/state/.lock.codex-thread"
+  out=$(CODEX_THREAD_ID="$thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 0 "$status" "Codex stale-lock recovery"
+  lock_pid=$(cat "$home/state/.lock")
+  [ "$lock_pid" = "$codex_pid" ] \
+    || fail "Codex stale-lock recovery recorded '$lock_pid', expected '$codex_pid'"
+  [ "$(cat "$home/state/.lock.codex-thread")" = "$codex_pid:$thread_id" ] \
+    || fail "Codex acquisition did not bind the lock pid to its thread id"
+  assert_contains "$out" "lock acquired: harness pid $codex_pid" \
+    "Codex acquisition did not report its live harness pid"
+
+  status=0
+  out=$(CODEX_THREAD_ID="$other_thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "a different Codex thread replaced the live lock identity"
+  assert_contains "$out" "different or malformed Codex thread identity" \
+    "a different Codex thread did not fail closed with an ownership diagnostic"
+  [ "$(cat "$home/state/.lock.codex-thread")" = "$codex_pid:$thread_id" ] \
+    || fail "a refused Codex thread changed the live lock identity"
+
+  CODEX_THREAD_ID="$thread_id" FM_FAKE_CODEX_PID="$codex_pid" FM_FAKE_CODEX_ISOLATED=1 \
+    PATH="$fakebin:$BASE_PATH" HOME_STATE="$home/state" ROOT_UNDER_TEST="$ROOT" \
+    bash -c '. "$ROOT_UNDER_TEST/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$HOME_STATE"' \
+    || fail "Codex thread identity did not verify ownership after ancestry became unavailable"
+  if CODEX_THREAD_ID="$other_thread_id" FM_FAKE_CODEX_PID="$codex_pid" FM_FAKE_CODEX_ISOLATED=1 \
+    PATH="$fakebin:$BASE_PATH" HOME_STATE="$home/state" ROOT_UNDER_TEST="$ROOT" \
+    bash -c '. "$ROOT_UNDER_TEST/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$HOME_STATE"'; then
+    fail "a different Codex thread verified ownership of the live lock"
+  fi
+
+  kill "$codex_pid" 2>/dev/null || true
+  wait "$codex_pid" 2>/dev/null || true
+  out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: stale" \
+    "dead Codex holder was not classified as a releasable stale lock"
+  pass "Codex lock: thread identity survives isolated command ancestry and stale holders remain releasable"
+}
+
 # --- output ordering ----------------------------------------------------------
 
 test_output_ordering_diagnostics_lead() {
-  local rec root home fakebin out lock_line boot_line wake_line context_line fleet_line next_line
+  local rec root home fakebin out mask lock_line boot_line wake_line context_line fleet_line next_line
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -763,10 +842,19 @@ EOF
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
   rm -f "$fakebin/node"
+  mask="$home/mask-system-node.bash"
+  cat > "$mask" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = node ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1037,7 +1125,7 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin out
+  local rec root home fakebin out mask
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1045,11 +1133,20 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
+  mask="$home/mask-system-node.bash"
+  cat > "$mask" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = node ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
@@ -1389,6 +1486,7 @@ test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_session_lock_concurrent_single_winner
+test_codex_session_lock_uses_thread_identity
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
