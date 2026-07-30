@@ -315,6 +315,11 @@ record_worktree "$PRESD_META"
 PRESD_PANE=$(grep '^herdr_pane_id=' "$PRESD_META" | cut -d= -f2-)
 PRESD_WS=$(workspace_of_pane "$PRESD_PANE")
 [ -n "$PRESD_WS" ] || fail "could not read presD's workspace"
+PRESD_JOURNAL="$PRES_HOME/state/presD.herdr-presentation"
+[ "$(journal_field "$PRESD_JOURNAL" version)" = 2 ] \
+  || fail "the duplicate-label projection did not publish a version 2 binding"$'\n'"$(cat "$PRESD_JOURNAL" 2>/dev/null)"
+[ "$(journal_field "$PRESD_JOURNAL" parent_workspace_id)" = "$WS_PRIMARY_DUP" ] \
+  || fail "the duplicate-label projection journal did not bind the launcher's exact parent workspace"
 [ "$PRESD_WS" != "$WS_PRIMARY" ] && [ "$PRESD_WS" != "$WS_PRIMARY_DUP" ] \
   || fail "a projected worker must not be collapsed into either same-labeled parent workspace"
 PRESD_ORDER=$(lab workspace list 2>/dev/null | jq -r --arg dup "$WS_PRIMARY_DUP" --arg child "$PRESD_WS" '

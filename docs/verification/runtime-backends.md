@@ -192,6 +192,9 @@ HERDR_TAB_ID=w1:t1
 HERDR_WORKSPACE_ID=w1
 ```
 
+This complete injection shape is verified only for Herdr 0.7.5.
+Firstmate requires both `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` before accepting claimed launcher ancestry.
+
 `pane get` reports the pane's current owning tab and workspace, which is what placement resolves from; the injected `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID` are creation-time snapshots and are not read as current identity:
 
 ```sh

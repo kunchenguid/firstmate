@@ -887,14 +887,15 @@ fm_backend_herdr_workspace_find() {  # <session>
 # fm_backend_herdr_launcher_identity: the EXACT herdr workspace that the
 # process making this spawn is itself running in.
 #
-# Herdr injects HERDR_ENV=1, HERDR_PANE_ID, HERDR_SESSION, HERDR_SOCKET_PATH,
-# HERDR_TAB_ID, and HERDR_WORKSPACE_ID into every process it manages a pane for
-# (verified 0.7.5 - docs/verification/runtime-backends.md), and a firstmate or
-# secondmate agent's own tool calls inherit them. That pane id is the only
-# authoritative launcher identity available: workspace LABELS are mutable and
-# herdr enforces no uniqueness on them, so a label search cannot tell one
-# `firstmate` workspace from another, and herdr's globally focused workspace is
-# whatever the captain happens to be looking at, not the launcher's.
+# Herdr 0.7.5 injects HERDR_ENV=1, HERDR_PANE_ID, HERDR_SESSION,
+# HERDR_SOCKET_PATH, HERDR_TAB_ID, and HERDR_WORKSPACE_ID into every process it
+# manages a pane for (docs/verification/runtime-backends.md), and a firstmate
+# or secondmate agent's own tool calls inherit them. Older injection shapes are
+# unverified and cannot establish launcher ancestry without both pane and
+# socket identity. Workspace LABELS are mutable and herdr enforces no
+# uniqueness on them, so a label search cannot tell one `firstmate` workspace
+# from another, and herdr's globally focused workspace is whatever the captain
+# happens to be looking at, not the launcher's.
 #
 # The injected HERDR_TAB_ID/HERDR_WORKSPACE_ID are deliberately NOT read as the
 # answer. They are a snapshot taken when the pane's process started, and herdr
@@ -929,28 +930,29 @@ fm_backend_herdr_launcher_identity() {  # <session>
   # Same-session proof, before the pane id is trusted at all: herdr pane ids
   # ("w2:p1") restart at the same low numbers in every session, so a pane id
   # borrowed from another session can silently resolve to a real but unrelated
-  # workspace here. The injected socket path is the strongest identity herdr
-  # exposes; the session name is checked too, for the case where herdr injected
-  # no socket path.
+  # workspace here. The injected socket path is the server identity herdr
+  # exposes, and the session name independently binds the named session.
   claimed_session=$(fm_backend_herdr_session)
   if [ "$claimed_session" != "$session" ]; then
     echo "error: herdr launcher pane '$pane' reports session '$claimed_session' but this spawn targets session '$session'; refusing to place a worker from a cross-session parent identity" >&2
     return 1
   fi
   claimed_socket=${HERDR_SOCKET_PATH:-}
-  if [ -n "$claimed_socket" ]; then
-    claimed_socket=$(fm_backend_herdr_canonical_socket_path "$claimed_socket") || {
-      echo "error: herdr launcher pane '$pane' reports an unusable socket path; refusing to place a worker from an unverifiable parent identity" >&2
-      return 1
-    }
-    session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
-      echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
-      return 1
-    }
-    if [ "$claimed_socket" != "$session_socket" ]; then
-      echo "error: herdr launcher pane '$pane' belongs to the server at '$claimed_socket', not session '$session' at '$session_socket'; refusing to place a worker from a cross-session parent identity" >&2
-      return 1
-    fi
+  if [ -z "$claimed_socket" ]; then
+    echo "error: herdr launcher pane '$pane' has no injected socket identity; refusing to place a worker from an unverifiable parent identity" >&2
+    return 1
+  fi
+  claimed_socket=$(fm_backend_herdr_canonical_socket_path "$claimed_socket") || {
+    echo "error: herdr launcher pane '$pane' reports an unusable socket path; refusing to place a worker from an unverifiable parent identity" >&2
+    return 1
+  }
+  session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+    echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
+    return 1
+  }
+  if [ "$claimed_socket" != "$session_socket" ]; then
+    echo "error: herdr launcher pane '$pane' belongs to the server at '$claimed_socket', not session '$session' at '$session_socket'; refusing to place a worker from a cross-session parent identity" >&2
+    return 1
   fi
 
   pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || {
@@ -1561,7 +1563,7 @@ fm_backend_herdr_projection_parent_workspace_exact() {  # <session> <parent-labe
 
 # fm_backend_herdr_projection_live_binding_matches: verify one exact projected
 # workspace, its single task tab/pane, its unique token label, and its current
-# position inside the exact parent's contiguous child block.
+# position inside the exact parent workspace's contiguous child block.
 # This read-only predicate grants no mutation authority by itself.
 fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
   local session=$1 token=$2 workspace=$3 tab=$4 pane=$5 parent_workspace=$6
@@ -1587,7 +1589,6 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
       | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)))] | length) == 1)
       | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)) and .workspace_id == $workspace)] | length) == 1)
       | select(([$spaces[]? | select(.workspace_id == $parent_workspace and .label == $parent_label)] | length) == 1)
-      | select(([$spaces[]? | select(.label == $parent_label)] | length) == 1)
       | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $parent_workspace)]) as $parents
       | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $workspace)]) as $children
       | select(($parents | length) == 1 and ($children | length) == 1)
