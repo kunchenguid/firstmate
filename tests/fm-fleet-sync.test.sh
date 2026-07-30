@@ -87,6 +87,43 @@ advance_origin() {
   git -C "$work" push -q origin main
 }
 
+build_populated_submodule_pair() {
+  local home=$1 name=$2 clone work sub_work sub_remote sub_remote_abs
+  clone=$(build_pair "$home" "$name")
+  work="$home/work-$name"
+  sub_work="$home/work-$name-submodule"
+  sub_remote="$home/remotes/$name-submodule.git"
+
+  git init -q "$sub_work"
+  git -C "$sub_work" symbolic-ref HEAD refs/heads/main
+  commit_file "$sub_work" module.txt v0 S0
+  git clone --quiet --bare "$sub_work" "$sub_remote"
+  sub_remote_abs=$(cd "$sub_remote" && pwd)
+  git -C "$sub_work" remote add origin "file://$sub_remote_abs"
+  git -C "$sub_work" push -q -u origin main
+  git -c protocol.file.allow=always -C "$work" submodule add -q \
+    "file://$sub_remote_abs" module
+  git -C "$work" commit -qm "add module"
+  git -C "$work" push -q origin main
+  git -C "$clone" pull -q --ff-only origin main
+  git -c protocol.file.allow=always -C "$clone" submodule update -q --init
+  printf '%s\n' "$clone"
+}
+
+advance_submodule_origin() {
+  local home=$1 name=$2 sub_work module_work work
+  sub_work="$home/work-$name-submodule"
+  module_work="$home/work-$name/module"
+  work="$home/work-$name"
+
+  commit_file "$sub_work" module.txt v1 S1
+  git -C "$sub_work" push -q origin main
+  git -C "$module_work" pull -q --ff-only origin main
+  git -C "$work" add module
+  git -C "$work" commit -qm "advance module"
+  git -C "$work" push -q origin main
+}
+
 # build_tree_identical_squash_pair <home> <name>: create the motivating graph:
 # common C0; local main gains a two-commit chain; origin/main gains one squash
 # commit from C0 whose exact root tree equals the local chain's final tree.
@@ -635,12 +672,17 @@ git_audit_internal_file_override() {
 #!/usr/bin/env bash
 real=${REAL_GIT_FOR_TEST:?}
 is_fetch=0; is_internal=0; is_origin=0; previous=; file_override=0
+no_recurse=0; scoped_include=0
 for a in "$@"; do
   [ "$a" = fetch ] && is_fetch=1
   [ "$a" = --refmap= ] && is_internal=1
   [ "$a" = origin ] && is_origin=1
+  [ "$a" = --recurse-submodules=no ] && no_recurse=1
   if [ "$previous" = -c ]; then
     [ "$a" != protocol.file.allow=always ] || file_override=1
+    case "$a" in
+      includeIf.gitdir:*.path=*) scoped_include=1 ;;
+    esac
     previous=
     continue
   fi
@@ -650,8 +692,14 @@ if [ "$is_fetch" = 1 ] && [ "$is_origin" = 1 ] && [ "$file_override" = 1 ]; then
   exit 91
 fi
 if [ "$is_fetch" = 1 ] && [ "$is_internal" = 1 ]; then
-  [ "$file_override" = 1 ] || exit 92
-  printf 'audited\n' >"${GIT_INTERNAL_FILE_AUDIT:?}"
+  if [ "$file_override" = 1 ]; then
+    [ "$no_recurse" = 1 ] || exit 92
+    printf 'transfer\n' >>"${GIT_INTERNAL_FILE_AUDIT:?}"
+  else
+    [ "$scoped_include" = 1 ] || exit 93
+    [ "$no_recurse" = 0 ] || exit 94
+    printf 'recursion\n' >>"${GIT_INTERNAL_FILE_AUDIT:?}"
+  fi
 fi
 exec "$real" "$@"
 SH
@@ -1643,10 +1691,70 @@ test_internal_object_fetch_overrides_file_policy_only_locally() {
 
   assert_contains "$(cat "$out")" "internal-file-policy: synced" \
     "repository file policy blocked the trusted staged-object transfer"
-  assert_present "$audit" "internal staged-object transfer lacked its scoped file override"
+  [ "$(grep -c '^transfer$' "$audit")" -eq 1 ] \
+    || fail "internal staged-object transfer lacked its non-recursive file override"
+  [ "$(grep -c '^recursion$' "$audit")" -eq 1 ] \
+    || fail "configured submodule recursion was not separated from object transfer"
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
     || fail "file-policy staged fetch did not publish and fast-forward"
-  pass "file transport override is scoped to trusted staged-object transfer"
+  pass "file transport override is isolated from configured submodule recursion"
+}
+
+test_internal_file_override_does_not_reach_submodule_fetches() {
+  local home clone remote submodule old tracking out new_submodule
+  home=$(new_home)
+  clone=$(build_populated_submodule_pair "$home" submodule-file-policy)
+  remote=$(cd "$home/remotes/submodule-file-policy.git" && pwd)
+  submodule="$clone/module"
+  git -C "$clone" config --local protocol.file.allow never
+  git -C "$clone" config --local protocol.ext.allow always
+  git -C "$clone" config --local fetch.recurseSubmodules on-demand
+  git -C "$clone" remote set-url origin "ext::git-upload-pack $remote"
+  git -C "$submodule" config --local protocol.file.allow never
+  advance_submodule_origin "$home" submodule-file-policy
+  new_submodule=$(git -C "$home/work-submodule-file-policy-submodule" rev-parse HEAD)
+  old=$(head_sha "$clone")
+  tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-file-policy: skipped: fetch failed" \
+    "submodule file policy was bypassed by the trusted parent transfer"
+  [ "$(head_sha "$clone")" = "$old" ] \
+    || fail "denied submodule fetch moved the local branch"
+  [ "$(git -C "$clone" rev-parse refs/remotes/origin/main)" = "$tracking" ] \
+    || fail "denied submodule fetch published the staged tracking ref"
+  ! git -C "$submodule" cat-file -e "$new_submodule^{commit}" 2>/dev/null \
+    || fail "parent file override reached the submodule fetch"
+  pass "trusted parent file override cannot authorize submodule transports"
+}
+
+test_configured_submodule_fetch_runs_under_original_policy() {
+  local home clone remote submodule sub_remote out new_submodule
+  home=$(new_home)
+  clone=$(build_populated_submodule_pair "$home" submodule-original-policy)
+  remote=$(cd "$home/remotes/submodule-original-policy.git" && pwd)
+  sub_remote=$(cd "$home/remotes/submodule-original-policy-submodule.git" && pwd)
+  submodule="$clone/module"
+  git -C "$clone" config --local protocol.file.allow never
+  git -C "$clone" config --local protocol.ext.allow always
+  git -C "$clone" config --local fetch.recurseSubmodules on-demand
+  git -C "$clone" remote set-url origin "ext::git-upload-pack $remote"
+  git -C "$submodule" config --local protocol.file.allow never
+  git -C "$submodule" config --local protocol.ext.allow always
+  git -C "$submodule" remote set-url origin "ext::git-upload-pack $sub_remote"
+  advance_submodule_origin "$home" submodule-original-policy
+  new_submodule=$(git -C "$home/work-submodule-original-policy-submodule" rev-parse HEAD)
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-original-policy: synced" \
+    "configured submodule fetch did not run separately under its own policy"
+  git -C "$submodule" cat-file -e "$new_submodule^{commit}" \
+    || fail "configured on-demand submodule fetch did not import the new commit"
+  [ "$(git -C "$submodule" rev-parse refs/remotes/origin/main)" = "$new_submodule" ] \
+    || fail "configured submodule fetch did not update its tracking ref"
+  pass "configured submodule fetch retains its original transport policy"
 }
 
 test_staged_fetch_origin_removal_failure_is_fatal() {
@@ -1705,6 +1813,24 @@ test_fetch_prune_tags_config_publishes_tag_deletions() {
   pass "valueless fetch.pruneTags publishes configured tag deletions"
 }
 
+test_staged_fetch_preserves_generic_protocol_policy() {
+  local home clone remote out
+  home=$(new_home)
+  clone=$(build_pair "$home" generic-protocol-policy)
+  remote=$(cd "$home/remotes/generic-protocol-policy.git" && pwd)
+  advance_origin "$home" generic-protocol-policy C1
+  git -C "$clone" config --local protocol.allow always
+  git -C "$clone" remote set-url origin "ext::git-upload-pack $remote"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "generic-protocol-policy: synced" \
+    "generic protocol.allow did not authorize the staged origin fetch"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
+    || fail "generic protocol policy fetch did not publish and fast-forward"
+  pass "staged fetch preserves generic protocol.allow"
+}
+
 test_auto_follow_tags_are_preserved() {
   local home clone work out tag_oid
   home=$(new_home)
@@ -1749,8 +1875,8 @@ test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session() {
     "Git 2.40-compatible staged fetch did not fast-forward"
   [ "$(grep -c $'^fetch\tremote\t' "$log")" -eq 1 ] \
     || fail "staged fetch did not use exactly one origin fetch session"
-  [ "$(grep -c $'^fetch\tlocal\t' "$log")" -eq 1 ] \
-    || fail "staged fetch object transfer was not one local fetch"
+  [ "$(grep -c $'^fetch\tlocal\t' "$log")" -eq 2 ] \
+    || fail "staged fetch did not separate local transfer and recursion"
   pass "staged fetch avoids newer porcelain and uses one remote session"
 }
 
@@ -2201,8 +2327,11 @@ test_staged_fetch_preserves_valueless_boolean_config
 test_staging_clone_forces_origin_remote_name
 test_staging_clone_overrides_file_policy_only_locally
 test_internal_object_fetch_overrides_file_policy_only_locally
+test_internal_file_override_does_not_reach_submodule_fetches
+test_configured_submodule_fetch_runs_under_original_policy
 test_staged_fetch_origin_removal_failure_is_fatal
 test_fetch_prune_tags_config_publishes_tag_deletions
+test_staged_fetch_preserves_generic_protocol_policy
 test_auto_follow_tags_are_preserved
 test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session
 test_staged_fetch_signals_clean_scope_and_preserve_caller_traps

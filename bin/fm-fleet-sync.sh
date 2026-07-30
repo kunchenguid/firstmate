@@ -311,7 +311,7 @@ stage_fetch_config_key() {
     remote.origin.*|url.*.insteadof|core.sshcommand|core.gitproxy|core.askpass)
       return 0
       ;;
-    ssh.variant|http.*|credential.*|protocol.*.allow|fetch.prunetags)
+    ssh.variant|http.*|credential.*|protocol.allow|protocol.*.allow|fetch.prunetags)
       return 0
       ;;
   esac
@@ -396,9 +396,9 @@ staged_fetch_scope_signal() {
 
 fetch_and_publish_configured_refs() {
   local git_dir stage_root stage before after changes local_config worktree_config
-  local output rc old_oid new_oid ref
+  local scoped_file_config output rc old_oid new_oid ref
   local saved_exit_trap saved_exit_action saved_term_trap saved_int_trap
-  local -a fetched_refs=()
+  local -a fetched_refs=() recursion_refs=()
 
   FETCH_OUTPUT=
   FETCH_REFUSAL=
@@ -429,6 +429,7 @@ fetch_and_publish_configured_refs() {
   changes="$stage_root/ref-changes"
   local_config="$stage_root/local-config"
   worktree_config="$stage_root/worktree-config"
+  scoped_file_config="$stage_root/scoped-file-config"
 
   if ! output=$(git -c protocol.file.allow=always \
       clone --quiet --mirror --shared --origin origin "$PROJ" "$stage" 2>&1); then
@@ -452,6 +453,11 @@ fetch_and_publish_configured_refs() {
   fi
   if ! copy_fetch_config_to_stage "$stage" "$local_config" "$worktree_config"; then
     FETCH_OUTPUT="cannot stage repository fetch configuration"
+    staged_fetch_scope_finish
+    return 1
+  fi
+  if ! git config --file "$scoped_file_config" protocol.file.allow always; then
+    FETCH_OUTPUT="cannot configure scoped staged-object transfer"
     staged_fetch_scope_finish
     return 1
   fi
@@ -479,12 +485,24 @@ fetch_and_publish_configured_refs() {
   done <"$changes"
   if [ "${#fetched_refs[@]}" -gt 0 ]; then
     if ! output=$(git -C "$PROJ" -c protocol.file.allow=always \
-        fetch --quiet --no-tags --no-write-fetch-head --refmap= \
+        fetch --quiet --no-tags --no-write-fetch-head \
+        --recurse-submodules=no --refmap= \
         "$stage" "${fetched_refs[@]}" 2>&1); then
       FETCH_OUTPUT=$output
       staged_fetch_scope_finish
       return 1
     fi
+    recursion_refs=("${fetched_refs[@]}")
+  else
+    recursion_refs=(HEAD)
+  fi
+  if ! output=$(git -C "$PROJ" \
+      -c "includeIf.gitdir:$git_dir.path=$scoped_file_config" \
+      fetch --quiet --no-tags --no-write-fetch-head --refmap= \
+      "$stage" "${recursion_refs[@]}" 2>&1); then
+    FETCH_OUTPUT=$output
+    staged_fetch_scope_finish
+    return 1
   fi
 
   if publish_staged_ref_changes "$changes"; then
