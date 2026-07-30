@@ -318,7 +318,7 @@ LUNA_AVAILABLE=$(printf '%s
 ' "$CODEX_RAW" | sed -n '2p')
 
 if [ -z "${PI_CACHE_RETENTION+x}" ]; then
-  PI_CACHE_RETENTION_ENV=unset
+  PI_CACHE_RETENTION_ENV="unset"
 else
   PI_CACHE_RETENTION_ENV=$PI_CACHE_RETENTION
 fi
