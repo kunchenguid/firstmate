@@ -185,7 +185,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
 }
 
 test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
-  local rec relative_id absolute_id out status launch home_real linked_home
+  local rec relative_id absolute_id out status launch home_real linked_home wt2
   relative_id=profile-relative-home-defaults-z1c
   absolute_id=profile-absolute-home-defaults-z1d
   rec=$(make_spawn_case profile-home-defaults pi "$relative_id" "$absolute_id")
@@ -213,12 +213,17 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
+  # The first spawn's record still claims $WT_DIR, and reusing a claimed slot
+  # is the double assignment fm-spawn now refuses, so this second spawn draws
+  # its own slot, as it does live.
+  wt2="$CASE_DIR/wt-home-defaults-second"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-home-defaults-second "$wt2"
   : > "$LAUNCH_LOG"
   out=$(
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
       FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
-      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt2" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$absolute_id" "$PROJ_DIR" 2>&1
