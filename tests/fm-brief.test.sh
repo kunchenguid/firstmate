@@ -266,12 +266,15 @@ test_no_mistakes_dod_wording() {
 
 # Four crewmates in a row (2026-07-26/27) reported `done:` as soon as their
 # implementation was committed with green project tests, never starting the
-# pipeline. They were following this section: it named the commit as the
-# completion condition and offered a `done:` gate there, deferring the pipeline
-# to a later firstmate steer fourteen lines below. A worker that stops reading
-# at its first stop condition stops at the commit. Pin the inverted order - the
-# PR with green checks is the first and only stop condition named, the commit is
-# explicitly intermediate - and pin that no earlier `done:` gate reappears.
+# pipeline. They were following this section: it opened by naming the commit as
+# the completion condition and offered a premature `done: {summary}` gate right
+# there, then handed the pipeline off to a firstmate steer. The real completion
+# gate - `done: PR {url} checks green` once /no-mistakes reports CI green - was
+# buried fourteen lines below at the end of the section. A worker that stops
+# reading at its first stop condition stops at the commit. Pin the inverted
+# order - the PR with green checks is the first and only stop condition named,
+# the commit is explicitly intermediate - and pin that no earlier `done:` gate
+# reappears.
 test_no_mistakes_dod_names_the_pr_gate_before_the_commit() {
   local home id brief gate_line commit_line
   home="$TMP_ROOT/dod-order-home"
