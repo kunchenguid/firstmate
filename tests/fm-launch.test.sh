@@ -426,6 +426,28 @@ EOF
   pass "selection: EOF and a blank line refuse instead of launching the default"
 }
 
+test_scripted_leading_zero_selection_refuses_cleanly() {
+  local home fb state execlog out rc i entries=""
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case leading-zero)
+EOF
+  # '08' on an 8-entry menu passes a decimal range check but reads as octal to
+  # bash arithmetic; it must get the same refuse-with-guidance every other
+  # invalid scripted input gets, not an arithmetic crash under set -eu.
+  for i in 1 2 3 4 5 6 7 8; do
+    entries="$entries{\"id\":\"e$i\",\"label\":\"Entry $i\",\"harness\":\"claude\"},"
+  done
+  printf '{"entries":[%s]}\n' "${entries%,}" > "$home/config/launch-presets.json"
+  out=$(run_launch "$home" "$fb" "$state" "$execlog" $'08\n') && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a scripted selection of '08' must refuse"
+  assert_contains "$out" "not one of the menu choices" \
+    "the refusal must carry the same guidance every invalid input gets"
+  assert_not_contains "$out" "value too great" \
+    "a 0-prefixed selection must never reach bash's octal arithmetic"
+  [ "$(jq -r '.tabs | length' "$state")" = 0 ] || fail "a refused selection must create nothing"
+  pass "selection: a 0-prefixed scripted choice refuses with guidance instead of crashing"
+}
+
 test_selecting_an_unavailable_entry_refuses() {
   local home fb state execlog out rc
   { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
@@ -578,6 +600,38 @@ EOF
   pass "reattach guard: an agent-less husk is replaced, not treated as a live session"
 }
 
+test_a_launch_in_flight_blocks_a_second_launch_until_released() {
+  local home fb state execlog out rc
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case launch-lock)
+EOF
+  # The startup window: the first launch has created its tab and sent its
+  # command, but no agent has registered in the pane yet, so the reattach
+  # check alone would read it as a husk and let a second launch replace it.
+  # Simulate that launcher still being in flight by holding the launch lock
+  # with a live pid, the same way bin/fm-wake-lib.sh's owner records it.
+  run_launch "$home" "$fb" "$state" "$execlog" $'1\n' >/dev/null
+  mkdir -p "$home/state/.launch.lock"
+  printf '%s\n' "$$" > "$home/state/.launch.lock/pid"
+
+  out=$(run_launch "$home" "$fb" "$state" "$execlog" $'1\n') && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a second launch must refuse while another launch holds the lock"
+  assert_contains "$out" "already starting a session here" \
+    "the refusal must name the in-flight launch"
+  [ "$(jq -r '[.tabs[]|select(.label=="firstmate")]|length' "$state")" = 1 ] \
+    || fail "the in-flight primary's tab must survive a refused second launch"
+
+  # Released, the same agent-less tab is a husk again and relaunch must stay
+  # open: the lock, not any pane state, is what tells a launch in flight apart
+  # from a session that died.
+  rm -rf "$home/state/.launch.lock"
+  run_launch "$home" "$fb" "$state" "$execlog" $'1\n' >/dev/null && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] || fail "a released launch lock must not block relaunch after a crash"
+  [ "$(jq -r '[.tabs[]|select(.label=="firstmate")]|length' "$state")" = 1 ] \
+    || fail "the relaunch must replace the husk, not stack a second primary tab"
+  pass "launch lock: an in-flight launch blocks a second one, and only while held"
+}
+
 test_reattach_check_fails_closed_when_herdr_stops_answering() {
   local home fb state execlog out rc tabs_before
   { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
@@ -728,6 +782,7 @@ test_menu_creates_nothing
 test_print_menu_is_fast
 test_scripted_selection_refuses_rather_than_reprompting
 test_scripted_selection_requires_an_explicit_choice
+test_scripted_leading_zero_selection_refuses_cleanly
 test_selecting_an_unavailable_entry_refuses
 test_herdr_absent_refuses_with_one_actionable_line
 test_old_herdr_protocol_refuses_and_relays_the_numbers
@@ -737,6 +792,7 @@ test_launch_records_the_choice_atomically
 test_stale_last_used_never_becomes_an_unlaunchable_default
 test_a_live_primary_blocks_a_second_one
 test_a_dead_primary_does_not_block_a_relaunch
+test_a_launch_in_flight_blocks_a_second_launch_until_released
 test_reattach_check_fails_closed_when_herdr_stops_answering
 test_missing_home_refuses_at_the_door
 test_broken_presets_refuse_instead_of_guessing
