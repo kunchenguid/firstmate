@@ -2,7 +2,8 @@
 name: project-management
 description: >-
   Agent-only procedure for Firstmate project management.
-  Use before adding, cloning, creating, registering, removing, or initializing a project.
+  Use before adding, creating, removing, or initializing a project.
+  Cloning or registering a project is add intake and uses the same trigger.
   Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, and outward-consent decisions.
 user-invocable: false
 metadata:
@@ -11,7 +12,8 @@ metadata:
 
 # project-management
 
-Use this procedure before adding, cloning, creating, registering, removing, or initializing a project.
+Use this procedure before adding, creating, removing, or initializing a project.
+Cloning or registering a project is add intake and uses the same trigger.
 This skill is the single owner of Firstmate's project-management procedure.
 It does not replace `secondmate-provisioning`, which owns project clones inside persistent secondmate homes.
 
