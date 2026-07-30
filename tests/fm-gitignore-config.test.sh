@@ -18,22 +18,30 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+random_leaf() {
+  printf '%s-%s' "$1" "$$-$RANDOM-$RANDOM"
+}
+
 test_config_dir_ignored_as_category() {
-  local sample
-  for sample in config/anything config/nested/dir/file config/some-new-key.admin; do
+  local direct nested sample
+  direct="$(random_leaf config/unlisted-key)"
+  nested="config/$(random_leaf nested-dir)/$(random_leaf deep-file)"
+  for sample in "$direct" "$nested" config/some-new-key.admin; do
     git -C "$ROOT" check-ignore -q "$sample" \
       || fail "git does not ignore $sample (config/ must be ignored as a directory)"
   done
-  pass "config/ is ignored as a directory, covering unlisted paths"
+  pass "config/ is ignored as a directory, covering unlisted and nested paths"
 }
 
-test_config_not_ignored_by_name_by_name_list() {
-  # Regression guard: .gitignore must not go back to enumerating config/ entries
-  # by exact filename, since that reintroduces the same silent-drift failure.
-  grep -qE '^config/[^/]+$' "$ROOT/.gitignore" \
-    && fail ".gitignore lists config/ entries by exact filename instead of ignoring the directory"
-  pass "no name-by-name config/ entries remain in .gitignore"
+test_unrelated_path_stays_visible() {
+  # Control: a path outside config/ must remain visible to Git, so the
+  # coverage above is proven by contrast rather than an always-ignoring rule.
+  local sibling
+  sibling="$(random_leaf not-config)"
+  git -C "$ROOT" check-ignore -q "$sibling" \
+    && fail "git unexpectedly ignores $sibling (outside config/)"
+  pass "an unrelated path outside config/ remains visible to git"
 }
 
 test_config_dir_ignored_as_category
-test_config_not_ignored_by_name_by_name_list
+test_unrelated_path_stays_visible
