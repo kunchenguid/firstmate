@@ -257,15 +257,18 @@ EOF
 }
 
 test_baseline_schema_and_fixture() {
-  local json kv weird_now render_file render_bytes
+  local json empty_json kv weird_now render_file render_bytes
   weird_now=$'measured"\\value\nsecond line'
   render_file="$TMP_ROOT/supervision-render.out"
   FM_ROOT_OVERRIDE="$ROOT" \
     "$SUPERVISION" --harness pi --read-only 0 --afk 0 --x-mode 0 > "$render_file" \
     || fail "direct supervision render failed"
   render_bytes=$(wc -c < "$render_file" | tr -d ' ')
-  json=$(FM_ROOT_OVERRIDE="$ROOT" FM_BASELINE_NOW="$weird_now" \
-    "$BASELINE" --json --with-session-fixture) \
+  json=$(
+    unset PI_CACHE_RETENTION
+    FM_ROOT_OVERRIDE="$ROOT" FM_BASELINE_NOW="$weird_now" \
+      "$BASELINE" --json --with-session-fixture
+  ) \
     || fail "baseline --json --with-session-fixture failed"
   printf '%s\n' "$json" | python3 -c '
 import json
@@ -274,8 +277,16 @@ data = json.load(sys.stdin)
 assert data["measured_at"] == sys.argv[1]
 assert data["pi_extension_tool_count"] == 1
 assert data["supervision_render_bytes"]["pi"] == int(sys.argv[2])
+assert data["pi_cache_retention_env"] == "unset"
 ' "$weird_now" "$render_bytes" \
     || fail "baseline JSON did not preserve strings, count LLM tools, or measure exact render bytes"
+  empty_json=$(PI_CACHE_RETENTION='' FM_ROOT_OVERRIDE="$ROOT" "$BASELINE" --json) \
+    || fail "baseline --json with empty PI_CACHE_RETENTION failed"
+  printf '%s\n' "$empty_json" | python3 -c '
+import json
+import sys
+assert json.load(sys.stdin)["pi_cache_retention_env"] == ""
+' || fail "baseline JSON did not preserve empty PI_CACHE_RETENTION"
   printf '%s\n' "$json" | grep -q '"schema": "fm-agent-loop-baseline.v1"' \
     || fail "baseline json missing schema"
   printf '%s\n' "$json" | grep -q '"agents_md_bytes"' \

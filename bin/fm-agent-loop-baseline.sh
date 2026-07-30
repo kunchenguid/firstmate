@@ -82,21 +82,6 @@ file_bytes() {
   fi
 }
 
-sha_file() {
-  local path=$1
-  if [ ! -f "$path" ]; then
-    printf '\n'
-    return 0
-  fi
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$path" | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$path" | awk '{print $1}'
-  else
-    printf '\n'
-  fi
-}
-
 # Skill frontmatter description bytes (always-discoverable cost).
 skill_description_stats() {
   local total=0 count=0 path desc
@@ -224,16 +209,11 @@ PY
 }
 
 run_session_fixture() {
-  local tmp root home fakebin out
+  local tmp home fakebin out
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-agent-loop-baseline.XXXXXX")
-  root="$tmp/root"
   home="$tmp/home"
   fakebin="$tmp/fakebin"
-  mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin" "$root"
-  # Minimal git root so tangle checks stay quiet.
-  git init -q -b main "$root" 2>/dev/null || true
-  git -C "$root" -c user.email=fm@example.invalid -c user.name=fm \
-    commit -q --allow-empty -m init 2>/dev/null || true
+  mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin"
   # Quiet toolchain stubs.
   for cmd in tmux node gh gh-axi chrome-devtools-axi lavish-axi treehouse no-mistakes; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$cmd"
@@ -337,7 +317,11 @@ CODEX_MODELS=$(printf '%s
 LUNA_AVAILABLE=$(printf '%s
 ' "$CODEX_RAW" | sed -n '2p')
 
-PI_CACHE_RETENTION_ENV=${PI_CACHE_RETENTION:-unset}
+if [ -z "${PI_CACHE_RETENTION+x}" ]; then
+  PI_CACHE_RETENTION_ENV=unset
+else
+  PI_CACHE_RETENTION_ENV=$PI_CACHE_RETENTION
+fi
 
 SESSION_FIXTURE_BYTES=0
 SESSION_FIXTURE_DETERMINISTIC=unknown
