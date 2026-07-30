@@ -44,6 +44,13 @@ This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `pro
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
 Never add an agent name as a commit co-author.
 
+### Fight for the "obvious" solution
+
+Measure twice, cut once: understand the problem fully before building, because cleverness is what gets written when you haven't.
+The biggest simplicity win is refusing to solve problems we don't have.
+Good code is the most simple thing that delivers full functionality and performance, nothing traded away, nothing bolted on.
+Push back when you see a more obvious way.
+
 ## 2. Layout and state
 
 `docs/configuration.md` is the single owner of the top-level operational-home layout and configuration schemas; each producing script's header and help own exact child fields and mutation mechanics.
