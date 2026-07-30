@@ -89,7 +89,43 @@ set +e
 # shellcheck source=bin/fm-afk-death-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-afk-death-lib.sh"
 
+FM_AFK_LAUNCH_STOP_PID=
+FM_AFK_LAUNCH_STOP_IDENTITY=
+FM_AFK_LAUNCH_STOP_INTENT_ACTIVE=0
+
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
+
+fm_afk_launch_stop_tracking_clear() {
+  FM_AFK_LAUNCH_STOP_PID=
+  FM_AFK_LAUNCH_STOP_IDENTITY=
+  FM_AFK_LAUNCH_STOP_INTENT_ACTIVE=0
+}
+
+fm_afk_launch_stop_intent_retract_if_live() {
+  local current_identity
+  [ "$FM_AFK_LAUNCH_STOP_INTENT_ACTIVE" -eq 1 ] || return 0
+  fm_pid_alive "$FM_AFK_LAUNCH_STOP_PID" || return 0
+  current_identity=$(fm_pid_identity "$FM_AFK_LAUNCH_STOP_PID" 2>/dev/null || true)
+  if [ -n "$current_identity" ] \
+    && [ "$current_identity" != "$FM_AFK_LAUNCH_STOP_IDENTITY" ]; then
+    return 0
+  fi
+  if fm_afk_stop_intent_retire "$FM_AFK_LAUNCH_STATE" \
+    "$FM_AFK_LAUNCH_STOP_PID" "$FM_AFK_LAUNCH_STOP_IDENTITY"; then
+    fm_afk_launch_stop_tracking_clear
+  fi
+}
+
+fm_afk_launch_signal_exit() {
+  local code=$1
+  fm_afk_launch_stop_intent_retract_if_live || true
+  exit "$code"
+}
+
+fm_afk_launch_exit_cleanup() {
+  fm_afk_launch_stop_intent_retract_if_live || true
+  fm_afk_launch_lock_release
+}
 
 fm_afk_launch_lock_owned() {
   local pid expected actual
@@ -362,37 +398,51 @@ fm_afk_launch_herdr_recover_created() {  # <session> <label>
 fm_afk_launch_check_dead_daemon() {
   local owner pid identity current_identity marker record_result
   [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] || return 0
+  fm_afk_unexpected_exit_read "$FM_AFK_LAUNCH_STATE" && return 0
   daemon_lock_held_by_live_daemon && return 0
-  owner=$(daemon_lock_owner 2>/dev/null) || return 0
-  pid=$(cat "$owner/pid" 2>/dev/null || true)
-  identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
-  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-  fm_afk_death_valid_identity "$identity" || return 0
-  if fm_pid_alive "$pid"; then
-    current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 0
-    [ "$current_identity" != "$identity" ] || return 0
+  owner=$(daemon_lock_owner 2>/dev/null || true)
+  pid=
+  identity=MISSING
+  if [ -n "$owner" ]; then
+    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
   fi
-  if fm_afk_stop_intent_matches "$FM_AFK_LAUNCH_STATE" "$pid" "$identity"; then
-    fm_afk_stop_intent_retire "$FM_AFK_LAUNCH_STATE" "$pid" "$identity" || return 1
-    fm_afk_launch_log "expected daemon loss observed (pid=$pid)"
-    return 0
+  if [ -z "$pid" ]; then
+    pid=$(cat "$FM_AFK_LAUNCH_STATE/.supervise-daemon.pid" 2>/dev/null || true)
+  fi
+  case "$pid" in ''|*[!0-9]*) pid=MISSING ;; esac
+  fm_afk_death_valid_identity "$identity" || identity=MISSING
+  if fm_pid_alive "$pid"; then
+    current_identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
+    if [ "$identity" != MISSING ] && [ "$current_identity" = "$identity" ]; then
+      return 0
+    fi
+  fi
+  if fm_afk_stop_intent_read "$FM_AFK_LAUNCH_STATE"; then
+    if { [ "$identity" != MISSING ] \
+      && [ "$FM_AFK_STOP_INTENT_PID" = "$pid" ] \
+      && [ "$FM_AFK_STOP_INTENT_IDENTITY" = "$identity" ]; } \
+      || { [ -z "$owner" ] && [ "$pid" = MISSING ]; }; then
+      fm_afk_launch_log "expected daemon loss observed (pid=$FM_AFK_STOP_INTENT_PID)"
+      return 0
+    fi
   fi
   marker=$(fm_afk_unexpected_exit_path "$FM_AFK_LAUNCH_STATE")
   fm_afk_unexpected_exit_record "$FM_AFK_LAUNCH_STATE" UNTRAPPABLE "$pid" "$identity"
   record_result=$?
   case "$record_result" in
     0)
-      fm_afk_launch_log "away-mode daemon loss detected (pid=$pid); alarm marker written"
+      fm_afk_launch_log "away-mode daemon loss detected (pid=$pid identity=$identity); alarm marker written"
       "$FM_AFK_LAUNCH_DIR/fm-supervise-daemon.sh" --wedge-alarm-notify \
-        "away-mode daemon exited unexpectedly (signal=UNTRAPPABLE pid=$pid) - see $marker" "$marker"
+        "away-mode daemon exited unexpectedly (signal=UNTRAPPABLE pid=$pid identity=$identity) - see $marker" "$marker"
       ;;
     2)
       return 0
       ;;
     *)
-      fm_afk_launch_log "away-mode daemon loss detected (pid=$pid); failed to write alarm marker"
+      fm_afk_launch_log "away-mode daemon loss detected (pid=$pid identity=$identity); failed to write alarm marker"
       "$FM_AFK_LAUNCH_DIR/fm-supervise-daemon.sh" --wedge-alarm-notify \
-        "away-mode daemon exited unexpectedly (signal=UNTRAPPABLE pid=$pid) - durable marker write failed" "$marker"
+        "away-mode daemon exited unexpectedly (signal=UNTRAPPABLE pid=$pid identity=$identity) - durable marker write failed" "$marker"
       return 1
       ;;
   esac
@@ -635,7 +685,8 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result
+  local pid pid_identity current_identity result=0 read_result afk_cleared=0
+  fm_afk_launch_stop_tracking_clear
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -652,7 +703,11 @@ fm_afk_launch_stop() {
     pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   fi
   if [ -n "$pid" ]; then
+    FM_AFK_LAUNCH_STOP_PID=$pid
+    FM_AFK_LAUNCH_STOP_IDENTITY=$pid_identity
+    FM_AFK_LAUNCH_STOP_INTENT_ACTIVE=1
     if ! fm_afk_stop_intent_publish "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity"; then
+      fm_afk_launch_stop_tracking_clear
       fm_afk_launch_log "failed to publish the exact daemon stop intent; preserving lifecycle state"
       return 1
     fi
@@ -667,18 +722,15 @@ fm_afk_launch_stop() {
   fi
   if [ -n "$pid" ] && fm_pid_alive "$pid"; then
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
+      fm_afk_launch_stop_intent_retract_if_live || true
       fm_afk_launch_log "could not confirm away-mode daemon exit; preserving lifecycle state"
       return 1
     }
     if [ "$current_identity" = "$pid_identity" ]; then
-      fm_afk_stop_intent_retire "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity" || true
+      fm_afk_launch_stop_intent_retract_if_live || true
       fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
       return 1
     fi
-  fi
-  if [ -n "$pid" ] \
-    && fm_afk_stop_intent_matches "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity"; then
-    fm_afk_stop_intent_retire "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity" || result=1
   fi
   # (2) Close the daemon's own terminal by exact id.
   if [ "$read_result" -eq 0 ]; then
@@ -688,7 +740,14 @@ fm_afk_launch_stop() {
   if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
     fm_afk_launch_log "failed to clear away-mode flag"
     result=1
+  else
+    afk_cleared=1
   fi
+  if [ "$afk_cleared" -eq 1 ] && [ -n "$pid" ] \
+    && fm_afk_stop_intent_matches "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity"; then
+    fm_afk_stop_intent_retire "$FM_AFK_LAUNCH_STATE" "$pid" "$pid_identity" || result=1
+  fi
+  fm_afk_launch_stop_tracking_clear
   if [ "$result" -eq 0 ]; then
     fm_afk_launch_log "away mode stopped; daemon terminal torn down and .afk cleared"
   else
@@ -700,9 +759,10 @@ fm_afk_launch_stop() {
 fm_afk_launch_main() {
   local result
   fm_afk_launch_lock_acquire || return 1
-  trap fm_afk_launch_lock_release EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  trap fm_afk_launch_exit_cleanup EXIT
+  trap 'fm_afk_launch_signal_exit 129' HUP
+  trap 'fm_afk_launch_signal_exit 130' INT
+  trap 'fm_afk_launch_signal_exit 143' TERM
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;
@@ -713,8 +773,9 @@ fm_afk_launch_main() {
     *) fm_afk_launch_usage >&2; return 2 ;;
   esac
   result=$?
+  fm_afk_launch_stop_intent_retract_if_live || result=1
   fm_afk_launch_lock_release || result=1
-  trap - EXIT INT TERM
+  trap - EXIT HUP INT TERM
   return "$result"
 }
 

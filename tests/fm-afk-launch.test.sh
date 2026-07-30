@@ -22,6 +22,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
+DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
@@ -310,6 +311,23 @@ unit_signal_exits_with_lock_cleanup() {
     pass "launcher signal: TERM exits and releases the lifecycle lock"
   else
     fail "launcher signal: interrupted lifecycle resumed or retained its lock"
+  fi
+  rm -rf "$st"
+}
+
+unit_daemon_identity_publication_is_mandatory() {
+  local st lock pidfile
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-identity-publish.XXXXXX")
+  lock="$st/state/.supervise-daemon.lock"
+  pidfile="$st/state/.supervise-daemon.pid"
+  mkdir -p "$lock/pid-identity"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    ! fm_super_publish_daemon_identity "$2" "$3" "$$" exact-identity
+  ' _ "$DAEMON" "$lock" "$pidfile" && [ ! -e "$pidfile" ]; then
+    pass "daemon startup: identity publication failure is fatal"
+  else
+    fail "daemon startup: identity publication failure was ignored"
   fi
   rm -rf "$st"
 }
@@ -744,6 +762,76 @@ unit_stop_confirms_daemon_exit() {
   rm -rf "$st"
 }
 
+unit_interrupted_stop_retracts_live_intent() {
+  local st daemon_pid launcher_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-interrupt.XXXXXX")
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  bash -c 'trap "" TERM; while :; do sleep 1; done' &
+  daemon_pid=$!
+  printf '%s\n' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 &
+  launcher_pid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$st/state/.supervise-daemon.stop-intent" ] && break
+    sleep 0.05
+  done
+  kill -TERM "$launcher_pid" 2>/dev/null || true
+  wait "$launcher_pid" 2>/dev/null || true
+  if kill -0 "$daemon_pid" 2>/dev/null \
+    && [ ! -e "$st/state/.supervise-daemon.stop-intent" ] \
+    && [ -e "$st/state/.afk" ] \
+    && [ -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop signal: interrupted stop retracts the live daemon intent"
+  else
+    fail "stop signal: interrupted stop left a stale live-daemon intent"
+  fi
+  kill -KILL "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_stop_identity_failure_retracts_live_intent() {
+  local st daemon_pid identity
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-identity.XXXXXX")
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  bash -c 'trap "" TERM; while :; do sleep 1; done' &
+  daemon_pid=$!
+  printf '%s\n' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  identity=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid")
+  printf '%s\n' "$identity" > "$st/state/.supervise-daemon.lock/pid-identity"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" EXPECTED_IDENTITY="$identity" bash -c '
+    . "$1"
+    fm_pid_identity() {
+      if [ -e "$FM_AFK_LAUNCH_STATE/.supervise-daemon.stop-intent" ]; then
+        return 1
+      fi
+      printf "%s\n" "$EXPECTED_IDENTITY"
+    }
+    seq() { printf "1\n"; }
+    sleep() { :; }
+    kill() {
+      [ "${1:-}" = -TERM ] && return 0
+      command kill "$@"
+    }
+    ! fm_afk_launch_stop
+  ' _ "$LAUNCH" && kill -0 "$daemon_pid" 2>/dev/null \
+    && [ ! -e "$st/state/.supervise-daemon.stop-intent" ] \
+    && [ -e "$st/state/.afk" ]; then
+    pass "stop identity: failed confirmation retracts the live daemon intent"
+  else
+    fail "stop identity: failed confirmation left a stale live-daemon intent"
+  fi
+  kill -KILL "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 unit_refresh_validates_record() {
   local st daemon_pid
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-record.XXXXXX")
@@ -940,8 +1028,8 @@ e2e_tmux() {
 # These run a real daemon in a disposable FM_HOME and target a uniquely named
 # tmux session, so no process or state outside this test home is touched.
 # ---------------------------------------------------------------------------
-death_test_start_daemon() {  # <home> <captain-session> <captain-pane>
-  local home=$1 captain_session=$2 captain_pane=$3 notifier pid
+death_test_configure_alarm() {  # <home>
+  local home=$1 notifier
   mkdir -p "$home/config"
   notifier="$home/record-alarm"
   cat > "$notifier" <<'SH'
@@ -950,6 +1038,12 @@ printf '%s\n' "${1:-}" >> "$(dirname "$0")/alarms"
 SH
   chmod +x "$notifier"
   printf 'command:%s\n' "$notifier" > "$home/config/wedge-alarm"
+}
+
+death_test_start_daemon() {  # <home> <captain-session> <captain-pane>
+  local home=$1 captain_session=$2 captain_pane=$3 notifier pid
+  death_test_configure_alarm "$home"
+  notifier="$home/record-alarm"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_SUPERVISOR_TARGET="$captain_pane" \
     FM_SUPERVISOR_BACKEND=tmux FM_WEDGE_ALARM_EXEC="$notifier" "$LAUNCH" start >/dev/null 2>&1 || return 1
   for _ in $(seq 1 100); do
@@ -1052,6 +1146,73 @@ unit_untrappable_daemon_death_alarms_on_guard() {
   death_test_stop_home "$home" "$captain_session"
 }
 
+unit_missing_identity_daemon_death_alarms_on_guard() {
+  local home pid marker alarm_count
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-missing-identity.XXXXXX")
+  marker="$home/state/.supervise-daemon.unexpected-exit"
+  death_test_configure_alarm "$home"
+  mkdir -p "$home/state/.supervise-daemon.lock" "$home/root"
+  sleep 30 &
+  pid=$!
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  : > "$home/state/.afk"
+  printf '%s\n' "$pid" > "$home/state/.supervise-daemon.pid"
+  printf '%s\n' "$pid" > "$home/state/.supervise-daemon.lock/pid"
+  FM_ROOT_OVERRIDE="$home/root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_WEDGE_ALARM_EXEC="$home/record-alarm" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1
+  FM_ROOT_OVERRIDE="$home/root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_WEDGE_ALARM_EXEC="$home/record-alarm" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1
+  alarm_count=0
+  [ ! -f "$home/alarms" ] || alarm_count=$(wc -l < "$home/alarms" | tr -d ' ')
+  if [ -s "$marker" ] \
+    && grep -F 'signal=UNTRAPPABLE' "$marker" >/dev/null \
+    && grep -F "pid=$pid" "$marker" >/dev/null \
+    && grep -F 'pid_identity=MISSING' "$marker" >/dev/null \
+    && [ "${alarm_count:-0}" = 1 ]; then
+    pass "daemon death: missing identity records available evidence and alarms once"
+  else
+    fail "daemon death: missing identity was silent or repeatedly alarmed"
+  fi
+  rm -rf "$home"
+}
+
+unit_expected_untrappable_death_survives_reconciliation() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (expected daemon KILL)"; return 0; }
+  local home captain_session captain_pane pid identity replacement_pid
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-expected-kill.XXXXXX")
+  captain_session="fm-afk-death-expected-kill-cap-$$"
+  tmux new-session -d -s "$captain_session" 2>/dev/null || { fail "expected daemon KILL: captain session creation failed"; rm -rf "$home"; return 0; }
+  captain_pane=$(tmux display-message -p -t "$captain_session" '#{pane_id}')
+  if death_test_start_daemon "$home" "$captain_session" "$captain_pane"; then
+    pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
+    identity=$(cat "$home/state/.supervise-daemon.lock/pid-identity" 2>/dev/null || true)
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c \
+      '. "$1"; fm_afk_stop_intent_publish "$2" "$3" "$4"' _ \
+      "$ROOT/bin/fm-afk-death-lib.sh" "$home/state" "$pid" "$identity" \
+      && kill -KILL "$pid" 2>/dev/null || true
+    for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+    mkdir -p "$home/root"
+    FM_ROOT_OVERRIDE="$home/root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_WEDGE_ALARM_EXEC="$home/record-alarm" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_SUPERVISOR_TARGET="$captain_pane" \
+      FM_SUPERVISOR_BACKEND=tmux FM_WEDGE_ALARM_EXEC="$home/record-alarm" \
+      "$LAUNCH" start >/dev/null 2>&1 || true
+    replacement_pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
+  fi
+  if [ ! -e "$home/state/.supervise-daemon.unexpected-exit" ] \
+    && [ ! -s "$home/alarms" ] \
+    && [ ! -e "$home/state/.supervise-daemon.stop-intent" ] \
+    && [ -n "${replacement_pid:-}" ] \
+    && [ "$replacement_pid" != "$pid" ] \
+    && kill -0 "$replacement_pid" 2>/dev/null; then
+    pass "daemon death: expected untrappable loss reconciles without a false alarm"
+  else
+    fail "daemon death: expected untrappable loss lost evidence or falsely alarmed"
+  fi
+  death_test_stop_home "$home" "$captain_session"
+}
+
 unit_stop_intent_wins_exit_race() {
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon death race)"; return 0; }
   local home captain_session captain_pane pid identity
@@ -1068,12 +1229,15 @@ unit_stop_intent_wins_exit_race() {
       && kill -TERM "$pid" 2>/dev/null || true
     for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
   fi
+  mkdir -p "$home/root"
+  FM_ROOT_OVERRIDE="$home/root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_WEDGE_ALARM_EXEC="$home/record-alarm" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1
   if [ ! -e "$home/state/.supervise-daemon.unexpected-exit" ] \
     && [ ! -s "$home/alarms" ] \
-    && [ ! -e "$home/state/.supervise-daemon.stop-intent" ]; then
-    pass "daemon death race: published exact intent wins a concurrent external TERM"
+    && [ -e "$home/state/.supervise-daemon.stop-intent" ]; then
+    pass "daemon death race: exact intent remains durable while away mode is active"
   else
-    fail "daemon death race: exact stop intent produced a false alarm or leaked"
+    fail "daemon death race: exact stop intent was consumed early or produced a false alarm"
   fi
   death_test_stop_home "$home" "$captain_session"
 }
@@ -1112,6 +1276,7 @@ unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
+unit_daemon_identity_publication_is_mandatory
 unit_herdr_command_failure_creates_no_workspace
 unit_herdr_partial_create_recovery
 unit_herdr_error_with_exact_ids_closes_exact
@@ -1131,9 +1296,13 @@ unit_stop_validates_before_signal
 unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
+unit_interrupted_stop_retracts_live_intent
+unit_stop_identity_failure_retracts_live_intent
 unit_expected_stop_does_not_alarm
 unit_external_daemon_term_alarms
 unit_untrappable_daemon_death_alarms_on_guard
+unit_missing_identity_daemon_death_alarms_on_guard
+unit_expected_untrappable_death_survives_reconciliation
 unit_stop_intent_wins_exit_race
 unit_refresh_and_reconcile_do_not_refire_death_alarm
 unit_refresh_validates_record

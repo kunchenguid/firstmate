@@ -1273,6 +1273,27 @@ trim_log() {
   tail -n "${FM_LOG_KEEP_LINES:-$LOG_KEEP_LINES_DEFAULT}" "$LOG" >"$tmp" 2>/dev/null && mv -f "$tmp" "$LOG"
 }
 
+fm_super_publish_daemon_identity() {  # <lock> <pidfile> <pid> <identity>
+  local lock=$1 pidfile=$2 pid=$3 identity=$4 published
+  if ! printf '%s\n' "$identity" > "$lock/pid-identity" 2>/dev/null; then
+    return 1
+  fi
+  published=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ "$published" != "$identity" ]; then
+    rm -f "$lock/pid-identity" 2>/dev/null || true
+    return 1
+  fi
+  if ! printf '%s\n' "$pid" > "$pidfile" 2>/dev/null; then
+    rm -f "$lock/pid-identity" 2>/dev/null || true
+    return 1
+  fi
+  published=$(cat "$pidfile" 2>/dev/null || true)
+  if [ "$published" != "$pid" ]; then
+    rm -f "$pidfile" "$lock/pid-identity" 2>/dev/null || true
+    return 1
+  fi
+}
+
 # ============================================================================
 # Everything below runs only when the script is EXECUTED, not sourced. The pure
 # classifiers above are sourceable for unit tests (tests/fm-daemon.test.sh).
@@ -1318,8 +1339,12 @@ fm_super_main() {
     fm_lock_release "$LOCK" 2>/dev/null || true
     exit 1
   }
-  echo "$DAEMON_PID" > "$PIDFILE"
-  printf '%s\n' "$DAEMON_IDENTITY" > "$LOCK/pid-identity" 2>/dev/null || true
+  if ! fm_super_publish_daemon_identity "$LOCK" "$PIDFILE" "$DAEMON_PID" "$DAEMON_IDENTITY"; then
+    echo "error: cannot publish away-mode daemon identity for pid $DAEMON_PID" >&2
+    rm -f "$PIDFILE" 2>/dev/null || true
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    exit 1
+  fi
 
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
@@ -1407,7 +1432,6 @@ fm_super_main() {
     afk_active "$STATE" || return 0
     if [ -n "$DAEMON_IDENTITY" ] \
       && fm_afk_stop_intent_matches "$STATE" "$DAEMON_PID" "$DAEMON_IDENTITY"; then
-      fm_afk_stop_intent_retire "$STATE" "$DAEMON_PID" "$DAEMON_IDENTITY" || true
       log "daemon expected stop observed (signal=$signal pid=$DAEMON_PID)"
       return 0
     fi
