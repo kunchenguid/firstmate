@@ -184,10 +184,16 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 Herdr has no direct cursor-row primitive.
 The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
+That structural scan reads only the tail rows bounded by `FM_BACKEND_HERDR_COMPOSER_LINES`, whose default leaves room for a harness footer plus a multi-line custom status line.
+A composer row pushed below that window reads `unknown` and defers away-mode injection exactly as pending input does, so a taller status line needs a larger bound.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If a future Herdr version strips ANSI style, ghost suggestions become pending rather than empty, which safely defers injection and eventually raises the wedge alarm.
+
+That same owner normalizes invisible composer padding to ordinary spaces before the verdict, because a no-break or zero-width character is not whitespace to any locale's trim.
+A harness idle row padded that way therefore reads `empty` instead of as text a human typed but did not send, and a candidate composer row holding only such padding is `empty` as well, since none of the normalized characters carries typed meaning.
+`tests/fm-composer-nbsp.test.sh` pins this for the shared classifier and for a recorded Claude screen replayed through this adapter.
 
 A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.

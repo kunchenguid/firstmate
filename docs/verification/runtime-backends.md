@@ -234,13 +234,13 @@ Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pa
 
 Real captures verified these active distinctions:
 
-- Claude and Codex use bare `❯` and `›` agent composers.
+- Claude and Codex use bare `❯` and `›` agent composers, and Claude 2.1.220 pads its idle row with U+00A0 (`e2 9d af c2 a0`), which no locale trims as whitespace; invisible padding is normalized before classification, so that row is empty rather than pending.
 - Pi uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.
 
-`tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
+`tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes, and `tests/fm-composer-nbsp.test.sh` pins the padded Claude idle row through both the shared classifier and the Herdr adapter.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:
 
 ```sh
