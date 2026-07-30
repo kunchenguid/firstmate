@@ -22,6 +22,8 @@ test_primary_hook_wiring() {
   local config pre stop matcher
   config="$ROOT/.devin/config.json"
   [ -f "$config" ] || fail "tracked .devin/config.json is missing"
+  jq -e '.read_config_from.claude == false' "$config" >/dev/null \
+    || fail "tracked Devin config does not disable Claude compatibility import"
   matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$config")
   [ "$matcher" = exec ] || fail "Devin PreToolUse matcher is '$matcher', expected exec"
   pre=$(jq -r '.hooks.PreToolUse[0].hooks[].command' "$config")
@@ -29,9 +31,12 @@ test_primary_hook_wiring() {
   assert_contains "$pre" 'fm-cd-pretool-check.sh' "Devin hook omitted cd checker"
   assert_contains "$pre" '--claude' "Devin hook did not select stderr-only deny output"
   stop=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$config")
-  assert_contains "$stop" 'pwd -P' "Devin Stop hook is not anchored to hook process cwd"
+  assert_contains "$stop" 'DEVIN_PROJECT_DIR' "Devin Stop hook omitted the native project root"
+  assert_contains "$stop" 'git rev-parse --show-toplevel' "Devin Stop hook omitted the Git-root fallback"
   assert_contains "$stop" 'fm-turnend-guard.sh' "Devin Stop hook omitted shared guard"
-  pass "tracked Devin primary hooks wire both seatbelts and the turn-end guard"
+  [ "$(jq '[.hooks.Stop[].hooks[] | select(.command | contains("fm-turnend-guard.sh"))] | length' "$config")" -eq 1 ] \
+    || fail "tracked Devin config does not have exactly one Devin Stop owner"
+  pass "tracked Devin config owns exactly one Stop hook and disables Claude import"
 }
 
 test_primary_pretool_hook_blocks() {
@@ -51,8 +56,45 @@ test_primary_pretool_hook_blocks() {
   pass "tracked Devin PreToolUse adapter blocks unsafe watcher commands with stderr-only output"
 }
 
+test_launch_templates_preserve_workspace_trust() {
+  local source
+  source=$(cat "$SPAWN")
+  [ "$(printf '%s' "$source" | grep -o -- '--respect-workspace-trust true' | wc -l | tr -d ' ')" -eq 2 ] \
+    || fail "Devin ordinary and secondmate launch templates do not both preserve workspace trust"
+  assert_not_contains "$source" '--respect-workspace-trust false' "a Devin launch template still bypasses workspace trust"
+  pass "ordinary and secondmate Devin launches preserve once-per-worktree trust"
+}
+
+test_primary_hooks_anchor_from_nested_cwd() {
+  local fixture nested command script marker mode
+  fixture="$TMP_ROOT/root with spaces"
+  nested="$fixture/nested/cwd"
+  marker="$fixture/hook-invocations"
+  mkdir -p "$fixture/.devin" "$fixture/bin" "$nested"
+  cp "$ROOT/.devin/config.json" "$fixture/.devin/config.json"
+  git -C "$fixture" init -q
+  for script in fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-turnend-guard.sh; do
+    # shellcheck disable=SC2016  # fixture script expands these values when its hook runs
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$(basename "$0")" >> "$FM_DEVIN_HOOK_MARKER"' > "$fixture/bin/$script"
+    chmod +x "$fixture/bin/$script"
+  done
+  for mode in env fallback; do
+    : > "$marker"
+    while IFS= read -r command; do
+      if [ "$mode" = env ]; then
+        (trap - EXIT; cd "$nested" && DEVIN_PROJECT_DIR="$fixture" FM_DEVIN_HOOK_MARKER="$marker" bash -c "$command")
+      else
+        (trap - EXIT; cd "$nested" && DEVIN_PROJECT_DIR='' FM_DEVIN_HOOK_MARKER="$marker" bash -c "$command")
+      fi
+    done < <(jq -r '.hooks.PreToolUse[].hooks[].command, .hooks.Stop[].hooks[].command' "$fixture/.devin/config.json")
+    [ "$(wc -l < "$marker" | tr -d ' ')" -eq 3 ] \
+      || fail "Devin $mode root resolution did not invoke all three hooks from a nested cwd: $(cat "$marker")"
+  done
+  pass "all Devin hooks resolve quoted project roots from nested working directories"
+}
+
 test_spawn_launch_and_turnend_config() {
-  local d home proj wt fakebin id out log config project_config user_config task_command config_mode
+  local d home proj wt fakebin id out log config project_config user_config user_config_before task_command config_mode
   d="$TMP_ROOT/spawn"
   home="$d/home"
   proj="$d/project"
@@ -68,9 +110,23 @@ test_spawn_launch_and_turnend_config() {
   mkdir -p "$(dirname "$project_config")"
   printf '%s\n' '{"version":1,"model":"repo-model","hooks":{"PreToolUse":[{"matcher":"exec","hooks":[{"type":"command","command":"repo-safety-hook"}]}],"Stop":[{"hooks":[{"type":"command","command":"repo-stop-hook"}]}]}}' > "$project_config"
   user_config="$d/xdg/devin/config.json"
+  user_config_before="$d/user-config.before.jsonc"
   mkdir -p "$(dirname "$user_config")"
   task_command="touch '$home/state/$id.turn-ended'"
-  jq -n --arg command "$task_command" '{version:1,theme_mode:"dark",hooks:{PreToolUse:[{matcher:"exec",hooks:[{type:"command",command:"user-safety-hook"}]}],Stop:[{hooks:[{type:"command",command:"user-stop-hook"}]},{hooks:[{type:"command",command:$command}]}]}}' > "$user_config"
+  printf '%s\n' \
+    '{' \
+    '  // Devin documents line comments in user configuration.' \
+    '  "version": 1,' \
+    '  "theme_mode": "dark",' \
+    '  "literal": "keep // and /* comment-like */ text",' \
+    '  "read_config_from": {"claude": true},' \
+    '  /* Block comments and trailing commas are accepted JSONC syntax. */' \
+    '  "hooks": {' \
+    '    "PreToolUse": [{"matcher":"exec","hooks":[{"type":"command","command":"user-safety-hook"},],},],' \
+    "    \"Stop\": [{\"hooks\":[{\"type\":\"command\",\"command\":\"user-stop-hook\"},],},{\"hooks\":[{\"type\":\"command\",\"command\":\"$task_command\"},],},]," \
+    '  },' \
+    '}' > "$user_config"
+  cp "$user_config" "$user_config_before"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -99,7 +155,8 @@ SH
   assert_contains "$out" "spawned $id harness=devin" "Devin spawn did not succeed"
   assert_grep 'DEVIN_CLI=1 devin' "$log" "Devin launch marker/command missing"
   assert_grep '--permission-mode dangerous' "$log" "Devin launch is not autonomous"
-  assert_grep '--respect-workspace-trust false' "$log" "Devin launch can stop at workspace trust"
+  assert_grep '--respect-workspace-trust true' "$log" "Devin launch bypassed workspace trust"
+  assert_not_contains "$(cat "$log")" '--respect-workspace-trust false' "Devin launch explicitly disabled workspace trust"
   assert_grep "--model 'swe-1.6'" "$log" "Devin model flag missing"
   assert_grep '--prompt-file' "$log" "Devin prompt-file launch missing"
   config="$home/state/$id.devin-config.json"
@@ -107,6 +164,8 @@ SH
   if [ "$(uname)" = Darwin ]; then config_mode=$(stat -f '%Lp' "$config"); else config_mode=$(stat -c '%a' "$config"); fi
   [ "$config_mode" = 600 ] || fail "Devin per-task config permissions are not 0600"
   jq -e '.theme_mode == "dark"
+    and .literal == "keep // and /* comment-like */ text"
+    and .read_config_from.claude == false
     and .hooks.PreToolUse[0].matcher == "exec"
     and .hooks.PreToolUse[0].hooks[0].command == "user-safety-hook"
     and .hooks.Stop[0].hooks[0].command == "user-stop-hook"
@@ -115,18 +174,21 @@ SH
     || fail "Devin task config did not preserve only user settings and the task hook: $(cat "$config")"
   jq -e '.model == "repo-model" and (.hooks.Stop | length == 1)' "$project_config" >/dev/null \
     || fail "spawn modified the project-local Devin config: $(cat "$project_config")"
-  jq -e '.theme_mode == "dark" and (.hooks.Stop | length == 2)' "$user_config" >/dev/null \
-    || fail "spawn modified the user-level Devin config: $(cat "$user_config")"
-  pass "fm-spawn composes user config with one task hook and leaves repository config native"
+  cmp -s "$user_config_before" "$user_config" \
+    || fail "spawn modified the JSONC user-level Devin config"
+  pass "fm-spawn composes JSONC user config with one task hook and preserves native project config"
 }
 
 test_invalid_user_config_remains_recoverable() {
   local name contents expected d home proj wt fakebin id out rc log config
-  for name in malformed root-null root-array hooks-null hooks-array stop-null stop-shape; do
+  for name in malformed unterminated-comment root-null root-array import-null import-array hooks-null hooks-array stop-null stop-shape; do
     case "$name" in
       malformed) contents='{"hooks":' ; expected='Unexpected end of JSON input' ;;
+      unterminated-comment) contents='{"version":1, /* unfinished' ; expected='unterminated block comment' ;;
       root-null) contents='null' ; expected='config root must be an object' ;;
       root-array) contents='[]' ; expected='config root must be an object' ;;
+      import-null) contents='{"read_config_from":null}' ; expected='read_config_from must be an object' ;;
+      import-array) contents='{"read_config_from":[]}' ; expected='read_config_from must be an object' ;;
       hooks-null) contents='{"hooks":null}' ; expected='hooks must be an object' ;;
       hooks-array) contents='{"hooks":[]}' ; expected='hooks must be an object' ;;
       stop-null) contents='{"hooks":{"Stop":null}}' ; expected='hooks.Stop must be an array' ;;
@@ -247,6 +309,8 @@ test_busy_signature_is_scoped_to_devin() {
 test_detection_marker
 test_primary_hook_wiring
 test_primary_pretool_hook_blocks
+test_launch_templates_preserve_workspace_trust
+test_primary_hooks_anchor_from_nested_cwd
 test_spawn_launch_and_turnend_config
 test_invalid_user_config_remains_recoverable
 test_lock_recognizes_devin_holder

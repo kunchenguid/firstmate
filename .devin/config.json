@@ -1,5 +1,8 @@
 {
   "version": 1,
+  "read_config_from": {
+    "claude": false
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -7,11 +10,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'root=$(pwd -P); [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-arm-pretool-check.sh\" ] || exit 0; exec \"$root/bin/fm-arm-pretool-check.sh\" --claude'"
+            "command": "bash -lc 'root=${DEVIN_PROJECT_DIR:-}; if [ -z \"$root\" ]; then root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; fi; [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-arm-pretool-check.sh\" ] || exit 0; exec \"$root/bin/fm-arm-pretool-check.sh\" --claude'"
           },
           {
             "type": "command",
-            "command": "bash -lc 'root=$(pwd -P); [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-cd-pretool-check.sh\" ] || exit 0; exec \"$root/bin/fm-cd-pretool-check.sh\" --claude'"
+            "command": "bash -lc 'root=${DEVIN_PROJECT_DIR:-}; if [ -z \"$root\" ]; then root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; fi; [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-cd-pretool-check.sh\" ] || exit 0; exec \"$root/bin/fm-cd-pretool-check.sh\" --claude'"
           }
         ]
       }
@@ -21,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'root=$(pwd -P); [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-turnend-guard.sh\" ] || exit 0; exec \"$root/bin/fm-turnend-guard.sh\"'"
+            "command": "bash -lc 'root=${DEVIN_PROJECT_DIR:-}; if [ -z \"$root\" ]; then root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; fi; [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-turnend-guard.sh\" ] || exit 0; exec \"$root/bin/fm-turnend-guard.sh\"'"
           }
         ]
       }

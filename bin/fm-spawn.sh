@@ -492,13 +492,14 @@ launch_template() {
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     # Devin CLI: --prompt-file avoids shell interpolation of the brief, dangerous
-    # is the unattended equivalent of the other adapters' bypass modes, and the
-    # per-task config carries the Stop turn-end hook without touching project config.
+    # is the unattended equivalent of the other adapters' bypass modes, workspace
+    # trust remains enabled so each worktree must be approved once, and the per-task
+    # config carries the Stop turn-end hook without touching project config.
     devin)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'DEVIN_CLI=1 devin --permission-mode dangerous --respect-workspace-trust false __MODELFLAG__--prompt-file __BRIEF__'
+        printf '%s' 'DEVIN_CLI=1 devin --permission-mode dangerous --respect-workspace-trust true __MODELFLAG__--prompt-file __BRIEF__'
       else
-        printf '%s' 'DEVIN_CLI=1 devin --config __DEVINCONFIG__ --permission-mode dangerous --respect-workspace-trust false __MODELFLAG__--prompt-file __BRIEF__'
+        printf '%s' 'DEVIN_CLI=1 devin --config __DEVINCONFIG__ --permission-mode dangerous --respect-workspace-trust true __MODELFLAG__--prompt-file __BRIEF__'
       fi
       ;;
     *) return 1 ;;
@@ -1677,11 +1678,85 @@ if [ "$HARNESS" = devin ]; then
       (umask 077; node - "$user_devin_config" "touch $(shell_quote "$TURNEND")" > "$DEVIN_CONFIG") <<'NODE'
 const fs = require("node:fs");
 const path = process.argv[2];
+function parseJsonc(source) {
+  let withoutComments = "";
+  let inString = false;
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (inString) {
+      withoutComments += char;
+      if (char === "\\") {
+        i += 1;
+        if (i < source.length) withoutComments += source[i];
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      withoutComments += char;
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      i += 2;
+      while (i < source.length && source[i] !== "\n" && source[i] !== "\r") i += 1;
+      if (i < source.length) withoutComments += source[i];
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      i += 2;
+      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) {
+        if (source[i] === "\n" || source[i] === "\r") withoutComments += source[i];
+        i += 1;
+      }
+      if (i >= source.length) throw new Error("unterminated block comment");
+      i += 1;
+      continue;
+    }
+    withoutComments += char;
+  }
+  if (inString) return JSON.parse(withoutComments);
+
+  let withoutTrailingCommas = "";
+  inString = false;
+  for (let i = 0; i < withoutComments.length; i += 1) {
+    const char = withoutComments[i];
+    if (inString) {
+      withoutTrailingCommas += char;
+      if (char === "\\") {
+        i += 1;
+        if (i < withoutComments.length) withoutTrailingCommas += withoutComments[i];
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      withoutTrailingCommas += char;
+      continue;
+    }
+    if (char === ",") {
+      let lookahead = i + 1;
+      while (lookahead < withoutComments.length && /\s/.test(withoutComments[lookahead])) lookahead += 1;
+      if (withoutComments[lookahead] === "}" || withoutComments[lookahead] === "]") continue;
+    }
+    withoutTrailingCommas += char;
+  }
+  return JSON.parse(withoutTrailingCommas);
+}
 try {
-  const config = JSON.parse(fs.readFileSync(path, "utf8"));
+  const config = parseJsonc(fs.readFileSync(path, "utf8"));
   if (config === null || Array.isArray(config) || typeof config !== "object") {
     throw new Error("config root must be an object");
   }
+  if (config.read_config_from === undefined) config.read_config_from = {};
+  if (config.read_config_from === null || Array.isArray(config.read_config_from) || typeof config.read_config_from !== "object") {
+    throw new Error("read_config_from must be an object");
+  }
+  config.read_config_from.claude = false;
   if (config.hooks === undefined) config.hooks = {};
   if (config.hooks === null || Array.isArray(config.hooks) || typeof config.hooks !== "object") {
     throw new Error("hooks must be an object");
@@ -1700,7 +1775,7 @@ try {
 }
 NODE
     else
-      (umask 077; printf '{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$turnend_json" > "$DEVIN_CONFIG")
+      (umask 077; printf '{"version":1,"read_config_from":{"claude":false},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$turnend_json" > "$DEVIN_CONFIG")
     fi
   fi
 fi

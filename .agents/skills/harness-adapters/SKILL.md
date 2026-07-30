@@ -183,8 +183,9 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Process name | `devin` |
 | Resume | `devin --resume <session-id>` or `devin --continue` |
 
-Launch with `DEVIN_CLI=1 devin --permission-mode dangerous --respect-workspace-trust false --prompt-file <brief>`.
+Launch with `DEVIN_CLI=1 devin --permission-mode dangerous --respect-workspace-trust true --prompt-file <brief>`.
 Firstmate-launched crewmates add `--config <state-owned-config>` containing the native user configuration plus their task Stop hook, without overwriting the user's file.
+That state-owned config disables Claude compatibility import so Devin has exactly one harness-owned Stop path.
 Devin loads the repository configuration through its native project layer alongside that override, so project settings and hooks are not copied or applied twice.
 Secondmates omit that override and load the tracked primary hooks from their Firstmate home.
 
@@ -198,7 +199,7 @@ No Devin background-task completion auto-wake contract has been verified, so do 
 
 The first launch may print the logged-in account and organization before the TUI.
 For a primary session launched normally, approve the workspace-trust prompt once per clone so repository hooks load.
-`--respect-workspace-trust false` suppresses the workspace-trust gate for unattended Firstmate launches.
+Firstmate keeps workspace trust enabled and relies on Devin's persisted once-per-worktree approval instead of bypassing that gate.
 
 ## claude (VERIFIED; busy-state hooks live-verified 2026-07-28 on Claude Code 2.1.220)
 
