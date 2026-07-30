@@ -128,8 +128,8 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
-#   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   Ship/scout spawns enforce isolated-worktree and Treehouse-base fail-closed
+#   launch contracts owned by docs/architecture.md.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -2131,14 +2131,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 
-  # Base the fresh worktree on origin's default branch so it never inherits the
-  # primary checkout's current working branch. Treehouse warms its pool from the
-  # primary's HEAD, so a worktree acquired while the primary sits on a feature
-  # branch would carry that branch's unmerged commits into the crewmate's PR
-  # (the base-pollution that produced 18-commit-wide diffs). Local-only repos
-  # skip this step; an origin-backed spawn refuses to launch unless its base is
-  # established. A crewmate that deliberately needs a non-default base still
-  # checks it out explicitly.
+  # Treehouse's pooled starting HEAD can be stale or inherit the primary's
+  # current branch, so origin-backed tasks establish their base from the remote's
+  # advertised default and fail closed if that cannot be done. Repositories
+  # without origin retain Treehouse's local base. See docs/architecture.md and
+  # tests/fm-spawn-default-base.test.sh.
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     if ! _fm_remote_head=$(git -C "$WT" ls-remote --symref origin HEAD 2>/dev/null); then
       echo "error: could not resolve origin's default branch; refusing to launch" >&2
