@@ -67,6 +67,13 @@ fi
 if [ -n "${FAKE_CURL_CALLED:-}" ]; then
   : > "$FAKE_CURL_CALLED"
 fi
+if [ -n "${FAKE_CURL_FAIL_COUNTER:-}" ] && [ -f "$FAKE_CURL_FAIL_COUNTER" ]; then
+  n=$(cat "$FAKE_CURL_FAIL_COUNTER")
+  if [ "$n" -gt 0 ]; then
+    echo $((n - 1)) > "$FAKE_CURL_FAIL_COUNTER"
+    exit 1
+  fi
+fi
 case "$url" in
   *"${FAKE_CURL_BLOCK_MATCH:-__no_match__}"*)
     if [ -n "${FAKE_CURL_BLOCK_MATCH:-}" ]; then
@@ -620,6 +627,39 @@ test_poll_reports_error_once() {
   pass "fm-trello-poll.sh surfaces relay errors once and dedupes"
 }
 
+test_poll_retries_transient_failure_silently() {
+  local home out counter
+  home="$TMP_ROOT/poll-transient-retry"; mkdir -p "$home/state"
+  write_config "$home"
+  local fakebin; fakebin=$(make_fake_curl "$home")
+  counter="$home/fail-counter"; echo 1 > "$counter"
+  local cards='[{"id":"cA","name":"first","idList":"L-inbox","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[],"badges":{"comments":0}}]'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TRELLO_CURL_RETRY_SLEEP=0 \
+    FAKE_CURL_FAIL_COUNTER="$counter" \
+    FAKE_LISTS_BODY="$LISTS_JSON" FAKE_CARDS_BODY="$cards" \
+    "$ROOT/bin/fm-trello-poll.sh")
+  [ "$out" = "trello-inbox cA" ] \
+    || fail "a single transient transport failure must be retried transparently (got: $out)"
+  assert_absent "$home/state/trello-poll.error" "a retried-through transient failure must never write an error marker"
+  pass "fm-trello-poll.sh retries a single transient transport failure without surfacing anything"
+}
+
+test_poll_defers_silently_when_retries_exhausted() {
+  local home out counter
+  home="$TMP_ROOT/poll-transient-exhausted"; mkdir -p "$home/state"
+  write_config "$home"
+  local fakebin; fakebin=$(make_fake_curl "$home")
+  counter="$home/fail-counter"; echo 99 > "$counter"
+  local cards='[{"id":"cA","name":"first","idList":"L-inbox","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[],"badges":{"comments":0}}]'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_TRELLO_CURL_RETRY_SLEEP=0 \
+    FAKE_CURL_FAIL_COUNTER="$counter" \
+    FAKE_LISTS_BODY="$LISTS_JSON" FAKE_CARDS_BODY="$cards" \
+    "$ROOT/bin/fm-trello-poll.sh")
+  [ -z "$out" ] || fail "a persistent transport failure must defer silently, never wake the watcher (got: $out)"
+  assert_absent "$home/state/trello-poll.error" "a persistent transport failure must not surface as a diagnostic wake"
+  pass "fm-trello-poll.sh defers silently to the next sweep once its transient-retry budget is exhausted"
+}
+
 test_mutation_and_poll_marker_updates_are_synchronized() {
   local home fakebin block_ready block_release poll_called cli_out cli_err poll_out
   local mut_pid poll_pid mut_rc poll_rc blocked_before_release poll_alive
@@ -768,6 +808,8 @@ test_poll_bound_in_progress_comment_preserves_nudge_routing
 test_poll_second_incident_sequence_ready_move_after_completed_binding
 test_poll_one_trigger_per_sweep
 test_poll_reports_error_once
+test_poll_retries_transient_failure_silently
+test_poll_defers_silently_when_retries_exhausted
 test_mutation_and_poll_marker_updates_are_synchronized
 test_bootstrap_activates_on_config
 test_bootstrap_inert_without_config

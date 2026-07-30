@@ -80,18 +80,32 @@ trello_configured() {
 # branch on the code. key and token are appended as query params (Trello's auth
 # scheme) but written into a 0600 -K config file rather than the command line, so
 # they never appear in `ps`/argv - the same discipline as X mode's bearer header
-# temp file. Returns non-zero (no code printed) on a transport failure.
+# temp file.
+#
+# A curl transport failure (rc != 0: connect refused, DNS blip, cold-connection
+# timeout) is retried a bounded number of times with a short sleep, because that
+# class of failure is a benign network blip, not an actionable board/credential
+# problem - a caller must never wake the watcher over one. Once retries are
+# exhausted, returns 2 (no code printed) so callers can distinguish "still
+# transient, defer silently" from other failures. Returns 1 (no code printed) for
+# a local setup failure (mktemp/write), which is not a retry candidate.
 trello_curl() {
   local method=$1 url=$2 out=$3; shift 3
-  local sep cfg code rc
+  local sep cfg code rc attempt=0
+  local retries="${FM_TRELLO_CURL_RETRIES:-2}"
   case "$url" in *\?*) sep='&' ;; *) sep='?' ;; esac
   cfg=$(mktemp "${TMPDIR:-/tmp}/fm-trello-curl.XXXXXX") || return 1
   chmod 600 "$cfg" 2>/dev/null || true
   printf 'url = "%s%skey=%s&token=%s"\n' "$url" "$sep" "$TRELLO_KEY" "$TRELLO_TOKEN" > "$cfg" || { rm -f "$cfg"; return 1; }
-  code=$(curl -m "${FM_TRELLO_TIMEOUT:-10}" -s -o "$out" -w '%{http_code}' -X "$method" "$@" -K "$cfg" 2>/dev/null)
-  rc=$?
+  while :; do
+    code=$(curl -m "${FM_TRELLO_TIMEOUT:-10}" -s -o "$out" -w '%{http_code}' -X "$method" "$@" -K "$cfg" 2>/dev/null)
+    rc=$?
+    [ "$rc" -eq 0 ] && break
+    attempt=$((attempt + 1))
+    [ "$attempt" -gt "$retries" ] && { rm -f "$cfg"; return 2; }
+    sleep "${FM_TRELLO_CURL_RETRY_SLEEP:-1}"
+  done
   rm -f "$cfg"
-  [ "$rc" -eq 0 ] || return 1
   printf '%s' "$code"
 }
 
@@ -102,15 +116,19 @@ trello_api() {
 }
 
 # Board lists JSON, fetched once per process and memoized in _TRELLO_LISTS_JSON.
-# Prints the JSON array on success; prints nothing and returns non-zero on failure.
+# Prints the JSON array on success; prints nothing on failure. Returns 2 when
+# trello_api exhausted its transient-retry budget (caller should defer silently,
+# never wake), 1 for any other failure (bad HTTP code, empty body, local setup).
 trello_lists_json() {
   if [ -n "${_TRELLO_LISTS_JSON:-}" ]; then
     printf '%s' "$_TRELLO_LISTS_JSON"
     return 0
   fi
-  local body code
+  local body code rc
   body=$(mktemp "${TMPDIR:-/tmp}/fm-trello-lists.XXXXXX") || return 1
-  code=$(trello_api GET "1/boards/$TRELLO_BOARD/lists?fields=id,name" "$body") || { rm -f "$body"; return 1; }
+  code=$(trello_api GET "1/boards/$TRELLO_BOARD/lists?fields=id,name" "$body")
+  rc=$?
+  if [ "$rc" -ne 0 ]; then rm -f "$body"; return "$rc"; fi
   if [ "$code" != "200" ]; then rm -f "$body"; return 1; fi
   _TRELLO_LISTS_JSON=$(cat "$body")
   rm -f "$body"

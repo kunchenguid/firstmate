@@ -95,7 +95,19 @@ trap trello_poll_cleanup EXIT
 # Resolve the lanes we care about. A missing lane is not fatal - the board may
 # not have every lane yet - but Inbox and Ready are the captain-owned request and
 # decision lanes, so if neither resolves there is nothing to poll.
-trello_lists_json >/dev/null || { emit_error_once "cannot read board lists"; exit 0; }
+#
+# trello_lists_json already retries a curl transport failure internally
+# (trello_curl); rc 2 means that retry budget is exhausted and this is still a
+# benign network blip, not an actionable board/credential problem - defer
+# silently to the next scheduled sweep rather than waking the watcher over it.
+trello_lists_json >/dev/null
+LISTS_RC=$?
+if [ "$LISTS_RC" -eq 2 ]; then
+  exit 0
+elif [ "$LISTS_RC" -ne 0 ]; then
+  emit_error_once "cannot read board lists"
+  exit 0
+fi
 INBOX_ID=$(trello_lane_id "Inbox" || true)
 READY_ID=$(trello_lane_id "Ready" || true)
 INPROGRESS_ID=$(trello_lane_id "In Progress" || true)
@@ -108,8 +120,14 @@ fi
 # One board-cards fetch gives lane, labels, and comment count for every open
 # card - enough to classify all four triggers without per-card round-trips.
 CARDS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-trello-cards.XXXXXX") || exit 0
-CODE=$(trello_api GET "1/boards/$TRELLO_BOARD/cards?fields=id,name,idList,dateLastActivity,labels,badges" "$CARDS_FILE") \
-  || { emit_error_once "cannot read board cards"; exit 0; }
+CODE=$(trello_api GET "1/boards/$TRELLO_BOARD/cards?fields=id,name,idList,dateLastActivity,labels,badges" "$CARDS_FILE")
+CARDS_RC=$?
+if [ "$CARDS_RC" -eq 2 ]; then
+  exit 0
+elif [ "$CARDS_RC" -ne 0 ]; then
+  emit_error_once "cannot read board cards"
+  exit 0
+fi
 case "$CODE" in
   200) ;;
   400|401|403|404) emit_error_once "board cards returned HTTP $CODE"; exit 0 ;;
