@@ -318,7 +318,9 @@ busy_turn_over_age() {  # <task>
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
+# every poll. Once established, that throttle survives new idle pane hashes;
+# only a real state transition clears it. Advances the stale suppressor to
+# <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
@@ -1011,8 +1013,13 @@ EOF
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
-          paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$w" ;;
+          paused)  handle_paused_stale "$w" "$task" "$h" ;;
+          working) clear_pause_tracking "$w" ;;
+          *)       if [ -e "$pf" ]; then
+                     handle_paused_stale "$w" "$task" "$h"
+                   else
+                     clear_pause_tracking "$w"
+                   fi ;;
         esac
       else
         [ -e "$pf" ] && clear_pause_tracking "$w"

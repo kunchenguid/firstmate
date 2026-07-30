@@ -786,6 +786,113 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# Trigger: a live, deliberately parked worker redraws its pane after the initial
+# stale notice. Static pane content masks the defect. The visible symptom is an
+# extra stale notice even though the configured pause interval has not expired.
+# Both content paths must retain the same throttle until the worker resumes, at
+# which point normal stale-work escalation must take over.
+test_live_paused_content_churn_keeps_throttle_until_resume() {
+  local mode dir state fakebin out capture_file statusf window key pane_hash sig pid round wakes i current target expected_hash
+  for mode in static changing; do
+    dir=$(make_case "live-paused-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+    window="test:fm-held"
+    printf 'idle parked pane token 0\n' > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+    printf 'paused: awaiting the upstream release\n' > "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "idle parked pane token 0")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+
+    round=0
+    while [ "$round" -lt 3 ]; do
+      if [ "$mode" = changing ] && [ "$round" -gt 0 ]; then
+        printf 'idle parked pane token %s\n' "$round" > "$capture_file"
+      fi
+      : > "$out"
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+        FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release' \
+        FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999999 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+        FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+      pid=$!
+      if [ "$round" -eq 0 ]; then
+        wait_for_exit "$pid" 100 || fail "$mode live pause did not emit its initial stale notice"
+      else
+        current=$(cat "$state/.count-$key" 2>/dev/null || echo 0)
+        if [ "$mode" = static ]; then target=$((current + 2)); else target=2; fi
+        expected_hash=$(hash_text "$(cat "$capture_file")")
+        i=0
+        while [ "$i" -lt 100 ] && is_live_non_zombie "$pid"; do
+          current=$(cat "$state/.count-$key" 2>/dev/null || echo 0)
+          if [ "$current" -ge "$target" ]; then
+            [ "$mode" = static ] || [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$expected_hash" ] || {
+              sleep 0.1
+              i=$((i + 1))
+              continue
+            }
+            break
+          fi
+          sleep 0.1
+          i=$((i + 1))
+        done
+        if ! is_live_non_zombie "$pid"; then
+          reap "$pid"
+          fail "$mode live pause emitted another notice inside the unexpired pause interval: $(cat "$out")"
+        fi
+        [ "$current" -ge "$target" ] || { reap "$pid"; fail "$mode live pause did not complete its quiet stale classification"; }
+        wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+        [ "$wakes" -eq 1 ] || { reap "$pid"; fail "$mode live pause emitted $wakes notices inside one pause interval"; }
+        reap "$pid"
+      fi
+      round=$((round + 1))
+    done
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+    [ "$wakes" -eq 1 ] || fail "$mode live pause emitted $wakes notices inside one pause interval"
+    [ -e "$state/.paused-resurfaced-$key" ] || fail "$mode live pause lost its re-surface throttle"
+  done
+
+  # Resume the changing-content case. The pause throttle must clear before this
+  # static working pane starts and eventually crosses the ordinary wedge timer.
+  printf 'working: upstream landed, resuming\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  printf 'working pane after resume\n' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999999 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+    [ ! -e "$state/.paused-$key" ] && [ ! -e "$state/.paused-rechecked-$key" ] && \
+      [ ! -e "$state/.paused-resurfaced-$key" ] && [ -s "$state/.stale-since-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "resumed worker surfaced before normal stale tracking began: $(cat "$out")"; }
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "resumed worker retained its pause marker"; }
+  [ ! -e "$state/.paused-rechecked-$key" ] || { reap "$pid"; fail "resumed worker retained its pause-state recheck"; }
+  [ ! -e "$state/.paused-resurfaced-$key" ] || { reap "$pid"; fail "resumed worker retained its pause throttle"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "resumed worker did not start normal stale tracking"; }
+  reap "$pid"
+
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999999 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "resumed worker did not escalate after crossing the ordinary stale threshold"
+  grep -F 'possible wedge' "$out" >/dev/null || fail "resumed worker escalation omitted its ordinary stuck-work reason"
+  pass "static and changing live pauses share one bounded throttle, which clears on resume before ordinary stuck detection"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1579,6 +1686,7 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_live_paused_content_churn_keeps_throttle_until_resume
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
