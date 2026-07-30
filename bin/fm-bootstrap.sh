@@ -18,7 +18,8 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "OPS_INBOX: <operational alert watch remediation>".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
 #          purely local fast-forward and never a remote fetch. Remote routes
@@ -70,6 +71,17 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          The operational alert inbox watch follows fm-ops-inbox-lib.sh's
+#          decision: auto mode arms only when this home has an alert inbox, while
+#          explicit enablement arms fail-closed even when the spool is absent.
+#          docs/ops-inbox-wake.md owns the contract.
+#          Arming registers the reserved standing check state/ops-watch.check.sh
+#          through the ordinary custom-check trust binding.
+#          Arming and disarming are silent unless FM_BOOTSTRAP_VERBOSE_FACTS=1
+#          requests the BOOTSTRAP_INFO fact.
+#          Only a failure prints an actionable OPS_INBOX line.
+#          FM_OPS_INBOX_STATE_DIR overrides the default watched operations state
+#          directory for tests and specialized setups.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -79,16 +91,17 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          secondmate_handoff_resume, x_mode_setup, ops_inbox_setup, fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          PR-check artifacts, secondmate homes, pending handoff outboxes,
-#          X-mode artifacts, project clones, or repair instructions.
+#          X-mode artifacts, the operational alert watch, project clones, or
+#          repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
@@ -146,6 +159,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-ops-inbox-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-ops-inbox-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
@@ -182,6 +201,10 @@ network_sweep_authorized() {
   echo "NETWORK_CHECKS: fleet lock ownership changed before $label, so this stale worker skipped that sweep"
   return 1
 }
+
+# Reserved check id for the standing operational alert inbox watch. It is a
+# watch, never a work item, so it never appears in the backlog or fleet view.
+OPS_INBOX_CHECK_ID=ops-watch
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -825,7 +848,7 @@ tool_version_at_least() {  # <tool> <min-version>
   [ "$patch" -ge "$min_patch" ]
 }
 
-x_mode_write_if_changed() {
+bootstrap_artifact_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
   parent=${dest%/*}
   [ "$parent" != "$dest" ] || return 1
@@ -846,7 +869,7 @@ x_mode_write_if_changed() {
       return 0
     fi
   fi
-  tmp=$(umask 077; mktemp "$parent/.fm-x-mode.XXXXXX" 2>/dev/null) || return 1
+  tmp=$(umask 077; mktemp "$parent/.fm-bootstrap-artifact.XXXXXX" 2>/dev/null) || return 1
   if ! printf '%s\n' "$content" > "$tmp" \
     || ! chmod "$mode" "$tmp" \
     || ! fmx_single_link_file_mode_valid "$tmp" "$mode" "$parent_device"; then
@@ -869,16 +892,25 @@ x_mode_write_if_changed() {
   fi
 }
 
-x_mode_artifact_present() {
+bootstrap_artifact_present() {
   [ -e "$1" ] || [ -L "$1" ]
 }
 
-x_mode_remove_artifact() {
+# The absolute home path to bake into a generated artifact. A relative FM_HOME
+# must never reach a durable shim, and CDPATH must never redirect the resolution.
+bootstrap_home_abs() {
+  case "$FM_HOME" in
+    /*) printf '%s\n' "$FM_HOME" ;;
+    *) CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P ;;
+  esac
+}
+
+bootstrap_artifact_remove() {
   local artifact=$1 parent=${1%/*}
-  x_mode_artifact_present "$artifact" || return 0
+  bootstrap_artifact_present "$artifact" || return 0
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
   rm -f -- "$artifact" 2>/dev/null || return 1
-  ! x_mode_artifact_present "$artifact"
+  ! bootstrap_artifact_present "$artifact"
 }
 
 # X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
@@ -906,8 +938,8 @@ x_mode_setup() {
 
   x_mode_remove_artifacts() {
     local failed=0
-    x_mode_remove_artifact "$shim" || failed=1
-    x_mode_remove_artifact "$cadence" || failed=1
+    bootstrap_artifact_remove "$shim" || failed=1
+    bootstrap_artifact_remove "$cadence" || failed=1
     [ "$failed" -eq 0 ]
   }
 
@@ -921,7 +953,7 @@ x_mode_setup() {
   if [ -z "$token" ]; then
     # Opt-out (or never opted in): drop any X artifacts; stay silent unless we
     # actually removed something.
-    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
+    if bootstrap_artifact_present "$shim" || bootstrap_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
         echo "FMX: X mode off - removed relay poll shim and 30s cadence; default cadence applies on the next supervision cycle; $(x_mode_supervision_repair)"
       else
@@ -939,7 +971,7 @@ x_mode_setup() {
     fi
   done
   if [ "$missing" -ne 0 ]; then
-    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
+    if bootstrap_artifact_present "$shim" || bootstrap_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
         echo "FMX: X mode off - missing relay poll dependencies; install them and rerun bootstrap"
       else
@@ -959,15 +991,9 @@ x_mode_setup() {
 
   mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
 
-  case "$FM_HOME" in
-    /*) shim_home=$FM_HOME ;;
-    *)
-      shim_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) \
-        || { fmx_arm_failed; return 0; }
-      ;;
-  esac
+  shim_home=$(bootstrap_home_abs) || { fmx_arm_failed; return 0; }
   shim_body=$(fmx_poll_shim_content "$shim_home" "$FM_ROOT")
-  x_mode_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
+  bootstrap_artifact_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
   fmx_poll_shim_valid "$shim" "$shim_home" "$FM_ROOT" \
     || { fmx_arm_failed; return 0; }
 
@@ -979,9 +1005,105 @@ x_mode_setup() {
 export FM_CHECK_INTERVAL=30
 EOF
 )
-  x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fmx_arm_failed; return 0; }
+  bootstrap_artifact_write_if_changed "$cadence" "$cadence_body" 600 || { fmx_arm_failed; return 0; }
 
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
+}
+
+# Operational alert inbox watch: keep the standing check that turns an unreviewed
+# critical alert backlog into an ordinary watcher wake. It is armed exactly when
+# fm_ops_inbox_watch_expected says so - by default only when the configured alert
+# spool actually exists - so a home with no operations runtime stays inert and
+# writes nothing. Arming registers state/ops-watch.check.sh through the normal
+# custom-check trust binding, which is what authorizes the watcher to run it.
+# Steady state, either armed or inert, is silent; only a real transition prints a
+# BOOTSTRAP_INFO fact, and only a failure prints an actionable OPS_INBOX line.
+# The check id is reserved, so a task that somehow owns it wins and the watch
+# refuses to arm rather than colliding with that task's artifacts.
+ops_inbox_setup() {
+  local check trust sidecar body home_abs
+  check="$STATE/$OPS_INBOX_CHECK_ID.check.sh"
+  trust="$STATE/$OPS_INBOX_CHECK_ID.check-trust"
+  sidecar="$STATE/.ops-inbox-wake"
+
+  ops_inbox_disarm() {  # <reason-when-removed>
+    local reason=$1 failed=0 disarm_home disarm_body
+    if ! bootstrap_artifact_present "$check"; then
+      bootstrap_artifact_present "$trust" || return 0
+      echo "OPS_INBOX: state/$OPS_INBOX_CHECK_ID.check-trust has no owned operational alert check; inspect and remove or rename it, then rerun bootstrap"
+      return 0
+    fi
+    disarm_home=$(bootstrap_home_abs) || {
+      echo "OPS_INBOX: the operational alert watch cannot prove ownership of state/$OPS_INBOX_CHECK_ID.check.sh because the firstmate home path is unresolved; leave it in place and rerun bootstrap after repairing the home"
+      return 0
+    }
+    disarm_body=$(fm_ops_inbox_shim_content "$disarm_home" "$FM_ROOT")
+    if [ ! -f "$check" ] || [ -L "$check" ] \
+      || ! cmp -s "$check" <(printf '%s\n' "$disarm_body"); then
+      echo "OPS_INBOX: state/$OPS_INBOX_CHECK_ID.check.sh is not this operational alert watch; leave it in place and retire or rename its owner, then rerun bootstrap"
+      return 0
+    fi
+    bootstrap_artifact_remove "$check" || failed=1
+    bootstrap_artifact_remove "$trust" || failed=1
+    bootstrap_artifact_remove "$sidecar" || failed=1
+    if [ "$failed" -eq 0 ]; then
+      [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
+        && echo "BOOTSTRAP_INFO: operational alert watch disarmed - $reason"
+      return 0
+    else
+      echo "OPS_INBOX: operational alert watch could not be disarmed; remove state/$OPS_INBOX_CHECK_ID.check.sh and its trust record, then rerun bootstrap"
+    fi
+  }
+
+  if bootstrap_artifact_present "$STATE/$OPS_INBOX_CHECK_ID.meta"; then
+    echo "OPS_INBOX: task id $OPS_INBOX_CHECK_ID is in use by live work, so the operational alert watch cannot arm; retire that task, then rerun bootstrap"
+    return 0
+  fi
+
+  if ! fm_ops_inbox_config_load "$CONFIG"; then
+    echo "OPS_INBOX: $FM_OPS_INBOX_CONFIG_ERROR; fix config/ops-inbox.json, then rerun bootstrap"
+    return 0
+  fi
+
+  if ! fm_ops_inbox_watch_expected "$FM_HOME"; then
+    ops_inbox_disarm "no alert inbox at $FM_OPS_INBOX_SPOOL"
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+    echo "OPS_INBOX: the operational alert watch cannot read the inbox until jq is installed; install jq, then rerun bootstrap"
+    ops_inbox_disarm "jq is required to read the alert inbox"
+    return 0
+  fi
+
+  mkdir -p "$STATE" 2>/dev/null || {
+    echo "OPS_INBOX: state directory is unavailable, so the operational alert watch cannot arm"
+    return 0
+  }
+
+  home_abs=$(bootstrap_home_abs) || {
+    echo "OPS_INBOX: the firstmate home path could not be resolved, so the operational alert watch cannot arm"
+    return 0
+  }
+  body=$(fm_ops_inbox_shim_content "$home_abs" "$FM_ROOT")
+  if [ -f "$check" ] && [ ! -L "$check" ] \
+    && cmp -s "$check" <(printf '%s\n' "$body") \
+    && fm_custom_check_registered "$STATE" "$OPS_INBOX_CHECK_ID"; then
+    return 0
+  fi
+  if ! bootstrap_artifact_write_if_changed "$check" "$body" 700 \
+    || ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-check-register.sh" "$OPS_INBOX_CHECK_ID" >/dev/null 2>&1 \
+    || ! fm_custom_check_registered "$STATE" "$OPS_INBOX_CHECK_ID"; then
+    bootstrap_artifact_remove "$check" || true
+    bootstrap_artifact_remove "$trust" || true
+    echo "OPS_INBOX: operational alert watch could not be armed; inspect state/$OPS_INBOX_CHECK_ID.check.sh, then rerun bootstrap"
+    return 0
+  fi
+  [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
+    && echo "BOOTSTRAP_INFO: operational alert watch armed for $FM_OPS_INBOX_SPOOL"
+  return 0
 }
 
 crew_dispatch_validate() {
@@ -1224,6 +1346,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  local_phase && ops_inbox_setup
   if network_phase && network_sweep_authorized 'project clone refresh'; then
     __fm_timing_stamp=$(fm_timing_now_ms)
     fleet_sync

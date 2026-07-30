@@ -3,9 +3,13 @@
 # Usage: . bin/fm-supervision-lib.sh
 #
 # Reports whether a firstmate home needs supervision because it has in-flight
-# work (a state/<id>.meta exists) or an X-mode relay poll
-# (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
+# work (a state/<id>.meta exists), a registered process-to-event source, or an
+# armed standing poll - a Relay poll (state/x-watch.check.sh) or the operational
+# alert inbox watch (state/ops-watch.check.sh) - and whether its watcher has a
+# fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
+# A source or standing poll only reaches firstmate through a live watcher, so
+# either is a supervision need even with an empty fleet.
 # bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
 # bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
 # fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh): under the Claude
@@ -27,9 +31,11 @@ fm_sup_stat_mtime() {
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
 #   FM_SUP_SOURCES        count of registered process-to-event sources
-#   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
-#                         registered event source (a source is a wait on an
+#   FM_SUP_NEEDED         true/false - in-flight work, an armed standing poll, or
+#                         a registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata)
+#   FM_SUP_STANDING_DESC  plain-language name of the armed standing poll(s), for
+#                         banners; empty when none is armed
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -38,7 +44,9 @@ fm_sup_stat_mtime() {
 fm_supervision_status() {
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
   FM_SUP_IN_FLIGHT=0
+  FM_SUP_SOURCES=0
   FM_SUP_NEEDED=false
+  FM_SUP_STANDING_DESC=
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
@@ -47,13 +55,20 @@ fm_supervision_status() {
     [ -e "$meta" ] || continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
-  FM_SUP_SOURCES=0
   for source in "$state"/procevent/*.source; do
     [ -e "$source" ] || continue
     FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
   done
+  [ -f "$state/x-watch.check.sh" ] && FM_SUP_STANDING_DESC="Relay polling"
+  if [ -f "$state/ops-watch.check.sh" ]; then
+    if [ -n "$FM_SUP_STANDING_DESC" ]; then
+      FM_SUP_STANDING_DESC="$FM_SUP_STANDING_DESC and operational alert monitoring"
+    else
+      FM_SUP_STANDING_DESC="operational alert monitoring"
+    fi
+  fi
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
-    || [ -f "$state/x-watch.check.sh" ] \
+    || [ -n "$FM_SUP_STANDING_DESC" ] \
     || [ "$FM_SUP_SOURCES" -gt 0 ]; then
     FM_SUP_NEEDED=true
   fi
