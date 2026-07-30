@@ -16,11 +16,12 @@
 #   <PreToolUse JSON on stdin> | bin/fm-cd-pretool-check.sh
 #   bin/fm-cd-pretool-check.sh --command '<cmd>'
 #
-# Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude, Codex, and Cursor. CLI mode is used by OpenCode and Pi after their
-# adapters extract the exact command string. --cursor selects Cursor's own deny
-# rendering and marks this invocation as the Cursor registration rather than the
-# Claude-settings duplicate Cursor also loads.
+# Stdin mode extracts .toolInput.command for Grok, .tool_input.command for
+# Claude, Codex, and Cursor, or .toolCall.args.CommandLine for Agy. CLI mode is
+# used by OpenCode and Pi after their adapters extract the exact command
+# string. --cursor selects Cursor's own deny rendering and marks this
+# invocation as the Cursor registration rather than the Claude-settings
+# duplicate Cursor also loads.
 #
 # Exit/output contract (identical shape to bin/fm-arm-pretool-check.sh):
 #   ALLOW - exit 0 and no output.
@@ -107,7 +108,7 @@ if [ "$CMD_SET" -eq 0 ]; then
   if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // .toolCall.args.CommandLine // empty)' 2>/dev/null) || exit 0
 fi
 
 [ -n "$CMD" ] || exit 0

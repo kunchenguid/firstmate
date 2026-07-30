@@ -17,7 +17,7 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|agy|^pi$|^pi-signed$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the

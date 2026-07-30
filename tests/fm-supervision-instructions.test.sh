@@ -117,6 +117,14 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
 
+  out=$("$RENDER" --harness agy)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "next foreground" "Agy ordinary-wake line lost its foreground checkpoint"
+  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "Agy ordinary-wake line lost the checkpoint command"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "Agy ordinary-wake line incorrectly uses a background arm"
+  out=$(FM_AGY_WATCH_CHECKPOINT=9 "$RENDER" --harness agy --repair-line)
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 9" "Agy recovery line lost its checkpoint override"
+
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
 
@@ -160,6 +168,16 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+test_agy_is_foreground_checkpoint() {
+  local out
+  out=$(FM_AGY_WATCH_CHECKPOINT=11 "$RENDER" --harness agy)
+  assert_contains "$out" "Mode: Agy foreground checkpoint." "Agy snippet missing foreground checkpoint mode"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 11" "Agy snippet did not render the checkpoint override"
+  assert_contains "$out" "fm-turnend-guard-agy.sh" "Agy snippet lost the primary Stop backstop"
+  assert_not_contains "$out" "__FM_AGY_CHECKPOINT__" "renderer leaked the Agy checkpoint placeholder"
+  pass "Agy supervision uses bounded foreground checkpoints with a native Stop backstop"
+}
+
 test_pi_snippet_uses_effective_extension_path() {
   local home out turnend watch
   home="$TMP_ROOT/pi-home"
@@ -184,4 +202,5 @@ test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
+test_agy_is_foreground_checkpoint
 test_pi_snippet_uses_effective_extension_path

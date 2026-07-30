@@ -311,7 +311,7 @@ fm_composer_strip_ghost() {
 # part of that union for the same reason the others are: without it a cursor
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|esc to cancel|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
@@ -326,6 +326,9 @@ FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # bin/fm-busy-lib.sh, never from this row.
 FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+# Agy's stable ASCII busy footer, part of the harness-less union above for the
+# same acknowledgement reason as the others.
+FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc to cancel'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -341,6 +344,7 @@ fm_busy_lines_match() {  # [harness]
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -1413,4 +1417,77 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
     idle|done) printf 'empty' ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# fm_composer_separated_state recognizes Agy's unbordered composer only through
+# its complete structural container.
+# The current composer is bounded by two long horizontal separator rows, holds
+# a `>` prompt between them, and has Agy's stable footer below the lower row.
+# This positive proof is what lets a bare `>` mean an empty agent composer here
+# without weakening the fleet-wide rule that an unstructured `>` is a shell.
+# An optional zero-based cursor row makes tmux require the cursor inside the
+# current container.
+# Returns one of empty|pending|unknown with status zero when Agy structure was
+# found, or status one with no output when the capture is not an Agy composer.
+fm_composer_separated_state() {  # <capture> [cursor-row]
+  local capture=$1 cursor=${2:-} plain line trimmed probe
+  local row=0 previous_separator=-1 top=-1 bottom=-1 footer=0 content="" content_row
+  plain=$(printf '%s\n' "$capture" | fm_composer_strip_ansi)
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    probe=${trimmed//─/}
+    if [ -z "$probe" ] && [ "${#trimmed}" -ge 20 ]; then
+      if [ "$previous_separator" -ge 0 ] \
+         && [ $((row - previous_separator)) -ge 2 ] \
+         && [ $((row - previous_separator)) -le 7 ]; then
+        top=$previous_separator
+        bottom=$row
+        footer=0
+      fi
+      previous_separator=$row
+    elif [ "$bottom" -ge 0 ] && [ "$row" -gt "$bottom" ] \
+         && [ $((row - bottom)) -le 8 ]; then
+      case "$trimmed" in
+        *'? for shortcuts'*|*'esc to cancel'*) footer=1 ;;
+      esac
+    fi
+    row=$((row + 1))
+  done <<EOF
+$plain
+EOF
+
+  [ "$top" -ge 0 ] && [ "$bottom" -gt "$top" ] && [ "$footer" -eq 1 ] || return 1
+  if [ -n "$cursor" ]; then
+    case "$cursor" in
+      *[!0-9]*) printf 'unknown'; return 0 ;;
+    esac
+    if [ "$cursor" -le "$top" ] || [ "$cursor" -ge "$bottom" ]; then
+      printf 'unknown'
+      return 0
+    fi
+  fi
+
+  row=0
+  while IFS= read -r line; do
+    if [ "$row" -gt "$top" ] && [ "$row" -lt "$bottom" ]; then
+      content_row="${line#"${line%%[![:space:]]*}"}"
+      content_row="${content_row%"${content_row##*[![:space:]]}"}"
+      if [ -n "$content_row" ]; then
+        if [ -n "$content" ]; then
+          content="$content $content_row"
+        else
+          content=$content_row
+        fi
+      fi
+    fi
+    row=$((row + 1))
+  done <<EOF
+$plain
+EOF
+  case "$content" in
+    '>'|'> '*) ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  fm_composer_classify_content 1 "$content"
 }

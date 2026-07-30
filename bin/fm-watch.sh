@@ -156,7 +156,7 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
                                       # turn-end hook) coalesce into one wake
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
-# remaining rendered-text fallback (Grok only).
+# remaining harness-scoped rendered-text fallbacks (Grok and Agy).
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash

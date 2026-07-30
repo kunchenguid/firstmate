@@ -147,7 +147,7 @@ Prose may improve without changing adapter behavior.
 
 - Allow returns exit 0 with both streams empty.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[code] reason"}` to stderr.
-- Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
+- Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok and Agy.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
@@ -160,6 +160,7 @@ Prose may improve without changing adapter behavior.
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
+| Agy | `.toolCall.args.CommandLine` | `.agents/hooks.json` forwards stdin and Agy consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
 | Cursor | `.tool_input.command` | `.cursor/hooks.json` matches `tool_name` `Shell` and forwards stdin with `--cursor`. Cursor reads the RETURNED object rather than the exit status, so `--cursor` prints `{"permission":"deny","user_message":"[code] reason"}` on stdout and exits 0; only that rendering is verified to block the command and surface the reason. |
@@ -168,6 +169,7 @@ Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry
 
 Grok project hooks require folder trust.
 Cursor project hooks require the workspace to be launched with `--trust`.
+Agy project hooks require the exact project trust acceptance that `fm-spawn.sh` handles before first prompt delivery.
 Every shell variable reference in a Grok hook command must carry an inline default such as `${GROK_WORKSPACE_ROOT:-}` because Grok expands the raw hook command before `bash -lc` runs it.
 The tracked Grok adapter therefore references `${GROK_WORKSPACE_ROOT:-}` directly instead of assigning and later reading a shell-local `$root` variable.
 
@@ -233,7 +235,7 @@ Every native-path automatic marker was present and every deny sentinel remained 
 ## Automated validation
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
-Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
+Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, Agy-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
 The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:

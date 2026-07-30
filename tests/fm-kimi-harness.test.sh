@@ -537,7 +537,7 @@ SH
   chmod +x "$fakebin/ps"
 
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
   out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \

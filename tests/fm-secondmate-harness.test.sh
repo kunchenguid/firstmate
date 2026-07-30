@@ -254,7 +254,7 @@ SH
   chmod +x "$fakebin/ps"
 
   err="$dir/fm-harness.err"
-  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u ANTIGRAVITY_AGENT \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh" 2>"$err")
   [ "$got" = codex ] || fail "dash-leading shell ancestry resolved '$got', expected codex"
   [ ! -s "$err" ] || fail "fm-harness wrote basename option noise for literal -zsh: $(cat "$err")"
