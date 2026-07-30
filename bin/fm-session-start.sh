@@ -146,23 +146,20 @@ print_backlog_pointer() {
 # Shared predicate/ids come from fm-tasks-axi-lib.sh so the prefix is not forked.
 print_backlog_tasks_axi_filtered() {
   local path=$1 raw=$2
-  local idfile hidden
+  local hidden hidden_ids
   hidden=$(fm_backlogged_count_from_file "$path")
-  if [ "${hidden:-0}" -eq 0 ]; then
-    printf '%s\n' "$raw"
-    return 0
-  fi
-  idfile=$(mktemp "${TMPDIR:-/tmp}/fm-backlog-hide.XXXXXX")
-  fm_backlogged_ids_from_file "$path" > "$idfile"
-  printf '%s\n' "$raw" | awk -v idfile="$idfile" '
+  hidden_ids=$(fm_backlogged_ids_from_file "$path")
+  printf '%s\n' "$raw" | awk -v hidden_ids="$hidden_ids" -v max="$BACKLOG_LIMIT" '
     BEGIN {
-      while ((getline line < idfile) > 0) {
+      count = split(hidden_ids, lines, "\n")
+      for (i = 1; i <= count; i++) {
+        line = lines[i]
         gsub(/[[:space:]]+$/, "", line)
         if (line != "") hide[line] = 1
       }
-      close(idfile)
       in_tasks = 0
       shown = 0
+      visible = 0
       flushed = 0
     }
     function flush_tasks(   h, i) {
@@ -188,7 +185,8 @@ print_backlog_tasks_axi_filtered() {
       id = line
       sub(/,.*/, "", id)
       if (hide[id]) next
-      body[shown++] = $0
+      visible++
+      if (shown < max) body[shown++] = $0
       next
     }
     {
@@ -198,76 +196,28 @@ print_backlog_tasks_axi_filtered() {
       }
       print
     }
-    END { flush_tasks() }
+    END {
+      flush_tasks()
+      if (visible > shown) {
+        printf "(truncated %d item(s); increase FM_SESSION_START_BACKLOG_LIMIT for a larger startup listing)\n", visible - shown
+      }
+    }
   '
-  rm -f "$idfile"
-  fm_backlog_hidden_hint "$hidden" "bin/fm-backlog-list.sh --backlog"
+  fm_backlog_hidden_hint "$hidden"
 }
 
 print_backlog_manual_compact() {
   local path=$1 reason=$2
   printf 'compact backlog listing (%s; max %s item(s); indented task bodies omitted)\n' "$reason" "$BACKLOG_LIMIT"
-  awk -v max="$BACKLOG_LIMIT" '
-    function state_for_heading(line, heading) {
-      heading = line
-      sub(/^##[[:space:]]+/, "", heading)
-      sub(/[[:space:]]+$/, "", heading)
-      if (heading == "In flight") return "in_flight"
-      if (heading == "Queued") return "queued"
-      if (heading == "Done") return "done"
-      return ""
-    }
-    function is_backlogged(line) {
-      return line ~ /\(hold:[[:space:]]*backlog:/
-    }
-    /^##[[:space:]]+/ {
-      state = state_for_heading($0)
-      if (state != "") {
-        pending_heading = $0
-        heading_pending = 1
-      }
-      next
-    }
-    state != "" && /^[-*][[:space:]]+/ {
-      if (is_backlogged($0)) {
-        hidden++
-        next
-      }
-      total++
-      if (shown < max) {
-        if (heading_pending) {
-          print pending_heading
-          heading_pending = 0
-        }
-        print $0
-        shown++
-      }
-      next
-    }
-    END {
-      if (total == 0) {
-        if (hidden > 0) {
-          print "(no non-backlogged item title lines found)"
-        } else {
-          print "(no backlog item title lines found)"
-        }
-      } else {
-        printf "(shown %d of %d backlog item title line(s))\n", shown, total
-        if (total > shown) {
-          printf "(truncated %d item(s); increase FM_SESSION_START_BACKLOG_LIMIT for a larger startup listing)\n", total - shown
-        }
-      }
-      if (hidden > 0) {
-        printf "%d backlogged hidden - use bin/fm-backlog-list.sh --backlog to list\n", hidden
-      }
-    }
-  ' "$path"
+  fm_backlog_render_title_lines "$path" routine "$BACKLOG_LIMIT" session
 }
 
 print_backlog_tasks_axi_compact() {
-  local path=$1 out rc
+  local path=$1 out rc hidden fetch_limit
   printf 'compact backlog listing (tasks-axi; max %s item(s); task bodies omitted)\n' "$BACKLOG_LIMIT"
-  out=$(tasks-axi list --file "$path" --limit "$BACKLOG_LIMIT" --fields blocked_by,hold_kind,hold_reason 2>&1)
+  hidden=$(fm_backlogged_count_from_file "$path")
+  fetch_limit=$((BACKLOG_LIMIT + hidden))
+  out=$(tasks-axi list --file "$path" --limit "$fetch_limit" --fields blocked_by,hold_kind,hold_reason 2>&1)
   rc=$?
   if [ "$rc" -eq 0 ]; then
     print_backlog_tasks_axi_filtered "$path" "$out"

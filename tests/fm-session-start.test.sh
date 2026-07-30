@@ -117,11 +117,12 @@ case "${1:-}" in
         exit 9
         ;;
     esac
-    case "$*" in *'--limit 80'*) : ;; *) printf '%s\n' 'missing compact limit' >&2; exit 9 ;; esac
+    case "$*" in *'--limit 3'*) : ;; *) printf '%s\n' 'fetch limit must include hidden rows' >&2; exit 9 ;; esac
     case "$*" in *'--file '*) : ;; *) printf '%s\n' 'missing explicit backlog file' >&2; exit 9 ;; esac
     cat <<'OUT'
-count: 2
-tasks[2]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:
+count: 3
+tasks[3]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:
+  hidden-first,queued,ship,firstmate,Hidden before visible rows,none,parked,backlog: later
   compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending
   blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"
 help[2]:
@@ -1075,6 +1076,7 @@ write_long_body_backlog() {
   Another long body line that should not be printed after the fix.
 
 ## Queued
+- [ ] hidden-first - Hidden before visible rows (repo: firstmate) (kind: ship) (since 2026-07-15) (hold: backlog: later) (hold-kind: parked)
 - [ ] blocked-followup - Follow compact startup blocked-by: compact-startup - waits for implementation (repo: firstmate) (kind: scout) (since 2026-07-15)
   QUEUED-BODY-LINE this is another long multiline note.
 
@@ -1097,9 +1099,10 @@ EOF
     > "$home/state/compact-startup.meta"
   log="$home/tasks-axi.log"
 
-  out=$(FM_FAKE_TASKS_AXI_LOG="$log" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_FAKE_TASKS_AXI_LOG="$log" FM_SESSION_START_BACKLOG_LIMIT=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "compact backlog listing (tasks-axi; max 80 item(s); task bodies omitted)" \
+  assert_contains "$out" "compact backlog listing (tasks-axi; max 2 item(s); task bodies omitted)" \
     "compatible tasks-axi backend did not render the compact backlog listing"
   assert_contains "$out" "tasks[2]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:" \
     "tasks-axi compact listing omitted the expected structured field header"
@@ -1107,14 +1110,18 @@ EOF
     "tasks-axi compact listing omitted in-flight identity, state, or hold metadata"
   assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"' \
     "tasks-axi compact listing omitted blocked-by metadata"
+  assert_not_contains "$out" "hidden-first,queued" \
+    "tasks-axi compact listing showed a hidden backlog item"
+  assert_contains "$out" "1 backlogged hidden - use bin/fm-backlog-list.sh --backlog to list" \
+    "tasks-axi compact listing omitted the shared hidden-count hint"
   assert_not_contains "$out" "OVERSIZED-BODY-LINE" "tasks-axi compact digest leaked an in-flight task body"
   assert_not_contains "$out" "QUEUED-BODY-LINE" "tasks-axi compact digest leaked a queued task body"
   assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
   assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
   assert_contains "$out" "Full task bodies remain available on demand: tasks-axi show <id> --full" \
     "compact digest omitted the full-body lookup pointer"
-  assert_grep "list --file $home/data/backlog.md --limit 80 --fields blocked_by,hold_kind,hold_reason" "$log" \
-    "session start did not ask tasks-axi for the bounded compact field set"
+  assert_grep "list --file $home/data/backlog.md --limit 3 --fields blocked_by,hold_kind,hold_reason" "$log" \
+    "session start did not fetch enough compact rows to fill the visible limit"
 
   pass "compatible tasks-axi backlog rendering is compact, bounded, and preserves recovery metadata"
 }

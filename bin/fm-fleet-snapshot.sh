@@ -11,7 +11,8 @@
 #   generated: UTC observation time for this fresh command execution.
 #   fm_home: resolved operational home.
 #   roots: resolved root/config/data/state/projects directories.
-#   backlog: {path,present,records[],hidden_backlogged_count,hidden_backlogged_hint}
+#   backlog: {path,present,records[],hidden_backlogged_ids,
+#     hidden_backlogged_count,hidden_backlogged_hint}
 #     where records are ordered as written in data/backlog.md and cover
 #     In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
@@ -273,19 +274,25 @@ first_pr_url_in_file() {  # <file>
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG}
   local include_backlog_json=false
-  local hint_cmd='bin/fm-backlog-list.sh --backlog'
+  local parsed hidden_count hidden_hint backlogged_ids_json
   # jq treats numeric 0 as truthy; pass a real JSON boolean.
   if [ "${INCLUDE_BACKLOG:-0}" -eq 1 ]; then
     include_backlog_json=true
   fi
   if [ ! -f "$backlog" ]; then
     jq -n --arg path "$backlog" \
-      '{path:$path,present:false,records:[],hidden_backlogged_count:0,hidden_backlogged_hint:null}'
+      '{path:$path,present:false,records:[],hidden_backlogged_ids:[],hidden_backlogged_count:0,hidden_backlogged_hint:null}'
     return 0
   fi
 
+  backlogged_ids_json=$(fm_backlogged_ids_from_file "$backlog" \
+    | jq -Rsc 'split("\n") | map(select(. != "")) | unique') || return 1
+
   # shellcheck disable=SC2094
-  jq -Rn --arg path "$backlog" --argjson include_backlog "$include_backlog_json" --arg hint_cmd "$hint_cmd" '
+  parsed=$(jq -Rn \
+    --arg path "$backlog" \
+    --argjson include_backlog "$include_backlog_json" \
+    --argjson backlogged_ids "$backlogged_ids_json" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def section_state:
       if . == "In flight" then "in_flight"
@@ -413,7 +420,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
               | $blocker
             ]
           | .backlogged =
-              (.hold_reason != null and (.hold_reason | startswith("backlog:")))
+              (.id as $id | $backlogged_ids | index($id) != null)
           | .current_role =
               (if .state == "in_flight" and .hold_reason != null and .hold_kind != null then "held"
                elif .state == "in_flight" and .kind == "program" then "program"
@@ -428,17 +435,37 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         else
           .backlogged = false
         end)
-    | .hidden_backlogged_count = ([.records[] | select(.backlogged == true)] | length)
-    | .hidden_backlogged_hint =
-        (if .hidden_backlogged_count > 0 and ($include_backlog | not) then
-           "\(.hidden_backlogged_count) backlogged hidden - use \($hint_cmd) to list"
-         else null end)
+    | .hidden_backlogged_ids = $backlogged_ids
+    | .hidden_backlogged_count = (.hidden_backlogged_ids | length)
     | .records |=
         (if $include_backlog then .
          else map(select(.backlogged != true))
          end)
     | del(.section,.order)
-  ' < "$backlog"
+  ' < "$backlog") || return 1
+
+  hidden_count=$(printf '%s' "$parsed" | jq -r '.hidden_backlogged_count')
+  hidden_hint=$(fm_backlog_hidden_hint "$hidden_count")
+  jq -n \
+    --argjson parsed "$parsed" \
+    --argjson include_backlog "$include_backlog_json" \
+    --arg hidden_hint "$hidden_hint" \
+    '$parsed + {
+      hidden_backlogged_hint:
+        (if $include_backlog or $hidden_hint == "" then null else $hidden_hint end)
+    }'
+}
+
+filter_backlogged_tasks() {  # <backlog-json> <tasks-json>
+  if [ "${INCLUDE_BACKLOG:-0}" -eq 1 ]; then
+    printf '%s\n' "$2"
+    return 0
+  fi
+  jq -n \
+    --argjson backlog "$1" \
+    --argjson tasks "$2" '
+    $backlog.hidden_backlogged_ids as $hidden
+    | $tasks | map(select(.id as $id | $hidden | index($id) | not))'
 }
 
 task_json_lines() {
@@ -1336,6 +1363,8 @@ scout_report_lines() {
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+TASKS_JSON=$(filter_backlogged_tasks "$BACKLOG_JSON" "$TASKS_JSON") \
+  || { echo "fm-fleet-snapshot: backlogged task filtering failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   secondmate_home_summary_json "$BACKLOG_JSON" "$TASKS_JSON" \

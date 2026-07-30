@@ -44,6 +44,8 @@ new_home() {
   home="$TMP_ROOT/$name"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   write_mixed_backlog "$home/data/backlog.md"
+  printf 'kind=ship\nproject=alpha\n' > "$home/state/cold-storage.meta"
+  printf 'kind=ship\nproject=alpha\n' > "$home/state/defer-later.meta"
   printf '%s\n' "$home"
 }
 
@@ -129,6 +131,9 @@ test_fleet_snapshot_hides_backlogged_by_default() {
     and ([.backlog.records[] | select(.id == "defer-later")] | length) == 1
     and ([.backlog.records[] | select(.id == "park-vendor")] | length) == 1
     and ([.backlog.records[] | select(.id == "active-do")] | length) == 1
+    and (.backlog.hidden_backlogged_ids == ["backlog-note", "cold-storage"])
+    and ([.tasks[] | select(.id == "cold-storage")] | length) == 0
+    and ([.tasks[] | select(.id == "defer-later")] | length) == 1
     and (.backlog.records[] | select(.id == "defer-later") | .backlogged == false)
     and (.backlog.records[] | select(.id == "park-vendor") | .hold_kind == "parked")
   ' >/dev/null \
@@ -154,6 +159,8 @@ test_fleet_snapshot_include_backlog_keeps_rows() {
     and ([.backlog.records[] | select(.id == "cold-storage" and .backlogged == true)] | length) == 1
     and ([.backlog.records[] | select(.id == "backlog-note" and .backlogged == true)] | length) == 1
     and ([.backlog.records[] | select(.id == "defer-later" and .backlogged == false)] | length) == 1
+    and ([.tasks[] | select(.id == "cold-storage" and .backlog.backlogged == true)] | length) == 1
+    and ([.tasks[] | select(.id == "defer-later" and .backlog.backlogged == false)] | length) == 1
     and ((.backlog.records[] | select(.id == "cold-storage") | .hold_reason) | startswith("backlog:"))
   ' >/dev/null \
     || fail "fleet snapshot --include-backlog did not keep tagged backlog: rows"
@@ -182,10 +189,10 @@ test_lib_predicate_helpers() {
     '- [ ] x - t (hold: waiting on vendor) (hold-kind: parked)'; then
     fail "title-line detector false-positive on parked"
   fi
-  hint=$(fm_backlog_hidden_hint 3 "bin/fm-backlog-list.sh --backlog")
+  hint=$(fm_backlog_hidden_hint 3)
   assert_contains "$hint" "3 backlogged hidden" "hint missing count"
   assert_contains "$hint" "bin/fm-backlog-list.sh --backlog" "hint missing list command"
-  empty=$(fm_backlog_hidden_hint 0 "x")
+  empty=$(fm_backlog_hidden_hint 0)
   [ -z "$empty" ] || fail "zero count must print no hint"
 
   pass "shared predicate and hint helpers match the backlog: contract"
