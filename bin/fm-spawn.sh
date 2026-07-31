@@ -11,10 +11,11 @@
 #   from that harness's launch rather than guessed.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
-#   is authorized). Without it, the script resolves FM_BACKEND, then config/backend, then
-#   runtime auto-detection (the runtime firstmate itself is executing inside -
-#   $TMUX, HERDR_ENV=1, or cmux runtime signals; bin/fm-backend.sh's
-#   fm_backend_detect, with cmux fallback details in docs/cmux-backend.md),
+#   is authorized). Without it, the script resolves FM_BACKEND, then
+#   config/backend, then runtime auto-detection from the runtime firstmate's
+#   environment: $TMUX, HERDR_ENV=1, or cmux runtime signals (via
+#   bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
+#   docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
