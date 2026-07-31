@@ -27,10 +27,13 @@ mkdir -p "$BRIEF_HOME/data"
 # is a weak guard on its own; test_no_heredoc_in_command_substitution and the
 # macos-stock-bash CI job carry the real cross-version enforcement.
 test_script_parses() {
-  local out rc
-  out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
-  expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
-  [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
+  local out rc shell
+  for shell in bash /bin/bash; do
+    [ -x "$shell" ] || command -v "$shell" >/dev/null || continue
+    out=$("$shell" -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+    expect_code 0 "$rc" "$shell -n bin/fm-brief.sh must parse cleanly (got: $out)"
+    [ -z "$out" ] || fail "$shell -n bin/fm-brief.sh emitted unexpected output: $out"
+  done
   pass "fm-brief.sh: bash -n succeeds"
 }
 

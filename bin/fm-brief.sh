@@ -298,6 +298,17 @@ fi
 # Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
 # yolo does not affect the brief because the worker never owns approval decisions;
 # firstmate applies the authority contract in AGENTS.md section 7, so discard it.
+#
+# The Definition-of-done bodies below are captured with `read -r -d ''`, not with
+# `DOD=$(cat <<EOF ... EOF)`. Stock macOS Bash 3.2 tracks quote state through a
+# heredoc body while scanning for the closing `)` of a command substitution, so a
+# single apostrophe in prose there ("firstmate's authority check") makes `bash -n`
+# reject the whole file with "unexpected EOF while looking for matching `''" - the
+# script becomes unusable on macOS while Bash 5 parses it fine (issue #166).
+# Keep these blocks free of command substitution so prose can contain apostrophes.
+# `read` returns 1 at EOF when the NUL delimiter is never found, hence `|| true`
+# under `set -e`; the single trailing newline it keeps is stripped after the case,
+# matching what `$(...)` used to strip.
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF

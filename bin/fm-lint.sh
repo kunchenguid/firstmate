@@ -16,6 +16,11 @@
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
 #
+# The same run also parses every bin root under whatever /bin/bash is, because
+# Bash 3.2 rejects constructs ShellCheck and Bash 5 accept, and skips that sweep
+# only where /bin/bash is absent. On Linux /bin/bash is typically Bash 5, so a
+# green sweep there does not prove the 3.2 invariant; CI's macOS lane does.
+#
 # Usage:
 #   fm-lint.sh                         lint the canonical file set
 #   fm-lint.sh <path>...               lint explicit roots with the same config
@@ -84,7 +89,7 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 fm_lint_usage() {
-  sed -n '2,26{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,31{s/^# \{0,1\}//;p;}' "$SELF"
 }
 
 JOBS=${FM_LINT_JOBS:-2}
@@ -164,6 +169,41 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
   printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s. Install %s.\n' \
     "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
   exit 1
+fi
+
+# Stock macOS Bash 3.2 rejects constructs ShellCheck and Bash 5 accept (issue
+# #166: an apostrophe in a heredoc nested in $(...)), so the same owner that
+# defines the lint file set also parses every shell root under /bin/bash. The
+# sweep is skipped only where /bin/bash is absent; where it exists it runs
+# whatever version that is, so on Linux (typically Bash 5) a green sweep does
+# not by itself prove the 3.2 invariant - CI's macOS lane is what proves it.
+# That lane takes its file set from --list-files, so the sweep covers the same
+# inventory rather than a narrower glob: a tests/ root that only 3.2 rejects
+# would otherwise pass this gate and fail that lane.
+# Selection is by repo-relative location, never by how the argument was spelled,
+# so a linted root can never silently skip the parse check.
+PARSE_RC=0
+if [ -x /bin/bash ]; then
+  for path in "${ROOTS[@]}"; do
+    rel=$path
+    case "$rel" in
+      "$ROOT"/*) rel=${rel#"$ROOT/"} ;;
+    esac
+    while :; do
+      case "$rel" in
+        ./*) rel=${rel#./} ;;
+        *) break ;;
+      esac
+    done
+    case "$rel" in
+      *.sh) [ -f "$path" ] || continue ;;
+      *) continue ;;
+    esac
+    /bin/bash -n "$path" || {
+      printf 'fm-lint.sh: %s does not parse under /bin/bash.\n' "$rel" >&2
+      PARSE_RC=1
+    }
+  done
 fi
 
 if [ -n "$TELEMETRY" ]; then
@@ -355,6 +395,10 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   fi
   worker=$((worker + 1))
 done
+
+if [ "$overall_rc" -eq 0 ] && [ "$PARSE_RC" -ne 0 ]; then
+  overall_rc=$PARSE_RC
+fi
 
 if [ -n "$TELEMETRY" ]; then
   TELEMETRY_END_EPOCH=$(date +%s)

@@ -29,6 +29,116 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
+# True only when /bin/bash really is the stock macOS Bash 3.2. The sweep runs
+# under whatever /bin/bash is, so an assertion about a construct only 3.2
+# rejects is valid only here; on a Bash 5 /bin/bash the same probe parses fine.
+stock_bash_is_32() {
+  [ -x /bin/bash ] || return 1
+  case $(/bin/bash --version 2>/dev/null | head -1) in
+    *"version 3.2"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The probe lives inside the repo because the sweep selects by repo-relative
+# location, so cleanup is registered with the repo's EXIT-trap convention
+# BEFORE the non-parsing file exists: an interrupted run must never leave a
+# file that would poison every later lint run and the CI parse loop. The
+# dot-prefixed directory keeps it out of the canonical `*.sh` globs even if it
+# did leak, while the case pattern still matches it across `/`.
+# Assigns FM_LINT_PROBE_DIR rather than echoing it: registering the EXIT trap
+# inside a command substitution would arm it in the subshell, whose exit would
+# delete the directory before the caller could use it.
+FM_LINT_PROBE_DIR=
+fm_lint_probe_dir() {  # [parent-dir-under-repo]
+  FM_LINT_PROBE_DIR=$(mktemp -d "$ROOT/${1:-bin}/.fm-lint-probe.XXXXXX") || return 1
+  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
+    trap fm_test_cleanup EXIT
+  fi
+  FM_TEST_CLEANUP_DIRS+=("$FM_LINT_PROBE_DIR")
+}
+
+# Path-normalization coverage that holds on every bash: an unterminated `if`
+# fails to parse under 3.2 and 5 alike, so this runs on the portable Linux
+# shards too and is what actually guards the repo-relative selection.
+test_parse_sweep_selects_a_linted_root_however_spelled() {
+  local tmp probe rel rc out
+  [ -x /bin/bash ] || { pass "SKIP (no /bin/bash): parse sweep path-spelling check"; return 0; }
+  pinned_ready || { pass "SKIP (ShellCheck $REQUIRED not resolved): parse sweep path-spelling check"; return 0; }
+  fm_lint_probe_dir || fail "could not create the probe directory"
+  tmp=$FM_LINT_PROBE_DIR
+  probe="$tmp/probe.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'if true; then\n'
+    printf '  :\n'
+  } > "$probe"
+  rel=${probe#"$ROOT/"}
+  # An explicit bin root keeps the probe scoped: the sweep still covers it
+  # because it matches the bin file set, without relinting the whole tree.
+  # A linted root that skipped the parse check would report a clean run it
+  # never verified, so all three spellings must reach the same sweep.
+  for spelling in "$rel" "$probe" "./$rel"; do
+    out=$(cd "$ROOT" && "$LINT" "$spelling" 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || fail "fm-lint.sh must fail for a non-parsing bin root spelled $spelling"
+    assert_contains "$out" "$rel does not parse under /bin/bash" \
+      "the spelling $spelling must resolve to the repo-relative root the sweep names"
+  done
+  pass "fm-lint.sh sweeps a linted bin root however the path is spelled"
+}
+
+# The 3.2-only half: proves the sweep rejects the exact construct issue #166 is
+# about, rather than passing vacuously. Bash 5 parses this probe fine, so this
+# assertion is only meaningful where /bin/bash is the stock 3.2 shell.
+test_parse_sweep_rejects_a_bash32_only_defect() {
+  local tmp probe rel rc out
+  pinned_ready || { pass "SKIP (ShellCheck $REQUIRED not resolved): Bash 3.2 parse sweep rejection"; return 0; }
+  stock_bash_is_32 || {
+    pass "SKIP (/bin/bash is not stock Bash 3.2; run on macOS to enable): Bash 3.2 parse sweep rejection"
+    return 0
+  }
+  fm_lint_probe_dir || fail "could not create the probe directory"
+  tmp=$FM_LINT_PROBE_DIR
+  probe="$tmp/probe.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    # shellcheck disable=SC2016  # the probe body is literal shell source, not an expansion
+    printf 'BODY=$(cat <<EOF\n'
+    printf "the crew's lab\n"
+    printf 'EOF\n)\n'
+    # shellcheck disable=SC2016  # the probe body is literal shell source, not an expansion
+    printf 'printf %%s "$BODY"\n'
+  } > "$probe"
+  rel=${probe#"$ROOT/"}
+  out=$(cd "$ROOT" && "$LINT" "$rel" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-lint.sh must fail on the heredoc-in-\$() defect Bash 3.2 rejects"
+  assert_contains "$out" "$rel does not parse under /bin/bash" "fm-lint.sh must name the file that fails the 3.2 parse"
+  pass "fm-lint.sh fails on a Bash 3.2-only parse defect ShellCheck accepts"
+}
+
+# The gate and the CI macOS lane must hold this rule over one file set. That
+# lane parses whatever --list-files reports, which includes tests/, so a sweep
+# scoped to the bin roots alone would pass here and fail there on the same file.
+test_parse_sweep_covers_the_whole_owner_inventory() {
+  local tmp probe rel rc out
+  [ -x /bin/bash ] || { pass "SKIP (no /bin/bash): parse sweep inventory coverage"; return 0; }
+  pinned_ready || { pass "SKIP (ShellCheck $REQUIRED not resolved): parse sweep inventory coverage"; return 0; }
+  fm_lint_probe_dir tests || fail "could not create the probe directory"
+  tmp=$FM_LINT_PROBE_DIR
+  probe="$tmp/probe.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'if true; then\n'
+    printf '  :\n'
+  } > "$probe"
+  rel=${probe#"$ROOT/"}
+  out=$(cd "$ROOT" && "$LINT" "$rel" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "the parse sweep must cover every inventoried root, not only the bin roots"
+  assert_contains "$out" "$rel does not parse under /bin/bash" \
+    "the sweep must name the inventoried tests/ root that fails to parse"
+  pass "the parse sweep covers the same inventory the CI macOS lane reads"
+}
+
 test_list_files_reports_the_shell_inventory() {
   local listed expected
   listed=$("$LINT" --list-files)
@@ -426,6 +536,9 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+test_parse_sweep_selects_a_linted_root_however_spelled
+test_parse_sweep_rejects_a_bash32_only_defect
+test_parse_sweep_covers_the_whole_owner_inventory
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
