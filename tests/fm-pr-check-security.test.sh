@@ -3335,6 +3335,40 @@ test_conflicted_pr_wakes_once_per_conflict_episode() {
   pass "a conflicted pull request wakes once per episode and leaves clean, closed, and merged outcomes unchanged"
 }
 
+# The conflict episode is recorded only after its wake is durably enqueued, so a
+# wake queue that cannot be appended to re-surfaces the conflict on a later
+# sweep instead of suppressing it for a whole resurface window.
+test_conflict_episode_survives_wake_queue_failure() {
+  local dir state url head rc
+  dir=$(make_case conflict-wake-queue-failure)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/1284
+  head=1111111122222222333333334444444455555555
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  mkdir "$state/.wake-queue"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGEABLE=CONFLICTING FM_TEST_GH_HEAD="$head" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/queue-fail.out" 2> "$dir/queue-fail.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "watcher woke despite wake queue publication failure"
+  [ ! -e "$state/.pr-dirty-task-a" ] || fail "a failed wake left the conflict episode recorded"
+
+  rmdir "$state/.wake-queue"
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGEABLE=CONFLICTING FM_TEST_GH_HEAD="$head" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/resurface.out" 2> "$dir/resurface.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "resurface cycle failed: $(cat "$dir/resurface.err")"
+  [ "$(grep -c "^check: .*task-a\.check\.sh: dirty $head $url\$" "$dir/resurface.out")" -eq 1 ] \
+    || fail "a conflict lost to a wake queue failure did not re-surface: $(cat "$dir/resurface.out")"
+  [ "$(cat "$state/.pr-dirty-task-a")" = "$head" ] || fail "re-surfaced conflict episode was not recorded"
+  pass "a conflict lost to a wake queue failure re-surfaces on the next sweep"
+}
+
 # The conflict marker is a poll artifact, so teardown must not leave it behind
 # for a later task reusing the same id.
 test_teardown_removes_conflict_episode_marker() {
@@ -3542,6 +3576,7 @@ test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_static_poll_conflict_contract
 test_conflicted_pr_wakes_once_per_conflict_episode
+test_conflict_episode_survives_wake_queue_failure
 test_teardown_removes_conflict_episode_marker
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication

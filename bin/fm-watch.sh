@@ -164,8 +164,10 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # an unrebased conflict does not re-wake every CHECK_INTERVAL. Poll silence is
 # ambiguous - clean, unknown, closed, and every error all look the same - so it
 # can never clear that key; a changed head can, because it means the branch
-# moved and the pull request went conflicting again from a new commit. A
-# conflict nobody has touched still re-surfaces every PR_DIRTY_RESURFACE_SECS,
+# moved and the pull request went conflicting again from a new commit. The key
+# is recorded only after the wake is durably enqueued, so a failed enqueue or a
+# watcher killed mid-cycle re-surfaces that conflict rather than swallowing it.
+# A conflict nobody has touched still re-surfaces every PR_DIRTY_RESURFACE_SECS,
 # finite so a forgotten conflict cannot rot invisibly.
 PR_DIRTY_RESURFACE_SECS=${FM_PR_DIRTY_RESURFACE_SECS:-3600}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
@@ -553,9 +555,9 @@ run_check_capture() {
 # Decide whether a validated PR poll's conflict result is a new episode worth
 # waking for. Returns 0 to wake and 1 to stay silent. The head commit reported
 # with the conflict is the episode key: an unchanged key inside the resurface
-# window is the same unrebased conflict already reported. A marker that cannot
-# be written surfaces rather than suppresses, because a state directory this
-# watcher cannot write is itself worth firstmate's attention.
+# window is the same unrebased conflict already reported. Pure read - the
+# episode is recorded by pr_dirty_mark_surfaced only after the wake is durably
+# enqueued, so a watcher that dies mid-cycle never swallows a conflict.
 pr_dirty_wake_due() {  # <task-id> <head-token>
   local id=$1 token=$2 marker
   marker="$STATE/.pr-dirty-$id"
@@ -563,8 +565,17 @@ pr_dirty_wake_due() {  # <task-id> <head-token>
     && [ "$(age_of "$marker")" -lt "$PR_DIRTY_RESURFACE_SECS" ]; then
     return 1
   fi
-  printf '%s\n' "$token" > "$marker" 2>/dev/null \
-    || triage_log "could not record the conflict episode for $id; surfacing it anyway"
+  return 0
+}
+
+# Record a conflict episode after its wake has been enqueued, so the same
+# unrebased conflict is not re-surfaced next sweep. A marker that cannot be
+# written only means the conflict surfaces again later - a duplicate wake, never
+# a swallowed one - so this reports and continues.
+pr_dirty_mark_surfaced() {  # <task-id> <head-token>
+  local id=$1 token=$2
+  printf '%s\n' "$token" > "$STATE/.pr-dirty-$id" 2>/dev/null \
+    || triage_log "could not record the conflict episode for $id; it may surface again"
   return 0
 }
 
@@ -772,6 +783,7 @@ while :; do
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
+      pr_dirty_token=
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
@@ -812,9 +824,11 @@ while :; do
         # so the worker can be steered to rebase without a lookup first.
         if [ "$is_pr_poll" -eq 1 ] && [ "${out#dirty }" != "$out" ]; then
           pr_dirty_wake_due "$id" "${out#dirty }" || continue
+          pr_dirty_token=${out#dirty }
           reason="check: $c: $out $url"
         fi
         fm_wake_append check "$c" "$reason" || exit 1
+        [ -z "$pr_dirty_token" ] || pr_dirty_mark_surfaced "$id" "$pr_dirty_token"
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           rm -f "$STATE/.pr-dirty-$id"
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
