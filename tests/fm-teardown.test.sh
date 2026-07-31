@@ -1264,6 +1264,23 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+test_teardown_removes_private_launch_brief() {
+  local case_dir rc launch_brief
+  case_dir=$(make_case launch-brief-cleanup)
+  write_meta "$case_dir" local-only ship
+  launch_brief="$case_dir/state/task-x1.launch-brief.md"
+  printf '%s\n' 'private rendered launch brief' > "$launch_brief"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "launch-brief-cleanup: forced teardown should succeed"
+  assert_absent "$launch_brief" "teardown left the private rendered launch brief"
+  pass "teardown removes the private rendered launch brief"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -1824,6 +1841,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
+test_teardown_removes_private_launch_brief
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present

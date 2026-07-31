@@ -40,6 +40,12 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# A no-mistakes ship scaffold carries __FM_NO_MISTAKES_INVOCATION__ unchanged;
+# fm-spawn resolves it from the concrete harness through harness-adapters and
+# writes a private per-launch copy under state/.
+# A current generated validation contract missing that token refuses launch.
+# The exact pre-token scaffold is the compatibility exception: spawn warns,
+# renders only the private copy, and leaves the durable legacy brief unchanged.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.

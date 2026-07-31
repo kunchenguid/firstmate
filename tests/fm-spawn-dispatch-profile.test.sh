@@ -27,14 +27,21 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    payload=
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          payload=$a
         fi
         prev=$a
       done
+    fi
+    if [ "${FM_FAKE_SEND_KEYS_FAIL:-0}" = 1 ]; then
+      case "$payload" in
+        *'encode launch-brief'*) exit 1 ;;
+      esac
     fi
     exit 0
     ;;
@@ -93,6 +100,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    FM_FAKE_SEND_KEYS_FAIL="${FM_TEST_SEND_KEYS_FAIL:-0}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -123,8 +131,129 @@ generate_ship_brief() {
     "$ROOT/bin/fm-brief.sh" "$id" "$repo" >/dev/null 2>&1
 }
 
+replace_brief_invocation_token() {
+  local home=$1 id=$2 replacement=$3 brief tmp
+  brief="$home/data/$id/brief.md"
+  tmp="$brief.tmp"
+  awk -v replacement="$replacement" '{
+    gsub(/__FM_NO_MISTAKES_INVOCATION__/, replacement)
+    print
+  }' "$brief" > "$tmp"
+  mv "$tmp" "$brief"
+}
+
+make_legacy_ship_brief() {
+  local home=$1 id=$2 brief tmp
+  replace_brief_invocation_token "$home" "$id" "/no-mistakes"
+  brief="$home/data/$id/brief.md"
+  tmp="$brief.tmp"
+  awk '{
+    sub(/^Firstmate will then instruct you to invoke \/no-mistakes to validate and ship a PR\.$/, "Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.")
+    print
+  }' "$brief" > "$tmp"
+  mv "$tmp" "$brief"
+}
+
 launched_brief_path() {
   sed -n "s/.*encode launch-brief < '\([^']*\)'.*/\1/p" "$1" | tail -1
+}
+
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
+test_token_stripped_current_ship_brief_refuses_launch() {
+  local rec id out status
+  id=profile-brief-token-stripped-z1h
+  rec=$(make_spawn_case profile-brief-token-stripped codex "$id")
+  read_case_record "$rec"
+  generate_ship_brief "$HOME_DIR" "$id" project
+  replace_brief_invocation_token "$HOME_DIR" "$id" ""
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "token-stripped current ship brief should refuse launch"
+  assert_contains "$out" "$id" "missing-token refusal did not name the task"
+  assert_contains "$out" "__FM_NO_MISTAKES_INVOCATION__" \
+    "missing-token refusal did not name the required token"
+  [ ! -s "$LAUNCH_LOG" ] || fail "token-stripped current ship brief reached the worker launch"
+  pass "token-stripped current ship brief refuses with task and token details"
+}
+
+test_legacy_codex_ship_brief_migrates_private_launch_copy() {
+  local rec id out status brief durable home_real
+  id=profile-brief-legacy-codex-z1i
+  rec=$(make_spawn_case profile-brief-legacy-codex codex "$id")
+  read_case_record "$rec"
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+  generate_ship_brief "$HOME_DIR" "$id" project
+  durable="$HOME_DIR/data/$id/brief.md"
+  make_legacy_ship_brief "$HOME_DIR" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "exact legacy Codex ship brief should relaunch"
+  assert_contains "$out" "warning: task $id" "legacy migration warning did not name the task"
+  assert_contains "$out" "legacy no-mistakes brief" "legacy migration warning was not explicit"
+  brief=$(launched_brief_path "$LAUNCH_LOG")
+  [ "$brief" = "$home_real/state/$id.launch-brief.md" ] \
+    || fail "legacy Codex launch did not use the private firstmate-home copy: $brief"
+  [ "$(file_mode "$brief")" = 600 ] || fail "legacy Codex launch brief was not mode 0600"
+  # shellcheck disable=SC2016 # The dollar-prefixed skill form is literal test data.
+  assert_grep '$no-mistakes' "$brief" "legacy Codex launch copy did not use the dollar invocation"
+  assert_no_grep '/no-mistakes' "$brief" "legacy Codex launch copy retained the rejected slash invocation"
+  assert_grep '/no-mistakes' "$durable" "legacy durable brief was modified during relaunch"
+  assert_no_grep '__FM_NO_MISTAKES_INVOCATION__' "$durable" \
+    "legacy durable brief unexpectedly gained the current scaffold token"
+  pass "legacy Codex brief migrates only a private launch copy through the resolved harness"
+}
+
+test_legacy_claude_ship_brief_migrates_private_launch_copy() {
+  local rec id out status brief durable home_real
+  id=profile-brief-legacy-claude-z1j
+  rec=$(make_spawn_case profile-brief-legacy-claude claude "$id")
+  read_case_record "$rec"
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+  generate_ship_brief "$HOME_DIR" "$id" project
+  durable="$HOME_DIR/data/$id/brief.md"
+  make_legacy_ship_brief "$HOME_DIR" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "exact legacy Claude ship brief should relaunch"
+  assert_contains "$out" "warning: task $id" "legacy migration warning did not name the task"
+  assert_contains "$out" "legacy no-mistakes brief" "legacy migration warning was not explicit"
+  brief=$(launched_brief_path "$LAUNCH_LOG")
+  [ "$brief" = "$home_real/state/$id.launch-brief.md" ] \
+    || fail "legacy Claude launch did not use the private firstmate-home copy: $brief"
+  assert_grep '/no-mistakes' "$brief" "legacy Claude launch copy did not use the slash invocation"
+  # shellcheck disable=SC2016 # The dollar-prefixed skill form is literal test data.
+  assert_no_grep '$no-mistakes' "$brief" "legacy Claude launch copy used Codex's dollar invocation"
+  assert_grep '/no-mistakes' "$durable" "legacy durable brief was modified during relaunch"
+  assert_no_grep '__FM_NO_MISTAKES_INVOCATION__' "$durable" \
+    "legacy durable brief unexpectedly gained the current scaffold token"
+  pass "legacy Claude brief migrates only a private launch copy through the resolved harness"
+}
+
+test_aborted_spawn_removes_private_launch_brief() {
+  local rec id out status launch_brief home_real
+  id=profile-brief-abort-cleanup-z1k
+  rec=$(make_spawn_case profile-brief-abort-cleanup codex "$id")
+  read_case_record "$rec"
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+  generate_ship_brief "$HOME_DIR" "$id" project
+  launch_brief="$home_real/state/$id.launch-brief.md"
+
+  out=$(FM_TEST_SEND_KEYS_FAIL=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn should fail when worker launch delivery fails"
+  assert_absent "$launch_brief" "aborted spawn orphaned its private rendered launch brief"
+  pass "aborted spawn removes its private rendered launch brief"
 }
 
 test_claude_launch_brief_uses_slash_no_mistakes_invocation() {
@@ -747,6 +876,10 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_token_stripped_current_ship_brief_refuses_launch
+test_legacy_claude_ship_brief_migrates_private_launch_copy
+test_legacy_codex_ship_brief_migrates_private_launch_copy
+test_aborted_spawn_removes_private_launch_brief
 test_claude_launch_brief_uses_slash_no_mistakes_invocation
 test_opencode_launch_brief_uses_harness_agnostic_no_mistakes_wording
 test_codex_launch_brief_uses_dollar_no_mistakes_invocation

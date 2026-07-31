@@ -129,7 +129,12 @@
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
-# A harness-neutral ship scaffold is rendered into a per-launch task-temp copy after harness resolution; harness-adapters owns exact no-mistakes forms, and an unreadable or unmatched form falls back to natural language.
+# A harness-neutral ship scaffold is rendered into a private
+# state/<id>.launch-brief.md after harness resolution.
+# harness-adapters owns exact no-mistakes forms, and an unreadable or unmatched
+# form falls back to natural language.
+# Exact pre-token scaffolds warn and use that private migration path without
+# changing their durable brief; malformed current validation contracts fail closed.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -335,6 +340,7 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+LAUNCH_BRIEF=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -355,6 +361,9 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$status" -ne 0 ] && [ -n "${LAUNCH_BRIEF:-}" ]; then
+    rm -f -- "$LAUNCH_BRIEF"
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -677,6 +686,63 @@ render_launch_brief_for_harness() {  # <source> <destination> <harness>
   }' "$source" > "$destination"
 }
 
+LEGACY_NO_MISTAKES_LINE_1='Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.'
+# shellcheck disable=SC2016 # Backticks are literal bytes in the historical scaffold.
+LEGACY_NO_MISTAKES_LINE_2='Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and `no-mistakes axi run --help` plus the `help` lines in each `axi` response are authoritative and version-matched to the installed binary.'
+# shellcheck disable=SC2016 # Backticks are literal bytes in the historical scaffold.
+LEGACY_NO_MISTAKES_LINE_3='After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append `done: PR {url} checks green` and stop. You are finished.'
+
+brief_is_recognized_legacy_no_mistakes() {  # <brief>
+  local brief=$1
+  grep -qxF "$LEGACY_NO_MISTAKES_LINE_1" "$brief" \
+    && grep -qxF "$LEGACY_NO_MISTAKES_LINE_2" "$brief" \
+    && grep -qxF "$LEGACY_NO_MISTAKES_LINE_3" "$brief"
+}
+
+render_legacy_launch_brief_for_harness() {  # <source> <destination> <harness>
+  local source=$1 destination=$2 harness=$3 invocation
+  invocation=$(no_mistakes_invocation_for_harness "$harness")
+  awk -v replacement="$invocation" \
+      -v line1="$LEGACY_NO_MISTAKES_LINE_1" \
+      -v line2="$LEGACY_NO_MISTAKES_LINE_2" \
+      -v line3="$LEGACY_NO_MISTAKES_LINE_3" '{
+    if ($0 == line1 || $0 == line2 || $0 == line3) {
+      gsub(/\/no-mistakes/, replacement)
+    }
+    print
+  }' "$source" > "$destination"
+}
+
+write_private_launch_brief() {  # <source> <destination> <harness> <legacy:0|1>
+  local source=$1 destination=$2 harness=$3 legacy=$4 old_umask status
+  rm -f -- "$destination"
+  old_umask=$(umask)
+  umask 077
+  if [ "$legacy" = 1 ]; then
+    if render_legacy_launch_brief_for_harness "$source" "$destination" "$harness"; then
+      status=0
+    else
+      status=$?
+    fi
+  else
+    if render_launch_brief_for_harness "$source" "$destination" "$harness"; then
+      status=0
+    else
+      status=$?
+    fi
+  fi
+  umask "$old_umask"
+  if [ "$status" -ne 0 ]; then
+    rm -f -- "$destination"
+    return "$status"
+  fi
+}
+
+brief_carries_no_mistakes_validation() {  # <brief>
+  local brief=$1
+  grep -Eq '^Firstmate will then instruct you to (invoke|run) .* to validate and ship a PR\.$' "$brief"
+}
+
 resolve_kimi_binary() {
   local candidate dir fallback
   candidate=$(command -v kimi 2>/dev/null || true)
@@ -996,6 +1062,22 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # once here so every downstream comparison uses the same physical form
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
+
+# The ship task's delivery contract is already resolved from the explicit --mode
+# validated above, so the brief's validation contract can be checked here, before
+# any worker endpoint exists: a malformed generated ship brief must fail closed
+# without leaving a pane or worktree behind.
+LEGACY_NO_MISTAKES_BRIEF=0
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
+   && ! grep -qF '__FM_NO_MISTAKES_INVOCATION__' "$BRIEF_REAL"; then
+  if brief_is_recognized_legacy_no_mistakes "$BRIEF_REAL"; then
+    LEGACY_NO_MISTAKES_BRIEF=1
+    echo "warning: task $ID has a legacy no-mistakes brief without __FM_NO_MISTAKES_INVOCATION__; rendering a private launch copy for resolved harness $HARNESS and leaving $BRIEF_REAL unchanged" >&2
+  elif brief_carries_no_mistakes_validation "$BRIEF_REAL"; then
+    echo "error: refusing task $ID launch for harness $HARNESS because ship brief $BRIEF_REAL is missing __FM_NO_MISTAKES_INVOCATION__" >&2
+    exit 1
+  fi
+fi
 
 real_path_or_raw() {  # <path>
   local path=$1 real
@@ -1488,15 +1570,20 @@ TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
 # The scaffold is deliberately harness-neutral because the concrete adapter is
-# resolved only here. Render a per-launch copy after that resolution, deriving
-# exact invocation facts from harness-adapters and falling back to wording that
-# every harness can follow. The source brief stays reusable across a respawn on
-# a different adapter.
-if grep -qF '__FM_NO_MISTAKES_INVOCATION__' "$BRIEF_REAL"; then
-  LAUNCH_BRIEF="$TASK_TMP/brief.md"
-  render_launch_brief_for_harness "$BRIEF_REAL" "$LAUNCH_BRIEF" "$HARNESS"
+# resolved only here. Render a private per-launch copy after that resolution,
+# deriving exact invocation facts from harness-adapters and falling back to
+# wording that every harness can follow. The durable source brief stays reusable
+# across a respawn on a different adapter. A recognized pre-token scaffold takes
+# this same path without changing its durable file.
+mkdir -p "$STATE"
+STATE_REAL=$(cd "$STATE" && pwd -P)
+if grep -qF '__FM_NO_MISTAKES_INVOCATION__' "$BRIEF_REAL" \
+   || [ "$LEGACY_NO_MISTAKES_BRIEF" = 1 ]; then
+  LAUNCH_BRIEF="$STATE_REAL/$ID.launch-brief.md"
+  write_private_launch_brief \
+    "$BRIEF_REAL" "$LAUNCH_BRIEF" "$HARNESS" "$LEGACY_NO_MISTAKES_BRIEF"
   if grep -qF '__FM_NO_MISTAKES_INVOCATION__' "$LAUNCH_BRIEF"; then
-    echo "error: harness-specific launch brief rendering left an unresolved no-mistakes invocation" >&2
+    echo "error: task $ID harness-specific launch brief rendering left an unresolved no-mistakes invocation" >&2
     exit 1
   fi
   BRIEF="$LAUNCH_BRIEF"
@@ -1507,8 +1594,6 @@ fi
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
 # and token pointers stay out of git's view so they never block teardown's dirty
 # check or leak into a commit.
-mkdir -p "$STATE"
-STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
