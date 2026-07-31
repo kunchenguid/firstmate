@@ -4,15 +4,23 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
-# REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
+# REFUSES if cleanup would discard work without a durable recovery path, because
+# cleanup hard-resets/removes the worktree and kills its processes. A PR-based ship
+# may be cleaned before merge only when its last status is the exact completion for
+# its canonically recorded PR, GitHub reports that same open non-draft PR green and
+# mergeable, the live head exactly matches the recorded PR head, and repository
+# evidence proves the local HEAD is contained in that PR head. That path detaches
+# but preserves the local task branch. Missing, duplicated, stale, contradictory,
+# or unavailable completion, PR identity, check, mergeability, or head evidence
+# refuses cleanup. A red, pending, or conflicted PR therefore never qualifies.
+#
+# Otherwise PR-based work has landed only when its PR is merged and GitHub reports
+# a PR head that contains the current local work, or its content is already present
+# in the up-to-date default branch. This recognizes the common squash-merge-then-
+# delete-branch flow, where the branch's own commits live nowhere on a remote yet
+# the change is fully in main. Merely reaching a remote-tracking branch is not
+# enough for a pre-merge PR-based ship. local-only work keeps its separate remote
+# or local-default reachability contract below.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -443,13 +451,173 @@ $unpushed
 EOF
 }
 
+local_work_is_in_pr_head() {
+  local pr_head=$1 current
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  git -C "$WT" merge-base --is-ancestor "$current" "$pr_head" 2>/dev/null \
+    || unpushed_patches_are_in_pr_head "$pr_head"
+}
+
+single_top_level_api_field() {
+  local text=$1 key=$2 values count
+  values=$(printf '%s\n' "$text" | awk -v prefix="$key: " \
+    'index($0, prefix) == 1 { print substr($0, length(prefix) + 1) }') || return 1
+  count=$(printf '%s\n' "$values" | grep -c . || true)
+  [ "$count" -eq 1 ] || return 1
+  printf '%s\n' "$values"
+}
+
+single_api_head_sha() {
+  local text=$1 values count
+  values=$(printf '%s\n' "$text" | awk '
+    $0 == "head:" { in_head = 1; next }
+    in_head && $0 !~ /^ / { in_head = 0 }
+    in_head && /^  sha: / { print substr($0, 8) }
+  ') || return 1
+  count=$(printf '%s\n' "$values" | grep -c . || true)
+  [ "$count" -eq 1 ] || return 1
+  printf '%s\n' "$values"
+}
+
+ensure_live_pr_head_object() {
+  local path=$1 number=$2 head=$3 fetched
+  git -C "$WT" cat-file -e "$head^{commit}" 2>/dev/null && return 0
+  fetched=$(git -C "$WT" fetch --quiet --no-tags \
+    "https://github.com/$path.git" "refs/pull/$number/head" 2>/dev/null \
+    && git -C "$WT" rev-parse --verify FETCH_HEAD 2>/dev/null) || return 1
+  [ "$fetched" = "$head" ] || return 1
+  git -C "$WT" cat-file -e "$head^{commit}" 2>/dev/null
+}
+
+TEARDOWN_PRESERVE_TASK_BRANCH=0
+TEARDOWN_PR_EVIDENCE_ERROR=
+pr_is_complete_green_and_mergeable() {
+  local branch=$1 status_file last_status provider url path number
+  local recorded_head_count recorded_head api state draft mergeable live_head
+  local checks parsed_summary parsed_count passed failed pending total
+  TEARDOWN_PR_EVIDENCE_ERROR=
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the task has no named local branch to preserve"
+    return 1
+  }
+  if ! fm_pr_metadata_identity_parse "$META"; then
+    TEARDOWN_PR_EVIDENCE_ERROR="the task has no single canonical recorded PR identity"
+    return 1
+  fi
+  provider=$FM_PR_META_PROVIDER
+  url=$FM_PR_META_URL
+  path=$FM_PR_META_PATH
+  number=$FM_PR_META_NUMBER
+  [ "$provider" = github ] || {
+    TEARDOWN_PR_EVIDENCE_ERROR="green-and-mergeable cleanup evidence is unavailable for provider $provider"
+    return 1
+  }
+
+  status_file="$STATE/$ID.status"
+  if [ ! -f "$status_file" ] || [ -L "$status_file" ] \
+    || [ "$(fm_pr_file_link_count "$status_file")" != 1 ]; then
+    TEARDOWN_PR_EVIDENCE_ERROR="the task completion record is absent or unsafe"
+    return 1
+  fi
+  last_status=$(awk 'NF { line = $0 } END { print line }' "$status_file" 2>/dev/null) || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the task completion record is unreadable"
+    return 1
+  }
+  case "$last_status" in
+    "done: PR $url"|"done: PR $url checks green") ;;
+    *)
+      TEARDOWN_PR_EVIDENCE_ERROR="the latest task event is not an unambiguous completion for the recorded PR"
+      return 1
+      ;;
+  esac
+
+  recorded_head_count=$(grep -c '^pr_head=' "$META" 2>/dev/null || true)
+  [ "$recorded_head_count" -eq 1 ] || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the recorded PR head is absent or ambiguous"
+    return 1
+  }
+  recorded_head=$(grep '^pr_head=' "$META" | cut -d= -f2-)
+  fm_pr_head_valid "$recorded_head" || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the recorded PR head is invalid"
+    return 1
+  }
+
+  api=$(gh-axi api "/repos/$path/pulls/$number" 2>/dev/null) || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the live PR identity, mergeability, or head is unavailable"
+    return 1
+  }
+  state=$(single_top_level_api_field "$api" state) || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the live PR state is absent or ambiguous"
+    return 1
+  }
+  draft=$(single_top_level_api_field "$api" draft) || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the live PR draft state is absent or ambiguous"
+    return 1
+  }
+  mergeable=$(single_top_level_api_field "$api" mergeable) || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the live PR mergeability is absent or ambiguous"
+    return 1
+  }
+  live_head=$(single_api_head_sha "$api") || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the live PR head is absent or ambiguous"
+    return 1
+  }
+  [ "$state" = open ] || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the recorded PR is not open"
+    return 1
+  }
+  [ "$draft" = false ] || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the recorded PR is still a draft"
+    return 1
+  }
+  [ "$mergeable" = true ] || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the recorded PR is conflicted or not provably mergeable"
+    return 1
+  }
+  fm_pr_head_valid "$live_head" && [ "$live_head" = "$recorded_head" ] || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the live PR head does not exactly match the recorded PR head"
+    return 1
+  }
+
+  checks=$(gh-axi pr checks "$number" --repo "$path" 2>/dev/null) || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the live PR check result is unavailable"
+    return 1
+  }
+  parsed_summary=$(printf '%s\n' "$checks" | sed -n \
+    -e 's/^summary: "\([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed, \([0-9][0-9]*\) total"$/\1 \2 0 \3/p' \
+    -e 's/^summary: "\([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed, \([0-9][0-9]*\) pending, \([0-9][0-9]*\) total"$/\1 \2 \3 \4/p')
+  parsed_count=$(printf '%s\n' "$parsed_summary" | grep -c . || true)
+  [ "$parsed_count" -eq 1 ] || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the live PR check summary is absent or ambiguous"
+    return 1
+  }
+  IFS=' ' read -r passed failed pending total <<EOF
+$parsed_summary
+EOF
+  if [ "$total" -eq 0 ] || [ "$passed" -ne "$total" ] \
+    || [ "$failed" -ne 0 ] || [ "$pending" -ne 0 ]; then
+    TEARDOWN_PR_EVIDENCE_ERROR="the recorded PR does not have an all-passing completed check suite"
+    return 1
+  fi
+
+  ensure_live_pr_head_object "$path" "$number" "$live_head" || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the validated live PR head is unavailable in the task repository"
+    return 1
+  }
+  local_work_is_in_pr_head "$live_head" || {
+    TEARDOWN_PR_EVIDENCE_ERROR="local HEAD is not contained in the validated live PR head; genuinely unpublished commits may be present"
+    return 1
+  }
+  TEARDOWN_PRESERVE_TASK_BRANCH=1
+}
+
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks GitHub
 # for both the PR state and head. Returns non-zero when the PR is not merged, the
 # current work is not contained in the PR head, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target view state head
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
@@ -466,9 +634,7 @@ pr_is_merged() {
   esac
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
-  unpushed_patches_are_in_pr_head "$head"
+  local_work_is_in_pr_head "$head"
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
@@ -780,42 +946,54 @@ validate_worktree_teardown_safety() {
   fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
-  if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
-        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+  if [ "$MODE" = local-only ]; then
+    if [ -n "$unpushed" ]; then
+      DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+      if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+        if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+          return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+        fi
+        echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
+        echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
       fi
-      echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
-      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+      unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
+      if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+        echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
+        [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+        [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+        echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
+      fi
+    elif [ -n "$dirty" ]; then
+      echo "REFUSED: local-only worktree $WT has uncommitted changes." >&2
+      echo "uncommitted changes present" >&2
+      echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
       return 1
     fi
-    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-  elif [ -n "$dirty" ]; then
+    return 0
+  fi
+
+  if [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
-  elif [ -n "$unpushed" ]; then
-    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
-    if [ -z "$branch" ]; then
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
-    fi
-    if ! work_is_landed "$branch"; then
-      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
   fi
+
+  branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+  if [ -z "$branch" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
+  fi
+  work_is_landed "$branch" && return 0
+  pr_is_complete_green_and_mergeable "$branch" && return 0
+
+  echo "REFUSED: PR-based worktree $WT is neither landed nor backed by complete green-and-mergeable cleanup evidence." >&2
+  [ -z "$TEARDOWN_PR_EVIDENCE_ERROR" ] || printf 'evidence: %s\n' "$TEARDOWN_PR_EVIDENCE_ERROR" >&2
+  [ -z "$unpushed" ] || printf 'commits absent from configured remote-tracking refs:\n%s\n' "$unpushed" >&2
+  echo "Resolve the cited evidence, merge the PR, or get the captain's explicit OK to discard, then --force." >&2
+  return 1
 }
 
 require_orca_worktree_path_match() {
@@ -1240,7 +1418,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null \
+        && [ "$TEARDOWN_PRESERVE_TASK_BRANCH" != 1 ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
@@ -1253,7 +1432,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
+    if git -C "$WT" checkout --detach -q 2>/dev/null \
+      && [ "$TEARDOWN_PRESERVE_TASK_BRANCH" != 1 ]; then
       git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
     fi
   fi

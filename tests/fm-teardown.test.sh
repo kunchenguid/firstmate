@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
-# The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# The check refuses to tear down a worktree without a durable recovery path because
+# treehouse return hard-resets the worktree. A PR-based ship can be cleaned before
+# merge only with exact completion, canonical PR identity, all-passing checks,
+# unambiguous mergeability, exact recorded/live head identity, and repository proof
+# that the local work is contained in that head; this path preserves the branch.
+# Otherwise its PR must be merged or its content present in the default branch.
 #
 # Covers three fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
@@ -24,7 +25,7 @@
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
+#   (d) no-mistakes + completed green mergeable open PR       -> ALLOW + preserve branch
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
@@ -38,6 +39,11 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (z) open PR + failed checks                                  -> REFUSE (red)
+#   (aa) open PR + merge conflict                                -> REFUSE (conflict)
+#   (ab) green PR + later local commit                           -> REFUSE (unpublished)
+#   (ac) absent/ambiguous completion, check, mergeability,
+#        identity, or head evidence                              -> REFUSE (evidence)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -248,6 +254,51 @@ append_pr_meta_for_current_head() {
 append_pr_meta_url() {
   local case_dir=$1
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+}
+
+write_pr_completion() {
+  local case_dir=$1 suffix=${2:- checks green}
+  printf 'done: PR https://github.com/example/repo/pull/7%s\n' "$suffix" \
+    > "$case_dir/state/task-x1.status"
+}
+
+# Supply hermetic live evidence for the pre-merge cleanup path. The API and
+# checks files can be edited by refusal cases to make one field missing,
+# duplicated, stale, red, pending, or conflicting without changing the others.
+add_gh_pr_open_evidence() {
+  local case_dir=$1 head=$2 mergeable=${3:-true} summary=${4:-3 passed, 0 failed, 3 total}
+  cat > "$case_dir/gh-api" <<EOF
+state: open
+draft: false
+head:
+  sha: $head
+mergeable: $mergeable
+EOF
+  printf 'summary: "%s"\n' "$summary" > "$case_dir/gh-checks"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+fixture=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
+case "${1:-} ${2:-}" in
+  "api /repos/example/repo/pulls/7") cat "$fixture/gh-api" ;;
+  "pr checks") cat "$fixture/gh-checks" ;;
+  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+setup_open_green_case() {
+  local name=$1 case_dir head
+  case_dir=$(make_case "$name")
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt "$name" "implement $name"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  append_pr_meta_for_current_head "$case_dir"
+  write_pr_completion "$case_dir"
+  add_gh_pr_open_evidence "$case_dir" "$head"
+  printf '%s\t%s\n' "$case_dir" "$head"
 }
 
 commit_tree_from_wt_head() {
@@ -589,25 +640,28 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
-test_no_mistakes_origin_remote_allows() {
-  local case_dir rc
-  case_dir=$(make_case nm-origin)
-  write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "shippable work"
-  # Push the task branch to origin and fetch so the worktree sees it.
-  git -C "$case_dir/wt" push -q origin fm/task-x1
-  git -C "$case_dir/project" fetch -q origin
+test_completed_green_mergeable_pr_allows_and_preserves_branch() {
+  local setup case_dir head rc kept_head
+  setup=$(setup_open_green_case green-mergeable)
+  IFS=$'\t' read -r case_dir head <<EOF
+$setup
+EOF
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "nm-origin: teardown should succeed when HEAD is on origin"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
+  expect_code 0 "$rc" "green-mergeable: completed green mergeable PR should allow cleanup"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "green-mergeable: teardown printed a REFUSED line"
+  assert_not_contains "$(cat "$case_dir/stderr")" "land its PR" \
+    "green-mergeable: teardown retained the obsolete land-its-PR refusal"
+  kept_head=$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1 2>/dev/null) \
+    || fail "green-mergeable: cleanup deleted the task branch"
+  [ "$kept_head" = "$head" ] || fail "green-mergeable: preserved branch moved from the validated PR head"
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
-    || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
-  pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+    || fail "green-mergeable: teardown manual prompt did not preserve date-gate check"
+  pass "completed green mergeable PR is cleaned before merge with its local branch preserved"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -625,7 +679,194 @@ test_no_mistakes_truly_unpushed_refuses() {
 
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
+  assert_not_contains "$(cat "$case_dir/stderr")" "land its PR" \
+    "nm-unpushed: refusal used the obsolete land-its-PR diagnosis"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+test_red_pr_refuses_cleanup() {
+  local setup case_dir head rc
+  setup=$(setup_open_green_case red-pr)
+  IFS=$'\t' read -r case_dir head <<EOF
+$setup
+EOF
+  printf '%s\n' 'summary: "2 passed, 1 failed, 3 total"' > "$case_dir/gh-checks"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "red-pr: teardown should refuse failed checks"
+  assert_grep "all-passing completed check suite" "$case_dir/stderr" \
+    "red-pr: refusal did not identify the red PR"
+  assert_present "$case_dir/state/task-x1.meta" "red-pr: cleanup removed task metadata"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$head" ] \
+    || fail "red-pr: refusal changed the task branch"
+  pass "red PR refuses cleanup and preserves all task recovery state"
+}
+
+test_pending_pr_refuses_cleanup() {
+  local setup case_dir head rc
+  setup=$(setup_open_green_case pending-pr)
+  IFS=$'\t' read -r case_dir head <<EOF
+$setup
+EOF
+  printf '%s\n' 'summary: "2 passed, 0 failed, 1 pending, 3 total"' > "$case_dir/gh-checks"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pending-pr: teardown should refuse pending checks"
+  assert_grep "all-passing completed check suite" "$case_dir/stderr" \
+    "pending-pr: refusal did not identify incomplete checks"
+  pass "pending PR checks refuse cleanup"
+}
+
+test_conflicted_pr_refuses_cleanup() {
+  local setup case_dir head rc
+  setup=$(setup_open_green_case conflicted-pr)
+  IFS=$'\t' read -r case_dir head <<EOF
+$setup
+EOF
+  sed -i.bak 's/^mergeable: true$/mergeable: false/' "$case_dir/gh-api"
+  rm -f "$case_dir/gh-api.bak"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "conflicted-pr: teardown should refuse a conflict"
+  assert_grep "conflicted or not provably mergeable" "$case_dir/stderr" \
+    "conflicted-pr: refusal did not identify mergeability"
+  assert_present "$case_dir/state/task-x1.meta" "conflicted-pr: cleanup removed task metadata"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$head" ] \
+    || fail "conflicted-pr: refusal changed the task branch"
+  pass "conflicted PR refuses cleanup and preserves all task recovery state"
+}
+
+test_green_pr_with_genuinely_unpublished_commit_refuses() {
+  local setup case_dir pr_head local_head rc
+  setup=$(setup_open_green_case unpublished-after-pr)
+  IFS=$'\t' read -r case_dir pr_head <<EOF
+$setup
+EOF
+  wt_commit_file "$case_dir" local-only.txt unpublished "later unpublished work"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unpublished-after-pr: teardown should refuse local work beyond the PR head"
+  assert_grep "genuinely unpublished commits may be present" "$case_dir/stderr" \
+    "unpublished-after-pr: refusal did not distinguish unpublished work"
+  assert_not_contains "$(cat "$case_dir/stderr")" "land its PR" \
+    "unpublished-after-pr: refusal used the obsolete land-its-PR diagnosis"
+  [ "$local_head" != "$pr_head" ] || fail "unpublished-after-pr: test setup did not advance HEAD"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$local_head" ] \
+    || fail "unpublished-after-pr: refusal changed the unpublished branch"
+  pass "green PR does not authorize cleanup of a genuinely unpublished later commit"
+}
+
+test_absent_and_ambiguous_pr_cleanup_evidence_refuses() {
+  local variant setup case_dir head rc expected tmp
+  for variant in \
+    completion-absent completion-ambiguous \
+    checks-absent checks-ambiguous \
+    mergeability-absent mergeability-ambiguous \
+    identity-absent identity-ambiguous \
+    recorded-head-absent recorded-head-ambiguous \
+    live-head-absent live-head-ambiguous; do
+    setup=$(setup_open_green_case "evidence-$variant")
+    IFS=$'\t' read -r case_dir head <<EOF
+$setup
+EOF
+    case "$variant" in
+      completion-absent)
+        rm -f "$case_dir/state/task-x1.status"
+        expected="completion record is absent"
+        ;;
+      completion-ambiguous)
+        printf '%s\n' 'working: completion was reopened' >> "$case_dir/state/task-x1.status"
+        expected="not an unambiguous completion"
+        ;;
+      checks-absent)
+        : > "$case_dir/gh-checks"
+        expected="check summary is absent or ambiguous"
+        ;;
+      checks-ambiguous)
+        cat "$case_dir/gh-checks" >> "$case_dir/gh-checks.duplicate"
+        cat "$case_dir/gh-checks.duplicate" >> "$case_dir/gh-checks"
+        expected="check summary is absent or ambiguous"
+        ;;
+      mergeability-absent)
+        tmp="$case_dir/gh-api.tmp"
+        grep -v '^mergeable:' "$case_dir/gh-api" > "$tmp"
+        mv "$tmp" "$case_dir/gh-api"
+        expected="mergeability is absent or ambiguous"
+        ;;
+      mergeability-ambiguous)
+        printf '%s\n' 'mergeable: false' >> "$case_dir/gh-api"
+        expected="mergeability is absent or ambiguous"
+        ;;
+      identity-absent)
+        tmp="$case_dir/state/task-x1.meta.tmp"
+        grep -vE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" > "$tmp"
+        mv "$tmp" "$case_dir/state/task-x1.meta"
+        expected="no single canonical recorded PR identity"
+        ;;
+      identity-ambiguous)
+        printf '%s\n' 'pr=https://github.com/example/repo/pull/7' \
+          >> "$case_dir/state/task-x1.meta"
+        expected="no single canonical recorded PR identity"
+        ;;
+      recorded-head-absent)
+        tmp="$case_dir/state/task-x1.meta.tmp"
+        grep -v '^pr_head=' "$case_dir/state/task-x1.meta" > "$tmp"
+        mv "$tmp" "$case_dir/state/task-x1.meta"
+        expected="recorded PR head is absent or ambiguous"
+        ;;
+      recorded-head-ambiguous)
+        printf 'pr_head=%s\n' "$head" >> "$case_dir/state/task-x1.meta"
+        expected="recorded PR head is absent or ambiguous"
+        ;;
+      live-head-absent)
+        tmp="$case_dir/gh-api.tmp"
+        grep -v '^  sha:' "$case_dir/gh-api" > "$tmp"
+        mv "$tmp" "$case_dir/gh-api"
+        expected="live PR head is absent or ambiguous"
+        ;;
+      live-head-ambiguous)
+        tmp="$case_dir/gh-api.tmp"
+        awk '/^  sha:/ { print; print; next } { print }' "$case_dir/gh-api" > "$tmp"
+        mv "$tmp" "$case_dir/gh-api"
+        expected="live PR head is absent or ambiguous"
+        ;;
+    esac
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "evidence-$variant: teardown should refuse"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "evidence-$variant: refusal did not identify the missing or ambiguous evidence"
+    assert_present "$case_dir/state/task-x1.meta" \
+      "evidence-$variant: cleanup removed task metadata after refusal"
+    [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$head" ] \
+      || fail "evidence-$variant: refusal changed the task branch"
+  done
+  pass "absent or ambiguous completion, check, mergeability, identity, and head evidence all refuse cleanup"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -1403,8 +1644,13 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
-test_no_mistakes_origin_remote_allows
+test_completed_green_mergeable_pr_allows_and_preserves_branch
 test_no_mistakes_truly_unpushed_refuses
+test_red_pr_refuses_cleanup
+test_pending_pr_refuses_cleanup
+test_conflicted_pr_refuses_cleanup
+test_green_pr_with_genuinely_unpublished_commit_refuses
+test_absent_and_ambiguous_pr_cleanup_evidence_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
