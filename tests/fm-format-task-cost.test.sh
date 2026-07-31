@@ -111,9 +111,32 @@ test_fm_state_override_takes_precedence() {
   pass "FM_STATE_OVERRIDE takes precedence over \$FM_HOME/state"
 }
 
+# A missing/failing `bc` must fall back to the flat BASE rate, not crash the
+# script under its own `set -euo pipefail` - the actual bug caught twice by
+# no-mistakes review: a first fix's plain, unguarded assignment still let a
+# genuinely-127 `bc` propagate through pipefail and exit the script before
+# the fallback branch ever ran.
+test_bc_missing_falls_back_to_flat_base_rate() {
+  local home meta fakebin got tool
+  home=$(new_home bc-missing)
+  meta="$home/state/no-bc-task.meta"
+  fm_write_meta "$meta" "model=sonnet" "effort=medium"
+
+  fakebin=$(fm_fakebin "$home")
+  for tool in grep cut printf basename dirname bash; do
+    ln -sf "$(command -v "$tool")" "$fakebin/$tool"
+  done
+
+  got=$(PATH="$fakebin" FM_HOME="$home" "$FORMAT_COST" no-bc-task)
+  [ "$got" = "~\$10" ] || fail "a missing bc must fall back to the flat sonnet/medium base rate; got '$got'"
+
+  pass "a missing bc falls back to the flat base rate instead of crashing under set -e"
+}
+
 test_model_effort_matrix
 test_unknown_model_and_effort_fall_back_to_sonnet_medium
 test_missing_taskid_is_silent
 test_missing_meta_file_is_silent
 test_resolves_state_via_fm_home_regardless_of_cwd
 test_fm_state_override_takes_precedence
+test_bc_missing_falls_back_to_flat_base_rate

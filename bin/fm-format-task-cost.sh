@@ -35,7 +35,7 @@ case "$EFFORT" in
   *)      MULT=1.0 ;;
 esac
 
-RAW_COST=$(echo "$BASE * $MULT" | bc 2>/dev/null)
+RAW_COST=$(echo "$BASE * $MULT" | bc 2>/dev/null) || RAW_COST=""
 if [ -n "$RAW_COST" ]; then
   COST=$(printf "%.0f" "$RAW_COST")
 else
