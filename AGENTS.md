@@ -308,7 +308,7 @@ That worker cancels the active run through no-mistakes axi's supported abort com
 The worker then follows `branch_sync.next_action` from structured axi status: use axi sync's supported guarded recovery only when its code is `recover_custody`, and otherwise proceed only when structured status confirms that branch ownership is already returned and no recovery is required.
 Custody recovery settles branch ownership, not content: the worker must replace the obsolete work from the correct pre-invalidation base rather than building on top of the recovered-but-obsolete head, keeping the obsolete run's own pipeline-fix commits out of what gets validated and shipped.
 Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
-Only once ownership is recovered or confirmed already returned does the worker replace the obsolete work, then start one new validation run against the final head so no obsolete or intermediate head is ever treated as authoritative.
+Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
 An ask-user finding returns as `needs-decision`; firstmate decides only when the configured authority permits, otherwise escalates to the captain.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
