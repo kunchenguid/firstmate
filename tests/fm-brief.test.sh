@@ -217,8 +217,12 @@ test_ship_modes_generate_clean_briefs() {
       "$id: ship brief lost its reviewable-size target"
     assert_grep "Only a blocking correctness or security defect" "$brief" \
       "$id: ship brief lost its follow-up boundary"
+    assert_grep "deferred follow-up in one short clause of your terminal \`done:\` line" "$brief" \
+      "$id: ship brief lost the return channel for deferred follow-ups"
     assert_grep "Append \`needs-decision: {the scope question}\` and stop (rule 6)" "$brief" \
       "$id: ship brief lost the status verb for scope escalation"
+    assert_grep "above 1,200 reviewable changed lines" "$brief" \
+      "$id: ship brief lost its pre-coding decomposition threshold"
     assert_grep "iterative no-mistakes review rounds have not closed this ship" "$brief" \
       "$id: ship brief lost its review-round reassessment boundary"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"

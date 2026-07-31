@@ -402,7 +402,8 @@ $RULE1
    generated, vendored, lockfile, and generated-snapshot churn, while hand-authored tests and fixtures count.
    Simplify an estimate above 600 reviewable changed lines.
    Only a blocking correctness or security defect, plus the corrections your accepted intent already
-   requires, is fixed inside this ship; anything else you discover becomes a follow-up.
+   requires, is fixed inside this ship; anything else you discover becomes a follow-up, so name each
+   real deferred follow-up in one short clause of your terminal \`done:\` line and let firstmate queue it.
    Append \`needs-decision: {the scope question}\` and stop (rule 6) rather than expanding this ship when a
    pre-coding estimate stays above 1,200 reviewable changed lines, when out-of-contract work you discovered
    still looks necessary now, or when three iterative no-mistakes review rounds have not closed this ship

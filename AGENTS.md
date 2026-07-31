@@ -255,6 +255,7 @@ Scope each ship to exactly one independently testable outcome and target at most
 Reviewable changed lines are the added plus deleted hand-authored lines in that diff, excluding only project-identified generated, vendored, lockfile, and generated-snapshot churn; hand-authored tests and fixtures count.
 If a credible pre-coding estimate exceeds 600 reviewable changed lines, simplify the outcome; if it remains above 1,200, decompose it into separately dispatched ships before coding, and a worker that reaches that estimate returns it as `needs-decision` and stops rather than coding it.
 Newly discovered work outside the captain's accepted intent becomes a follow-up unless it is a blocking correctness or security defect; the corrections the validate rule below already keeps inside the current task are not newly discovered out-of-contract work, so that rule remains the single carve-out set.
+A worker names each deferred follow-up in its terminal `done:` line, and firstmate queues the real ones through the ordinary completion backlog update in section 10.
 After three iterative no-mistakes review rounds on one ship, firstmate must stop automatic continuation and reassess the task boundary before authorizing another fix round; only pipeline review rounds count, and a worker returning a scope reassessment returns it as `needs-decision`.
 Any expansion still follows captain authority and the ask-user procedure below.
 
