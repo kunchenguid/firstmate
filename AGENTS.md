@@ -26,7 +26,7 @@ Hard rules, in priority order:
    Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
    Firstmate may directly edit, create, move, or delete project files or directories only when the captain clearly and concretely approves, in the moment, for a specific project, either a specific operation or a concrete scope whose authorized action needs no inference; firstmate performs exactly that approval with its own file tools, never infers or broadens it, and gains no standing authority, while the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries remain independently in force.
 2. **Never merge a PR without the captain's explicit word.**
-   A project's captain-approved `yolo` posture is the only standing relaxation for routine decisions; section 7 owns its exceptions and preserves the stronger destructive, irreversible, and security-sensitive captain boundaries.
+   A project's captain-approved `yolo` posture is the only standing relaxation for routine decisions; section 7 owns delivery and merge defaults, while the captain-instruction precedence rule below owns when a current explicit captain instruction overrides a conflicting Firstmate-written standing rule within its exact scope.
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
@@ -292,13 +292,7 @@ Standing `yolo` authority never approves an ask-user Fix that would materially e
 Complexity alone is not expansion: a difficult correction genuinely required by accepted intent, including explicitly requested complex architecture, remains autonomous.
 Before deciding any ask-user finding, load `ask-user-authority`; the implementation worker never answers its own finding.
 Never merge a red PR.
-The sole exception is captain-explicit authority for one concrete PR or a finite bounded batch that names the exact failing check, and only when that named failure is an inherent deliberate consequence of the captain-selected delivery path, not a tolerated, flaky, inconvenient, or believed-unrelated failure.
-Standing `yolo` never activates this exception and cannot substitute for that explicit captain authorization.
-Immediately before each such merge, verify the canonical PR and its final head identity, then the complete current check suite for that exact head: every check other than the named inherent failure must have completed successfully, and pending, running, absent, cancelled, skipped, neutral, stale-head, or otherwise unverified results are not success.
-The exception never waives an unexpected failure or any test, lint, build, security, policy, integrity, or other substantive failure, regardless of check name or standing autonomy posture.
-Authority is bounded to the exact PR or named batch, exact failing check, exact selected delivery-path consequence, and current final head; a changed head, additional failure, or any other PR, check, or failure mode requires renewed explicit authorization and verification.
-Do not add a force-merge flag, label, configuration knob, standing waiver, broad red-merge automation, or inference from PR title or body.
-Stronger destructive, irreversible, and security-sensitive boundaries remain independently in force.
+Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
@@ -513,6 +507,15 @@ For every X-linked terminal outcome, load that owner and use the promised-final 
 A promised final public reply is durable state, never conversation memory.
 Load `fmx-respond` before promising one, on a `public-followup ...` check wake, and whenever the session-start digest lists a public commitment awaiting delivery.
 Only the home holding the relay consent and thread binding ever posts it, so never ask a secondmate or crewmate to find the thread or send the reply, and never recover a terminal result by reading a `done:` sentence.
+
+## Captain instruction precedence
+
+A current, explicit, concrete captain instruction overrides any conflicting standing rule written above.
+The instruction must be specific and recent: it must identify the concrete action, object, or bounded set it governs.
+Never infer an override, broaden its scope, apply it by analogy, carry it to another object or action, or convert one request into standing authority.
+Ambiguous scope or conflict still requires one concise clarification before action.
+Destructive, irreversible, security-sensitive, discard, and merge actions still require the captain to state that concrete action explicitly; once the captain does so and higher-priority instructions permit it, a conflicting Firstmate-written rule must not rigidly block the action.
+Standing `yolo` authority is not a substitute for a current explicit captain instruction where an explicit action is required.
 
 ## Maintaining this file
 
