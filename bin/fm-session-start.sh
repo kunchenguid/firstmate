@@ -316,16 +316,22 @@ X_MODE_PRESENT=0
 if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
   PI_TURNEND_EXT="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
+  PI_LAVISH_EXT="$FM_ROOT/.pi/extensions/fm-lavish-poll.ts"
   PI_WATCH_MARKER="$STATE/.pi-watch-extension-loaded"
   PI_TURNEND_MARKER="$STATE/.pi-turnend-extension-loaded"
+  PI_LAVISH_MARKER="$STATE/.pi-lavish-extension-loaded"
   PI_LOCK="$STATE/.lock"
   PI_RESTART_COMMAND=$PRIMARY_HARNESS
   [ "$PRIMARY_HARNESS" != pi ] || PI_RESTART_COMMAND='plain pi'
   PI_WATCH_VERSION=$(hash_file "$PI_EXT" || printf '')
   PI_TURNEND_VERSION=$(hash_file "$PI_TURNEND_EXT" || printf '')
+  PI_LAVISH_VERSION=$(hash_file "$PI_LAVISH_EXT" || printf '')
   if ! pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
     || ! pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
+  fi
+  if ! pi_extension_loaded "$PI_LAVISH_MARKER" "$PI_LAVISH_VERSION" "$PI_LOCK"; then
+    printf 'PI_LAVISH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s auto-load for completion-aware Lavish feedback; use -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_LAVISH_EXT" "$PI_LAVISH_EXT"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \

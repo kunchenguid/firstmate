@@ -86,6 +86,16 @@ Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts 
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
+## Completion-aware Lavish feedback in Pi
+
+`.pi/extensions/fm-lavish-poll.ts` is the sole owner of long-lived `lavish-axi poll` subprocesses in Pi-family Firstmate primary sessions.
+Its model-facing `fm_lavish_poll` tool canonicalizes the artifact, returns immediately, preserves optional `--agent-reply` as one argument, suppresses duplicate ownership for that artifact, and injects a typed custom Pi message when feedback or a terminal or fatal result arrives.
+One session generation owns every attached child, bounded capture, private diagnostic, process-exit fallback, and UI status, and `session_shutdown` retires that generation before a replacement session can deliver anything.
+The relay deliberately does not use or extend fleet watcher supervision.
+Plain Pi and pi-signed expose the same extension API and load the same tracked implementation, including persistent Pi-family secondmates launched through `fm-spawn.sh`.
+The other supported primary harnesses retain their existing Lavish execution behavior because none loads Pi extensions: Claude's native background-job surface, Codex's non-resuming completion limit, OpenCode's plugin callback surface, Grok's background-notify mechanism, and standalone Kimi's hook surface are distinct integrations rather than compatible aliases for `pi.sendMessage` and `session_shutdown`.
+Active deterministic and real-session evidence lives in [`verification/lavish-relay.md`](verification/lavish-relay.md).
+
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.

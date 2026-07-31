@@ -308,6 +308,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/lavish-relay.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/public-followup.md",
       "audience": "maintainer-verification"
     },
