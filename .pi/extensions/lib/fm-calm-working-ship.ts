@@ -2,10 +2,10 @@
 //
 // Calm replaces Pi's stock working row with a tiny SSHHIP-derived boat while one
 // logical agent run is active. This module owns only the sprite geometry, the bounce
-// track, the two animation cadences, and the temporary TUI widget;
-// `.pi/extensions/fm-calm.ts` owns when the presentation is installed and removed, and
-// stays the sole caller of setWorkingVisible(). docs/calm.md owns the captain-facing
-// contract.
+// track, the two animation cadences, the session-scoped freeze/resume state, and the
+// temporary TUI widget; `.pi/extensions/fm-calm.ts` owns when the presentation is
+// installed and removed, and stays the sole caller of setWorkingVisible().
+// docs/calm.md owns the captain-facing contract.
 //
 // Cadence: one scheduler drives two logically independent clocks. Every tick advances
 // the water phase, and only every CALM_WORKING_SHIP_TICKS_PER_MOVE-th tick moves the
@@ -13,11 +13,19 @@
 // itself reads as calm. Both clocks stop together when the widget is disposed. Ticks,
 // not wall-clock timestamps, drive every state change, so tests can seek time exactly.
 //
+// Continuity: one extension-owned animation instance survives hide/show within the same
+// Pi process and Calm extension lifetime. Disposing the widget freezes column,
+// direction, water phase, and tick cadence without advancing them for hidden wall
+// time. The next working period resumes from that exact logical state. A fresh session
+// or new extension lifetime calls reset() and starts at the normal initial position.
+// State is never a module-level or process-global singleton.
+//
 // Verified against Pi 0.81.1 declarations and the Pi 0.82.0 CLI, which expose
 // ExtensionUIContext.setWidget() with a component factory, per-widget dispose(), and
 // TUI.requestRender(). Pi renders a widget through Component.render(width), so this
 // module recomputes its track from that width on every frame instead of caching a
-// terminal size that a resize would invalidate.
+// terminal size that a resize would invalidate. A resize while the boat is hidden is
+// applied on the first resumed frame through the same clamp path.
 import type { Component, TUI } from "@earendil-works/pi-tui";
 
 // The hull is symmetric and replaces waves on its row rather than adding a third row.
@@ -51,6 +59,14 @@ export type CalmWorkingShipAnimation = {
   render(width: number): string[];
   /** Advance one scheduler tick: water every tick, boat on its slower cadence. */
   tick(): void;
+  restoreLastRendered(): void;
+  /** Restore the normal initial column, direction, water phase, and cadence. */
+  reset(): void;
+  /**
+   * Clamp the frozen column and direction to `width` without advancing time.
+   * Used when a terminal resize lands while the working presentation is hidden.
+   */
+  clampToWidth(width: number): void;
   /** Current hull column, exposed for deterministic motion assertions. */
   position(): number;
   /** Current travel direction: 1 travelling right, -1 travelling left. */
@@ -72,6 +88,11 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
   let span = 0;
   let phase = 0;
   let ticks = 0;
+  let renderedPosition = position;
+  let renderedDirection = direction;
+  let renderedSpan = span;
+  let renderedPhase = phase;
+  let renderedTicks = ticks;
 
   // Reversing the moment the boat lands on an endpoint means the endpoint frame itself
   // already shows the new heading, so no frame at or after a bounce shows the old sail.
@@ -79,6 +100,33 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
     if (span <= 0) return;
     if (position >= span) direction = -1;
     else if (position <= 0) direction = 1;
+  };
+
+  const applyWidth = (width: number): void => {
+    if (width <= 0) {
+      span = 0;
+      position = 0;
+      return;
+    }
+    span = trackSpan(width);
+    position = Math.min(position, span);
+    settleDirectionAtEdges();
+  };
+
+  const commitRenderedState = (): void => {
+    renderedPosition = position;
+    renderedDirection = direction;
+    renderedSpan = span;
+    renderedPhase = phase;
+    renderedTicks = ticks;
+  };
+
+  const restoreLastRenderedState = (): void => {
+    position = renderedPosition;
+    direction = renderedDirection;
+    span = renderedSpan;
+    phase = renderedPhase;
+    ticks = renderedTicks;
   };
 
   /** One colored run of water covering absolute columns [from, from + count). */
@@ -98,6 +146,21 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
     direction: () => direction,
     waterPhase: () => phase,
 
+    restoreLastRendered: restoreLastRenderedState,
+
+    reset(): void {
+      position = 0;
+      direction = 1;
+      span = 0;
+      phase = 0;
+      ticks = 0;
+      commitRenderedState();
+    },
+
+    clampToWidth(width: number): void {
+      applyWidth(width);
+    },
+
     tick(): void {
       ticks += 1;
       phase = (phase + 1) % WAVE_CYCLE.length;
@@ -115,44 +178,51 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
 
       // A resize lands here before the next frame, so recompute and clamp the track
       // immediately rather than trusting a position measured against the old width.
-      span = trackSpan(width);
-      position = Math.min(position, span);
-      settleDirectionAtEdges();
+      applyWidth(width);
 
       const sail = direction >= 0 ? SAIL_RIGHT : SAIL_LEFT;
 
+      let frame: string[];
       if (width < SAIL_WIDTH) {
         // Too narrow for even the sail: a deterministic single row of water.
-        return [water(0, width)];
-      }
-
-      if (width < HULL_WIDTH) {
+        frame = [water(0, width)];
+      } else if (width < HULL_WIDTH) {
         // Too narrow for the hull: the sail alone rides the water row.
-        return [
+        frame = [
           water(0, position) +
             boat(sail) +
             water(position + SAIL_WIDTH, width - position - SAIL_WIDTH),
         ];
+      } else {
+        frame = [
+          " ".repeat(position + SAIL_OFFSET) + boat(sail),
+          water(0, position) +
+            boat(HULL) +
+            water(position + HULL_WIDTH, width - position - HULL_WIDTH),
+        ];
       }
 
-      return [
-        " ".repeat(position + SAIL_OFFSET) + boat(sail),
-        water(0, position) +
-          boat(HULL) +
-          water(position + HULL_WIDTH, width - position - HULL_WIDTH),
-      ];
+      commitRenderedState();
+      return frame;
     },
   };
 }
 
 /**
- * Build the temporary Calm working widget. Pi disposes the previous component before
- * installing a replacement under the same key and when it clears extension widgets, so
- * the single scheduler driving both cadences cannot outlive the widget or duplicate.
+ * Build the temporary Calm working widget bound to one caller-owned animation.
+ * Pi disposes the previous component before installing a replacement under the same
+ * key and when it clears extension widgets, so the single scheduler driving both
+ * cadences cannot outlive the widget or duplicate. Disposing freezes the shared
+ * animation in place; the next widget bound to the same animation resumes without
+ * applying hidden wall time.
  */
-export function createCalmWorkingShipWidget(tui: TUI): Component & { dispose(): void } {
-  const animation = createCalmWorkingShipAnimation();
+export function createCalmWorkingShipWidget(
+  tui: TUI,
+  animation: CalmWorkingShipAnimation = createCalmWorkingShipAnimation(),
+): Component & { dispose(): void } {
+  let disposed = false;
   const timer = setInterval(() => {
+    if (disposed) return;
     animation.tick();
     tui.requestRender();
   }, CALM_WORKING_SHIP_TICK_MS);
@@ -160,9 +230,14 @@ export function createCalmWorkingShipWidget(tui: TUI): Component & { dispose(): 
   timer.unref?.();
 
   return {
-    render: (width) => animation.render(width),
+    render: (width) => (disposed ? [] : animation.render(width)),
     // Every frame is rebuilt from fixed standard ANSI codes, so there is no cache.
     invalidate: () => {},
-    dispose: () => clearInterval(timer),
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      clearInterval(timer);
+      animation.restoreLastRendered();
+    },
   };
 }
