@@ -57,7 +57,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 ## Development
 
 Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - validate locally on a feature branch through `no-mistakes axi run --skip=push,pr,ci` (review, test, and lint only); never push that branch or open a PR against this repo.
-Report the validated branch to the captain, who fast-forward-merges it into local `main` once approved - the same explicit merge approval any other merge requires.
+Report the validated branch to the captain; once approved, fast-forward-merge it into local `main` - the same explicit merge approval any other merge requires.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
 There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.
