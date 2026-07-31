@@ -91,6 +91,10 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+BROWSER_RULE="3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   For browser or visual work against an internal app gated by SSO, export \`CHROME_DEVTOOLS_AXI_USER_DATA_DIR=\"$FM_ROOT/data/chrome-profile\"\` before invoking chrome-devtools-axi so it reuses the captain's persisted login session.
+   If you still land on a login page (the persisted session expired or was never established), do NOT attempt to authenticate yourself: append \`blocked: {app} needs a fresh manual login via bin/fm-chrome-login.sh\` to the status file and stop."
+
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -265,7 +269,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -376,7 +380,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

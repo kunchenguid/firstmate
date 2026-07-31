@@ -212,6 +212,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/chrome-auth-persistence.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/cmux-backend.md",
       "audience": "operator-current"
     },
