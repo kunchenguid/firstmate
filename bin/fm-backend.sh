@@ -383,6 +383,33 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# fm_backend_endpoint_orca_worktree_id_valid: Orca's native worktree id is the
+# composite "<repo-uuid>::<absolute-path>". The repo uuid is identical for every
+# worktree of one repo, so the path segment is the only discriminator and both
+# segments are required. That composite carries ':' and '/', which the shared
+# atom charset rejects, so Orca worktree ids get this exact shape check instead
+# of loosening validation for every other backend. The accepted path charset
+# still excludes whitespace, newlines, and every shell metacharacter, so a
+# validated id cannot escape the quoted argument it is passed as.
+fm_backend_endpoint_orca_worktree_id_valid() {  # <value>
+  local uuid path
+  case "$1" in
+    *::*) ;;
+    *) return 1 ;;
+  esac
+  uuid=${1%%::*}
+  path=${1#*::}
+  [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$path" in
+    *[!A-Za-z0-9._@%+/-]*) return 1 ;;
+  esac
+  return 0
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -503,7 +530,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_endpoint_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi

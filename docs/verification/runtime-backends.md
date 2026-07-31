@@ -384,6 +384,22 @@ result.runtime.state=ready
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
 
+Worktree id shape was verified on 2026-07-31 against Orca 1.4.162.
+
+```sh
+orca worktree list --json
+```
+
+Every one of the 200 listed worktrees shared a single `repoId` and carried `id` equal to `<repoId>::<path>`:
+
+```text
+3bbb3ee8-c628-4390-992c-af5118987e86::/Users/benjamintang/Documents/GitHub/diffusal
+3bbb3ee8-c628-4390-992c-af5118987e86::/private/tmp/diffusal-wt-base-main
+```
+
+`orca --help` documents the same composite as the selector form `id:<repo-id>::<path>`.
+Because the repo uuid never varies within a repository, cleanup accepts only that composite in `orca_worktree_id=` and refuses any looser value.
+
 ```sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh

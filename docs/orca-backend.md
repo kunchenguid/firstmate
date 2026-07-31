@@ -36,12 +36,14 @@ The normal isolation and unlanded-work refusal rules still apply.
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
-orca_worktree_id=<orca worktree id>
+orca_worktree_id=<orca repo uuid>::<absolute Orca worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+Orca's native worktree id is that whole composite, and its repo uuid is identical for every worktree of one repository, so the path segment is the only discriminator and a bare uuid identifies nothing.
+Cleanup validates `orca_worktree_id=` against exactly that composite shape and preserves task state rather than acting on any other value; [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) owns the live evidence.
 
 ## Current lifecycle and safety
 

@@ -124,11 +124,15 @@ test_supported_backend_endpoint_records_validate() {
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Zellij endpoint refused"
 
   id=orca-task
+  # Orca's native worktree id is the composite "<repo-uuid>::<absolute-path>",
+  # so this record carries the shape Orca actually issues.
   fm_write_meta "$dir/home/state/$id.meta" \
-    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=worktree-9"
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term_ad314371-e22d-4ac8-a541-546a8eb29ca7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=3bbb3ee8-c628-4390-992c-af5118987e86::$dir/worktree"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Orca endpoint refused"
-  [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca validation did not select its terminal"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = term_ad314371-e22d-4ac8-a541-546a8eb29ca7 ] \
+    || fail "Orca validation did not select its terminal"
 
   id=cmux-task
   fm_write_meta "$dir/home/state/$id.meta" \
