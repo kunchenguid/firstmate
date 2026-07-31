@@ -109,7 +109,9 @@ Task cleanup acquires that session lock before the task's isolated copy is retur
 Forced secondmate cleanup recursively preflights every Herdr child endpoint and acquires every affected named-session lock before mutating any child, then retains each child's durable identity unless that exact pane returns structured not-found after its close.
 Durable task records are erased only once the exact pane is confirmed gone through its structured presence: after every close path, only a structured not-found response counts as gone, while a present or unknown result retains every record with a visible, retryable error.
 Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
-If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
+An exactly bound presentation journal is retired when the backend already reports its recorded pane dead or after a requested close is confirmed; if that close cannot be confirmed, teardown fails before deleting task state so the same cleanup can be retried.
+If the journal cannot be bound exactly, teardown grants it no cleanup authority and preserves it for manual inspection; a focus-restoration error after the pane is confirmed dead does not prevent retirement.
+If lock, snapshot, pane identity, or restoration authority is ambiguous before close, cleanup warns and preserves the journal for manual inspection.
 
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
