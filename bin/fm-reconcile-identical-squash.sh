@@ -150,6 +150,22 @@ object_storage_state_valid() {
       ;;
   esac
   set +e
+  repo_git config --get-regexp \
+    '^remote\..*\.partialclonefilter$' >/dev/null 2>&1
+  rc=$?
+  set -e
+  case "$rc" in
+    0)
+      OBJECT_STORAGE_ERROR="partial or promisor object storage is configured"
+      return 1
+      ;;
+    1) ;;
+    *)
+      OBJECT_STORAGE_ERROR="cannot determine partial-clone filter state"
+      return 1
+      ;;
+  esac
+  set +e
   config_output=$(repo_git config --type=bool --get-regexp \
     '^remote\..*\.promisor$' 2>/dev/null)
   rc=$?

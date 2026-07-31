@@ -364,6 +364,39 @@ test_partial_or_promisor_storage_refuses_without_acquisition() {
   pass "partial or promisor storage refuses without object acquisition or ref movement"
 }
 
+test_partial_clone_filter_only_refuses_without_acquisition() {
+  local refs_before refs_after objects_before objects_after
+  new_divergent_fixture partial-clone-filter-only
+  refs_before="$CASE_ROOT/refs.before"
+  refs_after="$CASE_ROOT/refs.after"
+  objects_before="$CASE_ROOT/objects.before"
+  objects_after="$CASE_ROOT/objects.after"
+  git -C "$REPO" config remote.origin.partialCloneFilter tree:0
+  ! git -C "$REPO" config --get remote.origin.promisor >/dev/null 2>&1 \
+    || fail "partial-clone filter-only fixture configured a promisor boolean"
+  ! git -C "$REPO" config --local --get extensions.partialClone >/dev/null 2>&1 \
+    || fail "partial-clone filter-only fixture configured the partial-clone extension"
+  [ ! -e "$REPO/.git/objects/info/alternates" ] \
+    || fail "partial-clone filter-only fixture configured object alternates"
+  [ -z "$(find "$REPO/.git/objects/pack" -name '*.promisor' -print)" ] \
+    || fail "partial-clone filter-only fixture contains a promisor pack marker"
+  snapshot_refs "$REPO" "$refs_before"
+  snapshot_object_files "$REPO" "$objects_before"
+
+  run_helper_plain "$REPO"
+
+  assert_refused_without_move "$REPO" "$LOCAL_OLD" partial-clone-filter-only
+  snapshot_refs "$REPO" "$refs_after"
+  snapshot_object_files "$REPO" "$objects_after"
+  cmp -s "$refs_before" "$refs_after" \
+    || fail "partial-clone filter-only refusal changed a ref"
+  cmp -s "$objects_before" "$objects_after" \
+    || fail "partial-clone filter-only refusal acquired an object"
+  assert_grep "partial or promisor object storage is configured" "$RUN_ERR" \
+    "partial-clone filter-only refusal was not actionable"
+  pass "partial-clone filter-only storage refuses without object acquisition or ref movement"
+}
+
 test_virtual_or_incomplete_history_refuses() {
   new_divergent_fixture shallow-history
   printf '%s\n' "$BASE_OID" > "$REPO/.git/shallow"
@@ -798,6 +831,7 @@ test_source_fetch_disables_auto_maintenance
 test_ambient_git_overrides_refuse
 test_repository_local_alternates_refuse
 test_partial_or_promisor_storage_refuses_without_acquisition
+test_partial_clone_filter_only_refuses_without_acquisition
 test_virtual_or_incomplete_history_refuses
 test_dirty_refuses
 test_detached_refuses
