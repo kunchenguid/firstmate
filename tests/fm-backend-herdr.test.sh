@@ -1188,7 +1188,8 @@ test_projection_close_emptying_before_focus_repositions_then_uses_pane_death() {
   death_process_info_fixture w1:p1 "$bgpid" > "$resp/10.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/11.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/12.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/13.out"
+  cp "$resp/12.out" "$resp/13.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/14.out"
   make_death_lab "$dir" "$bgpid"
   printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w2","focused":true},{"workspace_id":"w3","focused":false},{"workspace_id":"w1","focused":false}]}}' > "$dir/mover-response"
   fb=$(make_herdr_fakebin "$dir")
@@ -1373,7 +1374,8 @@ test_projection_close_move_failure_falls_back_to_plain_close() {
   printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/9.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/11.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/12.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/13.out"
+  cp "$resp/12.out" "$resp/13.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/14.out"
   sleep 300 & bgpid=$!
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
@@ -1621,11 +1623,18 @@ assert_projection_close_failed_removal_rolls_back_the_reposition() {
   printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/9.out"
   bash -c 'trap "" HUP; sleep 300' & bgpid=$!
   death_process_info_fixture w1:p1 "$bgpid" > "$resp/10.out"
-  cp "$resp/3.out" "$resp/11.out"  # SIGHUP poll 1: pane still present
-  cp "$resp/3.out" "$resp/12.out"  # SIGHUP poll 2: pane still present
-  death_process_info_fixture w1:p1 "$bgpid" > "$resp/13.out"  # escalation resample: same owner
-  cp "$resp/3.out" "$resp/14.out"  # SIGKILL poll 1: pane still present
-  cp "$resp/3.out" "$resp/15.out"  # SIGKILL poll 2: pane still present
+  if [ "$mode" = pane-gone-workspace-present ]; then
+    printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/11.out"
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false},{"workspace_id":"w1","active_tab_id":"w1:t2","focused":false}]}}' > "$resp/12.out"
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/13.out"
+    printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/14.out"
+  else
+    cp "$resp/3.out" "$resp/11.out"  # SIGHUP poll 1: pane still present
+    cp "$resp/3.out" "$resp/12.out"  # SIGHUP poll 2: pane still present
+    death_process_info_fixture w1:p1 "$bgpid" > "$resp/13.out"  # escalation resample: same owner
+    cp "$resp/3.out" "$resp/14.out"  # SIGKILL poll 1: pane still present
+    cp "$resp/3.out" "$resp/15.out"  # SIGKILL poll 2: pane still present
+  fi
   if [ "$mode" = command-fails ]; then
     printf '9\n' > "$resp/16.exit"
     printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/17.out"
@@ -1661,6 +1670,7 @@ assert_projection_close_failed_removal_rolls_back_the_reposition() {
 test_projection_close_failed_removal_rolls_back_the_reposition() {
   assert_projection_close_failed_removal_rolls_back_the_reposition command-fails
   assert_projection_close_failed_removal_rolls_back_the_reposition command-succeeds-pane-present
+  assert_projection_close_failed_removal_rolls_back_the_reposition pane-gone-workspace-present
   pass "herdr presentation cleanup: every unconfirmed removal restores the exact original workspace order and reports failure"
 }
 

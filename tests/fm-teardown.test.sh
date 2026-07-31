@@ -1292,7 +1292,7 @@ SH
   : > "$marker"
 
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "herdr-marker-cleanup: forced teardown failed"
+    || fail "herdr-marker-cleanup: forced teardown failed: $(cat "$case_dir/stderr")"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
@@ -1454,7 +1454,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
     || fail "herdr-garbage-presence: ambiguous presence erased the durable endpoint metadata"
   [ -e "$case_dir/state/task-x1.status" ] \
     || fail "herdr-garbage-presence: ambiguous presence erased the task status record"
-  assert_grep "not confirmed gone" "$case_dir/stderr" \
+  assert_grep "ambiguous structured presence" "$case_dir/stderr" \
     "herdr-garbage-presence: the ambiguity refusal was not explained visibly"
   pass "herdr flat teardown never erases records when pane presence is unparseable"
 }
@@ -1523,6 +1523,107 @@ test_herdr_flat_teardown_preflight_refuses_before_changes() {
   assert_herdr_teardown_preflight_refuses_before_changes missing-parser
   assert_herdr_teardown_preflight_refuses_before_changes missing-explicit-close-helper
   pass "herdr flat teardown preflight refuses before every destructive change"
+}
+
+configure_secondmate_with_herdr_child() {  # <case-dir>
+  local case_dir=$1 home="$1/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/child-herdr.meta" \
+    "window=childsession:wC:p1" \
+    "endpoint_task_id=child-herdr" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "backend=herdr" \
+    "herdr_session=childsession" \
+    "herdr_workspace_id=wC" \
+    "herdr_tab_id=wC:t1" \
+    "herdr_pane_id=wC:p1"
+  : > "$home/state/child-herdr.status"
+  : > "$home/state/child-herdr.turn-ended"
+  cat > "$case_dir/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$*" >> "\${FM_FAKE_HERDR_LOG:?}"
+case "\${1:-} \${2:-}" in
+  "session list")
+    if [ "\${FM_FAKE_HERDR_SESSION_LIST_GARBAGE:-0}" = 1 ]; then
+      printf '%s\n' 'not-json'
+    else
+      printf '%s\n' '{"sessions":[{"name":"childsession","running":true,"socket_path":"$case_dir/child.sock"}]}'
+    fi
+    ;;
+  "workspace list") exit 1 ;;
+  "pane get")
+    if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
+      if [ "\${FM_FAKE_HERDR_PRESENCE_UNKNOWN:-0}" = 1 ]; then
+        printf '%s\n' 'not-json'
+      else
+        printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+        exit 1
+      fi
+    else
+      printf '%s\n' '{"result":{"pane":{"pane_id":"wC:p1","tab_id":"wC:t1","workspace_id":"wC"}}}'
+    fi
+    ;;
+  "pane close") : > "\${FM_FAKE_HERDR_CLOSED:?}" ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
+test_forced_secondmate_herdr_child_preflight_refuses_before_changes() {
+  local case_dir home log closed rc thlog
+  case_dir=$(make_case herdr-child-preflight)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_herdr_child "$case_dir"
+  home="$case_dir/secondmate-home"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; thlog="$case_dir/treehouse.log"
+  : > "$log"; : > "$thlog"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$thlog"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_FAKE_HERDR_SESSION_LIST_GARBAGE=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "herdr-child-preflight: teardown continued through an unresolvable child lock"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "herdr-child-preflight: refusal erased the parent record"
+  [ -e "$home/state/child-herdr.meta" ] || fail "herdr-child-preflight: refusal erased the child record"
+  [ -e "$home/state/child-herdr.status" ] || fail "herdr-child-preflight: refusal erased child status"
+  [ -d "$home" ] || fail "herdr-child-preflight: refusal removed the secondmate home"
+  [ ! -s "$thlog" ] || fail "herdr-child-preflight: refusal returned work before child preflight"
+  [ ! -e "$closed" ] || fail "herdr-child-preflight: refusal attempted a child close"
+  assert_grep "nothing was changed" "$case_dir/stderr" \
+    "herdr-child-preflight: refusal did not explain its non-mutating boundary"
+  pass "forced secondmate teardown preflights every Herdr child before cleanup mutation"
+}
+
+test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
+  local case_dir home log closed rc
+  case_dir=$(make_case herdr-child-unconfirmed-close)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_herdr_child "$case_dir"
+  home="$case_dir/secondmate-home"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_PRESENCE_UNKNOWN=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "herdr-child-unconfirmed-close: teardown erased records after an ambiguous close"
+  [ -e "$closed" ] || fail "herdr-child-unconfirmed-close: fixture did not attempt the child close"
+  [ -e "$home/state/child-herdr.meta" ] || fail "herdr-child-unconfirmed-close: ambiguous close erased child metadata"
+  [ -e "$home/state/child-herdr.status" ] || fail "herdr-child-unconfirmed-close: ambiguous close erased child status"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "herdr-child-unconfirmed-close: failed child cleanup erased parent metadata"
+  [ -d "$home" ] || fail "herdr-child-unconfirmed-close: failed child cleanup removed the secondmate home"
+  assert_grep "retaining that child's durable identity records" "$case_dir/stderr" \
+    "herdr-child-unconfirmed-close: refusal did not explain child record retention"
+  pass "forced secondmate teardown retains Herdr child identity until exact pane disappearance"
 }
 
 configure_herdr_projection_teardown_case() {  # <case-dir>
@@ -1658,6 +1759,8 @@ test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
+test_forced_secondmate_herdr_child_preflight_refuses_before_changes
+test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
