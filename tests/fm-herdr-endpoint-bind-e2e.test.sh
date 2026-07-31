@@ -6,6 +6,13 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 
+# This suite drives the real bin/fm-herdr-endpoint-bind.sh but sources neither
+# tests/lib.sh nor tests/herdr-test-safety.sh, so take the same documented
+# test-harness exemption they do: firstmate's own no-mistakes run executes the
+# suite from a gate worktree, which is exactly what the binder's
+# fm_refuse_if_gate_agent backstop refuses (bin/fm-gate-refuse-lib.sh).
+export FM_GATE_REFUSE_BYPASS=1
+
 fail() {
   printf 'not ok - %s\n' "$1" >&2
   rm -rf "$TMP_ROOT"
