@@ -30,13 +30,12 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, codex, pi, and grok set verified markers of their own; opencode and
-  # kimi are markerless, so a foreign marker retained in a terminal
+  # Claude, codex, pi, grok, and cursor set verified markers of their own;
+  # opencode and kimi are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
-  [ -n "${CODEX_THREAD_ID:-}" ] && { echo codex; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
     return
@@ -49,6 +48,11 @@ detect_own() {
   # session and tool processes (verified, cursor-agent 2026.07.23). The executable
   # is cursor-agent, not cursor, so the ancestry match below keys on "cursor".
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
+  # CODEX_THREAD_ID is checked last among the markers: Codex sets it on its own
+  # session, but a tmux server first started from a Codex primary carries it
+  # into every later window, so a harness that set its own live marker above
+  # must win over that inherited value.
+  [ -n "${CODEX_THREAD_ID:-}" ] && { echo codex; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do

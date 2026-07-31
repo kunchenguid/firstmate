@@ -412,8 +412,8 @@ SH
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
 # Markers today: CLAUDECODE (claude), CODEX_THREAD_ID (codex),
-# CURSOR_AGENT_SESSION_ID / CURSOR_CONVERSATION_ID / CURSOR_TRACE_ID
-# (session-lock identity only),
+# CURSOR_AGENT (cursor), CURSOR_AGENT_SESSION_ID / CURSOR_CONVERSATION_ID /
+# CURSOR_TRACE_ID (session-lock identity only),
 # PI_CODING_AGENT plus FM_PI_HARNESS (Pi family), GROK_AGENT (grok).
 # opencode has no env marker (ancestry only). Without this, a local
 # claude/pi/grok session fails cases that pin a different fake harness while CI
@@ -421,12 +421,12 @@ SH
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT_SESSION_ID \
+    env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT -u CURSOR_AGENT_SESSION_ID \
       -u CURSOR_CONVERSATION_ID -u CURSOR_TRACE_ID -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
-    env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT_SESSION_ID \
+    env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT -u CURSOR_AGENT_SESSION_ID \
       -u CURSOR_CONVERSATION_ID -u CURSOR_TRACE_ID -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
@@ -1062,7 +1062,7 @@ EOF
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   # fm-lock.sh's own exact success text.
-  assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
+  assert_contains "$out" "lock acquired: harness identity" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
   # fm-bootstrap.sh's own exact MISSING-tool line format.
   assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).

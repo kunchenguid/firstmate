@@ -78,25 +78,32 @@ fm_harness_process_matches() {  # <comm> <args>
 
 # Print a stable marker identity for harnesses whose tool environment exposes
 # one even when sandboxing hides process ancestry from `ps`.
+# Every marker here must be per-session and set by the harness itself: an
+# identity two concurrent sessions could share would break the one-active-
+# controller invariant this lock exists to enforce, so window- or host-scoped
+# values (e.g. VSCODE_PID) are deliberately not accepted.
+# A harness's own live marker outranks a foreign marker retained in a terminal
+# multiplexer's stored environment, so CURSOR_AGENT=1 - which only a live
+# cursor-agent process sets - wins over an inherited CODEX_THREAD_ID.
 fm_harness_marker_identity() {
+  local cursor_id=''
+  if [ -n "${CURSOR_AGENT_SESSION_ID:-}" ]; then
+    cursor_id="$CURSOR_AGENT_SESSION_ID"
+  elif [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then
+    cursor_id="$CURSOR_CONVERSATION_ID"
+  elif [ -n "${CURSOR_TRACE_ID:-}" ]; then
+    cursor_id="$CURSOR_TRACE_ID"
+  fi
+  if [ "${CURSOR_AGENT:-}" = "1" ] && [ -n "$cursor_id" ]; then
+    printf 'cursor:%s\n' "$cursor_id"
+    return 0
+  fi
   if [ -n "${CODEX_THREAD_ID:-}" ]; then
     printf 'codex:%s\n' "$CODEX_THREAD_ID"
     return 0
   fi
-  if [ -n "${CURSOR_AGENT_SESSION_ID:-}" ]; then
-    printf 'cursor:%s\n' "$CURSOR_AGENT_SESSION_ID"
-    return 0
-  fi
-  if [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then
-    printf 'cursor:%s\n' "$CURSOR_CONVERSATION_ID"
-    return 0
-  fi
-  if [ -n "${CURSOR_TRACE_ID:-}" ]; then
-    printf 'cursor:%s\n' "$CURSOR_TRACE_ID"
-    return 0
-  fi
-  if [ "${TERM_PROGRAM:-}" = "vscode" ] && [ -n "${VSCODE_PID:-}" ]; then
-    printf 'cursor-vscode:%s\n' "$VSCODE_PID"
+  if [ -n "$cursor_id" ]; then
+    printf 'cursor:%s\n' "$cursor_id"
     return 0
   fi
   return 1

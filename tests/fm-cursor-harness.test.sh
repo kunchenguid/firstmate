@@ -73,7 +73,10 @@ test_cursor_session_lock_identity() {
     *cursor-agent*) : ;;
     *) fail "FM_HARNESS_RE does not include cursor-agent" ;;
   esac
-  out=$(CURSOR_CONVERSATION_ID=c8822d4c fm_harness_marker_identity)
+  out=$(env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT -u CURSOR_AGENT_SESSION_ID \
+    -u CURSOR_TRACE_ID -u PI_CODING_AGENT -u GROK_AGENT \
+    CURSOR_CONVERSATION_ID=c8822d4c bash -c \
+    ". \"\$0/bin/fm-session-lock-lib.sh\"; fm_harness_marker_identity" "$ROOT")
   [ "$out" = "cursor:c8822d4c" ] || fail "cursor marker identity wrong, got '$out'"
 
   # Ancestry: a cursor-agent process is recognized as a live lock holder.
