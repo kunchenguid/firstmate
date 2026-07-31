@@ -2964,6 +2964,7 @@ if [ "$HARNESS" = kimi ]; then
   fi
 fi
 if [ "$HARNESS" = agy ]; then
+  export FM_COMPOSER_HARNESS=agy
   if ! agy_wait_for_ready; then
     agy_spawn_fail "Agy did not show the verified trust or ready surface before brief delivery"
     exit 1

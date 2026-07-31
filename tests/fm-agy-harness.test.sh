@@ -37,19 +37,68 @@ agy_pending_capture() {
     '? for shortcuts                              Gemini 3.6 Flash · low'
 }
 
+claude_lookalike_capture() {
+  printf '%s\n' \
+    '────────────────────────────────────────────────────────────────' \
+    '> a quoted transcript line Claude rendered from markdown' \
+    '────────────────────────────────────────────────────────────────' \
+    '╭──────────────────────────────────────────────────────────────╮' \
+    '│ >                                                            │' \
+    '╰──────────────────────────────────────────────────────────────╯' \
+    '  ? for shortcuts'
+}
+
 test_separated_composer_is_structural() {
   local state
   # shellcheck source=bin/fm-composer-lib.sh
   . "$ROOT/bin/fm-composer-lib.sh"
-  state=$(fm_composer_separated_state "$(agy_empty_capture)")
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_empty_capture)")
   [ "$state" = empty ] || fail "Agy empty separated composer read as $state"
-  state=$(fm_composer_separated_state "$(agy_pending_capture)")
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_pending_capture)")
   [ "$state" = pending ] || fail "Agy typed separated composer read as $state"
-  state=$(fm_composer_separated_state $'>\n$ ')
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state $'>\n$ ')
   [ -z "$state" ] || fail "bare shell prompt was accepted as Agy structure"
-  state=$(fm_composer_separated_state "$(agy_empty_capture)"$'\n────────────────────\n>\n────────────────────')
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_empty_capture)"$'\n────────────────────\n>\n────────────────────')
   [ -z "$state" ] || fail "a stale Agy footer authorized a later separator pair"
   pass "Agy composer classification requires the complete separated container"
+}
+
+test_separated_composer_is_harness_scoped() {
+  local state
+  # shellcheck source=bin/fm-composer-lib.sh
+  . "$ROOT/bin/fm-composer-lib.sh"
+  state=$(FM_COMPOSER_HARNESS= fm_composer_separated_state "$(agy_empty_capture)")
+  [ -z "$state" ] || fail "unscoped separated check claimed a pane as an Agy composer: $state"
+  state=$(FM_COMPOSER_HARNESS=claude fm_composer_separated_state "$(claude_lookalike_capture)")
+  [ -z "$state" ] || fail "a Claude rule/quote/rule transcript was claimed as an Agy composer: $state"
+  state=$(
+    # shellcheck source=bin/fm-tmux-lib.sh
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    tmux() {
+      case "$*" in
+        *cursor_y*) printf '4\n' ;;
+        *capture-pane*) claude_lookalike_capture ;;
+        *) return 0 ;;
+      esac
+    }
+    FM_COMPOSER_HARNESS=claude fm_tmux_composer_state pane
+  )
+  [ "$state" = empty ] || fail "a Claude pane with a rule/quote/rule tail did not fall through to its own box classifier: $state"
+  state=$(
+    # shellcheck source=bin/backends/cmux.sh
+    . "$ROOT/bin/backends/cmux.sh"
+    fm_backend_cmux_capture() {
+      printf '%s\n' \
+        '────────────────────────────────────────────────────────────────' \
+        '> a quoted transcript line rendered from markdown' \
+        '────────────────────────────────────────────────────────────────' \
+        '' \
+        '? for shortcuts'
+    }
+    FM_COMPOSER_HARNESS=claude fm_backend_cmux_composer_state workspace:surface
+  )
+  [ "$state" = unknown ] || fail "a non-Agy cmux pane with a rule/quote/rule tail was misclassified as $state"
+  pass "the structural Agy composer check never claims another harness's pane"
 }
 
 test_agy_busy_signature_is_harness_scoped() {
@@ -74,21 +123,21 @@ test_plain_backends_share_agy_composer_contract() {
       return 0
     }
     fm_backend_herdr_capture_ansi() { agy_empty_capture; }
-    fm_backend_herdr_composer_state test:pane
+    FM_COMPOSER_HARNESS=agy fm_backend_herdr_composer_state test:pane
   )
   [ "$state" = empty ] || fail "Herdr Agy composer read as $state"
   state=$(
     # shellcheck source=bin/backends/orca.sh
     . "$ROOT/bin/backends/orca.sh"
     fm_backend_orca_read_text_paged() { agy_pending_capture; }
-    fm_backend_orca_composer_state terminal
+    FM_COMPOSER_HARNESS=agy fm_backend_orca_composer_state terminal
   )
   [ "$state" = pending ] || fail "Orca Agy composer read as $state"
   state=$(
     # shellcheck source=bin/backends/cmux.sh
     . "$ROOT/bin/backends/cmux.sh"
     fm_backend_cmux_capture() { agy_empty_capture; }
-    fm_backend_cmux_composer_state workspace:surface
+    FM_COMPOSER_HARNESS=agy fm_backend_cmux_composer_state workspace:surface
   )
   [ "$state" = empty ] || fail "cmux Agy composer read as $state"
   pass "Herdr, Orca, and cmux consume the shared Agy composer interface"
@@ -334,6 +383,7 @@ SH
 }
 
 test_separated_composer_is_structural
+test_separated_composer_is_harness_scoped
 test_agy_busy_signature_is_harness_scoped
 test_plain_backends_share_agy_composer_contract
 test_agy_spawn_delivers_after_trust_and_registers_hook

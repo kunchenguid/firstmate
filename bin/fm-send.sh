@@ -401,6 +401,7 @@ fm_send_resolve_target() {  # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
+export FM_COMPOSER_HARNESS="$TARGET_HARNESS"
 shift
 
 # Supervision lease guard: a steer is overlap territory between the two Pi
