@@ -672,6 +672,25 @@ test_group_symlink_behavior() {
   assert_present "$err" "group/task collision must print an error"
   [ -e "$home/data/existing-task/brief-group-e6" ] && fail "colliding --group must not graft a symlink into another task's directory"
 
+  # --group must not equal the task's own id: that would graft a
+  # self-referential symlink into the task's own authoritative directory.
+  err="$TMP_ROOT/group-self.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-group-e7 alpha --scout --group=brief-group-e7 >/dev/null 2>"$err"
+  status=$?
+  expect_code 1 "$status" "--group equal to the task's own id must be refused"
+  assert_present "$err" "self-referential --group must print an error"
+  [ -e "$home/data/brief-group-e7/brief-group-e7" ] && fail "self-referential --group must not graft a symlink into the task's own directory"
+
+  # A task id that collides with an existing --group-only folder must be
+  # refused in the reverse direction too, not silently merged into it.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-group-e8 alpha --scout --group=widget-initiative >/dev/null 2>&1
+  err="$TMP_ROOT/group-reverse-collision.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" widget-initiative alpha --scout >/dev/null 2>"$err"
+  status=$?
+  expect_code 1 "$status" "a task id colliding with an existing --group folder must be refused"
+  assert_present "$err" "reverse group/task collision must print an error"
+  [ -e "$home/data/widget-initiative/brief.md" ] && fail "reverse collision must not scaffold a brief into the existing --group folder"
+
   pass "fm-brief.sh: --group creates additive, idempotent-per-task symlinks without touching the flat data/<id> path"
 }
 
