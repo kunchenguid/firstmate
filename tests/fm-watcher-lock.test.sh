@@ -438,14 +438,27 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
-  local dir state fakebin out peer identity armpid status i
+  local dir state fakebin out peer ready identity armpid status i
   dir=$(make_case restart-healthy-peer)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
+  ready="$dir/peer.ready"
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  # The peer only resists TERM once its handler is installed, and --restart
+  # signals it as soon as the arm starts. Node's startup is not instant, so the
+  # peer publishes a readiness marker from inside the handler-installed process
+  # and nothing signals it before that lands - otherwise the very first TERM
+  # kills the peer and the arm correctly starts a fresh watcher instead of
+  # attaching, which reads as a failure of a contract that was never exercised.
+  node -e 'process.on("SIGTERM", () => {}); require("fs").writeFileSync(process.argv[1], "ready"); setTimeout(() => {}, 300000)' "$ready" &
   peer=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || fail "the TERM-resistant peer never installed its signal handler"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
