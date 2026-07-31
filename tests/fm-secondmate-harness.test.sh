@@ -854,8 +854,8 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   wt="$w/crew-wt"
   fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
   fm_git_worktree "$proj" "$wt" "wt-crew"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  mkdir -p "$home/projects" "$home/state"
+  fm_write_ship_brief "$home/data/$id/brief.md" "ordinary crew ship brief"
   : > "$launchlog"
   PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \

@@ -666,6 +666,53 @@ function evalPayload(position) {
   return payloads.map((payload) => payload.value).join(" ");
 }
 
+/** Walks literal shell execution positions, including nested shells, substitutions, groups, eval, and stdin payloads. */
+export function walkShellCommandTree(command, maxDepth = 12) {
+  const commands = [];
+  const errors = [];
+  const opaquePayloads = [];
+
+  function walk(source, depth) {
+    if (depth > maxDepth) {
+      errors.push({ source, reason: "recursion limit" });
+      return;
+    }
+    const lexed = new Lexer(source).tokenize();
+    if (lexed.error) {
+      errors.push({ source, reason: lexed.error });
+      return;
+    }
+    const program = splitProgram(lexed.tokens);
+    for (const tokens of program.nodes) {
+      const position = commandPosition(tokens);
+      commands.push({ source, tokens, position });
+
+      for (const payload of position.wrapperPayloads) walk(payload, depth + 1);
+      for (const token of tokens) {
+        if (token.type === "group") walk(token.content, depth + 1);
+        if (token.type !== "word") continue;
+        for (const substitution of token.subs) walk(substitution.content, depth + 1);
+      }
+
+      const shell = shellInvocation(position);
+      if (shell?.kind === "command" && shell.payload) {
+        if (shell.payload.literal && shell.payload.subs.length === 0) {
+          walk(shell.payload.value, depth + 1);
+        } else {
+          opaquePayloads.push({ source, value: shell.payload.value });
+        }
+      }
+      const literalEvalPayload = evalPayload(position);
+      if (literalEvalPayload !== null) walk(literalEvalPayload, depth + 1);
+      for (const payload of shellHeredocPayloads(tokens, position)) walk(payload, depth + 1);
+      for (const payload of shellHereStringPayloads(tokens, position)) walk(payload, depth + 1);
+    }
+  }
+
+  walk(command, 0);
+  return { commands, errors, opaquePayloads };
+}
+
 function wordReferencesAny(word, names) {
   if (!word || names.size === 0) return false;
   for (const match of word.value.matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g)) {

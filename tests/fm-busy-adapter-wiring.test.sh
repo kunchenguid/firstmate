@@ -50,8 +50,7 @@ make_spawn_case() {  # <name> <harness> <id>
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
-  mkdir -p "$home/data/$id"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  fm_write_ship_brief "$home/data/$id/brief.md" "brief for $id"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -314,7 +313,9 @@ test_codex_unverified_until_a_semantic_source_exists() {
   expect_code 0 $? "codex spawn should succeed: $out"
   state="$HOME_DIR/state"
   assert_absent "$state/$id.busy-gen" "codex must not arm a busy contract with no verified semantic source"
-  assert_absent "$WT_DIR/.codex/hooks.json" "codex must not install unverified busy hooks"
+  assert_present "$WT_DIR/.codex/hooks.json" "codex ship spawn did not install its external-tool policy hook"
+  jq -e '.hooks.PreToolUse and (.hooks | has("UserPromptSubmit") | not)' "$WT_DIR/.codex/hooks.json" >/dev/null \
+    || fail "codex external-tool hook must not masquerade as unverified semantic busy wiring"
   assert_contains "$out" 'spawned '"$id"' harness=codex' "codex spawn did not complete normally"
   out=$(classify codex "$id" "$state")
   [ "$out" = "unknown codex-unverified" ] || fail "codex must classify 'unknown codex-unverified', got '$out'"

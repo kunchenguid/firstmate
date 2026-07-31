@@ -69,6 +69,13 @@ The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, a
 `opencode`, `pi`, and `pi-signed` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any watcher-arm PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
+
+## Ship external-tool policy
+
+Every ship launch and every generated promotable scout must connect the machine-readable policy in its brief before the first worker turn.
+Claude, Codex, OpenCode, Pi, pi-signed, and Grok have verified thin before-tool adapters; Kimi ship launches and every unverified or raw ship harness launch refuse instead of running without interception.
+`docs/external-tool-policy.md` owns the policy format, classifier boundary, adapter mechanics, runtime-backend applicability, and validation pointer.
+
 ## Primary delegation-shape guard
 
 Claude exposes built-in delegation, scheduling, and worktree tools that a primary session can use to create work with no `state/<id>.meta`, which makes the whole guard stack inert because every guard counts that metadata.

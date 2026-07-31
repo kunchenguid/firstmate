@@ -100,6 +100,21 @@ SH
   done
 }
 
+# fm_write_ship_brief <path> [task-text]: write the minimum valid ship brief
+# fixture, including the production machine-readable external-tool policy.
+fm_write_ship_brief() {
+  local path=$1 task_text=${2:-test ship brief}
+  mkdir -p "$(dirname "$path")"
+  cat > "$path" <<EOF
+$task_text
+
+# External tool policy
+\`\`\`firstmate-external-tools
+{"schema":"firstmate.external-tools.v1","shell":{"allow":["gh-axi","chrome-devtools-axi"]},"native":{"allow":["agent_browser"]}}
+\`\`\`
+EOF
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

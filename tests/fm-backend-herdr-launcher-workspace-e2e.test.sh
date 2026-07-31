@@ -121,8 +121,10 @@ journal_field() {  # <presentation-journal> <key>
 # Herdr at all".
 SPAWN_OUT=; SPAWN_ERR=; SPAWN_RC=
 spawn_from_launcher() {
-  local pane=$1 home=$2 id=$3 proj=$4
+  local pane=$1 home=$2 id=$3 proj=$4 arg secondmate=0
   shift 4
+  for arg in "$@"; do [ "$arg" != --secondmate ] || secondmate=1; done
+  if [ "$secondmate" -eq 0 ]; then set -- "$@" --scout; fi
   SPAWN_OUT="$TMP_ROOT/$id.out"; SPAWN_ERR="$TMP_ROOT/$id.err"
   if [ -n "$pane" ]; then
     env HERDR_ENV=1 HERDR_PANE_ID="$pane" HERDR_SESSION="$HERDR_LAB_SESSION" \
@@ -273,7 +275,7 @@ cat > "$TMP_ROOT/spawn-in-pane.sh" <<SPAWN
 #!/usr/bin/env bash
 set -u
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
-  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "sh -c 'echo launcher-ws-ok'" --backend herdr \\
+  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "sh -c 'echo launcher-ws-ok'" --scout --backend herdr \\
   > "$TMP_ROOT/dupC.out" 2> "$TMP_ROOT/dupC.err"
 echo \$? > "$TMP_ROOT/dupC.rc"
 SPAWN

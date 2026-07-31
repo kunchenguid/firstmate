@@ -4,7 +4,9 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
-#   positional harness arg still works for back-compat.
+#   positional harness arg still works for back-compat. A raw launch command remains
+#   available for adapter-verification scouts and secondmates, but ship spawns
+#   refuse it because no verified before-tool policy adapter is attached.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -71,7 +73,9 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. pi-signed launches that exact executable name from PATH and
+#   new adapters with scouts or secondmates. Ships refuse raw commands before
+#   endpoint creation because their tool policy cannot be intercepted reliably.
+#   pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
@@ -102,10 +106,16 @@
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
+#   Every generated ship and promotable scout brief carries one
+#   firstmate.external-tools.v1 policy block. Before endpoint launch, spawn
+#   validates that block from the brief itself and installs a verified
+#   PreToolUse adapter for the selected harness. A ship on a
+#   harness without reliable interception is refused instead of running unguarded.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#     __HOOKTRUSTFLAG__ Codex hook-trust bypass only after a task policy adapter is installed
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
@@ -465,7 +475,9 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        # Spawn fills __HOOKTRUSTFLAG__ only after it installs the otherwise-empty
+        # task worktree .codex/hooks.json for a declared external-tool policy.
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____HOOKTRUSTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -538,6 +550,24 @@ esac
 # retain the literal name in the launch command and task metadata.
 if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
+  exit 1
+fi
+
+external_tool_policy_harness_supported() {
+  case "$1" in
+    claude|codex|opencode|pi|pi-signed|grok) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# A ship must have a verified before-tool interception path before spawn performs
+# any harness-specific installation or creates a runtime endpoint.
+if [ "$KIND" = ship ] && ! external_tool_policy_harness_supported "$HARNESS"; then
+  if [ "$HARNESS" = kimi ]; then
+    echo "error: refusing ship spawn on harness 'kimi': no reliable pre-tool interception is verified; select claude, codex, opencode, pi, pi-signed, or grok" >&2
+  else
+    echo "error: refusing ship spawn on harness '${HARNESS:-unknown}': no verified external-tool policy adapter can intercept commands before execution" >&2
+  fi
   exit 1
 fi
 
@@ -849,6 +879,26 @@ fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
+
+TOOL_POLICY_ENABLED=0
+TOOL_POLICY_DECLARED=0
+TOOL_POLICY_CHECK="$FM_ROOT/bin/fm-external-tool-pretool-check.sh"
+grep -Fq '```firstmate-external-tools' "$BRIEF_REAL" && TOOL_POLICY_DECLARED=1
+if [ "$KIND" = ship ] || [ "$TOOL_POLICY_DECLARED" -eq 1 ]; then
+  external_tool_policy_harness_supported "$HARNESS" || {
+    echo "error: refusing $KIND spawn on harness '${HARNESS:-unknown}': the brief declares an external-tool policy but this harness cannot intercept tools before execution" >&2
+    exit 1
+  }
+  [ -x "$TOOL_POLICY_CHECK" ] || {
+    echo "error: refusing $KIND spawn because the external-tool policy checker is unavailable at $TOOL_POLICY_CHECK" >&2
+    exit 1
+  }
+  "$TOOL_POLICY_CHECK" --brief "$BRIEF_REAL" --validate || {
+    echo "error: refusing $KIND spawn because $BRIEF_REAL has no valid machine-readable external-tool policy" >&2
+    exit 1
+  }
+  TOOL_POLICY_ENABLED=1
+fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -1366,6 +1416,40 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+TOOL_POLICY_OWNER="$WT/.fm-external-tool-policy-owner"
+if [ "$TOOL_POLICY_ENABLED" -eq 1 ]; then
+  expected_tool_policy_owner=$(printf 'schema=firstmate.external-tools.v1\nharness=%s' "$HARNESS")
+  if [ -e "$TOOL_POLICY_OWNER" ]; then
+    actual_tool_policy_owner=$(cat "$TOOL_POLICY_OWNER" 2>/dev/null || true)
+    if [ "$actual_tool_policy_owner" != "$expected_tool_policy_owner" ]; then
+      echo "error: refusing ship spawn because $TOOL_POLICY_OWNER belongs to another harness or policy schema" >&2
+      exit 1
+    fi
+  else
+    case "$HARNESS" in
+      claude)
+        [ ! -e "$WT/.claude/settings.local.json" ] || {
+          echo "error: refusing Claude ship spawn because $WT/.claude/settings.local.json already exists and cannot be replaced safely" >&2
+          exit 1
+        }
+        ;;
+      codex)
+        [ ! -e "$WT/.codex/hooks.json" ] || {
+          echo "error: refusing Codex ship spawn because $WT/.codex/hooks.json already exists and cannot be replaced safely" >&2
+          exit 1
+        }
+        ;;
+      opencode)
+        [ ! -e "$WT/.opencode/plugins/fm-external-tool-policy.js" ] || {
+          echo "error: refusing OpenCode ship spawn because its external-tool policy plugin path already exists" >&2
+          exit 1
+        }
+        ;;
+    esac
+    printf '%s\n' "$expected_tool_policy_owner" > "$TOOL_POLICY_OWNER"
+  fi
+  exclude_path '.fm-external-tool-policy-owner'
+fi
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
@@ -1419,8 +1503,13 @@ if [ "$KIND" != secondmate ]; then
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+      tool_policy_hook=
+      if [ "$TOOL_POLICY_ENABLED" -eq 1 ]; then
+        j_tool_policy=$(json_escape "$(shell_quote "$TOOL_POLICY_CHECK") --brief $(shell_quote "$BRIEF_REAL") --format claude")
+        tool_policy_hook=",\"PreToolUse\":[{\"matcher\":\".*\",\"hooks\":[{\"type\":\"command\",\"command\":\"$j_tool_policy\",\"timeout\":10}]}]"
+      fi
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]$tool_policy_hook}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
@@ -1476,6 +1565,30 @@ export const FmBusyState = async () => {
 };
 EOF
       exclude_path '.opencode/plugins/fm-busy-state.js'
+      if [ "$TOOL_POLICY_ENABLED" -eq 1 ]; then
+        cat > "$WT/.opencode/plugins/fm-external-tool-policy.js" <<EOF
+// Firstmate ship external-tool policy adapter; the brief remains the only
+// authorization source. OpenCode blocks a tool call when this hook throws.
+import { spawn } from "node:child_process";
+const runPolicy = (args) => new Promise((resolve) => {
+  const child = spawn("$TOOL_POLICY_CHECK", args, { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  child.on("error", (error) => resolve({ code: 126, stderr: error.message }));
+  child.on("close", (code) => resolve({ code: code ?? 126, stderr }));
+});
+export const FmExternalToolPolicy = async () => ({
+  "tool.execute.before": async (input, output) => {
+    const tool = String(input && input.tool || "");
+    const inputJson = JSON.stringify(output && output.args || {});
+    const result = await runPolicy(["--brief", "$BRIEF_REAL", "--tool", tool, "--input-json", inputJson]);
+    if (result.code === 0) return;
+    throw new Error(result.stderr.trim() || "external-tool policy refused the ship tool call");
+  },
+});
+EOF
+        exclude_path '.opencode/plugins/fm-external-tool-policy.js'
+      fi
       ;;
     pi|pi-signed)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
@@ -1500,7 +1613,23 @@ const busyEvent = (state: string, event: string) =>
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
     ], () => resolve());
   });
+const externalToolPolicyEnabled = "$TOOL_POLICY_ENABLED" === "1";
+const externalToolPolicy = (tool: string, input: unknown) =>
+  new Promise<{ code: number; reason: string }>((resolve) => {
+    execFile("$TOOL_POLICY_CHECK", [
+      "--brief", "$BRIEF_REAL", "--tool", tool,
+      "--input-json", JSON.stringify(input ?? {}),
+    ], { encoding: "utf8" }, (error, _stdout, stderr) => {
+      resolve({ code: error ? (Number(error.code) || 126) : 0, reason: String(stderr || "").trim() });
+    });
+  });
 export default function (pi: any) {
+  pi.on("tool_call", async (event: any) => {
+    if (!externalToolPolicyEnabled || !event || event.type !== "tool_call") return {};
+    const result = await externalToolPolicy(String(event.toolName || ""), event.input);
+    if (result.code === 0) return {};
+    return { block: true, reason: result.reason || "external-tool policy refused the ship tool call" };
+  });
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
@@ -1519,6 +1648,14 @@ EOF
       # an explicit reason rather than falling back to idle, and no busy
       # wiring is installed. The turn-end NOTIFICATION marker still rides
       # the launch command via -c notify=[...] and __TURNEND__.
+      if [ "$TOOL_POLICY_ENABLED" -eq 1 ]; then
+        mkdir -p "$WT/.codex"
+        j_tool_policy=$(json_escape "$(shell_quote "$TOOL_POLICY_CHECK") --brief $(shell_quote "$BRIEF_REAL") --format plain")
+        cat > "$WT/.codex/hooks.json" <<EOF
+{"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"$j_tool_policy","timeout":10}]}]}}
+EOF
+        exclude_path '.codex/hooks.json'
+      fi
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
@@ -1568,6 +1705,64 @@ EOF
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
+      if [ "$TOOL_POLICY_ENABLED" -eq 1 ]; then
+        GROK_TOOL_POLICY_AUTH_DIR="$GROK_HOOKS_DIR/fm-external-tool-policy.d"
+        mkdir -p "$GROK_TOOL_POLICY_AUTH_DIR"
+        chmod 700 "$GROK_TOOL_POLICY_AUTH_DIR"
+        previous_tool_policy_token=$(cat "$STATE/$ID.grok-tool-policy-token" 2>/dev/null || true)
+        case "$previous_tool_policy_token" in
+          fm.????????????)
+            case "$previous_tool_policy_token" in
+              *[!A-Za-z0-9._-]*) ;;
+              *) rm -f "$GROK_TOOL_POLICY_AUTH_DIR/$previous_tool_policy_token" ;;
+            esac
+            ;;
+        esac
+        old_umask=$(umask)
+        umask 077
+        tool_policy_auth_file=$(mktemp "$GROK_TOOL_POLICY_AUTH_DIR/fm.XXXXXXXXXXXX")
+        umask "$old_umask"
+        {
+          printf '%s\n' "$TOOL_POLICY_CHECK"
+          printf '%s\n' "$BRIEF_REAL"
+          printf '%s\n' "$WT"
+        } > "$tool_policy_auth_file"
+        tool_policy_token=${tool_policy_auth_file##*/}
+        printf '%s\n' "$tool_policy_token" > "$STATE/$ID.grok-tool-policy-token"
+        sq_grok_tool_policy_auth_dir=$(shell_quote "$GROK_TOOL_POLICY_AUTH_DIR")
+        cat > "$GROK_HOOKS_DIR/fm-external-tool-policy.sh" <<EOF
+#!/usr/bin/env bash
+# Firstmate Grok ship external-tool policy adapter. Managed by fm-spawn.sh.
+set -u
+deny() {
+  detail="[external-tool-policy-error] \$1"
+  escaped=\$(printf '%s' "\$detail" | sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g' | tr '\\n' ' ')
+  printf '%s\n' "\$detail" >&2
+  printf '{"decision":"deny","reason":"%s"}\\n' "\$escaped"
+  exit 2
+}
+payload=\$(cat 2>/dev/null || true)
+[ -n "\$payload" ] || deny 'PreToolUse payload is empty; refusing the ship tool call'
+token=\${FM_EXTERNAL_TOOL_POLICY_TOKEN:-}
+[ -n "\$token" ] || exit 0
+case "\$token" in fm.????????????) : ;; *) deny 'ship policy token is malformed' ;; esac
+case "\$token" in *[!A-Za-z0-9._-]*) deny 'ship policy token contains unsafe bytes' ;; esac
+auth_dir=$sq_grok_tool_policy_auth_dir
+record="\$auth_dir/\$token"
+[ -f "\$record" ] || deny 'ship policy token is not registered'
+checker=\$(sed -n '1p' "\$record")
+brief=\$(sed -n '2p' "\$record")
+expected_workspace=\$(sed -n '3p' "\$record")
+case "\$checker:\$brief:\$expected_workspace" in /*:/*:/*) : ;; *) deny 'ship policy registration is malformed' ;; esac
+workspace=\${GROK_WORKSPACE_ROOT:-}
+[ "\$workspace" = "\$expected_workspace" ] || deny 'ship policy workspace does not match the registered task'
+printf '%s' "\$payload" | "\$checker" --brief "\$brief" --format grok
+EOF
+        chmod 700 "$GROK_HOOKS_DIR/fm-external-tool-policy.sh"
+        tool_policy_hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-external-tool-policy.sh")")
+        printf '{"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"%s","timeout":10}]}]}}\n' "$tool_policy_hook_command" > "$GROK_HOOKS_DIR/fm-external-tool-policy.json"
+        LAUNCH="FM_EXTERNAL_TOOL_POLICY_TOKEN=$(shell_quote "$tool_policy_token") $LAUNCH"
+      fi
       ;;
     kimi*)
       # Kimi's Stop hook is global, but it is inert unless cwd contains this
@@ -1617,6 +1812,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ "$TOOL_POLICY_ENABLED" -eq 0 ] || echo "external_tool_policy=enforced"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -1656,8 +1852,13 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+HOOKTRUSTFLAG=
+if [ "$HARNESS" = codex ] && [ "$TOOL_POLICY_ENABLED" -eq 1 ]; then
+  HOOKTRUSTFLAG='--dangerously-bypass-hook-trust '
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__HOOKTRUSTFLAG__/$HOOKTRUSTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}

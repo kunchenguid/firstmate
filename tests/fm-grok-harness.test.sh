@@ -39,8 +39,8 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   grok_home="$case_dir/grok"
   id="grok-$name-x1"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$grok_home"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  mkdir -p "$home/projects" "$home/state" "$home/config" "$grok_home"
+  fm_write_ship_brief "$home/data/$id/brief.md" "Grok harness test brief."
   fm_git_worktree "$proj" "$wt" "fm/$id"
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$grok_home|$id"
@@ -96,7 +96,7 @@ EOF
 }
 
 test_grok_teardown_removes_pointer_and_token() {
-  local rec case_dir home proj wt fakebin grok_home id out status token
+  local rec case_dir home proj wt fakebin grok_home id out status token tool_token
   rec=$(make_spawn_case teardown)
   IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
 $rec
@@ -105,6 +105,7 @@ EOF
   status=$?
   expect_code 0 "$status" "grok spawn should succeed before teardown"
   token=$(sed -n 's/^token=//p' "$wt/.fm-grok-turnend")
+  tool_token=$(cat "$home/state/$id.grok-tool-policy-token")
 
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
@@ -114,7 +115,9 @@ EOF
   assert_absent "$wt/.fm-grok-turnend" "grok pointer survived teardown"
   assert_absent "$grok_home/hooks/fm-turn-end.d/$token" "grok auth token survived teardown"
   assert_absent "$home/state/$id.grok-turnend-token" "grok state token survived teardown"
-  pass "grok teardown removes pointer and token state"
+  assert_absent "$grok_home/hooks/fm-external-tool-policy.d/$tool_token" "grok tool-policy auth token survived teardown"
+  assert_absent "$home/state/$id.grok-tool-policy-token" "grok tool-policy state token survived teardown"
+  pass "grok teardown removes turn-end and external-tool policy token state"
 }
 
 test_fm_lock_recognizes_grok_holder() {

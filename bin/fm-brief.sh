@@ -33,6 +33,10 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
+# Every ship and promotable scout brief includes one machine-readable
+# firstmate.external-tools.v1 policy block. bin/fm-spawn.sh reads that block
+# directly and refuses to launch declared policy work unless the selected
+# harness can enforce it before every tool call.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
@@ -247,12 +251,26 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+IFS= read -r -d '' EXTERNAL_TOOL_POLICY_SECTION <<'EOF' || true
+# External tool policy
+The JSON below is the only authorization source for controlled external tools.
+Spawn validates and connects this policy before your first turn.
+Project development commands such as tests, lint, builds, and local servers remain available.
+
+```firstmate-external-tools
+{"schema":"firstmate.external-tools.v1","shell":{"allow":["gh-axi","chrome-devtools-axi"]},"native":{"allow":["agent_browser"]}}
+```
+EOF
+EXTERNAL_TOOL_POLICY_SECTION=${EXTERNAL_TOOL_POLICY_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
 {TASK}
+
+$EXTERNAL_TOOL_POLICY_SECTION
 
 $HERDR_SECTION
 
@@ -265,7 +283,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use \`gh-axi\` for GitHub operations and \`chrome-devtools-axi\` for browser operations.
+   Use the native \`agent_browser\` tool only as a fallback when \`chrome-devtools-axi\` cannot complete the required evidence.
+   Never drive browser automation through a shell command unless the policy block explicitly authorizes that shell tool.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -362,6 +382,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
+$EXTERNAL_TOOL_POLICY_SECTION
+
 $HERDR_SECTION
 
 # Setup
@@ -376,7 +398,9 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use \`gh-axi\` for GitHub operations and \`chrome-devtools-axi\` for browser operations.
+   Use the native \`agent_browser\` tool only as a fallback when \`chrome-devtools-axi\` cannot complete the required evidence.
+   Never drive browser automation through a shell command unless the policy block explicitly authorizes that shell tool.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

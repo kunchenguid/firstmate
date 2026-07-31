@@ -70,6 +70,10 @@
       "target": "docs/verification/supervision.md"
     },
     {
+      "source": "docs/external-tool-policy.md",
+      "target": "docs/verification/external-tool-policy.md"
+    },
+    {
       "source": "docs/watcher-continuity.md",
       "target": "docs/verification/supervision.md"
     },
@@ -232,6 +236,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/external-tool-policy.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
     },
@@ -305,6 +313,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/external-tool-policy.md",
       "audience": "maintainer-verification"
     },
     {
