@@ -2,7 +2,7 @@
 //
 // The extension owns only Lavish poll subprocesses. Fleet watcher continuity and
 // turn-end enforcement remain with their existing extensions.
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -74,6 +74,8 @@ type RelayResult = {
   active?: number;
 };
 
+type LockOwnership = "owned" | "missing" | "other";
+
 type NormalizedArtifact = {
   artifact: string;
   inputPath: string;
@@ -112,7 +114,44 @@ class BoundedBytes {
 let nextGenerationId = 0;
 let activeGeneration: RelayGeneration | null = null;
 
+function parentPid(pid: string): string {
+  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
+}
+
+function pidAlive(pid: string): boolean {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function lockOwnership(): LockOwnership {
+  let lockPid = "";
+  try {
+    lockPid = readFileSync(resolve(state, ".lock"), "utf8").trim();
+  } catch {
+    return "missing";
+  }
+  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  let pid = String(process.pid);
+  for (let i = 0; i < 8; i += 1) {
+    if (pid === lockPid) return "owned";
+    pid = parentPid(pid);
+    if (!pid || pid === "1") break;
+  }
+  return pidAlive(lockPid) ? "other" : "missing";
+}
+
+function ownsOrCanInitializeHome(): boolean {
+  return lockOwnership() !== "other";
+}
+
 function markLoaded(): void {
+  if (!ownsOrCanInitializeHome()) return;
   mkdirSync(state, { recursive: true, mode: 0o700 });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`, { mode: 0o600 });
 }
@@ -336,7 +375,7 @@ function cleanupPoll(poll: RelayPoll, removeRecords: boolean): void {
 }
 
 function relayIsCurrent(poll: RelayPoll): boolean {
-  return activeGeneration === poll.generation && poll.generation.active && !poll.suppressDelivery;
+  return activeGeneration === poll.generation && poll.generation.active && !poll.suppressDelivery && ownsOrCanInitializeHome();
 }
 
 function deliveryMessage(
@@ -453,6 +492,9 @@ function startPoll(
 ): RelayResult {
   if (!generation.active || activeGeneration !== generation) {
     return { ok: false, action: "start", message: "Lavish relay unavailable: this Pi session generation is no longer active." };
+  }
+  if (!ownsOrCanInitializeHome()) {
+    return { ok: false, action: "start", message: "Lavish relay unavailable: another live Firstmate session owns this home." };
   }
   if (generation.polls.has(artifact)) {
     return {

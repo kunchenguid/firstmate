@@ -380,3 +380,141 @@ status=$?
 expect_code 0 "$status" "Pi Lavish relay must surface a missing executable once and clean failed-start resources"
 [ -z "$out" ] || fail "Pi Lavish relay failed-start test printed output: $out"
 pass "Pi Lavish relay reports fatal command failure exactly once without residue"
+
+NOOWNER_HOME="$TMP_ROOT/non-owner-home"
+NOOWNER_CONTROL="$TMP_ROOT/non-owner-control"
+mkdir -p "$NOOWNER_HOME/state" "$NOOWNER_CONTROL"
+out=$(cd "$PROJECT" && \
+  PLUGIN="$PROJECT/.pi/extensions/fm-lavish-poll.ts" \
+  FM_HOME="$NOOWNER_HOME" \
+  FM_LAVISH_AXI_BIN="$FAKE" \
+  FM_FAKE_LAVISH_CONTROL="$NOOWNER_CONTROL" \
+  node --input-type=module 2>&1 <<'JS'
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const lockHolder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+const lockPid = String(lockHolder.pid ?? "");
+if (!lockPid) throw new Error("failed to create live lock holder");
+try {
+  const handlers = new Map();
+  let tool;
+  const statuses = [];
+  const pi = {
+    on(name, handler) { handlers.set(name, handler); },
+    registerTool(candidate) { tool = candidate; },
+    sendMessage() { throw new Error("non-owner session delivered a message"); },
+  };
+  const ctx = {
+    cwd: process.cwd(),
+    ui: { setStatus(key, value) { statuses.push({ key, value }); } },
+    sessionManager: { getSessionId() { return "non-owner-generation"; } },
+  };
+  const marker = resolve(process.env.FM_HOME, "state/.pi-lavish-extension-loaded");
+  writeFileSync(resolve(process.env.FM_HOME, "state/.lock"), `${lockPid}\n`);
+  writeFileSync(marker, "owner-version\n4242\n");
+  const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?non-owner=${Date.now()}`);
+  mod.default(pi);
+  await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+  if (readFileSync(marker, "utf8") !== "owner-version\n4242\n") throw new Error("non-owner session overwrote the loaded marker");
+  const result = await tool.execute("non-owner-start", { action: "start", artifact: "one.html" }, undefined, undefined, ctx);
+  if (result.details?.ok !== false || !result.content[0]?.text.includes("another live Firstmate session owns this home")) {
+    throw new Error(`non-owner start was not refused: ${JSON.stringify(result)}`);
+  }
+  if (existsSync(resolve(process.env.FM_FAKE_LAVISH_CONTROL, "counter"))) throw new Error("non-owner start launched a poll child");
+  if (statuses.some((entry) => typeof entry.value === "string" && entry.value.includes("waiting"))) {
+    throw new Error(`non-owner session showed waiting status: ${JSON.stringify(statuses)}`);
+  }
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, ctx);
+} finally {
+  lockHolder.kill("SIGTERM");
+}
+JS
+)
+status=$?
+expect_code 0 "$status" "Pi Lavish relay must reject a non-owner loaded session"
+[ -z "$out" ] || fail "Pi Lavish relay non-owner test printed output: $out"
+pass "Pi Lavish relay preserves lock-owned markers and refuses non-owner starts"
+
+LOSS_HOME="$TMP_ROOT/ownership-loss-home"
+LOSS_CONTROL="$TMP_ROOT/ownership-loss-control"
+mkdir -p "$LOSS_HOME/state" "$LOSS_CONTROL"
+cat >"$LOSS_CONTROL/stdout.1" <<'EOF'
+session:
+  status: feedback
+prompts[1]{tag,text}:
+  review,"MUST_NOT_DELIVER_AFTER_OWNERSHIP_LOSS"
+next_step: continue review
+EOF
+out=$(cd "$PROJECT" && \
+  PLUGIN="$PROJECT/.pi/extensions/fm-lavish-poll.ts" \
+  FM_HOME="$LOSS_HOME" \
+  FM_LAVISH_AXI_BIN="$FAKE" \
+  FM_FAKE_LAVISH_CONTROL="$LOSS_CONTROL" \
+  node --input-type=module 2>&1 <<'JS'
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const messages = [];
+let tool;
+const statuses = [];
+const pi = {
+  on(name, handler) { handlers.set(name, handler); },
+  registerTool(candidate) { tool = candidate; },
+  sendMessage(message, options) { messages.push({ message, options }); },
+};
+const ctx = {
+  cwd: process.cwd(),
+  ui: { setStatus(key, value) { statuses.push({ key, value }); } },
+  sessionManager: { getSessionId() { return "ownership-loss-generation"; } },
+};
+async function waitFor(predicate, label, attempts = 500) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+function control(name) { return resolve(process.env.FM_FAKE_LAVISH_CONTROL, name); }
+const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?ownership-loss=${Date.now()}`);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+const marker = resolve(process.env.FM_HOME, "state/.pi-lavish-extension-loaded");
+if (!existsSync(marker)) throw new Error("missing-lock first session did not publish the loaded marker");
+const started = await tool.execute("loss-start", { action: "start", artifact: "one.html" }, undefined, undefined, ctx);
+if (!started.details?.ok) throw new Error(`missing-lock start was not preserved: ${JSON.stringify(started)}`);
+await waitFor(() => existsSync(control("pid.1")), "ownership-loss fake poll");
+const lockHolder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+const lockPid = String(lockHolder.pid ?? "");
+if (!lockPid) throw new Error("failed to create replacement lock holder");
+try {
+  writeFileSync(resolve(process.env.FM_HOME, "state/.lock"), `${lockPid}\n`);
+  writeFileSync(control("release.1"), "release\n");
+  await waitFor(() => existsSync(control("counter")) && readFileSync(control("counter"), "utf8").trim() === "1", "released poll");
+  if (messages.length !== 0) throw new Error(`ownership-lost poll delivered ${messages.length} message(s)`);
+  let status;
+  for (let i = 0; i < 500; i += 1) {
+    status = await tool.execute("loss-status", { action: "status", artifact: "one.html" }, undefined, undefined, ctx);
+    if (status.content[0]?.text.includes("no active poll")) break;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  if (!status.content[0]?.text.includes("no active poll")) throw new Error(`ownership-lost poll stayed active: ${status.content[0]?.text}`);
+  const second = await tool.execute("loss-second-start", { action: "start", artifact: "one.html" }, undefined, undefined, ctx);
+  if (second.details?.ok !== false || !second.content[0]?.text.includes("another live Firstmate session owns this home")) {
+    throw new Error(`ownership-lost generation accepted a new start: ${JSON.stringify(second)}`);
+  }
+} finally {
+  lockHolder.kill("SIGTERM");
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, ctx);
+}
+JS
+)
+status=$?
+expect_code 0 "$status" "Pi Lavish relay must suppress delivery after ownership loss"
+[ -z "$out" ] || fail "Pi Lavish relay ownership-loss test printed output: $out"
+pass "Pi Lavish relay suppresses delivery and starts after ownership loss"
