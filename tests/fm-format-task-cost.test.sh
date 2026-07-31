@@ -36,19 +36,19 @@ test_model_effort_matrix() {
     got=$(FM_HOME="$home" "$FORMAT_COST" t)
     [ "$got" = "$expected" ] || fail "model=$MODEL_UNDER_TEST effort=$EFFORT_UNDER_TEST: expected $expected, got $got"
   }
-  MODEL_UNDER_TEST=opus EFFORT_UNDER_TEST=xhigh expect_cost "\$50"
+  MODEL_UNDER_TEST=opus EFFORT_UNDER_TEST=xhigh expect_cost "~\$50"
 
   fm_write_meta "$meta" "model=opus" "effort=low"
-  MODEL_UNDER_TEST=opus EFFORT_UNDER_TEST=low expect_cost "\$20"
+  MODEL_UNDER_TEST=opus EFFORT_UNDER_TEST=low expect_cost "~\$20"
 
   fm_write_meta "$meta" "model=sonnet" "effort=medium"
-  MODEL_UNDER_TEST=sonnet EFFORT_UNDER_TEST=medium expect_cost "\$10"
+  MODEL_UNDER_TEST=sonnet EFFORT_UNDER_TEST=medium expect_cost "~\$10"
 
   fm_write_meta "$meta" "model=sonnet" "effort=high"
-  MODEL_UNDER_TEST=sonnet EFFORT_UNDER_TEST=high expect_cost "\$15"
+  MODEL_UNDER_TEST=sonnet EFFORT_UNDER_TEST=high expect_cost "~\$15"
 
   fm_write_meta "$meta" "model=haiku" "effort=low"
-  MODEL_UNDER_TEST=haiku EFFORT_UNDER_TEST=low expect_cost "\$2"
+  MODEL_UNDER_TEST=haiku EFFORT_UNDER_TEST=low expect_cost "~\$2"
 
   pass "cost matrix matches model base rate times effort multiplier"
 }
@@ -60,7 +60,7 @@ test_unknown_model_and_effort_fall_back_to_sonnet_medium() {
   fm_write_meta "$meta" "model=default" "effort=low"
 
   got=$(FM_HOME="$home" "$FORMAT_COST" t)
-  [ "$got" = "\$8" ] || fail "unrecognized model should fall back to the sonnet base rate; got $got"
+  [ "$got" = "~\$8" ] || fail "unrecognized model should fall back to the sonnet base rate; got $got"
 
   pass "an unrecognized model/effort value falls back to the sonnet/medium base rate and multiplier"
 }
@@ -92,7 +92,7 @@ test_resolves_state_via_fm_home_regardless_of_cwd() {
   fm_write_meta "$meta" "model=opus" "effort=low"
 
   got=$(cd /tmp && FM_HOME="$home" "$FORMAT_COST" cwd-task)
-  [ "$got" = "\$20" ] || fail "invoking from an unrelated cwd (/tmp) must still resolve state/ via \$FM_HOME; got $got"
+  [ "$got" = "~\$20" ] || fail "invoking from an unrelated cwd (/tmp) must still resolve state/ via \$FM_HOME; got $got"
 
   pass "state/<id>.meta resolves via \$FM_HOME, not the caller's cwd"
 }
@@ -106,7 +106,7 @@ test_fm_state_override_takes_precedence() {
   fm_write_meta "$meta" "model=haiku" "effort=xhigh"
 
   got=$(FM_HOME="$home" FM_STATE_OVERRIDE="$override_dir" "$FORMAT_COST" override-task)
-  [ "$got" = "\$4" ] || fail "FM_STATE_OVERRIDE must take precedence over \$FM_HOME/state; got $got"
+  [ "$got" = "~\$4" ] || fail "FM_STATE_OVERRIDE must take precedence over \$FM_HOME/state; got $got"
 
   pass "FM_STATE_OVERRIDE takes precedence over \$FM_HOME/state"
 }

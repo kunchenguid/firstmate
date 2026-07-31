@@ -35,7 +35,12 @@ case "$EFFORT" in
   *)      MULT=1.0 ;;
 esac
 
-COST=$(echo "$BASE * $MULT" | bc 2>/dev/null | xargs printf "%.0f" || echo "$BASE")
+RAW_COST=$(echo "$BASE * $MULT" | bc 2>/dev/null)
+if [ -n "$RAW_COST" ]; then
+  COST=$(printf "%.0f" "$RAW_COST")
+else
+  COST="$BASE"
+fi
 
-# Output format: "$15" (cost per agent)
-printf "\$%s" "$COST"
+# Output format: "~$15" (flat-rate estimate per agent, not measured spend)
+printf "~\$%s" "$COST"

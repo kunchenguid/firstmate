@@ -1188,7 +1188,7 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending \$20" \
+  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending ~\$20" \
     "tasks-axi compact listing did not append the recorded task's per-agent cost"
   assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"' \
     "a task with no recorded metadata must still render its own line"
@@ -1213,7 +1213,7 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "(hold: captain choice pending) (hold-kind: captain) \$20" \
+  assert_contains "$out" "(hold: captain choice pending) (hold-kind: captain) ~\$20" \
     "manual compact rendering did not append the recorded task's per-agent cost at the end of its line"
   assert_contains "$out" "blocked-followup - Follow compact startup blocked-by: compact-startup - waits for implementation (repo: firstmate) (kind: scout) (since 2026-07-15)" \
     "a task with no state/*.meta file must render unchanged, with no cost appended, in the manual rendering"

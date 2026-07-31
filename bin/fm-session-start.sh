@@ -142,16 +142,19 @@ print_backlog_pointer() {
 }
 
 append_cost_to_line() {
-  local line="$1" meta taskid cost
+  local line="$1" meta taskid taskid_re cost
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     taskid="$(basename "$meta" .meta)"
+    taskid_re="${taskid//./\\.}"
     # Anchor to the id's own position (tasks-axi's leading CSV id field, or
     # the manual listing's "- [ ] <id>" title line) - a bare substring match
     # would also fire on lines that merely mention this id elsewhere, such as
-    # another task's blocked_by column.
-    if [[ "$line" =~ ^[[:space:]]*$taskid,(.*)$ ]] \
-      || [[ "$line" =~ ^[-*][[:space:]]+\[[^]]*\][[:space:]]+$taskid([[:space:]]|$) ]]; then
+    # another task's blocked_by column. The id is escaped because '.' is a
+    # legal task-id character (fm_task_id_creation_valid) but also an ERE
+    # wildcard, so an unescaped id could false-cross-match a sibling id.
+    if [[ "$line" =~ ^[[:space:]]*$taskid_re,(.*)$ ]] \
+      || [[ "$line" =~ ^[-*][[:space:]]+\[[^]]*\][[:space:]]+$taskid_re([[:space:]]|$) ]]; then
       cost=$("$SCRIPT_DIR/fm-format-task-cost.sh" "$taskid" 2>/dev/null || echo "")
       if [ -n "$cost" ]; then
         line="${line% } $cost"
