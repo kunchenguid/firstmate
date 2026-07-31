@@ -351,6 +351,17 @@ test_no_mistakes_dod_wording() {
   # guards the structure that makes it safe.
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
+  # shellcheck disable=SC2016  # literal Markdown code spans are expected
+  assert_grep 'load its `no-mistakes-readiness` skill' "$brief" \
+    "no-mistakes DOD did not route readiness through its Firstmate-owned skill"
+  # shellcheck disable=SC2016  # literal Markdown code spans are expected
+  assert_grep 'Do not invoke no-mistakes until that Firstmate-owned preflight reports `READY`' "$brief" \
+    "no-mistakes DOD did not keep an unready implementation out of the pipeline"
+  # shellcheck disable=SC2016  # literal Markdown code spans are expected
+  assert_grep 'If it reports `NOT_READY`, keep the work in this implementation session' "$brief" \
+    "no-mistakes DOD did not return failed readiness to the implementation worker"
+  assert_grep "except through the Firstmate-owned readiness helper" "$brief" \
+    "no-mistakes brief did not authorize its exact task-private readiness record"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 

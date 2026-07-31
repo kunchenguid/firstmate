@@ -242,6 +242,27 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### No-mistakes attach projection
+
+The Firstmate-owned no-mistakes monitor was verified on 2026-07-31 with Herdr 0.7.5 protocol 17 in a guarded named lab.
+The lab used an active status fixture bound to the task branch and submitted commit, while its attach fixture remained in the foreground so Herdr could report the real process topology.
+
+```sh
+. bin/fm-herdr-lab.sh
+fm_herdr_lab_provision "$LAB"
+fm_herdr_lab_cli "$LAB" workspace create --cwd "$PWD" --label nm-monitor-lab --no-focus
+FM_HOME="$LAB_HOME" bin/fm-no-mistakes-ready.sh monitor-reconcile firstmate-no-mistakes-readiness
+FM_HOME="$LAB_HOME" bin/fm-no-mistakes-ready.sh monitor-reconcile firstmate-no-mistakes-readiness
+fm_herdr_lab_cli "$LAB" pane process-info --pane "$MONITOR_PANE"
+fm_herdr_lab_cli "$LAB" tab list --workspace "$WORKSPACE"
+```
+
+The first reconciliation reported one exact monitor pane, and the second reused that pane without another tab create.
+The process response identified `no-mistakes attach --run LABRUN123` in the exact monitor pane.
+The task tab remained focused while the monitor tab reported `focused:false` in the same exact workspace.
+After the fixture status changed to `completed`, reconciliation closed only the monitor pane, confirmed it gone, removed its journal, and left the focused task tab intact.
+Guarded teardown removed the named lab and the default-session tripwire remained byte-identical.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

@@ -273,6 +273,17 @@ There is still one watcher process; the event reader is a bounded child of that 
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
 
+## No-mistakes attach monitors
+
+The agent-only `no-mistakes-readiness` skill owns when a ready implementation may enter no-mistakes and when Firstmate reconciles its presentation monitor.
+`bin/fm-no-mistakes-ready.sh --help` owns the exact commands, bindings, recovery, and mutation mechanics.
+For a matched active run on a Herdr-backed task, the helper creates one unfocused tab in the task's recorded workspace and runs the supported attach TUI against the explicit run id.
+The TUI makes phases, logs, findings, tests, gates, and progress visible, while the native pipeline agent remains headless and the original implementation worker remains the sole AXI driver.
+The attach command has no verified read-only flag, so Firstmate never sends input to the monitor pane or uses it to answer gates.
+Other runtime backends retain their existing task panes and supervision without an attach projection.
+
+`tests/fm-no-mistakes-ready.test.sh` covers the executable contract, and [`verification/runtime-backends.md`](verification/runtime-backends.md#no-mistakes-attach-projection) records active Herdr evidence.
+
 ## Away-mode supervisor support
 
 The away daemon supports tmux and Herdr supervisor panes only.
