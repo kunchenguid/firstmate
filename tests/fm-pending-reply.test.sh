@@ -570,22 +570,26 @@ test_wrong_home_detected_not_acknowledged() {
   pass "wrong-home reports are detected but do not silently acknowledge"
 }
 
-test_unmarked_captain_input_creates_no_expectation() {
+test_crewmate_send_creates_no_expectation() {
   local dir fb log home rc pending_count
-  dir="$TMP_ROOT/unmarked"; mkdir -p "$dir"
+  dir="$TMP_ROOT/crewmate"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
-  home=$(setup_parent unmarked)
-  # Crewmate target stays unmarked and creates no pending-reply record.
+  home=$(setup_parent crewmate)
+  # A crewmate target IS marked, so the worker can tell a firstmate steer from a
+  # human typing into its pane (policy pinned by tests/fm-send-marker.test.sh).
+  # The correlation machinery stays secondmate-only: no corr= token rides along
+  # and no parent expectation is created, because a crewmate already answers on
+  # its own status file.
   fm_write_meta "$home/state/build.meta" \
     "window=sess:fm-build" "worktree=$home/wt" "project=$home/p" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   run_send "$fb" "$home" "$log" "build" "captain says hello"; rc=$?
-  expect_code 0 "$rc" "unmarked crewmate send should succeed"
-  [ "$(cat "$log")" = "captain says hello" ] \
-    || fail "crewmate send should stay unmarked"$'\n'"$(cat "$log" | od -An -c)"
+  expect_code 0 "$rc" "crewmate send should succeed"
+  [ "$(cat "$log")" = "${FM_FROMFIRST_MARK}captain says hello" ] \
+    || fail "crewmate send should carry the marker and nothing else"$'\n'"$(cat "$log" | od -An -c)"
   pending_count=$(find "$home/state/pending-replies" -type f 2>/dev/null | wc -l | tr -d ' ')
-  [ "$pending_count" = 0 ] || fail "unmarked input must create no pending-reply records (got $pending_count)"
-  pass "direct unmarked captain input creates no expectation"
+  [ "$pending_count" = 0 ] || fail "a crewmate steer must create no pending-reply records (got $pending_count)"
+  pass "a crewmate steer is marked but creates no expectation"
 }
 
 test_fm_send_marked_secondmate_creates_pending_and_embeds_corr() {
@@ -919,7 +923,7 @@ test_delivery_confirmation_fallback_reconciles
 test_unrelated_and_stale_corr_cannot_resolve
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
-test_unmarked_captain_input_creates_no_expectation
+test_crewmate_send_creates_no_expectation
 test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
 test_document_pointer_resolves
 test_helper_report_resolves

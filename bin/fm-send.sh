@@ -21,13 +21,28 @@
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
-# From-firstmate marker: when the resolved target is a task selector whose meta
-# records kind=secondmate, the text uses the live-charter-compatible
-# from-firstmate carrier owned by bin/fm-operational-input.sh so the secondmate
-# routes its reply via its status file or a status-pointed doc instead of
-# stranding it in chat the main firstmate never reads. A crewmate/scout target,
-# an explicit backend-target escape-hatch target, and the --key path are never
-# marked - their behavior is unchanged.
+# From-firstmate marker: a steer lands in the receiving agent's own chat, where
+# nothing else tells firstmate's instructions apart from a human typing into that
+# pane. Every text steer whose target is a task selector resolved through this
+# home's meta therefore uses the live-charter-compatible from-firstmate carrier
+# owned by bin/fm-operational-input.sh. A kind=secondmate target routes its reply
+# via its status file or a status-pointed doc instead of stranding it in chat the
+# main firstmate never reads; a crewmate or scout target reads the same marker
+# through its generated brief (bin/fm-brief.sh), which treats an unmarked message
+# as a human at the keyboard who may believe the pane is firstmate. An explicit
+# backend-target escape-hatch target and the --key path are never marked.
+#
+# Command-shaped text is the one exclusion. A harness recognizes a slash command,
+# or a codex `$<skill>` invocation, only at the very start of the composer line,
+# so ANY prefix silently demotes it to plain prose: verified 2026-07-28 on claude
+# 2.1.220 and pi 0.82.0, where the marked form stopped opening the completion
+# popup at all and `/no-mistakes` would have submitted as ordinary text. Crewmate
+# and scout sends of that shape stay unmarked and byte-identical. The exclusion
+# deliberately does NOT extend to a secondmate target, whose marker is what
+# creates the corr= correlation and pending-reply record below - dropping it
+# there would silently lose the reply guarantee. No current caller sends a
+# secondmate a command-shaped message (every secondmate send is natural
+# language); one that did would land as prose, so keep them natural language.
 #
 # Parent-owned pending-reply expectation: every newly marked secondmate request
 # also receives a privacy-safe correlation id and a durable parent record under
@@ -213,18 +228,27 @@ shift
 
 fm_backend_validate "$TARGET_BACKEND" || exit 1
 
-# Classify a from-firstmate -> secondmate request. Only a task selector resolved
-# through this home's meta whose authoritative kind is secondmate is marked: the
-# secondmate then routes its reply via the status path (see fm-marker-lib.sh).
-# An explicit backend target (the escape hatch for endpoints outside this home)
-# and any crewmate/scout target are left unmarked, and so is the --key path.
+# Classify a from-firstmate request. Only a task selector resolved through this
+# home's meta is marked, because only then is the recipient's identity known from
+# a durable record: an explicit backend target (the escape hatch for endpoints
+# outside this home) is left unmarked, and so is the --key path. The target's
+# authoritative kind then selects how much machinery rides along - a secondmate
+# additionally carries the corr= correlation token and a durable parent
+# pending-reply expectation, while a crewmate or scout carries the marker alone
+# (see fm-marker-lib.sh, fm-pending-reply-lib.sh). A meta predating the kind=
+# field records an empty value, which is not secondmate and so reads as the
+# crewmate default - the correct fallback.
 MARK_FROM_FIRSTMATE=0
+MARK_PENDING_REPLY=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
-if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ]; then
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  if [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+    MARK_PENDING_REPLY=1
+  fi
 fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
@@ -247,7 +271,34 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$2" || exit 1
 else
   MESSAGE=$*
-  if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
+  # One classification of "command-shaped" drives the two decisions below: the
+  # marker exclusion and the pre-Enter popup settle. Slash commands open a
+  # completion popup in some TUIs (verified on codex); submitting too fast selects
+  # nothing, so give the popup time to settle before the (retried) Enter. Codex
+  # opens the same kind of popup for a `$<skill>` invocation, so a `$...` message
+  # to a codex target counts too. That `$` case is scoped to codex on purpose:
+  # unlike `/`, a leading `$` commonly starts ordinary text ("$5/month", "$HOME"),
+  # so a universal `$` rule would needlessly slow plain text to
+  # claude/opencode/pi and strip its marker for nothing. The target backend's
+  # verified submit retry still backs the settle up either way. Classify the RAW
+  # operator text, before any marker or corr token is prepended.
+  COMMAND_SHAPED=0
+  case "$*" in
+    /*) COMMAND_SHAPED=1 ;;
+    \$*) if [ "$TARGET_HARNESS" = codex ]; then COMMAND_SHAPED=1; fi ;;
+  esac
+  # A prefix on command-shaped text demotes it to prose (see the header), so a
+  # crewmate or scout send of that shape stays unmarked. A secondmate keeps its
+  # marker regardless: it is what carries the correlation and reply expectation.
+  if [ "$COMMAND_SHAPED" = 1 ] && [ "$MARK_PENDING_REPLY" = 0 ]; then
+    MARK_FROM_FIRSTMATE=0
+  fi
+  if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$MARK_PENDING_REPLY" = 0 ]; then
+    # Crewmate or scout: the marker alone. No correlation token and no pending
+    # expectation - a crewmate reports through its own status file, which the
+    # watcher already surfaces, so there is nothing for a parent record to add.
+    fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
+  elif [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
@@ -272,21 +323,7 @@ else
       exit 1
     fi
   fi
-  # Slash commands open a completion popup in some TUIs (verified on codex);
-  # submitting too fast selects nothing, so give the popup time to settle before
-  # the (retried) Enter. Codex opens the same kind of popup for a `$<skill>`
-  # invocation, so a `$...` message to a codex target gets the same settle. That
-  # `$` case is scoped to codex on purpose: unlike `/`, a leading `$` commonly
-  # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
-  # needlessly slow plain text to claude/opencode/pi. The target backend's
-  # verified submit retry still backs the settle up either way.
-  case "$*" in
-    /*) settle=1.2 ;;
-    \$*)
-      if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
-      ;;
-    *) settle=0.3 ;;
-  esac
+  if [ "$COMMAND_SHAPED" = 1 ]; then settle=1.2; else settle=0.3; fi
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Only exact empty confirms delivery; every other

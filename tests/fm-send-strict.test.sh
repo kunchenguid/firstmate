@@ -5,10 +5,18 @@
 # well-formed backend target must fail loudly. These tests pin the historical
 # silent-fallback failures: missing FM_HOME, unresolved selectors, prefixless
 # herdr pane ids, dead explicit endpoints, and the healthy exact/fm-id paths.
+#
+# The healthy paths below type a metadata-routed steer, which carries the
+# from-firstmate marker (bin/fm-send.sh; policy pinned by
+# tests/fm-send-marker.test.sh). These assertions are about WHICH target is typed
+# to and that the text is typed once and submitted, so they expect the marker
+# rather than restating the marking policy.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-marker-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 TMP_ROOT=$(fm_test_tmproot fm-send-strict)
@@ -83,7 +91,7 @@ test_exact_lane_id_send_still_works() {
     "$SEND" mpf-lane-m8 "lost dispatch" >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "exact task id send should succeed when metadata exists"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=1 arg=lost dispatch" "exact id should type literal text to the meta target"
+  assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=1 arg=${FM_FROMFIRST_MARK}lost dispatch" "exact id should type literal text to the meta target"
   assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=0 arg=Enter" "exact id should submit with Enter"
   pass "fm-send strict: exact task/lane ids resolve through home metadata"
 }
@@ -157,7 +165,7 @@ test_healthy_fm_id_send_still_works() {
     "$SEND" fm-lane-ok "hello captain" >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "healthy fm-id send should succeed"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=hello captain" "healthy send should type literal text to the meta target"
+  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=${FM_FROMFIRST_MARK}hello captain" "healthy send should type literal text to the meta target"
   assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "healthy send should submit with Enter"
   assert_contains "$(cat "$err")" "requested message WILL still be sent" "fm-send guard banner should keep send-specific continuation wording"
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"

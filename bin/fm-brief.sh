@@ -39,6 +39,17 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every crewmate scaffold (ship and scout) also carries a "Who is speaking to
+# you" section. Firstmate's own steers arrive marked (bin/fm-send.sh, carrier
+# owned by bin/fm-operational-input.sh), so an unmarked message is a human at the
+# keyboard who may believe the pane is firstmate; the worker must identify itself
+# as a worker on this task before acting on one. The section names the single
+# exclusion - a bare slash or codex `$<skill>` command, which a harness
+# recognizes only at the start of the line and which therefore cannot be marked -
+# so the rule is never quietly violated by the routine validation trigger. It
+# also restates that escalation is the status file, because the opposite failure
+# is silent: a gate parked with only "Captain, ..." in a pane nobody reads stalls
+# the task with no wake and no visible symptom.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -128,6 +139,12 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+# The one owner of the marker's SHAPE, shared by all three scaffolds so a crewmate
+# and a secondmate cannot be taught different bytes. Each scaffold supplies its
+# own subject and its own consequence: a secondmate routes its reply to the status
+# path, a crewmate or scout identifies itself before acting on anything unmarked.
+FROMFIRST_MARKER_FACT="a leading \`$FM_FROMFIRST_LABEL\` label followed by an invisible system separator; that separator is untypable, so a human never produces it"
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -173,7 +190,7 @@ Never start a survey, audit, or "find improvements" sweep on your own initiative
 # Requests from the main firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.
 You must distinguish who it is from, because the answer goes to a different place.
-A request relayed to you by the main firstmate is tagged with a leading \`$FM_FROMFIRST_LABEL\` marker followed by an invisible system separator; this marker is untypable, so a human never produces it.
+A request relayed to you by the main firstmate is tagged with $FROMFIRST_MARKER_FACT.
 When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: the main firstmate does not read your chat, so a chat-only reply is lost.
 Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; include that exact token in your parent status reply (or in the status pointer to a detailed doc) so the parent can correlate the answer.
 Optional helper: \`bin/fm-secondmate-report.sh\` can append a correlated status line for you, but a plain \`echo\` that includes the same \`corr=<id>\` is equally valid - do not depend on the helper being present.
@@ -247,6 +264,22 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Shared by the ship and scout scaffolds: a crewmate cannot otherwise tell
+# firstmate's steers from a human typing into its pane, and both failure
+# directions are real. Rule 4's status file is named explicitly because the
+# opposite error - answering the captain in a pane nobody reads - is silent.
+IFS= read -r -d '' WHO_IS_SPEAKING <<EOF || true
+# Who is speaking to you
+Firstmate marks every message it sends you with $FROMFIRST_MARKER_FACT.
+A marked message is firstmate: act on it as task instruction.
+An unmarked message is a human typing directly into your pane - usually the captain, who may believe this pane is firstmate rather than a worker.
+The one exception is a message that starts with \`/\`, or on codex with \`\$\`, such as \`/no-mistakes\`: a harness recognizes that form only at the very start of the line, so firstmate cannot mark it without breaking it. Treat such a message as routine and act on it.
+Before acting on any other unmarked message, say plainly that you are a worker on task \`$ID\`, not firstmate, and that merges, cross-lane work, other lanes' state, and fleet supervision belong to firstmate. Then ask whether they still want you to proceed.
+Escalation is always the status file in rule 4, never this pane.
+Firstmate does not read your chat, so anything you address to the captain here is lost: a decision or gate left parked with only "Captain, ..." in this pane is invisible to everyone and stalls the task indefinitely.
+EOF
+WHO_IS_SPEAKING=${WHO_IS_SPEAKING%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -283,6 +316,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$WHO_IS_SPEAKING
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -397,6 +432,8 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$WHO_IS_SPEAKING
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

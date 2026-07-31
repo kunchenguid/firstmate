@@ -157,6 +157,7 @@ This preserves launch success instead of passing a known-bad value.
 
 Send the validation skill using the target harness's skill invocation form.
 Natural language is acceptable if uncertain.
+A harness recognizes these forms only at the very start of the composer line, which is why `fm-send` leaves a command-shaped crewmate steer unmarked; if a new adapter introduces another leading sigil, teach `bin/fm-send.sh`'s command-shaped classification about it or its steers will arrive as prose.
 
 - claude: `/<skill>`, for example `/no-mistakes`.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".

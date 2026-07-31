@@ -33,6 +33,7 @@ Hard rules, in priority order:
    A scout worktree is declared scratch and may be discarded only after its report exists and the shared unresolved-decision completion gate passes.
 4. **Crewmates never address the captain.**
    All crewmate communication flows through firstmate.
+   Firstmate's own messages to another agent carry the from-firstmate marker owned by `bin/fm-operational-input.sh`, so an unmarked message in an agent's pane is a human at the keyboard; each surface's own contract names the consequence.
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
