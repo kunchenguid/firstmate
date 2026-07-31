@@ -19,6 +19,9 @@
 #   (j) a worktree with a real, non-identical evidence pair still merges
 #   (k) the evidence check verifies the freshly fetched remote PR head, not a
 #       stale local worktree HEAD that gh-axi pr merge will not actually land
+#   (l) when the evidence check cannot run at all (missing/non-git worktree,
+#       or a valid worktree with no resolvable ref), a loud warning is printed
+#       to stderr and the merge still proceeds rather than failing closed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -124,7 +127,9 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr_head= was not recorded"
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
-  pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "records-before-merge: missing worktree git repo should still warn that the evidence check was skipped"
+  pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge, warning that evidence check was skipped"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -143,6 +148,8 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "merge-fails: missing worktree git repo should still warn that the evidence check was skipped"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
 }
 
@@ -158,6 +165,8 @@ test_extra_merge_args_forwarded() {
 
   grep -qxF 'pr merge 15 --repo example/repo --squash --delete-branch' "$case_dir/gh-axi.log" \
     || fail "extra-args: extra gh-axi pr merge flags were not forwarded"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "extra-args: missing worktree git repo should still warn that the evidence check was skipped"
   pass "fm-pr-merge forwards extra flags to gh-axi pr merge after the -- separator"
 }
 
@@ -273,6 +282,8 @@ test_explicit_merge_method_not_overridden() {
 
   grep -qxF 'pr merge 22 --repo example/repo --merge' "$case_dir/gh-axi.log" \
     || fail "explicit-merge-method: caller --merge was not forwarded without an extra default --squash"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "explicit-merge-method: missing worktree git repo should still warn that the evidence check was skipped"
   pass "fm-pr-merge does not add default --squash when the caller passes an explicit merge method"
 }
 
@@ -288,6 +299,8 @@ test_method_equals_merge_method_not_overridden() {
 
   grep -qxF 'pr merge 23 --repo example/repo --method=merge' "$case_dir/gh-axi.log" \
     || fail "method-equals-merge-method: caller --method=merge was not forwarded without an extra default --squash"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "method-equals-merge-method: missing worktree git repo should still warn that the evidence check was skipped"
   pass "fm-pr-merge respects --method=<value> as an explicit merge method"
 }
 
@@ -303,6 +316,8 @@ test_parses_pr_url_for_gh_axi() {
 
   grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
     || fail "url-parsing: gh-axi pr merge was not invoked as number + --repo + default --squash"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "url-parsing: missing worktree git repo should still warn that the evidence check was skipped"
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
@@ -405,6 +420,31 @@ test_evidence_check_uses_fetched_remote_pr_head_not_stale_local_worktree() {
   pass "fm-pr-merge checks evidence against the fetched remote PR head, not a stale local worktree"
 }
 
+test_unresolvable_ref_warns_and_still_merges() {
+  # A valid git worktree with no commits and no fetchable/recorded PR head has
+  # no ref the evidence check could ever run against: this must still warn
+  # loudly and merge, per the captain's decision to never fail closed.
+  local case_dir rc
+  case_dir=$(make_case unresolvable-ref)
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  add_gh_mocks "$case_dir" ffffffffffffffffffffffffffffffffffffffff
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/51 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "unresolvable-ref: fm-pr-merge should still merge with no resolvable ref"
+  grep -qxF 'pr merge 51 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "unresolvable-ref: gh-axi pr merge was not invoked"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "unresolvable-ref: a valid git worktree with no resolvable ref should still warn that the evidence check was skipped"
+  pass "fm-pr-merge warns and still merges when no ref can be resolved in a valid worktree"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -418,3 +458,4 @@ test_parses_pr_url_for_gh_axi
 test_identical_evidence_pair_refuses_merge
 test_different_evidence_pair_still_merges
 test_evidence_check_uses_fetched_remote_pr_head_not_stale_local_worktree
+test_unresolvable_ref_warns_and_still_merges

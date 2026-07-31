@@ -15,7 +15,10 @@
 # bin/fm-pr-check.sh, and only then to the local worktree HEAD with a
 # warning. A byte-identical before/after evidence image pair with no opt-out
 # marker refuses the merge. See bin/fm-evidence-check.sh --help for the pairing
-# convention and opt-out mechanism.
+# convention and opt-out mechanism. If the task's recorded worktree is
+# missing or not a git repository, or no ref can be resolved at all, the
+# check cannot run: a loud warning goes to stderr and the merge still
+# proceeds unverified rather than failing closed.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -126,7 +129,11 @@ if [ -n "$WT" ] && [ -d "$WT" ] && git -C "$WT" rev-parse --git-dir >/dev/null 2
       echo "error: byte-identical before/after evidence image pair detected, merge refused" >&2
       exit 1
     }
+  else
+    echo "warning: evidence check SKIPPED for task $ID; no resolvable PR head or worktree HEAD, merging unverified" >&2
   fi
+else
+  echo "warning: evidence check SKIPPED for task $ID; recorded worktree (${WT:-<empty>}) is missing or not a git repository, merging unverified" >&2
 fi
 
 merge_args=()
