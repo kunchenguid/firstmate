@@ -227,8 +227,9 @@ GNU bash, version 5.3.15(1)-release (x86_64-pc-linux-gnu)
 Unlike GitLab's public throwaway fixture project, there is no public Forgejo fixture to point a reader at.
 This evidence was instead gathered read-only against a real self-hosted Forgejo instance, using the `tea` login already configured and authenticated there (the moral equivalent of `gh`'s or `glab`'s own auth state); the host, owner, and repository names below are anonymized as `forge.example`/`owner/repo` the same way the GitLab section anonymizes its self-hosted-host demonstration as `gitlab.example`, since the property being demonstrated belongs to the command shapes and output fields, not to that specific instance.
 Every command actually run only listed or read existing pull requests; none of it created, merged, or otherwise mutated anything.
-No live end-to-end arm-and-merge cycle through `fm-pr-check.sh`/`fm-pr-merge.sh` against a real pull request was exercised, because doing so would require creating and then merging a real pull request on a live project, which is outside what produced this record.
-The captain should smoke-test the actual arm-and-merge path against a real pull request before relying on it unattended.
+A live end-to-end arm-and-merge cycle through `fm-pr-check.sh`/`fm-pr-poll.sh`/`fm-pr-merge.sh` was separately exercised against a real pull request on that same self-hosted Forgejo instance: the captain opened a small, real documentation-fix pull request from a short-lived feature branch into `main`, then ran this support's own check, poll, and merge scripts against it from an isolated scratch state directory so no real task state was touched.
+The URL parsed correctly (provider `gitea`, host, owner/repository, and pull request number), the poll stayed silent the whole time the pull request remained open, `fm-pr-merge.sh` performed a real squash merge via `tea` that advanced the target branch by exactly one commit matching the pull request title, and the poll then printed exactly `merged` once the merge landed.
+The cycle passed on the first attempt with no code changes required.
 
 ### The PR URL shape, confirmed from the live instance
 
@@ -298,4 +299,4 @@ So, like a GitLab task, a Gitea/Forgejo task records no `pr_head=`; the same pro
 ### Merging
 
 `tea pulls merge <index> --repo <owner>/<repo> --login <name> --style <merge|rebase|squash|rebase-merge>` performs the merge; firstmate defaults to `--style squash` when the caller passes no explicit `--style`/`-s`, mirroring the GitHub path's default `--squash`.
-This call was not exercised live (see "The evidence instance" above); it is covered by the hermetic fake-`tea` tests in `tests/fm-pr-merge.test.sh` instead.
+This call was exercised live (see "The evidence instance" above), and is additionally covered by the hermetic fake-`tea` tests in `tests/fm-pr-merge.test.sh`.
