@@ -44,6 +44,10 @@
 #   (ab) green PR + later local commit                           -> REFUSE (unpublished)
 #   (ac) absent/ambiguous completion, check, mergeability,
 #        identity, or head evidence                              -> REFUSE (evidence)
+#   (ad) green PR whose suite also reports skipped checks         -> ALLOW  (skipped)
+#   (ae) PR with no CI checks configured                          -> REFUSE (no suite)
+#   (af) check summary in an unrecognized shape                   -> REFUSE (fail-safe)
+#   (ag) suite where every check is skipped                       -> REFUSE (nothing passed)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -281,7 +285,10 @@ set -u
 fixture=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
 case "${1:-} ${2:-}" in
   "api /repos/example/repo/pulls/7") cat "$fixture/gh-api" ;;
-  "pr checks") cat "$fixture/gh-checks" ;;
+  "pr checks")
+    [ "${3:-}" = 7 ] && [ "${4:-}" = --repo ] && [ "${5:-}" = example/repo ] || exit 1
+    cat "$fixture/gh-checks"
+    ;;
   "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ;;
   *) exit 1 ;;
 esac
@@ -661,7 +668,71 @@ EOF
   [ "$kept_head" = "$head" ] || fail "green-mergeable: preserved branch moved from the validated PR head"
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "green-mergeable: teardown manual prompt did not preserve date-gate check"
+  assert_grep 'Preserved local branch fm/task-x1' "$case_dir/stdout" \
+    "green-mergeable: teardown did not record the preserved branch"
+  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/stdout" \
+    "green-mergeable: preserved-branch notice did not name the PR it backs"
   pass "completed green mergeable PR is cleaned before merge with its local branch preserved"
+}
+
+test_green_pr_with_skipped_checks_allows_cleanup() {
+  local setup case_dir head rc
+  setup=$(setup_open_green_case green-skipped)
+  IFS=$'\t' read -r case_dir head <<EOF
+$setup
+EOF
+  # gh-axi emits an extra "<n> skipped" segment whenever a conditional job does
+  # not run. Every check that ran passed, so the suite is still complete.
+  printf '%s\n' 'summary: "3 passed, 0 failed, 1 skipped, 4 total"' > "$case_dir/gh-checks"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "green-skipped: a green suite with a skipped check should allow cleanup"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "green-skipped: teardown printed a REFUSED line"
+  git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "green-skipped: cleanup deleted the task branch"
+  pass "green PR whose suite reports skipped checks is cleaned before merge"
+}
+
+test_unusable_check_suites_refuse_cleanup() {
+  local variant setup case_dir head rc expected
+  for variant in no-checks unrecognized-summary all-skipped; do
+    setup=$(setup_open_green_case "suite-$variant")
+    IFS=$'\t' read -r case_dir head <<EOF
+$setup
+EOF
+    case "$variant" in
+      no-checks)
+        printf '%s\n' 'checks: "0 passed, 0 failed — this PR has no CI checks configured"' \
+          > "$case_dir/gh-checks"
+        expected="no CI checks configured"
+        ;;
+      unrecognized-summary)
+        printf '%s\n' 'summary: "3 passed, 0 failed, 1 stalled, 4 total"' > "$case_dir/gh-checks"
+        expected="not in a recognized form"
+        ;;
+      all-skipped)
+        printf '%s\n' 'summary: "0 passed, 0 failed, 4 skipped, 4 total"' > "$case_dir/gh-checks"
+        expected="all-passing completed check suite"
+        ;;
+    esac
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "suite-$variant: teardown should refuse"
+    grep -q REFUSED "$case_dir/stderr" || fail "suite-$variant: no REFUSED line in stderr"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "suite-$variant: refusal did not cite the specific check-suite evidence gap"
+    git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1 >/dev/null 2>&1 \
+      || fail "suite-$variant: refused teardown still dropped the task branch"
+  done
+  pass "unusable check suites refuse pre-merge cleanup with evidence-specific reasons"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -1645,6 +1716,8 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_completed_green_mergeable_pr_allows_and_preserves_branch
+test_green_pr_with_skipped_checks_allows_cleanup
+test_unusable_check_suites_refuse_cleanup
 test_no_mistakes_truly_unpushed_refuses
 test_red_pr_refuses_cleanup
 test_pending_pr_refuses_cleanup

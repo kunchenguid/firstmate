@@ -479,14 +479,53 @@ single_api_head_sha() {
   printf '%s\n' "$values"
 }
 
-ensure_live_pr_head_object() {
-  local path=$1 number=$2 head=$3 fetched
-  git -C "$WT" cat-file -e "$head^{commit}" 2>/dev/null && return 0
-  fetched=$(git -C "$WT" fetch --quiet --no-tags \
-    "https://github.com/$path.git" "refs/pull/$number/head" 2>/dev/null \
-    && git -C "$WT" rev-parse --verify FETCH_HEAD 2>/dev/null) || return 1
+# Fetch refs/pull/<number>/head from one source and accept it only when the
+# fetched tip is exactly the already-validated head, so a stale mirror or a
+# fork remote cannot substitute a different commit.
+pr_head_fetch_matches() {
+  local source=$1 number=$2 head=$3 fetched
+  git -C "$WT" fetch --quiet --no-tags "$source" "refs/pull/$number/head" >/dev/null 2>&1 || return 1
+  fetched=$(git -C "$WT" rev-parse --verify FETCH_HEAD 2>/dev/null) || return 1
   [ "$fetched" = "$head" ] || return 1
   git -C "$WT" cat-file -e "$head^{commit}" 2>/dev/null
+}
+
+# Try the configured origin remote first so an SSH-authenticated private repo
+# works, then fall back to the canonical GitHub URL for clones whose origin
+# points elsewhere (e.g. a fork).
+ensure_live_pr_head_object() {
+  local path=$1 number=$2 head=$3
+  git -C "$WT" cat-file -e "$head^{commit}" 2>/dev/null && return 0
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1 \
+    && pr_head_fetch_matches origin "$number" "$head"; then
+    return 0
+  fi
+  pr_head_fetch_matches "https://github.com/$path.git" "$number" "$head"
+}
+
+# Parse gh-axi's PR check summary body - "<n> passed, <n> failed[, <n> skipped]
+# [, <n> pending], <n> total" - into "passed failed skipped pending total".
+# Refuses an unrecognized label, a repeated label, a malformed segment, or a
+# missing passed/failed/total so a future summary shape fails safe instead of
+# being silently misread.
+parse_check_summary_counts() {
+  awk '
+    {
+      known["passed"] = 1; known["failed"] = 1; known["skipped"] = 1
+      known["pending"] = 1; known["total"] = 1
+      n = split($0, seg, ", ")
+      for (i = 1; i <= n; i++) {
+        if (split(seg[i], f, " ") != 2) exit 1
+        if (f[1] !~ /^[0-9]+$/) exit 1
+        if (!(f[2] in known) || (f[2] in count)) exit 1
+        count[f[2]] = f[1]
+      }
+      if (!("passed" in count) || !("failed" in count) || !("total" in count)) exit 1
+      printf "%s %s %s %s %s\n", count["passed"], count["failed"], \
+        ("skipped" in count) ? count["skipped"] : 0, \
+        ("pending" in count) ? count["pending"] : 0, count["total"]
+    }
+  '
 }
 
 TEARDOWN_PRESERVE_TASK_BRANCH=0
@@ -494,7 +533,8 @@ TEARDOWN_PR_EVIDENCE_ERROR=
 pr_is_complete_green_and_mergeable() {
   local branch=$1 status_file last_status provider url path number
   local recorded_head_count recorded_head api state draft mergeable live_head
-  local checks parsed_summary parsed_count passed failed pending total
+  local checks summary_body parsed_summary parsed_count
+  local passed failed skipped pending total
   TEARDOWN_PR_EVIDENCE_ERROR=
   [ -n "$branch" ] && [ "$branch" != HEAD ] || {
     TEARDOWN_PR_EVIDENCE_ERROR="the task has no named local branch to preserve"
@@ -583,19 +623,25 @@ pr_is_complete_green_and_mergeable() {
     TEARDOWN_PR_EVIDENCE_ERROR="the live PR check result is unavailable"
     return 1
   }
-  parsed_summary=$(printf '%s\n' "$checks" | sed -n \
-    -e 's/^summary: "\([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed, \([0-9][0-9]*\) total"$/\1 \2 0 \3/p' \
-    -e 's/^summary: "\([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed, \([0-9][0-9]*\) pending, \([0-9][0-9]*\) total"$/\1 \2 \3 \4/p')
-  parsed_count=$(printf '%s\n' "$parsed_summary" | grep -c . || true)
-  [ "$parsed_count" -eq 1 ] || {
-    TEARDOWN_PR_EVIDENCE_ERROR="the live PR check summary is absent or ambiguous"
+  summary_body=$(printf '%s\n' "$checks" | sed -n 's/^summary: "\(.*\)"$/\1/p')
+  parsed_count=$(printf '%s\n' "$summary_body" | grep -c . || true)
+  if [ "$parsed_count" -ne 1 ]; then
+    if [ "$(printf '%s\n' "$checks" | grep -c '^checks: "' || true)" -eq 1 ]; then
+      TEARDOWN_PR_EVIDENCE_ERROR="the recorded PR has no CI checks configured, so no check suite proves it is green"
+    else
+      TEARDOWN_PR_EVIDENCE_ERROR="the live PR check summary is absent or ambiguous"
+    fi
+    return 1
+  fi
+  parsed_summary=$(printf '%s\n' "$summary_body" | parse_check_summary_counts) || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the live PR check summary is not in a recognized form"
     return 1
   }
-  IFS=' ' read -r passed failed pending total <<EOF
+  IFS=' ' read -r passed failed skipped pending total <<EOF
 $parsed_summary
 EOF
-  if [ "$total" -eq 0 ] || [ "$passed" -ne "$total" ] \
-    || [ "$failed" -ne 0 ] || [ "$pending" -ne 0 ]; then
+  if [ "$total" -eq 0 ] || [ "$passed" -eq 0 ] || [ "$failed" -ne 0 ] \
+    || [ "$pending" -ne 0 ] || [ $((passed + skipped)) -ne "$total" ]; then
     TEARDOWN_PR_EVIDENCE_ERROR="the recorded PR does not have an all-passing completed check suite"
     return 1
   fi
@@ -671,6 +717,14 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+# Record the surviving ref for the operator: the pre-merge cleanup path detaches
+# but keeps the task branch, and teardown removes the task's state files, so this
+# line is the only remaining link between the branch and the PR it backs.
+announce_preserved_task_branch() {
+  local branch=$1 pr=${PR_URL:-the recorded PR}
+  printf '%s\n' "Preserved local branch $branch: $ID was cleaned up before $pr merged. Delete the branch once that PR lands."
 }
 
 backlog_refresh_reminder() {
@@ -1409,7 +1463,8 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+# Best-effort: drop the local task branch so the shared repo does not accumulate
+# refs, except on the pre-merge cleanup path, which preserves it and says so.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -1418,9 +1473,12 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null \
-        && [ "$TEARDOWN_PRESERVE_TASK_BRANCH" != 1 ]; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        if [ "$TEARDOWN_PRESERVE_TASK_BRANCH" = 1 ]; then
+          announce_preserved_task_branch "$branch"
+        else
+          git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+        fi
       fi
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
@@ -1432,9 +1490,12 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null \
-      && [ "$TEARDOWN_PRESERVE_TASK_BRANCH" != 1 ]; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+    if git -C "$WT" checkout --detach -q 2>/dev/null; then
+      if [ "$TEARDOWN_PRESERVE_TASK_BRANCH" = 1 ]; then
+        announce_preserved_task_branch "$branch"
+      else
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
