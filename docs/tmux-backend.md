@@ -69,8 +69,9 @@ Run the real-harness guard after any harness upgrade and before trusting refresh
 Agent liveness and composer safety are separate checks.
 For a bordered composer, the tmux reader locates the complete box structurally and classifies every content row through the shared ANSI and ghost handling in `bin/fm-composer-lib.sh`.
 Real text on any content row is pending, while only an unambiguous box with every row empty is proven empty.
-Unreadable, incomplete, or structurally ambiguous boxes fail closed, and panes without a bordered composer retain the compatible cursor-row classification.
-The shared classifier accepts a shell glyph as an empty agent composer only inside a verified bordered composer.
+Before the bordered-box path, the reader recognizes Agy's unbordered composer through the shared `fm_composer_separated_state` proof: two long separator rows around a `>` prompt with Agy's verified footer, plus the cursor inside that container.
+Unreadable, incomplete, or structurally ambiguous boxes fail closed, and panes with neither structure retain the compatible cursor-row classification.
+The shared classifier accepts a shell glyph as an empty agent composer only inside a verified bordered composer or Agy's complete separator container.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 
 Busy state is not read from rendered text on this backend.

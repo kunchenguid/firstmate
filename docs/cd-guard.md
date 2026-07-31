@@ -79,6 +79,7 @@ It does not permit `cd /home/project`, because an absolute-path `cd` remains a p
 - Claude sends stdin JSON at `.tool_input.command` and adds `--claude` to preserve Claude's stderr-only deny requirement.
 - Codex sends stdin JSON at `.tool_input.command` without `--claude`.
 - Grok sends stdin JSON at `.toolInput.command`.
+- Agy sends stdin JSON at `.toolCall.args.CommandLine`.
 - OpenCode sends the exact command string through `--command <exact string>`.
 - Pi and pi-signed send the exact command string through `--command <exact string>`.
 
@@ -95,7 +96,7 @@ Identical in shape to `docs/arm-pretool-check.md`:
 
 - Allow (and inert-outside-primary) returns exit 0 with both streams empty.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[persistent-cd] reason"}` to stderr.
-- Default deny mode also writes `{"decision":"deny","reason":"[persistent-cd] reason"}` to stdout for Grok.
+- Default deny mode also writes `{"decision":"deny","reason":"[persistent-cd] reason"}` to stdout for Grok and Agy.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.

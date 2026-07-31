@@ -92,7 +92,7 @@ Spawn-time worktree discovery sends begin and end markers around `pwd`, captures
 
 Literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
-The composer verifier locates the last bordered composer row and delegates the content decision to `bin/fm-composer-lib.sh`.
+The composer verifier first recognizes Agy's separator-pair composer through the shared `fm_composer_separated_state` proof, then locates the last bordered composer row and delegates the content decision to `bin/fm-composer-lib.sh`.
 A bare shell prompt is `unknown`, and a slash-popup placeholder remains `pending`, so only Enter is retried and text is never retyped.
 cmux exposes no native generic agent busy signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
 Grok alone retains its isolated rendered-tail fallback.
