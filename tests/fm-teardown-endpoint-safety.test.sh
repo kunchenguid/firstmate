@@ -154,7 +154,16 @@ test_invalid_endpoint_records_refuse_before_mutation() {
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   assert_refused_without_mutation "$dir" "$id" "duplicate task binding"
 
-  pass "fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call"
+  dir=$(make_case legacy-herdr-unbound)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p2" "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2"
+  assert_refused_without_mutation "$dir" "$id" "legacy Herdr endpoint without a task binding"
+  grep -F "bin/fm-herdr-endpoint-bind.sh $id" "$dir/stderr" >/dev/null \
+    || fail "legacy Herdr refusal did not name the supported migration command: $(cat "$dir/stderr")"
+
+  pass "fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call, and an unbound legacy Herdr record names its migration command"
 }
 
 test_control_lock_contention_refuses_before_mutation() {
