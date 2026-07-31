@@ -933,6 +933,28 @@ test_bootstrap_opt_out_cleanup() {
   pass "bootstrap cleans up X artifacts on opt-out and is silent once off"
 }
 
+test_bootstrap_opt_out_falls_back_when_renderer_fails() {
+  local home bin out
+  home="$TMP_ROOT/boot-optout-renderfail"; mkdir -p "$home"
+  printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
+  FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  bin="$TMP_ROOT/boot-optout-renderfail-bin"
+  rm -rf "$bin"; mkdir -p "$bin"
+  cp -R "$ROOT/bin/." "$bin/"
+  cat > "$bin/fm-supervision-instructions.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$bin/fm-supervision-instructions.sh"
+  printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
+  out=$(CLAUDECODE=1 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "Restore watcher supervision according to the session-start operating block." \
+    "renderer failure must fall back to the non-prescriptive restore wording"
+  assert_not_contains "$out" "repair missing watcher supervision" \
+    "renderer-failure fallback must not prescribe a repair command"
+  pass "bootstrap X-mode transition falls back to the non-prescriptive wording"
+}
+
 test_bootstrap_opt_out_reports_cleanup_failure() {
   local home fakebin out
   home="$TMP_ROOT/boot-optout-fail"; mkdir -p "$home"
@@ -2920,4 +2942,5 @@ test_bootstrap_does_not_announce_when_arm_fails
 test_bootstrap_does_not_follow_x_artifact_symlinks
 test_bootstrap_inert_without_token
 test_bootstrap_opt_out_cleanup
+test_bootstrap_opt_out_falls_back_when_renderer_fails
 test_bootstrap_opt_out_reports_cleanup_failure

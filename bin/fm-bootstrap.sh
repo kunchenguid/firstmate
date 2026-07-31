@@ -915,7 +915,7 @@ x_mode_setup() {
     local out afk=0
     [ -e "$STATE/.afk" ] && afk=1
     out=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --liveness-line 2>/dev/null) \
-      || out='repair missing watcher supervision according to the session-start operating block.'
+      || out='Restore watcher supervision according to the session-start operating block.'
     printf '%s\n' "$out"
   }
 
