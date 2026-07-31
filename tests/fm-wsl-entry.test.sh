@@ -9,6 +9,8 @@ set -u
 ENTRY="$ROOT/bin/fm-wsl-entry.sh"
 BATCH="$ROOT/firstmate.bat"
 TMP_ROOT=$(fm_test_tmproot fm-wsl-entry)
+mkdir -p "$TMP_ROOT"
+TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P) || fail "could not resolve the test temp root"
 
 make_entry_fixture() {  # <root>
   local fixture=$1
