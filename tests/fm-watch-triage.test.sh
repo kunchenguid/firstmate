@@ -617,7 +617,7 @@ test_nonterminal_stale_not_working_surfaced() {
 # the pause's own status-file age, so a churny idle pane cannot reset the cadence)
 # for a recheck, so a forgotten pause cannot rot invisibly.
 test_nonterminal_stale_paused_absorbed_then_resurfaced() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf i
   dir=$(make_case nonterminal-stale-paused); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-held"
@@ -642,13 +642,30 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  # The absorb the assertions below read is asynchronous. Wait for the markers it
+  # writes, not for a fixed liveness budget a cold-started watcher can outlast on
+  # a loaded runner: that shape reports "suppressor not advanced" for a cycle that
+  # has not run yet. A watcher that instead exits, or one that never absorbs
+  # within the bounded wait, still fails on the assertions that follow.
+  i=0
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$pid"; do
+    [ -e "$state/.paused-$key" ] \
+      && [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! is_live_non_zombie "$pid"; then
     reap "$pid"; fail "watcher exited for a fresh declared pause (should absorb): $(cat "$out")"
   fi
-  [ ! -s "$out" ] || fail "fresh paused stale printed a wake reason during absorb"
-  [ ! -s "$state/.wake-queue" ] || fail "fresh paused stale enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on paused absorb"
   [ -e "$state/.paused-$key" ] || fail "paused flag not recorded on absorb"
+  # The marker wait breaks on the FIRST absorb, so on its own it would reap
+  # before a second poll ever runs - and surviving later polls is exactly what
+  # the pause throttle is for. Hold the original liveness window afterwards so
+  # the must-not-act assertions below still cover those later polls.
+  wait_live "$pid" 30 || { reap "$pid"; fail "watcher exited for a fresh declared pause (should absorb): $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "fresh paused stale printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "fresh paused stale enqueued a wake during absorb"
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused absorb must not start the wedge timer"
   reap "$pid"
 
@@ -1048,7 +1065,7 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
 }
 
 test_secondmate_unpause_clears_pause_tracking() {
-  local dir state fakebin out statusf window key pid
+  local dir state fakebin out statusf window key pid i
   dir=$(make_case secondmate-unpause-clears); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; statusf="$state/secondmate-resumed.status"; window="test:fm-secondmate-resumed"
   printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-resumed.meta"
@@ -1065,10 +1082,24 @@ test_secondmate_unpause_clears_pause_tracking() {
   : > "$state/.wedge-escalations-$key"
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  wait_live "$pid" 20 || fail "watcher exited while reconciling a resumed secondmate: $(cat "$out")"
+  # Same reason as the declared-pause absorb above: wait for the reconcile to
+  # land rather than for a fixed liveness budget, so a watcher that is merely
+  # late does not read as one that retained the markers.
+  i=0
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$pid"; do
+    [ ! -e "$state/.paused-$key" ] && [ ! -e "$state/.stale-$key" ] \
+      && [ ! -e "$state/.wedge-escalations-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$pid" || fail "watcher exited while reconciling a resumed secondmate: $(cat "$out")"
   [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "resumed secondmate retained the pause marker"; }
   [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "resumed secondmate retained stale tracking"; }
   [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "resumed secondmate retained wedge tracking"; }
+  # Clearing the markers is only half the contract: the watcher must then keep
+  # absorbing rather than surface the resumed pane. Hold the original liveness
+  # window, which the marker wait above can now break out of early.
+  wait_live "$pid" 20 || { reap "$pid"; fail "watcher exited while reconciling a resumed secondmate: $(cat "$out")"; }
   reap "$pid"
   pass "a resumed secondmate clears pause and stale tracking before stale exemption"
 }
@@ -1249,7 +1280,12 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
-    wait_for_exit "$pid" 40 || fail "watcher did not escalate on consecutive wedge round $n: $(cat "$out")"
+    # Each round cold-starts its own watcher, whose per-window capture/classify
+    # chain costs more than a 40-tick (~6.7s, one ps fork per tick) wait spends -
+    # the same measured mismatch the AFK cold-start case documents below. Wait on
+    # the same 100-tick budget so a loaded runner cannot turn a correct escalation
+    # into a reap-before-classify failure.
+    wait_for_exit "$pid" 100 || fail "watcher did not escalate on consecutive wedge round $n: $(cat "$out")"
     grep -F "escalation $n" "$out" >/dev/null || fail "round $n did not report escalation count $n: $(cat "$out")"
     if [ "$n" -lt 3 ]; then
       grep -F "demand-deep-inspection" "$out" >/dev/null && fail "round $n escalated to demand-deep-inspection before the threshold: $(cat "$out")"
