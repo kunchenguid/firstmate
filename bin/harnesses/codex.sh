@@ -14,4 +14,4 @@
 FM_HARNESS_CODEX_WORKTREE_ARTIFACTS=''
 # shellcheck disable=SC2034  # read indirectly by bin/fm-harness-adapter.sh;
 # each adapter is linted as its own canonical root, so its consumer is out of scope.
-FM_HARNESS_CODEX_STATE_ARTIFACTS=''
+FM_HARNESS_CODEX_STATE_ARTIFACT_SUFFIXES=''

@@ -18,4 +18,4 @@ FM_HARNESS_GROK_WORKTREE_ARTIFACTS='.fm-grok-turnend'
 # That function is already a single owner, so folding it in would buy nothing.
 # shellcheck disable=SC2034  # read indirectly by bin/fm-harness-adapter.sh;
 # each adapter is linted as its own canonical root, so its consumer is out of scope.
-FM_HARNESS_GROK_STATE_ARTIFACTS='@ID@.grok-turnend-token'
+FM_HARNESS_GROK_STATE_ARTIFACT_SUFFIXES='.grok-turnend-token'

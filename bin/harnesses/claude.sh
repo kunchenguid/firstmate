@@ -12,9 +12,13 @@
 #                                         task worktree that this harness's
 #                                         wiring writes. fm-spawn adds each to
 #                                         info/exclude; fm-teardown removes each.
-#   FM_HARNESS_<NAME>_STATE_ARTIFACTS     newline-separated names RELATIVE to the
-#                                         state dir, with @ID@ standing for the
-#                                         task id.
+#   FM_HARNESS_<NAME>_STATE_ARTIFACT_SUFFIXES  newline-separated per-task
+#                                         filename SUFFIXES; each state artifact
+#                                         is the task id followed by one suffix,
+#                                         RELATIVE to the state dir. Suffixes
+#                                         rather than placeholder patterns, so
+#                                         deriving a name is plain concatenation
+#                                         and byte-exact for any id.
 # Either list may be empty; bin/harnesses/codex.sh declares both empty.
 #
 # These are constants rather than functions because they are pure data, and the
@@ -45,4 +49,4 @@ FM_HARNESS_CLAUDE_WORKTREE_ARTIFACTS='.claude/settings.local.json'
 # and fm-teardown's retire_busy_state own them rather than any adapter.
 # shellcheck disable=SC2034  # read indirectly by bin/fm-harness-adapter.sh;
 # each adapter is linted as its own canonical root, so its consumer is out of scope.
-FM_HARNESS_CLAUDE_STATE_ARTIFACTS=''
+FM_HARNESS_CLAUDE_STATE_ARTIFACT_SUFFIXES=''

@@ -19,4 +19,4 @@ FM_HARNESS_KIMI_WORKTREE_ARTIFACTS='.fm-kimi-turnend'
 # remove_kimi_turnend_auth owns it and it is not listed here.
 # shellcheck disable=SC2034  # read indirectly by bin/fm-harness-adapter.sh;
 # each adapter is linted as its own canonical root, so its consumer is out of scope.
-FM_HARNESS_KIMI_STATE_ARTIFACTS='@ID@.kimi-turnend-token'
+FM_HARNESS_KIMI_STATE_ARTIFACT_SUFFIXES='.kimi-turnend-token'

@@ -18,4 +18,4 @@ FM_HARNESS_PI_WORKTREE_ARTIFACTS=''
 # agent_settled) in addition to the turn-end signal.
 # shellcheck disable=SC2034  # read indirectly by bin/fm-harness-adapter.sh;
 # each adapter is linted as its own canonical root, so its consumer is out of scope.
-FM_HARNESS_PI_STATE_ARTIFACTS='@ID@.pi-ext.ts'
+FM_HARNESS_PI_STATE_ARTIFACT_SUFFIXES='.pi-ext.ts'

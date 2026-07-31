@@ -66,7 +66,7 @@ test_pi_signed_shares_the_pi_adapter() {
   [ -z "$(fm_harness_worktree_artifacts pi)" ] \
     || fail "pi must declare no worktree artifacts; its extension lives in the state dir"
   assert_contains "$(fm_harness_state_artifacts_all demo)" 'demo.pi-ext.ts' \
-    "pi's state artifact must appear in the union with the task id substituted"
+    "pi's state artifact must appear in the union as the task id plus its suffix"
   pass "pi-signed shares pi's adapter, and pi's artifact stays outside the worktree"
 }
 
@@ -75,23 +75,32 @@ test_union_is_deduplicated_and_id_substituted() {
   union=$(fm_harness_state_artifacts_all task-42)
   assert_contains "$union" 'task-42.grok-turnend-token' "grok state artifact missing from the union"
   assert_contains "$union" 'task-42.kimi-turnend-token' "kimi state artifact missing from the union"
-  assert_not_contains "$union" '@ID@' "the @ID@ placeholder was not substituted"
   [ "$(printf '%s\n' "$union" | sort | uniq -d | wc -l)" -eq 0 ] \
     || fail "the state union contains duplicates"
   [ "$(fm_harness_worktree_artifacts_all | sort | uniq -d | wc -l)" -eq 0 ] \
     || fail "the worktree union contains duplicates"
 
   # The main teardown id is charset-guarded, but orca child ids come from
-  # basename and are not, so substitution must be byte-exact even for the
-  # characters replacement engines treat specially (& and \).
-  local nasty
-  nasty='child-&-\1\-x'
-  union=$(fm_harness_state_artifacts_all "$nasty")
-  assert_contains "$union" "$nasty.grok-turnend-token" \
-    "an id containing & or backslash must substitute byte-exactly"
-  assert_not_contains "$union" '@ID@' "the @ID@ placeholder survived a hostile id"
+  # basename and are not, so name derivation must stay byte-exact even for the
+  # bytes substitution engines treat specially (& \ " '): a hostile id must
+  # derive exactly as many names as a plain one, each the id itself followed
+  # by a non-empty suffix.
+  local nasty nasty_union rel
+  nasty='child-&-\1\-"-'\''-x'
+  nasty_union=$(fm_harness_state_artifacts_all "$nasty")
+  [ "$(printf '%s\n' "$nasty_union" | wc -l)" -eq "$(printf '%s\n' "$union" | wc -l)" ] \
+    || fail "a hostile id changed how many state artifact names derive"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    case "$rel" in
+      "$nasty"?*) : ;;
+      *) fail "state artifact '$rel' is not the hostile id plus a suffix" ;;
+    esac
+  done <<EOF
+$nasty_union
+EOF
 
-  pass "artifact unions are deduplicated and substitute the task id"
+  pass "artifact unions are deduplicated and derive names from the task id"
 }
 
 # --- the drift guard ---------------------------------------------------------
@@ -123,10 +132,10 @@ test_installed_artifacts_are_all_removed() {
     proj="$case_dir/proj"; wt="$case_dir/wt"; state="$case_dir/state"
     home="$case_dir/home"; grok_home="$case_dir/grok"; scratch="$case_dir/busy-baseline"
     # Grok and Kimi never arm the busy contract, so their ids can carry the
-    # bytes replacement engines treat specially (& and \); the removal below
+    # bytes substitution engines treat specially (& \ " '); the removal below
     # must still resolve their state tokens byte-exactly.
     case "$harness" in
-      grok|kimi) id='drift-&-\1-x' ;;
+      grok|kimi) id='drift-&-\1-"-'\''-x' ;;
       *) id="drift-$harness-x" ;;
     esac
     fm_git_worktree "$proj" "$wt" "fm/drift-$harness"

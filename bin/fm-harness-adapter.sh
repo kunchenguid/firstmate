@@ -186,9 +186,10 @@ fm_harness_source() {  # <name>
 #                                          These are what fm-spawn writes and
 #                                          adds to info/exclude, and what
 #                                          fm-teardown removes from the worktree.
-#   FM_HARNESS_<NAME>_STATE_ARTIFACTS      names RELATIVE to the state dir, with
-#                                          the literal token @ID@ standing for
-#                                          the task id.
+#   FM_HARNESS_<NAME>_STATE_ARTIFACT_SUFFIXES  per-task filename SUFFIXES; each
+#                                          state artifact is the task id
+#                                          followed by one suffix, RELATIVE to
+#                                          the state dir.
 #
 # Names are read indirectly so the union stays one loop rather than six arms.
 
@@ -218,22 +219,24 @@ fm_harness_worktree_artifacts_all() {
   done | awk 'NF && !seen[$0]++'
 }
 
-# fm_harness_state_artifacts_all: the same union for state-dir artifacts, with
-# @ID@ replaced by <id>. One name per line. The substitution is a QUOTED shell
-# parameter expansion because it must be byte-exact: fm_task_id_path_safe
-# guards the main teardown id, but cleanup_firstmate_home_children derives
-# child ids from basename with no charset guarantee, and an id carrying a
-# character a replacement engine treats specially (`&` or `\` in awk's gsub,
-# and in bash 5.2+ patsub_replacement unless the replacement is quoted) would
-# mangle the derived name and quietly skip the removal.
+# fm_harness_state_artifacts_all: the same union for state-dir artifacts:
+# every declared suffix appended to <id>, one name per line. Adapters declare
+# SUFFIXES rather than placeholder patterns because plain concatenation is the
+# only derivation that stays byte-exact for ANY id on every supported bash:
+# fm_task_id_path_safe guards the main teardown id, but
+# cleanup_firstmate_home_children derives child ids from basename with no
+# charset guarantee, and every substitution engine mishandles some byte -
+# awk's gsub treats `&` and `\` in the replacement specially, and a quoted
+# ${var//pat/repl} replacement keeps its literal quotes on bash <= 4.2
+# (stock macOS /bin/bash is 3.2).
 fm_harness_state_artifacts_all() {  # <id>
-  local id=$1 adapter name
+  local id=$1 adapter suffix
   for adapter in $FM_HARNESS_ADAPTERS; do
-    _fm_harness_adapter_var "$adapter" STATE_ARTIFACTS
+    _fm_harness_adapter_var "$adapter" STATE_ARTIFACT_SUFFIXES
     printf '\n'
-  done | while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    printf '%s\n' "${name//@ID@/"$id"}"
+  done | while IFS= read -r suffix; do
+    [ -n "$suffix" ] || continue
+    printf '%s%s\n' "$id" "$suffix"
   done | awk '!seen[$0]++'
 }
 
