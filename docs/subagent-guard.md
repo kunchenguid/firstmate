@@ -175,7 +175,7 @@ When that script is absent the message still defers to intake classification and
 
 ## Harness wiring
 
-Every supported primary harness was reviewed.
+The harnesses listed below were reviewed, except where a row explicitly records an open applicability check.
 Applicability turns on one question: does the harness expose built-in delegation tools that a primary session could use instead of `bin/fm-spawn.sh`?
 
 | Harness | Delegation surface | Status |
@@ -185,6 +185,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
+| Devin | not established | Not classified in this record; enumerate its primary tool surface before claiming that the delegation guard is applicable or unnecessary. |
 
 ### Codex, verified not applicable
 
@@ -240,6 +241,11 @@ Wiring an unvalidated matcher would trade a known gap for an unknown breakage.
 The bounded follow-up for each is identical to the Codex procedure above.
 On a host with the binary installed, ask the harness to enumerate its tools, then wire the matcher and re-run the live matrix below.
 `bin/fm-subagent-pretool-check.sh` needs no change for any of them: it already accepts Grok's stdin shape and the `--tool` CLI form OpenCode and Pi use, and it already emits the Grok stdout decision object by default.
+
+### Devin applicability
+
+This record does not contain an empirical enumeration of Devin's primary-session tools.
+Until that check is performed, no Devin delegation tool is classified as safe or blocked by this guard.
 
 ## Live validation record, 2026-07-22
 
