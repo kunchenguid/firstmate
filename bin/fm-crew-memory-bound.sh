@@ -53,7 +53,8 @@
 #
 # A bound launch runs as `... -- <LAUNCH_SHELL> -c <launch>`, and that shell only
 # replaces itself with the harness when <launch> is ONE SIMPLE COMMAND with no
-# redirections.  For anything else it forks, remains the pane's foreground
+# redirections and no leading keyword such as `time` or `!`.  For anything else it
+# forks, remains the pane's foreground
 # process-group leader, and tmux then reports `bash` as the pane command, which
 # fm_backend_tmux_agent_state reads as `dead` - so recovery would relaunch a
 # crewmate that is still working.  A launch that would land in that state is
@@ -189,20 +190,40 @@ read_bound() {
 # rejects a top-level (unquoted, unsubstituted) shell operator. Operators inside
 # quotes or inside $(...)/`...` belong to another command and do not make the
 # outer command non-simple.
+#
+# Operator characters are not the whole shape, because a pipeline modifier or a
+# compound-command keyword carries none of them and still forks: `time claude` and
+# `! claude` both leave the shell in place, and `coproc claude` detaches the
+# harness outright. Reserved words are recognized before expansion and only in
+# command position, so the scan also refuses when the FIRST word is one - and only
+# when that word is bare, since `'time' claude` and `FOO=1 time claude` both run
+# the time binary as an ordinary simple command.
 launch_shape_refusal() {
   print_error "launch command cannot be bound: $1, so $LAUNCH_SHELL would fork instead of becoming the harness and the pane would report a shell - which supervision reads as a dead crewmate"
 }
 
 require_execable_launch() {
-  local s=$1 n i ch nx stack='' top nl bs
+  local s=$1 n i ch nx stack='' top nl bs tab word='' word_done=0 word_bare=1
   nl='
 '
   bs=$'\\'
+  tab=$'\t'
   n=${#s}
   i=0
   while [ "$i" -lt "$n" ]; do
     ch=${s:$i:1}
     if [ -n "$stack" ]; then top=${stack: -1}; else top=''; fi
+    if [ "$word_done" -eq 0 ]; then
+      if [ -n "$top" ]; then
+        word_bare=0
+      else
+        case "$ch" in
+          ' ' | "$tab") [ -z "$word" ] || word_done=1 ;;
+          "$bs" | '"' | "'" | '`' | '$') word_bare=0 ;;
+          *) word="$word$ch" ;;
+        esac
+      fi
+    fi
     case "$top" in
       S)
         [ "$ch" != "'" ] || stack=${stack%?}
@@ -261,6 +282,15 @@ require_execable_launch() {
   if [ -n "$stack" ]; then
     launch_shape_refusal "its quoting or command substitution is unbalanced"
     return 1
+  fi
+  if [ "$word_bare" -eq 1 ]; then
+    case "$word" in
+      'time' | '!' | 'coproc' | 'function' | 'select' | 'if' | 'then' | 'elif' | 'else' | 'fi' \
+        | 'for' | 'while' | 'until' | 'do' | 'done' | 'case' | 'esac' | 'in' | '{' | '}' | '[[' | ']]')
+        launch_shape_refusal "it starts with the shell keyword '$word' rather than a command"
+        return 1
+        ;;
+    esac
   fi
   return 0
 }

@@ -174,6 +174,7 @@ Nothing is unprotected by that: the setting is inherited by secondmate homes, so
 
 A bound crewmate's harness is launched through a `bash -c` layer, which hands the pane's foreground process group to the harness only when the launch is a single simple command.
 Every built-in harness launch template is one, but the raw launch command escape hatch (`bin/fm-spawn.sh <id> <repo> "<launch>"`) is arbitrary shell text: while a bound is active, a raw launch containing a pipeline, a list (`&&`, `;`), a redirection, or a subshell is refused before anything is created, because such a pane would report a shell rather than the harness and supervision would read a live crewmate as dead.
+A leading shell keyword is refused for the same reason and is easy to miss because it carries none of those characters: `time <harness>` and `! <harness>` keep the shell in place, and `coproc <harness>` detaches it outright.
 Use `bin/fm-crew-memory-bound.sh check-launch '<launch>'` to check a raw launch against that rule.
 
 Use `bin/fm-crew-memory-bound.sh read` to validate and print the effective bound, or `bin/fm-crew-memory-bound.sh preflight` to prove this host can enforce it.

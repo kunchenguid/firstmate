@@ -90,6 +90,7 @@ The harness and every process it forks are inside, so every command a crewmate c
 A command typed directly into the pane shell after the harness has exited is not, and relaunching a harness there goes back through `bin/fm-spawn.sh` and is bounded again.
 
 The bounded launch line ends in `<shell> -c <launch>`, and that shell replaces itself with the harness only for a single simple command; for a pipeline, list, redirection, or subshell it forks and stays the pane's foreground process-group leader, which `fm_backend_tmux_agent_state` reads as `dead` while the crewmate is still working.
+A leading shell keyword does the same while carrying none of those characters, measured under the bound: `sleep 90` reports `sleep` as the pane command, while `time sleep 90` and `! sleep 90` both report `bash` and `coproc sleep 90` detaches the process outright.
 Every built-in launch template is a simple command, so the constraint binds only the raw-launch escape hatch, and a raw launch that would land in that state is refused before any window, worktree, or metadata exists rather than spawned.
 
 The bound applies to crewmates only, never to a secondmate agent itself: a secondmate is a persistent idle-by-default supervisor that compiles nothing, and killing its harness at a ceiling sized for build lanes would take down a whole home rather than one task.

@@ -198,13 +198,23 @@ for good in \
   'claude -p hi' \
   'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model opus "$(/x/op-input.sh encode launch-brief < /x/brief)"' \
   'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode --prompt "$(/x/op-input.sh encode launch-brief < /x/brief)"' \
-  'codex -c "notify=[\"bash\",\"-c\",\"touch /x/t\"]" "$(/x/op-input.sh encode launch-brief < /x/brief)"'; do
+  'codex -c "notify=[\"bash\",\"-c\",\"touch /x/t\"]" "$(/x/op-input.sh encode launch-brief < /x/brief)"' \
+  "'time' claude -p hi" \
+  'TIMEFORMAT=x claude -p hi' \
+  'timeout 5 claude -p hi' \
+  'coprocessor-cli --run claude'; do
   RC=0
   OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" "$BOUND" check-launch "$good" 2>&1) || RC=$?
   expect_code 0 "$RC" "a simple-command launch must remain bindable: $good"$'\n'"$OUT"
 done
 pass "the built-in launch shapes - env prefixes, quoted command substitution, redirection inside it - stay bindable"
 
+# A keyword prefix carries none of the operator characters above and still forks:
+# `time` and `!` are pipeline modifiers, `coproc` detaches the harness outright,
+# and a compound command is not a simple command at all. Reserved words are
+# recognized before expansion and only in command position, which is why the bare
+# forms below are refused while the quoted and post-assignment forms above stay
+# bindable.
 for bad in \
   'claude -p hi > /tmp/log' \
   'claude -p hi | tee /tmp/log' \
@@ -212,13 +222,26 @@ for bad in \
   'setup; claude -p hi' \
   '(claude -p hi)' \
   'claude -p hi &' \
-  'claude -p "unterminated'; do
+  'claude -p "unterminated' \
+  'time claude -p hi' \
+  '! claude -p hi' \
+  'coproc claude -p hi' \
+  'while claude -p hi' \
+  '{ claude -p hi' \
+  '  time claude -p hi'; do
   RC=0
   OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" "$BOUND" check-launch "$bad" 2>&1) || RC=$?
   expect_code 1 "$RC" "a launch bash would fork for must be refused: $bad"
   assert_contains "$OUT" "cannot be bound" "the refusal says the launch cannot be bound: $bad"
 done
-pass "pipelines, lists, redirections, subshells, and unbalanced quoting are refused rather than bound"
+pass "pipelines, lists, redirections, subshells, keyword prefixes, and unbalanced quoting are refused rather than bound"
+
+RC=0
+OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" FM_CREW_MEMORY_BOUND="8G" \
+  "$BOUND" wrap fm-x 'time claude -p hi' 2>&1) || RC=$?
+expect_code 1 "$RC" "wrap must refuse a keyword-prefixed launch too, not only check-launch"
+assert_not_contains "$OUT" "systemd-run" "no launch line is emitted for a keyword-prefixed launch"
+pass "a keyword prefix is refused at wrap as well, so the escape hatch closes at both layers"
 
 RC=0
 OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" FM_CREW_MEMORY_BOUND="8G" \
