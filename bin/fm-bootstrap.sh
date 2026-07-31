@@ -900,10 +900,26 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != 
   echo "BOOTSTRAP_INFO: crew harness override active: $crew"
 fi
 crew_dispatch_validate
-if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
-  && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
-  echo "BOOTSTRAP_INFO: tasks-axi available"
-fi
+backlog_backend=$(fm_backlog_backend_value "$CONFIG")
+case "$backlog_backend" in
+  beads)
+    if ! command -v task >/dev/null 2>&1; then
+      echo "MISSING: task CLI (beads store; install: $(install_cmd task))"
+    elif ! task list --limit 1 >/dev/null 2>&1; then
+      echo "MISSING: task store is unreachable or broken (beads backend configured, cannot run 'task list')"
+    elif [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+      echo "BOOTSTRAP_INFO: beads task store available"
+    fi
+    ;;
+  manual)
+    : # manual backend requires no validation
+    ;;
+  *)
+    if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && fm_tasks_axi_compatible; then
+      echo "BOOTSTRAP_INFO: tasks-axi available"
+    fi
+    ;;
+esac
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
