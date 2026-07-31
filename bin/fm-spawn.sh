@@ -620,8 +620,10 @@ effort_flag_for_harness() {
       ;;
     codex)
       # Verified 2026-08-01 on codex-cli 0.146.0: `codex debug models` reports
-      # low|medium|high|xhigh|max|ultra for the installed worker models. Keep
-      # ultra outside firstmate's shared effort axis until delegation is tested.
+      # effort support per model, with max on gpt-5.6-sol and gpt-5.6-terra. This
+      # stays model-agnostic because an unsupported pairing fails closed loudly
+      # (exit 1 on an HTTP 400 unsupported_value for reasoning.effort, no work
+      # done). Keep ultra outside the shared effort axis until delegation is tested.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
@@ -636,8 +638,8 @@ effort_flag_for_harness() {
       esac
       ;;
     pi|pi-signed)
-      # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
-      # its --thinking flag.
+      # Verified 2026-07-27 on Pi and pi-signed 0.82.0: both accept the full shared
+      # effort vocabulary, including max, through the --thinking flag.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
