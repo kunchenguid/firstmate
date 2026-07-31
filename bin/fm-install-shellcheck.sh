@@ -56,30 +56,34 @@ fm_shellcheck_sha256() {  # <file>
   fi
 }
 
+# The release asset and digest for one platform, as "<archive> <sha256>". The
+# archive name is built here and nowhere else, so --resolve reports exactly the
+# file the install path below downloads.
 fm_shellcheck_resolve() {  # <uname-s> <uname-m>
-  fm_shellcheck_asset "$1" "$2" || {
-    printf 'fm-install-shellcheck.sh: unsupported platform %s/%s; ShellCheck %s is published for darwin and linux on aarch64 and x86_64 only\n' \
+  local asset platform sha256
+  asset=$(fm_shellcheck_asset "$1" "$2") || {
+    printf 'fm-install-shellcheck.sh: unsupported platform %s/%s; this installer supports ShellCheck %s on darwin and linux for aarch64 and x86_64\n' \
       "$1" "$2" "$VERSION" >&2
     return 1
   }
+  read -r platform sha256 <<EOF
+$asset
+EOF
+  printf 'shellcheck-v%s.%s.tar.xz %s\n' "$VERSION" "$platform" "$sha256"
 }
 
 if [ "${1:-}" = "--resolve" ]; then
   # Separate assignment so set -eu aborts on an unsupported platform instead of
-  # reading an empty archive name and checksum.
+  # printing an empty archive name and checksum.
   RESOLVED=$(fm_shellcheck_resolve "${2:-$(uname -s)}" "${3:-$(uname -m)}")
-  read -r platform sha256 <<EOF
-$RESOLVED
-EOF
-  printf 'shellcheck-v%s.%s.tar.xz %s\n' "$VERSION" "$platform" "$sha256"
+  printf '%s\n' "$RESOLVED"
   exit 0
 fi
 
 RESOLVED=$(fm_shellcheck_resolve "$(uname -s)" "$(uname -m)")
-read -r PLATFORM SHA256 <<EOF
+read -r ARCHIVE SHA256 <<EOF
 $RESOLVED
 EOF
-ARCHIVE="shellcheck-v${VERSION}.${PLATFORM}.tar.xz"
 URL="https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/${ARCHIVE}"
 DESTINATION=${1:?usage: fm-install-shellcheck.sh <destination-directory>}
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-shellcheck.XXXXXX")

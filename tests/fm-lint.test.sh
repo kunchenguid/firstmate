@@ -58,7 +58,8 @@ test_installer_selects_a_verified_asset_per_platform() {
   # one global checksum constant made the installer unusable off Linux x86_64,
   # so a Mac contributor could not install the pin and the lint tests below
   # silently degraded to SKIP instead of checking what CI enforces.
-  local expected actual os arch platform sha
+  local expected actual os arch platform sha digests distinct
+  digests=
   # Digests confirmed against the upstream v0.11.0 release assets by direct
   # download, so this table is the executable owner of that pairing. Bumping the
   # pin must re-verify and update both this table and the installer's, which is
@@ -70,16 +71,19 @@ test_installer_selects_a_verified_asset_per_platform() {
       || fail "installer refused supported platform $os/$arch"
     [ "$actual" = "$expected" ] \
       || fail "installer resolved $os/$arch to '$actual', expected '$expected'"
-    # A digest must never be reused across platforms, which is what a single
-    # global constant would look like.
-    [ "$(printf '%s\n' "$actual" | awk '{print $2}')" = "$sha" ] \
-      || fail "installer did not carry $platform's own checksum"
+    digests="${digests:+$digests }$(printf '%s\n' "$actual" | awk '{print $2}')"
   done <<EOF
 Darwin arm64 darwin.aarch64 56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
 Darwin x86_64 darwin.x86_64 3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6
 Linux aarch64 linux.aarch64 12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
 Linux x86_64 linux.x86_64 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
 EOF
+  # Four supported platforms must resolve to four different digests. One global
+  # checksum constant - the original defect - collapses that count, and so does
+  # a table that pastes the same digest into several rows.
+  distinct=$(printf '%s\n' "$digests" | tr ' ' '\n' | sort -u | wc -l | tr -d '[:space:]')
+  [ "$distinct" -eq 4 ] \
+    || fail "expected four distinct platform checksums, resolved $distinct: $digests"
   pass "ShellCheck installer selects each supported platform's own verified asset"
 }
 
@@ -94,8 +98,8 @@ test_installer_resolves_the_ci_platform_unchanged() {
 }
 
 test_installer_refuses_an_unsupported_platform() {
-  # Refusing loudly is the point: a platform upstream does not publish must not
-  # silently download some other architecture's binary.
+  # Refusing loudly is the point: a platform this installer does not support
+  # must not silently download some other architecture's binary.
   local out rc combo
   for combo in "Linux riscv64" "Darwin ppc64" "FreeBSD x86_64" "Windows x86_64"; do
     rc=0
@@ -183,13 +187,25 @@ installer_sandbox_path() {  # <tmp>
 [ "\${1:-}" != "-m" ] || { printf '%s\n' "$(uname -m)"; exit 0; }
 printf '%s\n' "$(uname -s)"
 SH
+  # Pins the asset the installer actually asks for, so the archive name that
+  # reaches the network is covered rather than only the --resolve seam.
   cat > "$sandbox/curl" <<'SH'
 #!/usr/bin/env bash
+url=
+out=
 while [ "$#" -gt 0 ]; do
-  [ "$1" != "-o" ] || { : > "$2"; exit 0; }
-  shift
+  case "$1" in
+    -o) out=${2:-}; shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
 done
-exit 2
+[ "$url" = "$FM_TEST_EXPECTED_URL" ] || {
+  printf 'curl: requested %s, expected %s\n' "$url" "$FM_TEST_EXPECTED_URL" >&2
+  exit 22
+}
+[ -n "$out" ] || exit 2
+: > "$out"
 SH
   cat > "$sandbox/tar" <<'SH'
 #!/usr/bin/env bash
@@ -213,25 +229,36 @@ test_installer_never_skips_checksum_verification() {
   # The portable checksum tool must never become an excuse to skip the check.
   # Three cases: sha256sum absent but shasum present still verifies; a wrong
   # digest is refused; and no checksum tool at all refuses rather than installing.
-  local tmp sandbox host_sha out rc
+  local tmp sandbox resolved host_sha url out rc
   tmp=$(fm_test_tmproot fm-shellcheck-checksum)
   sandbox=$(installer_sandbox_path "$tmp")
-  host_sha=$(resolve_asset "$(uname -s)" "$(uname -m)" | awk '{print $2}')
+  resolved=$(resolve_asset "$(uname -s)" "$(uname -m)")
+  host_sha=$(printf '%s\n' "$resolved" | awk '{print $2}')
+  url="https://github.com/koalaman/shellcheck/releases/download/v$REQUIRED/$(printf '%s\n' "$resolved" | awk '{print $1}')"
 
+  # SHA-1 is shasum's default, so a fallback that forgot -a 256 would compare a
+  # SHA-1 digest against a SHA-256 pin. Refusing anything else keeps this test
+  # honest about which algorithm verified the download.
   cat > "$sandbox/shasum" <<'SH'
 #!/usr/bin/env bash
-printf '%s  -\n' "$FM_TEST_SHASUM_ANSWER"
+[ "${1:-}" = "-a" ] && [ "${2:-}" = "256" ] && [ -r "${3:-}" ] || {
+  printf 'shasum: expected "-a 256 <readable file>", got: %s\n' "$*" >&2
+  exit 2
+}
+printf '%s  %s\n' "$FM_TEST_SHASUM_ANSWER" "$3"
 SH
   chmod +x "$sandbox/shasum"
 
   rc=0
-  out=$(FM_TEST_VERSION="$REQUIRED" FM_TEST_SHASUM_ANSWER="$host_sha" \
+  out=$(FM_TEST_VERSION="$REQUIRED" FM_TEST_EXPECTED_URL="$url" \
+    FM_TEST_SHASUM_ANSWER="$host_sha" \
     PATH="$sandbox" "$INSTALLER" "$tmp/ok" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "installer did not fall back to shasum without sha256sum"$'\n'"$out"
   [ -x "$tmp/ok/shellcheck" ] || fail "shasum fallback did not install ShellCheck"
 
   rc=0
-  out=$(FM_TEST_VERSION="$REQUIRED" FM_TEST_SHASUM_ANSWER=deadbeef \
+  out=$(FM_TEST_VERSION="$REQUIRED" FM_TEST_EXPECTED_URL="$url" \
+    FM_TEST_SHASUM_ANSWER=deadbeef \
     PATH="$sandbox" "$INSTALLER" "$tmp/bad" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "installer accepted a mismatched checksum via shasum"$'\n'"$out"
   assert_contains "$out" "checksum mismatch" "installer did not report the mismatch"
@@ -239,7 +266,8 @@ SH
 
   rm -f "$sandbox/shasum"
   rc=0
-  out=$(FM_TEST_VERSION="$REQUIRED" PATH="$sandbox" "$INSTALLER" "$tmp/none" 2>&1) || rc=$?
+  out=$(FM_TEST_VERSION="$REQUIRED" FM_TEST_EXPECTED_URL="$url" \
+    PATH="$sandbox" "$INSTALLER" "$tmp/none" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "installer installed without any checksum tool"$'\n'"$out"
   assert_contains "$out" "no SHA-256 tool found" "installer did not name the missing checksum tool"
   [ ! -e "$tmp/none/shellcheck" ] || fail "installer installed an unverified binary"
