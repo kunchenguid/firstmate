@@ -121,6 +121,10 @@ if [ -n "$GROUP" ]; then
       exit 1
       ;;
   esac
+  if [ "$GROUP" = "$ID" ]; then
+    echo "error: --group=$GROUP must not equal the task id" >&2
+    exit 1
+  fi
 fi
 if [ -n "$GROUP" ] && [ "$KIND" = secondmate ]; then
   echo "error: --group does not apply to --secondmate charters" >&2
@@ -139,14 +143,19 @@ fi
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+if [ -e "$DATA/$ID/.fm-group" ]; then
+  echo "error: $DATA/$ID is already used as a --group folder for other tasks, refusing to scaffold a task with this id" >&2
+  exit 1
+fi
+if [ -n "$GROUP" ] && { [ -e "$DATA/$GROUP/brief.md" ] || [ -e "$DATA/$GROUP/report.md" ]; }; then
+  echo "error: $DATA/$GROUP is itself a task directory (has brief.md or report.md), refusing to use it as a --group folder" >&2
+  exit 1
+fi
 mkdir -p "$DATA/$ID"
 
 if [ -n "$GROUP" ]; then
-  if [ -e "$DATA/$GROUP/brief.md" ] || [ -e "$DATA/$GROUP/report.md" ]; then
-    echo "error: $DATA/$GROUP is itself a task directory (has brief.md or report.md), refusing to use it as a --group folder" >&2
-    exit 1
-  fi
   mkdir -p "$DATA/$GROUP"
+  : > "$DATA/$GROUP/.fm-group"
   GROUP_LINK="$DATA/$GROUP/$ID"
   if [ -L "$GROUP_LINK" ] && [ "$(readlink "$GROUP_LINK")" = "../$ID" ]; then
     : # already correct, idempotent
