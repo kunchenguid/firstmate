@@ -561,6 +561,75 @@ test_outward_delivery_stays_with_the_owning_home() {
   pass "a child home reports typed results but can never become the outward-post owner"
 }
 
+test_delivery_requires_registration_before_posting() {
+  local home log out
+  home=$(make_home missing-registration)
+  log="$home/curl.log"; : > "$log"
+  seed_commitment "$home" pf-missing req-missing x main work-missing
+  fm_write_meta "$home/state/work-missing.meta" \
+    "x_request=req-missing" "x_request_ts=1700000000" "x_followups=1"
+  emit_terminal "$home" "$home" pf-missing main work-missing >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  rm -f "$home/state/public-followup/registry/pf-missing"
+
+  FAKE_CURL_LOG="$log" expect_failure "delivery without a registration must refuse" \
+    run_pf "$home" deliver pf-missing
+  assert_contains "$EXPECT_OUT" "registration for 'pf-missing' is missing or invalid" \
+    "missing registration must be an actionable delivery refusal"
+  [ "$(followup_posts "$log")" -eq 0 ] || fail "missing registration must prevent any public post"
+  [ "$(task_state "$home" pf-missing)" != done ] \
+    || fail "missing registration must not close the obligation"
+  assert_grep 'x_request=req-missing' "$home/state/work-missing.meta" \
+    "missing registration must leave the legacy link for reconciliation"
+  pass "typed delivery refuses to post when its cleanup registration is missing"
+}
+
+test_secondmate_teardown_requires_parent_binding() {
+  local parent child
+  parent=$(make_home teardown-parent)
+  child=$(make_home teardown-child relay-off)
+  printf '%s\n' mate > "$child/.fm-secondmate-home"
+  seed_commitment "$parent" pf-teardown req-teardown x secondmate:mate work-child
+  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  fm_write_meta "$child/state/work-child.meta" \
+    "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+
+  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+    expect_failure "marked child teardown without a parent must refuse cleanup" \
+    "$TEARDOWN" work-child
+  assert_contains "$EXPECT_OUT" "cannot resolve the primary home for marked secondmate mate" \
+    "missing parent binding must be an actionable teardown refusal"
+  assert_present "$child/state/work-child.meta" \
+    "missing parent binding must preserve the child work metadata"
+
+  parent=$(make_home teardown-valid-parent)
+  child=$(make_home teardown-valid-child relay-off)
+  printf '%s\n' mate > "$child/.fm-secondmate-home"
+  printf -- '- mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
+    "$child" > "$parent/data/secondmates.md"
+  seed_commitment "$parent" pf-teardown-valid req-teardown-valid x secondmate:mate work-child
+  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  fm_write_meta "$child/state/work-child.meta" \
+    "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+
+  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+    FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
+    expect_failure "marked child teardown with a valid parent must enforce the parent commitment" \
+    "$TEARDOWN" work-child
+  assert_contains "$EXPECT_OUT" "still owes a public reply" \
+    "valid parent binding must route cleanup through the parent commitment"
+  case "$EXPECT_OUT" in
+    *"cannot resolve the primary home"*) fail "valid parent binding was reported as unresolved" ;;
+  esac
+  assert_present "$child/state/work-child.meta" \
+    "an owed parent commitment must preserve the child work metadata"
+  pass "marked secondmate teardown resolves its parent and fails closed when unavailable"
+}
+
 test_pending_rejects_malformed_listing() {
   local home out
   home=$(make_home pending-malformed)
@@ -831,6 +900,8 @@ test_late_receipt_closes_the_exact_attempt_without_reposting
 test_typed_terminal_clear_only_removes_legacy_link
 test_interrupted_delivery_refuses_to_repost
 test_outward_delivery_stays_with_the_owning_home
+test_delivery_requires_registration_before_posting
+test_secondmate_teardown_requires_parent_binding
 test_pending_rejects_malformed_listing
 test_private_context_survives_inbox_cleanup
 test_cleanup_refuses_while_a_public_reply_is_owed

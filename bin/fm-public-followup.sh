@@ -494,6 +494,24 @@ EOF
 
 # --- subcommand: deliver ----------------------------------------------------
 
+public_followup_registration_valid() {
+  local id=$1 file relation work_home work_id generation
+  file="$(fm_pf_registry_dir "$STATE")/$id"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  relation=$(fm_pf_registry_get "$STATE" "$id" relation_id)
+  work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
+  work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
+  generation=$(fm_pf_registry_get "$STATE" "$id" generation)
+  [ -n "$relation" ] && [ -n "$work_id" ] || return 1
+  case "$work_home" in
+    main) ;;
+    secondmate:*) [ -n "${work_home#secondmate:}" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  fm_pf_slug_valid "$work_id" || return 1
+  case "$generation" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 public_followup_secondmate_home() {
   local id=$1 meta home marker
   meta="$STATE/$id.meta"
@@ -513,8 +531,7 @@ public_followup_secondmate_home() {
 
 clear_public_followup_link() {
   local id=$1 work_home work_id home state
-  [ -f "$(fm_pf_registry_dir "$STATE")/$id" ] \
-    && [ ! -L "$(fm_pf_registry_dir "$STATE")/$id" ] || return 0
+  public_followup_registration_valid "$id" || return 1
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
   [ -n "$work_home" ] && [ -n "$work_id" ] || return 1
@@ -531,6 +548,40 @@ clear_public_followup_link() {
   esac
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$FM_ROOT" \
     "$FM_ROOT/bin/fm-x-followup.sh" --clear "$work_id" >/dev/null
+}
+
+public_followup_legacy_link_status() {
+  local payload=$1 relations work_home work_id home meta
+  if ! printf '%s' "$payload" | jq -e '
+    (.public_followup.work_relations | type == "array")
+    and all(.public_followup.work_relations[];
+      (.work_ref.home_id | type == "string")
+      and (.work_ref.task_id | type == "string")
+    )
+  ' >/dev/null 2>&1; then
+    return 2
+  fi
+  relations=$(printf '%s' "$payload" | jq -r '
+    .public_followup.work_relations[]
+    | [.work_ref.home_id, .work_ref.task_id]
+    | @tsv
+  ' 2>/dev/null) || return 2
+  [ -n "$relations" ] || return 2
+  while IFS=$'\t' read -r work_home work_id; do
+    [ -n "$work_home" ] && [ -n "$work_id" ] || return 2
+    case "$work_home" in
+      main) home=$FM_HOME ;;
+      secondmate:*) home=$(public_followup_secondmate_home "${work_home#secondmate:}") || return 2 ;;
+      *) return 2 ;;
+    esac
+    meta="$home/state/$work_id.meta"
+    [ -e "$meta" ] || continue
+    [ -f "$meta" ] && [ ! -L "$meta" ] || return 2
+    [ -n "$(fmx_meta_get "$meta" x_request)" ] && return 0
+  done <<EOF
+$relations
+EOF
+  return 1
 }
 
 record_error() {
@@ -580,7 +631,7 @@ cmd_deliver() {
     || die "this home has not opted into the myfirstmate relay, so it cannot post a public reply" 1
   require_tools
 
-  local payload delivery attempt request platform text tmp_text hash chunks rc receipt receipt_fields receipt_dry_run
+  local payload delivery attempt request platform text tmp_text hash chunks rc receipt receipt_fields receipt_dry_run link_status
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
   [ -n "$payload" ] || die "no public-followup obligation '$id' in this home's backlog" 1
 
@@ -592,14 +643,27 @@ cmd_deliver() {
 
   case "$delivery" in
     posted|waived)
-      if ! clear_public_followup_link "$id"; then
-        die "obligation '$id' is already $delivery, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+      if public_followup_registration_valid "$id"; then
+        if ! clear_public_followup_link "$id"; then
+          die "obligation '$id' is already $delivery, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+        fi
+      else
+        link_status=1
+        public_followup_legacy_link_status "$payload" || link_status=$?
+        case "$link_status" in
+          0) die "obligation '$id' is already $delivery, but its legacy X link cannot be cleared without a valid registration; reconcile it before any later terminal follow-up" 1 ;;
+          1) ;;
+          *) die "obligation '$id' is already $delivery, but its registration is missing or invalid and the legacy X link cannot be verified; reconcile it before any later terminal follow-up" 1 ;;
+        esac
       fi
       rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
       printf 'already delivered %s state=%s\n' "$id" "$delivery"
       return 0
       ;;
-    ready|retry-due|context-blocked|unknown|partial) ;;
+    ready|retry-due|context-blocked|unknown|partial)
+      public_followup_registration_valid "$id" \
+        || die "public-followup registration for '$id' is missing or invalid; reconcile it before delivery so any legacy X link can be cleared" 1
+      ;;
     delivery-posting)
       die "obligation '$id' is mid-delivery on attempt $attempt: a previous post was started and its outcome was never recorded. Confirm whether that post landed, then close it with 'record-posted $id --attempt $attempt --chunks <exact-count>' or reopen it for retry. Posting again here could duplicate the public reply." 1
       ;;
@@ -716,6 +780,8 @@ cmd_record_posted() {
   case "$chunks" in ''|*[!0-9]*) die "--chunks <n> is required and must be a positive integer" ;; esac
   [ "$chunks" -ge 1 ] 2>/dev/null || die "--chunks <n> is required and must be a positive integer"
   fm_pf_relay_active "$FM_HOME" || die "the relay is not active for this home" 1
+  public_followup_registration_valid "$id" \
+    || die "public-followup registration for '$id' is missing or invalid; reconcile it before recording a receipt so any legacy X link can be cleared" 1
   require_tools
 
   local payload request platform

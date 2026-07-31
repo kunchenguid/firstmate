@@ -147,16 +147,44 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
+PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
+public_followup_resolve_primary_home() {
+  local parent=$1 child=$2 id=$3 parent_meta registry lines line_count meta_home registry_home
+  case "$parent" in /*) ;; *) return 1 ;; esac
+  parent=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
+  child=$(CDPATH='' cd -- "$child" 2>/dev/null && pwd -P) || return 1
+  [ "$parent" != "$child" ] || return 1
+  parent_meta="$parent/state/$id.meta"
+  [ -f "$parent_meta" ] && [ ! -L "$parent_meta" ] || return 1
+  [ "$(fm_meta_get "$parent_meta" kind)" = secondmate ] || return 1
+  meta_home=$(fm_meta_get "$parent_meta" home)
+  meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || return 1
+  [ "$meta_home" = "$child" ] || return 1
+  registry="$parent/data/secondmates.md"
+  [ -f "$registry" ] && [ ! -L "$registry" ] || return 1
+  lines=$(grep -E "^- $id( |$)" "$registry" 2>/dev/null || true)
+  line_count=$(printf '%s\n' "$lines" | grep -c . || true)
+  [ "$line_count" -eq 1 ] || return 1
+  line=$(printf '%s\n' "$lines")
+  registry_home=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p')
+  registry_home=$(CDPATH='' cd -- "$registry_home" 2>/dev/null && pwd -P) || return 1
+  [ "$registry_home" = "$child" ] || return 1
+  printf '%s\n' "$parent"
+}
 if [ "$KIND" = secondmate ]; then
   PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$ID"
-elif [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ]; then
+elif [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; then
+  PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
   SECOND_MATE_ID=$(sed -n '1p' "$FM_HOME/$SUB_HOME_MARKER")
   if fm_pf_slug_valid "$SECOND_MATE_ID"; then
     PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$SECOND_MATE_ID"
-    if [ -n "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" ]; then
-      PUBLIC_FOLLOWUP_HOME=$(CDPATH='' cd -- "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME" 2>/dev/null && pwd -P) || PUBLIC_FOLLOWUP_HOME=
-      [ -n "$PUBLIC_FOLLOWUP_HOME" ] || PUBLIC_FOLLOWUP_STATE=
-      [ -z "$PUBLIC_FOLLOWUP_STATE" ] || PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
+    if PUBLIC_FOLLOWUP_HOME=$(public_followup_resolve_primary_home \
+        "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" "$FM_HOME" "$SECOND_MATE_ID"); then
+      PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
+      PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
+    else
+      PUBLIC_FOLLOWUP_HOME=
+      PUBLIC_FOLLOWUP_STATE=
     fi
   fi
 fi
@@ -1116,6 +1144,10 @@ fi
 # reconcilable. Refuse while this home still owes a public reply for exactly this
 # work. Both gates live in bin/fm-public-followup-lib.sh, so a home that never
 # opted into the myfirstmate relay runs one [ -f ] test and nothing else here.
+if [ "$FORCE" != "--force" ] && [ "$PUBLIC_FOLLOWUP_PARENT_UNRESOLVED" = 1 ]; then
+  echo "REFUSED: cannot resolve the primary home for marked secondmate $SECOND_MATE_ID; refusing cleanup without its durable parent binding." >&2
+  exit 1
+fi
 if [ "$FORCE" != "--force" ] \
   && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
   && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME" \
