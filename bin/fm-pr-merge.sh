@@ -18,10 +18,12 @@
 # or the local main/master branch when no remote default can be resolved),
 # so a pre-existing unrelated leftover pair elsewhere in the repo tree can
 # never refuse a merge it has nothing to do with; when no base can be
-# determined at all, the check falls back to scanning the whole ref, but
-# when a base is found and every changed path is root-level (no directory
-# component to scope to), the check is skipped rather than widened back to
-# the whole ref. A byte-identical before/after evidence image pair with no
+# determined at all, or a base is found but diffing against it fails (e.g.
+# unrelated history with no merge base), the check falls back to scanning
+# the whole ref, but when a base is found, the diff succeeds, and every
+# changed path is root-level (no directory component to scope to), the
+# check is skipped rather than widened back to the whole ref. A
+# byte-identical before/after evidence image pair with no
 # opt-out marker refuses the merge. bin/fm-evidence-check.sh's own header
 # comment owns the pairing convention and opt-out mechanism. If the task's
 # recorded worktree is missing or not a git repository, no ref can be
