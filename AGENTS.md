@@ -53,7 +53,7 @@ Each secondmate has a persistent isolated `FM_HOME`, including its own state, ba
 
 Tracked files hold shared instructions and tooling; `data/` holds durable private fleet records; `state/` holds volatile runtime records and append-only status events; `config/` holds local operating choices; and `projects/` contains clones that are read-only to firstmate except under hard rule 1's concrete captain-approved project operation exception.
 
-The full per-file layout catalog - every `config/` knob and every generated `state/` artifact - lives in `docs/configuration.md` "Operational home layout and state".
+The detailed per-file layout catalog lives in `docs/configuration.md` "Operational home layout and state".
 The entries below are the ones whose semantics matter every session.
 
 ```

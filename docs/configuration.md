@@ -17,7 +17,7 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and X-specific state mechanics' exact child fields and mutation contracts remain with their named scripts and reference sections.
-The full per-file layout catalog:
+The per-file layout catalog:
 
 ```
 AGENTS.md            shared orchestrator behavior contract (CLAUDE.md is a symlink to it)
