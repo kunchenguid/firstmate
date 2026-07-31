@@ -31,6 +31,17 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Task lifecycle notification hook (config/notification-hook)
+
+Firstmate can send optional transport-neutral `task.ready` and `task.completed` events to one local executable without depending on an HTTP client or notification service.
+To enable it, write the executable's absolute path as the only line of the effective home's gitignored `config/notification-hook` file.
+The executable receives one bounded `firstmate.notification.v1` JSON object on standard input and no arguments, so it can forward the event to any locally chosen service.
+Firstmate never evaluates this configuration as shell syntax, and relative paths, command strings, directories, and non-executable files are ignored with a bounded local diagnostic.
+An absent file disables the feature silently, while hook failures and timeouts leave task, merge, cleanup, backlog, and command exit status unchanged.
+Failure diagnostics are recorded without hook output, configured paths, prompts, or environment values in the gitignored `state/notification-hook.log` file.
+The exact payload fields, bounds, timeout, diagnostics retention, and executable invocation mechanics are owned by [`bin/fm-notify.sh`](../bin/fm-notify.sh)'s header and `--help` output.
+The hook is local to each Firstmate home and is not inherited into secondmate homes.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -441,6 +452,7 @@ FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in C
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_NOTIFICATION_TIMEOUT_SECS=5   # seconds allowed for the optional config/notification-hook executable; positive integers only, capped at 60
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env

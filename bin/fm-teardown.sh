@@ -1345,6 +1345,13 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# Successful non-forced teardown is the single task.completed owner across
+# local-only, direct-PR, no-mistakes, and scout paths. All landing/report and
+# cleanup checks have succeeded here, while task metadata still exists for the
+# notifier's bounded privacy-safe payload.
+if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+  "$SCRIPT_DIR/fm-notify.sh" completed "$ID" || true
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token"

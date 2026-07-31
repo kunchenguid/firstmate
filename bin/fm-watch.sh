@@ -454,6 +454,23 @@ scan_signals() {
   return 0
 }
 
+# The watcher is the single task.ready emission owner because every supported
+# harness and runtime backend converges on the same append-only status signal.
+# The notifier itself applies the delivery-mode boundary and is always fail-open.
+notify_ready_signals() {  # <pending scan rows>
+  local pending=$1 sf sig f id seen=$'\n'
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    case "$f" in "$STATE"/*.status) ;; *) continue ;; esac
+    case "$seen" in *$'\n'"$f"$'\n'*) continue ;; esac
+    seen="$seen$f"$'\n'
+    id=$(basename "$f" .status)
+    "$SCRIPT_DIR/fm-notify.sh" status "$id" || true
+  done <<EOF
+$pending
+EOF
+}
+
 run_check_process() {
   local c=$1
   shift
@@ -812,6 +829,7 @@ while :; do
 $pending
 EOF
     reason="signal:$files"
+    notify_ready_signals "$pending"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;

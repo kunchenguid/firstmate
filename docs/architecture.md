@@ -158,6 +158,16 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
 
+## Optional task lifecycle notifications
+
+The optional notification hook is an informational observer and never participates in task, merge, cleanup, or backlog truth.
+`bin/fm-watch.sh` is the single `task.ready` emission owner because all supported worker tools and runtime providers converge on the same append-only status-event path.
+The watcher delegates mode-specific readiness recognition to `bin/fm-notify.sh`, so local-only branch readiness, direct-PR readiness, green no-mistakes PR readiness, and scout report readiness share one bounded payload contract without treating the no-mistakes pre-validation handoff as delivery-ready.
+`bin/fm-teardown.sh` is the single `task.completed` emission owner for local-only, direct-PR, no-mistakes, and scout work after the existing landing or report proof and non-forced cleanup have succeeded.
+Keeping completion at that common owner also covers a PR merged outside `fm-pr-merge.sh` and prevents explicit discard from being reported as completion.
+The stable event identity is derived only from the schema, bounded project name, task id, kind, and event, so retries, restarts, worker-tool changes, and runtime-provider changes retain the same semantic identity.
+[`configuration.md`](configuration.md#task-lifecycle-notification-hook-confignotification-hook) owns operator setup, while `bin/fm-notify.sh` owns the executable interface and exact data mechanics.
+
 ## Dispatch profiles
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.

@@ -493,9 +493,80 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_NOTIFY_CAPTURE="${FM_NOTIFY_CAPTURE:-$case_dir/capture}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+configure_notification_hook() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/notification-hook" <<'SH'
+#!/usr/bin/env bash
+IFS= read -r payload || exit 1
+printf '%s\n' "$payload" >> "${FM_NOTIFY_CAPTURE:?}"
+SH
+  chmod +x "$case_dir/notification-hook"
+  printf '%s\n' "$case_dir/notification-hook" > "$case_dir/config/notification-hook"
+  : > "$case_dir/capture"
+}
+
+add_decision_verify_tasks_axi() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' '0.2.2'; exit 0 ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update --archive-body'; exit 0 ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path>'; exit 0 ;;
+  "hold --help") printf '%s\n' 'usage: tasks-axi hold <id> --kind captain'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+test_completed_notification_uses_successful_teardown_for_all_delivery_paths() {
+  local spec mode kind case_dir count event outcome payload force_case
+  for spec in local-only:ship direct-PR:ship no-mistakes:ship no-mistakes:scout; do
+    mode=${spec%%:*}
+    kind=${spec#*:}
+    case_dir=$(make_case "notify-${mode}-${kind}")
+    write_meta "$case_dir" "$mode" "$kind"
+    configure_notification_hook "$case_dir"
+    if [ "$kind" = scout ]; then
+      mkdir -p "$case_dir/data/task-x1"
+      printf '%s\n' '# Report' > "$case_dir/data/task-x1/report.md"
+      printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+      add_decision_verify_tasks_axi "$case_dir"
+    else
+      wt_commit "$case_dir" "landed $mode work"
+      if [ "$mode" = local-only ]; then
+        git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+      else
+        add_fork_with_pushed_branch "$case_dir"
+      fi
+    fi
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+      || fail "notification teardown failed for $mode/$kind"
+    count=$(awk 'END { print NR + 0 }' "$case_dir/capture")
+    [ "$count" -eq 1 ] || fail "teardown emitted $count completion notifications for $mode/$kind"
+    payload=$(tail -1 "$case_dir/capture")
+    event=$(printf '%s\n' "$payload" | jq -r '.event')
+    outcome=$(printf '%s\n' "$payload" | jq -r '.outcome')
+    [ "$event/$outcome" = task.completed/completed ] \
+      || fail "teardown emitted the wrong completion payload for $mode/$kind"
+  done
+
+  force_case=$(make_case notify-force-discard)
+  write_meta "$force_case" local-only ship
+  configure_notification_hook "$force_case"
+  wt_commit "$force_case" "discarded work"
+  run_teardown "$force_case" --force > "$force_case/stdout" 2> "$force_case/stderr" \
+    || fail "forced discard fixture failed"
+  [ ! -s "$force_case/capture" ] || fail "forced discard emitted task.completed"
+  pass "successful teardown solely emits completion for every delivery path and never for forced discard"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1399,6 +1470,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
 }
 
 test_local_only_fork_remote_allows
+test_completed_notification_uses_successful_teardown_for_all_delivery_paths
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses

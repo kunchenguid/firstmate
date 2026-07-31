@@ -6,6 +6,33 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Task lifecycle notification neutrality
+
+The transport-neutral task lifecycle notification contract was verified on 2026-08-01 with GNU Bash 5.2.21, Git 2.43.0, and jq 1.7 on Linux x86_64.
+The executable-interface matrix covers absent and configured hooks, failure and timeout behavior, malformed path refusal, payload bounds, readiness and completion semantics for every delivery mode and scouts, stable retry identity, and watcher ownership.
+The same matrix varies task metadata across Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi plus tmux, Herdr, Zellij, Orca, and cmux, and requires the event identity to remain unchanged.
+This is applicable to every worker tool and runtime provider because readiness is consumed only after their common status-file convergence and completion is emitted only from their common cleanup path.
+No tool-specific hook or runtime-provider adapter participates in payload construction or execution.
+
+```sh
+tests/fm-notify.test.sh
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all tests/fm-teardown.test.sh | grep -F 'successful teardown solely emits completion'
+```
+
+Observed bounded output:
+
+```text
+ok - an absent notification hook is silent and non-fatal
+ok - a configured hook receives bounded privacy-safe JSON on standard input
+ok - hook failures and timeouts stay non-fatal with privacy-safe diagnostics
+ok - relative paths, command strings, directories, and non-executables are never evaluated
+ok - ready emission matches local-only, direct-PR, no-mistakes, and scout delivery boundaries
+ok - retries and every supported harness/runtime backend preserve one event identity
+ok - completed emission supports local-only, direct-PR, no-mistakes, and scout tasks
+ok - the backend-neutral watcher owns task.ready emission from status events
+ok - successful teardown solely emits completion for every delivery path and never for forced discard
+```
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
