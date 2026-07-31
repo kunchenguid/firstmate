@@ -42,9 +42,13 @@ Because bootstrap requires `tasks-axi` on `PATH` on every profile, that delegati
 Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer, `tasks-axi update --help` exposes `--archive-body`, and `tasks-axi mv --help` exposes `[<id>...]` for the atomic multi-ID move introduced in 0.2.2 and required by handoff delegation.
 That sentence is the single owner of the tasks-axi compatibility definition; every other document points here instead of restating the version gates.
 Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" below for missing-tool reporting and silent default-backend behavior.
+Set the local, gitignored `config/backlog-backend` file to `beads` to use the beads federated `task` store as the queue source; session-start's digest will list items with `status:ready` label from the beads store instead of `data/backlog.md`.
+Beads requires the `task` CLI on `PATH` and access to the active beads store.
+Bootstrap validates the beads backend and reports a `MISSING:` line if the CLI is absent or the store is unreachable.
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not missing-tool reporting.
 Absent or `tasks-axi` selects the default tasks-axi backend.
-The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
+The file format is unchanged in tasks-axi and manual modes; both produce the same `## In flight`, `## Queued`, and `## Done` sections in `data/backlog.md`.
+The beads backend does not use `data/backlog.md`; all backlog state lives in the beads store and is queried dynamically at session start.
 
 ## Runtime backend (config/backend / FM_BACKEND)
 

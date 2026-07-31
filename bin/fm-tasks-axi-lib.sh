@@ -72,5 +72,13 @@ fm_backlog_backend_manual() {
 fm_tasks_axi_backend_available() {
   local config_dir=$1
   fm_backlog_backend_manual "$config_dir" && return 1
+  [ "$(fm_backlog_backend_value "$config_dir")" = beads ] && return 1
   fm_tasks_axi_compatible
+}
+
+fm_beads_backend_available() {
+  local config_dir=$1
+  [ "$(fm_backlog_backend_value "$config_dir")" = beads ] || return 1
+  command -v task >/dev/null 2>&1 || return 1
+  task list --limit 1 >/dev/null 2>&1
 }
