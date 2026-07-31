@@ -7,11 +7,12 @@
 # spawn on codex too, primary config/backlog-backend=manual makes that home
 # hand-edit backlog files too, primary config/backend pins that home's local
 # runtime-backend default for future spawns, primary config/startup-memory-budget
-# bounds that home's startup-memory curation, and primary
+# bounds that home's startup-memory curation, primary
 # config/herdr-presentation-spaces enables the same default-off Herdr presentation
-# projection). It also pushes the one primary-authoritative shared
-# captain-preference file, data/captain-shared.md, into each secondmate home's
-# data/ as a read-only copy.
+# projection, and primary config/crew-memory-bound gives that home's own
+# crewmates the same enforced build-memory ceiling). It also pushes the one
+# primary-authoritative shared captain-preference file, data/captain-shared.md,
+# into each secondmate home's data/ as a read-only copy.
 #
 # Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
 #
@@ -46,7 +47,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget crew-memory-bound}"
 
 fm_inherit_file_mode() {
   if [ "$(uname)" = Darwin ]; then

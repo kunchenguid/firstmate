@@ -256,6 +256,29 @@ fi
 if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
+# Crew memory bound (bin/fm-crew-memory-bound.sh owns the mechanics). Proven
+# here, before any window, worktree, or metadata exists, so a home that
+# configured a bound the host cannot actually enforce refuses to spawn instead
+# of launching a crewmate whose builds would run unbounded. Exit 3 is the
+# "no bound configured" path and leaves this spawn exactly as it was.
+CREW_MEMORY_BOUND=0
+CREW_MEMORY_MAX=
+CREW_MEMORY_HIGH=
+crew_memory_preflight_rc=0
+crew_memory_preflight_out=$("$SCRIPT_DIR/fm-crew-memory-bound.sh" preflight) || crew_memory_preflight_rc=$?
+case "$crew_memory_preflight_rc" in
+  0)
+    CREW_MEMORY_BOUND=1
+    CREW_MEMORY_MAX=$(printf '%s\n' "$crew_memory_preflight_out" | sed -n 's/^max=//p')
+    CREW_MEMORY_HIGH=$(printf '%s\n' "$crew_memory_preflight_out" | sed -n 's/^high=//p')
+    ;;
+  3) ;;
+  *)
+    echo "error: config/crew-memory-bound is set but its memory bound could not be established; refusing to spawn a crewmate whose builds would be unbounded" >&2
+    exit 1
+    ;;
+esac
+
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -1641,6 +1664,13 @@ META_WINDOW=$T
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
   fi
+  # Recorded only when a bound is configured, so an unbounded home's meta stays
+  # byte-identical. Supervision reads it to explain a build that died of SIGKILL
+  # mid-compile as this bound doing its job rather than an unexplained crash.
+  if [ "$CREW_MEMORY_BOUND" -eq 1 ]; then
+    echo "crew_memory_max=$CREW_MEMORY_MAX"
+    [ -z "$CREW_MEMORY_HIGH" ] || echo "crew_memory_high=$CREW_MEMORY_HIGH"
+  fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -1678,6 +1708,19 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home $LAUNCH"
+fi
+# Bind the harness and every process it will ever fork into one memory-bounded
+# scope. This wraps the launch rather than any build command on purpose: the
+# crewmate composes its own compiler invocations later, and a wrapper around one
+# named command would be escaped by the next one it types. preflight already
+# proved the mechanism above, and systemd-run itself refuses rather than falling
+# back, so there is no path from here to an unbounded harness.
+if [ "$CREW_MEMORY_BOUND" -eq 1 ]; then
+  BOUNDED_LAUNCH=$("$SCRIPT_DIR/fm-crew-memory-bound.sh" wrap "$ID" "$LAUNCH") || {
+    echo "error: could not bind $ID to its configured memory bound; refusing to launch it unbounded" >&2
+    exit 1
+  }
+  LAUNCH=$BOUNDED_LAUNCH
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so

@@ -151,6 +151,28 @@ An inherited `data/captain-shared.md` counts in a secondmate's total but remains
 The internal `/stow` skill curates only the editable local files in that case and reports the primary-owned shared file as a concrete exception if it alone exceeds the budget.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
+## Crewmate memory bound (config/crew-memory-bound)
+
+`config/crew-memory-bound` gives every newly spawned crewmate an enforced memory ceiling covering its whole pane process tree.
+It exists because a crewmate pane is a plain shell that the crewmate composes its own build commands inside: wrapping one named command would be escaped by the next command it types, so the bound is attached to the launched harness and inherited by every process that harness ever forks.
+Without this file a crewmate's compilers run under whatever the host allows, which on a single-user machine means the global out-of-memory killer is the only ceiling.
+
+The file holds exactly one line, `<MemoryMax> [<MemoryHigh>]`, where each token is a positive integer with an optional `K`, `M`, `G`, or `T` suffix and `MemoryHigh`, when given, does not exceed `MemoryMax`.
+`MemoryHigh` is the soft ceiling at which the kernel starts reclaiming and throttling, so a build that spikes briefly slows down instead of dying; `MemoryMax` is the hard ceiling at which the offending process is killed.
+Swap is denied inside the bound unconditionally, because a runaway build left with swap would page the host into thrashing rather than dying, which is the failure this setting prevents.
+The kernel kills the single largest member of the bound - in practice the runaway compiler - rather than the whole crewmate, so the agent survives to report the failed build.
+A build killed this way fails with `SIGKILL` (exit 137), and the task's local record carries `crew_memory_max=` so that death reads as this bound doing its job rather than an unexplained crash.
+
+The setting fails closed.
+When the file is present but the bound cannot actually be established - no `systemd-run`, no reachable user manager, no delegated memory controller - `bin/fm-spawn.sh` refuses to spawn rather than launching a crewmate whose builds would be unbounded.
+Enforcement is proven at every spawn rather than assumed: a throwaway scope is created and its limits are read back from the live cgroup before any window exists.
+An absent file leaves spawning exactly as it was, so a host without a systemd user manager is unaffected until it opts in.
+The setting is inherited by secondmate homes, so a secondmate's own crewmates are bound by the same ceiling.
+
+Use `bin/fm-crew-memory-bound.sh read` to validate and print the effective bound, or `bin/fm-crew-memory-bound.sh preflight` to prove this host can enforce it.
+That script's header owns the exact exit-code contract, scope flags, and wrapping mechanics.
+`docs/verification/crew-memory-bound.md` records the measured evidence behind these guarantees.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -300,7 +322,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `crew-memory-bound`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
