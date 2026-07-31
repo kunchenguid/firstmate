@@ -34,11 +34,11 @@
 # stays committed locally. The day that repository stops being private, pushes
 # stop and say why.
 #
-# LAYOUT: <evidence-repo>/<home-tag>/<task-id>/. The home tag comes from
-# fm-backend-hometag-lib.sh, so concurrent tasks in different homes - two
-# secondmates, or two independent installations that both use task id "fix-auth"
-# - never collide. The path is derivable from the task alone; `path` prints it,
-# and there is deliberately no registry to consult.
+# LAYOUT: <evidence-repo>/<home-tag>/<task-id>/. The home tag identifies the
+# firstmate home, so concurrent tasks in different homes - two secondmates, or
+# two homes that both use the task id "fix-auth" - never collide. The path is
+# derivable from the task alone; `path` prints it, and there is deliberately no
+# registry to consult.
 #
 # SIZE POLICY: an artifact at or below FM_EVIDENCE_MAX_DIRECT_BYTES is committed
 # whole. Anything larger is recorded in the manifest by size and SHA-256 only,
@@ -60,9 +60,29 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-# shellcheck source=bin/fm-backend-hometag-lib.sh
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
+FM_EVIDENCE_SECONDMATE_MARKER=".fm-secondmate-home"
+
+# The home segment of the layout. This deliberately keys on FM_HOME rather than
+# reusing fm-backend-hometag-lib.sh, which hashes FM_ROOT: that library
+# discriminates INSTALLATIONS sharing one backend namespace, but FM_HOME exists
+# precisely so several homes can share one tracked code root, and those homes
+# must not write into each other's evidence path. The readable prefix follows
+# the same convention so a path is recognizable on sight.
+evidence_home_tag() {
+  local marker="$FM_HOME/$FM_EVIDENCE_SECONDMATE_MARKER" id prefix home hash
+  prefix=firstmate
+  if [ -f "$marker" ]; then
+    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
+    [ -n "$id" ] && prefix="2ndmate-$id"
+  fi
+  home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home=$FM_HOME
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$home" | shasum -a 256 | awk '{print substr($1,1,8)}')
+  else
+    hash=$(printf '%s' "$home" | sha256sum | awk '{print substr($1,1,8)}')
+  fi
+  printf '%s-%s\n' "$prefix" "$hash"
+}
 
 # The size boundary between a committed artifact and a manifest-only record, as
 # a named constant rather than a judgement made at each call site. 64 MiB keeps
@@ -74,6 +94,9 @@ FM_EVIDENCE_MAX_DIRECT_BYTES_DEFAULT=67108864
 FM_EVIDENCE_MANIFEST="EVIDENCE-MANIFEST.txt"
 
 CUSTODY_FAILED=2
+# Reserved internal return meaning "this home has not opted in", kept distinct
+# from every real failure so the two can never be confused.
+NOT_CONFIGURED=3
 
 usage() {
   awk '
@@ -102,21 +125,35 @@ read_config() {  # <name>
   printf '%s\n' "$value"
 }
 
-# The configured destination, or a non-zero return when this home has not opted
-# in. A configured-but-unusable destination is a loud error, never a silent
-# fallback to disabled: that would discard evidence exactly when the operator
-# believed it was being kept.
+# The configured destination.
+#
+# Callers read this through a command substitution, which runs it in a subshell,
+# so it must REPORT rather than exit: an `exit` here would only leave the
+# subshell and the caller would read the failure as "not configured". That
+# distinction is the whole safety property - a configured-but-unusable
+# destination has to be a loud error, never a silent fallback to disabled, which
+# would discard evidence exactly when the operator believed it was being kept.
+# Hence two separate non-zero returns, and diagnostics on stderr.
 resolve_evidence_repo() {
   local configured resolved
-  configured=$(read_config evidence-repo) || return 1
+  configured=$(read_config evidence-repo) || return "$NOT_CONFIGURED"
   case "$configured" in
     /*) : ;;
-    *) fail 1 "config/evidence-repo must be an absolute path, got: $configured" ;;
+    *) printf 'fm-evidence: config/evidence-repo must be an absolute path, got: %s\n' "$configured" >&2
+       return 1 ;;
   esac
-  [ -d "$configured" ] || fail 1 "config/evidence-repo names no directory: $configured"
-  resolved=$(cd "$configured" && pwd -P) || fail 1 "cannot resolve config/evidence-repo: $configured"
-  git -C "$resolved" rev-parse --show-toplevel >/dev/null 2>&1 \
-    || fail 1 "config/evidence-repo is not a git repository: $resolved"
+  if [ ! -d "$configured" ]; then
+    printf 'fm-evidence: config/evidence-repo names no directory: %s\n' "$configured" >&2
+    return 1
+  fi
+  if ! resolved=$(cd "$configured" && pwd -P); then
+    printf 'fm-evidence: cannot resolve config/evidence-repo: %s\n' "$configured" >&2
+    return 1
+  fi
+  if ! git -C "$resolved" rev-parse --show-toplevel >/dev/null 2>&1; then
+    printf 'fm-evidence: config/evidence-repo is not a git repository: %s\n' "$resolved" >&2
+    return 1
+  fi
   printf '%s\n' "$resolved"
 }
 
@@ -151,11 +188,24 @@ file_sha256() {  # <path>
 
 # owner/name from the destination clone's remote, for the visibility check.
 # Handles the ssh://, scp-like, and https:// forms, including the host alias
-# form (github.com-personal) a multi-account setup requires.
-remote_owner_name() {  # <repo>
-  local repo=$1 remote url path
+# form (github.com-personal) that a multi-account setup requires and that must
+# survive verbatim, since rewriting it to a plain host breaks the identity the
+# clone authenticates with.
+# The last two path segments are the owner and name. A host path that is deeper
+# than that (a nested group on another forge) simply yields a slug the GitHub
+# lookup will not resolve, which skips the push rather than guessing.
+# The remote this destination publishes to: origin when present, otherwise the
+# only one configured. Whatever URL it carries is used verbatim, never rewritten.
+evidence_remote() {  # <repo>
+  local repo=$1 remote
   remote=$(git -C "$repo" remote 2>/dev/null | grep -Fx origin || git -C "$repo" remote 2>/dev/null | head -1)
   [ -n "$remote" ] || return 1
+  printf '%s\n' "$remote"
+}
+
+remote_owner_name() {  # <repo>
+  local repo=$1 remote url path owner name
+  remote=$(evidence_remote "$repo") || return 1
   url=$(git -C "$repo" remote get-url "$remote" 2>/dev/null) || return 1
   case "$url" in
     *://*) path=${url#*://}; path=${path#*@}; path=${path#*/} ;;
@@ -163,11 +213,16 @@ remote_owner_name() {  # <repo>
     *) return 1 ;;
   esac
   path=${path%.git}
+  path=${path%/}
   case "$path" in
-    */*/*|'') return 1 ;;
-    */*) printf '%s\n' "$path" ;;
+    */*) : ;;
     *) return 1 ;;
   esac
+  name=${path##*/}
+  owner=${path%/*}
+  owner=${owner##*/}
+  [ -n "$owner" ] && [ -n "$name" ] || return 1
+  printf '%s/%s\n' "$owner" "$name"
 }
 
 # Prints "private", "public", or returns non-zero when visibility cannot be
@@ -185,7 +240,7 @@ remote_visibility() {  # <repo>
 }
 
 destination_path() {  # <repo> <task-id>
-  printf '%s/%s/%s\n' "$1" "$(fm_backend_hometag)" "$2"
+  printf '%s/%s/%s\n' "$1" "$(evidence_home_tag)" "$2"
 }
 
 validate_task_id() {  # <task-id>
@@ -204,7 +259,7 @@ copy_artifacts() {  # <source> <dest> <task-id> <limit>
   {
     printf '# firstmate evidence manifest\n'
     printf '# task: %s\n' "$id"
-    printf '# home: %s\n' "$(fm_backend_hometag)"
+    printf '# home: %s\n' "$(evidence_home_tag)"
     printf '# direct-commit limit: %s bytes\n' "$limit"
     printf '# columns: disposition sha256 bytes path\n'
   } > "$manifest"
@@ -232,22 +287,32 @@ EOF
 }
 
 cmd_path() {  # <task-id>
-  local id=$1 repo
+  local id=$1 repo rc=0
   validate_task_id "$id"
-  repo=$(resolve_evidence_repo) || fail 1 "no config/evidence-repo in $CONFIG; this home has not opted in"
+  repo=$(resolve_evidence_repo) || rc=$?
+  case "$rc" in
+    0) : ;;
+    "$NOT_CONFIGURED") fail 1 "no config/evidence-repo in $CONFIG; this home has not opted in" ;;
+    *) exit 1 ;;
+  esac
   destination_path "$repo" "$id"
 }
 
 cmd_preserve() {  # <task-id>
-  local id=$1 repo source dest limit count visibility
+  local id=$1 repo source dest limit count visibility rc=0
 
   validate_task_id "$id"
 
-  if ! repo=$(resolve_evidence_repo); then
+  repo=$(resolve_evidence_repo) || rc=$?
+  case "$rc" in
+    0) : ;;
     # Not opted in. Silence is the contract: teardown must behave exactly as it
     # does in a home that has never heard of this feature.
-    return 0
-  fi
+    "$NOT_CONFIGURED") return 0 ;;
+    # Configured but unusable, already explained on stderr. This must stay a
+    # failure so teardown refuses rather than destroying the source.
+    *) exit 1 ;;
+  esac
 
   source="$DATA/$id"
   if [ ! -d "$source" ] || [ -z "$(find "$source" -type f 2>/dev/null | head -1)" ]; then
@@ -267,7 +332,7 @@ cmd_preserve() {  # <task-id>
 
   if git -C "$repo" diff --cached --quiet -- "$dest"; then
     note "evidence for $id already current in $repo"
-  elif git -C "$repo" commit -q -m "evidence($(fm_backend_hometag)/$id): preserve $count artifact(s)" -- "$dest"; then
+  elif git -C "$repo" commit -q -m "evidence($(evidence_home_tag)/$id): preserve $count artifact(s)" -- "$dest"; then
     note "committed $count artifact(s) for $id in $repo"
   else
     fail "$CUSTODY_FAILED" "cannot commit evidence for $id in $repo"
@@ -283,7 +348,9 @@ cmd_preserve() {  # <task-id>
     note "REFUSED to push evidence for $id: $repo is $visibility, and unredacted evidence may only be published to a private repository"
     return 0
   fi
-  if git -C "$repo" push --quiet 2>/dev/null; then
+  # Named remote and explicit ref, so this does not depend on the clone having
+  # an upstream configured for its current branch.
+  if git -C "$repo" push --quiet "$(evidence_remote "$repo")" HEAD 2>/dev/null; then
     note "pushed evidence for $id"
   else
     note "evidence for $id is committed locally; the push did not succeed and will be carried by the next preserve"
