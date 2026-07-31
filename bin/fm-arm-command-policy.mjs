@@ -671,8 +671,24 @@ export function walkShellCommandTree(command, maxDepth = 12) {
   const commands = [];
   const errors = [];
   const opaquePayloads = [];
-
-  function walk(source, depth) {
++  const leadingExecutionKeywords = new Set(["!", "do", "elif", "else", "if", "then", "time", "until", "while"]);
++  const controlOnlyKeywords = new Set(["case", "done", "esac", "fi", "for", "function", "select"]);
++
++  function shellExecutionPosition(tokens) {
++    let remaining = tokens;
++    while (remaining.length > 0) {
++      const position = commandPosition(remaining);
++      const name = basename(position.command?.value || "");
++      if (!name || controlOnlyKeywords.has(name)) return null;
++      if (!leadingExecutionKeywords.has(name)) return position;
++      const commandIndex = remaining.indexOf(position.command);
++      if (commandIndex < 0) return null;
++      remaining = remaining.slice(commandIndex + 1);
++    }
++    return null;
++  }
++
++  function walk(source, depth) {
     if (depth > maxDepth) {
       errors.push({ source, reason: "recursion limit" });
       return;
@@ -684,17 +700,17 @@ export function walkShellCommandTree(command, maxDepth = 12) {
     }
     const program = splitProgram(lexed.tokens);
     for (const tokens of program.nodes) {
-      const position = commandPosition(tokens);
-      commands.push({ source, tokens, position });
-
-      for (const payload of position.wrapperPayloads) walk(payload, depth + 1);
++      const position = shellExecutionPosition(tokens);
++      if (position) commands.push({ source, tokens, position });
++
++      for (const payload of position?.wrapperPayloads || []) walk(payload, depth + 1);
       for (const token of tokens) {
         if (token.type === "group") walk(token.content, depth + 1);
         if (token.type !== "word") continue;
         for (const substitution of token.subs) walk(substitution.content, depth + 1);
       }
 
-      const shell = shellInvocation(position);
+      const shell = position ? shellInvocation(position) : null;
       if (shell?.kind === "command" && shell.payload) {
         if (shell.payload.literal && shell.payload.subs.length === 0) {
           walk(shell.payload.value, depth + 1);
@@ -702,10 +718,12 @@ export function walkShellCommandTree(command, maxDepth = 12) {
           opaquePayloads.push({ source, value: shell.payload.value });
         }
       }
-      const literalEvalPayload = evalPayload(position);
+      const literalEvalPayload = position ? evalPayload(position) : null;
       if (literalEvalPayload !== null) walk(literalEvalPayload, depth + 1);
-      for (const payload of shellHeredocPayloads(tokens, position)) walk(payload, depth + 1);
-      for (const payload of shellHereStringPayloads(tokens, position)) walk(payload, depth + 1);
+      if (position) {
+        for (const payload of shellHeredocPayloads(tokens, position)) walk(payload, depth + 1);
+        for (const payload of shellHereStringPayloads(tokens, position)) walk(payload, depth + 1);
+      }
     }
   }
 
