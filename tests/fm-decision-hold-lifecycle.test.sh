@@ -550,6 +550,122 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+test_resolution_survives_backlog_retention_without_weakening_registration() {
+  local home origin hold
+  home=$(make_home resolved-retention)
+  origin=sample-retained-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review retained sample" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create retention origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Retained sample review\n\nOne captain choice remains.\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose retained route" --reason "captain retained route pending" --repo sample) \
+    || fail "could not register retention hold"
+  run_decisions "$home" complete "$origin" route >/dev/null \
+    || fail "could not complete retention inventory"
+  tasks_in "$home" add retained-route-work "Apply retained route" --kind ship --repo sample \
+    --blocked-by "$hold" >/dev/null || fail "could not create retained routed work"
+  printf 'Use the retained route.\n' > "$home/retained-route-decision.txt"
+  run_decisions "$home" resolve "$origin" route \
+    --decision-file "$home/retained-route-decision.txt" --routed-to retained-route-work >/dev/null \
+    || fail "could not resolve retention hold"
+  assert_present "$home/data/$origin/decision-resolutions/route.receipt" \
+    "resolve did not write its task-owned durable receipt"
+  tasks_in "$home" "done" "$hold" --keep 0 >/dev/null \
+    || fail "could not apply ordinary Done retention"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "retention fixture did not prune the resolved hold"
+  fi
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "resolved decision stopped being durable after backlog retention"
+  if run_decisions "$home" hold "$origin" route \
+    --title "Choose retained route" --reason "captain retained route pending" --repo sample \
+    > "$home/rehold.out" 2> "$home/rehold.err"; then
+    fail "hold retry re-registered a resolved decision after retention"
+  fi
+  assert_grep "already durably resolved" "$home/rehold.err" \
+    "resolved hold retry did not explain its refusal"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "resolved hold retry put a ruled question back into the open backlog"
+
+  home=$(make_home never-registered-retention)
+  origin=sample-never-registered-review
+  mkdir -p "$home/data/$origin"
+  write_origin_meta "$home" "$origin"
+  printf 'decisions_reviewed=1\ndecision_keys=missing\n' >> "$home/state/$origin.meta"
+  printf '# Never registered sample review\n' > "$home/data/$origin/report.md"
+  if run_decisions "$home" verify "$origin" > "$home/verify.out" 2> "$home/verify.err"; then
+    fail "an inventory key with no registered decision evidence passed verification"
+  fi
+  assert_grep "is absent from" "$home/verify.err" \
+    "never-registered refusal did not identify the absent captain decision"
+  pass "resolved decisions survive backlog retention while never-registered decisions still refuse"
+}
+
+test_attested_reconciliation_repairs_only_reviewed_pruned_decisions() {
+  local home origin hold
+  home=$(make_home attested-reconciliation)
+  origin=sample-trapped-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review trapped sample" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create trapped origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Trapped sample review\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose trapped route" --reason "captain trapped route pending" --repo sample) \
+    || fail "could not register trapped hold"
+  run_decisions "$home" complete "$origin" route >/dev/null \
+    || fail "could not complete trapped inventory"
+  tasks_in "$home" update "$hold" \
+    --body 'Resolution recorded by fm-decision-hold.\nRouted work:\n- trapped-route-work' >/dev/null \
+    || fail "could not seed legacy resolved body"
+  tasks_in "$home" "done" "$hold" --keep 0 >/dev/null \
+    || fail "could not prune legacy resolved hold"
+  cat > "$home/data/$origin/decision-ruling.md" <<'EOF'
+# Captain ruling
+
+Use the repaired route.
+EOF
+  if run_decisions "$home" reconcile "$origin" route \
+    --decision-file "$home/data/$origin/decision-ruling.md" --routed-to trapped-route-work \
+    --reason "legacy resolved hold was pruned by ordinary retention" \
+    > "$home/no-attestation.out" 2> "$home/no-attestation.err"; then
+    fail "reconciliation accepted no explicit resolved attestation"
+  fi
+  run_decisions "$home" reconcile "$origin" route \
+    --decision-file "$home/data/$origin/decision-ruling.md" --routed-to trapped-route-work \
+    --reason "legacy resolved hold was pruned by ordinary retention" --attest-resolved >/dev/null \
+    || fail "attested reconciliation could not repair a reviewed pruned decision"
+  assert_grep "recorded_by=reconcile" \
+    "$home/data/$origin/decision-resolutions/route.receipt" \
+    "reconciliation receipt did not retain its auditable source"
+  assert_grep "reconciliation_reason=legacy resolved hold was pruned by ordinary retention" \
+    "$home/data/$origin/decision-resolutions/route.receipt" \
+    "reconciliation receipt did not retain its operator reason"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "attested reconciliation did not repair completion verification"
+
+  home=$(make_home unattested-never-registered)
+  origin=sample-unregistered-reconcile
+  mkdir -p "$home/data/$origin"
+  write_origin_meta "$home" "$origin"
+  printf 'decisions_reviewed=1\ndecision_keys=other\n' >> "$home/state/$origin.meta"
+  printf '# Unregistered sample review\n' > "$home/data/$origin/report.md"
+  printf '# Claimed ruling\n' > "$home/data/$origin/claimed-ruling.md"
+  if run_decisions "$home" reconcile "$origin" missing \
+    --decision-file "$home/data/$origin/claimed-ruling.md" --routed-to claimed-work \
+    --reason "claimed legacy resolution" --attest-resolved \
+    > "$home/unregistered.out" 2> "$home/unregistered.err"; then
+    fail "reconciliation manufactured a receipt for a never-registered decision"
+  fi
+  assert_absent "$home/data/$origin/decision-resolutions/missing.receipt" \
+    "failed never-registered reconciliation left a receipt"
+  pass "attested reconciliation repairs reviewed pruned decisions without bypassing registration"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +676,5 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_resolution_survives_backlog_retention_without_weakening_registration
+test_attested_reconciliation_repairs_only_reviewed_pruned_decisions

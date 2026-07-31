@@ -6,7 +6,7 @@ This document records the deterministic mechanism, structured surfaces, and priv
 ## Mechanism
 
 `bin/fm-decision-hold.sh` is the only lifecycle command for an investigation or visual review's unresolved captain decisions.
-The command runs tasks-axi in the active `FM_HOME`, so the existing backlog remains the only durable work database and a secondmate-owned decision stays in the secondmate home.
+The command runs tasks-axi in the active `FM_HOME`, so the existing backlog remains the authoritative work database and a secondmate-owned decision stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
@@ -17,6 +17,7 @@ The `complete` subcommand unions the reviewed keys into `decision_keys=` and app
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
 It accepts `--none` as an explicit semantic inventory result, not as inferred absence.
 It verifies every listed identity against tasks-axi before recording completion.
+When ordinary retention has removed a resolved Done item, it verifies that identity against the resolution receipt written by `resolve` instead.
 For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
 
@@ -25,8 +26,15 @@ The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
-An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
+After the Done record is verified, it atomically writes `data/<origin-id>/decision-resolutions/<decision-key>.receipt` with the decision text, digest, routed identities, recorder, and timestamp.
+An exact retry can finish a partial routing operation or restore a missing receipt from the still-present resolved backlog record, while a changed decision or routed-task set is rejected.
+A valid receipt makes later verification independent of Done retention without making an absent never-registered decision valid.
 A failed intermediate step leaves the hold open.
+
+The `reconcile` subcommand is the migration path for a legacy resolved decision whose Done record was pruned before receipts existed.
+It requires live originating metadata whose reviewed `decision_keys` already contains the key, an absent backlog identity, a durable decision file beneath `data/<origin-id>/`, routed identities, a one-line audit reason, and `--attest-resolved`.
+Its receipt retains the task-relative evidence path and reconciliation reason, so the exception is auditable and cannot manufacture registration evidence for a key outside the reviewed inventory.
+Exact syntax and retry behavior remain owned by `bin/fm-decision-hold.sh --help`.
 
 ## Structured read surfaces
 
@@ -43,6 +51,7 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Resolution-receipt retention and legacy reconciliation verification date: 2026-08-01.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -62,6 +71,8 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - resolved decisions survive backlog retention while never-registered decisions still refuse
+ok - attested reconciliation repairs reviewed pruned decisions without bypassing registration
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

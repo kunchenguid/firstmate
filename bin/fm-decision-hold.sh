@@ -24,6 +24,9 @@
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#   fm-decision-hold.sh reconcile <origin-id> <decision-key> \
+#     --decision-file <task-owned-path> --routed-to <task-id> \
+#     [--routed-to <task-id>...] --reason <reason> --attest-resolved
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -35,8 +38,15 @@
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
-# those dependency edges, and only then marks the hold Done. A failure before the
-# final step leaves the captain hold open.
+# those dependency edges, marks the hold Done, and then writes a task-owned
+# resolution receipt that survives ordinary Done retention. A failure before the
+# receipt write remains safely retryable from the resolved backlog record.
+#
+# `reconcile` repairs a legacy resolved hold whose Done record was already pruned
+# before receipts existed. It requires the live metadata inventory to prove the
+# decision was registered, a durable task-owned decision file, routed identities,
+# a one-line audit reason, and an explicit resolved attestation. It refuses when
+# the backlog identity still exists or the reviewed inventory lacks the key.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -140,6 +150,109 @@ meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+resolution_receipt_path() {  # <origin-id> <decision-key>
+  printf '%s/%s/decision-resolutions/%s.receipt\n' "$DATA" "$1" "$2"
+}
+
+receipt_field() {  # <receipt> <field>
+  sed -n "2,10s/^$2=//p" "$1" | head -1
+}
+
+verify_resolution_receipt() {  # <origin-id> <decision-key>
+  local origin=$1 key=$2 receipt id digest routed recorded_by recorded_at evidence reason decision route
+  receipt=$(resolution_receipt_path "$origin" "$key")
+  [ -f "$receipt" ] || return 1
+  id=$(hold_id "$origin" "$key")
+  [ "$(sed -n '1p' "$receipt")" = fm-decision-hold-resolution-v1 ] \
+    || fail "resolution receipt for $id has an unsupported format"
+  [ "$(sed -n '11p' "$receipt")" = --- ] \
+    || fail "resolution receipt for $id has an invalid header"
+  [ "$(sed -n '12p' "$receipt")" = 'Captain decision:' ] \
+    || fail "resolution receipt for $id has no captain decision body"
+  [ "$(receipt_field "$receipt" hold_id)" = "$id" ] \
+    || fail "resolution receipt for $id records a different hold identity"
+  [ "$(receipt_field "$receipt" origin_id)" = "$origin" ] \
+    || fail "resolution receipt for $id records a different origin identity"
+  [ "$(receipt_field "$receipt" decision_key)" = "$key" ] \
+    || fail "resolution receipt for $id records a different decision key"
+  digest=$(receipt_field "$receipt" decision_digest)
+  printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "resolution receipt for $id has an invalid decision digest"
+  routed=$(receipt_field "$receipt" routed_identities)
+  [ -n "$routed" ] || fail "resolution receipt for $id has no routed identities"
+  while IFS= read -r route; do
+    validate_slug routed-task "$route"
+  done <<EOF
+$(printf '%s\n' "$routed" | tr ',' '\n')
+EOF
+  recorded_by=$(receipt_field "$receipt" recorded_by)
+  case "$recorded_by" in
+    resolve) : ;;
+    reconcile)
+      evidence=$(receipt_field "$receipt" evidence_file)
+      reason=$(receipt_field "$receipt" reconciliation_reason)
+      [ -n "$evidence" ] || fail "reconciled resolution receipt for $id has no evidence file"
+      [ -n "$reason" ] || fail "reconciled resolution receipt for $id has no audit reason"
+      ;;
+    *) fail "resolution receipt for $id has an invalid recorder" ;;
+  esac
+  recorded_at=$(receipt_field "$receipt" recorded_at)
+  [ -n "$recorded_at" ] || fail "resolution receipt for $id has no recorded timestamp"
+  decision=$(sed -n '13,$p' "$receipt")
+  [ -n "$decision" ] || fail "resolution receipt for $id has an empty captain decision"
+  [ "$(sha256_text "$decision")" = "$digest" ] \
+    || fail "resolution receipt for $id does not match its decision digest"
+}
+
+verify_receipt_retry_identity() {  # <origin-id> <decision-key> <digest> <routed-csv>
+  local origin=$1 key=$2 digest=$3 routed=$4 receipt id
+  receipt=$(resolution_receipt_path "$origin" "$key")
+  id=$(hold_id "$origin" "$key")
+  verify_resolution_receipt "$origin" "$key" \
+    || fail "resolution receipt for $id is absent"
+  [ "$(receipt_field "$receipt" decision_digest)" = "$digest" ] \
+    || fail "resolution receipt for $id records a different captain decision"
+  [ "$(receipt_field "$receipt" routed_identities)" = "$routed" ] \
+    || fail "resolution receipt for $id records different routed work"
+}
+
+write_resolution_receipt() {  # <origin> <key> <digest> <routes> <decision> <recorder> <evidence> <reason>
+  local origin=$1 key=$2 digest=$3 routed=$4 decision=$5 recorder=$6 evidence=$7 reason=$8
+  local dir receipt tmp id recorded_at
+  dir="$DATA/$origin/decision-resolutions"
+  receipt=$(resolution_receipt_path "$origin" "$key")
+  id=$(hold_id "$origin" "$key")
+  if [ -f "$receipt" ]; then
+    verify_receipt_retry_identity "$origin" "$key" "$digest" "$routed"
+    return 0
+  fi
+  mkdir -p "$dir" || fail "could not create resolution receipt directory for $id"
+  tmp="$dir/.$key.receipt.tmp.$$"
+  recorded_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  if ! (umask 077; {
+    printf 'fm-decision-hold-resolution-v1\n'
+    printf 'hold_id=%s\n' "$id"
+    printf 'origin_id=%s\n' "$origin"
+    printf 'decision_key=%s\n' "$key"
+    printf 'decision_digest=%s\n' "$digest"
+    printf 'routed_identities=%s\n' "$routed"
+    printf 'recorded_by=%s\n' "$recorder"
+    printf 'recorded_at=%s\n' "$recorded_at"
+    printf 'evidence_file=%s\n' "$evidence"
+    printf 'reconciliation_reason=%s\n' "$reason"
+    printf '%s\n' '---'
+    printf 'Captain decision:\n%s\n' "$decision"
+  } > "$tmp"); then
+    rm -f "$tmp"
+    fail "could not write resolution receipt for $id"
+  fi
+  if ! mv "$tmp" "$receipt"; then
+    rm -f "$tmp"
+    fail "could not publish resolution receipt for $id"
+  fi
+  verify_receipt_retry_identity "$origin" "$key" "$digest" "$routed"
+}
+
 origin_open_decisions() {  # <origin-id>
   local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last verb
   open=$(status_open_decisions "$status_file")
@@ -184,9 +297,13 @@ verify_hold_resolved() {  # <hold-id>
   return 1
 }
 
-verify_hold_durable() {  # <hold-id>
-  local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+verify_hold_durable() {  # <origin-id> <decision-key>
+  local origin=$1 key=$2 id show state held kind hold_kind body
+  id=$(hold_id "$origin" "$key")
+  if ! show=$(task_show "$id"); then
+    verify_resolution_receipt "$origin" "$key" && return 0
+    fail "captain decision $id is absent from $FM_HOME/data/backlog.md and has no durable resolution receipt"
+  fi
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -249,6 +366,9 @@ command_hold() {
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   id=$(hold_id "$origin" "$key")
+  if verify_resolution_receipt "$origin" "$key"; then
+    fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
+  fi
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
@@ -300,7 +420,7 @@ command_complete() {
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
-      verify_hold_durable "$(hold_id "$origin" "$key")"
+      verify_hold_durable "$origin" "$key"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -350,7 +470,7 @@ command_verify() {
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
-      verify_hold_durable "$(hold_id "$origin" "$key")"
+      verify_hold_durable "$origin" "$key"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -360,7 +480,7 @@ EOF
     [ -n "$key" ] || continue
     list_has_key "$keys" "$key" \
       || fail "open structured decision $origin/$key is outside the reviewed inventory"
-    verify_hold_durable "$(hold_id "$origin" "$key")"
+    verify_hold_durable "$origin" "$key"
   done <<EOF
 $open
 EOF
@@ -397,6 +517,16 @@ command_resolve() {
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
+    write_resolution_receipt "$origin" "$key" "$decision_digest" "$routed_csv" \
+      "$decision" resolve '' ''
+    printf 'resolved: %s\n' "$id"
+    return 0
+  fi
+  if verify_resolution_receipt "$origin" "$key"; then
+    if task_show "$id" >/dev/null; then
+      fail "resolution receipt for $id conflicts with an unresolved backlog item"
+    fi
+    verify_receipt_retry_identity "$origin" "$key" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
@@ -450,7 +580,72 @@ command_resolve() {
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  write_resolution_receipt "$origin" "$key" "$decision_digest" "$routed_csv" \
+    "$decision" resolve '' ''
   printf 'resolved: %s -> %s\n' "$id" "$routed"
+}
+
+command_reconcile() {
+  local origin=${1:-} key=${2:-} decision_file='' routed='' reason='' attested=0
+  local meta reviewed keys id decision decision_digest routed_csv origin_dir decision_dir decision_name decision_path evidence
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --decision-file) shift; decision_file=${1:-} ;;
+      --routed-to) shift; validate_slug routed-task "${1:-}"; routed="${routed}${routed:+ }${1:-}" ;;
+      --reason) shift; reason=${1:-} ;;
+      --attest-resolved) attested=1 ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  [ -n "$decision_file" ] || fail "--decision-file is required"
+  [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
+  [ ! -L "$decision_file" ] || fail "reconciliation decision file must not be a symlink: $decision_file"
+  [ -n "$routed" ] || fail "at least one --routed-to task is required"
+  validate_one_line reason "$reason"
+  [ "$attested" = 1 ] \
+    || fail "--attest-resolved is required for legacy reconciliation"
+  meta="$STATE/$origin.meta"
+  [ -f "$meta" ] || fail "origin metadata is absent: $meta"
+  reviewed=$(meta_value "$meta" decisions_reviewed)
+  [ "$reviewed" = 1 ] || fail "origin $origin has no completed unresolved-decision inventory"
+  keys=$(meta_value "$meta" decision_keys)
+  list_has_key "$keys" "$key" \
+    || fail "captain decision $origin/$key was never registered in the reviewed inventory"
+  origin_dir=$(cd "$DATA/$origin" 2>/dev/null && pwd -P) \
+    || fail "origin data directory is absent: $DATA/$origin"
+  decision_dir=$(cd "$(dirname "$decision_file")" 2>/dev/null && pwd -P) \
+    || fail "cannot resolve decision file directory: $decision_file"
+  decision_name=$(basename "$decision_file")
+  decision_path="$decision_dir/$decision_name"
+  case "$decision_path" in
+    "$origin_dir"/*) evidence=${decision_path#"$origin_dir"/} ;;
+    *) fail "reconciliation decision file must be owned by $DATA/$origin" ;;
+  esac
+  decision=$(cat "$decision_path")
+  [ -n "$decision" ] || fail "decision file must not be empty"
+  [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
+    || fail "decision file exceeds 8192 bytes"
+  routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
+  routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')
+  decision_digest=$(sha256_text "$decision")
+  require_tasks_axi
+  id=$(hold_id "$origin" "$key")
+  if task_show "$id" >/dev/null; then
+    fail "captain decision $id still exists in the backlog; use resolve instead of reconciliation"
+  fi
+  if verify_resolution_receipt "$origin" "$key"; then
+    verify_receipt_retry_identity "$origin" "$key" "$decision_digest" "$routed_csv"
+    printf 'reconciled: %s\n' "$id"
+    return 0
+  fi
+  write_resolution_receipt "$origin" "$key" "$decision_digest" "$routed_csv" \
+    "$decision" reconcile "$evidence" "$reason"
+  printf 'reconciled: %s\n' "$id"
 }
 
 case "${1:-}" in
@@ -459,6 +654,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   resolve) shift; command_resolve "$@" ;;
+  reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
