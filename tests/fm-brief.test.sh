@@ -662,6 +662,16 @@ test_group_symlink_behavior() {
   status=$?
   expect_code 1 "$status" "--group combined with --secondmate must be refused"
 
+  # A --group name that collides with an existing task's own authoritative
+  # directory must be refused, not silently grafted into that task's dir.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" existing-task alpha --scout >/dev/null 2>&1
+  err="$TMP_ROOT/group-collision.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-group-e6 alpha --scout --group=existing-task >/dev/null 2>"$err"
+  status=$?
+  expect_code 1 "$status" "--group colliding with an existing task directory must be refused"
+  assert_present "$err" "group/task collision must print an error"
+  [ -e "$home/data/existing-task/brief-group-e6" ] && fail "colliding --group must not graft a symlink into another task's directory"
+
   pass "fm-brief.sh: --group creates additive, idempotent-per-task symlinks without touching the flat data/<id> path"
 }
 

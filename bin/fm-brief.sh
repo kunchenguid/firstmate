@@ -142,6 +142,10 @@ BRIEF="$DATA/$ID/brief.md"
 mkdir -p "$DATA/$ID"
 
 if [ -n "$GROUP" ]; then
+  if [ -e "$DATA/$GROUP/brief.md" ] || [ -e "$DATA/$GROUP/report.md" ]; then
+    echo "error: $DATA/$GROUP is itself a task directory (has brief.md or report.md), refusing to use it as a --group folder" >&2
+    exit 1
+  fi
   mkdir -p "$DATA/$GROUP"
   GROUP_LINK="$DATA/$GROUP/$ID"
   if [ -L "$GROUP_LINK" ] && [ "$(readlink "$GROUP_LINK")" = "../$ID" ]; then
