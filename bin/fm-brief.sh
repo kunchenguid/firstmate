@@ -60,6 +60,14 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Every scaffold carries a verification-discipline section: witness a negative
+# control fail before trusting success reported only by absence, and wait on
+# completion artifacts rather than process names.
+# Ship scaffolds additionally carry branch conflict resolution: rebase and
+# resolve branch/base conflicts autonomously at any file count when intent is
+# clear, escalating only genuinely ambiguous intent to firstmate. In
+# no-mistakes mode that delegated rebase is the stated exception to the
+# do-not-commit-while-a-run-is-active rule.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -410,6 +418,7 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+The one exception is a rebase the pipeline hands back to you: resolve and commit it under \`# Branch conflict resolution\` above, then return to driving the gates.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
