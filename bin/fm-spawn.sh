@@ -277,11 +277,9 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
-# Set to 1 once this invocation owns the valid task id under its spawn lock.
-# Any later failure must not vanish statelessly: spawn_abort_cleanup leaves a
-# meta record and a failed: status line so the failure presents as an ordinary
-# terminal state the same reap path handles (upstream issue 1336).
-SPAWN_ENDPOINT_MAY_EXIST=0
+SPAWN_FAILURE_RECORD_OWNED=0
+SPAWN_ABORT_META_READY=0
+SPAWN_META_OWNED=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -328,8 +326,9 @@ spawn_abort_cleanup() {
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
         mkdir -p "$STATE" 2>/dev/null || true
-        if [ -d "$STATE" ]; then
-          {
+        if [ -d "$STATE" ] && [ "$SPAWN_FAILURE_RECORD_OWNED" = 1 ] \
+           && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+          if {
             echo "window=$W"
             echo "worktree=${WT:-}"
             echo "project=$PROJ_ABS"
@@ -343,7 +342,9 @@ spawn_abort_cleanup() {
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } > "$STATE/$ID.meta" 2>/dev/null || true
+          } > "$STATE/$ID.meta" 2>/dev/null; then
+            SPAWN_META_OWNED=1
+          fi
         fi
       fi
     fi
@@ -356,11 +357,13 @@ spawn_abort_cleanup() {
   # from the meta write: its abort cleanup above already records meta exactly
   # when the worktree survives for a retry, and a removed orca worktree would
   # make a fresh meta record un-reapable without --force.
-  if [ "$status" -ne 0 ] && [ "$SPAWN_ENDPOINT_MAY_EXIST" = 1 ]; then
+  if [ "$status" -ne 0 ] \
+     && { [ "$SPAWN_FAILURE_RECORD_OWNED" = 1 ] || [ "$SPAWN_META_OWNED" = 1 ]; }; then
     mkdir -p "$STATE" 2>/dev/null || true
     if [ -d "$STATE" ]; then
-      if [ "${BACKEND:-}" != orca ] && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-        {
+      if [ "${BACKEND:-}" != orca ] && [ "$SPAWN_ABORT_META_READY" = 1 ] \
+         && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+        if {
           echo "window=${T:-${W:-}}"
           echo "endpoint_task_id=$ID"
           echo "worktree=${WT:-}"
@@ -388,9 +391,13 @@ spawn_abort_cleanup() {
             echo "cmux_workspace_id=${CMUX_WORKSPACE_ID:-}"
             echo "cmux_surface_id=${CMUX_SURFACE_ID:-}"
           fi
-        } > "$STATE/$ID.meta" 2>/dev/null || true
+        } > "$STATE/$ID.meta" 2>/dev/null; then
+          SPAWN_META_OWNED=1
+        fi
       fi
-      if { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; } \
+      if { [ "$SPAWN_META_OWNED" = 1 ] \
+           || { [ "${BACKEND:-}" != orca ] && [ "$SPAWN_ABORT_META_READY" = 0 ] \
+                && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; }; } \
          && ! grep -q '^failed:' "$STATE/$ID.status" 2>/dev/null; then
         printf 'failed: spawn failed before launch completed (exit %s); inspect endpoint %s\n' \
           "$status" "${T:-${W:-unpublished}}" >> "$STATE/$ID.status" 2>/dev/null || true
@@ -479,7 +486,9 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
-SPAWN_ENDPOINT_MAY_EXIST=1
+if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+  SPAWN_FAILURE_RECORD_OWNED=1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1041,6 +1050,7 @@ case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
     T="$SES:$W"
+    SPAWN_ABORT_META_READY=1
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's
     # non-default tmux config cannot rename the window away from fm-<id> once
@@ -1213,6 +1223,7 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    SPAWN_ABORT_META_READY=1
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -1225,6 +1236,7 @@ EOF
       exit 1
     fi
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
+    SPAWN_ABORT_META_READY=1
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
@@ -1237,6 +1249,7 @@ EOF
       exit 1
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
+    SPAWN_ABORT_META_READY=1
     ;;
   orca)
     set +e
@@ -1710,6 +1723,7 @@ META_WINDOW=$T
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+SPAWN_META_OWNED=1
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

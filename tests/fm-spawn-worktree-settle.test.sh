@@ -52,7 +52,10 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    [ -z "${FM_FAKE_EXISTING_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_EXISTING_WINDOW"
+    exit 0
+    ;;
   new-window)
     printf '@1\n'
     [ "${FM_FAKE_NEW_WINDOW_FAIL_AFTER_CREATE:-0}" != 1 ]
@@ -214,5 +217,45 @@ test_backend_partial_create_failure_leaves_terminal_state() {
 }
 
 test_backend_partial_create_failure_leaves_terminal_state
+
+test_preendpoint_failure_leaves_status_without_meta() {
+  local rec id out rc
+  id=settle-preendpoint-z5
+  rec=$(make_settle_case settle-preendpoint "$id" 0)
+  read_settle_record "$rec"
+  rm -f "$HOME_DIR/data/$id/brief.md"
+
+  rc=0
+  out=$(run_settle_spawn "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn with no brief should fail"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "pre-endpoint failure wrote unreapable endpoint metadata"
+  assert_grep 'failed: spawn failed before launch completed' "$HOME_DIR/state/$id.status" \
+    "pre-endpoint failure left no visible failed status"
+  pass "a pre-endpoint failure leaves status without unreapable metadata"
+}
+
+test_preendpoint_failure_leaves_status_without_meta
+
+test_duplicate_spawn_does_not_terminalize_live_task() {
+  local rec id out rc meta_before meta_after
+  id=settle-duplicate-z6
+  rec=$(make_settle_case settle-duplicate "$id" 0)
+  read_settle_record "$rec"
+  run_settle_spawn "$id" >/dev/null || fail "duplicate-spawn setup failed"
+  meta_before=$(cat "$HOME_DIR/state/$id.meta")
+
+  rc=0
+  out=$(FM_FAKE_EXISTING_WINDOW="fm-$id" run_settle_spawn "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "duplicate spawn should be refused"
+  assert_contains "$out" "already exists" "duplicate spawn lost its refusal diagnostic"
+  meta_after=$(cat "$HOME_DIR/state/$id.meta")
+  [ "$meta_after" = "$meta_before" ] || fail "duplicate spawn mutated the live task metadata"
+  ! grep -q '^failed:' "$HOME_DIR/state/$id.status" 2>/dev/null \
+    || fail "duplicate spawn falsely marked the live task terminal"
+  pass "a duplicate spawn cannot terminalize an existing live task"
+}
+
+test_duplicate_spawn_does_not_terminalize_live_task
 
 echo "# all fm-spawn-worktree-settle tests passed"
