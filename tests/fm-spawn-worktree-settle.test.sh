@@ -12,6 +12,11 @@
 # transient-then-settled pane_current_path sequence with a fake tmux and
 # asserts the recorded worktree resolves to the real, settled worktree, never
 # the stale first read.
+#
+# Also covers upstream issue 1336: when the settle loop expires (the pane never
+# enters a worktree, as when treehouse get refuses), the failed spawn must
+# still leave state/<id>.meta and a failed: line in state/<id>.status so the
+# ordinary terminal-state reap path can see it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -89,12 +94,12 @@ EOF
 }
 
 run_settle_spawn() {
-  local id=$1
+  local id=$1 pane_path=${2:-$WT_DIR}
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
+    FM_FAKE_PANE_PATH="$pane_path" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" 2>&1
@@ -143,5 +148,31 @@ test_already_settled_pane_costs_one_confirm_sleep() {
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+
+# Upstream issue 1336: a bootstrap that fails after the pane exists (here the
+# pane never leaves the project, as when treehouse get refuses on an exhausted
+# pool) must still leave a meta record and a failed: status line, so the failed
+# spawn presents as an ordinary terminal state the same reap path handles
+# instead of an invisible orphan pane.
+test_failed_bootstrap_leaves_meta_and_failed_status() {
+  local rec id out rc
+  id=settle-never-settles-z3
+  rec=$(make_settle_case settle-never "$id" 0)
+  read_settle_record "$rec"
+
+  rc=0
+  out=$(FM_SPAWN_WORKTREE_POLLS=2 run_settle_spawn "$id" "$PROJ_DIR") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a pane that never enters a worktree should fail the spawn"
+  assert_contains "$out" "did not enter a worktree" "spawn failure lost its diagnostic"
+  [ -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "failed spawn left no meta record behind"
+  assert_grep "window=" "$HOME_DIR/state/$id.meta" \
+    "failed spawn's meta does not record its endpoint"
+  assert_grep "failed: spawn failed before launch completed" "$HOME_DIR/state/$id.status" \
+    "failed spawn left no supervisor-visible failed: status line"
+  pass "a failed spawn leaves meta and a failed: status line (upstream issue 1336)"
+}
+
+test_failed_bootstrap_leaves_meta_and_failed_status
 
 echo "# all fm-spawn-worktree-settle tests passed"

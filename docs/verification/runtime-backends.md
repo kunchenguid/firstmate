@@ -279,6 +279,26 @@ ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destruc
 ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
 ```
 
+The projection and teardown suites ran again on 2026-07-30 against Herdr 0.7.5 after the upstream-issue-1336/1337 done-means-cleanup changes (failed spawns leave state; pre-dead panes count as confirmed-closed for journal retirement; unconfirmed closes fail loudly for retry):
+
+```sh
+tests/fm-backend-herdr-presentation-e2e.test.sh
+tests/fm-teardown.test.sh
+tests/fm-spawn-worktree-settle.test.sh
+```
+
+Observed guarantees:
+
+```text
+ok - real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration
+ok - herdr projection teardown retires its journal only after confirming the exact recorded pane is gone
+ok - herdr projection teardown reports an unconfirmed close loudly, keeps state, and converges on retry
+ok - herdr projection teardown retires the journal when the pane is already dead
+ok - a failed spawn leaves meta and a failed: status line (upstream issue 1336)
+```
+
+The post-create abort fixtures now also prove the issue-1336 contract against real Herdr: both failed spawns left a meta record and a failed: status line even though abort cleanup removed their exact panes.
+
 The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
 
 ```sh

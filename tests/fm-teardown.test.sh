@@ -1797,14 +1797,14 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
   pass "herdr projection teardown retires its journal only after confirming the exact recorded pane is gone"
 }
 
-test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
-  local case_dir log closed restored
+test_herdr_projection_teardown_retains_records_when_presence_unknown() {
+  local case_dir log closed restored rc
   case_dir=$(make_case herdr-projection-unconfirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
-  local rc=0
+  rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_PRESENCE_UNKNOWN=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
@@ -1817,11 +1817,70 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
     || fail "unconfirmed task-pane close erased the durable endpoint metadata"
   assert_grep "close could not be confirmed" "$case_dir/stderr" \
     "unconfirmed projected close did not explain why the journal was retained"
-  assert_grep "not confirmed gone" "$case_dir/stderr" \
-    "unconfirmed projected close did not explain why the records were retained"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "unconfirmed projected close must not escalate to workspace cleanup"
   pass "herdr projection teardown retains every record when post-close presence is unknown"
+}
+
+test_herdr_projection_teardown_reports_unconfirmed_close_loudly_for_retry() {
+  local case_dir log closed restored rc
+  case_dir=$(make_case herdr-projection-close-failed)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+
+  set +e
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unconfirmed-close: teardown must fail loudly so the handling turn retries"
+  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "unconfirmed-close: unconfirmed task-pane close incorrectly retired the presentation journal"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "unconfirmed-close: task state was deleted even though the pane close was never confirmed"
+  assert_grep "close could not be confirmed" "$case_dir/stderr" \
+    "unconfirmed-close: teardown did not report the unconfirmed close loudly"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "unconfirmed-close: unconfirmed projected close must not escalate to workspace cleanup"
+
+  # The handling turn's retry converges: once the close can complete, the same
+  # teardown finishes and retires the journal. Reset only the fake's restored
+  # marker so its workspace list again shows the projected workspace.
+  rm -f "$restored"
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout-retry" 2> "$case_dir/stderr-retry" \
+    || fail "unconfirmed-close retry: teardown failed once the pane close could complete"
+  [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "unconfirmed-close retry: journal was not retired after the close completed"
+  pass "herdr projection teardown reports an unconfirmed close loudly, keeps state, and converges on retry"
+}
+
+test_herdr_projection_teardown_retires_journal_for_predead_pane() {
+  local case_dir log closed restored
+  case_dir=$(make_case herdr-projection-predead-pane)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  # The pane died before teardown ran: pane get reports pane_not_found and the
+  # projected workspace is already gone from the workspace list. Retirement
+  # must treat the dead pane as confirmed-closed (upstream issue 1337) rather
+  # than quarantining the journal forever.
+  : > "$closed"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-projection-predead-pane: teardown of a pre-dead pane failed"
+  [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "herdr-projection-predead-pane: pre-dead pane did not retire its presentation journal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "quarantined" \
+    "herdr-projection-predead-pane: pre-dead pane journal was quarantined instead of retired"
+  assert_not_contains "$(cat "$case_dir/stderr")" "could not be confirmed" \
+    "herdr-projection-predead-pane: pre-dead pane was misreported as an unconfirmed close"
+  assert_not_contains "$(cat "$log")" "pane close" \
+    "herdr-projection-predead-pane: a close was attempted against an already-dead pane"
+  pass "herdr projection teardown retires the journal when the pane is already dead"
 }
 
 test_local_only_fork_remote_allows
@@ -1841,7 +1900,9 @@ test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
-test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
+test_herdr_projection_teardown_retains_records_when_presence_unknown
+test_herdr_projection_teardown_reports_unconfirmed_close_loudly_for_retry
+test_herdr_projection_teardown_retires_journal_for_predead_pane
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

@@ -41,7 +41,11 @@
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
 # read-only token correlation agrees with that endpoint and pane closure is
-# confirmed. Otherwise the journal stays quarantined for manual inspection.
+# confirmed; a pane the backend already reports dead counts as confirmed-closed
+# (upstream issue 1337). A close that cannot be confirmed is a loud teardown
+# failure before any state deletion, so the handling turn retries instead of
+# the pane outliving its records; any other unmatched journal stays quarantined
+# for manual inspection.
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
@@ -1443,6 +1447,7 @@ fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_PANE_PREDEAD=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
 if [ "$BACKEND" = herdr ] \
@@ -1454,11 +1459,20 @@ if [ "$BACKEND" = herdr ] \
   if [ -n "$HERDR_PRESENTATION_SESSION" ] \
      && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
      && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ]; then
+    if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
+      # Upstream issue 1337: a pane the backend already reports dead is
+      # confirmed-closed by definition - the exact case where journal
+      # retirement is safest. Retire without a close attempt; requiring the
+      # token-bearing workspace to still be listed would quarantine the
+      # journal forever once herdr has reaped the pane (and possibly the
+      # whole projected workspace).
+      HERDR_PRESENTATION_PANE_PREDEAD=1
+    elif fm_backend_herdr_projection_endpoint_matches_journal \
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+      "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+      HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+    fi
   fi
 fi
 
@@ -1471,7 +1485,7 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
-elif [ "$BACKEND" = herdr ]; then
+elif [ "$BACKEND" = herdr ] && [ "$HERDR_PRESENTATION_PANE_PREDEAD" != 1 ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
   else
@@ -1480,11 +1494,20 @@ elif [ "$BACKEND" = herdr ]; then
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+if [ "$HERDR_PRESENTATION_PANE_PREDEAD" = 1 ]; then
+  rm -f "$HERDR_PRESENTATION_JOURNAL"
+elif [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
   else
-    echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
+    # Upstream issue 1337: an unconfirmed close must be loud, not silently
+    # tolerated. Refuse before any state deletion so the pane cannot outlive
+    # the records that could reap it, and the handling turn's retry can
+    # converge once the close completes (or the pane dies, which the pre-dead
+    # branch above then treats as confirmed-closed).
+    echo "error: exact herdr task-pane close could not be confirmed for $ID; the pane may still exist" >&2
+    echo "retaining the presentation journal and all task state; retry bin/fm-teardown.sh $ID once the pane close can complete" >&2
+    exit 1
   fi
 elif [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then

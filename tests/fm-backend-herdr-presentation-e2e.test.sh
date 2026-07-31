@@ -776,10 +776,20 @@ for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
     fail "serialized post-create abort cleanup left exact task pane $ABORT_PANE alive"
   fi
 done
-[ ! -e "$HOME_DIR/state/abort-a.meta" ] && [ ! -e "$HOME_DIR/state/abort-b.meta" ] \
-  || fail "post-create abort fixtures published task metadata before launch"
+# Upstream issue 1336: even though abort cleanup removed their panes, the
+# failed spawns still leave state behind - a meta record and a failed: status
+# line - so they present as ordinary terminal states the same reap path
+# handles instead of invisible orphan state.
+for ABORT_ID in abort-a abort-b; do
+  [ -e "$HOME_DIR/state/$ABORT_ID.meta" ] \
+    || fail "post-create abort fixture $ABORT_ID left no meta record behind"
+  grep -F "failed:" "$HOME_DIR/state/$ABORT_ID.status" >/dev/null 2>&1 \
+    || fail "post-create abort fixture $ABORT_ID left no failed: status line"
+done
 rm -rf "$POST_CREATE_ABORT_CONTROL"
-rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
+rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation" \
+  "$HOME_DIR/state/abort-a.meta" "$HOME_DIR/state/abort-b.meta" \
+  "$HOME_DIR/state/abort-a.status" "$HOME_DIR/state/abort-b.status"
 pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
 
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)

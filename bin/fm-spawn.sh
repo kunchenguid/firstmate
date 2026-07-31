@@ -64,6 +64,12 @@
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends.
+#   A spawn that fails after its pane/endpoint may exist still leaves state
+#   behind: spawn_abort_cleanup writes state/<id>.meta (when the normal
+#   publication never ran) and appends a failed: line to state/<id>.status, so
+#   the failed spawn presents as an ordinary terminal state the same reap path
+#   handles (upstream issue 1336). Orca is the exception: its abort cleanup
+#   already records meta exactly when the worktree survives for a retry.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -271,6 +277,12 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+# Set to 1 once the spawn's backend pane/endpoint may exist (immediately after
+# the endpoint-creation case below). From that point a failing spawn must not
+# vanish statelessly: spawn_abort_cleanup leaves a meta record and a failed:
+# status line so the failure presents as an ordinary terminal state the same
+# reap path handles (upstream issue 1336).
+SPAWN_ENDPOINT_MAY_EXIST=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -334,6 +346,55 @@ spawn_abort_cleanup() {
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
+      fi
+    fi
+  fi
+  # Upstream issue 1336: a spawn that fails after its pane/endpoint may exist
+  # must still be born with state. Leave a meta record (written here only when
+  # the normal publication below never ran) and a failed: status line, so the
+  # failed spawn presents as an ordinary terminal state the same done/failed
+  # reap path handles instead of an invisible orphan pane. Orca is excluded
+  # from the meta write: its abort cleanup above already records meta exactly
+  # when the worktree survives for a retry, and a removed orca worktree would
+  # make a fresh meta record un-reapable without --force.
+  if [ "$status" -ne 0 ] && [ "$SPAWN_ENDPOINT_MAY_EXIST" = 1 ]; then
+    mkdir -p "$STATE" 2>/dev/null || true
+    if [ -d "$STATE" ]; then
+      if [ "${BACKEND:-}" != orca ] && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+        {
+          echo "window=${T:-$W}"
+          echo "endpoint_task_id=$ID"
+          echo "worktree=${WT:-}"
+          echo "project=$PROJ_ABS"
+          echo "harness=$HARNESS"
+          echo "kind=$KIND"
+          echo "mode=${MODE:-no-mistakes}"
+          echo "yolo=${YOLO:-off}"
+          echo "tasktmp=${TASK_TMP:-/tmp/fm-$ID}"
+          echo "model=${MODEL:-default}"
+          echo "effort=${EFFORT:-default}"
+          [ "${BACKEND:-tmux}" = tmux ] || echo "backend=$BACKEND"
+          if [ "${BACKEND:-}" = herdr ]; then
+            echo "herdr_session=${HERDR_SES:-}"
+            echo "herdr_workspace_id=${HERDR_WORKSPACE_ID:-}"
+            echo "herdr_tab_id=${HERDR_TAB_ID:-}"
+            echo "herdr_pane_id=${HERDR_PANE_ID:-}"
+          fi
+          if [ "${BACKEND:-}" = zellij ]; then
+            echo "zellij_session=${ZELLIJ_SES:-}"
+            echo "zellij_tab_id=${ZELLIJ_TAB_ID:-}"
+            echo "zellij_pane_id=${ZELLIJ_PANE_ID:-}"
+          fi
+          if [ "${BACKEND:-}" = cmux ]; then
+            echo "cmux_workspace_id=${CMUX_WORKSPACE_ID:-}"
+            echo "cmux_surface_id=${CMUX_SURFACE_ID:-}"
+          fi
+        } > "$STATE/$ID.meta" 2>/dev/null || true
+      fi
+      if { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; } \
+         && ! grep -q '^failed:' "$STATE/$ID.status" 2>/dev/null; then
+        printf 'failed: spawn failed before launch completed (exit %s); inspect endpoint %s\n' \
+          "$status" "${T:-$W}" >> "$STATE/$ID.status" 2>/dev/null || true
       fi
     fi
   fi
@@ -1203,6 +1264,9 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+# Past this point the task's pane/endpoint may exist, so a failure must leave
+# state behind (see spawn_abort_cleanup and upstream issue 1336).
+SPAWN_ENDPOINT_MAY_EXIST=1
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
 # Every other backend addresses its pane/surface by the id already in $T, so default
@@ -1320,7 +1384,8 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
-  for _ in $(seq 1 60); do
+  worktree_polls=${FM_SPAWN_WORKTREE_POLLS:-60}
+  for _ in $(seq 1 "$worktree_polls"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -1339,7 +1404,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${worktree_polls}s; inspect window $T" >&2
     exit 1
   fi
 
