@@ -171,6 +171,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -444,7 +446,7 @@ fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
 # The verified launch command per adapter. The knowledge half of each adapter
-# (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
+# (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
@@ -1365,42 +1367,158 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$KIND" != secondmate ]; then
+  # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
+  # adapter with a verified semantic source. The launch brief sent below IS a
+  # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
+  # embedded into each adapter's wiring so an event from a superseded
+  # incarnation is rejected as stale. Grok stays on its isolated rendered-tail
+  # fallback and standalone Kimi stays unknown until fm_busy_kimi_verified
+  # opens, so neither is armed here.
+  BUSY_GEN=
+  case "$HARNESS" in
+    codex*)
+      if fm_busy_codex_semantic_source; then
+        echo "error: codex semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
+        exit 1
+      fi
+      ;;
+  esac
+  case "$HARNESS" in
+    claude*|opencode*|pi|pi-signed)
+      BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+        echo "error: failed to arm the busy-state contract for $ID" >&2
+        exit 1
+      }
+      ;;
+    kimi*)
+      # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
+      # live-verified installed version (bin/fm-busy-lib.sh owns the gate and
+      # the required evidence). Arming without wiring would seed a busy record
+      # nothing can ever clear, so the arm waits for the wiring.
+      if fm_busy_kimi_verified; then
+        echo "error: kimi semantic busy-state wiring is not implemented; open the gate only together with verified wiring" >&2
+        exit 1
+      fi
+      ;;
+  esac
   case "$HARNESS" in
     claude*)
+      # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
+      # a turn; Stop (normal completion), StopFailure (API-error turn end),
+      # and SessionEnd (process shutdown) all close it, so an abnormal end can
+      # never leave a stale busy record. Claude fires no hook for a manual
+      # interrupt, so the firstmate-controlled interruption procedure
+      # (harness-adapters) records idle/fm-interrupt itself. Stop keeps the
+      # turn-ended NOTIFICATION touch for the watcher. Every hook command
+      # tolerates a refused event (|| true) so a stale-gen writer can never
+      # break Claude's own lifecycle.
       mkdir -p "$WT/.claude"
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
+      j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
+      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
+      j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
-      cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
-export const FmTurnEnd = async ({ \$ }) => ({
-  event: async ({ event }) => {
-    if (event.type === "session.idle") await \$\`touch $TURNEND\`
-  },
-})
+      cat > "$WT/.opencode/plugins/fm-busy-state.js" <<EOF
+// Firstmate semantic busy-state events + turn-end notification; written by
+// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Semantic state comes from OpenCode's session.status events: busy and retry
+// are active, idle is inactive. Scoping latches the first session that
+// reports activity (the worker's main session - a subagent child session can
+// only start while the main session is already busy) and ignores other
+// sessions' status until the latched session settles, so a child's idle can
+// never clear the worker's busy state. The session.idle touch stays the
+// watcher's wake NOTIFICATION, never current-state truth.
+import { execFile } from "node:child_process";
+const busyEvent = (state, event) =>
+  new Promise((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
+    ], () => resolve());
+  });
+export const FmBusyState = async () => {
+  let activeSession = null;
+  return {
+    event: async ({ event }) => {
+      if (event.type === "session.status") {
+        const sessionID = event.properties.sessionID;
+        const statusType = event.properties.status && event.properties.status.type;
+        if (statusType === "busy" || statusType === "retry") {
+          if (activeSession === null) activeSession = sessionID;
+          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
+          return;
+        }
+        if (statusType === "idle" && sessionID === activeSession) {
+          activeSession = null;
+          await busyEvent("idle", "session-status-idle");
+        }
+        return;
+      }
+      if (event.type === "session.idle") {
+        if (event.properties.sessionID === activeSession) {
+          activeSession = null;
+          await busyEvent("idle", "session-idle");
+        }
+        await new Promise((resolve) => {
+          execFile("touch", ["$TURNEND"], () => resolve());
+        });
+      }
+    },
+  };
+};
 EOF
-      exclude_path '.opencode/plugins/fm-turn-end.js'
+      exclude_path '.opencode/plugins/fm-busy-state.js'
       ;;
     pi|pi-signed)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
       cat > "$STATE/$ID.pi-ext.ts" <<EOF
-// Firstmate turn-end signal; written by fm-spawn.
-// Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
-// (fires once, only when the whole run exits): the watcher needs a signal at
-// every turn boundary so an idle crewmate is surfaced, not just at shutdown.
+// Firstmate semantic busy-state events + turn-end notification; written by
+// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Semantic state: "agent_start" -> busy when a low-level agent run begins;
+// "agent_settled" -> idle only when ctx.isIdle() confirms Pi will not
+// continue automatically - auto-retries, auto-compaction retries, tool
+// loops, and queued continuations all keep the run un-settled, and a settle
+// that raced another extension's fresh run keeps state busy via isIdle().
+// "turn_end" fires at every inner turn boundary (one LLM response plus its
+// tool calls) and stays a wake NOTIFICATION touch for the watcher, never
+// current-state truth.
 import { execFile } from "node:child_process";
+const busyEvent = (state: string, event: string) =>
+  new Promise<void>((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
+    ], () => resolve());
+  });
 export default function (pi: any) {
+  pi.on("agent_start", () => busyEvent("busy", "agent-start"));
+  pi.on("agent_settled", (_event: any, ctx: any) => {
+    if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    return busyEvent("idle", "agent-settled");
+  });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
       ;;
     codex*)
-      # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
+      # probes and the evidence). Neither Codex path is usable on the
+      # installed binary: a pane worker's turns are not observable through
+      # the app-server protocol, and its lifecycle hooks did not fire for a
+      # firstmate-launched worker. Codex therefore classifies unknown with
+      # an explicit reason rather than falling back to idle, and no busy
+      # wiring is installed. The turn-end NOTIFICATION marker still rides
+      # the launch command via -c notify=[...] and __TURNEND__.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
@@ -1499,6 +1617,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).

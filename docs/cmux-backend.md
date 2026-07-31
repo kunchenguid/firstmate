@@ -94,7 +94,8 @@ Literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
 The composer verifier locates the last bordered composer row and delegates the content decision to `bin/fm-composer-lib.sh`.
 A bare shell prompt is `unknown`, and a slash-popup placeholder remains `pending`, so only Enter is retried and text is never retyped.
-cmux exposes no native generic agent busy signal, so supervision uses the shared capture/hash and busy-regex path.
+cmux exposes no native generic agent busy signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
+Grok alone retains its isolated rendered-tail fallback.
 
 A task workspace's last surface cannot be closed directly.
 Cleanup owns the whole workspace and uses `close-workspace`.

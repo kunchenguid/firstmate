@@ -59,9 +59,11 @@ Unreadable, incomplete, or structurally ambiguous boxes fail closed, and panes w
 The shared classifier accepts a shell glyph as an empty agent composer only inside a verified bordered composer.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 
-Rendered busy detection is also harness-scoped.
-Task metadata selects only that harness's verified signature, so output from one harness cannot make another harness appear busy.
-The exact selection contract and safety rationale live in [architecture](architecture.md#runtime-session-backends), while the signatures live in [the harness-adapters skill](../.agents/skills/harness-adapters/SKILL.md).
+Busy state is not read from rendered text on this backend.
+A task's busy, idle, unknown, or dead verdict comes from the semantic busy-state contract owned by `bin/fm-busy-lib.sh`; [architecture](architecture.md#busy-state-is-semantic-per-adapter) owns its boundaries.
+The one remaining rendered-tail reader is Grok's isolated fallback inside that contract, which can only classify a Grok task.
+The submit acknowledgement and away-mode supervisor-pane busy guard below still consult rendered output, but only to decide whether input can be delivered, never to decide recorded task state.
+The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message once and retries Enter only until the composer clears.

@@ -612,7 +612,7 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   pass "busy detection: real Kimi moon-plus-middot captures require its harness while idle labels stay idle"
 }
 
-test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
+test_watcher_never_classifies_kimi_from_its_spinner() (
   local state="$TMP_ROOT/watch-state" busy_capture='  🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
   mkdir -p "$state"
   printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
@@ -624,26 +624,26 @@ test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
   . "$ROOT/bin/fm-watch.sh"
   # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
   fm_backend_busy_state() { printf 'unknown'; }
-  window_is_busy fake "$busy_capture" \
-    || fail "fm-watch did not recognize the real Kimi spinner-line shape"
+  # Standalone Kimi has no verified semantic busy source, so it classifies
+  # unknown - and unknown is never working. Its moon-phase spinner is
+  # deliberately not a state source: the approved redesign forbids inventing a
+  # Kimi UI signature, and that glyph set is locale- and emoji-font-sensitive.
+  if window_is_busy fake "$busy_capture"; then
+    fail "fm-watch classified a Kimi task busy from its spinner instead of unknown"
+  fi
+  [ "$(fm_busy_classify tmux fake kimi kimi-watch "$state" "$busy_capture")" = "unknown kimi-unverified" ] \
+    || fail "a Kimi task must classify unknown kimi-unverified"
   printf 'window=fake\nharness=codex\n' > "$state/kimi-watch.meta"
   if window_is_busy fake "$busy_capture"; then
-    fail "fm-watch applied Kimi's real spinner signature to a recorded Codex task"
+    fail "fm-watch applied Kimi's spinner to a recorded Codex task"
   fi
-  printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
-  if window_is_busy fake 'ordinary response ending with 🌕'; then
-    fail "fm-watch treated an ordinary Kimi moon as a spinner line"
+  printf 'window=fake\nharness=grok\n' > "$state/kimi-watch.meta"
+  if window_is_busy fake "$busy_capture"; then
+    fail "Kimi's spinner classified a recorded Grok task through its isolated fallback"
   fi
-  if window_is_busy fake '🌕 Full moon details'; then
-    fail "fm-watch treated moon-led Kimi output without the middot separator as busy"
-  fi
-  if window_is_busy fake 'auto  K2.7 Coding thinking  /some/path'; then
-    fail "fm-watch treated Kimi's idle thinking-effort status label as busy"
-  fi
-  if window_is_busy fake 'Ctrl+c:cancel'; then
-    fail "fm-watch let Grok's exact busy token classify a recorded Kimi task busy"
-  fi
-  pass "fm-watch: Kimi spinner matching is metadata-scoped and ignores Grok's busy token"
+  window_is_busy fake 'Ctrl+c:cancel' \
+    || fail "Grok's own verified token must still classify a recorded Grok task busy"
+  pass "fm-watch classifies Kimi as unknown rather than from its spinner, and Grok's fallback stays isolated"
 )
 
 test_kimi_bordered_prompt_needs_no_override() {
@@ -672,5 +672,5 @@ test_kimi_readiness_gate_precedes_pointer
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
-test_watcher_scopes_moon_spinner_to_recorded_kimi_task
+test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override

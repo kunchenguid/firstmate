@@ -102,6 +102,13 @@ prime_turnend_seen() {  # <file>
   printf '%s' "$(seen_sig "$f")" > "$(dirname "$f")/.seen-$base"
 }
 
+record_pi_busy() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source pi-ext --event agent-start
+}
+
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
@@ -1098,6 +1105,7 @@ test_busy_pane_below_turn_age_bound_is_absorbed() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-fresh"
   printf 'Working... (12.3s)' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-fresh.meta"
+  record_pi_busy "$state" busy-fresh
   printf 'working: setup complete\n' > "$state/busy-fresh.status"
   sig=$(seen_sig "$state/busy-fresh.status"); printf '%s' "$sig" > "$state/.seen-busy-fresh_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1123,6 +1131,7 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-stable"
   printf 'Working...' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-stable.meta"
+  record_pi_busy "$state" busy-stable
   printf 'working: setup complete\n' > "$state/busy-stable.status"
   sig=$(seen_sig "$state/busy-stable.status"); printf '%s' "$sig" > "$state/.seen-busy-stable_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1166,6 +1175,7 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-ticking"
   printf 'Working... (3600.1s)' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-ticking.meta"
+  record_pi_busy "$state" busy-ticking
   printf 'working: setup complete\n' > "$state/busy-ticking.status"
   sig=$(seen_sig "$state/busy-ticking.status"); printf '%s' "$sig" > "$state/.seen-busy-ticking_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1206,6 +1216,7 @@ test_busy_pane_turn_end_touch_resets_age() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-reset"
   printf 'Working...' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-reset.meta"
+  record_pi_busy "$state" busy-reset
   printf 'working: setup complete\n' > "$state/busy-reset.status"
   sig=$(seen_sig "$state/busy-reset.status"); printf '%s' "$sig" > "$state/.seen-busy-reset_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1239,6 +1250,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-demand-inspect"
   printf 'Working...' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-demand.meta"
+  record_pi_busy "$state" busy-demand
   printf 'working: setup complete\n' > "$state/busy-demand.status"
   sig=$(seen_sig "$state/busy-demand.status"); printf '%s' "$sig" > "$state/.seen-busy-demand_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1290,6 +1302,7 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-default"
   printf 'Working...' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-default.meta"
+  record_pi_busy "$state" busy-default
   printf 'working: setup complete\n' > "$state/busy-default.status"
   sig=$(seen_sig "$state/busy-default.status"); printf '%s' "$sig" > "$state/.seen-busy-default_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
