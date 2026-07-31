@@ -232,6 +232,10 @@ backlog_key_noncanonical_body_lines() {
 RAW_HOME=$(secondmate_home "$ID") || exit 1
 [ -n "$RAW_HOME" ] || { echo "error: secondmate $ID has no home in $REG" >&2; exit 1; }
 SUB_HOME=$(validate_secondmate_home "$ID" "$RAW_HOME") || exit 1
+if [ "$(fm_backlog_backend_value "$SUB_HOME/config")" = beads ]; then
+  echo "error: secondmate $ID uses beads backend; backlog handoff is not supported with beads" >&2
+  exit 1
+fi
 SUB_BACKLOG="$SUB_HOME/data/backlog.md"
 validate_backlog_file "main backlog" "$MAIN_BACKLOG" || exit 1
 validate_backlog_file "secondmate backlog" "$SUB_BACKLOG" || exit 1

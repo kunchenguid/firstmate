@@ -502,7 +502,7 @@ install_cmd() {
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
-    task) echo "go install github.com/steveyegge/beads/cmd/bd@latest  # task is the beads CLI" ;;
+    task) echo "go install github.com/steveyegge/beads/cmd/bd@latest && ln -sf bd ~/go/bin/task" ;;
     *) return 1 ;;
   esac
 }
