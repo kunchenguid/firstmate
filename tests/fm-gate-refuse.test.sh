@@ -29,6 +29,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-marker-lib.sh"
 
 GATE_LIB="$ROOT/bin/fm-gate-refuse-lib.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -272,7 +274,10 @@ test_send_refuses_and_admits() {
   expect_code 0 "$rc" "send: a normal session must still send"
   assert_not_contains "$out" "$ENV_MSG" "send: normal send must not print the gate refusal"
   assert_not_contains "$out" "$PATH_MSG" "send: normal send must not print the backstop refusal"
-  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=1 arg=hello captain" "send: normal send should type the text"
+  # A metadata-routed steer carries the from-firstmate marker (bin/fm-send.sh;
+  # policy pinned by tests/fm-send-marker.test.sh). This assertion is about the
+  # gate refusal boundary, not the marking policy, so it expects the marker.
+  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=1 arg=${FM_FROMFIRST_MARK}hello captain" "send: normal send should type the text"
   pass "fm-send: refuses on marker and gate-worktree backstop; a normal steer is unaffected"
 }
 
