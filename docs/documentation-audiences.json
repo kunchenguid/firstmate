@@ -140,6 +140,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/firstmate-cursor-cloud/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
       "audience": "agent-runtime"
     },
