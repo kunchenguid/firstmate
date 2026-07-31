@@ -40,6 +40,52 @@ Three properties follow and are load-bearing for dispatch:
 `quotaSemantics.status` is `unknown` with no `effectiveAvailability` entries at all for providers whose vendor exposes no window (observed for `cursor` and `copilot`).
 `state.authStatus` is present only for some providers (observed for `grok` alone), so its absence is missing evidence, not a credential fault.
 
+## Completion-runway shape the judgment depends on
+
+Verified 2026-07-31 against quota-axi 0.1.17 schema 3.
+The command below records the producer shape without persisting account-specific quota values:
+
+```sh
+quota-axi --json | jq '{schemaVersion, effectiveAvailabilityFields: ([.providers[]?.quotaSemantics.effectiveAvailability[]? | keys] | unique), runwayFields: ([.providers[]?.quotaSemantics.effectiveAvailability[]?.runway? | select(type == "object") | keys] | unique)}'
+```
+
+```json
+{
+  "schemaVersion": 3,
+  "effectiveAvailabilityFields": [
+    [
+      "boundedBy",
+      "effectivePercentRemaining",
+      "limitingWindowIds",
+      "pace",
+      "runway",
+      "scope",
+      "status"
+    ]
+  ],
+  "runwayFields": [
+    [
+      "limitingWindowId",
+      "projectedExhaustedAt",
+      "projectionBasis",
+      "projectionConfidence",
+      "status",
+      "usableRunwaySeconds"
+    ],
+    [
+      "limitingWindowId",
+      "projectedExhaustedAt",
+      "status",
+      "usableRunwaySeconds"
+    ]
+  ]
+}
+```
+
+`runway` is nested under each effective-availability scope, so the same provider/model applicability rules govern both effective headroom and runway.
+Projection confidence and basis are not present on every known runway, so selection must preserve their absence as uncertainty rather than fabricate them.
+The older-schema fallback contract is owned by `quota-array-dispatch`; this evidence does not reinterpret an absent runway or pace field.
+
 ## Provider-family counterfactual that this producer schema supports
 
 Verified 2026-07-30 on Pi 0.82.0 and quota-axi 0.1.16.
@@ -128,3 +174,5 @@ Re-run the two commands above and update this section and the pinned version tog
 It asserts that the script accepts no harness, model, or provider input, never calls `quota-axi`, exits alike for every probe result because it renders no verdict, invokes only the two fixed non-destructive argv forms with stdin closed, holds a real bound even when the configured bound is zero or malformed, and never echoes raw vendor output.
 `tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals.
 `tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
+`tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake `quota-axi --json` snapshot per case.
+It covers the Claude 1 percent versus Codex 55 percent reserve regression, explicit accounting for unmeasurable runway, and the strongest-reasoning constraint.
