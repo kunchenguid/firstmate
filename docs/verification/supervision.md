@@ -200,7 +200,7 @@ tests/fm-turnend-guard.test.sh
 
 ### Arm-layer successor and parked check-in cadence
 
-Captured 2026-07-31 from a live home's `state/.watch-cycle-exits.log`, preserved verbatim at `tests/fixtures/watch-cycle-exits.fixture.log` because the file accumulates over days and cannot be regenerated.
+Captured 2026-07-31 from a live home's `state/.watch-cycle-exits.log`, preserved verbatim at `tests/fixtures/watch-cycle-exits/cycle-exits.log` because the file accumulates over days and cannot be regenerated.
 
 ```text
 records                       499

@@ -700,7 +700,7 @@ stage_parked_lanes() {  # <state> <capture-file> <count> <backdate-secs>
 
 # Defect 2. A lane parked awaiting a captain decision cannot clear until a human
 # acts, so it must not carry a standing per-cycle trigger. In the preserved
-# capture (tests/fixtures/watch-cycle-exits.fixture.log) 112 of 499 cycles ended
+# capture (tests/fixtures/watch-cycle-exits/cycle-exits.log) 112 of 499 cycles ended
 # within five seconds of starting, every one on a parked lane: independently
 # phased lanes each ended a cycle of their own, so a fresh watcher died on
 # whichever one happened to be next overdue. Due lanes now batch into one

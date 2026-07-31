@@ -875,7 +875,7 @@ stage_one_signal_home() {  # <case-name>
 }
 
 # Defect 1. A delivered wake must arm the next cycle BEFORE it is handled.
-# The captured evidence in tests/fixtures/watch-cycle-exits.fixture.log shows
+# The captured evidence in tests/fixtures/watch-cycle-exits/cycle-exits.log shows
 # what the other ordering costs: 499 of 499 real cycles closed with
 # successor=none, so supervision ended on every single delivered wake and came
 # back only if something above this layer happened to re-arm. The window that
@@ -1001,7 +1001,7 @@ test_successor_is_not_armed_without_supervision_need() {
 # defect it recorded, these tests are guarding nothing and must say so.
 test_preserved_capture_still_shows_the_defect_a_fresh_cycle_no_longer_has() {
   local fixture total no_successor short_stale dir state fakebin armout armpid successor_pid
-  fixture="$ROOT/tests/fixtures/watch-cycle-exits.fixture.log"
+  fixture="$ROOT/tests/fixtures/watch-cycle-exits/cycle-exits.log"
   [ -s "$fixture" ] || fail "the preserved cycle-exit capture is missing"
   total=$(grep -c '^arm_pid=' "$fixture")
   no_successor=$(grep -c 'successor=none$' "$fixture")
