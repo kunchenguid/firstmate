@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared quota-axi compatibility floor for bootstrap and dispatch auth.
+# Shared quota-axi compatibility floor for the bootstrap diagnostic.
 # Usage: . bin/fm-quota-axi-lib.sh
 #
 # 0.1.16 is the floor because it is the first build that reports each provider's
@@ -9,8 +9,8 @@
 # produce a captain-facing sign-out claim for a candidate that never read it.
 #
 # This file is the single owner of that version number. bin/fm-bootstrap.sh
-# turns a failing check into the operator-facing MISSING diagnostic, and
-# bin/fm-auth-preflight.sh refuses to emit an unscoped verdict on an older build.
+# turns a failing check into the operator-facing MISSING diagnostic, which is
+# what keeps an older build from reaching a dispatch intake at all.
 
 FM_QUOTA_AXI_MIN=0.1.16
 
