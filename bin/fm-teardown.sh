@@ -287,22 +287,6 @@ remove_kimi_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
-# Best-effort Parlay deregistration (bin/fm-spawn.sh's header owns enrollment).
-# The recorded background pid is killed unconditionally so a `parlay` that went
-# missing from PATH between spawn and teardown never orphans it; only the final
-# `parlay agent-down` network call is gated on `parlay` being present.
-deregister_parlay_agent() {
-  local state_dir=$1 id=$2 pid_file pid
-  pid_file="$state_dir/$id.parlay-listen-pid"
-  pid=$(cat "$pid_file" 2>/dev/null || true)
-  case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
-  rm -f "$pid_file"
-  if command -v parlay >/dev/null 2>&1; then
-    parlay agent-down "$id" >/dev/null 2>&1 \
-      || echo "warning: parlay agent-down failed for $id (non-blocking)" >&2
-  fi
-}
-
 retire_busy_state() {
   local state_dir=$1 id=$2 gen=${3:-}
   if [ -n "$gen" ]; then
