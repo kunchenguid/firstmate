@@ -192,8 +192,7 @@ No armed watch is lost by upgrading.
 
 ## What this change does not cover
 
-`bin/fm-pr-merge.sh` still addresses GitHub only, by owner and repository.
-It refuses a GitLab merge request URL rather than sending it to the wrong forge, so merging a merge request stays a deliberate manual step until merge parity lands separately.
+`bin/fm-pr-merge.sh` merging a GitLab merge request is a separate change from the watch this record verifies; see `tests/fm-pr-merge.test.sh` for its hermetic coverage, including a multi-group project path.
 
 A GitLab task records no `pr_head=`.
 `gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.

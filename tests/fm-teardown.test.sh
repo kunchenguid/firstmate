@@ -237,6 +237,44 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# Give the project's origin a URL shape (rather than a bare local path) so the
+# provider-guess-from-origin path can parse a host out of it, while it still
+# resolves to the exact same bare repo for real git fetch/push. "localhost" is
+# the one host git's own file transport recognizes as a no-op prefix.
+use_url_shaped_gitlab_origin() {
+  local case_dir=$1
+  git -C "$case_dir/project" remote set-url origin "file://localhost$case_dir/origin.git"
+}
+
+# glab mock answering only `mr view` (state), for a merge request whose number
+# is already known (recorded pr=). Args: case_dir state
+add_glab_mr_merged_state() {
+  local case_dir=$1 state=$2
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "mr view") printf 'title:\tfixture\nstate:\t%s\n' "$state" ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
+# glab mock answering both `mr list` (branch -> number, for the no-pr=-recorded
+# discovery path) and `mr view` (state). Args: case_dir number branch state
+add_glab_branch_discovery_mocks() {
+  local case_dir=$1 number=$2 branch=$3 state=$4
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "mr list") printf '!%s\t%s\n' "$number" "fixture project!$number title (main) <- ($branch)" ;;
+  "mr view") printf 'title:\tfixture\nstate:\t%s\n' "$state" ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
 append_pr_meta_for_current_head() {
   local case_dir=$1 head
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -701,6 +739,90 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
+}
+
+# GitLab counterpart of the squash-ancestor GitHub case above: pr= is recorded
+# as a merge request URL, its provider comes from parsing that URL (not from
+# origin), and the merge request's frozen head is fetched via GitLab's own
+# refs/merge-requests/<n>/head ref rather than a JSON field.
+test_gitlab_pr_url_recorded_merged_allows() {
+  local case_dir rc local_head
+  case_dir=$(make_case gitlab-pr-recorded)
+  write_meta "$case_dir" no-mistakes ship
+  use_url_shaped_gitlab_origin "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf '%s\n' 'pr=https://gitlab.example.com/group/subgroup/project/-/merge_requests/7' \
+    >> "$case_dir/state/task-x1.meta"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin "$local_head:refs/merge-requests/7/head"
+  add_glab_mr_merged_state "$case_dir" merged
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-pr-recorded: teardown should succeed for a merged GitLab merge request"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-pr-recorded: teardown printed a REFUSED line"
+  pass "teardown accepts a merged GitLab merge request recorded as pr="
+}
+
+# GitLab counterpart of no-pr-branch-discovery: no pr= was ever recorded, so
+# the provider is guessed from the project's own origin remote, and the merge
+# request number is discovered from the branch name via glab, exactly
+# reproducing the real false-refusal report this fixes for GitLab projects.
+test_gitlab_no_pr_recorded_discovers_merged_mr_by_branch_allows() {
+  local case_dir rc local_head mr_head
+  case_dir=$(make_case gitlab-no-pr-branch-discovery)
+  write_meta "$case_dir" no-mistakes ship
+  use_url_shaped_gitlab_origin "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  mr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes auto-fix")
+  git -C "$case_dir/wt" push -q origin "$mr_head:refs/merge-requests/9/head"
+  add_glab_branch_discovery_mocks "$case_dir" 9 fm/task-x1 merged
+
+  ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
+    || fail "gitlab-no-pr-branch-discovery: test setup bug, meta unexpectedly has a pr= line"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-no-pr-branch-discovery: teardown should succeed by discovering the merged MR from the branch name"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-no-pr-branch-discovery: teardown printed a REFUSED line"
+  pass "teardown discovers a merged GitLab merge request by branch name and tears down when no pr= was ever recorded"
+}
+
+# Fail-safe: a GitLab lookup error (e.g. glab errors on `mr view`) must fall
+# back to the content check rather than ever being read as a merge, exactly
+# like the existing GitHub gh-error case.
+test_gitlab_lookup_error_and_content_absent_refuses() {
+  local case_dir rc
+  case_dir=$(make_case gitlab-lookup-error)
+  write_meta "$case_dir" no-mistakes ship
+  use_url_shaped_gitlab_origin "$case_dir"
+  printf '%s\n' 'pr=https://gitlab.example.com/group/subgroup/project/-/merge_requests/7' \
+    >> "$case_dir/state/task-x1.meta"
+  # Real content not landed anywhere, so only a working GitLab lookup could
+  # allow teardown; the fail-safe must refuse rather than allow on a glab error.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  cat > "$case_dir/fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+echo "error: merge request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/glab"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-lookup-error: teardown should refuse when glab errors and content is not in default"
+  grep -q REFUSED "$case_dir/stderr" || fail "gitlab-lookup-error: no REFUSED line in stderr"
+  pass "a GitLab lookup error with content not in default refuses (fail-safe)"
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
@@ -1413,6 +1535,9 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
+test_gitlab_pr_url_recorded_merged_allows
+test_gitlab_no_pr_recorded_discovers_merged_mr_by_branch_allows
+test_gitlab_lookup_error_and_content_absent_refuses
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head

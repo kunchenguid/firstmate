@@ -8,19 +8,23 @@
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
-# The PR itself is resolved from the task's recorded pr= when present, or - when
-# no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
-# where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
-# up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# normal ship task whose commits are not so reachable - when its PR or merge
+# request is merged and the forge reports a head that contains the current
+# local work, or its content is already present in the up-to-date default
+# branch. This recognizes the common squash-merge-then-delete-branch flow,
+# where the branch's own commits live nowhere on a remote yet the change is
+# fully in main.
+# The PR/MR itself is resolved from the task's recorded pr= when present (its
+# own provider tag says whether to ask GitHub or GitLab), or - when no pr= was
+# ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI, where
+# the usual "checks green" fm-pr-check.sh trigger never fires) - by guessing
+# the provider from the project's own origin remote and looking up a merged
+# PR/MR whose head branch matches the worktree's branch, fetching its head via
+# refs/pull/<n>/head (GitHub) or refs/merge-requests/<n>/head (GitLab) when the
+# branch itself was deleted. So a missing pr= never by itself causes a false
+# refusal of landed work.
+# A forge lookup error falls back to the content check; if that is also
+# inconclusive, teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
@@ -385,6 +389,20 @@ pr_number_from_branch() {
   printf '%s' "$n"
 }
 
+# Resolve the merge-request number for a worktree branch via glab, against the
+# given host-qualified project URL. Echoes the number on a single match and
+# returns non-zero on no match or any lookup failure (fail-safe), the same
+# contract as pr_number_from_branch above.
+mr_number_from_branch() {
+  local branch=$1 repo_url=$2 out n
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
+  [ -n "$repo_url" ] || return 1
+  out=$( cd "$WT" && glab mr list --all --source-branch "$branch" --repo "$repo_url" --per-page 1 2>/dev/null ) || return 1
+  n=$(printf '%s\n' "$out" | sed -n 's/^!\([0-9][0-9]*\)\t.*/\1/p' | head -1)
+  [ -n "$n" ] || return 1
+  printf '%s' "$n"
+}
+
 pr_number_from_target() {
   local target=$1 n
   case "$target" in
@@ -443,19 +461,12 @@ $unpushed
 EOF
 }
 
-# Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
-pr_is_merged() {
-  local branch=$1 target view state head current
-  if [ -n "$PR_URL" ]; then
-    target=$PR_URL
-  else
-    target=$(pr_number_from_branch "$branch") || return 1
-  fi
-  [ -n "$target" ] || return 1
+# GitHub state+head lookup, unchanged from before GitLab support: asks GitHub
+# for both the PR state and head, then ensures the head commit object is
+# present locally. Echoes the head SHA on a merged PR; returns non-zero when
+# the PR is not merged, no PR is found, or any gh error occurs.
+pr_state_and_head_github() {
+  local target=$1 view state head
   view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   head=${view#*$'\t'}
@@ -466,6 +477,73 @@ pr_is_merged() {
   esac
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
+  printf '%s\n' "$head"
+}
+
+# GitLab state+head lookup: MR state via glab's plain field output (no JSON
+# processor required, matching bin/fm-pr-poll.sh's own approach), and the head
+# commit via GitLab's standard refs/merge-requests/<n>/head ref, fetched from
+# the recorded origin remote so it reuses that remote's own configured
+# credentials rather than needing a fresh authenticated URL. Echoes the head
+# SHA on a merged merge request; returns non-zero when it is not merged, not
+# found, or any glab or fetch error occurs.
+pr_state_and_head_gitlab() {
+  local number=$1 repo_url=$2 raw state head
+  raw=$(cd "$WT" && glab mr view "$number" --repo "$repo_url" 2>/dev/null) || return 1
+  state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1)
+  [ -n "$state" ] || return 1
+  case "$state" in
+    merged) ;;
+    *) return 1 ;;
+  esac
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "refs/merge-requests/$number/head" >/dev/null 2>&1 || return 1
+  head=$(git -C "$WT" rev-parse --verify FETCH_HEAD 2>/dev/null) || return 1
+  printf '%s\n' "$head"
+}
+
+# Is the worktree's PR or merge request merged for local work contained in its
+# head? Resolves the target from the recorded pr= URL first (its own provider
+# tag says whether to ask GitHub or GitLab), or - when none was ever recorded -
+# from the branch name against the provider guessed from the project's own
+# origin remote. Returns non-zero when the PR/MR is not merged, the current
+# work is not contained in its head, no PR/MR is found, the provider cannot be
+# determined, or any lookup error occurs - the caller then falls back to the
+# content check.
+pr_is_merged() {
+  local branch=$1 provider origin_url target repo_url head current
+  if [ -n "$PR_URL" ]; then
+    fm_pr_url_parse "$PR_URL" || return 1
+    provider=$FM_PR_PROVIDER
+  else
+    origin_url=$(git -C "$WT" remote get-url origin 2>/dev/null) || return 1
+    fm_pr_remote_identity "$origin_url" || return 1
+    provider=$FM_PR_REMOTE_PROVIDER
+  fi
+  case "$provider" in
+    github)
+      if [ -n "$PR_URL" ]; then
+        target=$PR_URL
+      else
+        target=$(pr_number_from_branch "$branch") || return 1
+      fi
+      [ -n "$target" ] || return 1
+      head=$(pr_state_and_head_github "$target") || return 1
+      ;;
+    gitlab)
+      if [ -n "$PR_URL" ]; then
+        repo_url="https://$FM_PR_HOST/$FM_PR_PATH"
+        target=$FM_PR_NUMBER
+      else
+        repo_url="https://$FM_PR_REMOTE_HOST/$FM_PR_REMOTE_PATH"
+        target=$(mr_number_from_branch "$branch" "$repo_url") || return 1
+      fi
+      [ -n "$target" ] || return 1
+      head=$(pr_state_and_head_gitlab "$target" "$repo_url") || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$head" ] || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
   unpushed_patches_are_in_pr_head "$head"

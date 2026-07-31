@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Merge a task's PR after recording pr= and any available pr_head= through
-# bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
-# The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
-# owner/repository and PR number are passed to gh-axi as separate arguments.
+# Merge a task's PR or merge request after recording pr= and any available
+# pr_head= through bin/fm-pr-check.sh, so teardown can verify landed work after
+# squash merges. The full canonical URL is parsed by bin/fm-pr-lib.sh: a GitHub
+# PR resolves to owner/repository and is merged with gh-axi, while a GitLab
+# merge request resolves to its host-qualified project path (which may sit
+# several groups deep) and is merged with glab. Both are addressed by number.
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi/glab merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,17 +26,22 @@ if [ "$#" -lt 2 ]; then
 fi
 ID=$1
 RAW_URL=$2
-# bin/fm-pr-lib.sh parses GitLab merge request URLs so the watcher can follow
-# them, but this path still addresses only GitHub by owner/repository. The
-# provider check holds that refusal exactly as it was until merge parity lands.
-if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL" \
-  || [ "$FM_PR_PROVIDER" != github ]; then
+if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
   echo "error: invalid PR merge request" >&2
   exit 2
 fi
+case "$FM_PR_PROVIDER" in
+  github|gitlab) ;;
+  *)
+    echo "error: invalid PR merge request" >&2
+    exit 2
+    ;;
+esac
 URL=$FM_PR_URL
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
+PR_HOST=$FM_PR_HOST
+PR_PATH=$FM_PR_PATH
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
 [ "${1:-}" = "--" ] && shift
@@ -81,4 +88,15 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+case "$FM_PR_PROVIDER" in
+  github)
+    gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+    ;;
+  gitlab)
+    # A bare group/project path would resolve against glab's own configured
+    # default host, not necessarily this merge request's host, so --repo
+    # always carries the full host-qualified project URL instead.
+    glab mr merge "$PR_NUMBER" --repo "https://$PR_HOST/$PR_PATH" --yes --auto-merge=false \
+      "${merge_args[@]+"${merge_args[@]}"}" "$@"
+    ;;
+esac

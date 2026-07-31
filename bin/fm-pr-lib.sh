@@ -163,8 +163,8 @@ fm_pr_gitlab_path_valid() {
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
 # bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty; teaching the merge path about GitLab is a separate change, and
-# until then it refuses a GitLab URL rather than merging anything.
+# them empty; bin/fm-pr-merge.sh addresses GitLab by FM_PR_HOST and FM_PR_PATH
+# instead, since a GitLab project has no fixed owner/repository shape.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -205,6 +205,50 @@ fm_pr_url_parse() {
   FM_PR_HOST=$host
   FM_PR_PATH=$path
   FM_PR_NUMBER=${BASH_REMATCH[3]}
+}
+
+# Parses a project's own git remote URL (https, ssh://, or scp-like
+# git@host:path) into a host and path, for the two places that have no
+# canonical PR/MR URL to parse directly: a freshly scaffolded brief, and
+# bin/fm-teardown.sh's branch-name merge lookup when no pr= was ever recorded.
+# Guesses the forge from the host exactly as fm_pr_url_parse's own host rule
+# does: an exact github.com host is github, and any other resolvable host is
+# treated as gitlab, since GitLab also runs self-hosted under an arbitrary
+# host. Sets FM_PR_REMOTE_PROVIDER, FM_PR_REMOTE_HOST, and FM_PR_REMOTE_PATH;
+# returns non-zero, never a guess, when no host and path can be extracted.
+FM_PR_REMOTE_PROVIDER=
+FM_PR_REMOTE_HOST=
+FM_PR_REMOTE_PATH=
+
+fm_pr_remote_identity() {
+  local url=${1-} host path
+  local LC_ALL=C
+  FM_PR_REMOTE_PROVIDER=
+  FM_PR_REMOTE_HOST=
+  FM_PR_REMOTE_PATH=
+  if [[ "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*://([^/@]+@)?([^/:]+)(:[0-9]+)?/(.+)$ ]]; then
+    host=${BASH_REMATCH[2]}
+    path=${BASH_REMATCH[4]}
+  elif [[ "$url" =~ ^[^/@[:space:]]+@([^:/[:space:]]+):(.+)$ ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+  else
+    return 1
+  fi
+  path=${path%.git}
+  path=${path%/}
+  [ -n "$host" ] && [ -n "$path" ] || return 1
+  # Consumed by bin/fm-brief.sh and bin/fm-teardown.sh, which have no
+  # canonical PR/MR URL to parse and so read these globals directly.
+  # shellcheck disable=SC2034
+  FM_PR_REMOTE_HOST=$host
+  # shellcheck disable=SC2034
+  FM_PR_REMOTE_PATH=$path
+  # shellcheck disable=SC2034
+  case "$host" in
+    github.com) FM_PR_REMOTE_PROVIDER=github ;;
+    *) FM_PR_REMOTE_PROVIDER=gitlab ;;
+  esac
 }
 
 fm_pr_head_valid() {

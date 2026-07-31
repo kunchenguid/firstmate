@@ -2872,14 +2872,16 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
-  # The merge path still addresses GitHub only, so it refuses rather than
-  # sending a merge request to the wrong forge.
+  # The merge path now addresses GitLab too: it records pr= and merges
+  # through glab, addressed by the same host-qualified project URL as the
+  # watch above, and never touches the GitHub CLI for a GitLab URL.
   write_task_meta "$dir" task-c
-  set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -eq 2 ] || fail "merge wrapper did not refuse a GitLab merge request URL"
+  run_merge_entry "$dir" task-c "$url" >/dev/null 2>&1 \
+    || fail "merge wrapper did not merge a GitLab merge request URL"
+  assert_grep "pr=$url" "$dir/home/state/task-c.meta" \
+    "merge wrapper did not record pr= for a GitLab merge request"
+  grep -qF -- "mr merge 7 --repo https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
+    || fail "merge wrapper did not address glab by project URL and merge request number"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
