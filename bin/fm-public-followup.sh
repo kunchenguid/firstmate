@@ -503,17 +503,14 @@ public_followup_registration_valid() {
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
   generation=$(fm_pf_registry_get "$STATE" "$id" generation)
   [ -n "$relation" ] && [ -n "$work_id" ] || return 1
-  case "$work_home" in
-    main) ;;
-    secondmate:*) [ -n "${work_home#secondmate:}" ] || return 1 ;;
-    *) return 1 ;;
-  esac
+  fm_pf_home_id_valid "$work_home" || return 1
   fm_pf_slug_valid "$work_id" || return 1
   case "$generation" in ''|*[!0-9]*) return 1 ;; esac
 }
 
 public_followup_secondmate_home() {
   local id=$1 meta home marker
+  fm_pf_home_id_valid "secondmate:$id" || return 1
   meta="$STATE/$id.meta"
   home=$(fmx_meta_get "$meta" home)
   if [ -z "$home" ] && [ -f "$DATA/secondmates.md" ] && [ ! -L "$DATA/secondmates.md" ]; then

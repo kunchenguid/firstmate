@@ -587,7 +587,7 @@ test_delivery_requires_registration_before_posting() {
 test_secondmate_teardown_requires_parent_binding() {
   local parent child
   parent=$(make_home teardown-parent)
-  child=$(make_home teardown-child relay-off)
+  child=$(make_home teardown-child)
   printf '%s\n' mate > "$child/.fm-secondmate-home"
   seed_commitment "$parent" pf-teardown req-teardown x secondmate:mate work-child
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
@@ -605,7 +605,7 @@ test_secondmate_teardown_requires_parent_binding() {
     "missing parent binding must preserve the child work metadata"
 
   parent=$(make_home teardown-valid-parent)
-  child=$(make_home teardown-valid-child relay-off)
+  child=$(make_home teardown-valid-child)
   printf '%s\n' mate > "$child/.fm-secondmate-home"
   printf -- '- mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
     "$child" > "$parent/data/secondmates.md"
@@ -628,6 +628,81 @@ test_secondmate_teardown_requires_parent_binding() {
   assert_present "$child/state/work-child.meta" \
     "an owed parent commitment must preserve the child work metadata"
   pass "marked secondmate teardown resolves its parent and fails closed when unavailable"
+}
+
+test_relay_disabled_marked_child_skips_public_guard() {
+  local child out rc
+  child=$(make_home teardown-disabled-child relay-off)
+  fm_git_init_commit "$child/projects/worktree"
+  printf '%s\n' disabled-mate > "$child/.fm-secondmate-home"
+  fm_write_meta "$child/state/work-disabled.meta" \
+    "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
+    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "kind=ship" "mode=local-only"
+
+  rc=0
+  out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+    FM_CONFIG_OVERRIDE="$child/config" \
+    FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$TMP_ROOT/unreadable-parent" \
+    "$TEARDOWN" work-disabled 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "relay-disabled marked-child teardown must not refuse public-followup cleanup (rc=$rc): $out"
+  assert_not_contains "$out" "cannot resolve the primary home" \
+    "relay-disabled teardown must not inspect or refuse on a missing parent"
+  assert_not_contains "$out" "still owes a public reply" \
+    "relay-disabled teardown must not run the public commitment guard"
+  assert_absent "$child/state/public-followup" \
+    "relay-disabled marked-child teardown must not create a public-followup artifact"
+  pass "relay-disabled marked-child teardown skips parent resolution and public guarding"
+}
+
+test_secondmate_parent_binding_matches_literal_id() {
+  local parent child
+  parent=$(make_home teardown-literal-parent)
+  child=$(make_home teardown-literal-child)
+  printf '%s\n' 'mate.id' > "$child/.fm-secondmate-home"
+  printf -- '- mateXid - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
+    "$child" > "$parent/data/secondmates.md"
+  seed_commitment "$parent" pf-teardown-literal req-teardown-literal x secondmate:mate.id work-literal
+  fm_write_meta "$parent/state/mate.id.meta" "kind=secondmate" "home=$child"
+  fm_write_meta "$child/state/work-literal.meta" \
+    "window=firstmate:fm-work-literal" "endpoint_task_id=work-literal" \
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+
+  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+    FM_CONFIG_OVERRIDE="$child/config" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
+    expect_failure "a near-match registry id must not satisfy a dotted parent binding" \
+    "$TEARDOWN" work-literal
+  assert_contains "$EXPECT_OUT" "cannot resolve the primary home for marked secondmate mate.id" \
+    "a dotted id must be matched as an exact registry field"
+  assert_present "$child/state/work-literal.meta" \
+    "a near-match parent binding must preserve the child work metadata"
+  pass "secondmate parent resolution matches the durable registry id literally"
+}
+
+test_traversal_registration_is_refused_before_delivery() {
+  local home log out
+  home=$(make_home traversal-registration)
+  log="$home/curl.log"; : > "$log"
+  seed_commitment "$home" pf-traversal req-traversal x main work-traversal
+  emit_terminal "$home" "$home" pf-traversal main work-traversal >/dev/null \
+    || fail "emit failed for traversal registration"
+  sed -i.bak 's/^work_home=.*/work_home=secondmate:..\/..\/x/' \
+    "$home/state/public-followup/registry/pf-traversal"
+  rm -f "$home/state/public-followup/registry/pf-traversal.bak"
+  run_pf "$home" consume >/dev/null || fail "consume failed for traversal registration"
+
+  out=$(FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-traversal 2>&1) && \
+    fail "a traversal-shaped registration must not be deliverable"
+  assert_contains "$out" "registration for 'pf-traversal' is missing or invalid" \
+    "a traversal-shaped work home must be rejected before delivery"
+  [ "$(followup_posts "$log")" -eq 0 ] || fail "an invalid work home must not post publicly"
+  assert_present "$home/state/public-followup/registry/pf-traversal" \
+    "an invalid work home must retain its registration for reconciliation"
+  [ "$(task_state "$home" pf-traversal)" != done ] \
+    || fail "an invalid work home must not close the obligation"
+  pass "traversal-shaped registrations are rejected before path construction or posting"
 }
 
 test_pending_rejects_malformed_listing() {
@@ -902,6 +977,9 @@ test_interrupted_delivery_refuses_to_repost
 test_outward_delivery_stays_with_the_owning_home
 test_delivery_requires_registration_before_posting
 test_secondmate_teardown_requires_parent_binding
+test_relay_disabled_marked_child_skips_public_guard
+test_secondmate_parent_binding_matches_literal_id
+test_traversal_registration_is_refused_before_delivery
 test_pending_rejects_malformed_listing
 test_private_context_survives_inbox_cleanup
 test_cleanup_refuses_while_a_public_reply_is_owed
