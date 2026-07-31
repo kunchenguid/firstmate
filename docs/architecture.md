@@ -288,10 +288,13 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 ## Self-updates stay safe
 
-`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+`/updatefirstmate` normally fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+An optional local private-upstream configuration first integrates the declared public branch into private `origin/main` in a disposable clone, validates the result, and publishes it without force before the same origin fast-forward can touch a running home.
+Failure preserves isolated evidence and leaves private main plus every running checkout unchanged.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 The origin-based updater and the local secondmate sync share the same guarded fast-forward helper; only the origin mode fetches.
-The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
+The private integration mechanics are owned by `bin/fm-private-update.sh`, and the situational procedure is owned by the `/updatefirstmate` skill.
+Firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) owns the self-update trigger.
 
 ## Restart-proof
 

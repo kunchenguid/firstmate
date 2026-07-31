@@ -198,6 +198,45 @@ SH
   pass "pi-signed identity: authoritative launch selection distinguishes shared wrapper ancestry"
 }
 
+test_hermes_session_lock_identity() {
+  local dir fakebin got
+  dir="$TMP_ROOT/hermes-session-lock-identity"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field" in
+  comm=|args=) printf '/opt/test/bin/%s\n' "${FM_TEST_HERMES_NAME:-hermes}" ;;
+  ppid=) printf '1\n' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+  case "$got" in
+    ''|*[!0-9]*) fail "session-lock ancestry did not recognize exact hermes wrapper" ;;
+  esac
+  PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 4242' \
+    "$ROOT" || fail "session-lock liveness rejected exact hermes holder"
+  if FM_TEST_HERMES_NAME=hermes-helper PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 4242' \
+    "$ROOT"; then
+    fail "session-lock liveness accepted inexact hermes-helper holder"
+  fi
+
+  pass "session-lock identity recognizes the captain-local exact hermes wrapper"
+}
+
 test_dash_leading_process_names_are_basename_operands() {
   local dir fakebin got err status
   dir="$TMP_ROOT/dash-leading-process-names"
@@ -2325,6 +2364,7 @@ SH
 test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
+test_hermes_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_spawn_split_and_inherit
