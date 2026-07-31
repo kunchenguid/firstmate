@@ -1491,7 +1491,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 
 W="fm-$ID"
 case "$BACKEND" in
-  tmux)
+  tmux|psmux)
     SES=$(fm_backend_tmux_container_ensure)
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
@@ -1500,7 +1500,11 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    if [ "$BACKEND" = psmux ]; then
+      WID=$(fm_backend_psmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    else
+      WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    fi
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -1733,7 +1737,7 @@ fi
 : "${WT_TARGET:=$T}"
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
-    tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
+    tmux|psmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
     herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
@@ -1743,6 +1747,7 @@ spawn_send_text_line() {  # <target> <text>
 spawn_current_path() {  # <target>
   case "$BACKEND" in
     tmux) fm_backend_tmux_current_path "$1" ;;
+    psmux) fm_backend_psmux_current_path "$1" ;;
     herdr) fm_backend_herdr_current_path "$1" ;;
     zellij) fm_backend_zellij_current_path "$1" "$W" ;;
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
@@ -1750,7 +1755,7 @@ spawn_current_path() {  # <target>
 }
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
-    tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
+    tmux|psmux) fm_backend_tmux_send_literal "$1" "$2" ;;
     herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
     zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_literal "$1" "$2" ;;
@@ -1759,7 +1764,7 @@ spawn_send_literal() {  # <target> <text>
 }
 spawn_send_key() {  # <target> <key>
   case "$BACKEND" in
-    tmux) fm_backend_tmux_send_key "$1" "$2" ;;
+    tmux|psmux) fm_backend_tmux_send_key "$1" "$2" ;;
     herdr) fm_backend_herdr_send_key "$1" "$2" ;;
     zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_key "$1" "$2" ;;
@@ -1818,8 +1823,48 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+# spawn_psmux_worktree_from_banner: on psmux, #{pane_current_path} reports the
+# pane leader's cwd, not the interactive subshell treehouse opens, so the cwd
+# poll used for tmux never sees the worktree. treehouse prints an authoritative
+# "Entered worktree at <path>" banner on entering; read that instead, and
+# normalize its ~ / backslash / drive-letter display form to an MSYS path. Prints
+# the resolved worktree path, or nothing after 60s.
+spawn_psmux_worktree_from_banner() {  # <target>
+  local target=$1 cap raw
+  for _ in $(seq 1 60); do
+    cap=$(fm_backend_capture psmux "$target" 80 2>/dev/null || true)
+    raw=$(printf '%s\n' "$cap" | sed -n 's/.*Entered worktree at \(.*\)\. Type.*/\1/p' | tail -1)
+    if [ -n "$raw" ]; then
+      raw=${raw//\\//}
+      [ "${raw:0:1}" = '~' ] && raw="$HOME/${raw:2}"
+      case "$raw" in
+        [A-Za-z]:/*) command -v cygpath >/dev/null 2>&1 && raw=$(cygpath -u "$raw" 2>/dev/null || printf '%s' "$raw") ;;
+      esac
+      printf '%s\n' "$raw"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
+
+  # psmux reports the pane leader's cwd, not treehouse's interactive subshell, so
+  # the cwd poll below cannot see the worktree; detect it from treehouse's banner
+  # instead. Same interactive `treehouse get` and auto-return lifecycle as tmux -
+  # only the detection signal differs. tmux leaves WT empty here and polls below.
+  if [ "$BACKEND" = psmux ]; then
+    WT=$(spawn_psmux_worktree_from_banner "$WT_TARGET" || true)
+    # psmux cannot fall back to the cwd poll below (it never sees the treehouse
+    # subshell's cwd), so a missing banner is a hard failure - fail fast rather
+    # than run the whole futile poll.
+    [ -n "$WT" ] || {
+      echo "error: treehouse get did not report a worktree via the psmux banner within 60s; inspect window $T" >&2
+      exit 1
+    }
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -1843,6 +1888,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
   for _ in $(seq 1 60); do
+    [ -n "$WT" ] && break  # psmux banner detection already set WT; skip the poll
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
