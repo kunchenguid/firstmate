@@ -13,6 +13,7 @@ Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-au
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
+A dead numeric owner of `state/.claude-autoarm.lock` is reclaimed through the shared lock primitive and logged only after the replacement owner acquires the claim; a live owner or contended reclaim keeps the competing hook inert.
 While supervision is still needed and away mode remains inactive, an actionable close or typed failure wakes the idle session through exit 2.
 
 ## Actionable wake ordering
@@ -56,7 +57,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, and `/fork`, same-instance shutdown-plus-start, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
-`tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, and exit-2 translation.
+`tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, dead single-flight owner reclaim and logging, contended reclaim, and exit-2 translation.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard.
 
