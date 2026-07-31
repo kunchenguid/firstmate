@@ -168,6 +168,8 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
+  # Trailing colon forces tmux to resolve $session as a session, not a window
+  # whose name happens to match (e.g. session "DarkOrbit" + window "DarkOrbit").
   if windows=$(LC_ALL=C tmux list-windows -t "$session:" -F '#{window_name}' 2>&1); then
     inventory_status=0
   else

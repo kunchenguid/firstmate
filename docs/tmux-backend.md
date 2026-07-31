@@ -33,9 +33,11 @@ tmux attach -t firstmate
 Each task window is named `fm-<id>`.
 
 ```sh
-tmux list-windows -t <session-name>
+tmux list-windows -t '<session-name>:'
 tmux select-window -t <session-name>:fm-<id>
 ```
+
+The trailing colon forces tmux to resolve the target as a session rather than a window whose name happens to match the session's.
 
 Typing into an attached task window is authoritative direct intervention.
 Routine supervision does not require attachment: `bin/fm-peek.sh <id>` captures a bounded tail and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` steers the recorded endpoint.
@@ -48,6 +50,7 @@ A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
+Both the spawn-time duplicate-window check and this probe's membership inventory force session resolution with a trailing colon, so a window named after its session can never shadow the session target.
 
 The verified Pi Launcher path reports the exact foreground command `pi-launcher` for both pi and pi-signed, while direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly.
 Similar or prefixed process names are not accepted through those exact Pi-family entries.
