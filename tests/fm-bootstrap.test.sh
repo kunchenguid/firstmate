@@ -766,6 +766,11 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
+  # This fixture routes one provider-prefixed model, so it needs the matching
+  # registry entry to stay silent. Silent-by-default is the contract for a FULLY
+  # configured home; a home routing provider models with no registry is
+  # deliberately loud, and tests/fm-model-zero-budget.test.sh owns that case.
+  printf '%s\n' '{"schema":"fm-model-registry.v1","providers":{"anthropic":{"access_class":"A","cost_posture":"subscription-flat"}},"models":{"anthropic/claude-sonnet-5":{"provider":"anthropic","model_id":"claude-sonnet-5","cost_class":"subscription-flat","status":"approved-primary","observation_level":"O4","evidence":{"probe":{"result":"ok","rc":0,"at":"2026-07-27T01:20:00Z"}}}},"observation":{"levels":{"O4":{"probe_max_age_days":36500}}}}' > "$case_dir/home/config/models.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
@@ -781,6 +786,38 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
+# Derive a registry that covers every provider-prefixed model a dispatch body
+# names, so a fixture exercising DISPATCH validation is not also exercising
+# registry absence. Every provider is declared subscription-flat and every model
+# approved and probed: these fixtures are about schema validation, not cost class.
+# tests/fm-model-zero-budget.test.sh owns the registry-absence behavior.
+write_covering_registry() {
+  local body=$1 out=$2
+  printf '%s\n' "$body" | jq '
+    def profiles($v):
+      if ($v | type) == "array" then $v
+      elif ($v | type) == "object" then [$v]
+      else [] end;
+    [ (((.rules // [])[]? | profiles(.use?)[]?), (profiles(.default // null)[]?))
+      | .model? // empty ]
+    | map(select(type == "string" and (. != "default") and (test("/"))))
+    | unique
+    | { schema: "fm-model-registry.v1",
+        providers: (map({ key: (split("/")[0]),
+                          value: { access_class: "A", cost_posture: "subscription-flat" } })
+                    | from_entries),
+        models: (map({ key: ., value: {
+                        provider: (split("/")[0]),
+                        model_id: (split("/") | .[1:] | join("/")),
+                        cost_class: "subscription-flat",
+                        status: "approved-primary",
+                        observation_level: "O4",
+                        evidence: { probe: { result: "ok", rc: 0, at: "2026-07-27T01:20:00Z" } } } })
+                 | from_entries),
+        observation: { levels: { O4: { probe_max_age_days: 36500 } } } }
+  ' > "$out" 2>/dev/null || printf '%s\n' '{"schema":"fm-model-registry.v1"}' > "$out"
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out n
   n=0
@@ -791,6 +828,7 @@ test_crew_dispatch_validation() {
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
+    write_covering_registry "$body" "$case_dir/home/config/models.json"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -832,6 +870,36 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# Regression through the BOOTSTRAP path, not only a direct script call: the probe
+# sweep once ran fm-model-verify.sh with stderr discarded, so a due-selection
+# query that died at runtime read as a healthy sweep that probed nothing. The
+# registry passes schema validation (observation levels are unvalidated) but
+# fails inside select_due, because an object probe_max_age_days cannot be
+# multiplied - the diagnostic arrives on stderr and bootstrap must surface it.
+test_model_probe_sweep_failure_is_loud_through_bootstrap() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/probe-sweep-loud"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/config/models.json" <<'JSON'
+{ "schema": "fm-model-registry.v1",
+  "providers": { "openai-codex": { "access_class": "A", "cost_posture": "subscription-flat" } },
+  "models": { "openai-codex/gpt-5.4-mini": {
+      "provider": "openai-codex", "model_id": "gpt-5.4-mini",
+      "cost_class": "subscription-flat", "status": "approved-primary",
+      "observation_level": "O4",
+      "evidence": { "probe": { "result": "ok", "rc": 0, "at": "2026-07-27T01:20:00Z" } } } },
+  "observation": { "levels": { "O4": { "probe_max_age_days": { "days": 36500 } } } } }
+JSON
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "could not determine which models are due" \
+    "a failed due-selection must be visible in bootstrap output, not swallowed"
+  pass "bootstrap surfaces a probe-sweep failure instead of reading it as a healthy empty sweep"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_quota_axi_min_version
@@ -853,3 +921,4 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_model_probe_sweep_failure_is_loud_through_bootstrap

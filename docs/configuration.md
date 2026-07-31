@@ -274,6 +274,121 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Model registry (config/models.json)
+
+`config/models.json` is an optional local, gitignored registry of the models this home is allowed to route work to, and the enforced copy of its zero-budget rule.
+This section is the single owner of the schema and its per-field semantics.
+`.agents/skills/model-onboarding/SKILL.md` owns the admission policy that decides what belongs here, and `bin/fm-model-registry-lib.sh` owns the enforcement mechanics.
+
+The registry exists to make one safety rule checkable by a machine rather than by memory: an API-key provider may be routed only to a model on an explicit verified-free allowlist.
+One credential commonly reaches both free and metered models on the same provider, rendered identically in every catalogue listing, so a single plausible model name is a charge.
+The unit of authorization is therefore the model, never the provider and never the credential.
+
+Keeping the registry separate from `config/crew-dispatch.json` is what enables the referential-integrity check: bootstrap refuses when a dispatch rule names a model that is absent from the registry, carries a non-approved status, or has no live-probe record.
+That catches a bad model at config-edit time, before any worker is launched against it.
+
+```json
+{
+  "schema": "fm-model-registry.v1",
+  "providers": {
+    "<provider-id>": {
+      "access_class": "<A|B|C|D>",
+      "cost_posture": "<subscription-flat|api-key|self-hosted>",
+      "credential_env": "<ENV VAR NAME ONLY, never a value>",
+      "catalogue_sources": ["<path to a harness price catalogue>"],
+      "status": "<active|blocked|dropped>",
+      "status_reason": "<required when status is not active>"
+    }
+  },
+  "models": {
+    "<provider>/<model-id>": {
+      "provider": "<provider-id>",
+      "model_id": "<model-id>",
+      "harness": "<adapter that can reach it>",
+      "cost_class": "<subscription-flat|verified-free|metered|unknown>",
+      "status": "<rejected|blocked|experimental|approved-fallback|approved-specialist|approved-primary>",
+      "status_reason": "<required for rejected and blocked>",
+      "price_at_verification": { "input": 0, "output": 0 },
+      "eligible_routes": [], "prohibited_routes": [],
+      "context": { "advertised": 0, "operational_ceiling": 0, "max_output": 0 },
+      "controls": { "effort_bands": [], "tool_calling": true, "structured_output": true },
+      "limits": { "concurrency": null, "shared_quota_pool": "<pool id>" },
+      "observation_level": "<O1|O2|O3|O4>",
+      "evidence": {
+        "probe": { "result": "ok", "rc": 0, "latency_s": 0, "at": "<ISO8601>" },
+        "price": { "at": "<ISO8601>", "sources": ["<source kind>"] },
+        "dossier": "<path to the dossier>"
+      },
+      "last_verified": "<ISO8601>"
+    }
+  },
+  "zero_budget": {
+    "allowlist": {
+      "<provider>/<model-id>": {
+        "price_at_verification": { "input": 0, "output": 0 },
+        "verified_at": "<ISO8601>",
+        "sources": ["<source kind>"],
+        "hard_ceiling": "<provider-side mechanism that refuses rather than bills>"
+      }
+    }
+  },
+  "observation": { "levels": { "<O1|O2|O3|O4>": { "probe_max_age_days": 0 } } },
+  "promotion": {
+    "enabled": false,
+    "requires_instrument": "<named evidence instrument>",
+    "thresholds": {},
+    "authority": {
+      "t4_to_t3": "automatic-notify-immediate",
+      "t3_to_t2": "captain-confirm",
+      "t2_to_t1": "never-by-evidence",
+      "t1_to_t0": "never-by-evidence"
+    }
+  }
+}
+```
+
+`schema` is required and must be exactly `fm-model-registry.v1`; an unrecognized value is refused rather than best-effort parsed, so a future format change fails loudly instead of being silently misread.
+Every other top-level block is optional, and an absent block simply has nothing to enforce.
+
+`providers` classifies each provider's cost posture, and it is what lets enforcement answer "can this call cost money" for a model that is not in `models` at all.
+A `subscription-flat` or `self-hosted` provider is allowed without an allowlist entry, because no per-call charge exists.
+An `api-key` provider is allowed only for models named in `zero_budget.allowlist`.
+A provider absent from this block is **refused**: an unknown cost posture is never treated as a default-allow.
+A provider whose `status` is `blocked` or `dropped` is refused with its recorded `status_reason`.
+
+`price_at_verification` stores the price numerically rather than only a cost class, because that is what makes a later repricing detectable; a name-only allowlist is structurally blind to one.
+`catalogue_sources` names the harness price catalogues to compare against, as local data rather than a path hardcoded in tracked code, since those paths are version-pinned and move on every harness upgrade.
+Both the pinned per-provider catalogue shape and the provider-fetched store shape are understood.
+
+Evidence `sources` accept `probe`, `provider-entitlement`, `provider-doc`, `harness-static-catalogue`, `harness-fetched-cache`, `third-party`, and `inference`, in descending authority.
+An allowlist entry must carry at least one genuinely price-bearing source - `provider-doc` or `harness-static-catalogue` - or it **fails validation**.
+A `harness-fetched-cache` price is refreshed by the provider underneath you and cannot establish one, and a `probe` deliberately does not count either: it proves the account gets an answer, not what that answer costs.
+An allowlist entry must also record `verified_at` and a `price_at_verification` that is zero in every field.
+
+`limits.concurrency` caps how many workers may run on a model at once, and `limits.shared_quota_pool` makes siblings that draw on one free-tier pool count against the same cap, so several workers cannot collectively breach one quota.
+`observation.levels[<level>].probe_max_age_days` sets how stale a model's probe evidence may become before it is reported, which is what keeps the session-start probe sweep interval-gated rather than probing every routed model every time.
+
+`promotion.authority` is validated as a ceiling in each direction: a home may be equally or more conservative than the values above, never more permissive.
+`t2_to_t1` and `t1_to_t0` must be `never-by-evidence`, because Tier 1 is triggered by risk rather than capability rank and no accumulation of evidence may enter it.
+Promotion stays dormant until both `promotion.enabled` is true and the named instrument is producing records, so activating it is a configuration and data change rather than a code change.
+
+Enforcement is deliberately asymmetric about the file's absence.
+With **no** `config/models.json`, the spawn-time check is inert and spawns behave exactly as they did before the registry existed, so nothing is forced on a home that never opted in; bootstrap then reports `MODEL_REGISTRY: no config/models.json ...` whenever the dispatch config routes to a provider-prefixed model, so the unenforced state is never silent.
+With the file **present**, every unclear answer refuses: malformed JSON, an unsupported schema, an unclassified provider, a stale-evidence allowlist entry, and a missing `jq` all refuse rather than pass, because a broken safety file must never read as an absent one.
+A bare model name with no provider prefix is a harness-native selector and is always allowed.
+
+Routability is a separate axis from cost, and the two are enforced independently.
+A model recorded as `rejected` or `blocked` is refused at spawn even when it carries no cost risk at all, because a model on a flat subscription can still be one the account is not entitled to use.
+Availability is a third axis again: a rate-limited or cooling-down model is unavailable rather than rejected, lives in `state/model-health.json`, and never changes the routing status recorded here.
+
+A live probe is itself a billable act on a metered provider, so `bin/fm-model-verify.sh` consults the same zero-budget decision before issuing any request, on the interval-gated sweep and on an explicit `--model` alike - a typed model name is not authorization to spend money.
+A refused model is reported as `MODEL_VERIFY: refusing to probe <model> - <reason>`, no request is issued, and its prior record in `state/model-health.json` is left untouched.
+`--force-probe` is the only override, and a forced probe announces itself on stdout so an authorized billable probe is never invisible.
+Bootstrap reports registry problems as `MODEL_REGISTRY: invalid config/models.json - <reason>` for schema failures, `MODEL_REGISTRY: <model> ...` for integrity failures, `MODEL_PRICE: <model> ...` for drift, and `MODEL_VERIFY: <model> ...` for probe results.
+Valid, current registries stay silent.
+See [`docs/examples/models.json`](examples/models.json) for a starting point to copy into local `config/models.json`, and `bin/fm-model-verify.sh --help` for the probe and drift mechanics.
+Rollback is deleting the file: every check becomes a no-op.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -288,7 +403,7 @@ Backend tool availability uses the adapter's own executable resolver, so bootstr
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
-When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
+When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation, and when `config/models.json` exists, `jq` is required for model registry validation and the spawn-time zero-budget check refuses without it.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
@@ -309,7 +424,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `models.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
