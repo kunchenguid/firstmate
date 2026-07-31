@@ -9,7 +9,12 @@
 # This file is sourced by scripts and has no side effects on source.
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+# The pi family is ANCHORED because a bare `pi` substring would also match pip,
+# pipenv, and any path containing "pi"; every other name is a safe substring.
+# pi-launcher and Pi are the launcher wrapper and the npm shim basename, both
+# already known to bin/backends/tmux.sh's pane classifier - without them a Pi
+# session could not prove it owned the home's session lock.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^pi-launcher$|^Pi$'
 
 # Walk the current process ancestry (up to 16 hops) and print a harness pid.
 # For every harness except Claude, the first match wins (innermost pid), which

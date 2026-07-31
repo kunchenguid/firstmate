@@ -535,7 +535,101 @@ SH
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
   out=$(CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
-  pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"
+  # A variant basename must resolve too. An exact `kimi)` arm made self-detection
+  # the ONLY consumer that missed one, while fm-session-lock-lib.sh and
+  # backends/tmux.sh both matched kimi as a substring.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+pid=
+prev=
+for arg in "$@"; do
+  [ "$prev" = -o ] && field=$arg
+  [ "$prev" = -p ] && pid=$arg
+  prev=$arg
+done
+case "$field:$pid" in
+  comm=:4242) printf '/opt/kimi/bin/kimi-nightly\n' ;;
+  comm=:*) printf '/bin/bash\n' ;;
+  ppid=:4242) printf '1\n' ;;
+  ppid=:*) printf '4242\n' ;;
+  args=:*) printf 'bash\n' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = kimi ] || fail "a kimi variant basename detected as '$out', not kimi"
+
+  pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence, including a variant basename"
+}
+
+# The pi family is matched EXACTLY (a bare `pi` substring would also hit pip and
+# pipenv), so each real launcher basename needs its own arm. pi-launcher and Pi
+# were known to backends/tmux.sh's pane classifier but not to self-detection, so
+# a firstmate running under either reported `unknown`.
+test_pi_launcher_basenames_detect_as_pi() {
+  local dir fakebin cfg out comm
+  dir="$TMP_ROOT/pi-detection"
+  fakebin=$(fm_fakebin "$dir")
+  cfg="$dir/config"
+  mkdir -p "$cfg"
+
+  for comm in pi pi-signed pi-launcher Pi; do
+    cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+field=
+pid=
+prev=
+for arg in "\$@"; do
+  [ "\$prev" = -o ] && field=\$arg
+  [ "\$prev" = -p ] && pid=\$arg
+  prev=\$arg
+done
+case "\$field:\$pid" in
+  comm=:4242) printf '/opt/pi/bin/$comm\n' ;;
+  comm=:*) printf '/bin/bash\n' ;;
+  ppid=:4242) printf '1\n' ;;
+  ppid=:*) printf '4242\n' ;;
+  args=:*) printf 'bash\n' ;;
+esac
+SH
+    chmod +x "$fakebin/ps"
+    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+    [ "$out" = pi ] || fail "pi-family basename '$comm' detected as '$out', not pi"
+  done
+
+  # The anti-substring guard must hold: these must NOT read as a harness.
+  for comm in pip pipenv piper; do
+    cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+field=
+pid=
+prev=
+for arg in "\$@"; do
+  [ "\$prev" = -o ] && field=\$arg
+  [ "\$prev" = -p ] && pid=\$arg
+  prev=\$arg
+done
+case "\$field:\$pid" in
+  comm=:4242) printf '/usr/bin/$comm\n' ;;
+  comm=:*) printf '/bin/bash\n' ;;
+  ppid=:4242) printf '1\n' ;;
+  ppid=:*) printf '4242\n' ;;
+  args=:*) printf 'bash\n' ;;
+esac
+SH
+    chmod +x "$fakebin/ps"
+    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+    [ "$out" = unknown ] || fail "'$comm' must not be detected as a harness, got '$out'"
+  done
+
+  pass "fm-harness: every pi launcher basename resolves to pi while pip/pipenv stay unrecognized"
 }
 
 test_kimi_session_lock_identity() {
@@ -563,6 +657,54 @@ SH
   assert_contains "$out" "lock: held by live harness pid" \
     "fm-lock did not recognize Kimi as a live holder"
   pass "fm-lock recognizes Kimi ancestry and live lock holders"
+}
+
+# bin/fm-session-lock-lib.sh's FM_HARNESS_RE anchors the pi family so a bare `pi`
+# cannot match pip or pipenv. pi-launcher and Pi were missing from it, so a Pi
+# session could not prove it owned the home's session lock - a fail-closed miss
+# (fm_session_lock_owned_by_self returns 1), but it blocks legitimate arming.
+test_pi_launcher_session_lock_identity() {
+  local home fakebin comm out
+  for comm in pi-launcher Pi; do
+    home="$TMP_ROOT/pi-lock-home-$comm"
+    fakebin=$(fm_fakebin "$TMP_ROOT/pi-lock-fake-$comm")
+    mkdir -p "$home/state"
+    cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"comm="*) printf '%s\n' '/opt/pi/bin/$comm'; exit 0 ;;
+  *"args="*) printf '%s\n' '$comm'; exit 0 ;;
+esac
+exit 1
+SH
+    chmod +x "$fakebin/ps"
+    FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" \
+      || fail "fm-lock did not acquire from '$comm' ancestry"
+    printf '%s\n' "$$" > "$home/state/.lock"
+    out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+    assert_contains "$out" "lock: held by live harness pid" \
+      "fm-lock did not recognize '$comm' as a live holder"
+  done
+
+  # The anchor must still reject the dangerous near-misses.
+  for comm in pip pipenv; do
+    home="$TMP_ROOT/pi-lock-neg-$comm"
+    fakebin=$(fm_fakebin "$TMP_ROOT/pi-lock-negfake-$comm")
+    mkdir -p "$home/state"
+    cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"comm="*) printf '%s\n' '/usr/bin/$comm'; exit 0 ;;
+  *"args="*) printf '%s\n' '$comm'; exit 0 ;;
+esac
+exit 1
+SH
+    chmod +x "$fakebin/ps"
+    FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1 \
+      && fail "'$comm' must not satisfy the harness-ancestry lock check"
+  done
+
+  pass "fm-lock recognizes pi-launcher and Pi ancestry while pip/pipenv stay rejected"
 }
 
 test_kimi_busy_signature_is_scoped_to_spinner_lines() {
@@ -670,7 +812,9 @@ test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_detection_uses_ancestry_after_markers
+test_pi_launcher_basenames_detect_as_pi
 test_kimi_session_lock_identity
+test_pi_launcher_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
 test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override

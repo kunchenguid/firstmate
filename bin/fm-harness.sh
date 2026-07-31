@@ -53,9 +53,19 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
-      kimi) echo kimi; return ;;
+      # Substring, like the four harnesses above: a basename match is already
+      # narrow, and an exact arm here made this the ONLY consumer that missed a
+      # variant name. bin/fm-session-lock-lib.sh and bin/backends/tmux.sh both
+      # matched kimi as a substring, so a `kimi-nightly` process was recognized
+      # by those two while self-detection returned `unknown`.
+      *kimi*) echo kimi; return ;;
+      # The pi family stays EXACT on purpose: a bare `pi` substring would also
+      # match pip, pipenv, and any path component containing "pi". pi-launcher
+      # and Pi are the launcher wrapper and the npm shim basename; both were
+      # already recognized by bin/backends/tmux.sh's pane classifier but not
+      # here, so a firstmate running under either self-detected as `unknown`.
       pi-signed) echo pi; return ;;
-      pi) echo pi; return ;;
+      pi|pi-launcher|Pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
