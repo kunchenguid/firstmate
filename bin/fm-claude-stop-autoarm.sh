@@ -108,6 +108,21 @@ fi
 # Claude runs one background process per firing with no dedupe. Exactly one
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
+# A prior hook may have died without releasing its claim (e.g. SIGKILL during
+# a timeout). Reclaim a claim whose recorded owner is dead so supervision does
+# not stay dark behind a stale owner.
+if [ -e "$OWNER_LOCK" ] || [ -L "$OWNER_LOCK" ]; then
+  OWNER_PID=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
+  case "$OWNER_PID" in
+    ''|*[!0-9]*) ;;
+    *)
+      if ! kill -0 "$OWNER_PID" 2>/dev/null; then
+        printf 'firstmate auto-arm: reclaiming dead owner claim (pid=%s)\n' "$OWNER_PID" >&2
+      fi
+      ;;
+  esac
+fi
+
 fm_lock_try_acquire "$OWNER_LOCK" || exit 0
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 

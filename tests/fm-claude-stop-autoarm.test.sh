@@ -373,6 +373,21 @@ test_single_flight_admits_exactly_one_owner() {
   pass "auto-arm: concurrent firings admit one owner and one rewake translation"
 }
 
+test_reclaims_dead_autoarm_owner_claim() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/dead-autoarm-claim")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '9999999\n' > "$dir/state/.claude-autoarm.lock/pid"
+  out=$(run_autoarm "$dir" 2>&1); status=$?
+  expect_code 2 "$status" "a dead auto-arm owner claim must be reclaimed and translated"
+  assert_contains "$out" "reclaiming dead owner claim" "reclaim must be logged"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming dead owner claim"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "dead-claim reclaim must record outcome=rewake"
+  pass "auto-arm: dead owner claim is reclaimed and logged"
+}
+
 test_need_vanished_mid_cycle_closes_quietly() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/vanished")
@@ -429,6 +444,7 @@ test_failed_close_rewakes_with_failure_banner
 test_clean_close_exits_silently
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
+test_reclaims_dead_autoarm_owner_claim
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
