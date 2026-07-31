@@ -55,4 +55,4 @@ Applicability was reviewed across all five supported runtime backends.
 - Orca is not affected because backend routing receives the already-rendered launch command and does not interpret harness-specific `--agent` flags.
 - cmux is not affected because backend routing receives the already-rendered launch command and does not interpret harness-specific `--agent` flags.
 
-The regression coverage is `tests/fm-spawn-dispatch-profile.test.sh` for ship, scout, and secondmate launch commands, plus `tests/fm-kimi-harness.test.sh` for the byte-pinned adapter launch template inventory.
+The regression coverage is `tests/fm-spawn-dispatch-profile.test.sh` for ship, scout, and secondmate launch commands.
