@@ -577,7 +577,7 @@ test_delivery_requires_registration_before_posting() {
   assert_contains "$EXPECT_OUT" "registration for 'pf-missing' is missing or invalid" \
     "missing registration must be an actionable delivery refusal"
   [ "$(followup_posts "$log")" -eq 0 ] || fail "missing registration must prevent any public post"
-  [ "$(task_state "$home" pf-missing)" != done ] \
+  [ "$(task_state "$home" pf-missing)" != 'done' ] \
     || fail "missing registration must not close the obligation"
   assert_grep 'x_request=req-missing' "$home/state/work-missing.meta" \
     "missing registration must leave the legacy link for reconciliation"
@@ -742,7 +742,7 @@ test_traversal_registration_is_refused_before_delivery() {
   [ "$(followup_posts "$log")" -eq 0 ] || fail "an invalid work home must not post publicly"
   assert_present "$home/state/public-followup/registry/pf-traversal" \
     "an invalid work home must retain its registration for reconciliation"
-  [ "$(task_state "$home" pf-traversal)" != done ] \
+  [ "$(task_state "$home" pf-traversal)" != 'done' ] \
     || fail "an invalid work home must not close the obligation"
   pass "traversal-shaped registrations are rejected before path construction or posting"
 }
