@@ -149,11 +149,19 @@ test_owned_lock_is_silent() {
   # lock-owning pid and the nudge recognizes the session already ran.
   # FM_LOCK_OS_OVERRIDE=posix pins the working-ps ancestry contract for
   # determinism across hosts.
+  # The trailing `exit $?` is load-bearing: without a command after `"$0"`, bash
+  # exec-optimizes the final command and REPLACES the fake 'claude' shell with
+  # the nudge process. The nudge would then inherit the lock-owner pid but carry
+  # the interpreter's comm (not 'claude'), so the ancestry walk finds no harness
+  # and the lock reads as unowned. Keeping `exit $?` forces the nudge to run as a
+  # real child while the fake 'claude' survives as its lock-owning parent, and
+  # still propagates the nudge's exit status.
   # shellcheck disable=SC2016 # $$/$FM_HOME/$0 are evaluated by the spawned shell.
   out=$(FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" \
     FM_LOCK_OS_OVERRIDE=posix "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$0"
+        exit $?
       ' "$NUDGE" 2>&1) || status=$?
   expect_code 0 "$status" "owned lock nudge must exit 0"
   [ -z "$out" ] || fail "owned lock nudge must be silent, got: $out"
