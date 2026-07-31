@@ -149,6 +149,7 @@ test_owned_lock_is_silent() {
   # lock-owning pid and the nudge recognizes the session already ran.
   # FM_LOCK_OS_OVERRIDE=posix pins the working-ps ancestry contract for
   # determinism across hosts.
+  # shellcheck disable=SC2016 # $$/$FM_HOME/$0 are evaluated by the spawned shell.
   out=$(FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" \
     FM_LOCK_OS_OVERRIDE=posix "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"

@@ -119,6 +119,7 @@ _fm_is_windows() {
 # match, keep walking through consecutive claude ancestors (the bg-spare hook
 # worker chain) and stop the instant a non-match follows; any other harness
 # match wins at its innermost pid.
+# shellcheck disable=SC2016 # PowerShell source; $env:/$p/$n stay literal by design.
 _FM_PS_ANCESTRY='
 $ErrorActionPreference="SilentlyContinue"; $ProgressPreference="SilentlyContinue"
 $id=[int]$env:FM_START_WINPID
@@ -141,6 +142,7 @@ exit 1
 
 # True (exit 0) when FM_CHECK_WINPID is a live process whose image looks like a
 # verified harness.
+# shellcheck disable=SC2016 # PowerShell source; $env:/$p/$n stay literal by design.
 _FM_PS_ALIVE='
 $ErrorActionPreference="SilentlyContinue"; $ProgressPreference="SilentlyContinue"
 $id=[int]$env:FM_CHECK_WINPID
