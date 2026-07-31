@@ -29,6 +29,11 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# Before destructive cleanup, teardown acts as custodian for the task's evidence
+# through bin/fm-evidence.sh, which is a silent no-op unless this home opted in
+# with config/evidence-repo. That gate is on the local commit and never on the
+# push, so an unreachable remote never blocks reclaiming a worktree; --force
+# warns instead of refusing.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -1204,6 +1209,27 @@ if [ "$FORCE" != "--force" ] \
     printf '%s\n' "$PUBLIC_FOLLOWUP_BLOCKING" >&2
     echo "Deliver it with bin/fm-public-followup.sh deliver <obligation-id>, waive it with tasks-axi public-followup waive, or use --force after explicit discard approval." >&2
     exit 1
+  fi
+fi
+
+# Firstmate is the custodian for a work item's evidence, and it acts here,
+# before anything is destroyed. bin/fm-evidence.sh is a silent no-op unless this
+# home opted in with config/evidence-repo. It fails only when the local commit
+# fails, so this gate is on preserved evidence and never on a reachable network:
+# an unreachable remote must not block reclaiming a worktree, and cleanup must
+# not proceed over evidence that was never committed. Secondmate homes are not
+# work items and carry no task artifact directory.
+# --force is the approved discard path, so it warns instead of refusing, exactly
+# as it does for every other teardown refusal.
+if [ "$KIND" != secondmate ]; then
+  if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-evidence.sh" preserve "$ID"; then
+    if [ "$FORCE" != "--force" ]; then
+      echo "REFUSED: could not preserve task $ID's evidence before cleanup." >&2
+      echo "Cleanup destroys the worktree, so fix the evidence destination or clear config/evidence-repo first." >&2
+      exit 1
+    fi
+    echo "WARNING: could not preserve task $ID's evidence; continuing because --force authorizes discard." >&2
   fi
 fi
 
