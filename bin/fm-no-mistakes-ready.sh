@@ -20,9 +20,10 @@
 # implementation_complete, decisions, design_grounding, runtime_grounding,
 # and maestro.
 # Replace every `pending` verdict and placeholder evidence, then run `check`.
-# After reviewing every evidence axis, Firstmate alone runs `approve` with the
-# exact implementation HEAD. The durable approval binds both that HEAD and the
-# reviewed record bytes. Worker evidence without this approval cannot be ready.
+# After reviewing every evidence axis, the lock-owning Firstmate session alone
+# runs `approve` with the exact implementation HEAD. The durable approval binds
+# both that HEAD and the reviewed record bytes. Worker evidence without this
+# approval cannot be ready.
 # `check` also verifies the exact fm/<task-id> branch, clean committed worktree,
 # record-to-HEAD and approval binding, no-mistakes ship metadata, and Spec Kit applicability.
 # It prints `READY`, `NOT_READY`, or `ERROR` and exits 0, 1, or 2 respectively.
@@ -61,6 +62,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 usage() {
   awk '
@@ -287,7 +290,15 @@ fm_nm_validate_readiness() { # <task-id> <require-approval>
   done
   if [ "$require_approval" -eq 1 ]; then
     approval=$(fm_nm_approval_path)
-    fm_nm_approval_load "$approval" && approval_status=0 || approval_status=$?
+    if [ ! -e "$approval" ] && [ ! -L "$approval" ]; then
+      approval_status=3
+    else
+      fm_session_lock_owned_by_self "$STATE" || {
+        fm_nm_error "semantic approval can be validated only by the lock-owning Firstmate session"
+        return 2
+      }
+      fm_nm_approval_load "$approval" && approval_status=0 || approval_status=$?
+    fi
     case "$approval_status" in
       0)
         evidence_sha256=$(fm_pr_sha256 "$record") || {
@@ -330,6 +341,10 @@ fm_nm_check() { # <task-id>
 
 fm_nm_approve() { # <task-id> <exact-head>
   local id=$1 exact_head=$2 approval dir tmp evidence_sha256
+  fm_session_lock_owned_by_self "$STATE" || {
+    fm_nm_error "semantic approval can be published only by the lock-owning Firstmate session"
+    return 2
+  }
   fm_nm_validate_readiness "$id" 0 || return $?
   [ "$exact_head" = "$FM_NM_VALIDATED_HEAD" ] || {
     fm_nm_error "approval head $exact_head does not match worktree HEAD $FM_NM_VALIDATED_HEAD"
@@ -356,6 +371,11 @@ fm_nm_approve() { # <task-id> <exact-head>
     printf 'head=%s\n' "$FM_NM_VALIDATED_HEAD"
     printf 'evidence_sha256=%s\n' "$evidence_sha256"
   } > "$tmp"
+  fm_session_lock_owned_by_self "$STATE" || {
+    rm -f "$tmp"
+    fm_nm_error "Firstmate session-lock ownership changed before semantic approval publication"
+    return 2
+  }
   mv "$tmp" "$approval" || { rm -f "$tmp"; return 2; }
   printf 'approved: Firstmate semantic readiness for task %s at %s\n' "$id" "$FM_NM_VALIDATED_HEAD"
 }
@@ -532,13 +552,13 @@ fm_nm_monitor_process_matches() { # <session> <pane> <run> <executable>
   output=$(fm_backend_herdr_cli "$1" pane process-info --pane "$2" 2>/dev/null) || return 1
   candidate=$(printf '%s' "$output" | jq -er --arg pane "$2" --arg run "$3" '
     select(.result.process_info.pane_id == $pane)
-    | [.result.process_info.foreground_processes[]?
-      | select((.argv | type) == "array")
-      | select((.argv | length) == 4)
-      | select((.argv[0] | type) == "string")
-      | select(.argv[1] == "attach" and .argv[2] == "--run" and .argv[3] == $run)
-      | .argv[0]]
-    | if length == 1 then .[0] else empty end
+    | select((.result.process_info.foreground_processes | type) == "array")
+    | select((.result.process_info.foreground_processes | length) == 1)
+    | .result.process_info.foreground_processes[0].argv
+    | select(type == "array" and length == 4)
+    | select((.[0] | type) == "string")
+    | select(.[1] == "attach" and .[2] == "--run" and .[3] == $run)
+    | .[0]
   ' 2>/dev/null) || return 1
   candidate=$(fm_nm_canonical_executable "$candidate") || return 1
   expected=$(fm_nm_canonical_executable "$4") || return 1

@@ -26,6 +26,35 @@ assert_contains_text() {
   esac
 }
 
+make_fake_session_owner_ps() { # <fakebin>
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+field=
+pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$pid" = "$FM_FAKE_SESSION_OWNER" ]; then
+  case "$field" in
+    comm=|args=) printf 'codex\n' ;;
+    ppid=) printf '1\n' ;;
+    *) exit 1 ;;
+  esac
+else
+  case "$field" in
+    comm=|args=) printf 'bash\n' ;;
+    ppid=) printf '%s\n' "$FM_FAKE_SESSION_OWNER" ;;
+    *) exit 1 ;;
+  esac
+fi
+SH
+  chmod +x "$1/ps"
+}
+
 new_repo() { # <dir> <task-id>
   local dir=$1 id=$2
   mkdir -p "$dir"
@@ -146,7 +175,8 @@ test_help() {
 }
 
 test_readiness_outcomes() {
-  local home state data worktree id output status record head
+  local home state data worktree id output status record head approval authbin
+  local PATH=$PATH FM_FAKE_SESSION_OWNER=$$
   home="$TMP_ROOT/readiness-home"
   state="$home/state"
   data="$home/data"
@@ -154,6 +184,10 @@ test_readiness_outcomes() {
   id=ready-task
   new_repo "$worktree" "$id"
   write_meta "$state" "$id" "$worktree" tmux
+  authbin=$(fm_fakebin "$TMP_ROOT/readiness-auth")
+  make_fake_session_owner_ps "$authbin"
+  PATH="$authbin:$PATH"
+  export PATH FM_FAKE_SESSION_OWNER
 
   output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" "$HELPER" init "$id") || \
     fail_with_output "init failed" "$output"
@@ -174,10 +208,28 @@ test_readiness_outcomes() {
   set -e
   [ "$status" -eq 1 ] || fail_with_output "worker evidence produced READY without Firstmate approval" "$output"
   assert_contains_text "$output" 'Firstmate semantic approval is missing' "worker-only readiness lacked an approval diagnostic"
+  approval="$data/$id/no-mistakes-readiness.approval"
+  set +e
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" approve "$id" "$head" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] || fail_with_output "worker session published semantic approval" "$output"
+  assert_contains_text "$output" 'lock-owning Firstmate session' "unowned approval refusal lacked caller-authority evidence"
+  [ ! -e "$approval" ] || fail "unowned approval attempt published an approval artifact"
+  printf '%s\n' "$FM_FAKE_SESSION_OWNER" > "$state/.lock"
   output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
     "$HELPER" approve "$id" "$head") || fail_with_output "semantic approval failed" "$output"
   assert_contains_text "$output" "approved: Firstmate semantic readiness for task $id at $head" \
     "semantic approval did not bind the exact commit"
+  rm -f "$state/.lock"
+  set +e
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" "$HELPER" check "$id" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] || fail_with_output "worker session validated Firstmate semantic approval" "$output"
+  assert_contains_text "$output" 'lock-owning Firstmate session' "unowned approval validation lacked caller-authority evidence"
+  printf '%s\n' "$FM_FAKE_SESSION_OWNER" > "$state/.lock"
   output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" "$HELPER" check "$id") || \
     fail_with_output "approved readiness record did not pass" "$output"
   assert_contains_text "$output" "READY: task $id at $head" "ready result did not bind the exact commit"
@@ -253,7 +305,7 @@ test_readiness_outcomes() {
   [ "$status" -eq 1 ] || fail_with_output "dirty worktree did not fail readiness" "$output"
   assert_contains_text "$output" 'worktree is not clean and committed' "dirty worktree reason was not explicit"
   git -C "$worktree" checkout -- file.txt
-  pass "fm-no-mistakes-ready: READY and NOT_READY are commit-bound and project-adaptive"
+  pass "fm-no-mistakes-ready: readiness is Firstmate-authorized and commit-bound"
 }
 
 make_fake_no_mistakes() { # <fakebin> <status-file>
@@ -350,6 +402,8 @@ case "$first $second" in
       printf '{"result":{"process_info":{"pane_id":"w1:p2","foreground_processes":[{"argv":["%s","wrapper","attach","--run","%s"]}]}}}\n' "$FM_FAKE_NM_BIN" "$run"
     elif [ -e "$fixture/counterfeit-executable" ]; then
       printf '{"result":{"process_info":{"pane_id":"w1:p2","foreground_processes":[{"argv":["%s/not-no-mistakes","attach","--run","%s"]}]}}}\n' "$fixture" "$run"
+    elif [ -e "$fixture/additional-process" ]; then
+      printf '{"result":{"process_info":{"pane_id":"w1:p2","foreground_processes":[{"argv":["%s","attach","--run","%s"]},{"argv":["bash","other"]}]}}}\n' "$FM_FAKE_NM_BIN" "$run"
     else
       printf '{"result":{"process_info":{"pane_id":"w1:p2","foreground_processes":[{"argv":["%s","attach","--run","%s"]}]}}}\n' "$FM_FAKE_NM_BIN" "$run"
     fi
@@ -450,6 +504,17 @@ test_monitor_backends_and_lifecycle() {
   [ "$rc" -eq 2 ] || fail_with_output "counterfeit attach executable was accepted" "$output"
   [ -e "$journal" ] || fail "counterfeit attach executable discarded monitor authority"
   rm -f "$fixture/counterfeit-executable"
+
+  : > "$fixture/additional-process"
+  set +e
+  output=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-reconcile "$id" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail_with_output "additional foreground process was accepted beside exact attach" "$output"
+  [ -e "$journal" ] || fail "ambiguous foreground process set discarded monitor authority"
+  [ ! -e "$fixture/closed" ] || fail "ambiguous foreground process set closed the monitor pane"
+  rm -f "$fixture/additional-process"
 
   git -C "$worktree" checkout -q --detach
   set +e
@@ -563,7 +628,7 @@ test_monitor_backends_and_lifecycle() {
   [ ! -e "$journal" ] || fail "inspected attempt recovery retained its journal"
   [ ! -e "$fixture/closed" ] || fail "attempt recovery mutated the ambiguous presentation pane"
   [ ! -e "$fixture/presentation-lock-missing" ] || fail "monitor mutated Herdr outside the shared presentation lock"
-  pass "fm-no-mistakes-ready: exact Herdr monitor is idempotent, terminal-only, and focus-safe"
+  pass "fm-no-mistakes-ready: Herdr monitor requires one locked exact attach process"
 }
 
 test_monitor_ids_are_validated_before_lock_paths() {

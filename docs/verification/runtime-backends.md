@@ -244,24 +244,26 @@ No ambient `herdr server stop` command is a supported test operation.
 
 ### No-mistakes attach projection
 
-The Firstmate-owned no-mistakes monitor was verified on 2026-07-31 with Herdr 0.7.5 protocol 17 in a guarded named lab.
-The lab used an active status fixture bound to the task branch and submitted commit, while its attach fixture remained in the foreground so Herdr could report the real process topology.
+The Firstmate-owned monitor contract was verified on 2026-07-31 with Herdr 0.7.5 protocol 17 response shapes and no-mistakes v1.41.2.
+`tests/fm-no-mistakes-ready.test.sh` is the complete self-cleaning fixture: it creates the temporary task repository and metadata, exact AXI status fixture, executable attach fixture, and Herdr API fixture without external setup variables.
+The Herdr fixture refuses create, focus restoration, close, and post-close gone confirmation unless the session/socket-wide presentation lock is held.
+It reports an exact attach process plus a second foreground process to prove that ambiguous topology preserves the pane and journal instead of authorizing retirement.
 
 ```sh
-. bin/fm-herdr-lab.sh
-fm_herdr_lab_provision "$LAB"
-fm_herdr_lab_cli "$LAB" workspace create --cwd "$PWD" --label nm-monitor-lab --no-focus
-FM_HOME="$LAB_HOME" bin/fm-no-mistakes-ready.sh monitor-reconcile firstmate-no-mistakes-readiness
-FM_HOME="$LAB_HOME" bin/fm-no-mistakes-ready.sh monitor-reconcile firstmate-no-mistakes-readiness
-fm_herdr_lab_cli "$LAB" pane process-info --pane "$MONITOR_PANE"
-fm_herdr_lab_cli "$LAB" tab list --workspace "$WORKSPACE"
+NM_OUT=$(bin/fm-test-run.sh tests/fm-no-mistakes-ready.test.sh)
+NM_STATUS=$?
+printf '%s\n' "$NM_OUT" | sed -n '/^ok - /p'
+test "$NM_STATUS" -eq 0
 ```
 
-The first reconciliation reported one exact monitor pane, and the second reused that pane without another tab create.
-The process response identified `no-mistakes attach --run LABRUN123` in the exact monitor pane.
-The task tab remained focused while the monitor tab reported `focused:false` in the same exact workspace.
-After the fixture status changed to `completed`, reconciliation closed only the monitor pane, confirmed it gone, removed its journal, and left the focused task tab intact.
-Guarded teardown removed the named lab and the default-session tripwire remained byte-identical.
+Exact filtered output:
+
+```text
+ok - fm-no-mistakes-ready: help renders the full mechanics header
+ok - fm-no-mistakes-ready: readiness is Firstmate-authorized and commit-bound
+ok - fm-no-mistakes-ready: Herdr monitor requires one locked exact attach process
+ok - fm-no-mistakes-ready: monitor IDs are rejected before lock-path authority
+```
 
 ### Prune and respawn
 

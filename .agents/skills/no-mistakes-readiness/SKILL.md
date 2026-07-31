@@ -55,6 +55,7 @@ Bind the record to the exact implementation commit after every corrective implem
 The helper independently checks the branch name, clean worktree, committed HEAD, record binding, task kind and delivery mode, required verdicts, evidence presence, and detectable Spec Kit applicability.
 Worker evidence alone never authorizes `READY`.
 After inspecting every axis against the accepted intent and project, Firstmate runs the helper's semantic approval command with the exact reviewed HEAD.
+The helper accepts approval publication and validation only from the Firstmate session that owns the home's session lock.
 The approval binds both that commit and the reviewed evidence bytes, so a later commit or evidence edit requires renewed Firstmate review and approval.
 
 ## Outcome model
