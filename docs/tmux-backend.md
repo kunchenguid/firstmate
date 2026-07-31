@@ -80,19 +80,21 @@ The supervisor guard selects only the detected primary harness's signature rathe
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics, and `bin/backends/tmux.sh` owns the routing between its two confirmation paths.
 Both paths type a message once and retry Enter only, never retyping.
-For a recorded task whose harness has a trusted semantic lifecycle source with an armed busy contract (claude, opencode, pi, and pi-signed today), submission is confirmed from the harness's own lifecycle record: a new turn opening after Enter is `empty turn-opened`, and a record-proven mid-turn pane that keeps running accepts the Enter as queued (`empty enter-queued`).
-The composer-geometry and luminance readers are not consulted for that verdict, and eligibility comes from `bin/fm-busy-lib.sh`'s per-harness trust table, so codex and kimi become semantic automatically when their verification gates open.
-While `FM_SUBMIT_SEMANTIC_COMPARE=1` (the bake-in default) the rendered composer is still read once afterwards purely for comparison, and any disagreement between the two signals prints a loud `SUBMIT-CONFIRM DISAGREEMENT` warning, the designed tripwire for a mis-wired lifecycle hook reporting submits that did not happen.
-Setting it to `0` ends the bake-in and removes every pane read from the semantic confirm path.
-Harnesses with no verified semantic source yet (codex, kimi, grok), tasks without an armed busy contract, and context-free sends keep the rendered-composer core; a task-scoped fallback verdict carries an explicit `composer-fallback` label so a structurally inferred result is never presented as lifecycle-confirmed, and the away-mode daemon's context-free call keeps its exact bare verdict.
+Semantic confirmation requires positive evidence, because an unchanged record can never prove a delivery: for a recorded task whose harness has a trusted semantic lifecycle source with an armed busy contract (claude, opencode, pi, and pi-signed today) and whose record proves an idle baseline, a send is `empty turn-opened` only when a trusted busy record with an advanced sequence is observed after an Enter keystroke this send actually delivered.
+The whole read-baseline, type, Enter, and confirm window runs under a per-task lock (`state/<id>.submit-lock`), so two concurrent sends cannot claim one turn; a contended lock fails closed as `unknown send-contended` without typing, and a dead holder's stale lock is broken automatically.
+A send whose every Enter keystroke was rejected is `send-failed`, never a confirmation.
+Eligibility comes from `bin/fm-busy-lib.sh`'s per-harness trust table, so codex and kimi become semantic automatically when their verification gates open.
+While `FM_SUBMIT_SEMANTIC_COMPARE=1` (the bake-in default) the rendered composer is read exactly once after the semantic verdict, and a disagreement prints a loud `SUBMIT-CONFIRM DISAGREEMENT` warning and appends durable evidence to `state/<id>.submit-disagreement`; a confirmation contradicted by a still-pending composer is downgraded to `unknown semantic-contradicted`, so during bake-in the rendered signal can veto a confirmation but never grant one.
+Setting the flag to `0` ends the bake-in and removes every pane read from the semantic confirm path.
+Every other case keeps the rendered-composer core: a mid-turn, unknown, malformed, or stale baseline, a harness with no verified semantic source yet (codex, kimi, grok), and a task without an armed busy contract; a task-scoped fallback verdict carries an explicit `composer-fallback` label so a structurally inferred result is never presented as lifecycle-confirmed, and the away-mode daemon's context-free call keeps its exact bare verdict.
 On the fallback path only a proven empty composer is a positive delivery acknowledgement: text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 `fm-send.sh` reports every unconfirmed verdict as a failure instead of retyping or assuming delivery, and its error output names how confirmation was attempted.
 
-OpenCode 1.18.4 has one busy-queue exception, handled on both paths.
+OpenCode 1.18.4 has one busy-queue exception, owned by the fallback path.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
-The semantic path proves the mid-turn fact from the lifecycle record; the fallback path accepts only structurally proven pending text in a provably busy pane as queued after the normal retry budget, while an idle pane remains `pending` as a genuine swallowed Enter.
+A mid-turn send routes to the fallback (the record cannot change to prove the queued Enter), which accepts only structurally proven pending text in a provably busy pane as queued after the normal retry budget, while an idle pane remains `pending` as a genuine swallowed Enter.
 Ambiguous pending text never receives the fallback busy-queue conversion.
-`tests/fm-tmux-submit-busy.test.sh` covers the fallback composer matrix, and `tests/fm-tmux-submit-semantic.test.sh` proves record-confirmed submits with no pane capture, the disagreement warning in both directions, and the labelled fallback.
+`tests/fm-tmux-submit-busy.test.sh` covers the fallback composer matrix, and `tests/fm-tmux-submit-semantic.test.sh` proves transition-confirmed submits, the lock's contended and stale outcomes, the rejected-Enter refusal, the contradiction downgrade with its durable record, and the labelled fallback for busy baselines, codex, and unarmed tasks.
 
 ## Limits and regression entry points
 

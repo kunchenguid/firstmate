@@ -48,22 +48,24 @@
 # Semantic submit confirmation (the finish of the #1327 migration): for a
 # recorded task whose harness has a trusted semantic lifecycle source with an
 # armed busy contract (bin/fm-busy-lib.sh: claude, opencode, pi, pi-signed
-# today), submission is no longer confirmed by reading rendered pane
-# characters at all. fm_tmux_submit_semantic confirms "a turn opened, per the
-# harness's own lifecycle signal, after my Enter" from the task's busy record,
-# mirroring herdr's native agent-state confirmation
-# (bin/backends/herdr.sh fm_backend_herdr_send_text_submit). The
-# composer-geometry and luminance readers below stay as the EXPLICITLY
-# LABELLED FALLBACK for harnesses with no semantic source yet (codex, kimi,
-# grok) and for context-free callers (the away-mode daemon's supervisor
-# injection); bin/backends/tmux.sh owns the routing and the fallback label.
-# While FM_SUBMIT_SEMANTIC_COMPARE=1 (the bake-in default) the semantic path
-# also reads the rendered composer once purely for comparison and prints a
-# loud SUBMIT-CONFIRM DISAGREEMENT warning when the two signals differ, the
-# designed tripwire for a mis-wired hook reporting submits that did not
-# happen. The incidents above (ghost text read as typed input, 9.5 hours of
-# suppressed escalations) are exactly the class this migration removes from
-# the confirm path.
+# today) AND a record-proven idle baseline, fm_tmux_submit_semantic confirms
+# "a turn opened, per the harness's own lifecycle signal, after my delivered
+# Enter" from the task's busy record, under a per-task submit lock, mirroring
+# herdr's native agent-state confirmation on legibly idle baselines
+# (bin/backends/herdr.sh fm_backend_herdr_send_text_submit). An unchanged
+# record never confirms anything, so every other baseline (mid-turn, unknown,
+# malformed, stale) and every harness without a verified semantic source
+# (codex, kimi, grok) uses the composer-geometry and luminance readers below
+# as the EXPLICITLY LABELLED FALLBACK, as do context-free callers (the
+# away-mode daemon's supervisor injection); bin/backends/tmux.sh owns the
+# routing and the fallback label. While FM_SUBMIT_SEMANTIC_COMPARE=1 (the
+# bake-in default) the semantic path also reads the rendered composer once
+# after the verdict, prints a loud SUBMIT-CONFIRM DISAGREEMENT warning when
+# the two signals differ, records the disagreement durably, and downgrades a
+# contradicted confirmation to unconfirmed - the designed tripwire for a
+# mis-wired hook reporting submits that did not happen. The incidents above
+# (ghost text read as typed input, 9.5 hours of suppressed escalations) are
+# exactly the class this migration removes from the confirm path.
 #
 # Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
 # structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
@@ -454,6 +456,33 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
 
 # --- Semantic submit confirmation -------------------------------------------
 #
+# THE CONFIRMATION RULE (independent-review redesign, 2026-07-31): delivery is
+# confirmed ONLY by positive evidence - an idle-to-busy transition, observed
+# in the task's trusted busy record, after an Enter this process successfully
+# delivered. An unchanged record can never confirm anything: the spawn-time
+# seed, a stuck busy record from a crashed turn, and a mis-wired hook all
+# look like "still busy", so any verdict built on an unchanged record would
+# report instructions as delivered when they were not. Consequences:
+#   - Only an exact idle baseline enters the semantic path. A busy, unknown,
+#     malformed, or stale baseline routes to the labelled rendered-composer
+#     fallback, which proves pane-level facts at decision time (the same
+#     split herdr uses: native confirmation on legibly idle baselines,
+#     composer reads otherwise).
+#   - turn-opened is accepted only from that idle baseline, so a turn caused
+#     by the harness picking up a previously queued message can never
+#     confirm a swallowed Enter.
+#   - The Enter keystroke's exit status is tracked; if no Enter was
+#     delivered, the verdict is send-failed, never a confirmation.
+#   - The whole read-baseline/type/Enter/confirm window runs under a
+#     per-task lock, so two concurrent sends cannot both claim one turn;
+#     a contended lock fails closed as unknown send-contended.
+#   - While FM_SUBMIT_SEMANTIC_COMPARE=1 (the bake-in default) the rendered
+#     composer is read once AFTER the semantic verdict, and a contradiction
+#     DOWNGRADES a confirmation to unknown semantic-contradicted (the
+#     rendered signal can veto a confirmation, never grant one) and is
+#     recorded durably in state/<id>.submit-disagreement as well as on
+#     stderr.
+#
 # Confirmation window tuning, mirroring herdr's sampled confirmation
 # (fm_backend_herdr_wait_for_working): each Enter attempt spreads
 # FM_SUBMIT_SEMANTIC_POLLS record reads across a per-attempt budget of
@@ -464,6 +493,8 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
 # enter-sleep alone would under-sample.
 FM_SUBMIT_SEMANTIC_POLLS=${FM_SUBMIT_SEMANTIC_POLLS:-6}
 FM_SUBMIT_SEMANTIC_MIN_BUDGET=${FM_SUBMIT_SEMANTIC_MIN_BUDGET:-0.9}
+FM_SUBMIT_LOCK_WAIT=${FM_SUBMIT_LOCK_WAIT:-10}
+FM_SUBMIT_LOCK_STALE=${FM_SUBMIT_LOCK_STALE:-60}
 
 # fm_tmux_submit_semantic_eligible: 0 iff <harness> has a trusted semantic
 # lifecycle source (bin/fm-busy-lib.sh's per-harness trust table, so codex
@@ -493,41 +524,101 @@ fm_tmux_submit_record_read() {  # <state-dir> <id> <harness>
   printf '%s %s' "$r_state" "$r_seq"
 }
 
-# fm_tmux_submit_semantic_core: type <text> ONCE, then submit with Enter and
-# confirm delivery from the harness's OWN lifecycle signal - a busy record
-# with seq advanced past the pre-send baseline, written by a source the
-# task's harness trusts - with NO rendered-pane read on the confirm path.
-# Retries Enter only, never retypes (same contract as fm_tmux_submit_core).
-# Echoes "<verdict> <reason>":
-#   empty turn-opened   a turn opened after our Enter: positive confirmation
-#   empty enter-queued  the record proved the pane mid-turn before Enter and
-#                       the same turn is still running afterwards: the
-#                       harness accepted and queued the Enter (the scraper
-#                       core's busy-queued contract, with the busy fact from
-#                       the lifecycle record instead of a footer regex)
-#   pending no-turn     no new turn and not mid-turn: a genuine swallowed
-#                       Enter or a mis-wired hook; the caller must not
-#                       assume delivery
-#   send-failed         the literal type itself failed
+# fm_tmux_submit_lock_path: the per-task send-serialization lock directory.
+fm_tmux_submit_lock_path() {  # <state-dir> <id>
+  printf '%s/%s.submit-lock' "$1" "$2"
+}
+
+fm_tmux_submit_lock_age() {  # <dir> -> whole seconds since last mtime (0 on any failure)
+  local m now
+  m=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null) || { printf '0'; return 0; }
+  case "$m" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+  now=$(date +%s)
+  if [ "$now" -ge "$m" ]; then printf '%s' $((now - m)); else printf '0'; fi
+}
+
+# fm_tmux_submit_lock_acquire: bounded-wait atomic mkdir lock with a PID
+# stamp. A holder whose PID is dead is stale and is broken by a single
+# winner (atomic rename, then remove), so two waiters can never free-for-all
+# an in-use lock. A lock directory with no readable PID is broken only after
+# FM_SUBMIT_LOCK_STALE seconds, covering a holder killed between mkdir and
+# the stamp write. Returns non-zero after FM_SUBMIT_LOCK_WAIT seconds of
+# contention, and callers must fail closed on that.
+fm_tmux_submit_lock_acquire() {  # <state-dir> <id>
+  local dir pid stale waited=0 max_waits
+  dir=$(fm_tmux_submit_lock_path "$1" "$2")
+  max_waits=$(( ${FM_SUBMIT_LOCK_WAIT:-10} * 10 ))
+  while :; do
+    if mkdir "$dir" 2>/dev/null; then
+      printf '%s\n' "$$" > "$dir/pid"
+      return 0
+    fi
+    pid=$(cat "$dir/pid" 2>/dev/null || true)
+    stale=0
+    if [ -n "$pid" ]; then
+      case "$pid" in
+        *[!0-9]*) stale=1 ;;
+        *) kill -0 "$pid" 2>/dev/null || stale=1 ;;
+      esac
+    elif [ "$(fm_tmux_submit_lock_age "$dir")" -ge "${FM_SUBMIT_LOCK_STALE:-60}" ]; then
+      stale=1
+    fi
+    if [ "$stale" = 1 ]; then
+      if mv "$dir" "$dir.stale.$$" 2>/dev/null; then
+        rm -rf "$dir.stale.$$"
+      fi
+      continue
+    fi
+    waited=$((waited + 1))
+    [ "$waited" -le "$max_waits" ] || return 1
+    sleep 0.1
+  done
+}
+
+fm_tmux_submit_lock_release() {  # <state-dir> <id>
+  local dir pid
+  dir=$(fm_tmux_submit_lock_path "$1" "$2")
+  pid=$(cat "$dir/pid" 2>/dev/null || true)
+  [ "$pid" = "$$" ] && rm -rf "$dir"
+  return 0
+}
+
+# fm_tmux_submit_disagreement_record: durable append-only record of one
+# semantic-vs-rendered submit-confirm disagreement, written alongside the
+# stderr warning so the evidence survives the session
+# (state/<id>.submit-disagreement; removed by teardown). Best-effort: the
+# verdict downgrade is the load-bearing consequence, not this write.
+fm_tmux_submit_disagreement_record() {  # <state-dir> <id> <harness> <semantic-reason> <composer-state> <action>
+  printf 'v1 ts=%s harness=%s semantic=%s composer=%s action=%s\n' \
+    "$(date +%s)" "$3" "$4" "$5" "$6" >> "$1/$2.submit-disagreement" 2>/dev/null || true
+}
+
+# fm_tmux_submit_semantic_core: type <text> ONCE into a task whose baseline
+# record the caller has proven idle under the submit lock, then submit with
+# Enter and confirm delivery ONLY from the positive idle-to-busy transition:
+# a busy record with seq advanced past <base-seq>, written by a source the
+# task's harness trusts, observed after an Enter this process successfully
+# delivered. Retries Enter only, never retypes (same contract as
+# fm_tmux_submit_core). Echoes "<verdict> <reason>":
+#   empty turn-opened   a turn opened after our delivered Enter
+#   pending no-turn     no turn opened: a swallowed Enter or a broken hook;
+#                       the caller must not assume delivery
+#   send-failed         the literal type failed, or no Enter keystroke was
+#                       ever delivered (every send-keys Enter failed)
 # Residual risk, shared with and documented by the herdr model: a turn so
 # fast it opens AND closes between two record reads would be missed and
 # report pending; the caller's recovery is Enter-only, so the worst case is
-# a loud unconfirmed error, never a duplicate typed message. A turn that
-# opens spontaneously (not from our Enter) inside the sub-second window
-# would be wrongly credited; the bake-in composer comparison in
-# fm_tmux_submit_semantic surfaces exactly that shape as a disagreement.
-fm_tmux_submit_semantic_core() {  # <target> <text> <retries> <enter-sleep> <settle> <state-dir> <id> <harness>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 state=$6 id=$7 harness=$8
-  local base base_state base_seq cur cur_state cur_seq
+# a loud unconfirmed error, never a duplicate typed message. On an idle
+# worker no queued message is pending by construction (queued input is
+# consumed at turn end), so a turn opening in this window after our
+# delivered Enter is our submit; direct captain typing in the same
+# sub-second window remains the accepted residual, and the bake-in
+# comparison in fm_tmux_submit_semantic surfaces that shape as a
+# disagreement and downgrades it.
+fm_tmux_submit_semantic_core() {  # <target> <text> <retries> <enter-sleep> <settle> <state-dir> <id> <harness> <base-seq>
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 state=$6 id=$7 harness=$8 base_seq=$9
+  local cur cur_state cur_seq enter_ok=0
   local i=0 p polls interval
-  base=$(fm_tmux_submit_record_read "$state" "$id" "$harness")
-  if [ "$base" = none ]; then
-    base_state=unknown
-    base_seq=-1
-  else
-    base_state=${base%% *}
-    base_seq=${base##* }
-  fi
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   polls=$FM_SUBMIT_SEMANTIC_POLLS
@@ -536,12 +627,14 @@ fm_tmux_submit_semantic_core() {  # <target> <text> <retries> <enter-sleep> <set
     'BEGIN { b += 0; m += 0; if (m > b) b = m; if (b < 0) b = 0; if (p < 1) p = 1; printf "%.4f", b / p }' 2>/dev/null)
   case "$interval" in ''|*[!0-9.]*) interval=$sleep_s ;; esac
   while :; do
-    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    if tmux send-keys -t "$target" Enter 2>/dev/null; then
+      enter_ok=1
+    fi
     p=0
     while [ "$p" -lt "$polls" ]; do
       sleep "$interval"
       cur=$(fm_tmux_submit_record_read "$state" "$id" "$harness")
-      if [ "$cur" != none ]; then
+      if [ "$enter_ok" = 1 ] && [ "$cur" != none ]; then
         cur_state=${cur%% *}
         cur_seq=${cur##* }
         if [ "$cur_state" = busy ] && [ "$cur_seq" -gt "$base_seq" ]; then
@@ -554,42 +647,59 @@ fm_tmux_submit_semantic_core() {  # <target> <text> <retries> <enter-sleep> <set
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done
-  if [ "$base_state" = busy ]; then
-    cur=$(fm_tmux_submit_record_read "$state" "$id" "$harness")
-    if [ "$cur" != none ] && [ "${cur%% *}" = busy ] && [ "${cur##* }" -eq "$base_seq" ]; then
-      printf 'empty enter-queued'
-      return 0
-    fi
+  if [ "$enter_ok" = 0 ]; then
+    printf 'send-failed'
+    return 0
   fi
   printf 'pending no-turn'
 }
 
-# fm_tmux_submit_semantic: the semantic submit confirm plus the bake-in
-# cross-check. The semantic verdict ALWAYS decides. While
-# FM_SUBMIT_SEMANTIC_COMPARE=1 (the bake-in default) the legacy rendered
-# composer is read once afterwards purely for comparison, and a disagreement
-# between the two signals prints a loud warning on stderr: a mis-wired
-# lifecycle hook reporting submits that did not happen is the main risk of
-# this migration, and the disagreement signal is how it gets caught. Setting
-# FM_SUBMIT_SEMANTIC_COMPARE=0 ends the bake-in, after which this path
-# performs no pane capture at all. The enter-queued verdict is not compared:
-# a mid-turn pane legitimately keeps the queued text visible (opencode), so
-# a composer read cannot indict it either way.
+# fm_tmux_submit_semantic: the locked semantic submit confirm plus the
+# bake-in cross-check. Under the per-task submit lock it reads the trusted
+# baseline record; anything but an exact idle baseline returns the
+# 'fallback not-idle-baseline' routing sentinel (the adapter then runs the
+# labelled rendered-composer core), because an unchanged record can never
+# confirm a delivery. On an idle baseline the core runs, and while
+# FM_SUBMIT_SEMANTIC_COMPARE=1 (the bake-in default) the rendered composer
+# is read once afterwards, still under the lock so a following send cannot
+# pollute the comparison:
+#   - turn-opened contradicted by a still-pending composer DOWNGRADES the
+#     confirmation to unknown semantic-contradicted, so a mis-wired hook can
+#     never mark an undelivered instruction delivered (and never suppress a
+#     pending-reply escalation); the rendered signal can veto a
+#     confirmation, never grant one.
+#   - no-turn contradicted by a cleared composer stays unconfirmed.
+# Both directions print the loud stderr warning and append the durable
+# state/<id>.submit-disagreement record. Setting FM_SUBMIT_SEMANTIC_COMPARE=0
+# ends the bake-in, after which this path performs no pane capture at all.
+# A contended lock returns unknown send-contended without typing anything.
 fm_tmux_submit_semantic() {  # <target> <text> <retries> <enter-sleep> <settle> <state-dir> <id> <harness>
-  local target=$1 id=$7 harness=$8 out verdict reason composer
-  out=$(fm_tmux_submit_semantic_core "$@")
+  local target=$1 state=$6 id=$7 harness=$8 base base_seq out verdict reason composer
+  fm_tmux_submit_lock_acquire "$state" "$id" || { printf 'unknown send-contended'; return 0; }
+  base=$(fm_tmux_submit_record_read "$state" "$id" "$harness")
+  if [ "$base" = none ] || [ "${base%% *}" != idle ]; then
+    fm_tmux_submit_lock_release "$state" "$id"
+    printf 'fallback not-idle-baseline'
+    return 0
+  fi
+  base_seq=${base##* }
+  out=$(fm_tmux_submit_semantic_core "$target" "$2" "$3" "$4" "$5" "$state" "$id" "$harness" "$base_seq")
   verdict=${out%% *}
   reason=${out#* }
   if [ "$verdict" != send-failed ] && [ "${FM_SUBMIT_SEMANTIC_COMPARE:-1}" = 1 ]; then
     composer=$(fm_tmux_composer_state "$target")
     case "$reason:$composer" in
       turn-opened:pending|turn-opened:pending-unproven)
-        echo "warning: SUBMIT-CONFIRM DISAGREEMENT for $id (harness=$harness): the lifecycle record confirms a submitted turn, but the rendered composer still shows unsubmitted text; a mis-wired lifecycle hook can report submits that did not happen - inspect the pane and state/$id.busy-state before trusting either signal" >&2
+        fm_tmux_submit_disagreement_record "$state" "$id" "$harness" "$reason" "$composer" downgraded
+        echo "warning: SUBMIT-CONFIRM DISAGREEMENT for $id (harness=$harness): the lifecycle record reports a submitted turn, but the rendered composer still shows unsubmitted text; the confirmation is DOWNGRADED to unconfirmed because a mis-wired lifecycle hook can report submits that did not happen - inspect the pane, state/$id.busy-state, and state/$id.submit-disagreement" >&2
+        out='unknown semantic-contradicted'
         ;;
       no-turn:empty)
-        echo "warning: SUBMIT-CONFIRM DISAGREEMENT for $id (harness=$harness): the rendered composer cleared, but no turn opened in the lifecycle record; the send is treated as UNCONFIRMED - inspect the pane and state/$id.busy-state before re-sending" >&2
+        fm_tmux_submit_disagreement_record "$state" "$id" "$harness" "$reason" "$composer" reported
+        echo "warning: SUBMIT-CONFIRM DISAGREEMENT for $id (harness=$harness): the rendered composer cleared, but no turn opened in the lifecycle record; the send is treated as UNCONFIRMED - inspect the pane, state/$id.busy-state, and state/$id.submit-disagreement before re-sending" >&2
         ;;
     esac
   fi
+  fm_tmux_submit_lock_release "$state" "$id"
   printf '%s' "$out"
 }

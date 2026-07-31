@@ -52,15 +52,18 @@ fm_backend_tmux_send_key() {  # <target> <key>
 # submit with Enter (retried, never retyped) and verify. This is the routing
 # owner between the two confirmation paths in bin/fm-tmux-lib.sh:
 #   - With semantic context ([state-dir] [id] [harness], passed by fm-send
-#     for a task resolved through this home's meta) and a harness holding a
-#     trusted lifecycle source with an armed busy contract, confirmation
-#     comes from the harness's own lifecycle record
-#     (fm_tmux_submit_semantic); the composer-geometry and luminance readers
-#     never decide the verdict on this path.
-#   - Otherwise the rendered-composer core runs as the EXPLICITLY LABELLED
-#     FALLBACK for harnesses with no verified semantic source yet (codex,
-#     kimi, grok): its verdict carries a `composer-fallback` second token so
-#     a structurally inferred result is never presented as
+#     for a task resolved through this home's meta), a harness holding a
+#     trusted lifecycle source with an armed busy contract, and a
+#     record-proven IDLE baseline, confirmation comes from the harness's own
+#     lifecycle record (fm_tmux_submit_semantic): only an observed
+#     idle-to-busy transition after a delivered Enter confirms, under the
+#     per-task submit lock.
+#   - Every other case with task context - a mid-turn, unknown, or unreadable
+#     baseline (the 'fallback not-idle-baseline' sentinel), a harness with no
+#     verified semantic source yet (codex, kimi, grok), or an unarmed task -
+#     runs the rendered-composer core as the EXPLICITLY LABELLED FALLBACK:
+#     its verdict carries a `composer-fallback` second token so a
+#     structurally inferred result is never presented as
 #     lifecycle-confirmed.
 #   - Called with no semantic context at all (the away-mode daemon's
 #     supervisor injection), it remains the bare verbatim re-export of
@@ -69,10 +72,13 @@ fm_backend_tmux_send_key() {  # <target> <key>
 # Callers match the FIRST token and must require exact `empty` there for
 # confirmed delivery; the optional second token names how it was confirmed.
 fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [state-dir] [id] [harness]
-  local state=${7:-} id=${8:-} harness=${9:-} verdict
+  local state=${7:-} id=${8:-} harness=${9:-} out verdict
   if fm_tmux_submit_semantic_eligible "$harness" "$state" "$id"; then
-    fm_tmux_submit_semantic "$1" "$2" "$3" "$4" "$5" "$state" "$id" "$harness"
-    return 0
+    out=$(fm_tmux_submit_semantic "$1" "$2" "$3" "$4" "$5" "$state" "$id" "$harness")
+    case "$out" in
+      fallback*) ;;
+      *) printf '%s' "$out"; return 0 ;;
+    esac
   fi
   verdict=$(fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5")
   if [ -n "$state" ] && [ -n "$id" ]; then

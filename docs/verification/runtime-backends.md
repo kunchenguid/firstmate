@@ -135,14 +135,14 @@ tests/fm-tmux-submit-busy.test.sh
 Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
 Expected fallback submit matrix (harnesses with no semantic lifecycle source, and context-free sends): proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
 
-Semantic submit confirmation was validated on 2026-07-31 against the armed busy-record contract with fixture lifecycle events written through the real `bin/fm-busy-event.sh`:
+Semantic submit confirmation was validated on 2026-07-31 (revalidated the same day after the independent-review redesign) against the armed busy-record contract with fixture lifecycle events written through the real `bin/fm-busy-event.sh`:
 
 ```sh
 bash tests/fm-tmux-submit-semantic.test.sh
 ```
 
-All eleven cases passed, including the call-count proof that a record-confirmed submit performs zero `capture-pane` and zero `display-message` reads with the bake-in comparison off.
-Expected semantic submit matrix: a trusted busy record with an advanced sequence confirms `empty turn-opened`; a record-proven mid-turn pane that keeps running reports `empty enter-queued`; no new turn on an idle baseline stays `pending no-turn`; the bake-in comparison warns loudly in both disagreement directions; codex, kimi, and unarmed tasks fall back with the `composer-fallback` label; and a context-free call keeps the bare single-token verdict.
+All sixteen cases passed.
+Expected semantic submit matrix: only an idle baseline enters the semantic path, and a trusted busy record with an advanced sequence observed after a delivered Enter confirms `empty turn-opened`; no turn on an idle baseline stays `pending no-turn`; a send whose every Enter keystroke was rejected is `send-failed`; every busy, unknown, or unreadable baseline routes to the labelled `composer-fallback`, so an unchanged record (including the spawn-time seed and a stuck record from a crashed turn) can never confirm; the per-task submit lock fails closed as `unknown send-contended` when contended and breaks a dead holder's stale lock; the shipped default performs exactly one post-verdict comparison read, warns loudly in both disagreement directions, records each disagreement in `state/<id>.submit-disagreement`, and downgrades a contradicted confirmation to `unknown semantic-contradicted`; with the comparison off the semantic path performs zero pane reads; codex, kimi, and unarmed tasks fall back with the `composer-fallback` label; and a context-free call keeps the bare single-token verdict.
 The turn-open signals themselves reuse the #1327 hook, plugin, and extension wiring whose live-harness evidence is recorded in [supervision.md](supervision.md).
 
 ### Cleanup endpoint identity
