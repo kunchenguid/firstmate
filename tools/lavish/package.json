@@ -1,0 +1,28 @@
+{
+  "name": "@ruby-labs/lavish",
+  "version": "1.0.0",
+  "description": "Durable store-and-forward decision capture for Firstmate",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "bin": {
+    "lavish": "./src/cli.mjs",
+    "lavish-axi": "./src/cli.mjs"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "PROVENANCE.md",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/protocol.mjs && node --check src/migration.mjs && node --check src/cli.mjs && npm test && npm pack --dry-run"
+  },
+  "dependencies": {
+    "@toon-format/toon": "4.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

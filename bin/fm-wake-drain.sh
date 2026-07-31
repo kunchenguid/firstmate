@@ -12,6 +12,20 @@ fm_refuse_if_gate_agent
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
 
+# Intake answers before draining their redundant wake pointers.
+# The intake command scans only durable answer files without receipts, writes
+# each declared destination first, then writes its receipt.
+# Failure is visible but cannot block unrelated fleet wakes from draining.
+LAVISH_INTAKE_OUT=$("$SCRIPT_DIR/fm-lavish-intake.sh" 2>&1)
+LAVISH_INTAKE_RC=$?
+if [ -n "$LAVISH_INTAKE_OUT" ]; then
+  printf 'LAVISH_INTAKE:\n%s\n' "$LAVISH_INTAKE_OUT"
+fi
+if [ "$LAVISH_INTAKE_RC" -ne 0 ]; then
+  printf 'LAVISH_INTAKE: failed with status %s; durable answers remain unreceipted\n' \
+    "$LAVISH_INTAKE_RC" >&2
+fi
+
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert watcher liveness here too. A
 # lapsed supervision chain then surfaces on a plain drain-and-handle turn, not

@@ -234,6 +234,41 @@ test_lock_stale_steal_single_winner_under_concurrency() {
   pass "concurrent stale-lock steal yields exactly one winner"
 }
 
+test_lock_stale_steal_chain_is_bounded() {
+  local dir state lockdir dead rc suffix i
+  dir=$(make_case lock-stale-steal-chain)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$lockdir.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  rc=0
+  FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer failed to recover a stale steal mutex (rc=$rc)"
+
+  lockdir="$state/.bounded.lock"
+  suffix=
+  i=0
+  while [ "$i" -le 9 ]; do
+    mkdir "$lockdir$suffix"
+    printf '%s\n' "$dead" > "$lockdir$suffix/pid"
+    suffix="$suffix.steal"
+    i=$((i + 1))
+  done
+  rc=0
+  FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "an excessive stale steal chain was recursively reclaimed"
+  [ ! -e "$lockdir$suffix" ] && [ ! -L "$lockdir$suffix" ] || fail "stale steal recovery grew beyond its bounded guard depth"
+  pass "stale steal mutex recovery is bounded"
+}
+
 test_lock_live_steal_mutex_is_not_reclaimed() {
   local dir state lockdir dead holder_file holder out i lockpid stealpid
   dir=$(make_case lock-live-stealer)
@@ -709,6 +744,11 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+if [ "${FM_TEST_FOCUSED:-}" = stale-steal-chain ]; then
+  test_lock_stale_steal_chain_is_bounded
+  exit 0
+fi
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_stale_watch_lock_reclaimed
@@ -717,6 +757,7 @@ test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
+test_lock_stale_steal_chain_is_bounded
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace

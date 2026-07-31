@@ -32,7 +32,7 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
    - **Captain's Call** - every open decision relayed verbatim with its options, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
    - **Recently Landed** - merged PRs, completed scouts, and finished local-only work since the last report, across the main fleet and every registered secondmate home.
-   - **Underway** - each live direct report making progress, with its current state, and the plans / main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
+   - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files and pending `data/decisions/<id>/request.md` records).
    - **Charted Next** - queued or gated next work, with each item's blocker or date reason.
 
 3. **Write the dated report file so it persists, then surface the mandatory four-section digest in chat.**
@@ -40,7 +40,7 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
      This is the required artifact; it lives in gitignored `data/` alongside the worked example.
      If today's file already exists, delete it first, then create a new file from scratch.
    - The chat response is the concise four-section digest defined by the contract below: materially shorter than the report file, and it links to that file for the full picture.
-   - For a richer review surface, optionally offer a Lavish board with `lavish-axi` when the report has enough structure to deserve one, but the markdown file is the required artifact and the four-section chat digest is the required minimum.
+   - When the report exposes multiple genuine captain-owned choices, optionally create a durable Lavish decision with `lavish-axi`, but the Markdown file is the required artifact and the four-section chat digest is the required minimum.
 
 ## Chat-response contract
 

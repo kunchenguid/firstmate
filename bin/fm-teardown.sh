@@ -358,7 +358,7 @@ fi
 
 managed_endpoint_is_gone() {  # <backend> <target> <expected-label> [probe-home] [recorded-scoped-target]
   local backend=$1 target=$2 expected=$3 probe_home=${4:-} recorded_scoped_target=${5:-}
-  local attempt state agent_state last=unknown
+  local attempt state last=unknown
   [ -n "$target" ] || return 2
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
     if [ -n "$probe_home" ]; then
@@ -368,17 +368,7 @@ managed_endpoint_is_gone() {  # <backend> <target> <expected-label> [probe-home]
     fi
     case "$state" in
       absent) return 0 ;;
-      present)
-        if [ -n "$probe_home" ]; then
-          agent_state=$(unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" fm_backend_agent_alive "$backend" "$target" "$expected" "$recorded_scoped_target" 2>/dev/null)
-        else
-          agent_state=$(fm_backend_agent_alive "$backend" "$target" "$expected" "$recorded_scoped_target" 2>/dev/null)
-        fi
-        case "$agent_state" in
-          dead|alive) last=present ;;
-          *) last=unknown ;;
-        esac
-        ;;
+      present) last=present ;;
       unknown) last=unknown ;;
       *) last=unknown ;;
     esac
@@ -2869,7 +2859,7 @@ def confined(path):
     except ValueError:
         return False
 
-def retain(path, expected_directory):
+def retain(path, expected_directory, hold_file=False):
     metadata = os.lstat(path)
     if stat.S_ISLNK(metadata.st_mode):
         raise OSError(f"redirected object storage entry: {path}")
@@ -2902,14 +2892,20 @@ def retain(path, expected_directory):
     if confined(os.path.realpath(path)):
         os.close(descriptor)
         raise OSError(f"object storage depends on retiring home: {path}")
+    if not expected_directory and not hold_file:
+        os.close(descriptor)
+        descriptor = None
     held.append((path, descriptor, expected))
     return descriptor, opened
 
 def inspect(objects):
     objects = os.path.normpath(objects)
     directory, metadata = retain(objects, True)
+    held_index = len(held) - 1
     identity = (metadata.st_dev, metadata.st_ino)
     if identity in visited:
+        os.close(directory)
+        held.pop()
         return
     visited.add(identity)
     object_device = metadata.st_dev
@@ -2931,8 +2927,11 @@ def inspect(objects):
     if os.path.lexists(http_alternates):
         raise OSError(f"HTTP alternates are not durable proof: {http_alternates}")
     if not os.path.lexists(alternates):
+        if objects != initial:
+            os.close(directory)
+            held[held_index] = (objects, None, held[held_index][2])
         return
-    alternate_fd, _ = retain(alternates, False)
+    alternate_fd, _ = retain(alternates, False, True)
     with os.fdopen(os.dup(alternate_fd), "r", encoding="utf-8") as stream:
         entries = [line.rstrip("\n") for line in stream]
     if not entries or any(not entry or "\x00" in entry for entry in entries):
@@ -2942,6 +2941,9 @@ def inspect(objects):
             raise OSError(f"quoted alternates are ambiguous: {alternates}")
         candidate = entry if os.path.isabs(entry) else os.path.join(objects, entry)
         inspect(os.path.realpath(candidate))
+    if objects != initial:
+        os.close(directory)
+        held[held_index] = (objects, None, held[held_index][2])
 
 def verify_retained():
     for path, descriptor, expected in held:
@@ -2952,13 +2954,15 @@ def verify_retained():
             stat.S_IFMT(metadata.st_mode),
             metadata.st_size,
         )
-        opened = os.fstat(descriptor)
-        retained = (
-            opened.st_dev,
-            opened.st_ino,
-            stat.S_IFMT(opened.st_mode),
-            opened.st_size,
-        )
+        retained = expected
+        if descriptor is not None:
+            opened = os.fstat(descriptor)
+            retained = (
+                opened.st_dev,
+                opened.st_ino,
+                stat.S_IFMT(opened.st_mode),
+                opened.st_size,
+            )
         if current != expected or retained != expected or stat.S_ISLNK(metadata.st_mode):
             raise OSError(f"object storage identity changed during graph proof: {path}")
 
@@ -3044,7 +3048,8 @@ except (OSError, UnicodeError, subprocess.SubprocessError) as error:
     raise SystemExit(1)
 finally:
     for _, descriptor, _ in reversed(held):
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
 PY
 }
 

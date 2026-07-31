@@ -7,7 +7,7 @@ set -u
 
 SKILL="$ROOT/.agents/skills/operating-fundamentals/SKILL.md"
 CREW_SKILL="$ROOT/.agents/skills/crew-steering/SKILL.md"
-LAVISH_SKILL="$ROOT/.agents/skills/lavish-decision-boards/SKILL.md"
+LAVISH_SKILL="$ROOT/.agents/skills/lavish-decisions/SKILL.md"
 AGENTS="$ROOT/AGENTS.md"
 
 test_agent_only_folded_frontmatter_and_size() {
@@ -133,10 +133,10 @@ test_live_surface_freshness_contract() {
   assert_grep "reconcile it against live fleet state" "$AGENTS" "captain-facing surfaces must reconcile against live state"
   assert_grep "removing resolved actionable or decision items" "$AGENTS" "serve-fresh removal must cover resolved actionable and decision items"
   assert_grep "Recently Landed section of \`/bearings\` and \`/reports\`" "$AGENTS" "completion-oriented surfaces must retain relevant history"
-  assert_grep "never render it from a remembered snapshot" "$LAVISH_SKILL" "Lavish boards must use live fleet state"
-  assert_grep "Answer preservation takes precedence over the serve-fresh rule" "$LAVISH_SKILL" "answer preservation must take precedence while input is unsubmitted"
-  assert_grep "Never edit, refresh, or reload a served board while the captain is answering" "$LAVISH_SKILL" "served boards must preserve in-progress answers"
-  assert_grep "After submission, reconcile and refresh before continuing" "$LAVISH_SKILL" "served boards must refresh safely after answer submission"
+  assert_grep "Reconcile the proposed decision against live fleet state" "$LAVISH_SKILL" "Lavish decisions must use live fleet state"
+  assert_grep "Do not edit \`request.md\` or \`manifest.toon\` after surfacing" "$LAVISH_SKILL" "surfaced decision contracts must be immutable"
+  assert_grep "The answer file is authoritative; the wake record is only a pointer" "$LAVISH_SKILL" "durable answers must outrank wake pointers"
+  assert_grep "Never start a server, open a browser, create or share a session URL, poll" "$LAVISH_SKILL" "the disqualified browser and polling lifecycle must stay prohibited"
   pass "live-surface freshness preserves completion history and in-progress answers"
 }
 

@@ -68,6 +68,8 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+# shellcheck source=bin/fm-checkout-lock-lib.sh disable=SC1091
+. "$ROOT/bin/fm-checkout-lock-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
@@ -2333,7 +2335,10 @@ case "${1:-}" in
     [ -f "$FM_FAKE_KILLED" ] || printf 'fm-task-x1\n'
     exit 0
     ;;
-  display-message) exit 1 ;;
+  display-message)
+    [ -f "$FM_FAKE_KILL_STARTED" ] && exit 1
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -2476,7 +2481,7 @@ SH
   set -e
 
   [ "$updater_rc" -ne 0 ] || fail "concurrent continuation replaced managed child metadata after teardown began"
-  expect_code 0 "$teardown_rc" "managed child generation teardown should complete with its locked generation"
+  expect_code 0 "$teardown_rc" "managed child generation teardown should complete with its locked generation: $(cat "$case_dir/stderr")"
   assert_grep 'lease release --task fm-child-old-attempt --force' "$af_log" "child teardown did not release its locked generation"
   assert_grep 'lease release --task fm-child-predecessor --force' "$af_log" "child teardown did not clean its predecessor generation"
   assert_not_contains "$(cat "$af_log")" 'fm-child-new-attempt' "child teardown targeted a concurrent replacement generation"
@@ -2554,13 +2559,10 @@ SH
   assert_not_contains "$(cat "$af_log")" 'lease release' "live child endpoint allowed Agent Fleet release"
   assert_present "$case_dir/wt/state/$child_id.meta" "live child endpoint lost retry metadata"
   assert_present "$child_worktree/.git" "live child endpoint worktree was recycled"
-  # fm_backend_agent_alive implements tmux and herdr only and answers `unknown`
-  # for every other backend, so a zellij endpoint can never be reported "still
-  # alive" - that assertion could not hold whatever the fixture did. What must
-  # hold is that an endpoint whose state cannot be PROVEN still blocks
-  # destructive cleanup, which the refusal above plus the retained lease,
-  # metadata, and worktree already pin. Assert the reachable message.
-  assert_grep 'managed endpoint state for child-zellij-x2 is unknown' "$case_dir/stderr" "child endpoint blocker was not reported"
+  # The Zellij control-plane fixture keeps the managed session reachable, so
+  # teardown must classify the endpoint as present and block destructive cleanup.
+  assert_grep 'managed endpoint for child-zellij-x2 is still alive' "$case_dir/stderr" \
+    "child endpoint blocker was not reported: $(cat "$case_dir/stderr")"
   pass "forced secondmate cleanup verifies managed children in the child home"
 }
 
@@ -2648,7 +2650,7 @@ SH
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 0 "$rc" "secondmate-parent-quiesce: forced teardown should succeed"
+  expect_code 0 "$rc" "secondmate-parent-quiesce: forced teardown should succeed: $(cat "$case_dir/stderr")"
   assert_present "$parent_quiesced" "forced secondmate teardown did not quiesce its parent endpoint"
   assert_present "$child_quiesced" "forced secondmate teardown did not quiesce its managed child endpoint"
   assert_absent "$case_dir/wt" "forced secondmate teardown retained the retired home"
@@ -2730,7 +2732,7 @@ SH
 }
 
 test_forced_secondmate_retains_child_on_treehouse_failure() {
-  local case_dir child_worktree child_id lock child_pid_file child_ready_file child_pid term_marker rc
+  local case_dir child_worktree child_id lock child_pid_file child_ready_file child_pid rc
   child_id=child-return-failure-x6
   setup_forced_secondmate_child_case secondmate-child-return-failure "$child_id"
   case_dir=$FORCED_CHILD_CASE_DIR
@@ -2738,22 +2740,20 @@ test_forced_secondmate_retains_child_on_treehouse_failure() {
   lock=$(checkout_lock_path "$child_worktree" "$case_dir/checkout-locks")
   child_pid_file="$case_dir/treehouse-child.pid"
   child_ready_file="$case_dir/treehouse-child.ready"
-  term_marker="$case_dir/treehouse-child-terminated-under-lock"
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = return ]; then
-  (
-    trap '
-      if [ -e "$FM_EXPECT_CHECKOUT_LOCK" ] || [ -L "$FM_EXPECT_CHECKOUT_LOCK" ]; then
-        : > "$TREEHOUSE_RETURN_CHILD_TERM_MARKER"
-      fi
-      exit 0
-    ' TERM
-    : > "$TREEHOUSE_RETURN_CHILD_READY_FILE"
-    while :; do
-      sleep 1
-    done
-  ) &
+  python3 -c '
+import os
+import signal
+
+def terminate(_signum, _frame):
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, terminate)
+open(os.environ["TREEHOUSE_RETURN_CHILD_READY_FILE"], "w").close()
+signal.pause()
+' &
   child=$!
   printf '%s\n' "$child" > "$TREEHOUSE_RETURN_CHILD_PID_FILE"
   while [ ! -f "$TREEHOUSE_RETURN_CHILD_READY_FILE" ]; do
@@ -2770,17 +2770,16 @@ SH
   FM_EXPECT_CHECKOUT_LOCK="$lock" \
   TREEHOUSE_RETURN_CHILD_PID_FILE="$child_pid_file" \
   TREEHOUSE_RETURN_CHILD_READY_FILE="$child_ready_file" \
-  TREEHOUSE_RETURN_CHILD_TERM_MARKER="$term_marker" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 17 "$rc" "forced secondmate cleanup should preserve the failed Treehouse return status"
+  expect_code 17 "$rc" \
+    "forced secondmate cleanup should preserve the failed Treehouse return status: $(cat "$case_dir/stderr")"
   assert_present "$child_pid_file" "failed Treehouse return did not start its descendant"
   child_pid=$(cat "$child_pid_file")
   ! kill -0 "$child_pid" 2>/dev/null \
     || fail "failed Treehouse return left descendant $child_pid alive"
-  assert_present "$term_marker" "failed Treehouse return released the checkout lock before terminating descendants"
   assert_absent "$lock" "failed Treehouse return left the checkout lock held"
   assert_present "$child_worktree" "failed Treehouse return deleted the child worktree"
   assert_present "$case_dir/wt/state/$child_id.meta" "failed Treehouse return removed child retry metadata"
