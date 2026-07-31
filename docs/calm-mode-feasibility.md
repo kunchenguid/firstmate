@@ -373,3 +373,55 @@ The same run after resizing that TUI to 64 columns, showing the waves refilled t
 
 Colors at that time were confirmed from an escape-preserving capture as theme-derived entries; the revision below replaced them with standard ANSI blue and yellow.
 Pressing Escape during a run left `Operation aborted` with no boat and no residual blank row, and toggling Calm off restored Pi's stock `⠴ Working...` row on the next run.
+
+## 2026-07-30 Calm working-presentation revision verification
+
+The revision replaced the single-cadence, theme-colored, same-orientation sprite with a slower boat over independently animated water, standard ANSI colors, and a directional mainsail.
+It was verified against the installed Pi 0.82.0 CLI with a deterministic in-process provider and no credentials.
+
+```text
+$ pi --version
+0.82.0
+
+$ tests/fm-pi-primary-types.test.sh
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1
+
+$ bin/fm-lint.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: ok surfaces=57 local_links=163
+
+$ bin/fm-test-run.sh --changed --base origin/main
+FM_TEST_SUMMARY total=32 failed=0 skipped_gate=7 duration_ms=386738
+FM_TEST_SUMMARY_FAMILY family=live-harness-optin count=7 duration_ms=257 failed=0
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=25 duration_ms=383010 failed=0
+```
+
+Real Pi TUI observations from the isolated deterministic trial at 100 columns.
+The hull column held steady across consecutive samples while the water pattern shifted, then advanced about one column every 880ms, which separates the two cadences:
+
+```text
+hull_col=12  water=~-~~~-~~~-~\__/~~-~~~-~~~-~~~-~~~-~~~-~~~-~~~-~~~-~~~-~~
+hull_col=12  water=~~~-~~~-~~~\__/-~~~-~~~-~~~-~~~-~~~-~~~-~~~-~~~-~~~-~~~-
+hull_col=13  water=~~-~~~-~~~-~\__/~~-~~~-~~~-~~~-~~~-~~~-~~~-~~~-~~~-~~~-~
+hull_col=16  (about 2.6s later)
+```
+
+An escape-preserving capture confirmed standard ANSI foreground codes only, blue water and yellow boat, with a default-foreground reset closing each run:
+
+```text
+^[[34m~~~-~~~-~~~-~~~^[[33m\__/^[[34m-~~~-~~~-~~~-~~~-...
+^[[33m<|^[[39m
+```
+
+Resizing the same running TUI to 12 columns shortened the track enough to observe both reversals, each already showing the heading it was about to travel:
+
+```text
+left-heading :          |>  over  ~-~~~-~~\__/
+right-heading:  <|          over  \__/~~-~~~-~
+```
+
+At 3 columns the sprite fell back to a single exact-width row, `<|~`.
+Escape aborted the run leaving `Operation aborted`, no boat, and no stale sprite rows, and the trial exited 0 after deleting its temporary state.
+
