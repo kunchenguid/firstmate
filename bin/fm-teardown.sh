@@ -149,9 +149,6 @@ PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
 PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
 PUBLIC_FOLLOWUP_RELAY_ACTIVE=0
-if [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
-  PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
-fi
 public_followup_resolve_primary_home() {
   local parent=$1 child=$2 id=$3 parent_meta registry lines line_count meta_home registry_home
   fm_pf_home_id_valid "secondmate:$id" || return 1
@@ -176,10 +173,7 @@ public_followup_resolve_primary_home() {
   [ "$registry_home" = "$child" ] || return 1
   printf '%s\n' "$parent"
 }
-if [ "$KIND" = secondmate ]; then
-  PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$ID"
-elif [ "$PUBLIC_FOLLOWUP_RELAY_ACTIVE" = 1 ] \
-  && { [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; }; then
+if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
   PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
   SECOND_MATE_ID=$(sed -n '1p' "$FM_HOME/$SUB_HOME_MARKER")
   if fm_pf_home_id_valid "secondmate:$SECOND_MATE_ID"; then
@@ -188,11 +182,22 @@ elif [ "$PUBLIC_FOLLOWUP_RELAY_ACTIVE" = 1 ] \
         "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" "$FM_HOME" "$SECOND_MATE_ID"); then
       PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
       PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
+      if [ "$FORCE" != "--force" ] \
+        && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME"; then
+        PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+      fi
     else
       PUBLIC_FOLLOWUP_HOME=
       PUBLIC_FOLLOWUP_STATE=
     fi
   fi
+elif [ "$KIND" = secondmate ]; then
+  PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$ID"
+  if [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
+    PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+  fi
+elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
+  PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
 fi
 
 default_branch() {
@@ -1156,7 +1161,7 @@ if [ "$FORCE" != "--force" ] && [ "$PUBLIC_FOLLOWUP_PARENT_UNRESOLVED" = 1 ]; th
 fi
 if [ "$FORCE" != "--force" ] \
   && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
-  && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME" \
+  && [ "$PUBLIC_FOLLOWUP_RELAY_ACTIVE" = 1 ] \
   && fm_pf_has_registrations "$PUBLIC_FOLLOWUP_STATE"; then
   if ! PUBLIC_FOLLOWUP_BLOCKING=$(FM_HOME="$PUBLIC_FOLLOWUP_HOME" FM_STATE_OVERRIDE="$PUBLIC_FOLLOWUP_STATE" \
       "$SCRIPT_DIR/fm-public-followup.sh" guard-work "$PUBLIC_FOLLOWUP_WORK_HOME" "$ID" 2>/dev/null); then

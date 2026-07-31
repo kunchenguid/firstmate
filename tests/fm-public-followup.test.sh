@@ -630,11 +630,54 @@ test_secondmate_teardown_requires_parent_binding() {
   pass "marked secondmate teardown resolves its parent and fails closed when unavailable"
 }
 
-test_relay_disabled_marked_child_skips_public_guard() {
-  local child out rc
+test_relay_disabled_unmarked_teardown_skips_public_path() {
+  local home tasks_log out rc
+  home=$(make_home teardown-disabled-unmarked relay-off)
+  fm_git_init_commit "$home/projects/worktree"
+  tasks_log="$home/tasks-axi.log"; : > "$tasks_log"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >> "$FAKE_TASKS_AXI_LOG"
+exit 99
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  fm_write_meta "$home/state/work-disabled.meta" \
+    "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
+    "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
+    "kind=ship" "mode=local-only"
+
+  rc=0
+  out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FAKE_TASKS_AXI_LOG="$tasks_log" \
+    "$TEARDOWN" work-disabled 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "relay-disabled unmarked teardown must not refuse public-followup cleanup (rc=$rc): $out"
+  [ ! -s "$tasks_log" ] || fail "relay-disabled unmarked teardown must not invoke tasks-axi: $(tr '\n' ';' < "$tasks_log")"
+  assert_not_contains "$out" "still owes a public reply" \
+    "relay-disabled unmarked teardown must not run the public commitment guard"
+  assert_absent "$home/state/public-followup" \
+    "relay-disabled unmarked teardown must not create a public-followup artifact"
+  pass "relay-disabled unmarked teardown runs no public-followup work"
+}
+
+test_relay_disabled_parent_allows_marked_child_teardown() {
+  local parent child tasks_log out rc
+  parent=$(make_home teardown-disabled-parent relay-off)
   child=$(make_home teardown-disabled-child relay-off)
   fm_git_init_commit "$child/projects/worktree"
   printf '%s\n' disabled-mate > "$child/.fm-secondmate-home"
+  printf -- '- disabled-mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
+    "$child" > "$parent/data/secondmates.md"
+  fm_write_meta "$parent/state/disabled-mate.meta" "kind=secondmate" "home=$child"
+  tasks_log="$child/tasks-axi.log"; : > "$tasks_log"
+  printf 'manual\n' > "$child/config/backlog-backend"
+  cat > "$child/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >> "$FAKE_TASKS_AXI_LOG"
+exit 99
+SH
+  chmod +x "$child/fakebin/tasks-axi"
   fm_write_meta "$child/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
@@ -644,16 +687,15 @@ test_relay_disabled_marked_child_skips_public_guard() {
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
     FM_CONFIG_OVERRIDE="$child/config" \
-    FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$TMP_ROOT/unreadable-parent" \
+    FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" FAKE_TASKS_AXI_LOG="$tasks_log" \
     "$TEARDOWN" work-disabled 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || fail "relay-disabled marked-child teardown must not refuse public-followup cleanup (rc=$rc): $out"
-  assert_not_contains "$out" "cannot resolve the primary home" \
-    "relay-disabled teardown must not inspect or refuse on a missing parent"
+  [ "$rc" -eq 0 ] || fail "relay-disabled parent must allow marked-child teardown (rc=$rc): $out"
+  [ ! -s "$tasks_log" ] || fail "relay-disabled parent must not invoke tasks-axi for a marked child"
   assert_not_contains "$out" "still owes a public reply" \
-    "relay-disabled teardown must not run the public commitment guard"
+    "relay-disabled parent must not run the public commitment guard"
   assert_absent "$child/state/public-followup" \
-    "relay-disabled marked-child teardown must not create a public-followup artifact"
-  pass "relay-disabled marked-child teardown skips parent resolution and public guarding"
+    "relay-disabled parent must not create a public-followup artifact"
+  pass "a marked child proceeds without tasks-axi when its parent relay is disabled"
 }
 
 test_secondmate_parent_binding_matches_literal_id() {
@@ -977,7 +1019,8 @@ test_interrupted_delivery_refuses_to_repost
 test_outward_delivery_stays_with_the_owning_home
 test_delivery_requires_registration_before_posting
 test_secondmate_teardown_requires_parent_binding
-test_relay_disabled_marked_child_skips_public_guard
+test_relay_disabled_unmarked_teardown_skips_public_path
+test_relay_disabled_parent_allows_marked_child_teardown
 test_secondmate_parent_binding_matches_literal_id
 test_traversal_registration_is_refused_before_delivery
 test_pending_rejects_malformed_listing
