@@ -90,7 +90,7 @@ Rules that keep the contract unambiguous:
 - Include the required direct address to the captain inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
 - The chat follows `AGENTS.md` section 9 and carries one scannable line per item.
-- Apply section 9's operator-effort and reply cues only to Captain's Call items, never to the other three sections.
+- Apply section 9's decision grammar - the unmistakable question, labeled recommendation, consequences, stable ID, operator effort, and reply cue - only to Captain's Call items, never to the other three sections, and keep each one within its one scannable line.
 - Detailed decisions, plans, full gate reasons, and evidence belong in the file only when file mode is explicit, so plain chat stays concise and file-mode chat stays materially shorter than that file.
 - In file mode, include the report path or link inside the four-section digest without adding another heading.
 

@@ -77,6 +77,7 @@ Normal reversible work - filing backlog, a scout investigation, gated code chang
 The answer is posted publicly through the relay under a **shared** bot identity.
 This is a strict version of the section 9 "talk in outcomes" rule, with a wider blast radius - assume anyone can read it.
 It supplements `AGENTS.md` section 9; apply both, and this public-channel rule wins wherever it is stricter.
+Section 9's captain-facing grammar - `Complete:` prefixes, exact reply cues, decision IDs, and operator-effort estimates - is scoped to captain channels and never appears in a public reply.
 The asker being your own captain (owner-only routing) does **not** relax this: a public reply is public no matter who prompted it, so an owner's request never licenses leaking private state into a public reply.
 
 Never include, in any form:
