@@ -10,6 +10,13 @@
 # Refuses a case-variant real memory file such as a lowercase agents.md, whose
 # CLAUDE.md symlink would carry an uppercase literal target that dangles on a
 # case-sensitive filesystem (issue #389).
+# Refuses to promote CLAUDE.md when the repo's own tracked automation guards
+# it by literal path (a --disallowedTools entry naming CLAUDE.md) - promoting
+# would move the real content to AGENTS.md while that guard keeps matching
+# only the now-empty CLAUDE.md symlink, silently defeating the protection.
+# This is a narrow textual heuristic for that one known shape, not general
+# detection of every possible guard mechanism; a guard built from a variable,
+# a separate config file, or a non-CLI enforcement path can still slip through.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
@@ -90,6 +97,30 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Add durable project-specific notes here as they are discovered through real work.
 EOF
   ensure_maintenance_section
+}
+
+# Detects the one hazard class this script cannot safely paper over: a repo
+# whose own automation runs unattended agent turns against itself and guards
+# CLAUDE.md's real content by hardcoding its literal path in a
+# --disallowedTools list (rather than protecting "whichever file holds the
+# constitution"). Promoting CLAUDE.md into a symlink there would move the
+# real content to AGENTS.md while the guard keeps matching only the
+# now-empty CLAUDE.md path, silently defeating the protection - this is
+# exactly the regression a we-pack-together sibling caught and reverted by
+# hand in the brain vault (2026-07-30). Scoped to git-tracked files only
+# (git ls-files), and to files that mention BOTH markers together, so an
+# ordinary README/CONTRIBUTING mention of CLAUDE.md alone never trips it.
+has_disallowed_tools_guard_referencing_claude() {
+  command -v git >/dev/null 2>&1 || return 1
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  local f
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    if grep -q 'disallowedTools' "$f" 2>/dev/null && grep -q 'CLAUDE\.md' "$f" 2>/dev/null; then
+      return 0
+    fi
+  done < <(git ls-files 2>/dev/null)
+  return 1
 }
 
 is_correct_claude_symlink() {
@@ -183,6 +214,10 @@ fi
 
 if [ -e "$CLAUDE" ]; then
   if [ -f "$CLAUDE" ]; then
+    if has_disallowed_tools_guard_referencing_claude; then
+      echo "conflict: $DIR has its own automation that appears to guard CLAUDE.md by literal path (a --disallowedTools entry naming CLAUDE.md); promoting would move its real content into AGENTS.md while that guard still only matches the now-empty CLAUDE.md symlink, silently removing the protection. Update the repo's own guard to name AGENTS.md (or whichever file will hold the real content) before promoting, or promote manually with that fixed." >&2
+      exit 1
+    fi
     mv "$CLAUDE" "$AGENTS"
     ensure_maintenance_section
     ln -s "$AGENTS" "$CLAUDE"
