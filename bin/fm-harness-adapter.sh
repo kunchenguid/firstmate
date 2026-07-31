@@ -219,13 +219,22 @@ fm_harness_worktree_artifacts_all() {
 }
 
 # fm_harness_state_artifacts_all: the same union for state-dir artifacts, with
-# @ID@ replaced by <id>. One name per line.
+# @ID@ replaced by <id>. One name per line. The substitution is a QUOTED shell
+# parameter expansion because it must be byte-exact: fm_task_id_path_safe
+# guards the main teardown id, but cleanup_firstmate_home_children derives
+# child ids from basename with no charset guarantee, and an id carrying a
+# character a replacement engine treats specially (`&` or `\` in awk's gsub,
+# and in bash 5.2+ patsub_replacement unless the replacement is quoted) would
+# mangle the derived name and quietly skip the removal.
 fm_harness_state_artifacts_all() {  # <id>
-  local id=$1 adapter
+  local id=$1 adapter name
   for adapter in $FM_HARNESS_ADAPTERS; do
     _fm_harness_adapter_var "$adapter" STATE_ARTIFACTS
     printf '\n'
-  done | awk -v id="$id" 'NF { gsub(/@ID@/, id); if (!seen[$0]++) print }'
+  done | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    printf '%s\n' "${name//@ID@/"$id"}"
+  done | awk '!seen[$0]++'
 }
 
 # fm_harness_dirty_allow_re: the extended-regex alternation fm-teardown's

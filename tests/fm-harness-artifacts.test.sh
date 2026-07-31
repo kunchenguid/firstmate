@@ -14,10 +14,10 @@
 # The structural guard is what these tests assert: the paths live in
 # bin/harnesses/<name>.sh, and spawn's exclude plus every teardown removal path
 # derive from that one list. The strongest case here is
-# test_installed_artifacts_are_all_removed, which reads the paths fm-spawn
-# actually writes out of fm-spawn itself and proves each is removed - so a future
-# rename that updates only the installer fails this suite instead of silently
-# leaking again.
+# test_installed_artifacts_are_all_removed, which RUNS fm-spawn's real install
+# tail per harness and proves every file it actually wrote is hidden from git
+# and cleared by the production removers - so a future rename that updates only
+# the installer fails this suite instead of silently leaking again.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -80,46 +80,127 @@ test_union_is_deduplicated_and_id_substituted() {
     || fail "the state union contains duplicates"
   [ "$(fm_harness_worktree_artifacts_all | sort | uniq -d | wc -l)" -eq 0 ] \
     || fail "the worktree union contains duplicates"
+
+  # The main teardown id is charset-guarded, but orca child ids come from
+  # basename and are not, so substitution must be byte-exact even for the
+  # characters replacement engines treat specially (& and \).
+  local nasty
+  nasty='child-&-\1\-x'
+  union=$(fm_harness_state_artifacts_all "$nasty")
+  assert_contains "$union" "$nasty.grok-turnend-token" \
+    "an id containing & or backslash must substitute byte-exactly"
+  assert_not_contains "$union" '@ID@' "the @ID@ placeholder survived a hostile id"
+
   pass "artifact unions are deduplicated and substitute the task id"
 }
 
 # --- the drift guard ---------------------------------------------------------
 
 test_installed_artifacts_are_all_removed() {
-  local spawn teardown installed rel missed=
+  local spawn harness case_dir proj wt state home grok_home scratch id
+  local before after installed state_before state_after state_installed baseline
+  local control dirty rel out rc install_block spawn_helpers
+  local total_installed=0 total_state_installed=0
   spawn="$ROOT/bin/fm-spawn.sh"
-  teardown="$ROOT/bin/fm-teardown.sh"
 
-  # Every worktree path fm-spawn actually writes, read out of fm-spawn itself
-  # rather than restated here, so this cannot rot into agreeing with a stale
-  # copy of the truth. Only REDIRECTION targets count: `mkdir -p "$WT/.claude"`
-  # creates a directory to write into, not an artifact to remove.
-  # shellcheck disable=SC2016  # single quotes are deliberate: these patterns match
-  # the LITERAL string $WT in fm-spawn's source, not this shell's variable.
-  installed=$(grep -oE '> *"\$WT/\.[A-Za-z0-9._/-]+"' "$spawn" \
-    | sed -e 's|^> *"\$WT/||' -e 's|"$||' | LC_ALL=C sort -u)
-  [ -n "$installed" ] || fail "found no worktree artifacts written by fm-spawn.sh; the extraction pattern is stale"
+  # fm-spawn's REAL install tail: busy-state arming, the per-harness wiring
+  # writes, and the exclusion call. It is executed here per harness rather than
+  # restated or read back as text, so whatever the installer actually writes
+  # must survive the install -> exclude -> remove loop to pass. Only the
+  # harness binary launch is out of reach; nothing below stubs a write.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the anchor is the
+  # literal $KIND guard line in fm-spawn's source.
+  install_block=$(sed -n '/^if \[ "\$KIND" != secondmate \]; then$/,/^fi$/p' "$spawn")
+  [ -n "$install_block" ] || fail "could not locate fm-spawn's harness install block; its anchors are stale"
+  spawn_helpers=$(sed -n '/^shell_quote()/,/^}/p;/^json_escape()/,/^}/p;/^exclude_path()/,/^}/p;/^exclude_harness_artifacts()/,/^}/p' "$spawn")
+  [ -n "$spawn_helpers" ] || fail "could not locate fm-spawn's helper functions; their anchors are stale"
 
-  while IFS= read -r rel; do
-    [ -n "$rel" ] || continue
-    fm_harness_worktree_artifacts_all | grep -qxF "$rel" \
-      || missed="$missed$rel"$'\n'
-  done <<EOF
+  # shellcheck disable=SC1090  # deliberate: extracting the production removers under test
+  eval "$(sed -n '/^remove_harness_worktree_artifacts()/,/^}/p;/^remove_harness_state_artifacts()/,/^}/p' "$ROOT/bin/fm-teardown.sh")"
+
+  for harness in $ADAPTER_HARNESSES; do
+    case_dir="$TMP_ROOT/drift-$harness"
+    proj="$case_dir/proj"; wt="$case_dir/wt"; state="$case_dir/state"
+    home="$case_dir/home"; grok_home="$case_dir/grok"; scratch="$case_dir/busy-baseline"
+    # Grok and Kimi never arm the busy contract, so their ids can carry the
+    # bytes replacement engines treat specially (& and \); the removal below
+    # must still resolve their state tokens byte-exactly.
+    case "$harness" in
+      grok|kimi) id='drift-&-\1-x' ;;
+      *) id="drift-$harness-x" ;;
+    esac
+    fm_git_worktree "$proj" "$wt" "fm/drift-$harness"
+    mkdir -p "$state" "$scratch" "$home/.kimi-code/fm-turn-end.d" "$grok_home"
+
+    # The per-task busy files that arming ALONE creates are generic records
+    # owned by retire_busy_state, not harness artifacts, so they are learned
+    # empirically here and subtracted rather than named.
+    "$ROOT/bin/fm-busy-event.sh" arm "$scratch" "$id" >/dev/null 2>&1 || true
+    baseline=$(cd "$scratch" && find . -type f | LC_ALL=C sort)
+
+    before=$(cd "$wt" && find . -type f | LC_ALL=C sort)
+    state_before=$(cd "$state" && find . -type f | LC_ALL=C sort)
+
+    out=$(
+      exec 2>&1
+      set -e
+      HOME=$home GROK_HOME=$grok_home
+      export HOME GROK_HOME
+      # shellcheck disable=SC2034  # read by the eval'd production block below
+      FM_ROOT=$ROOT KIND=task HARNESS=$harness WT=$wt STATE=$state ID=$id
+      STATE_REAL=$(cd "$state" && pwd -P)
+      # shellcheck disable=SC2034  # read by the eval'd production block below
+      TURNEND="$STATE_REAL/$id.turn-ended"
+      # shellcheck source=bin/fm-busy-lib.sh
+      . "$ROOT/bin/fm-busy-lib.sh"
+      eval "$spawn_helpers"
+      eval "$install_block"
+    ); rc=$?
+    expect_code 0 "$rc" "fm-spawn's install block failed for $harness:"$'\n'"$out"
+
+    # Whatever the installer wrote, the exclusion path must hide it from git;
+    # an installed-but-undeclared artifact surfaces as an untracked file here.
+    dirty=$(git -C "$wt" status --porcelain)
+    [ -z "$dirty" ] \
+      || fail "after install and exclusion for $harness, git still sees untracked files - fm-spawn writes an artifact its adapter does not declare:"$'\n'"$dirty"
+
+    after=$(cd "$wt" && find . -type f | LC_ALL=C sort)
+    state_after=$(cd "$state" && find . -type f | LC_ALL=C sort)
+    installed=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
+    state_installed=$(comm -13 <(printf '%s\n' "$state_before") <(printf '%s\n' "$state_after"))
+
+    control="$wt/crewmate-$RANDOM$RANDOM.txt"
+    printf 'unlanded work\n' > "$control"
+
+    remove_harness_worktree_artifacts "$wt"
+    remove_harness_state_artifacts "$state" "$id"
+
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      assert_absent "$wt/${rel#./}" "fm-spawn installed '$rel' for $harness but the removal path left it behind"
+      total_installed=$((total_installed + 1))
+    done <<EOF
 $installed
 EOF
-  [ -z "$missed" ] \
-    || fail "fm-spawn writes worktree artifacts no adapter declares, so teardown will not remove them:"$'\n'"$missed"
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      printf '%s\n' "$baseline" | grep -qxF "$rel" && continue
+      assert_absent "$state/${rel#./}" "fm-spawn wrote state artifact '$rel' for $harness but the removal path left it behind"
+      total_state_installed=$((total_state_installed + 1))
+    done <<EOF
+$state_installed
+EOF
+    assert_present "$control" "the removal path deleted a crewmate's real file for $harness"
+  done
 
-  # And the removal paths must all go through the one owner rather than
-  # hand-listing paths again.
-  [ "$(grep -c 'remove_harness_worktree_artifacts "' "$teardown")" -ge 4 ] \
-    || fail "not every teardown worktree removal path routes through remove_harness_worktree_artifacts"
-  # shellcheck disable=SC2016  # single quotes are deliberate: matches the literal
-  # "$WT/" text in fm-teardown's source.
-  grep -qE 'rm -f "\$(WT|child_wt)/\.(claude|opencode|fm-)' "$teardown" \
-    && fail "fm-teardown still hand-lists harness artifact paths; they belong to bin/harnesses/"
+  # If the block extraction or the install arms ever go stale, the loop above
+  # degenerates into asserting nothing; refuse that silently-green shape.
+  [ "$total_installed" -ge 1 ] \
+    || fail "no harness installed any worktree artifact; the install-block extraction went stale"
+  [ "$total_state_installed" -ge 1 ] \
+    || fail "no harness installed any state artifact; the install-block extraction went stale"
 
-  pass "every worktree artifact fm-spawn writes is declared by an adapter and removed through the one owner"
+  pass "every artifact the real installer writes is excluded from git and removed by the production removers"
 }
 
 test_dirty_allowlist_covers_every_artifact_and_nothing_else() {
