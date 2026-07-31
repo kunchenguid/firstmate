@@ -64,7 +64,9 @@ case "${1:-}" in
     case "${4:-}" in
       fm_spawn_toolchain_bin=*)
         pane_command=$4
-        PATH="${FM_FAKE_INITIAL_PANE_PATH:-/usr/bin:/bin}" /bin/zsh -c \
+        # /bin/sh exists on every CI platform (zsh does not); the guarantee is
+        # POSIX shell, so sh exercises the same contract the pane shell runs.
+        PATH="${FM_FAKE_INITIAL_PANE_PATH:-/usr/bin:/bin}" /bin/sh -c \
           "$pane_command; $pane_command; printf '%s\\n' \"\$PATH\"" \
           > "$FM_FAKE_TOOLCHAIN_PATH_LOG"
         exit 0
