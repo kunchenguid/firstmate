@@ -19,11 +19,17 @@ test_detection_marker() {
 }
 
 test_primary_hook_wiring() {
-  local config pre stop matcher
+  local config session pre stop matcher
   config="$ROOT/.devin/config.json"
   [ -f "$config" ] || fail "tracked .devin/config.json is missing"
   jq -e '.read_config_from.claude == false' "$config" >/dev/null \
     || fail "tracked Devin config does not disable Claude compatibility import"
+  session=$(jq -r '.hooks.SessionStart[0].hooks[0].command // empty' "$config")
+  assert_contains "$session" 'fm-sessionstart-nudge.sh' "Devin SessionStart hook omitted session-start nudge"
+  assert_contains "$session" 'DEVIN_PROJECT_DIR' "Devin SessionStart hook omitted the native project root"
+  assert_contains "$session" 'git rev-parse --show-toplevel' "Devin SessionStart hook omitted the Git-root fallback"
+  [ "$(jq '[.hooks.SessionStart[].hooks[] | select(.command | contains("fm-sessionstart-nudge.sh"))] | length' "$config")" -eq 1 ] \
+    || fail "tracked Devin config does not have exactly one SessionStart owner"
   matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$config")
   [ "$matcher" = exec ] || fail "Devin PreToolUse matcher is '$matcher', expected exec"
   pre=$(jq -r '.hooks.PreToolUse[0].hooks[].command' "$config")
@@ -73,7 +79,7 @@ test_primary_hooks_anchor_from_nested_cwd() {
   mkdir -p "$fixture/.devin" "$fixture/bin" "$nested"
   cp "$ROOT/.devin/config.json" "$fixture/.devin/config.json"
   git -C "$fixture" init -q
-  for script in fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-turnend-guard.sh; do
+  for script in fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-turnend-guard.sh fm-sessionstart-nudge.sh; do
     # shellcheck disable=SC2016  # fixture script expands these values when its hook runs
     printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$(basename "$0")" >> "$FM_DEVIN_HOOK_MARKER"' > "$fixture/bin/$script"
     chmod +x "$fixture/bin/$script"
@@ -86,11 +92,53 @@ test_primary_hooks_anchor_from_nested_cwd() {
       else
         (trap - EXIT; cd "$nested" && DEVIN_PROJECT_DIR='' FM_DEVIN_HOOK_MARKER="$marker" bash -c "$command")
       fi
-    done < <(jq -r '.hooks.PreToolUse[].hooks[].command, .hooks.Stop[].hooks[].command' "$fixture/.devin/config.json")
-    [ "$(wc -l < "$marker" | tr -d ' ')" -eq 3 ] \
-      || fail "Devin $mode root resolution did not invoke all three hooks from a nested cwd: $(cat "$marker")"
+    done < <(jq -r '.hooks.SessionStart[].hooks[].command, .hooks.PreToolUse[].hooks[].command, .hooks.Stop[].hooks[].command' "$fixture/.devin/config.json")
+    [ "$(wc -l < "$marker" | tr -d ' ')" -eq 4 ] \
+      || fail "Devin $mode root resolution did not invoke all four hooks from a nested cwd: $(cat "$marker")"
   done
   pass "all Devin hooks resolve quoted project roots from nested working directories"
+}
+
+test_spawn_control_character_state_path() {
+  local d home proj wt state fakebin id log out config
+  d="$TMP_ROOT/control-path"
+  home="$d/home"
+  proj="$d/project"
+  wt="$d/wt"
+  state="$d/state"$'\n'"control"
+  id=devin-control-x1
+  log="$d/tmux.log"
+  fakebin=$(fm_fakebin "$d/fake")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/config" "$state"
+  state=$(cd "$state" && pwd -P)
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows|has-session|new-session|new-window|send-keys|set-buffer|paste-buffer|delete-buffer|kill-window) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  out=$(XDG_CONFIG_HOME="$d/xdg" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_TMUX_LOG="$log" \
+    TMUX='fake,1,0' PATH="$fakebin:$PATH" "$SPAWN" "$id" "$proj" \
+    --harness devin 2>&1)
+  assert_contains "$out" "spawned $id harness=devin" "Devin spawn with a control-character state path did not succeed"
+  config="$state/$id.devin-config.json"
+  jq -e --arg state "$state" \
+    '[.hooks.Stop[].hooks[] | select(.command | contains($state))] | length == 1' "$config" >/dev/null \
+    || fail "Devin config did not preserve a control-character state path as valid JSON: $(cat "$config")"
+  pass "Devin config JSON-escapes control characters in state paths"
 }
 
 test_spawn_launch_and_turnend_config() {
@@ -312,6 +360,7 @@ test_primary_pretool_hook_blocks
 test_launch_templates_preserve_workspace_trust
 test_primary_hooks_anchor_from_nested_cwd
 test_spawn_launch_and_turnend_config
+test_spawn_control_character_state_path
 test_invalid_user_config_remains_recoverable
 test_lock_recognizes_devin_holder
 test_lock_rejects_unrelated_devin_argv

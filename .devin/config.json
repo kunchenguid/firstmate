@@ -4,6 +4,16 @@
     "claude": false
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'root=${DEVIN_PROJECT_DIR:-}; if [ -z \"$root\" ]; then root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; fi; [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-sessionstart-nudge.sh\" ] || exit 0; exec \"$root/bin/fm-sessionstart-nudge.sh\"'"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "exec",

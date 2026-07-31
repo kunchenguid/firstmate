@@ -686,7 +686,7 @@ case "$LAUNCH" in
 esac
 
 json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+  node -e 'process.stdout.write(JSON.stringify(process.argv[1]).slice(1, -1))' "$1"
 }
 
 resolved_existing_dir() {
