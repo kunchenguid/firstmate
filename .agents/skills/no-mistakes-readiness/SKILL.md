@@ -19,7 +19,7 @@ The installed no-mistakes skill and live AXI help remain authoritative for pipel
 No-mistakes is the final delivery review and shipping gate.
 It is not the place to finish the feature.
 The implementation worker owns implementation, self-audit, project-native analysis, tests, and applicable design and runtime grounding before any pipeline run starts.
-No independent manual reviewer is added before no-mistakes.
+Firstmate semantically reviews that readiness evidence before no-mistakes without taking over implementation or adding a separate code-review gate.
 Readiness evidence answers whether implementation is complete enough to enter the selected delivery review; it does not replace that review.
 
 Use the same implementation worker for readiness and for driving the eventual AXI run.
@@ -53,12 +53,15 @@ Apply each axis to the project and accepted intent instead of imposing a fixed t
 
 Bind the record to the exact implementation commit after every corrective implementation commit.
 The helper independently checks the branch name, clean worktree, committed HEAD, record binding, task kind and delivery mode, required verdicts, evidence presence, and detectable Spec Kit applicability.
+Worker evidence alone never authorizes `READY`.
+After inspecting every axis against the accepted intent and project, Firstmate runs the helper's semantic approval command with the exact reviewed HEAD.
+The approval binds both that commit and the reviewed evidence bytes, so a later commit or evidence edit requires renewed Firstmate review and approval.
 
 ## Outcome model
 
 The helper has exactly three readiness outcomes:
 
-- `READY` means every semantic axis is evidenced and every deterministic repository check passed for the current implementation commit.
+- `READY` means every semantic axis is evidenced, every deterministic repository check passed, and Firstmate's semantic approval matches the current implementation commit and exact evidence record.
   Firstmate may now invoke the installed no-mistakes skill on the same worker through `harness-adapters`.
 - `NOT_READY` means implementation evidence or a deterministic prerequisite is incomplete.
   Do not start no-mistakes.
@@ -71,7 +74,7 @@ A failed preflight is not a review finding and must never be handed to no-mistak
 
 ## Starting and supervising validation
 
-Immediately before invoking the worker's no-mistakes skill, Firstmate checks the durable record itself and proceeds only on `READY` for the current HEAD.
+Immediately before invoking the worker's no-mistakes skill, Firstmate checks the durable record and approval itself and proceeds only on `READY` for the current HEAD.
 After the worker starts AXI, Firstmate uses the helper's monitor reconciliation entry point.
 If the run is not visible yet, keep supervising the worker and reconcile again after AXI reports its run.
 Reconcile again during recovery, at material validation transitions, and before teardown.

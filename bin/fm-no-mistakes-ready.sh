@@ -4,6 +4,7 @@
 #
 # Usage:
 #   fm-no-mistakes-ready.sh init <task-id>
+#   fm-no-mistakes-ready.sh approve <task-id> <exact-head>
 #   fm-no-mistakes-ready.sh check <task-id>
 #   fm-no-mistakes-ready.sh monitor-reconcile <task-id>
 #   fm-no-mistakes-ready.sh monitor-clear-attempt <task-id> <attempt-token>
@@ -19,14 +20,17 @@
 # implementation_complete, decisions, design_grounding, runtime_grounding,
 # and maestro.
 # Replace every `pending` verdict and placeholder evidence, then run `check`.
+# After reviewing every evidence axis, Firstmate alone runs `approve` with the
+# exact implementation HEAD. The durable approval binds both that HEAD and the
+# reviewed record bytes. Worker evidence without this approval cannot be ready.
 # `check` also verifies the exact fm/<task-id> branch, clean committed worktree,
-# record-to-HEAD binding, no-mistakes ship metadata, and Spec Kit applicability.
+# record-to-HEAD and approval binding, no-mistakes ship metadata, and Spec Kit applicability.
 # It prints `READY`, `NOT_READY`, or `ERROR` and exits 0, 1, or 2 respectively.
 #
 # `monitor-reconcile` reads the task's exact endpoint metadata and the
 # current-branch AXI status.
 # On Herdr it binds one state/<task-id>.no-mistakes-monitor journal to the exact
-# run, session, workspace, tab, pane, and submitted head, then runs only
+# run, session, workspace, tab, pane, canonical executable, and submitted head, then runs only
 # `no-mistakes attach --run <id>` in a new `--no-focus` tab beside the worker.
 # Repeated calls reuse that exact pane.
 # A terminal run retires only the journal-bound pane, and only after exact
@@ -97,6 +101,30 @@ fm_nm_task_load() { # <task-id>
 
 fm_nm_record_path() {
   printf '%s/%s/no-mistakes-readiness.tsv' "$DATA" "$FM_NM_ID"
+}
+
+fm_nm_approval_path() {
+  printf '%s/%s/no-mistakes-readiness.approval' "$DATA" "$FM_NM_ID"
+}
+
+fm_nm_approval_load() { # <approval>
+  local approval=$1 key line_count
+  [ -f "$approval" ] && [ ! -L "$approval" ] || return 3
+  for key in version authority task head evidence_sha256; do
+    [ "$(grep -c "^$key=" "$approval" 2>/dev/null || true)" -eq 1 ] || return 2
+  done
+  line_count=$(awk 'END { print NR + 0 }' "$approval")
+  [ "$line_count" -eq 5 ] || return 2
+  FM_NM_A_VERSION=$(fm_meta_get "$approval" version)
+  FM_NM_A_AUTHORITY=$(fm_meta_get "$approval" authority)
+  FM_NM_A_TASK=$(fm_meta_get "$approval" task)
+  FM_NM_A_HEAD=$(fm_meta_get "$approval" head)
+  FM_NM_A_EVIDENCE_SHA256=$(fm_meta_get "$approval" evidence_sha256)
+  [ "$FM_NM_A_VERSION" = 1 ] && [ "$FM_NM_A_AUTHORITY" = firstmate ] \
+    && [ "$FM_NM_A_TASK" = "$FM_NM_ID" ] || return 2
+  case "$FM_NM_A_HEAD" in ''|*[!0-9a-f]*) return 2 ;; esac
+  [ "${#FM_NM_A_EVIDENCE_SHA256}" -eq 64 ] || return 2
+  case "$FM_NM_A_EVIDENCE_SHA256" in *[!0-9a-f]*) return 2 ;; esac
 }
 
 fm_nm_init() { # <task-id>
@@ -182,8 +210,9 @@ fm_nm_evidence_is_concrete() { # <verdict> <evidence>
   return 0
 }
 
-fm_nm_check() { # <task-id>
-  local id=$1 record branch head record_head axis verdict evidence worktree_status failures=0
+fm_nm_validate_readiness() { # <task-id> <require-approval>
+  local id=$1 require_approval=$2 record approval branch head record_head axis verdict evidence
+  local worktree_status evidence_sha256 approval_status failures=0
   fm_nm_task_load "$id" || return $?
   record=$(fm_nm_record_path)
   if [ ! -f "$record" ] || [ -L "$record" ]; then
@@ -256,11 +285,79 @@ fm_nm_check() { # <task-id>
       failures=$((failures + 1))
     fi
   done
+  if [ "$require_approval" -eq 1 ]; then
+    approval=$(fm_nm_approval_path)
+    fm_nm_approval_load "$approval" && approval_status=0 || approval_status=$?
+    case "$approval_status" in
+      0)
+        evidence_sha256=$(fm_pr_sha256 "$record") || {
+          fm_nm_error "cannot hash readiness evidence for approval validation"
+          return 2
+        }
+        if [ "$FM_NM_A_HEAD" != "$head" ]; then
+          printf 'NOT_READY: Firstmate approval head %s does not match worktree HEAD %s\n' "$FM_NM_A_HEAD" "${head:-missing}"
+          failures=$((failures + 1))
+        fi
+        if [ "$FM_NM_A_EVIDENCE_SHA256" != "$evidence_sha256" ]; then
+          printf 'NOT_READY: readiness evidence changed after Firstmate semantic approval\n'
+          failures=$((failures + 1))
+        fi
+        ;;
+      3)
+        printf 'NOT_READY: exact-HEAD Firstmate semantic approval is missing\n'
+        failures=$((failures + 1))
+        ;;
+      *)
+        fm_nm_error "malformed Firstmate approval at $approval"
+        return 2
+        ;;
+    esac
+  fi
   if [ "$failures" -ne 0 ]; then
     printf 'NOT_READY: %s readiness requirement(s) remain\n' "$failures"
     return 1
   fi
-  printf 'READY: task %s at %s; evidence %s\n' "$id" "$head" "$record"
+  FM_NM_VALIDATED_RECORD=$record
+  FM_NM_VALIDATED_HEAD=$head
+  return 0
+}
+
+fm_nm_check() { # <task-id>
+  local id=$1
+  fm_nm_validate_readiness "$id" 1 || return $?
+  printf 'READY: task %s at %s; evidence %s\n' "$id" "$FM_NM_VALIDATED_HEAD" "$FM_NM_VALIDATED_RECORD"
+}
+
+fm_nm_approve() { # <task-id> <exact-head>
+  local id=$1 exact_head=$2 approval dir tmp evidence_sha256
+  fm_nm_validate_readiness "$id" 0 || return $?
+  [ "$exact_head" = "$FM_NM_VALIDATED_HEAD" ] || {
+    fm_nm_error "approval head $exact_head does not match worktree HEAD $FM_NM_VALIDATED_HEAD"
+    return 2
+  }
+  approval=$(fm_nm_approval_path)
+  dir=${approval%/*}
+  if [ -e "$approval" ] || [ -L "$approval" ]; then
+    [ -f "$approval" ] && [ ! -L "$approval" ] || {
+      fm_nm_error "approval path is not a regular file at $approval"
+      return 2
+    }
+  fi
+  evidence_sha256=$(fm_pr_sha256 "$FM_NM_VALIDATED_RECORD") || {
+    fm_nm_error "cannot hash readiness evidence for semantic approval"
+    return 2
+  }
+  tmp=$(mktemp "$dir/.no-mistakes-readiness-approval.XXXXXX") || return 2
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 2; }
+  {
+    printf 'version=1\n'
+    printf 'authority=firstmate\n'
+    printf 'task=%s\n' "$id"
+    printf 'head=%s\n' "$FM_NM_VALIDATED_HEAD"
+    printf 'evidence_sha256=%s\n' "$evidence_sha256"
+  } > "$tmp"
+  mv "$tmp" "$approval" || { rm -f "$tmp"; return 2; }
+  printf 'approved: Firstmate semantic readiness for task %s at %s\n' "$id" "$FM_NM_VALIDATED_HEAD"
 }
 
 fm_nm_timeout_run() { # <worktree> <no-mistakes args...>
@@ -313,11 +410,13 @@ fm_nm_run_status() { # [<run-id>]
 }
 
 fm_nm_run_matches_task() { # <status-output>
-  local output=$1 branch run_head resolved worktree_head
+  local output=$1 branch run_head resolved worktree_branch worktree_head
   branch=$(fm_nm_toon_field "$output" branch)
   run_head=$(fm_nm_toon_field "$output" head)
   [ -n "$branch" ] && [ "$branch" = "fm/$FM_NM_ID" ] || return 1
   [ -n "$run_head" ] || return 1
+  worktree_branch=$(git -C "$FM_NM_WORKTREE" branch --show-current 2>/dev/null) || return 1
+  [ "$worktree_branch" = "fm/$FM_NM_ID" ] || return 1
   worktree_head=$(git -C "$FM_NM_WORKTREE" rev-parse HEAD 2>/dev/null) || return 1
   resolved=$(git -C "$FM_NM_WORKTREE" rev-parse "$run_head^{commit}" 2>/dev/null) || return 1
   [ "$resolved" = "$worktree_head" ] \
@@ -368,11 +467,11 @@ fm_nm_monitor_journal_load() { # <journal>
     return 4
   fi
   [ "$version" = 1 ] || return 1
-  for key in tab pane; do
+  for key in tab pane executable; do
     [ "$(grep -c "^$key=" "$journal" 2>/dev/null || true)" -eq 1 ] || return 1
   done
   line_count=$(awk 'END { print NR + 0 }' "$journal")
-  [ "$line_count" -eq 8 ] || return 1
+  [ "$line_count" -eq 9 ] || return 1
   FM_NM_J_VERSION=$version
   FM_NM_J_TASK=$(fm_meta_get "$journal" task)
   FM_NM_J_RUN=$(fm_meta_get "$journal" run)
@@ -381,11 +480,14 @@ fm_nm_monitor_journal_load() { # <journal>
   FM_NM_J_WORKSPACE=$(fm_meta_get "$journal" workspace)
   FM_NM_J_TAB=$(fm_meta_get "$journal" tab)
   FM_NM_J_PANE=$(fm_meta_get "$journal" pane)
+  FM_NM_J_EXECUTABLE=$(fm_meta_get "$journal" executable)
   [ "$FM_NM_J_VERSION" = 1 ] && [ "$FM_NM_J_TASK" = "$FM_NM_ID" ] || return 1
   for key in "$FM_NM_J_RUN" "$FM_NM_J_HEAD" "$FM_NM_J_SESSION" "$FM_NM_J_WORKSPACE" \
     "${FM_NM_J_TAB//:/_}" "${FM_NM_J_PANE//:/_}"; do
     case "$key" in ''|*[!A-Za-z0-9._@%+-]*) return 1 ;; esac
   done
+  case "$FM_NM_J_EXECUTABLE" in /*) ;; *) return 1 ;; esac
+  case "$FM_NM_J_EXECUTABLE" in *$'\t'*|*$'\n'*) return 1 ;; esac
 }
 
 fm_nm_monitor_pane_record() { # <session> <pane>
@@ -408,25 +510,46 @@ fm_nm_monitor_pane_record() { # <session> <pane>
   printf '%s\t%s\t%s' "$pane" "$tab" "$workspace"
 }
 
-fm_nm_monitor_process_matches() { # <session> <pane> <run>
-  local output
-  output=$(fm_backend_herdr_cli "$1" pane process-info --pane "$2" 2>/dev/null) || return 1
-  printf '%s' "$output" | jq -e --arg pane "$2" --arg run "$3" '
-    .result.process_info.pane_id == $pane
-    and ([.result.process_info.foreground_processes[]?
-      | (.argv // [])
-      | select(type == "array")
-      | select(any(.[]?; . == "attach"))
-      | select(index("--run") as $index | $index != null and .[$index + 1] == $run)
-    ] | length) == 1
-  ' >/dev/null 2>&1
+fm_nm_canonical_executable() { # <path>
+  local path=$1 link dir count=0
+  case "$path" in /*) ;; *) return 1 ;; esac
+  while [ -L "$path" ]; do
+    [ "$count" -lt 40 ] || return 1
+    link=$(readlink "$path" 2>/dev/null) || return 1
+    case "$link" in
+      /*) path=$link ;;
+      *) path="${path%/*}/$link" ;;
+    esac
+    count=$((count + 1))
+  done
+  [ -f "$path" ] && [ -x "$path" ] || return 1
+  dir=$(cd "${path%/*}" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s' "$dir" "${path##*/}"
 }
 
-fm_nm_monitor_process_wait() { # <session> <pane> <run>
-  local session=$1 pane=$2 run=$3 attempt=0 attempts=${FM_NM_MONITOR_PROCESS_ATTEMPTS:-30}
+fm_nm_monitor_process_matches() { # <session> <pane> <run> <executable>
+  local output candidate expected
+  output=$(fm_backend_herdr_cli "$1" pane process-info --pane "$2" 2>/dev/null) || return 1
+  candidate=$(printf '%s' "$output" | jq -er --arg pane "$2" --arg run "$3" '
+    select(.result.process_info.pane_id == $pane)
+    | [.result.process_info.foreground_processes[]?
+      | select((.argv | type) == "array")
+      | select((.argv | length) == 4)
+      | select((.argv[0] | type) == "string")
+      | select(.argv[1] == "attach" and .argv[2] == "--run" and .argv[3] == $run)
+      | .argv[0]]
+    | if length == 1 then .[0] else empty end
+  ' 2>/dev/null) || return 1
+  candidate=$(fm_nm_canonical_executable "$candidate") || return 1
+  expected=$(fm_nm_canonical_executable "$4") || return 1
+  [ "$candidate" = "$expected" ]
+}
+
+fm_nm_monitor_process_wait() { # <session> <pane> <run> <executable>
+  local session=$1 pane=$2 run=$3 executable=$4 attempt=0 attempts=${FM_NM_MONITOR_PROCESS_ATTEMPTS:-30}
   case "$attempts" in ''|*[!0-9]*) attempts=30 ;; esac
   while [ "$attempt" -lt "$attempts" ]; do
-    fm_nm_monitor_process_matches "$session" "$pane" "$run" && return 0
+    fm_nm_monitor_process_matches "$session" "$pane" "$run" "$executable" && return 0
     sleep 0.1
     attempt=$((attempt + 1))
   done
@@ -435,6 +558,7 @@ fm_nm_monitor_process_wait() { # <session> <pane> <run>
 
 fm_nm_run_matches_journal() { # <status-output>
   local output=$1 branch run_head resolved_run resolved_submitted
+  fm_nm_run_matches_task "$output" || return 1
   branch=$(fm_nm_toon_field "$output" branch)
   run_head=$(fm_nm_toon_field "$output" head)
   [ "$branch" = "fm/$FM_NM_ID" ] && [ -n "$run_head" ] || return 1
@@ -444,8 +568,8 @@ fm_nm_run_matches_journal() { # <status-output>
     || git -C "$FM_NM_WORKTREE" merge-base --is-ancestor "$resolved_submitted" "$resolved_run" 2>/dev/null
 }
 
-fm_nm_monitor_publish() { # <journal> <run> <head> <session> <workspace> <tab> <pane>
-  local journal=$1 run=$2 head=$3 session=$4 workspace=$5 tab=$6 pane=$7 tmp
+fm_nm_monitor_publish() { # <journal> <run> <head> <session> <workspace> <tab> <pane> <executable>
+  local journal=$1 run=$2 head=$3 session=$4 workspace=$5 tab=$6 pane=$7 executable=$8 tmp
   mkdir -p "$STATE" || return 1
   tmp=$(mktemp "$STATE/.${FM_NM_ID}.no-mistakes-monitor.XXXXXX") || return 1
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
@@ -458,6 +582,7 @@ fm_nm_monitor_publish() { # <journal> <run> <head> <session> <workspace> <tab> <
     printf 'workspace=%s\n' "$workspace"
     printf 'tab=%s\n' "$tab"
     printf 'pane=%s\n' "$pane"
+    printf 'executable=%s\n' "$executable"
   } > "$tmp"
   mv "$tmp" "$journal" || { rm -f "$tmp"; return 1; }
 }
@@ -495,7 +620,7 @@ fm_nm_shell_quote() {
   printf "'"
 }
 
-fm_nm_monitor_create() { # <journal> <run> <submitted-head>
+fm_nm_monitor_create_under_lock() { # <journal> <run> <submitted-head>
   local journal=$1 run=$2 submitted_head=$3 session workspace task_pane focus_before output
   local status tab pane record nm_bin command short_run token label
   session=$(fm_meta_get "$FM_NM_META" herdr_session)
@@ -509,6 +634,12 @@ fm_nm_monitor_create() { # <journal> <run> <submitted-head>
     fm_nm_error "task $FM_NM_ID Herdr pane no longer matches its recorded tab and workspace"
     return 2
   }
+  nm_bin=$(command -v no-mistakes 2>/dev/null) || nm_bin=
+  nm_bin=$(fm_nm_canonical_executable "$nm_bin") || nm_bin=
+  if [ -z "$nm_bin" ]; then
+    fm_nm_error "no-mistakes command is unavailable for the attach pane"
+    return 2
+  fi
   focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     fm_nm_error "cannot capture exact Herdr focus before monitor creation"
     return 2
@@ -546,15 +677,9 @@ fm_nm_monitor_create() { # <journal> <run> <submitted-head>
     fm_nm_error "Herdr monitor tab did not converge to its exact workspace binding; preserving any unconfirmed attempt"
     return 2
   fi
-  if ! fm_nm_monitor_publish "$journal" "$run" "$submitted_head" "$session" "$workspace" "$tab" "$pane"; then
+  if ! fm_nm_monitor_publish "$journal" "$run" "$submitted_head" "$session" "$workspace" "$tab" "$pane" "$nm_bin"; then
     fm_nm_monitor_cleanup_created "$journal" "$session" "$pane" || true
     fm_nm_error "cannot publish exact Herdr monitor journal; preserving any unconfirmed attempt"
-    return 2
-  fi
-  nm_bin=$(command -v no-mistakes 2>/dev/null) || nm_bin=
-  if [ -z "$nm_bin" ]; then
-    fm_nm_monitor_cleanup_created "$journal" "$session" "$pane" || true
-    fm_nm_error "no-mistakes command is unavailable for the attach pane; preserving any unconfirmed monitor"
     return 2
   fi
   command="exec $(fm_nm_shell_quote "$nm_bin") attach --run $(fm_nm_shell_quote "$run")"
@@ -563,12 +688,39 @@ fm_nm_monitor_create() { # <journal> <run> <submitted-head>
     fm_nm_error "could not start no-mistakes attach in exact Herdr monitor pane; preserving any unconfirmed monitor"
     return 2
   fi
-  if ! fm_nm_monitor_process_wait "$session" "$pane" "$run"; then
+  if ! fm_nm_monitor_process_wait "$session" "$pane" "$run" "$nm_bin"; then
     fm_nm_monitor_cleanup_created "$journal" "$session" "$pane" || true
     fm_nm_error "no-mistakes attach did not become the exact foreground process; preserving any unconfirmed monitor"
     return 2
   fi
   printf 'visible: no-mistakes run %s attached in Herdr pane %s without focus change\n' "$run" "$pane"
+}
+
+fm_nm_with_presentation_lock() { # <session> <function> [args...]
+  local session=$1 operation=$2 lock attempt=0 attempts=${FM_NM_PRESENTATION_LOCK_ATTEMPTS:-50} rc
+  shift 2
+  case "$attempts" in ''|*[!0-9]*) attempts=50 ;; esac
+  lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
+    fm_nm_error "cannot resolve the shared Herdr presentation lock for session $session"
+    return 2
+  }
+  while ! fm_lock_try_acquire "$lock"; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$attempts" ] || {
+      fm_nm_error "shared Herdr presentation lock is busy for session $session"
+      return 2
+    }
+    sleep 0.1
+  done
+  "$operation" "$@" && rc=0 || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+fm_nm_monitor_create() { # <journal> <run> <submitted-head>
+  local session
+  session=$(fm_meta_get "$FM_NM_META" herdr_session)
+  fm_nm_with_presentation_lock "$session" fm_nm_monitor_create_under_lock "$@"
 }
 
 fm_nm_monitor_clear_attempt_locked() { # <task-id> <attempt-token>
@@ -592,20 +744,29 @@ fm_nm_monitor_clear_attempt_locked() { # <task-id> <attempt-token>
   printf 'cleared: inspected Herdr monitor attempt %s; no pane was discovered or mutated\n' "$supplied_token"
 }
 
-fm_nm_monitor_clear_attempt() { # <task-id> <attempt-token>
-  local id=$1 token=$2 lock rc
+fm_nm_with_monitor_task_lock() { # <task-id> <function> [args...]
+  local id=$1 operation=$2 lock rc
+  shift 2
+  fm_task_id_creation_valid "$id" || {
+    fm_nm_error "invalid task id '$id'"
+    return 2
+  }
   mkdir -p "$STATE" || return 2
   lock="$STATE/.${id}.no-mistakes-monitor.lock"
   if ! fm_lock_try_acquire "$lock"; then
     fm_nm_error "monitor reconciliation is already active for task $id"
     return 2
   fi
-  fm_nm_monitor_clear_attempt_locked "$id" "$token" && rc=0 || rc=$?
+  "$operation" "$@" && rc=0 || rc=$?
   fm_lock_release "$lock"
   return "$rc"
 }
 
-fm_nm_monitor_retire() { # <journal> <status-output>
+fm_nm_monitor_clear_attempt() { # <task-id> <attempt-token>
+  fm_nm_with_monitor_task_lock "$1" fm_nm_monitor_clear_attempt_locked "$@"
+}
+
+fm_nm_monitor_retire_under_lock() { # <journal> <status-output>
   local journal=$1 status_output=$2 record status
   fm_nm_run_terminal "$status_output" || return 1
   record=$(fm_nm_monitor_pane_record "$FM_NM_J_SESSION" "$FM_NM_J_PANE") && status=0 || status=$?
@@ -619,7 +780,7 @@ fm_nm_monitor_retire() { # <journal> <status-output>
       fm_nm_error "terminal run $FM_NM_J_RUN monitor pane is ambiguous; preserving it and its journal"
       return 2
     }
-  fm_nm_monitor_process_matches "$FM_NM_J_SESSION" "$FM_NM_J_PANE" "$FM_NM_J_RUN" || {
+  fm_nm_monitor_process_matches "$FM_NM_J_SESSION" "$FM_NM_J_PANE" "$FM_NM_J_RUN" "$FM_NM_J_EXECUTABLE" || {
     fm_nm_error "terminal run $FM_NM_J_RUN monitor pane no longer proves the exact attach process; preserving it"
     return 2
   }
@@ -631,6 +792,10 @@ fm_nm_monitor_retire() { # <journal> <status-output>
   }
   rm -f "$journal"
   printf 'retired: terminal no-mistakes run %s Herdr presentation pane %s\n' "$FM_NM_J_RUN" "$FM_NM_J_PANE"
+}
+
+fm_nm_monitor_retire() { # <journal> <status-output>
+  fm_nm_with_presentation_lock "$FM_NM_J_SESSION" fm_nm_monitor_retire_under_lock "$@"
 }
 
 fm_nm_monitor_reconcile_locked() { # <task-id>
@@ -677,7 +842,7 @@ fm_nm_monitor_reconcile_locked() { # <task-id>
     fi
     if [ "$status" -ne 0 ] \
       || [ "$record" != "$FM_NM_J_PANE"$'\t'"$FM_NM_J_TAB"$'\t'"$FM_NM_J_WORKSPACE" ] \
-      || ! fm_nm_monitor_process_matches "$FM_NM_J_SESSION" "$FM_NM_J_PANE" "$FM_NM_J_RUN"; then
+      || ! fm_nm_monitor_process_matches "$FM_NM_J_SESSION" "$FM_NM_J_PANE" "$FM_NM_J_RUN" "$FM_NM_J_EXECUTABLE"; then
         fm_nm_error "active run $FM_NM_J_RUN has an ambiguous or repurposed monitor pane; refusing a duplicate"
         return 2
     fi
@@ -707,16 +872,7 @@ fm_nm_monitor_reconcile_locked() { # <task-id>
 }
 
 fm_nm_monitor_reconcile() { # <task-id>
-  local id=$1 lock rc
-  mkdir -p "$STATE" || return 2
-  lock="$STATE/.${id}.no-mistakes-monitor.lock"
-  if ! fm_lock_try_acquire "$lock"; then
-    fm_nm_error "monitor reconciliation is already active for task $id"
-    return 2
-  fi
-  fm_nm_monitor_reconcile_locked "$id" && rc=0 || rc=$?
-  fm_lock_release "$lock"
-  return "$rc"
+  fm_nm_with_monitor_task_lock "$1" fm_nm_monitor_reconcile_locked "$@"
 }
 
 case "${1:-}" in
@@ -733,6 +889,12 @@ case "${1:-}" in
       check) fm_nm_check "$id" ;;
       monitor-reconcile) fm_nm_monitor_reconcile "$id" ;;
     esac
+    ;;
+  approve)
+    id=${2:-}
+    head=${3:-}
+    [ -n "$id" ] && [ -n "$head" ] && [ "$#" -eq 3 ] || { usage >&2; exit 2; }
+    fm_nm_approve "$id" "$head"
     ;;
   monitor-clear-attempt)
     id=${2:-}

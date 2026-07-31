@@ -139,6 +139,7 @@ test_help() {
   output=$("$HELPER" --help)
   assert_contains_text "$output" 'monitor-reconcile <task-id>' "help omitted monitor reconciliation"
   assert_contains_text "$output" 'monitor-clear-attempt <task-id> <attempt-token>' "help omitted attempt recovery"
+  assert_contains_text "$output" 'approve <task-id> <exact-head>' "help omitted Firstmate semantic approval"
   # shellcheck disable=SC2016 # Literal Markdown code spans are the expected help text.
   assert_contains_text "$output" 'prints `READY`, `NOT_READY`, or `ERROR`' "help omitted readiness outcomes"
   pass "fm-no-mistakes-ready: help renders the full mechanics header"
@@ -167,9 +168,43 @@ test_readiness_outcomes() {
 
   head=$(git -C "$worktree" rev-parse HEAD)
   write_ready_record "$record" "$head" not-applicable
+  set +e
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" "$HELPER" check "$id" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 1 ] || fail_with_output "worker evidence produced READY without Firstmate approval" "$output"
+  assert_contains_text "$output" 'Firstmate semantic approval is missing' "worker-only readiness lacked an approval diagnostic"
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" approve "$id" "$head") || fail_with_output "semantic approval failed" "$output"
+  assert_contains_text "$output" "approved: Firstmate semantic readiness for task $id at $head" \
+    "semantic approval did not bind the exact commit"
   output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" "$HELPER" check "$id") || \
-    fail_with_output "complete readiness record did not pass" "$output"
+    fail_with_output "approved readiness record did not pass" "$output"
   assert_contains_text "$output" "READY: task $id at $head" "ready result did not bind the exact commit"
+
+  sed -i $'s#focused_tests\tpass\t.*#focused_tests\tpass\tgeneric focused test evidence with enough characters#' "$record"
+  set +e
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" "$HELPER" check "$id" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 1 ] || fail_with_output "post-approval evidence rewrite retained READY" "$output"
+  assert_contains_text "$output" 'evidence changed after Firstmate semantic approval' \
+    "semantic approval did not bind the reviewed evidence bytes"
+  write_ready_record "$record" "$head" not-applicable
+
+  printf 'next\n' >> "$worktree/file.txt"
+  git -C "$worktree" add file.txt
+  git -C "$worktree" commit -qm next
+  head=$(git -C "$worktree" rev-parse HEAD)
+  sed -i $'s#^head\t[^\t]*#head\t'"$head"'#' "$record"
+  set +e
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" "$HELPER" check "$id" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 1 ] || fail_with_output "later implementation commit retained old Firstmate approval" "$output"
+  assert_contains_text "$output" 'Firstmate approval head' "later commit did not invalidate exact-HEAD approval"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" approve "$id" "$head" >/dev/null || fail "renewed semantic approval failed"
 
   sed -i $'s#intent_trace\tpass\t.*#intent_trace\tpass\tdone#' "$record"
   set +e
@@ -205,6 +240,8 @@ test_readiness_outcomes() {
   [ "$status" -eq 1 ] || fail_with_output "Spec Kit not-applicable did not fail" "$output"
   assert_contains_text "$output" 'Spec Kit markers are present' "Spec Kit applicability was not enforced"
   write_ready_record "$record" "$head" pass
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" approve "$id" "$head" >/dev/null || fail "Spec Kit evidence reapproval failed"
   output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" "$HELPER" check "$id") || \
     fail_with_output "applicable Spec Kit pass did not clear readiness" "$output"
 
@@ -230,6 +267,7 @@ esac
 SH
   chmod +x "$fakebin/no-mistakes"
   export FM_FAKE_NM_STATUS="$status_file"
+  export FM_FAKE_NM_BIN="$fakebin/no-mistakes"
 }
 
 make_fake_herdr() { # <fakebin> <fixture-dir>
@@ -239,6 +277,13 @@ make_fake_herdr() { # <fakebin> <fixture-dir>
 set -u
 fixture=$FM_FAKE_HERDR_FIXTURE
 log=$fixture/calls.log
+require_presentation_lock() {
+  [ -n "${FM_FAKE_PRESENTATION_LOCK:-}" ] \
+    && { [ -e "$FM_FAKE_PRESENTATION_LOCK" ] || [ -L "$FM_FAKE_PRESENTATION_LOCK" ]; } || {
+      : > "$fixture/presentation-lock-missing"
+      exit 2
+    }
+}
 printf '%s\n' "$*" >> "$log"
 first=${1:-}
 second=${2:-}
@@ -248,6 +293,9 @@ focused_monitor=false
 [ "$active" = w1:t1 ] && focused_task=true
 [ "$active" = w1:t2 ] && focused_monitor=true
 case "$first $second" in
+  "session list")
+    printf '{"sessions":[{"name":"test","running":true,"socket_path":"%s/herdr.sock"}]}\n' "$fixture"
+    ;;
   "workspace list")
     printf '{"result":{"workspaces":[{"workspace_id":"w1","focused":true,"active_tab_id":"%s"}]}}\n' "$active"
     ;;
@@ -259,6 +307,7 @@ case "$first $second" in
     fi
     ;;
   "tab create")
+    require_presentation_lock
     : > "$fixture/created"
     rm -f "$fixture/closed"
     if [ -e "$fixture/ambiguous-create" ]; then
@@ -271,6 +320,7 @@ case "$first $second" in
     printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1"}}}'
     ;;
   "tab focus")
+    require_presentation_lock
     printf 'w1:t1\n' > "$fixture/active-tab"
     printf '%s\n' '{"result":{"ok":true}}'
     ;;
@@ -281,6 +331,9 @@ case "$first $second" in
     elif [ "$pane" = w1:p2 ] && [ -e "$fixture/created" ] && [ ! -e "$fixture/closed" ]; then
       printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
     else
+      if [ "$pane" = w1:p2 ] && [ -e "$fixture/closed" ]; then
+        require_presentation_lock
+      fi
       printf '%s\n' '{"error":{"code":"pane_not_found"}}'
       exit 1
     fi
@@ -293,11 +346,16 @@ case "$first $second" in
     run=$(cat "$fixture/run-id")
     if [ -e "$fixture/repurposed" ] || [ -e "$fixture/attach-missing" ]; then
       printf '%s\n' '{"result":{"process_info":{"pane_id":"w1:p2","foreground_processes":[{"argv":["bash","other"]}]}}}'
+    elif [ -e "$fixture/counterfeit-shape" ]; then
+      printf '{"result":{"process_info":{"pane_id":"w1:p2","foreground_processes":[{"argv":["%s","wrapper","attach","--run","%s"]}]}}}\n' "$FM_FAKE_NM_BIN" "$run"
+    elif [ -e "$fixture/counterfeit-executable" ]; then
+      printf '{"result":{"process_info":{"pane_id":"w1:p2","foreground_processes":[{"argv":["%s/not-no-mistakes","attach","--run","%s"]}]}}}\n' "$fixture" "$run"
     else
-      printf '{"result":{"process_info":{"pane_id":"w1:p2","foreground_processes":[{"argv":["/fake/no-mistakes","attach","--run","%s"]}]}}}\n' "$run"
+      printf '{"result":{"process_info":{"pane_id":"w1:p2","foreground_processes":[{"argv":["%s","attach","--run","%s"]}]}}}\n' "$FM_FAKE_NM_BIN" "$run"
     fi
     ;;
   "pane close")
+    require_presentation_lock
     : > "$fixture/closed"
     printf '%s\n' '{"result":{"ok":true}}'
     ;;
@@ -322,7 +380,7 @@ EOF
 }
 
 test_monitor_backends_and_lifecycle() {
-  local home state data worktree id fakebin fixture status_file head run output count journal rc backend token
+  local home state data worktree id fakebin fixture status_file head run output count journal rc backend token presentation_lock
   home="$TMP_ROOT/monitor-home"
   state="$home/state"
   data="$home/data"
@@ -341,6 +399,11 @@ test_monitor_backends_and_lifecycle() {
   write_run_status "$status_file" "$run" "fm/$id" running "$head"
   make_fake_no_mistakes "$fakebin" "$status_file"
   make_fake_herdr "$fakebin" "$fixture"
+  presentation_lock=$(PATH="$fakebin:$PATH" bash -c \
+    '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path test' _ "$ROOT") \
+    || fail "could not resolve fake shared presentation lock"
+  export FM_FAKE_PRESENTATION_LOCK="$presentation_lock"
+  : > "$fixture/calls.log"
 
   for backend in tmux zellij orca cmux; do
     write_meta "$state" "$id" "$worktree" "$backend"
@@ -358,6 +421,7 @@ test_monitor_backends_and_lifecycle() {
   [ -f "$journal" ] || fail "monitor creation did not publish its exact journal"
   grep -F "run=$run" "$journal" >/dev/null || fail "monitor journal lost exact run id"
   grep -F "pane=w1:p2" "$journal" >/dev/null || fail "monitor journal lost response-derived pane id"
+  grep -F "executable=$FM_FAKE_NM_BIN" "$journal" >/dev/null || fail "monitor journal lost canonical executable identity"
   grep -F "pane run w1:p2" "$fixture/calls.log" | grep -F "attach --run '$run'" >/dev/null \
     || fail "monitor did not run supported attach against the exact run id"
   [ "$(cat "$fixture/active-tab")" = w1:t1 ] || fail "monitor creation stole focus"
@@ -366,6 +430,49 @@ test_monitor_backends_and_lifecycle() {
     "$HELPER" monitor-reconcile "$id") || fail_with_output "idempotent monitor reconciliation failed" "$output"
   count=$(grep -c '^tab create ' "$fixture/calls.log" || true)
   [ "$count" -eq 1 ] || fail "reconciliation created a duplicate monitor pane"
+
+  : > "$fixture/counterfeit-shape"
+  set +e
+  output=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-reconcile "$id" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail_with_output "counterfeit attach argv shape was accepted" "$output"
+  [ -e "$journal" ] || fail "counterfeit attach argv discarded monitor authority"
+  rm -f "$fixture/counterfeit-shape"
+
+  : > "$fixture/counterfeit-executable"
+  set +e
+  output=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-reconcile "$id" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail_with_output "counterfeit attach executable was accepted" "$output"
+  [ -e "$journal" ] || fail "counterfeit attach executable discarded monitor authority"
+  rm -f "$fixture/counterfeit-executable"
+
+  git -C "$worktree" checkout -q --detach
+  set +e
+  output=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-reconcile "$id" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail_with_output "detached task branch retained a journaled monitor" "$output"
+  git -C "$worktree" checkout -q "fm/$id"
+
+  printf 'advanced\n' >> "$worktree/file.txt"
+  git -C "$worktree" add file.txt
+  git -C "$worktree" commit -qm advanced
+  head=$(git -C "$worktree" rev-parse HEAD)
+  set +e
+  output=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-reconcile "$id" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail_with_output "advanced task HEAD retained a stale journaled run" "$output"
+  write_run_status "$status_file" "$run" "fm/$id" running "$head"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-reconcile "$id" >/dev/null || fail "current journaled run did not recover after AXI head caught up"
 
   write_run_status "$status_file" "$run" fm/other-task running "$head"
   set +e
@@ -455,9 +562,40 @@ test_monitor_backends_and_lifecycle() {
   assert_contains_text "$output" 'no pane was discovered or mutated' "attempt recovery misstated its mutation boundary"
   [ ! -e "$journal" ] || fail "inspected attempt recovery retained its journal"
   [ ! -e "$fixture/closed" ] || fail "attempt recovery mutated the ambiguous presentation pane"
+  [ ! -e "$fixture/presentation-lock-missing" ] || fail "monitor mutated Herdr outside the shared presentation lock"
   pass "fm-no-mistakes-ready: exact Herdr monitor is idempotent, terminal-only, and focus-safe"
+}
+
+test_monitor_ids_are_validated_before_lock_paths() {
+  local home state data id target output rc
+  home="$TMP_ROOT/invalid-monitor-id-home"
+  state="$home/state"
+  data="$home/data"
+  id='x/../../escaped'
+  mkdir -p "$state/.x"
+
+  target="$home/escaped.no-mistakes-monitor.lock"
+  mkdir -p "$target"
+  printf '999999\n' > "$target/pid"
+  set +e
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-reconcile "$id" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail_with_output "invalid reconcile task id was accepted" "$output"
+  [ -f "$target/pid" ] || fail "invalid reconcile task id touched an escaped lock path"
+
+  set +e
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-clear-attempt "$id" token 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail_with_output "invalid clear-attempt task id was accepted" "$output"
+  [ -f "$target/pid" ] || fail "invalid clear-attempt task id touched an escaped lock path"
+  pass "fm-no-mistakes-ready: monitor IDs are rejected before lock-path authority"
 }
 
 test_help
 test_readiness_outcomes
 test_monitor_backends_and_lifecycle
+test_monitor_ids_are_validated_before_lock_paths
