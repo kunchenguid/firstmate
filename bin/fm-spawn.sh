@@ -486,6 +486,12 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] \
+   && [ -f "$STATE/$ID.status" ] && [ ! -L "$STATE/$ID.status" ] \
+   && [ "$(wc -l < "$STATE/$ID.status" 2>/dev/null | tr -d '[:space:]')" = 1 ] \
+   && grep -q '^failed: spawn failed before launch completed ' "$STATE/$ID.status"; then
+  rm -f "$STATE/$ID.status"
+fi
 if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
   SPAWN_FAILURE_RECORD_OWNED=1
 fi

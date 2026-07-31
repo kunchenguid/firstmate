@@ -232,7 +232,27 @@ test_preendpoint_failure_leaves_status_without_meta() {
     || fail "pre-endpoint failure wrote unreapable endpoint metadata"
   assert_grep 'failed: spawn failed before launch completed' "$HOME_DIR/state/$id.status" \
     "pre-endpoint failure left no visible failed status"
-  pass "a pre-endpoint failure leaves status without unreapable metadata"
+
+  printf '%s\n' 'failed: spawn failed before launch completed (exit 99); inspect endpoint old' \
+    > "$HOME_DIR/state/$id.status"
+  rc=0
+  out=$(run_settle_spawn "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a repeated spawn with no brief should fail"
+  assert_no_grep 'exit 99' "$HOME_DIR/state/$id.status" \
+    "repeated failure retained the prior status-only spawn verdict"
+  assert_grep 'failed: spawn failed before launch completed (exit 1)' "$HOME_DIR/state/$id.status" \
+    "repeated failure did not record its current reason"
+
+  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  out=$(run_settle_spawn "$id")
+  rc=$?
+  expect_code 0 "$rc" "corrected same-id retry should spawn successfully"
+  assert_contains "$out" "spawned $id" "corrected same-id retry did not report success"
+  [ -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "corrected same-id retry did not publish live metadata"
+  ! grep -q '^failed:' "$HOME_DIR/state/$id.status" 2>/dev/null \
+    || fail "corrected same-id retry retained the stale terminal verdict"
+  pass "a status-only failure is retired before deliberate same-id reuse"
 }
 
 test_preendpoint_failure_leaves_status_without_meta
