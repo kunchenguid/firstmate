@@ -222,7 +222,7 @@ Native supervision paths were also validated in the same scratch project:
 - Grok ran the same exact command with `background: true`, its hook returned exit 0, and the dummy arm produced the same started line.
 - Codex ran the foreground checkpoint above and produced `CHECKPOINT_EXECUTED`.
 - OpenCode ran in an interactive TUI on `tmux -L fm-pretool-smoke`, reached `session.idle`, and its unchanged watch-arm plugin created the scratch automatic-arm marker.
-- Pi loaded both primary extensions, called `fm_watch_arm_pi`, and created the scratch automatic-arm marker.
+- Pi loaded both watcher-supervision extensions, called `fm_watch_arm_pi`, and created the scratch automatic-arm marker.
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
 
