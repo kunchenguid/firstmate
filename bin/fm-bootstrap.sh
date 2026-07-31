@@ -55,7 +55,10 @@
 #          incompatible build reports MISSING like no-mistakes. A compatible
 #          tasks-axi default backend is silent. quota-axi is required for the
 #          agent-owned dispatch-profile array procedure in AGENTS.md section 4
-#          and .agents/skills/quota-array-dispatch/SKILL.md.
+#          and .agents/skills/quota-array-dispatch/SKILL.md, and is also version
+#          gated by fm-quota-axi-lib.sh, which owns that floor and its rationale.
+#          An older build reports MISSING like no-mistakes rather than passing
+#          silently while emitting auth semantics dispatch cannot scope.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -97,6 +100,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
@@ -530,31 +535,31 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-NO_MISTAKES_MIN_MAJOR=1
-NO_MISTAKES_MIN_MINOR=31
-NO_MISTAKES_MIN_PATCH=2
+NO_MISTAKES_MIN=1.31.2
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
-no_mistakes_version_parts() {
-  local output
-  command -v no-mistakes >/dev/null 2>&1 || return 1
-  output=$(no-mistakes --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1
-}
-
-no_mistakes_compatible() {
-  local parts major minor patch extra
-  parts=$(no_mistakes_version_parts) || return 1
+# Shared semantic-version floor for the tool gates below. A version string that
+# cannot be parsed into exactly one major.minor.patch triple is incompatible,
+# never assumed current, so a development or vendored build cannot pass a floor
+# it was never checked against.
+tool_version_at_least() {  # <tool> <min-version>
+  local tool=$1 min=$2 output parts major minor patch extra
+  local min_major min_minor min_patch min_extra
+  command -v "$tool" >/dev/null 2>&1 || return 1
+  output=$("$tool" --version 2>/dev/null) || return 1
+  parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
   IFS=' ' read -r major minor patch extra <<< "$parts"
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  [ "$major" -gt "$NO_MISTAKES_MIN_MAJOR" ] && return 0
-  [ "$major" -eq "$NO_MISTAKES_MIN_MAJOR" ] || return 1
-  [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
-  [ "$minor" -eq "$NO_MISTAKES_MIN_MINOR" ] || return 1
-  [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
+  IFS='.' read -r min_major min_minor min_patch min_extra <<< "$min"
+  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
+  [ "$major" -gt "$min_major" ] && return 0
+  [ "$major" -eq "$min_major" ] || return 1
+  [ "$minor" -gt "$min_minor" ] && return 0
+  [ "$minor" -eq "$min_minor" ] || return 1
+  [ "$patch" -ge "$min_patch" ]
 }
 
 x_mode_write_if_changed() {
@@ -867,8 +872,11 @@ if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
+if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+fi
+if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
+  echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"

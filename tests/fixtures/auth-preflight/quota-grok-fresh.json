@@ -1,0 +1,73 @@
+{
+  "generatedAt": "1970-01-01T00:00:00.000Z",
+  "schemaVersion": 3,
+  "providers": [
+    {
+      "provider": "grok",
+      "label": "Grok",
+      "source": "web",
+      "windows": [
+        {
+          "id": "credits",
+          "label": "credits",
+          "kind": "credits",
+          "percentUsed": 58,
+          "percentRemaining": 42,
+          "startsAt": "1970-01-01T00:00:00.000Z",
+          "resetsAt": "1970-01-08T00:00:00.000Z",
+          "pace": {
+            "status": "ahead",
+            "timeRemainingPercent": 55.2388,
+            "elapsedPercent": 44.7612,
+            "reservePercentPoints": -13.2388,
+            "cycleBasis": "starts_at_resets_at",
+            "cycleSeconds": 604800,
+            "burnMultiple": 1.2958,
+            "projectedExhaustedAt": "1970-01-06T00:00:00.000Z",
+            "projectionConfidence": "established",
+            "projectionBasis": "cycle_average"
+          }
+        }
+      ],
+      "state": {
+        "status": "fresh",
+        "stale": false,
+        "refreshedAt": "1970-01-01T00:00:00.000Z",
+        "sourcesTried": [
+          "web",
+          "pi:xai"
+        ],
+        "authStatus": "usable"
+      },
+      "quotaSemantics": {
+        "status": "known",
+        "description": "Grok's shared credits window bounds every product.",
+        "effectiveAvailability": [
+          {
+            "scope": "all_products",
+            "status": "known",
+            "effectivePercentRemaining": 42,
+            "boundedBy": [
+              "credits"
+            ],
+            "limitingWindowIds": [
+              "credits"
+            ],
+            "pace": {
+              "status": "ahead",
+              "aheadWindowIds": [
+                "credits"
+              ],
+              "worstReservePercentPoints": -13.2388,
+              "worstReserveWindowId": "credits"
+            }
+          }
+        ]
+      },
+      "credits": {
+        "remaining": 0,
+        "unit": "credits"
+      }
+    }
+  ]
+}

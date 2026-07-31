@@ -1,0 +1,37 @@
+{
+  "generatedAt": "1970-01-01T00:00:00.000Z",
+  "schemaVersion": 3,
+  "providers": [
+    {
+      "provider": "grok",
+      "label": "Grok",
+      "source": "none",
+      "windows": [],
+      "state": {
+        "status": "auth_required",
+        "stale": false,
+        "error": "Grok sign-in required",
+        "sourcesTried": [
+          "web",
+          "pi:xai"
+        ],
+        "authStatus": "unusable"
+      },
+      "quotaSemantics": {
+        "status": "unknown",
+        "description": "Grok's shared credits window bounds every product.",
+        "effectiveAvailability": [
+          {
+            "scope": "all_products",
+            "status": "unknown",
+            "effectivePercentRemaining": null
+          }
+        ]
+      },
+      "credits": {
+        "remaining": 0,
+        "unit": "credits"
+      }
+    }
+  ]
+}
