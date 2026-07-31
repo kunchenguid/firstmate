@@ -575,7 +575,7 @@ Zellij has no cursor or ANSI composer primitive and retains its existing pane-di
 Agy discovers `hooks.json` in `.agents`, `.agent`, `_agents`, and `_agent`.
 Firstmate selects the first root whose `hooks.json` is absent, creates one task-local Stop hook there, and refuses if every root is occupied or unsafe.
 It never merges with or overwrites project hook configuration.
-The generated hook calls `bin/fm-agy-turnend-hook.sh` with an exact workspace, private state registry, and random task token.
+The generated hook calls `bin/fm-agy-turnend-hook.sh` with an exact workspace, the private `state/agy-turn-end.d/` registry, and a random task token.
 The script requires the Stop payload's sole `workspacePaths` entry, the worktree `.fm-agy-turnend` pointer, the expected token, and the private registry target to agree before it touches `state/<id>.turn-ended`.
 An arbitrary Agy session outside that bound Firstmate worktree has no matching hook, pointer, and registry tuple and cannot write task state.
 Teardown removes the generated hook, empty customization directory, pointer, private auth entry, and state token.
