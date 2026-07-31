@@ -261,23 +261,34 @@ fi
 # configured a bound the host cannot actually enforce refuses to spawn instead
 # of launching a crewmate whose builds would run unbounded. Exit 3 is the
 # "no bound configured" path and leaves this spawn exactly as it was.
+#
+# CREWMATES ONLY, deliberately - do not extend this to secondmates: bound what
+# builds, not what supervises. A secondmate is a persistent, idle-by-default
+# supervisor that compiles nothing, and a ceiling sized for build lanes that
+# kills its harness takes out a whole home rather than one task. No protection is
+# lost: a secondmate's own crewmates are crewmates, and config/crew-memory-bound
+# is inherited into that home, so they are bounded when they spawn.
+# CREW_MEMORY_BOUND therefore stays 0 for a secondmate spawn, which is what keeps
+# both the launch wrapping and the crew_memory_max meta field off that path.
 CREW_MEMORY_BOUND=0
 CREW_MEMORY_MAX=
 CREW_MEMORY_HIGH=
-crew_memory_preflight_rc=0
-crew_memory_preflight_out=$("$SCRIPT_DIR/fm-crew-memory-bound.sh" preflight) || crew_memory_preflight_rc=$?
-case "$crew_memory_preflight_rc" in
-  0)
-    CREW_MEMORY_BOUND=1
-    CREW_MEMORY_MAX=$(printf '%s\n' "$crew_memory_preflight_out" | sed -n 's/^max=//p')
-    CREW_MEMORY_HIGH=$(printf '%s\n' "$crew_memory_preflight_out" | sed -n 's/^high=//p')
-    ;;
-  3) ;;
-  *)
-    echo "error: config/crew-memory-bound is set but its memory bound could not be established; refusing to spawn a crewmate whose builds would be unbounded" >&2
-    exit 1
-    ;;
-esac
+if [ "$KIND" != secondmate ]; then
+  crew_memory_preflight_rc=0
+  crew_memory_preflight_out=$("$SCRIPT_DIR/fm-crew-memory-bound.sh" preflight) || crew_memory_preflight_rc=$?
+  case "$crew_memory_preflight_rc" in
+    0)
+      CREW_MEMORY_BOUND=1
+      CREW_MEMORY_MAX=$(printf '%s\n' "$crew_memory_preflight_out" | sed -n 's/^max=//p')
+      CREW_MEMORY_HIGH=$(printf '%s\n' "$crew_memory_preflight_out" | sed -n 's/^high=//p')
+      ;;
+    3) ;;
+    *)
+      echo "error: config/crew-memory-bound is set but its memory bound could not be established; refusing to spawn a crewmate whose builds would be unbounded" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
@@ -555,6 +566,21 @@ esac
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
 esac
+
+# A bound launch runs through a `bash -c` layer, which only hands the pane's
+# foreground process group to the harness when the launch is one simple command;
+# a pipeline, list, or redirection leaves the pane reporting a shell, which
+# fm_backend_tmux_agent_state reads as a dead agent and stuck-crewmate recovery
+# would then act on while the crewmate is still working. Every built-in launch
+# template is a simple command, but the raw-launch escape hatch above is
+# arbitrary shell text, so the shape is checked here - before any window,
+# worktree, or metadata exists - rather than only at wrap time.
+if [ "$CREW_MEMORY_BOUND" -eq 1 ]; then
+  "$SCRIPT_DIR/fm-crew-memory-bound.sh" check-launch "$LAUNCH" || {
+    echo "error: config/crew-memory-bound is active and this launch command cannot be bound; use a single simple command as the raw launch" >&2
+    exit 1
+  }
+fi
 
 # pi-signed is an explicitly selected executable identity, not an alias that may
 # silently fall back to pi. Resolve it from PATH before creating an endpoint and
@@ -1664,7 +1690,8 @@ META_WINDOW=$T
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
   fi
-  # Recorded only when a bound is configured, so an unbounded home's meta stays
+  # Recorded only when this spawn is actually bound - a crewmate on a home with a
+  # proven bound - so an unbounded home's meta, and every secondmate's, stays
   # byte-identical. Supervision reads it to explain a build that died of SIGKILL
   # mid-compile as this bound doing its job rather than an unexplained crash.
   if [ "$CREW_MEMORY_BOUND" -eq 1 ]; then
@@ -1715,8 +1742,15 @@ fi
 # named command would be escaped by the next one it types. preflight already
 # proved the mechanism above, and systemd-run itself refuses rather than falling
 # back, so there is no path from here to an unbounded harness.
+#
+# The bound proven by that preflight is handed through explicitly instead of
+# being re-read from config here: this runs long after the window, worktree, and
+# meta exist, so re-reading would let a config edit in that window create a scope
+# that disagrees with the crew_memory_max recorded in meta, or fail a spawn whose
+# state is already on disk.
 if [ "$CREW_MEMORY_BOUND" -eq 1 ]; then
-  BOUNDED_LAUNCH=$("$SCRIPT_DIR/fm-crew-memory-bound.sh" wrap "$ID" "$LAUNCH") || {
+  BOUNDED_LAUNCH=$(FM_CREW_MEMORY_BOUND="$CREW_MEMORY_MAX${CREW_MEMORY_HIGH:+ $CREW_MEMORY_HIGH}" \
+    "$SCRIPT_DIR/fm-crew-memory-bound.sh" wrap "$ID" "$LAUNCH") || {
     echo "error: could not bind $ID to its configured memory bound; refusing to launch it unbounded" >&2
     exit 1
   }

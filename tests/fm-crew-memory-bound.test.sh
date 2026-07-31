@@ -138,6 +138,47 @@ OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" FM_CREW_MEMORY_BOUND="8G" \
 expect_code 1 "$RC" "a scope whose processes stay in the root cgroup must fail"
 assert_contains "$OUT" "root cgroup" "the refusal names the root-cgroup escape"
 pass "a scope that reports success but leaves processes in the root cgroup is refused"
+
+# The preflight must prove EVERY limit it sets, not just memory.max. systemd
+# starts a scope even when a property write to the kernel fails, so a host with
+# the memory controller delegated but no swap accounting would otherwise come up
+# with memory.max enforced, swap unbounded, and the mechanism reporting
+# "enforced=proven" - and a runaway build would page the host into thrashing
+# instead of dying, which is precisely what MemorySwapMax=0 exists to prevent.
+cat > "$FAKEBIN/systemd-run" <<'SH'
+#!/usr/bin/env bash
+printf '/user.slice/fake.scope\n'
+printf '8589934592\n'
+printf 'max\n'
+printf 'max\n'
+exit 0
+SH
+chmod +x "$FAKEBIN/systemd-run"
+RC=0
+OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" FM_CREW_MEMORY_BOUND="8G" \
+  PATH="$FAKEBIN:$NOSYSTEMD" "$BOUND" preflight 2>&1) || RC=$?
+expect_code 1 "$RC" "a scope whose swap denial never reached the kernel must fail the preflight"
+assert_contains "$OUT" "memory.swap.max" "the refusal names the limit that was not enforced"
+assert_not_contains "$OUT" "enforced=proven" "a partially enforced bound is never claimed as proven"
+pass "a scope enforcing memory.max but not the swap denial is refused rather than proven"
+
+# The same for the soft ceiling: a configured MemoryHigh that did not land is a
+# bound the host does not actually hold.
+cat > "$FAKEBIN/systemd-run" <<'SH'
+#!/usr/bin/env bash
+printf '/user.slice/fake.scope\n'
+printf '8589934592\n'
+printf 'max\n'
+printf '0\n'
+exit 0
+SH
+chmod +x "$FAKEBIN/systemd-run"
+RC=0
+OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" FM_CREW_MEMORY_BOUND="8G 6G" \
+  PATH="$FAKEBIN:$NOSYSTEMD" "$BOUND" preflight 2>&1) || RC=$?
+expect_code 1 "$RC" "a configured MemoryHigh that did not land must fail the preflight"
+assert_contains "$OUT" "memory.high" "the refusal names the soft ceiling that was not enforced"
+pass "a configured MemoryHigh is proven from the kernel too, not assumed from the flag"
 rm -f "$FAKEBIN/systemd-run"
 
 RC=0
@@ -145,6 +186,46 @@ OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" "$BOUND" wrap fm-x 'claude -p hi' 2>&1) |
 expect_code 3 "$RC" "wrap on an unconfigured home reports unconfigured"
 [ -z "$OUT" ] || fail "wrap must print no launch line when unconfigured, got: $OUT"
 pass "wrap never emits a launch line it cannot bind"
+
+# A bound launch runs under `bash -c`, which only replaces itself with the
+# harness for one simple command. Anything else leaves the pane reporting a
+# shell, which the tmux backend reads as a DEAD agent - so recovery would
+# relaunch a crewmate that is still working. Those shapes must be refused, not
+# bound. Every built-in launch template is a simple command, so the shapes below
+# stand in for the raw-launch escape hatch.
+# shellcheck disable=SC2016  # these are launch strings under test, not this shell's expansions
+for good in \
+  'claude -p hi' \
+  'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model opus "$(/x/op-input.sh encode launch-brief < /x/brief)"' \
+  'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode --prompt "$(/x/op-input.sh encode launch-brief < /x/brief)"' \
+  'codex -c "notify=[\"bash\",\"-c\",\"touch /x/t\"]" "$(/x/op-input.sh encode launch-brief < /x/brief)"'; do
+  RC=0
+  OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" "$BOUND" check-launch "$good" 2>&1) || RC=$?
+  expect_code 0 "$RC" "a simple-command launch must remain bindable: $good"$'\n'"$OUT"
+done
+pass "the built-in launch shapes - env prefixes, quoted command substitution, redirection inside it - stay bindable"
+
+for bad in \
+  'claude -p hi > /tmp/log' \
+  'claude -p hi | tee /tmp/log' \
+  'setup && claude -p hi' \
+  'setup; claude -p hi' \
+  '(claude -p hi)' \
+  'claude -p hi &' \
+  'claude -p "unterminated'; do
+  RC=0
+  OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" "$BOUND" check-launch "$bad" 2>&1) || RC=$?
+  expect_code 1 "$RC" "a launch bash would fork for must be refused: $bad"
+  assert_contains "$OUT" "cannot be bound" "the refusal says the launch cannot be bound: $bad"
+done
+pass "pipelines, lists, redirections, subshells, and unbalanced quoting are refused rather than bound"
+
+RC=0
+OUT=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" FM_CREW_MEMORY_BOUND="8G" \
+  "$BOUND" wrap fm-x 'claude -p hi | tee /tmp/log' 2>&1) || RC=$?
+expect_code 1 "$RC" "wrap must refuse a launch it cannot keep visible to supervision"
+assert_not_contains "$OUT" "systemd-run" "no launch line is emitted for a refused shape"
+pass "wrap enforces the same shape rule, so nothing reaches a pane that supervision would misread"
 
 # The spawn-level refusal: fm-spawn must abort before creating any window when a
 # bound is configured but unenforceable. tmux is faked so backend validation
@@ -169,6 +250,21 @@ assert_contains "$OUT" "refusing to spawn" "the spawn refusal is explicit"
 assert_absent "$TMP_ROOT/spawn-state/fm-bound-refusal.meta" \
   "a refused spawn leaves no task metadata behind"
 pass "fm-spawn refuses to launch a crewmate whose bound cannot be established"
+
+# The bound covers what builds, not what supervises: a secondmate is a
+# persistent idle-by-default supervisor that compiles nothing, and a ceiling
+# sized for build lanes that killed its harness would take out a whole home. The
+# same unenforceable bound must therefore not stop a secondmate spawn - whatever
+# else that spawn does in this stub environment, it must not be refused for the
+# crew memory bound.
+RC=0
+OUT=$(FM_HOME="$TMP_ROOT" FM_CONFIG_OVERRIDE="$SPAWN_CONFIG" \
+  FM_STATE_OVERRIDE="$TMP_ROOT/spawn-state" FM_DATA_OVERRIDE="$TMP_ROOT/spawn-data" \
+  FM_BACKEND=tmux PATH="$FAKEBIN:$PATH" \
+  "$SPAWN" fm-bound-secondmate --secondmate "$TMP_ROOT" 2>&1) || RC=$?
+assert_not_contains "$OUT" "refusing to spawn a crewmate whose builds would be unbounded" \
+  "a secondmate spawn is never gated on the crewmate build bound"
+pass "the bound applies to crewmates only, so an unenforceable bound never blocks a secondmate"
 
 # --- enforced membership and enforcement ------------------------------------
 #
@@ -224,16 +320,34 @@ LIMITS=$(FM_CONFIG_OVERRIDE="$CONFIG_DIR" FM_CREW_MEMORY_BOUND="512M 384M" \
 RC=0
 OUT=$(eval "$LIMITS" 2>&1) || RC=$?
 expect_code 0 "$RC" "the limits probe runs"
-assert_contains "$OUT" "536870912" "memory.max is the configured 512M"
-assert_contains "$OUT" "402653184" "memory.high is the configured 384M"
-assert_contains "$OUT" "0" "swap is denied so a runaway cannot page the host instead of dying"
-pass "the kernel reports the configured limits on the crew cgroup"
+# Compared line by line, not by substring: "0" is a substring of every byte count
+# here, so a substring check on the swap line could never fail and the swap half
+# of the guarantee - which is not a tunable - would have no coverage at all.
+LIMIT_MAX=$(printf '%s\n' "$OUT" | sed -n '1p')
+LIMIT_HIGH=$(printf '%s\n' "$OUT" | sed -n '2p')
+LIMIT_SWAP=$(printf '%s\n' "$OUT" | sed -n '3p')
+[ "$LIMIT_MAX" = 536870912 ] || fail "memory.max must be the configured 512M, got '$LIMIT_MAX'"$'\n'"$OUT"
+[ "$LIMIT_HIGH" = 402653184 ] || fail "memory.high must be the configured 384M, got '$LIMIT_HIGH'"$'\n'"$OUT"
+[ "$LIMIT_SWAP" = 0 ] || fail "memory.swap.max must be 0 so a runaway cannot page the host instead of dying, got '$LIMIT_SWAP'"$'\n'"$OUT"
+pass "the kernel reports the configured limits, swap included, on the crew cgroup"
 
 # Exceeding the bound must kill the offending build and leave the host alone. A
 # sentinel started outside the scope stands in for the rest of the host: it must
 # still be running once the allocator inside the scope is killed.
+#
+# Its margin is deliberately far longer than any plausible allocator runtime. The
+# hog below grows a bash string, which is quadratic in copying and can take a
+# long time on exactly the loaded build host this feature targets. A sentinel
+# that could finish first would turn that into "the bound took the host with it",
+# reporting a timing race as the feature's worst failure mode.
+#
+# It holds no test file descriptor and its timer pid is recorded, so the long
+# margin costs nothing at teardown: an orphaned timer would otherwise keep this
+# script's stdout open for its whole duration.
 SENTINEL_OUT="$TMP_ROOT/sentinel"
-( sleep 30; printf 'alive\n' > "$SENTINEL_OUT" ) &
+SENTINEL_TIMER_PIDFILE="$TMP_ROOT/sentinel.timer"
+( sleep 600 & printf '%s\n' "$!" > "$SENTINEL_TIMER_PIDFILE"; wait; printf 'alive\n' > "$SENTINEL_OUT" ) \
+  </dev/null >/dev/null 2>&1 &
 SENTINEL_PID=$!
 
 cat > "$TMP_ROOT/hog.sh" <<'SH'
@@ -257,7 +371,11 @@ assert_not_contains "$OUT" "survived" "the over-bound build must not reach compl
 pass "a build that exceeds the bound is killed (exit $RC)"
 
 kill -0 "$SENTINEL_PID" 2>/dev/null || fail "the out-of-scope sentinel died: the bound took the host with it"
+# The sentinel goes first: its timer is what would write the completion marker,
+# so reaping the timer before its parent would forge the very thing the marker
+# below is meant to rule out.
 kill "$SENTINEL_PID" 2>/dev/null || true
 wait "$SENTINEL_PID" 2>/dev/null || true
+kill "$(cat "$SENTINEL_TIMER_PIDFILE" 2>/dev/null)" 2>/dev/null || true
 assert_absent "$SENTINEL_OUT" "sentinel should have been killed by the test, not completed"
 pass "processes outside the bound survive the kill: the build dies, the host does not"

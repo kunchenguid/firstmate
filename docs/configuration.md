@@ -164,10 +164,17 @@ The kernel kills the single largest member of the bound - in practice the runawa
 A build killed this way fails with `SIGKILL` (exit 137), and the task's local record carries `crew_memory_max=` so that death reads as this bound doing its job rather than an unexplained crash.
 
 The setting fails closed.
-When the file is present but the bound cannot actually be established - no `systemd-run`, no reachable user manager, no delegated memory controller - `bin/fm-spawn.sh` refuses to spawn rather than launching a crewmate whose builds would be unbounded.
-Enforcement is proven at every spawn rather than assumed: a throwaway scope is created and its limits are read back from the live cgroup before any window exists.
+When the file is present but the bound cannot actually be established - no `systemd-run`, no reachable user manager, no delegated memory controller, or a limit that did not reach the kernel - `bin/fm-spawn.sh` refuses to spawn rather than launching a crewmate whose builds would be unbounded.
+Enforcement is proven at every spawn rather than assumed: a throwaway scope is created and every limit it sets - `memory.max`, `memory.high` when configured, and the swap denial - is read back from the live cgroup before any window exists.
 An absent file leaves spawning exactly as it was, so a host without a systemd user manager is unaffected until it opts in.
-The setting is inherited by secondmate homes, so a secondmate's own crewmates are bound by the same ceiling.
+
+The bound covers crewmates, not the secondmate agent itself.
+A secondmate is a persistent, idle-by-default supervisor that compiles nothing, and a ceiling sized for build lanes that killed its harness would take out a whole home rather than one task.
+Nothing is unprotected by that: the setting is inherited by secondmate homes, so a secondmate's own crewmates are bound by the same ceiling when they spawn.
+
+A bound crewmate's harness is launched through a `bash -c` layer, which hands the pane's foreground process group to the harness only when the launch is a single simple command.
+Every built-in harness launch template is one, but the raw launch command escape hatch (`bin/fm-spawn.sh <id> <repo> "<launch>"`) is arbitrary shell text: while a bound is active, a raw launch containing a pipeline, a list (`&&`, `;`), a redirection, or a subshell is refused before anything is created, because such a pane would report a shell rather than the harness and supervision would read a live crewmate as dead.
+Use `bin/fm-crew-memory-bound.sh check-launch '<launch>'` to check a raw launch against that rule.
 
 Use `bin/fm-crew-memory-bound.sh read` to validate and print the effective bound, or `bin/fm-crew-memory-bound.sh preflight` to prove this host can enforce it.
 That script's header owns the exact exit-code contract, scope flags, and wrapping mechanics.

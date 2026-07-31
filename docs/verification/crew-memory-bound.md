@@ -47,6 +47,7 @@ $ cat /sys/fs/cgroup$p/memory.max /sys/fs/cgroup$p/memory.high /sys/fs/cgroup$p/
 ```
 
 `memory.swap.max` is `0` by construction: `MemoryMax` alone bounds resident memory, so a runaway build left with swap would page the host into thrashing instead of dying.
+The spawn-time preflight reads back these same three files rather than `memory.max` alone, because systemd starts a scope even when one of its property writes does not reach the kernel: a host with the memory controller delegated but swap accounting unavailable would otherwise come up with `memory.max` enforced, swap unbounded, and the mechanism reporting `enforced=proven`.
 
 ## Exceeding the bound
 
@@ -88,6 +89,12 @@ The pane's own login shell is deliberately left outside the scope: replacing it 
 The harness and every process it forks are inside, so every command a crewmate composes during its work is bounded.
 A command typed directly into the pane shell after the harness has exited is not, and relaunching a harness there goes back through `bin/fm-spawn.sh` and is bounded again.
 
+The bounded launch line ends in `<shell> -c <launch>`, and that shell replaces itself with the harness only for a single simple command; for a pipeline, list, redirection, or subshell it forks and stays the pane's foreground process-group leader, which `fm_backend_tmux_agent_state` reads as `dead` while the crewmate is still working.
+Every built-in launch template is a simple command, so the constraint binds only the raw-launch escape hatch, and a raw launch that would land in that state is refused before any window, worktree, or metadata exists rather than spawned.
+
+The bound applies to crewmates only, never to a secondmate agent itself: a secondmate is a persistent idle-by-default supervisor that compiles nothing, and killing its harness at a ceiling sized for build lanes would take down a whole home rather than one task.
+`config/crew-memory-bound` is inherited into secondmate homes, so that home's own crewmates are bound when they spawn.
+
 ## Lifetime
 
 The scope is transient and `--collect`ed, so it disappears with the harness and cleanup needs no teardown step:
@@ -104,5 +111,6 @@ The cgroup directory is removed with the unit, so repeated spawns do not accumul
 ## Fail-closed behavior
 
 `bin/fm-spawn.sh` proves enforcement before any window, worktree, or task metadata exists, and refuses the spawn when a configured bound cannot be established.
-`tests/fm-crew-memory-bound.test.sh` covers three distinct ways the mechanism can be unavailable - no `systemd-run` on `PATH`, a `systemd-run` that cannot create the scope, and a `systemd-run` that reports success while leaving processes in the root cgroup - and requires a refusal in each.
+`tests/fm-crew-memory-bound.test.sh` covers five distinct ways the mechanism can be unavailable - no `systemd-run` on `PATH`, a `systemd-run` that cannot create the scope, one that reports success while leaving processes in the root cgroup, and one whose swap denial or configured `MemoryHigh` never reached the kernel - and requires a refusal in each.
+It also requires a refusal for a raw launch command whose shape would leave the pane reporting a shell instead of the harness.
 An absent `config/crew-memory-bound` leaves spawning unchanged, so a host with no systemd user manager is unaffected until it opts in.
