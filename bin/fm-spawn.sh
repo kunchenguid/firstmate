@@ -10,7 +10,8 @@
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
 #   --backend <name> is the explicit runtime session-provider backend for this
-#   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
+#   exact task only (docs/configuration.md "Runtime backend" owns when that flag
+#   is authorized). Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
 #   $TMUX, HERDR_ENV=1, or cmux runtime signals; bin/fm-backend.sh's
 #   fm_backend_detect, with cmux fallback details in docs/cmux-backend.md),
