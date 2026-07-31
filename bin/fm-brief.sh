@@ -307,6 +307,7 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# shellcheck disable=SC2016 # Backticks and <items> are literal brief markup.
 FOLLOWUP_SLOT='Send that line as prescribed; only when real deferred follow-ups exist, append one concise `; follow-ups: <items>` clause to it (rule 8).'
 
 case "$MODE" in
