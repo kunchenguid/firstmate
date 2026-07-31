@@ -86,6 +86,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  <id>/<evidence>    raw expensive-to-reproduce evidence a scout preserved beside its report and cited by name; written by the crewmate because the scout worktree and every commit in it are discarded at cleanup; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
