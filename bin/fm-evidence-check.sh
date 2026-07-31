@@ -11,13 +11,15 @@
 # before-1-typed-not-saved.png / after-1-typed-with-save-button.png), a
 # leading "<N>-" ordinal shared by both sides pairs them too.
 #
-# An unpaired image (a legitimate after-only set, or any image that does not
-# follow either convention) is never a failure and is silently ignored. But a
-# directory holding both before-* and after-* images that includes any image
-# left unpaired after matching - whether the directory paired nothing at all
-# or paired some images and left others over - is never silently "ok" either.
-# A leftover image is unverified evidence, even alongside a genuine pair in
-# the same directory, so it is a refusal that names the unpaired files.
+# An unpaired image (a legitimate after-only or before-only extra, or any
+# image that does not follow either convention) is never a failure and is
+# silently ignored, even alongside a genuine pair in the same directory. But a
+# directory that shows real evidence of an attempted-but-failed pairing - a
+# before-* image left unmatched AND a separate after-* image left unmatched in
+# that same directory, whether the directory paired nothing at all or paired
+# some images and left others over - is never silently "ok" either. Leftovers
+# on both sides mean an honest before/after set could not be verified, so it
+# is a refusal that names the unpaired files.
 #
 # Usage:
 #   fm-evidence-check.sh --ref <git-ref> [--root <repo>] [--] [<pathspec>...]
@@ -45,8 +47,8 @@
 # Exit 0: no evidence images, no before/after pairs, or every identical pair
 #         carries its .allow-identical marker.
 # Exit 1: at least one before/after pair is byte-identical with no marker, or a
-#         directory holds both before-* and after-* images and at least one of
-#         them was left unpaired after matching.
+#         directory left both an unmatched before-* image and an unmatched
+#         after-* image over after matching.
 # Exit 2: usage error, or the git ref/repo could not be read.
 set -eu
 
@@ -292,7 +294,7 @@ def main():
 
         leftover_before = [p for i, (p, _i, _k) in enumerate(befores) if i not in matched_before]
         leftover_after = [p for i, (p, _i, _k) in enumerate(afters) if i not in matched_after]
-        if leftover_before or leftover_after:
+        if leftover_before and leftover_after:
             unpaired.append((leftover_before, leftover_after))
 
     for before_path, after_path in opted_out:

@@ -17,9 +17,11 @@
 #       rather than printing a bare "ok" having verified nothing
 #   (h) a leftover, differently-named pair beside an already-matched pair in
 #       the same directory still refuses instead of being silently dropped
-#   (i) the .allow-identical marker opts an identical pair back in
-#   (j) --local mode hashes files on disk instead of reading a git ref
-#   (k) usage errors exit 2 without touching git
+#   (i) a genuinely one-sided extra image (no opposite-side counterpart) beside
+#       an already-matched pair in the same directory still passes silently
+#   (j) the .allow-identical marker opts an identical pair back in
+#   (k) --local mode hashes files on disk instead of reading a git ref
+#   (l) usage errors exit 2 without touching git
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -227,6 +229,34 @@ test_leftover_pair_beside_matched_pair_refuses() {
   pass "fm-evidence-check refuses a leftover unpaired image even beside a matched pair"
 }
 
+test_one_sided_extra_beside_matched_pair_passes_silently() {
+  # A directory can hold one legitimately matched pair alongside a genuinely
+  # one-sided extra image (e.g. supplementary after-only context) that has no
+  # before counterpart at all. That is not an attempted-but-failed pairing -
+  # it is the same "legitimate after-only set" the docstring exempts - so it
+  # must stay a silent pass, unlike a leftover pair where both sides are
+  # left unmatched.
+  local dir rc out err
+  dir="$TMP_ROOT/one-sided-extra-beside-matched"
+  init_repo "$dir"
+  write_png "$dir/before-desktop.png" OLDBYTES
+  write_png "$dir/after-desktop.png" NEWBYTES
+  write_png "$dir/after-extra-context.png" CONTEXTBYTES
+  commit_all "$dir"
+
+  out="$dir/stdout"; err="$dir/stderr"
+  set +e
+  "$CHECK" --ref HEAD --root "$dir" > "$out" 2> "$err"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "one-sided-extra-beside-matched: a one-sided extra beside a matched pair must pass"
+  [ ! -s "$err" ] || fail "one-sided-extra-beside-matched: unexpected stderr output: $(cat "$err")"
+  assert_grep 'pairs_checked=1' "$out" \
+    "one-sided-extra-beside-matched: the matched pair was not counted as checked"
+  pass "fm-evidence-check silently passes a one-sided extra image beside a matched pair"
+}
+
 test_allow_identical_marker_opts_in() {
   local dir rc out
   dir="$TMP_ROOT/opt-out"
@@ -299,6 +329,7 @@ test_reversed_convention_paired
 test_ordinal_pairs_state_described_suffixes
 test_unpairable_set_refuses_not_silent_ok
 test_leftover_pair_beside_matched_pair_refuses
+test_one_sided_extra_beside_matched_pair_passes_silently
 test_allow_identical_marker_opts_in
 test_local_mode_hashes_disk_files
 test_usage_errors_exit_2
