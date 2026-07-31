@@ -319,26 +319,36 @@ signal_reason_is_actionable() {  # <file> ...
 #             pane; the crewmate is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
 #   paused  - the crewmate's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
+#             pause (paused:), or stale-pane triage supplied that durable pause
+#             alongside a finished run-step, so the pane is EXPECTED to idle;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
 #             torn-down/unknown crewmate, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crewmate
-# that appended paused: but then STARTED a run reports working, never paused.
+# authoritatively (not the status log) keeps run-step precedence: a crewmate that
+# appended paused: but then STARTED a run reports working, never paused. The optional
+# second argument is reserved for stale-pane absorb triage. A declared pause there
+# may override only a DONE run-step (including passed and checks-passed outcomes,
+# which fm-crew-state.sh maps to done), because the run has finished and the durable
+# event explains why its pane is now expected to idle. Failed, parked, unknown, and
+# actively-working run-steps never yield to that event.
 # NOT a pure local read: fm-crew-state.sh may make bounded no-mistakes and GitHub
 # PR-state calls, so callers run it only on no-verb signal and first-sighting
 # stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
+crew_absorb_class() {  # <id> [declared-pause-status-line]
+  local id=$1 declared_pause=${2:-} line state src
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
+  src=${line#*source: }; src=${src%% *}
   if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
+  fi
+  if [ "$state" = "done" ] && [ "$src" = run-step ] && status_is_paused "$declared_pause"; then
+    printf 'paused'
+    return
   fi
   printf 'none'
 }

@@ -336,6 +336,13 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
   crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  [ "$(crew_absorb_class a)" = none ] || fail "terminal run-step without pause context was absorbed"
+  [ "$(crew_absorb_class a 'paused: awaiting ordered PR merges')" = paused ] \
+    || fail "terminal run-step did not yield to a declared pause for absorb classification"
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · validation failed'
+  [ "$(crew_absorb_class a 'paused: awaiting ordered PR merges')" = none ] \
+    || fail "failed run-step was absorbed behind a declared pause"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
@@ -911,6 +918,9 @@ test_nonterminal_stale_not_working_surfaced() {
   pane_hash=$(hash_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  : > "$state/.paused-rechecked-$key"
+  : > "$state/.paused-resurfaced-$key"
   # No running pipeline; the pane is idle. NOT provably working.
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
 
@@ -924,9 +934,87 @@ test_nonterminal_stale_not_working_surfaced() {
   grep -F "possible wedge" "$out" >/dev/null && fail "an immediate stopped-crew stale was mislabeled a wedge"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced on surface"
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer should not be set when surfacing immediately"
+  [ ! -e "$state/.paused-$key" ] || fail "stopped crew without a declared pause retained a pause marker"
+  [ ! -e "$state/.paused-rechecked-$key" ] || fail "stopped crew without a declared pause retained a pause recheck marker"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "stopped crew without a declared pause retained a pause resurface marker"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the immediate stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
+}
+
+# A terminal no-mistakes run-step remains authoritative current-state evidence,
+# but for stale-pane ABSORB classification a newer durable declared pause says why
+# the finished crewmate is intentionally idle. The pause must therefore enter the
+# long-cadence path without losing cadence markers from an earlier watcher cycle.
+test_terminal_run_step_declared_pause_absorbed_with_markers() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case terminal-run-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="default:w6:pKV"
+  printf 'idle after checks passed, awaiting ordered merges\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/terminal-paused.meta"
+  printf 'paused: waiting on the captain to merge PRs #63, #64, and #65 in order before D4 can start\n' \
+    > "$state/terminal-paused.status"
+  sig=$(seen_sig "$state/terminal-paused.status"); printf '%s' "$sig" > "$state/.seen-terminal-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after checks passed, awaiting ordered merges")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-resurfaced-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "terminal run-step overrode its declared pause and surfaced: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "terminal-run declared pause printed a stale wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "terminal-run declared pause enqueued a stale wake"; }
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || { reap "$pid"; fail "terminal-run declared pause did not advance its stale suppressor"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "terminal-run declared pause did not create its pause marker"; }
+  [ -e "$state/.paused-rechecked-$key" ] || { reap "$pid"; fail "terminal-run declared pause did not retain its authoritative recheck marker"; }
+  [ -e "$state/.paused-resurfaced-$key" ] || { reap "$pid"; fail "terminal-run declared pause lost its long-cadence resurface marker"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "terminal-run declared pause started a wedge timer"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "terminal run-step plus durable declared pause is absorbed and preserves pause cadence markers"
+}
+
+test_surface_nonterminal_stale_clears_pause_only_after_status_resumes() {
+  local dir state window key
+  dir=$(make_case surface-stale-pause-markers); state="$dir/state"; window="default:w6:pKV"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/marker-owner.meta"
+  printf 'paused: awaiting ordered PR merges\n' > "$state/marker-owner.status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  : > "$state/.paused-$key"
+  : > "$state/.paused-rechecked-$key"
+  : > "$state/.paused-resurfaced-$key"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090
+    . "$1"
+    fm_wake_append() { :; }
+    wake() { :; }
+    surface_nonterminal_stale "$2" hash-one
+  ' _ "$WATCH" "$window" || fail "surface helper failed for a declared pause"
+  [ -e "$state/.paused-$key" ] || fail "surface helper deleted a durable declared-pause marker"
+  [ -e "$state/.paused-rechecked-$key" ] || fail "surface helper deleted a declared-pause recheck marker"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "surface helper deleted a declared-pause resurface marker"
+
+  printf 'working: ordered PR merges landed, resuming\n' > "$state/marker-owner.status"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090
+    . "$1"
+    fm_wake_append() { :; }
+    wake() { :; }
+    surface_nonterminal_stale "$2" hash-two
+  ' _ "$WATCH" "$window" || fail "surface helper failed after the declared pause ended"
+  [ ! -e "$state/.paused-$key" ] || fail "surface helper retained a pause marker after status resumed"
+  [ ! -e "$state/.paused-rechecked-$key" ] || fail "surface helper retained a pause recheck marker after status resumed"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "surface helper retained a pause resurface marker after status resumed"
+  pass "non-terminal stale surfaces preserve pause cadence markers only while status remains declared paused"
 }
 
 # --- non-terminal stale, crewmate DECLARED a pause: absorbed, re-surfaced on a
@@ -991,6 +1079,8 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   grep -F "stale: $window" "$out" >/dev/null || fail "re-surface did not print a stale wake"
   grep -F "awaiting external" "$out" >/dev/null || fail "re-surface was not labeled a paused/awaiting-external recheck"
   grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was mislabeled a possible wedge"
+  [ -e "$state/.paused-$key" ] || fail "long-cadence pause re-surface lost the pause marker"
+  [ -e "$state/.paused-rechecked-$key" ] || fail "long-cadence pause re-surface lost the authoritative recheck marker"
   [ -e "$state/.paused-resurfaced-$key" ] || fail "the paused re-surface throttle marker was not recorded"
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
@@ -1728,6 +1818,9 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = pause-regressions ]; then
   test_declared_pause_preempts_permission_prompt_stale
+  test_nonterminal_stale_not_working_surfaced
+  test_terminal_run_step_declared_pause_absorbed_with_markers
+  test_surface_nonterminal_stale_clears_pause_only_after_status_resumes
   test_nonterminal_stale_paused_absorbed_then_resurfaced
   test_herdr_blocked_transition_enters_pause_absorb_path
   exit 0
@@ -1763,6 +1856,8 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
+test_terminal_run_step_declared_pause_absorbed_with_markers
+test_surface_nonterminal_stale_clears_pause_only_after_status_resumes
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_failure_pause_stale_surfaced_not_absorbed
 test_herdr_blocked_transition_enters_pause_absorb_path
