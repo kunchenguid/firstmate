@@ -166,6 +166,13 @@ fm_tmux_row_has_composer_edge() {  # <plain-row>
 
 fm_tmux_composer_geometry_spaces() {  # <content-inner> -> spaces
   local content=$1 probe
+  # U+00A0 is whitespace for composer purposes, and bin/fm-composer-lib.sh owns
+  # that rule, so reuse its FM_COMPOSER_NBSP literal instead of spelling the
+  # bytes again here. Map it to a space rather than trimming it: the caller
+  # compares this row's width against the border widths. Literal-string
+  # substitution, never a character class - see the NON-BREAKING SPACE note in
+  # bin/fm-composer-lib.sh.
+  content=${content//"$FM_COMPOSER_NBSP"/ }
   probe="${content#"${content%%[![:space:]]*}"}"
   case "$probe" in
     '>'*) content=${content/>/ } ;;
