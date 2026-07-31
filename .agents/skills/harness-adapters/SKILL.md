@@ -156,13 +156,18 @@ This preserves launch success instead of passing a known-bad value.
 
 Send the validation skill using the target harness's skill invocation form.
 Natural language is acceptable if uncertain.
+The bullets below are also the machine-readable authority used when `fm-spawn` renders a launch brief: exact forms begin with `exact invocation`, while every other row deliberately selects natural language.
 
-- claude: `/<skill>`, for example `/no-mistakes`.
-- codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
-- opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
-- pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
-- grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
-- kimi: `/<skill>`, for example `/no-mistakes`.
+- claude: exact invocation `/no-mistakes`.
+- codex: exact invocation `$no-mistakes`; `/no-mistakes` is claude-only and codex rejects it as "Unrecognized command".
+- opencode: natural-language invocation because no separate skill form is verified beyond normal slash-command behavior.
+- pi: natural-language invocation because no separate skill form is verified beyond normal command behavior.
+- pi-signed: natural-language invocation because no separate skill form is verified beyond normal command behavior.
+- grok: exact invocation `/no-mistakes`.
+  This is verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`.
+  Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command like `/no-mistakes` that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting.
+  A genuine second Enter is required; `fm_tmux_submit_core`'s retried Enter handles this through the structural composer reader, while the herdr backend needed the dedicated `fm_backend_herdr_composer_state` fix because its prior delta-based verification false-positived on that same popup-close content change.
+- kimi: exact invocation `/no-mistakes`.
 
 ## Submission acknowledgement hazards
 

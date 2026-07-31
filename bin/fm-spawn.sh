@@ -129,6 +129,7 @@
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# A harness-neutral ship scaffold is rendered into a per-launch task-temp copy after harness resolution; harness-adapters owns exact no-mistakes forms, and an unreadable or unmatched form falls back to natural language.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -641,6 +642,39 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+no_mistakes_invocation_for_harness() {  # <harness>
+  local harness=$1 adapters line invocation
+  adapters="$FM_ROOT/.agents/skills/harness-adapters/SKILL.md"
+  line=
+  if [ -r "$adapters" ]; then
+    line=$(awk -v target="$harness" '
+      $0 == "## no-mistakes skill invocation" { in_section = 1; next }
+      in_section && /^## / { exit }
+      in_section && index($0, "- " target ": ") == 1 { print; exit }
+    ' "$adapters" || true)
+  fi
+  case "$line" in
+    *'exact invocation `'*'`'*)
+      invocation=${line#*'exact invocation `'}
+      invocation=${invocation%%'`'*}
+      if [ -n "$invocation" ]; then
+        printf '%s%s%s\n' '`' "$invocation" '`'
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s\n' "the \`no-mistakes\` skill by name in natural language"
+}
+
+render_launch_brief_for_harness() {  # <source> <destination> <harness>
+  local source=$1 destination=$2 harness=$3 invocation
+  invocation=$(no_mistakes_invocation_for_harness "$harness")
+  awk -v replacement="$invocation" '{
+    gsub(/__FM_NO_MISTAKES_INVOCATION__/, replacement)
+    print
+  }' "$source" > "$destination"
 }
 
 resolve_kimi_binary() {
@@ -1452,6 +1486,22 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
+
+# The scaffold is deliberately harness-neutral because the concrete adapter is
+# resolved only here. Render a per-launch copy after that resolution, deriving
+# exact invocation facts from harness-adapters and falling back to wording that
+# every harness can follow. The source brief stays reusable across a respawn on
+# a different adapter.
+if grep -qF '__FM_NO_MISTAKES_INVOCATION__' "$BRIEF_REAL"; then
+  LAUNCH_BRIEF="$TASK_TMP/brief.md"
+  render_launch_brief_for_harness "$BRIEF_REAL" "$LAUNCH_BRIEF" "$HARNESS"
+  if grep -qF '__FM_NO_MISTAKES_INVOCATION__' "$LAUNCH_BRIEF"; then
+    echo "error: harness-specific launch brief rendering left an unresolved no-mistakes invocation" >&2
+    exit 1
+  fi
+  BRIEF="$LAUNCH_BRIEF"
+  BRIEF_REAL="$LAUNCH_BRIEF"
+fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks

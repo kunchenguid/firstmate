@@ -116,6 +116,79 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+generate_ship_brief() {
+  local home=$1 id=$2 repo=$3
+  rm -f "$home/data/$id/brief.md"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" "$id" "$repo" >/dev/null 2>&1
+}
+
+launched_brief_path() {
+  sed -n "s/.*encode launch-brief < '\([^']*\)'.*/\1/p" "$1" | tail -1
+}
+
+test_claude_launch_brief_uses_slash_no_mistakes_invocation() {
+  local rec id out status brief
+  id=profile-brief-claude-z1e
+  rec=$(make_spawn_case profile-brief-claude claude "$id")
+  read_case_record "$rec"
+  generate_ship_brief "$HOME_DIR" "$id" project
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with generated ship brief should succeed"
+  brief=$(launched_brief_path "$LAUNCH_LOG")
+  assert_present "$brief" "claude launch did not point at a readable generated brief"
+  assert_grep '/no-mistakes' "$brief" \
+    "claude launch brief did not use the harness-adapters slash invocation"
+  # shellcheck disable=SC2016 # The dollar-prefixed skill form is literal test data.
+  assert_no_grep '$no-mistakes' "$brief" \
+    "claude launch brief used Codex's dollar-prefixed invocation"
+  pass "claude launch receives a generated brief with /no-mistakes"
+}
+
+test_codex_launch_brief_uses_dollar_no_mistakes_invocation() {
+  local rec id out status brief
+  id=profile-brief-codex-z1f
+  rec=$(make_spawn_case profile-brief-codex codex "$id")
+  read_case_record "$rec"
+  generate_ship_brief "$HOME_DIR" "$id" project
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with generated ship brief should succeed"
+  brief=$(launched_brief_path "$LAUNCH_LOG")
+  assert_present "$brief" "codex launch did not point at a readable generated brief"
+  # shellcheck disable=SC2016 # The dollar-prefixed skill form is literal test data.
+  assert_grep '$no-mistakes' "$brief" \
+    "codex launch brief did not use the harness-adapters dollar-prefixed invocation"
+  assert_no_grep '/no-mistakes' "$brief" \
+    "codex launch brief retained the Claude-only slash invocation"
+  pass "codex launch receives a generated brief with \$no-mistakes"
+}
+
+test_opencode_launch_brief_uses_harness_agnostic_no_mistakes_wording() {
+  local rec id out status brief
+  id=profile-brief-opencode-z1g
+  rec=$(make_spawn_case profile-brief-opencode opencode "$id")
+  read_case_record "$rec"
+  generate_ship_brief "$HOME_DIR" "$id" project
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "opencode spawn with generated ship brief should succeed"
+  brief=$(launched_brief_path "$LAUNCH_LOG")
+  assert_present "$brief" "opencode launch did not point at a readable generated brief"
+  assert_grep "the \`no-mistakes\` skill by name in natural language" "$brief" \
+    "opencode launch brief did not use the harness-agnostic fallback"
+  # shellcheck disable=SC2016 # The dollar-prefixed skill form is literal test data.
+  assert_no_grep '$no-mistakes' "$brief" \
+    "opencode launch brief guessed Codex's dollar-prefixed invocation"
+  assert_no_grep '/no-mistakes' "$brief" \
+    "opencode launch brief guessed the slash invocation"
+  pass "opencode launch receives a generated brief with natural-language validation wording"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -674,6 +747,9 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_claude_launch_brief_uses_slash_no_mistakes_invocation
+test_opencode_launch_brief_uses_harness_agnostic_no_mistakes_wording
+test_codex_launch_brief_uses_dollar_no_mistakes_invocation
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
