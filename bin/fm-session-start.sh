@@ -136,7 +136,19 @@ print_file_or_absent() {
 }
 
 print_backlog_pointer() {
-  printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+  local backend
+  backend=$(fm_backlog_backend_value "$CONFIG")
+  case "$backend" in
+    beads)
+      printf 'Full task bodies remain available on demand: task show <id> (beads task store).\n'
+      ;;
+    manual)
+      printf 'Full task bodies remain available on demand: inspect data/backlog.md.\n'
+      ;;
+    *)
+      printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+      ;;
+  esac
 }
 
 print_backlog_manual_compact() {
