@@ -146,7 +146,12 @@ append_cost_to_line() {
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     taskid="$(basename "$meta" .meta)"
-    if [[ "$line" =~ (^|[^A-Za-z0-9_-])$taskid([^A-Za-z0-9_-]|$) ]]; then
+    # Anchor to the id's own position (tasks-axi's leading CSV id field, or
+    # the manual listing's "- [ ] <id>" title line) - a bare substring match
+    # would also fire on lines that merely mention this id elsewhere, such as
+    # another task's blocked_by column.
+    if [[ "$line" =~ ^[[:space:]]*$taskid,(.*)$ ]] \
+      || [[ "$line" =~ ^[-*][[:space:]]+\[[^]]*\][[:space:]]+$taskid([[:space:]]|$) ]]; then
       cost=$("$SCRIPT_DIR/fm-format-task-cost.sh" "$taskid" 2>/dev/null || echo "")
       if [ -n "$cost" ]; then
         line="${line% } $cost"

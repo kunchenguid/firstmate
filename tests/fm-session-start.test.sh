@@ -1171,6 +1171,56 @@ EOF
   pass "unavailable or incompatible tasks-axi falls back to compact manual backlog rendering"
 }
 
+test_backlog_compact_tasks_axi_appends_per_agent_cost() {
+  local rec root home fakebin out
+  rec=$(new_world backlog-compact-tasks-axi-cost)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_tasks_axi_compact "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  write_long_body_backlog "$home/data/backlog.md"
+  mkdir -p "$home/projects/firstmate"
+  fm_write_meta "$home/state/compact-startup.meta" \
+    "window=fm-sess:compact" "worktree=$home/projects/firstmate" "project=firstmate" "kind=ship" \
+    "model=opus" "effort=low"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending \$20" \
+    "tasks-axi compact listing did not append the recorded task's per-agent cost"
+  assert_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"' \
+    "a task with no recorded metadata must still render its own line"
+  assert_not_contains "$out" 'blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-" $' \
+    "a task with no state/*.meta file must not gain a cost suffix"
+
+  pass "tasks-axi compact backlog rendering appends per-agent cost only for tasks with recorded metadata"
+}
+
+test_backlog_compact_manual_appends_per_agent_cost() {
+  local rec root home fakebin out
+  rec=$(new_world backlog-compact-manual-cost)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  write_long_body_backlog "$home/data/backlog.md"
+  fm_write_meta "$home/state/compact-startup.meta" \
+    "window=fm-sess:compact" "kind=ship" "model=opus" "effort=low"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "(hold: captain choice pending) (hold-kind: captain) \$20" \
+    "manual compact rendering did not append the recorded task's per-agent cost at the end of its line"
+  assert_contains "$out" "blocked-followup - Follow compact startup blocked-by: compact-startup - waits for implementation (repo: firstmate) (kind: scout) (since 2026-07-15)" \
+    "a task with no state/*.meta file must render unchanged, with no cost appended, in the manual rendering"
+
+  pass "manual backlog rendering appends per-agent cost only for tasks with recorded metadata"
+}
+
 # --- fleet-state digest: no in-flight tasks ----------------------------------
 
 test_fleet_digest_empty_fleet() {
@@ -1404,6 +1454,8 @@ test_composition_invokes_real_scripts
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
+test_backlog_compact_tasks_axi_appends_per_agent_cost
+test_backlog_compact_manual_appends_per_agent_cost
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
