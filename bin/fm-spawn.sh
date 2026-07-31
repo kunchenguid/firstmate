@@ -1225,8 +1225,10 @@ esac
 # the project checkout or a secondmate home.  Successful spawns replace this
 # record with their ordinary metadata after worktree allocation completes.
 publish_bootstrap_endpoint_state() {
+  local tmp
   mkdir -p "$STATE" || return 1
-  {
+  tmp=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || return 1
+  if ! {
     echo "window=$T"
     echo "endpoint_task_id=$ID"
     echo "worktree=$PROJ_ABS"
@@ -1255,7 +1257,18 @@ publish_bootstrap_endpoint_state() {
     if [ "$KIND" = secondmate ]; then
       echo "home=$PROJ_ABS"
     fi
-  } > "$STATE/$ID.meta"
+  } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! grep -qx 'spawn_phase=bootstrap' "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$STATE/$ID.meta"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 publish_task_metadata() {

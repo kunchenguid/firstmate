@@ -63,7 +63,10 @@ if [ -n "${FM_FAKE_META_MV_FAIL_ONCE:-}" ]; then
   source=${2:-}
   case "$source" in
     */.*.meta.*)
-      if [ ! -e "$FM_FAKE_META_MV_FAIL_ONCE" ]; then
+      phase=promotion
+      grep -qx 'spawn_phase=bootstrap' "$source" 2>/dev/null && phase=bootstrap
+      target=${FM_FAKE_META_MV_FAIL_TARGET:-promotion}
+      if [ "$phase" = "$target" ] && [ ! -e "$FM_FAKE_META_MV_FAIL_ONCE" ]; then
         : > "$FM_FAKE_META_MV_FAIL_ONCE"
         exit 91
       fi
@@ -96,15 +99,16 @@ $1
 EOF
 }
 
-run_spawn() {  # <id> <reported-pane-cwd> [fail-first-meta-promotion-marker]
-  local id=$1 cwd=$2 fail_meta=${3:-}
+run_spawn() {  # <id> <reported-pane-cwd> [fail-meta-marker] [fail-phase:bootstrap|promotion]
+  local id=$1 cwd=$2 fail_meta=${3:-} fail_phase=${4:-promotion}
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_SPAWN_NO_GUARD=1 \
     HERDR_SESSION=default FM_FAKE_HERDR_LOG="$HERDR_LOG" \
     FM_FAKE_HERDR_CASE="$CASE_DIR" \
-    FM_FAKE_META_MV_FAIL_ONCE="$fail_meta" FM_REAL_MV="$REAL_MV" \
+    FM_FAKE_META_MV_FAIL_ONCE="$fail_meta" FM_FAKE_META_MV_FAIL_TARGET="$fail_phase" \
+    FM_REAL_MV="$REAL_MV" \
     FM_FAKE_HERDR_CLOSED="$CLOSED_FILE" FM_FAKE_HERDR_CWD="$cwd" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" "sh -c 'true'" --backend herdr 2>&1
@@ -163,6 +167,28 @@ test_failed_flat_herdr_bootstrap_stays_discoverable_and_tears_down_exactly() {
   pass "fm-spawn: failed flat Herdr bootstrap remains discoverable and teardown closes only its exact pane"
 }
 
+test_failed_bootstrap_publication_never_exposes_partial_state() {
+  local rec id=herdr-bootstrap-publish-fail-d4 out status
+  rec=$(make_case publication-failed "$id")
+  read_case "$rec"
+
+  out=$(run_spawn "$id" "$WT_DIR" "$CASE_DIR/bootstrap-mv-failed" bootstrap)
+  status=$?
+  expect_code 1 "$status" "spawn should fail when the bootstrap endpoint record cannot be atomically published"
+  assert_contains "$out" "could not publish bootstrap endpoint state" \
+    "bootstrap publication failure was not reported"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "a failed atomic bootstrap publication exposed a partial endpoint record"
+  assert_absent "$HOME_DIR/state/$id.status" \
+    "aborting an unpublished bootstrap falsely claimed a durable endpoint record"
+  assert_not_contains "$(cat "$HERDR_LOG")" 'session stop' "aborted bootstrap publication touched a Herdr session"
+  assert_not_contains "$(cat "$HERDR_LOG")" 'session delete' "aborted bootstrap publication touched a Herdr session"
+  # No leftover temp record must remain under the state directory.
+  assert_not_contains "$(ls -a "$HOME_DIR/state")" ".$id.meta." \
+    "a failed atomic bootstrap publication left a stray temp record"
+  pass "fm-spawn: a failed atomic bootstrap publication publishes no partial or malformed endpoint state"
+}
+
 test_successful_spawn_replaces_bootstrap_record_with_normal_metadata() {
   local rec id=herdr-bootstrap-success-b2 out status
   rec=$(make_case successful "$id")
@@ -179,6 +205,7 @@ test_successful_spawn_replaces_bootstrap_record_with_normal_metadata() {
 
 test_failed_flat_herdr_bootstrap_stays_discoverable_and_tears_down_exactly
 test_failed_metadata_promotion_preserves_bootstrap_record
+test_failed_bootstrap_publication_never_exposes_partial_state
 test_successful_spawn_replaces_bootstrap_record_with_normal_metadata
 
 echo "# all fm-spawn-bootstrap-endpoint tests passed"
