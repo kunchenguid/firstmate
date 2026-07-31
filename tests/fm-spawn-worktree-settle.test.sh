@@ -53,7 +53,12 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    printf '@1\n'
+    [ "${FM_FAKE_NEW_WINDOW_FAIL_AFTER_CREATE:-0}" != 1 ]
+    exit
+    ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys) exit 0 ;;
 esac
 exit 0
@@ -103,6 +108,15 @@ run_settle_spawn() {
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+}
+
+run_settle_teardown() {
+  local id=$1
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
@@ -170,9 +184,35 @@ test_failed_bootstrap_leaves_meta_and_failed_status() {
     "failed spawn's meta does not record its endpoint"
   assert_grep "failed: spawn failed before launch completed" "$HOME_DIR/state/$id.status" \
     "failed spawn left no supervisor-visible failed: status line"
-  pass "a failed spawn leaves meta and a failed: status line (upstream issue 1336)"
+  run_settle_teardown "$id" >/dev/null \
+    || fail "forced teardown could not reap a failed-spawn stub with no worktree"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "forced teardown left the failed-spawn meta behind"
+  [ ! -e "$HOME_DIR/state/$id.status" ] \
+    || fail "forced teardown left the failed-spawn status behind"
+  pass "a failed spawn leaves ordinary terminal state that forced teardown can reap (upstream issue 1336)"
 }
 
 test_failed_bootstrap_leaves_meta_and_failed_status
+
+test_backend_partial_create_failure_leaves_terminal_state() {
+  local rec id out rc
+  id=settle-partial-create-z4
+  rec=$(make_settle_case settle-partial-create "$id" 0)
+  read_settle_record "$rec"
+
+  rc=0
+  out=$(FM_FAKE_NEW_WINDOW_FAIL_AFTER_CREATE=1 run_settle_spawn "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a backend create helper failure should fail the spawn"
+  [ -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "partial backend create failure left no meta record behind"
+  assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
+    "partial backend create failure lost its owned endpoint"
+  assert_grep "failed: spawn failed before launch completed" "$HOME_DIR/state/$id.status" \
+    "partial backend create failure left no terminal status"
+  pass "a backend helper failure after partial creation leaves terminal state"
+}
+
+test_backend_partial_create_failure_leaves_terminal_state
 
 echo "# all fm-spawn-worktree-settle tests passed"

@@ -383,8 +383,8 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
-fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
-  local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
+fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [allow-empty-worktree]
+  local meta=$1 id=$2 allow_empty_worktree=${3:-0} backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
@@ -400,10 +400,16 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: task $id has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
     return 1
   }
-  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
-    echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
-    return 1
-  }
+  if ! worktree=$(fm_backend_meta_exact_value "$meta" worktree); then
+    if [ "$allow_empty_worktree" = 1 ] \
+       && [ "$(grep -c '^worktree=' "$meta" 2>/dev/null || true)" -eq 1 ] \
+       && grep -qx 'worktree=' "$meta" 2>/dev/null; then
+      worktree=
+    else
+      echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
+      return 1
+    fi
+  fi
   project=$(fm_backend_meta_exact_value "$meta" project) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous project identity; preserving task state." >&2
     return 1

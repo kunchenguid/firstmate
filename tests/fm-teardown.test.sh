@@ -1778,11 +1778,29 @@ SH
   chmod +x "$case_dir/fakebin/herdr"
 }
 
+write_bound_herdr_projection_journal() {  # <case-dir> [pane-id]
+  local case_dir=$1 pane_id=${2:-w1:p2} token=AbCdEfGhIjKlMnOpQrStUv
+  printf '%s\n' \
+    'version=2' \
+    'task_id=task-x1' \
+    "projection_id=$token" \
+    "home=$case_dir" \
+    'session=fmtest' \
+    'workspace_id=w1' \
+    'tab_id=w1:t2' \
+    "pane_id=$pane_id" \
+    'parent_workspace_id=w0' \
+    'parent_label=firstmate' \
+    "workspace_label=└ task-x1 · p:$token" \
+    'task_label=fm-task-x1' > "$case_dir/state/task-x1.herdr-presentation"
+}
+
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
   local case_dir log closed restored
   case_dir=$(make_case herdr-projection-confirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
+  write_bound_herdr_projection_journal "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
@@ -1862,6 +1880,7 @@ test_herdr_projection_teardown_retires_journal_for_predead_pane() {
   case_dir=$(make_case herdr-projection-predead-pane)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
+  write_bound_herdr_projection_journal "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
   # The pane died before teardown ran: pane get reports pane_not_found and the
   # projected workspace is already gone from the workspace list. Retirement
@@ -1881,6 +1900,25 @@ test_herdr_projection_teardown_retires_journal_for_predead_pane() {
   assert_not_contains "$(cat "$log")" "pane close" \
     "herdr-projection-predead-pane: a close was attempted against an already-dead pane"
   pass "herdr projection teardown retires the journal when the pane is already dead"
+}
+
+test_herdr_projection_teardown_quarantines_mismatched_predead_journal() {
+  local case_dir log closed restored
+  case_dir=$(make_case herdr-projection-predead-mismatch)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  write_bound_herdr_projection_journal "$case_dir" w1:p9
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  : > "$closed"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-projection-predead-mismatch: forced teardown failed"
+  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "herdr-projection-predead-mismatch: mismatched journal was incorrectly retired"
+  assert_grep "remains quarantined" "$case_dir/stderr" \
+    "herdr-projection-predead-mismatch: mismatched journal was not reported quarantined"
+  pass "herdr projection teardown quarantines a mismatched pre-dead journal"
 }
 
 test_local_only_fork_remote_allows
@@ -1903,6 +1941,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_records_when_presence_unknown
 test_herdr_projection_teardown_reports_unconfirmed_close_loudly_for_retry
 test_herdr_projection_teardown_retires_journal_for_predead_pane
+test_herdr_projection_teardown_quarantines_mismatched_predead_journal
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

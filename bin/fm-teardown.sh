@@ -128,7 +128,13 @@ META="$STATE/$ID.meta"
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
-fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+ALLOW_EMPTY_FAILURE_WORKTREE=0
+if [ "$FORCE" = "--force" ] \
+   && [ -f "$STATE/$ID.status" ] && [ ! -L "$STATE/$ID.status" ] \
+   && grep -q '^failed: spawn failed before launch completed ' "$STATE/$ID.status"; then
+  ALLOW_EMPTY_FAILURE_WORKTREE=1
+fi
+fm_backend_validate_task_endpoint "$META" "$ID" "$ALLOW_EMPTY_FAILURE_WORKTREE" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
@@ -1455,12 +1461,20 @@ if [ "$BACKEND" = herdr ] \
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
   HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_TAB=$(meta_value "$META" herdr_tab_id)
   HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
   if [ -n "$HERDR_PRESENTATION_SESSION" ] \
      && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_TAB" ] \
      && [ -n "$HERDR_PRESENTATION_PANE" ] \
      && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ]; then
-    if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
+    if fm_backend_herdr_projection_journal_snapshot "$HERDR_PRESENTATION_JOURNAL" "$ID" \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$HERDR_PRESENTATION_SESSION" ] \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$HERDR_PRESENTATION_WORKSPACE" ] \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$HERDR_PRESENTATION_TAB" ] \
+       && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$HERDR_PRESENTATION_PANE" ] \
+       && [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
       # Upstream issue 1337: a pane the backend already reports dead is
       # confirmed-closed by definition - the exact case where journal
       # retirement is safest. Retire without a close attempt; requiring the
