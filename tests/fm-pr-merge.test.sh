@@ -597,6 +597,60 @@ test_root_level_only_change_skips_evidence_check() {
   pass "fm-pr-merge skips the evidence check (rather than scanning the whole tree) for a PR that only touches root-level files"
 }
 
+test_evidence_base_diff_failure_falls_back_to_unscoped_scan() {
+  # When the resolved base and the PR head share no common history at all,
+  # `git diff base...head` itself fails (fatal: no merge base), rather than
+  # returning an empty changed-paths list. That failure must not be treated
+  # the same as a PR that genuinely changed zero paths (which skips the
+  # check outright, per test_root_level_only_change_skips_evidence_check):
+  # it must instead fall back to an unscoped whole-ref scan, same as when no
+  # base can be resolved at all, so a real byte-identical pair in the PR
+  # head's own tree still refuses the merge instead of silently passing.
+  local case_dir rc origin real_dir unrelated_dir
+  case_dir=$(make_case unrelated-history)
+  origin="$case_dir/origin.git"
+  real_dir="$case_dir/real"
+  unrelated_dir="$case_dir/unrelated"
+
+  git init -q --bare "$origin"
+
+  mkdir -p "$real_dir"
+  git -C "$real_dir" init -q
+  printf 'root doc\n' > "$real_dir/AGENTS.md"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "origin default branch history"
+  git -C "$real_dir" branch -M main
+  git -C "$real_dir" push -q "$origin" main
+
+  mkdir -p "$unrelated_dir/docs/pr-assets/widget"
+  git -C "$unrelated_dir" init -q
+  printf BYTES > "$unrelated_dir/docs/pr-assets/widget/before-desktop.png"
+  printf BYTES > "$unrelated_dir/docs/pr-assets/widget/after-desktop.png"
+  git -C "$unrelated_dir" add -A
+  git -C "$unrelated_dir" commit -qm "unrelated PR head history"
+  git -C "$unrelated_dir" push -q "$origin" "HEAD:refs/pull/91/head"
+
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  git -C "$case_dir/wt" remote add origin "$origin"
+
+  add_gh_mocks "$case_dir" ffffffffffffffffffffffffffffffffffffffff
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unrelated-history: fm-pr-merge should refuse on a byte-identical pair caught by the unscoped fallback scan"
+  assert_grep 'byte-identical before/after evidence image pair detected' "$case_dir/stderr" \
+    "unrelated-history: a diff failure against an unrelated base should fall back to scanning the whole PR head ref, not skip the check"
+  grep -qxF 'pr merge 91 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    && fail "unrelated-history: gh-axi pr merge was invoked despite the identical pair"
+  pass "fm-pr-merge falls back to an unscoped scan when the base diff itself fails, rather than skipping the check"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -614,3 +668,4 @@ test_unresolvable_ref_warns_and_still_merges
 test_no_recorded_head_and_unresolvable_ref_warns_and_still_merges
 test_scoped_evidence_check_ignores_unrelated_leftover
 test_root_level_only_change_skips_evidence_check
+test_evidence_base_diff_failure_falls_back_to_unscoped_scan

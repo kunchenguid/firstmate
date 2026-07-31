@@ -144,6 +144,30 @@ test_reversed_convention_paired() {
   pass "fm-evidence-check pairs the reversed <prefix>-before/<prefix>-after convention"
 }
 
+test_reversed_convention_mixed_case_paired() {
+  # The before-/after- prefix convention already matches case-insensitively
+  # (lower.startswith), so the reversed <prefix>-before/<prefix>-after
+  # convention must agree rather than silently excluding a mixed/upper-case
+  # suffix from pairing, which would let an identical pair merge unnoticed.
+  local dir rc err
+  dir="$TMP_ROOT/reversed-mixed-case"
+  init_repo "$dir"
+  write_png "$dir/shot-BEFORE.png" SAMEBYTES
+  write_png "$dir/shot-AFTER.png" SAMEBYTES
+  commit_all "$dir"
+
+  err="$dir/stderr"
+  set +e
+  "$CHECK" --ref HEAD --root "$dir" > "$dir/stdout" 2> "$err"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "reversed-mixed-case: shot-BEFORE.png/shot-AFTER.png must still be paired"
+  assert_grep 'shot-BEFORE.png == shot-AFTER.png' "$err" \
+    "reversed-mixed-case: refusal did not name the mixed-case reversed-convention pair"
+  pass "fm-evidence-check pairs the reversed convention case-insensitively"
+}
+
 test_ordinal_pairs_state_described_suffixes() {
   # Real filenames from we-pack-together's docs/pr-assets/sidebar-silent-discard
   # (commit d71bc9c): the suffix after before-/after- describes the state
@@ -326,6 +350,7 @@ test_different_pair_passes
 test_after_only_set_passes_silently
 test_no_images_passes_silently
 test_reversed_convention_paired
+test_reversed_convention_mixed_case_paired
 test_ordinal_pairs_state_described_suffixes
 test_unpairable_set_refuses_not_silent_ok
 test_leftover_pair_beside_matched_pair_refuses

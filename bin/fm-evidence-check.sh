@@ -139,12 +139,12 @@ def classify(basename):
         return "before", basename[len("before-"):]
     if lower.startswith("after-"):
         return "after", basename[len("after-"):]
-    match = re.match(r"^(.*)-before(\.[A-Za-z0-9]+)$", basename)
+    match = re.match(r"^(.*)-before(\.[A-Za-z0-9]+)$", lower)
     if match:
-        return "before", match.group(1) + match.group(2)
-    match = re.match(r"^(.*)-after(\.[A-Za-z0-9]+)$", basename)
+        return "before", basename[:match.end(1)] + basename[match.start(2):]
+    match = re.match(r"^(.*)-after(\.[A-Za-z0-9]+)$", lower)
     if match:
-        return "after", match.group(1) + match.group(2)
+        return "after", basename[:match.end(1)] + basename[match.start(2):]
     return None
 
 

@@ -166,13 +166,19 @@ if [ -n "$WT" ] && [ -d "$WT" ] && git -C "$WT" rev-parse --git-dir >/dev/null 2
     EVIDENCE_PATHSPECS=()
     EVIDENCE_BASE_RESOLVED=false
     if EVIDENCE_BASE=$(resolve_evidence_base); then
-      EVIDENCE_BASE_RESOLVED=true
-      while IFS= read -r changed_dir; do
-        [ -n "$changed_dir" ] && [ "$changed_dir" != "." ] || continue
-        EVIDENCE_PATHSPECS+=("$changed_dir")
-      done < <(git -C "$WT" diff --name-only "$EVIDENCE_BASE...$EVIDENCE_REF" -- 2>/dev/null \
-        | while IFS= read -r changed_path; do dirname "$changed_path"; done \
-        | sort -u)
+      diff_output=$(git -C "$WT" diff --name-only "$EVIDENCE_BASE...$EVIDENCE_REF" -- 2>/dev/null) \
+        && diff_rc=0 || diff_rc=$?
+      if [ "$diff_rc" -eq 0 ]; then
+        EVIDENCE_BASE_RESOLVED=true
+        while IFS= read -r changed_dir; do
+          [ -n "$changed_dir" ] && [ "$changed_dir" != "." ] || continue
+          EVIDENCE_PATHSPECS+=("$changed_dir")
+        done < <(printf '%s' "$diff_output" \
+          | while IFS= read -r changed_path; do dirname "$changed_path"; done \
+          | sort -u)
+      else
+        echo "warning: evidence check base diff for task $ID failed (exit $diff_rc); scanning entire ref unscoped" >&2
+      fi
     fi
     if "$EVIDENCE_BASE_RESOLVED" && [ "${#EVIDENCE_PATHSPECS[@]}" -eq 0 ]; then
       echo "warning: evidence check SKIPPED for task $ID; PR changed no paths with a directory component to scope the check to" >&2
