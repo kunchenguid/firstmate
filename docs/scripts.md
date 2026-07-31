@@ -100,3 +100,6 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-topic-inbox.sh`      | Inspect and claim durable Telegram topic-board inbox items without deleting them     |
 | `fm-topic-reply.sh`      | Send an idempotently keyed reply into an item's originating Telegram topic and archive it after its initial answer |
 | `fm-topic-service.sh`    | Install and manage the persistent systemd user service for the Telegram topic-board listener |
+| `fm-public-followup-lib.sh` | Shared relay-activation gate, O(1) presence checks, and private transport paths for promised public replies |
+| `fm-public-followup.sh`  | Reconcile typed terminal work results into a public commitment and deliver its final reply once |
+| `fm-public-followup-emit.sh` | Report one typed terminal work result into the home that owes the public reply    |
