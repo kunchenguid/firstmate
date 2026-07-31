@@ -665,7 +665,10 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) exit 0 ;;
+  # The explicit sess:win endpoint is live: a real list-windows inventory
+  # answers with the window name (fm_backend_target_exists requires this
+  # since the display-message fallback fix, kunchenguid/firstmate#1130).
+  list-windows) printf 'win\n'; exit 0 ;;
 esac
 exit 0
 SH
@@ -684,7 +687,7 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
 
 strip_send_preflight() {  # <log>
   local preflight
-  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
+  preflight=$'tmux\x1flist-windows\x1f-t\x1fsess\x1f-F\x1f#{window_index}\t#{window_name}'
   awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
 }
 
@@ -702,7 +705,7 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
-  assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
+  assert_contains "$(cat "$log_new")" $'\x1flist-windows\x1f-t\x1fsess\x1f-F\x1f#{window_index}\t#{window_name}' \
     "fm-send --key did not verify the explicit tmux target before sending"
   strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"

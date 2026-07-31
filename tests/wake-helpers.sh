@@ -136,7 +136,11 @@ case "${1:-}" in
     [ "$_print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
   list-windows)
-    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+    # Default to the supervisor pane's window (firstmate:0) so the cheap
+    # inventory-based fm_backend_target_exists read sees a live supervisor
+    # endpoint, matching what FM_FAKE_TMUX_PANE_ALIVE=1 already models for
+    # display-message (kunchenguid/firstmate#1130).
+    printf '%s\n' "${FM_FAKE_TMUX_WINDOW:-0}"
     exit 0 ;;
   capture-pane)
     # Honor a single-line band capture (-S N -E M, both non-negative) for the
@@ -224,7 +228,22 @@ case "${1:-}" in
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
-  list-windows) exit 0 ;;
+  # The supervisor pane (firstmate:0) and the explicit fm-send endpoint
+  # (sess:win) are live: a real list-windows inventory answers with the
+  # queried session's window, which the inventory-based
+  # fm_backend_target_exists requires (kunchenguid/firstmate#1130).
+  list-windows)
+    target=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "-t" ] && target=$a
+      prev="$a"
+    done
+    case "$target" in
+      firstmate) printf '0\n' ;;
+      *) printf 'win\n' ;;
+    esac
+    exit 0 ;;
   send-keys)
     shift
     text=""; is_enter=0; lit=0

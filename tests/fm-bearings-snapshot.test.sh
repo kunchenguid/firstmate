@@ -30,6 +30,29 @@ SH
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
+  # A real tmux answers list-windows with the queried session's live windows,
+  # which fm_backend_target_exists reads to prove the recorded window still
+  # exists (kunchenguid/firstmate#1130). Inventory this home's recorded
+  # windows, keeping the fixture's alive/absent convention: every window is
+  # live except the *dead-* ones this suite models as gone.
+  list-windows)
+    session=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "-t" ] && session=$a
+      prev=$a
+    done
+    for m in "${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}"/*.meta; do
+      [ -f "$m" ] || continue
+      w=$(sed -n 's/^window=//p' "$m")
+      case "$w" in
+        "$session":*) w=${w#*:} ;;
+        *) continue ;;
+      esac
+      case "$w" in ''|*dead-*) continue ;; esac
+      printf '%s\n' "$w"
+    done
+    ;;
   capture-pane)
     case "$*" in
       *fm-domain-alpha*) printf 'stale terminal summary: Phase 7 started\n> \n' ;;

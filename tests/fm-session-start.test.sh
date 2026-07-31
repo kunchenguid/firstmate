@@ -197,25 +197,31 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: models REAL tmux behavior around
+# the given live "session:window" target for the two primitives a tmux
+# endpoint liveness read can use. display-message SILENTLY FALLS BACK to the
+# live window when the window part of the target does not match (exit 0,
+# answering about the wrong window) and fails only when the session itself is
+# gone; list-windows inventories exactly the live window. The earlier
+# exit-1-for-anything-but-the-live-target fixture encoded the
+# fm_backend_target_exists false-alive bug (kunchenguid/firstmate#1130) as
+# expected behavior.
 make_fake_tmux() {
   local fakebin=$1 live=$2
+  local live_session=${live%%:*} live_window=${live#*:}
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+target=""
+prev=""
+for a in "\$@"; do
+  [ "\$prev" = "-t" ] && target="\$a"
+  prev="\$a"
+done
+[ "\${target%%:*}" = "$live_session" ] || exit 1
 case "\${1:-}" in
-  display-message)
-    target=""
-    prev=""
-    for a in "\$@"; do
-      [ "\$prev" = "-t" ] && target="\$a"
-      prev="\$a"
-    done
-    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
-    exit 1
-    ;;
+  display-message) printf '%%1\n'; exit 0 ;;
+  list-windows) printf '%s\n' "$live_window"; exit 0 ;;
 esac
 exit 1
 SH

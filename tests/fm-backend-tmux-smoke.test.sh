@@ -156,6 +156,70 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- fm_backend_target_exists: a gone window of a LIVE session reads dead ---
+# Regression for kunchenguid/firstmate#1130: a bare `display-message -p -t`
+# silently falls back to another window when the window part of the target
+# does not match, so the cheap liveness read must require the exact recorded
+# window in a successful session inventory.
+
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "fm_backend_target_exists should report the live window alive"
+if fm_backend_target_exists tmux "$SESSION:no-such-window-xyz" 2>/dev/null; then
+  fail "fm_backend_target_exists reported a nonexistent window of a live session alive"
+fi
+if fm_backend_target_exists tmux "no-such-session-xyz:$WINDOW" 2>/dev/null; then
+  fail "fm_backend_target_exists reported a window of a nonexistent session alive"
+fi
+pass "real tmux: fm_backend_target_exists reads the live window alive and a gone window of a live session dead"
+
+# A %pane / @window handle carries no session to inventory, so it is proved by
+# exact-answer equality instead: a gone id makes display-message exit 0 with an
+# EMPTY (or otherwise non-matching) answer, which only the comparison catches.
+live_pane=$(tmux display-message -p -t "$TARGET" '#{pane_id}') \
+  || fail "could not read the live pane id"
+live_window_id=$(tmux display-message -p -t "$TARGET" '#{window_id}') \
+  || fail "could not read the live window id"
+fm_backend_target_exists tmux "$live_pane" \
+  || fail "fm_backend_target_exists should report the live %pane id alive"
+fm_backend_target_exists tmux "$live_window_id" \
+  || fail "fm_backend_target_exists should report the live @window id alive"
+if fm_backend_target_exists tmux '%99999' 2>/dev/null; then
+  fail "fm_backend_target_exists reported a never-allocated %pane id alive"
+fi
+if fm_backend_target_exists tmux '@99999' 2>/dev/null; then
+  fail "fm_backend_target_exists reported a never-allocated @window id alive"
+fi
+pass "real tmux: fm_backend_target_exists reads live %pane/@window ids alive and never-allocated ones dead"
+
+# A window name may itself contain dots (a task id only has to be path-safe, so
+# id `api.2` records window `fm-api.2`): the pane-index strip must not report
+# that live window dead, and real tmux resolves the exact name the same way.
+DOTTED_WINDOW="fm-api.2"
+DOTTED_TARGET="$SESSION:$DOTTED_WINDOW"
+tmux new-window -d -t "$SESSION:" -n "$DOTTED_WINDOW" \
+  || fail "could not create the dotted-name window"
+fm_backend_target_exists tmux "$DOTTED_TARGET" \
+  || fail "fm_backend_target_exists reported the live dotted-name window dead"
+[ "$(tmux display-message -p -t "$DOTTED_TARGET" '#{window_name}')" = "$DOTTED_WINDOW" ] \
+  || fail "real tmux did not resolve '$DOTTED_TARGET' to the window literally named '$DOTTED_WINDOW'"
+# Kill by @id: tmux's own kill-window parses the trailing `.2` as a pane index
+# and cannot address this window by name - which is precisely why the liveness
+# read has to inventory the session rather than trust a per-target probe.
+dotted_id=$(tmux display-message -p -t "$DOTTED_TARGET" '#{window_id}') \
+  || fail "could not read the dotted-name window id"
+tmux kill-window -t "$dotted_id" || fail "could not kill the dotted-name window"
+if fm_backend_target_exists tmux "$DOTTED_TARGET" 2>/dev/null; then
+  fail "fm_backend_target_exists still reports the killed dotted-name window alive"
+fi
+pass "real tmux: fm_backend_target_exists reads a live dotted window name alive and dead once killed"
+
+# A colon-less target carries no session to inventory: fail closed rather than
+# resolve it against some other session's window.
+if fm_backend_target_exists tmux "$WINDOW" 2>/dev/null; then
+  fail "fm_backend_target_exists accepted a bare window name with no session"
+fi
+pass "real tmux: fm_backend_target_exists refuses a bare (colon-less) window name"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"
@@ -165,6 +229,9 @@ fi
 state=$(fm_backend_agent_state tmux "$TARGET")
 [ "$state" = missing ] \
   || fail "a real missing window in a readable session should classify as missing, got '$state'"
+if fm_backend_target_exists tmux "$TARGET" 2>/dev/null; then
+  fail "fm_backend_target_exists still reports the killed window alive"
+fi
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"

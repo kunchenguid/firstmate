@@ -56,7 +56,22 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  # The explicit endpoints these tests send to (other:win, outside:window)
+  # are live: a real list-windows inventory answers with the queried
+  # session's window (fm_backend_target_exists requires this since the
+  # display-message fallback fix, kunchenguid/firstmate#1130).
+  list-windows)
+    target=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "-t" ] && target="$a"
+      prev="$a"
+    done
+    case "$target" in
+      other) printf 'win\n' ;;
+      outside) printf 'window\n' ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH

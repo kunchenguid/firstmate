@@ -44,7 +44,9 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 ## Current behavior and safety
 
-A target-existence check proves only that the pane exists.
+A target-existence check proves only that the recorded endpoint still exists, never what runs in it.
+Because `tmux display-message` silently answers about another window instead of failing when the recorded one is gone, a `session:window` target is proved by an exact window-index or window-name match in a live session inventory, a `%pane` or `@window` handle by an exact-id answer, and a target carrying no session to inventory is refused.
+A window name may itself contain dots, so the full window part is matched before the pane-index-stripped form.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.

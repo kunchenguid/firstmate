@@ -16,7 +16,8 @@
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
-#   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
+#   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell);
+#       a window gone from a still-LIVE session reads dead too (#1130)
 #   (i) kind=scout skips the run lookup                           -> pane/status-log
 #   (j) torn-down worktree / missing meta                         -> unknown/none
 #   (k) crew_is_provably_working end-to-end over the REAL helper (not a canned
@@ -86,6 +87,20 @@ case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
+  # pane_readable's tmux arm now goes through fm_backend_target_exists, which
+  # proves the recorded window against a real list-windows inventory instead
+  # of a bare display-message probe (kunchenguid/firstmate#1130). Answer with
+  # this home's recorded windows, so FM_FAKE_TMUX_MISSING keeps modelling a
+  # gone endpoint exactly as it does for the probes above.
+  # FM_FAKE_TMUX_WINDOW_GONE models the narrower, real #1130 shape instead: the
+  # SESSION is alive, so display-message and capture-pane still succeed (real
+  # tmux silently falls back to another window), and only the inventory shows
+  # the recorded window is gone.
+  list-windows)
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    [ "${FM_FAKE_TMUX_WINDOW_GONE:-0}" = 1 ] && { printf 'other-window\n'; exit 0; }
+    sed -n 's/^window=[^:]*://p' "${FM_STATE_OVERRIDE:?}"/*.meta 2>/dev/null
+    ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
@@ -166,11 +181,13 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_WINDOW_GONE=0
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_TMUX_WINDOW_GONE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -1047,6 +1064,32 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
+# Regression for kunchenguid/firstmate#1130 at THIS helper's read path: the
+# crew's window is gone but its SESSION is still alive, so the bare
+# `tmux display-message -p -t sess:win '#{pane_id}'` pane_readable used to run
+# silently answers about ANOTHER window and exits 0 - reporting a killed crew
+# as still alive and letting the stale status log through as current state.
+# Routing the tmux arm through fm_backend_target_exists (which proves the
+# recorded window against a real list-windows inventory) is what makes this
+# read `unknown · none`.
+test_gone_window_in_live_session_ignores_stale_status_log() {
+  reset_fakes
+  local d; d=$(new_case gone-window-live-session)
+  make_repo_on_branch "$d/wt" fm/feat-gone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gone.meta" "window=fm:fm-feat-gone" "worktree=$d/wt" "kind=ship"
+  printf 'working: implementing the widget\n' > "$d/state/feat-gone.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_WINDOW_GONE=1   # session alive, this crew's window gone
+  local out; out=$(run_crew_state "$d" feat-gone)
+  assert_contains "$out" "state: unknown" "gone window in a live session -> unknown"
+  assert_contains "$out" "source: none" "gone window in a live session -> none source"
+  assert_contains "$out" "backend target gone" "gone window in a live session reports the dead endpoint"
+  assert_not_contains "$out" "source: status-log" "a gone window must not let the stale log read as current"
+  pass "a gone window of a LIVE session ignores the stale status log (no display-message fallback false-alive)"
+}
+
 # A closed/unreadable pane must NOT mask an authoritative run-step: judge by the
 # run-step, not the shell. The common case is a finished crew whose agent has
 # exited and closed its window (the normal gap between completion and teardown) -
@@ -1345,6 +1388,7 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+test_gone_window_in_live_session_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound

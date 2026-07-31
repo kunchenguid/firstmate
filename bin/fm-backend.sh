@@ -827,14 +827,73 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|pending-unp
 # probe). A gone tmux window or an unqueryable herdr pane (server down, pane
 # closed), missing zellij pane, or unreadable Orca terminal simply fails, which
 # IS "does not exist" for this purpose.
-# Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
-# primitive so callers that only need a fast alive/dead read (recovery
-# digests, the session-start fleet digest) do not re-derive it inline.
+# The one primitive behind every fast alive/dead read (recovery digests, the
+# session-start fleet digest, fm-crew-state.sh's pane_readable), so no caller
+# re-derives a liveness probe inline and drifts from this contract.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
-  local backend=$1 target=$2 expected_label=${3:-} session pane
+  local backend=$1 target=$2 expected_label=${3:-} session pane window idx name
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      # tmux display-message NEVER reliably fails for a bad target: a
+      # session:window whose window part does not match silently falls back
+      # to another window (exit 0, answering about the WRONG window), a gone
+      # %pane or @window id exits 0 too (empty or fallback answer). A bare
+      # exit-code read therefore cannot prove the recorded endpoint exists.
+      # Exact handles (%/@ ids) are verified by exact-answer equality, and a
+      # session:window name by requiring the exact recorded window in a
+      # successful session inventory - the same guarantee
+      # fm_backend_tmux_agent_state gives recovery, kept read-only and one
+      # tmux call for this cheap path.
+      case "$target" in
+        %*)
+          [ "$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null)" = "$target" ]
+          ;;
+        @*)
+          [ "$(tmux display-message -p -t "$target" '#{window_id}' 2>/dev/null)" = "$target" ]
+          ;;
+        *:*)
+          session=${target%%:*}
+          pane=${target#*:}
+          [ -n "$session" ] && [ -n "$pane" ] || return 1
+          # The window part may itself CONTAIN dots: a task id only has to be
+          # path-safe (fm_task_id_path_safe), so id `api.2` records window
+          # `fm-api.2`, and real tmux resolves that exact window name ahead of
+          # any pane-index split. Try the FULL window part first and keep the
+          # pane-index-stripped form only as a fallback, which is what still
+          # resolves a legacy `firstmate:0.1` supervisor target.
+          window=$pane
+          case "$pane" in
+            *.*)
+              # session:window.pane-index targets the window; a non-numeric
+              # suffix is part of the window name itself.
+              case "${pane##*.}" in
+                *[!0-9]*|'') : ;;
+                *) window=${pane%.*} ;;
+              esac
+              ;;
+          esac
+          # The window part may be a NAME or a numeric INDEX (e.g. the
+          # legacy firstmate:0 supervisor fallback): one inventory call
+          # listing both tab-separated, exact field match on either. Matched
+          # in-shell rather than through awk so this cheap probe stays a
+          # single fork and adds no new tool dependency to the many callers
+          # that source this library (the fm-crew-state.sh read path it now
+          # backs uses no awk today).
+          while IFS=$'\t' read -r idx name; do
+            case "$idx" in "$pane"|"$window") return 0 ;; esac
+            case "$name" in "$pane"|"$window") return 0 ;; esac
+          done < <(tmux list-windows -t "$session" -F '#{window_index}	#{window_name}' 2>/dev/null)
+          return 1
+          ;;
+        *)
+          # A colon-less target carries no session to inventory, so there is
+          # nothing to verify the recorded endpoint against: fail closed
+          # rather than resolve it against every session, which is exactly the
+          # "answered about some other window" false-alive this guards.
+          # fm_backend_validate_task_endpoint refuses this shape too.
+          return 1
+          ;;
+      esac
       ;;
     herdr)
       fm_backend_source herdr || return 1
