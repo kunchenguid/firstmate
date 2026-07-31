@@ -62,6 +62,8 @@
 #       event's bounded public-safe outcome is reused exactly, which keeps the
 #       common path deterministic. The sequence is begin-delivery with the
 #       payload hash, post, then record the posted receipt or a typed error.
+#       A validated receipt also clears any bound legacy X link before the
+#       registration is removed.
 #       An already-posted obligation is a silent success; an obligation left in
 #       delivery-posting by a crash is REFUSED rather than posted again.
 #
@@ -90,6 +92,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
@@ -421,7 +424,16 @@ cmd_pending() {
   # An unreadable backlog with registrations present is exactly the silence this
   # whole path exists to prevent, so say so rather than printing nothing.
   if ! command -v jq >/dev/null 2>&1 || ! command -v tasks-axi >/dev/null 2>&1 \
-      || ! listing=$(tx public-followup list --json 2>/dev/null) || [ -z "$listing" ]; then
+      || ! listing=$(tx public-followup list --json 2>/dev/null) || [ -z "$listing" ] \
+      || ! printf '%s' "$listing" | jq -e '
+        type == "object"
+        and (.public_followups | type == "array")
+        and all(.public_followups[];
+          type == "object"
+          and (.id | type == "string")
+          and (.public_followup | type == "object")
+          and (.state | type == "string"))
+      ' >/dev/null 2>&1; then
     if fm_pf_has_registrations "$STATE"; then
       printf 'cannot read this home'\''s public commitments through tasks-axi; %s registration(s) are still recorded under state/%s/registry\n' \
         "$(fm_pf_registry_ids "$STATE" | grep -c . || true)" "$FM_PF_DIRNAME"
@@ -442,12 +454,22 @@ cmd_pending() {
     if [ -z "$payload" ]; then
       # The obligation is gone from the backlog (pruned after Done): the
       # registration is stale bookkeeping, not evidence, so drop it.
+      if ! clear_public_followup_link "$id"; then
+        printf 'cannot clear the legacy X link for closed public commitment %s; registration retained for reconciliation\n' "$id"
+        printed=1
+        continue
+      fi
       rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
       continue
     fi
     delivery=$(pf_field "$payload" '.public_followup.delivery.state')
     task_state=$(pf_field "$payload" '.state')
     if [ "$task_state" = 'done' ] || [ "$delivery" = 'posted' ] || [ "$delivery" = 'waived' ]; then
+      if ! clear_public_followup_link "$id"; then
+        printf 'cannot clear the legacy X link for closed public commitment %s; registration retained for reconciliation\n' "$id"
+        printed=1
+        continue
+      fi
       rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
       continue
     fi
@@ -471,6 +493,45 @@ EOF
 }
 
 # --- subcommand: deliver ----------------------------------------------------
+
+public_followup_secondmate_home() {
+  local id=$1 meta home marker
+  meta="$STATE/$id.meta"
+  home=$(fmx_meta_get "$meta" home)
+  if [ -z "$home" ] && [ -f "$DATA/secondmates.md" ] && [ ! -L "$DATA/secondmates.md" ]; then
+    home=$(awk -v id="$id" '$1 == "-" && $2 == id { line=$0 } END { print line }' "$DATA/secondmates.md" 2>/dev/null \
+      | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
+  fi
+  [ -n "$home" ] || return 1
+  case "$home" in /*) ;; *) return 1 ;; esac
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || return 1
+  marker=$(sed -n '1p' "$home/.fm-secondmate-home" 2>/dev/null)
+  [ "$marker" = "$id" ] || return 1
+  printf '%s\n' "$home"
+}
+
+clear_public_followup_link() {
+  local id=$1 work_home work_id home state
+  [ -f "$(fm_pf_registry_dir "$STATE")/$id" ] \
+    && [ ! -L "$(fm_pf_registry_dir "$STATE")/$id" ] || return 0
+  work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
+  work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
+  [ -n "$work_home" ] && [ -n "$work_id" ] || return 1
+  case "$work_home" in
+    main)
+      home=$FM_HOME
+      state=$STATE
+      ;;
+    secondmate:*)
+      home=$(public_followup_secondmate_home "${work_home#secondmate:}") || return 1
+      state="$home/state"
+      ;;
+    *) return 1 ;;
+  esac
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    "$FM_ROOT/bin/fm-x-followup.sh" --clear "$work_id" >/dev/null
+}
 
 record_error() {
   local id=$1 attempt=$2 state=$3 code=$4 next=$5 tmp rc
@@ -531,6 +592,10 @@ cmd_deliver() {
 
   case "$delivery" in
     posted|waived)
+      if ! clear_public_followup_link "$id"; then
+        die "obligation '$id' is already $delivery, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+      fi
+      rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
       printf 'already delivered %s state=%s\n' "$id" "$delivery"
       return 0
       ;;
@@ -606,6 +671,9 @@ EOF
       die "dry-run for '$id' did not post; recorded as retryable and left the obligation open" 1
     fi
     if record_posted "$id" "$attempt" "$request" "$platform" "$chunks"; then
+      if ! clear_public_followup_link "$id"; then
+        die "the public reply for '$id' POSTED and its receipt was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+      fi
       rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
       printf 'delivered %s request=%s platform=%s chunks=%s\n' "$id" "$request" "$platform" "$chunks"
       return 0
@@ -658,6 +726,9 @@ cmd_record_posted() {
 
   record_posted "$id" "$attempt" "$request" "$platform" "$chunks" \
     || die "tasks-axi refused the receipt for '$id' attempt $attempt; the recorded attempt must match exactly" 1
+  if ! clear_public_followup_link "$id"; then
+    die "the receipt for '$id' was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+  fi
   rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
   printf 'recorded %s attempt=%s request=%s\n' "$id" "$attempt" "$request"
 }
@@ -733,6 +804,9 @@ cmd_retire() {
           || die "obligation '$id' is still ${delivery:-unresolved}; retiring its registration now would hide an open public promise. Deliver it, waive it, or pass --force." 1
         ;;
     esac
+  fi
+  if ! clear_public_followup_link "$id"; then
+    die "could not clear the legacy X link for '$id'; its registration was retained for reconciliation" 1
   fi
   rm -f -- "$(fm_pf_registry_dir "$STATE")/$id" 2>/dev/null || true
   printf 'retired %s\n' "$id"

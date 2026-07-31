@@ -236,10 +236,15 @@ test_outcome_text_is_bounded_without_corrupting_characters() {
 # cold reconciliation from disk delivers exactly one final reply into the
 # original thread and closes the obligation.
 test_restart_e2e_delivers_exactly_once() {
-  local home log out posts receipt
+  local home child log out posts receipt
   home=$(make_home restart-e2e)
+  child=$(make_home restart-child relay-off)
   log="$home/curl.log"; : > "$log"
   seed_commitment "$home" pf-restart req-restart discord secondmate:fmdev work-code-q1
+  printf '%s\n' fmdev > "$child/.fm-secondmate-home"
+  fm_write_meta "$home/state/fmdev.meta" "kind=secondmate" "home=$child"
+  fm_write_meta "$child/state/work-code-q1.meta" \
+    "x_request=req-restart" "x_request_ts=1700000000" "x_followups=1"
 
   # The reported failure, reproduced: with the work bound but no reconciled
   # terminal result, the commitment is stranded at pending-work and nothing can
@@ -290,6 +295,8 @@ test_restart_e2e_delivers_exactly_once() {
   [ "$receipt" = posted ] || fail "a validated posted receipt must be recorded, got '$receipt'"
   [ "$(task_state "$home" pf-restart)" = 'done' ] \
     || fail "the commitment must be Done only after the receipt"
+  assert_no_grep '^x_request=' "$child/state/work-code-q1.meta" \
+    "typed delivery must clear the secondmate's legacy X link"
   pass "restart end-to-end: typed result reconciles from disk and delivers one reply to the original thread"
 }
 
@@ -443,6 +450,8 @@ test_late_receipt_closes_the_exact_attempt_without_reposting() {
   home=$(make_home late-receipt)
   log="$home/curl.log"; : > "$log"
   seed_commitment "$home" pf-late req-late x main work-late
+  fm_write_meta "$home/state/work-late.meta" \
+    "x_request=req-late" "x_request_ts=1700000000" "x_followups=1"
   emit_terminal "$home" "$home" pf-late main work-late >/dev/null || fail "emit failed"
   FAKE_CURL_LOG="$log" run_pf "$home" consume >/dev/null || fail "consume failed"
 
@@ -466,6 +475,8 @@ test_late_receipt_closes_the_exact_attempt_without_reposting() {
   posts=$(followup_posts "$log")
   [ "$posts" -eq 0 ] || fail "recording a late receipt must post nothing, got $posts posts"
   [ "$(task_state "$home" pf-late)" = 'done' ] || fail "a validated late receipt must close the commitment"
+  assert_no_grep '^x_request=' "$home/state/work-late.meta" \
+    "a late receipt must clear the legacy X link"
 
   FAKE_CURL_LOG="$log" expect_failure "a receipt for a different attempt must be refused" \
     run_pf "$home" record-posted pf-late --attempt 9 --chunks 1
@@ -523,11 +534,16 @@ test_outward_delivery_stays_with_the_owning_home() {
   child=$(make_home child relay-off)
   log="$owner/curl.log"; : > "$log"
   seed_commitment "$owner" pf-own req-own discord secondmate:child work-child
+  printf '%s\n' child > "$child/.fm-secondmate-home"
+  fm_write_meta "$owner/state/child.meta" "kind=secondmate" "home=$child"
+  fm_write_meta "$child/state/work-child.meta" \
+    "x_request=req-own" "x_request_ts=1700000000" "x_followups=1"
 
   FAKE_CURL_LOG="$log" emit_terminal "$owner" "$owner" pf-own secondmate:child work-child >/dev/null \
     || fail "the child could not report its typed result"
   [ "$(followup_posts "$log")" -eq 0 ] \
     || fail "reporting a terminal result must never post publicly"
+  run_pf "$owner" consume >/dev/null || fail "the owning home could not consume the child's typed result"
 
   # The child home has no commitment of its own and no relay consent, so it can
   # neither deliver nor even see one.
@@ -538,7 +554,29 @@ test_outward_delivery_stays_with_the_owning_home() {
   assert_contains "$EXPECT_OUT" "has not opted into the myfirstmate relay" \
     "the refusal must name the missing relay consent"
   [ "$(followup_posts "$log")" -eq 0 ] || fail "the refused delivery must post nothing"
+  FAKE_CURL_LOG="$log" run_pf "$owner" deliver pf-own >/dev/null \
+    || fail "the owning home must deliver the typed public reply"
+  assert_no_grep '^x_request=' "$child/state/work-child.meta" \
+    "typed delivery must clear the child task's legacy X link"
   pass "a child home reports typed results but can never become the outward-post owner"
+}
+
+test_pending_rejects_malformed_listing() {
+  local home out
+  home=$(make_home pending-malformed)
+  seed_commitment "$home" pf-malformed req-malformed discord main work-malformed
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s' '{"public_followups":['
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+
+  out=$(run_pf "$home" pending) || fail "pending must survive malformed tasks-axi output"
+  assert_contains "$out" "cannot read this home's public commitments through tasks-axi" \
+    "malformed backlog output must use the loud fallback"
+  assert_present "$home/state/public-followup/registry/pf-malformed" \
+    "malformed backlog output must retain the registration"
+  pass "pending keeps registrations when tasks-axi returns malformed JSON"
 }
 
 test_private_context_survives_inbox_cleanup() {
@@ -793,6 +831,7 @@ test_late_receipt_closes_the_exact_attempt_without_reposting
 test_typed_terminal_clear_only_removes_legacy_link
 test_interrupted_delivery_refuses_to_repost
 test_outward_delivery_stays_with_the_owning_home
+test_pending_rejects_malformed_listing
 test_private_context_survives_inbox_cleanup
 test_cleanup_refuses_while_a_public_reply_is_owed
 test_relay_disabled_home_pays_nothing
