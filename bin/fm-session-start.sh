@@ -142,16 +142,18 @@ print_backlog_pointer() {
 }
 
 append_cost_to_line() {
-  local line="$1" taskid cost
-  if [[ "$line" =~ fm-[a-z0-9-]+ ]]; then
-    taskid="${BASH_REMATCH[0]}"
-    if [ -f "$STATE/${taskid}.meta" ]; then
+  local line="$1" meta taskid cost
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    taskid="$(basename "$meta" .meta)"
+    if [[ "$line" =~ (^|[^A-Za-z0-9_-])$taskid([^A-Za-z0-9_-]|$) ]]; then
       cost=$("$SCRIPT_DIR/fm-format-task-cost.sh" "$taskid" 2>/dev/null || echo "")
       if [ -n "$cost" ]; then
         line="${line% } $cost"
       fi
+      break
     fi
-  fi
+  done
   echo "$line"
 }
 
@@ -200,7 +202,7 @@ print_backlog_tasks_axi_compact() {
   out=$(tasks-axi list --file "$path" --limit "$BACKLOG_LIMIT" --fields blocked_by,hold_kind,hold_reason 2>&1)
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    printf '%s\n' "$out"
+    printf '%s\n' "$out" | while IFS= read -r line; do append_cost_to_line "$line"; done
   else
     printf 'tasks-axi compact listing failed; falling back to title-line rendering.\n'
     printf '%s\n' "$out"

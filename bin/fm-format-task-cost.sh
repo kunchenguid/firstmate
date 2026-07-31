@@ -8,7 +8,11 @@ set -euo pipefail
 TASKID="${1:-}"
 [ -z "$TASKID" ] && exit 0
 
-METAFILE="state/${TASKID}.meta"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_HOME="${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+METAFILE="$STATE/${TASKID}.meta"
 [ ! -f "$METAFILE" ] && exit 0
 
 # Extract model and effort from metadata
