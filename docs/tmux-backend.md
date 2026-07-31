@@ -111,6 +111,13 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+## Proving absence needs a session-scoped handle
+
+`fm_backend_target_state` can only answer `absent` for tmux when it can derive a session to scope `tmux list-windows` to.
+It takes that session from `tmux_session_target=` when the metadata records one, otherwise from the `session:window` form of the target itself; a bare unscoped window name yields `unknown`, never `absent`.
+That matters because the managed-lifecycle callers release nothing on `unknown` - `bin/fm-teardown.sh` retains the worktree, lease, and metadata instead.
+A real spawn always records a scoped handle (`bin/fm-spawn.sh` builds `T="$SES:$W"` and persists it as `window=`), so this is not a gap in the product path; it is the shape any tmux task metadata must have, fixtures included.
+
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.

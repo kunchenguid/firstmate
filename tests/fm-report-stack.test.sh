@@ -400,8 +400,8 @@ test_retention_cohort_and_sweep_share_drift_budget() {
 test_retention_guard_cannot_advance_minimum_age() {
   local stack="$TMP_ROOT/retention-minimum-age-stack" before after completed deadline cohort cutoff
   local retention_ms=2592000000 id legacy_id
-  id=minimum-age-cohort
-  legacy_id=minimum-age-legacy
+  id='minimum-age-cohort'
+  legacy_id='minimum-age-legacy'
   mkdir -p "$stack/entries"
   before=$(node -e 'process.stdout.write(String(Date.now()))')
   completed=$(node -e 'process.stdout.write(new Date(Number(process.argv[1]) - 30 * 24 * 60 * 60 * 1000 + 60000).toISOString())' "$before")

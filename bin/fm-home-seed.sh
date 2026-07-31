@@ -869,6 +869,19 @@ refuse_populated_projectless_home() {
   return 1
 }
 
+# refuse_projectless_seed_preconditions: the complete --no-projects destination
+# precondition set, as a pure predicate over <home> and the parent brief. It
+# mutates nothing, so it is safe to evaluate both before the refresher preflight
+# (where it reports the precise reason) and again against the resolved home.
+# A no-op when --no-projects was not requested.
+refuse_projectless_seed_preconditions() {  # <id> <no-projects> <home>
+  local id=$1 no_projects=$2 home=$3
+  [ "$no_projects" -eq 1 ] || return 0
+  refuse_populated_projectless_home "$home" || return 1
+  [ -f "$SEED_PARENT_BRIEF" ] || return 0
+  refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF"
+}
+
 refuse_projectful_projectless_charter() {
   local id=$1 brief=$2 project_clones
   project_clones=$(brief_section_text "$brief" "Project clones")
@@ -946,6 +959,15 @@ seed_home() {
     home=$(acquire_treehouse_home "$id")
     SEED_HOME="$home"
     SEED_HOME_RETAINED=1
+    # Prove the acquired home is a legal destination BEFORE taking its lifecycle
+    # lock, exactly as the explicit-home branch below does. These locks are keyed
+    # on the home path and are not reentrant, so an acquired home that IS the
+    # active firstmate home resolves to the lock this seed already holds for
+    # $FM_HOME above, and the second acquisition could only ever wait out
+    # FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS against itself. Refusing first turns
+    # that self-deadlock into the actionable refusal the caller needs. Retention
+    # is already armed, so the acquired home is still kept for manual recovery.
+    refuse_active_home_path "$home" || return 1
     SEED_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$home") || return 1
     freshness_status=0
     "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$home" "$FM_ROOT" || freshness_status=$?
@@ -961,6 +983,16 @@ seed_home() {
     refuse_active_home_path "$requested_abs" || return 1
     SEED_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$requested_abs") || return 1
     validate_home_assignment "$id" "$requested_abs" || return 1
+    # --no-projects preconditions run BEFORE the refresher preflight below. They
+    # are cheap, local destination-shape checks, and the preflight reads the
+    # destination tree - including projects/ - so an unreadable or otherwise
+    # unusable projects/ made the preflight fail first and reported a generic
+    # "cannot be refreshed safely" instead of the specific, actionable reason.
+    # A caller that explicitly passed --no-projects has said the projects tree is
+    # irrelevant to them, so gating their precondition on a tree read was the
+    # wart. They are pure predicates and are re-run against the resolved home
+    # below, so nothing the later pass proved is weakened.
+    refuse_projectless_seed_preconditions "$id" "$no_projects" "$requested_abs" || return 1
     "$SCRIPT_DIR/fm-checkout-refresh.sh" preflight "$FM_ROOT" >/dev/null 2>&1 || true
     SEED_HOME="$requested_abs"
     [ -e "$requested_abs" ] || SEED_HOME_CREATED=1
@@ -979,12 +1011,7 @@ seed_home() {
   validate_home_assignment "$id" "$home"
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
-  if [ "$no_projects" -eq 1 ]; then
-    refuse_populated_projectless_home "$home" || return 1
-    if [ -f "$SEED_PARENT_BRIEF" ]; then
-      refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
-    fi
-  fi
+  refuse_projectless_seed_preconditions "$id" "$no_projects" "$home" || return 1
   mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1

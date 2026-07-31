@@ -49,6 +49,17 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Writing a new fake tmux for this suite: teardown proves endpoint state through
+# fm_backend_target_state plus fm_backend_tmux_agent_alive, and releases nothing
+# on `unknown`. A stub therefore needs all three of:
+#   - a `#{pane_current_command}` answer on display-message (a bare shell for an
+#     idle pane, a harness name for a live agent) - without it a present pane is
+#     `unknown` and every case refuses for an unprovable read;
+#   - a `list-windows` arm, which is the only way absence is ever proved;
+#   - per-target answers when a case has more than one endpoint.
+# The task metadata needs a session-scoped handle for the same reason - see
+# docs/tmux-backend.md "Proving absence needs a session-scoped handle".
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -64,6 +75,8 @@ REAL_PYTHON_FOR_TEST=$(command -v python3)
 export REAL_PYTHON_FOR_TEST
 REAL_STAT_FOR_TEST=$(command -v stat)
 export REAL_STAT_FOR_TEST
+REAL_PS_FOR_TEST=$(command -v ps)
+export REAL_PS_FOR_TEST
 
 write_treehouse_lease() {
   local worktree=$1 holder=$2 slot pool state
@@ -601,13 +614,17 @@ git_index_lock_path() {
   esac
 }
 
+# Delegate to the product's own derivation rather than re-deriving the key here.
+# The re-implementation this replaced hashed the physical common-dir path
+# verbatim, while fm_checkout_lock_key lowercases it - so every lock path
+# computed under a mktemp directory with an uppercase character (nearly all of
+# them) named a file that never existed, and the assertions built on it either
+# passed vacuously or failed for a reason that had nothing to do with locking.
+# shellcheck source=bin/fm-checkout-lock-lib.sh disable=SC1091
+. "$ROOT/bin/fm-checkout-lock-lib.sh"
+
 checkout_lock_path() {
-  local dir=$1 lock_root=$2 common key
-  common=$(git -C "$dir" rev-parse --git-common-dir)
-  case "$common" in /*) ;; *) common="$dir/$common" ;; esac
-  common=$(cd "$common" && pwd -P)
-  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
-  printf '%s/%s.lock\n' "$lock_root" "$key"
+  fm_checkout_lock_path "$1" "$2"
 }
 
 # fakebin/lsof stub: no process ever holds anything open (lsof's not-found exit
@@ -678,7 +695,13 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-if [ -n "$dir" ] && [ "${args[2]:-}" = status ] && [ "${args[3]:-}" = --porcelain ]; then
+# Match the porcelain flag in either spelling: teardown's dirty checks all pass
+# --porcelain=v1, so keying on a bare --porcelain made this stub a silent no-op.
+porcelain=0
+case "${args[3]:-}" in
+  --porcelain|--porcelain=*) porcelain=1 ;;
+esac
+if [ -n "$dir" ] && [ "${args[2]:-}" = status ] && [ "$porcelain" -eq 1 ]; then
   lock=$("$real" -C "$dir" rev-parse --git-path index.lock 2>/dev/null || true)
   case "$lock" in
     /*|'') ;;
@@ -1199,7 +1222,7 @@ SH
 }
 
 test_content_in_default_fallback_allows() {
-  local case_dir rc common key expected_lock lock_marker
+  local case_dir rc expected_lock lock_marker
   case_dir=$(make_case content-landed)
   write_meta "$case_dir" no-mistakes ship
   # No pr= recorded and the default gh-axi mock reports no PR, so the merged-PR path
@@ -1207,11 +1230,10 @@ test_content_in_default_fallback_allows() {
   # the same net change has independently landed on origin/main via a squash commit.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   land_on_origin_main "$case_dir" feature.txt hello
-  common=$(git -C "$case_dir/wt" rev-parse --git-common-dir)
-  case "$common" in /*) ;; *) common="$case_dir/wt/$common" ;; esac
-  common=$(cd "$common" && pwd -P)
-  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
-  expected_lock="$case_dir/checkout-locks/$key.lock"
+  # Name the lock through the product's own deriver, like the other lock cases: it
+  # lowercases the common-dir path before hashing, so any hand-rolled shasum of the
+  # raw path names a file that never exists under a mixed-case mktemp directory.
+  expected_lock=$(checkout_lock_path "$case_dir/wt" "$case_dir/checkout-locks")
   lock_marker="$case_dir/checkout-return-held-lock"
 
   set +e
@@ -1314,17 +1336,17 @@ SH
 }
 
 test_content_fallback_honors_shared_checkout_lock() {
-  local case_dir rc common key lock_root lock
+  local case_dir rc lock_root lock
   case_dir=$(make_case content-shared-lock)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   land_on_origin_main "$case_dir" feature.txt hello
-  common=$(git -C "$case_dir/wt" rev-parse --git-common-dir)
-  case "$common" in /*) ;; *) common="$case_dir/wt/$common" ;; esac
-  common=$(cd "$common" && pwd -P)
-  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
   lock_root="$case_dir/checkout-locks"
-  lock="$lock_root/$key.lock"
+  # Contend the lock at the path the product itself derives; hashing the raw
+  # common-dir path skips the lowercasing in fm_checkout_stable_path_key, so the
+  # lock would be planted where nothing looks for it and the contention this case
+  # exists to prove would go undetected.
+  lock=$(checkout_lock_path "$case_dir/wt" "$lock_root")
   mkdir -p "$lock"
   printf '%s\n' "$$" > "$lock/pid"
 
@@ -1899,8 +1921,17 @@ test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
 test_non_linked_index_lock_path_is_checked_from_worktree() {
   local case_dir rc lock
   case_dir=$(make_case non-linked-index-lock)
+  # Only a non-linked checkout makes `git rev-parse --git-path index.lock` answer with
+  # the RELATIVE `.git/index.lock`; a linked worktree always answers absolutely. So the
+  # task worktree here is a clone's own primary checkout, and the recorded project is a
+  # linked worktree of that same clone - two distinct exact roots sharing one common Git
+  # directory, which is what validate_teardown_target_identity requires. Re-cloning the
+  # worktree standalone instead would leave it belonging to no recorded project, which
+  # teardown refuses outright and for good reason.
   git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  rm -rf "$case_dir/project"
   git clone -q "$case_dir/origin.git" "$case_dir/wt"
+  git -C "$case_dir/wt" worktree add -q --detach "$case_dir/project"
   git -C "$case_dir/wt" checkout -q -b fm/task-x1
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "shippable normal clone work"
@@ -2290,6 +2321,16 @@ case "${1:-}" in
   kill-window)
     : > "$FM_FAKE_KILL_STARTED"
     while [ ! -f "$FM_FAKE_ALLOW_KILL" ]; do sleep 0.01; done
+    : > "$FM_FAKE_KILLED"
+    exit 0
+    ;;
+  list-windows)
+    # Teardown only performs endpoint cleanup for an endpoint it can still see,
+    # and then requires confirmed absence, so a stub pinned to either state
+    # cannot exercise this: reported absent, kill-window is skipped and the
+    # generation-lock race below never happens; reported present forever,
+    # teardown refuses. Observable until the kill lands, gone after it.
+    [ -f "$FM_FAKE_KILLED" ] || printf 'fm-task-x1\n'
     exit 0
     ;;
   display-message) exit 1 ;;
@@ -2300,6 +2341,7 @@ SH
 
   FM_AGENT_FLEET_BIN="$case_dir/fakebin/agent-fleet" FM_FAKE_AF_LOG="$af_log" \
     FM_FAKE_KILL_STARTED="$kill_started" FM_FAKE_ALLOW_KILL="$allow_kill" \
+    FM_FAKE_KILLED="$case_dir/killed" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
   teardown_pid=$!
   fm_test_wait_for_file "$kill_started" "$teardown_pid" 0.05 \
@@ -2349,7 +2391,7 @@ test_managed_child_teardown_locks_generation_before_snapshot() {
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
     "worktree=$case_dir/wt" \
-    "project=$case_dir/project" \
+    "project=$case_dir/wt" \
     'kind=secondmate' \
     'mode=secondmate' \
     "home=$case_dir/wt"
@@ -2385,8 +2427,13 @@ case "${1:-}" in
       *fm-child-lock-x3*)
         : > "$FM_FAKE_KILL_STARTED"
         while [ ! -f "$FM_FAKE_ALLOW_KILL" ]; do sleep 0.01; done
+        : > "$FM_FAKE_KILLED"
         ;;
     esac
+    exit 0
+    ;;
+  list-windows)
+    [ -f "$FM_FAKE_KILLED" ] || printf 'fm-child-lock-x3\n'
     exit 0
     ;;
   display-message) exit 1 ;;
@@ -2397,6 +2444,7 @@ SH
 
   FM_AGENT_FLEET_BIN="$case_dir/fakebin/agent-fleet" FM_FAKE_AF_LOG="$af_log" \
     FM_FAKE_KILL_STARTED="$kill_started" FM_FAKE_ALLOW_KILL="$allow_kill" \
+    FM_FAKE_KILLED="$case_dir/killed" \
     FM_EXPECT_CHILD_LINEAGE_PATH="$case_dir/wt/data/$child_id/account-attempts.md" \
     FM_REJECT_CHILD_LINEAGE_PATH="$case_dir/data/$child_id/account-attempts.md" \
     FM_EXPECT_CHILD_LINEAGE_MARKER="$case_dir/child-lineage-verified" \
@@ -2452,7 +2500,7 @@ test_forced_secondmate_child_uses_child_home_for_endpoint_verification() {
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
     "worktree=$case_dir/wt" \
-    "project=$case_dir/project" \
+    "project=$case_dir/wt" \
     'kind=secondmate' \
     'mode=secondmate' \
     "home=$case_dir/wt"
@@ -2506,45 +2554,86 @@ SH
   assert_not_contains "$(cat "$af_log")" 'lease release' "live child endpoint allowed Agent Fleet release"
   assert_present "$case_dir/wt/state/$child_id.meta" "live child endpoint lost retry metadata"
   assert_present "$child_worktree/.git" "live child endpoint worktree was recycled"
-  assert_grep 'managed endpoint for child-zellij-x2 is still alive' "$case_dir/stderr" "child endpoint blocker was not reported"
+  # fm_backend_agent_alive implements tmux and herdr only and answers `unknown`
+  # for every other backend, so a zellij endpoint can never be reported "still
+  # alive" - that assertion could not hold whatever the fixture did. What must
+  # hold is that an endpoint whose state cannot be PROVEN still blocks
+  # destructive cleanup, which the refusal above plus the retained lease,
+  # metadata, and worktree already pin. Assert the reachable message.
+  assert_grep 'managed endpoint state for child-zellij-x2 is unknown' "$case_dir/stderr" "child endpoint blocker was not reported"
   pass "forced secondmate cleanup verifies managed children in the child home"
 }
 
 test_forced_secondmate_quiesces_parent_before_child_cleanup() {
   local case_dir child_project child_worktree child_id parent_live parent_quiesced rc
+  local child_live child_quiesced
   case_dir=$(make_case secondmate-parent-quiesce)
   child_project="$case_dir/child-project"
   child_worktree="$case_dir/child-worktree"
   child_id=child-after-quiesce-x4
   parent_live="$case_dir/parent-live"
   parent_quiesced="$case_dir/parent-quiesced"
+  child_live="$case_dir/child-live"
+  child_quiesced="$case_dir/child-quiesced"
   prepare_secondmate_home_fixture "$case_dir"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
     "worktree=$case_dir/wt" \
-    "project=$case_dir/project" \
+    "project=$case_dir/wt" \
     'kind=secondmate' \
     'mode=secondmate' \
     "home=$case_dir/wt"
   fm_git_worktree "$child_project" "$child_worktree" child-branch
   write_treehouse_lease "$child_worktree" "firstmate-$child_id"
+  # A real tmux spawn records a session-scoped handle (bin/fm-spawn.sh builds
+  # T="$SES:$W" and persists it), so an unscoped bare window name is not a shape
+  # the product ever writes. fm_backend_target_state cannot derive a session from
+  # one, so it answers `unknown` for every probe and no stub could ever prove the
+  # child absent. Carry the same window= + tmux_session_target= pair the parent
+  # meta and the suite's write_meta helper already use.
   fm_write_meta "$case_dir/wt/state/$child_id.meta" \
     "window=fm-$child_id" \
+    "tmux_session_target=firstmate:fm-$child_id" \
     "worktree=$child_worktree" \
     "project=$child_project" \
     'kind=ship' \
     'mode=local-only'
   : > "$parent_live"
+  : > "$child_live"
+  # Answer PER TARGET: the parent and the child are independent endpoints, and
+  # each stays observable until its own kill-window lands (the same
+  # observable-until-killed contract the suite's default tmux stub implements).
+  # A single global liveness marker made the child unresolvable the moment the
+  # parent was quiesced, which is exactly the ordering this case exercises.
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+live_marker() {
+  case "$*" in
+    *fm-task-x1*) printf '%s' "$FM_FAKE_PARENT_LIVE" ;;
+    *fm-child-after-quiesce-x4*) printf '%s' "$FM_FAKE_CHILD_LIVE" ;;
+  esac
+}
 case "${1:-}" in
-  display-message) [ -f "$FM_FAKE_PARENT_LIVE" ] ;;
+  display-message)
+    marker=$(live_marker "$@")
+    [ -n "$marker" ] && [ -f "$marker" ] || exit 1
+    case " $* " in
+      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    esac
+    exit 0
+    ;;
   list-panes) exit 0 ;;
+  list-windows)
+    [ ! -f "$FM_FAKE_PARENT_LIVE" ] || printf '%s\n' fm-task-x1
+    [ ! -f "$FM_FAKE_CHILD_LIVE" ] || printf '%s\n' fm-child-after-quiesce-x4
+    exit 0
+    ;;
   kill-window)
     case "$*" in
       *fm-task-x1*) rm -f "$FM_FAKE_PARENT_LIVE"; : > "$FM_FAKE_PARENT_QUIESCED" ;;
+      *fm-child-after-quiesce-x4*) rm -f "$FM_FAKE_CHILD_LIVE"; : > "$FM_FAKE_CHILD_QUIESCED" ;;
     esac
     exit 0
     ;;
@@ -2554,12 +2643,14 @@ SH
 
   set +e
   FM_FAKE_PARENT_LIVE="$parent_live" FM_FAKE_PARENT_QUIESCED="$parent_quiesced" \
+    FM_FAKE_CHILD_LIVE="$child_live" FM_FAKE_CHILD_QUIESCED="$child_quiesced" \
     FM_EXPECT_PARENT_QUIESCED="$parent_quiesced" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 0 "$rc" "secondmate-parent-quiesce: forced teardown should succeed"
   assert_present "$parent_quiesced" "forced secondmate teardown did not quiesce its parent endpoint"
+  assert_present "$child_quiesced" "forced secondmate teardown did not quiesce its managed child endpoint"
   assert_absent "$case_dir/wt" "forced secondmate teardown retained the retired home"
   pass "forced secondmate teardown quiesces and verifies the parent before child cleanup"
 }
@@ -2570,33 +2661,71 @@ setup_forced_secondmate_child_case() {
   FORCED_CHILD_PROJECT="$FORCED_CHILD_CASE_DIR/child-project"
   FORCED_CHILD_WORKTREE="$FORCED_CHILD_CASE_DIR/child-worktree"
   FORCED_CHILD_PARENT_LIVE="$FORCED_CHILD_CASE_DIR/parent-live"
+  FORCED_CHILD_LIVE="$FORCED_CHILD_CASE_DIR/child-live"
   prepare_secondmate_home_fixture "$FORCED_CHILD_CASE_DIR"
   fm_write_meta "$FORCED_CHILD_CASE_DIR/state/task-x1.meta" \
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
     "worktree=$FORCED_CHILD_CASE_DIR/wt" \
-    "project=$FORCED_CHILD_CASE_DIR/project" \
+    "project=$FORCED_CHILD_CASE_DIR/wt" \
     'kind=secondmate' \
     'mode=secondmate' \
     "home=$FORCED_CHILD_CASE_DIR/wt"
   fm_git_worktree "$FORCED_CHILD_PROJECT" "$FORCED_CHILD_WORKTREE" child-branch
   write_treehouse_lease "$FORCED_CHILD_WORKTREE" "firstmate-$child_id"
+  # window= plus tmux_session_target= mirrors what bin/fm-spawn.sh persists for a
+  # real tmux endpoint (T="$SES:$W"). Without a session-scoped handle
+  # fm_backend_target_state has nothing to scope `tmux list-windows` to and can
+  # only ever answer `unknown`, so the child endpoint would be unresolvable no
+  # matter what the stub replied.
   fm_write_meta "$FORCED_CHILD_CASE_DIR/wt/state/$child_id.meta" \
     "window=fm-$child_id" \
+    "tmux_session_target=firstmate:fm-$child_id" \
     "worktree=$FORCED_CHILD_WORKTREE" \
     "project=$FORCED_CHILD_PROJECT" \
     'kind=ship' \
     'mode=local-only'
   : > "$FORCED_CHILD_PARENT_LIVE"
-  cat > "$FORCED_CHILD_CASE_DIR/fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
+  : > "$FORCED_CHILD_LIVE"
+  # Parent and child are independent endpoints, so the stub answers per target
+  # and each stays observable until its own kill-window lands.
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -u'
+    printf 'child_live=%s\n' "$(printf '%q' "$FORCED_CHILD_LIVE")"
+    printf 'child_label=%s\n' "$(printf '%q' "fm-$child_id")"
+    cat <<'SH'
+live_marker() {
+  case "$*" in
+    *fm-task-x1*) printf '%s' "$FM_FAKE_PARENT_LIVE" ;;
+    *"$child_label"*) printf '%s' "$child_live" ;;
+  esac
+}
 case "${1:-}" in
-  display-message) [ -f "$FM_FAKE_PARENT_LIVE" ]; exit $? ;;
+  display-message)
+    marker=$(live_marker "$@")
+    [ -n "$marker" ] && [ -f "$marker" ] || exit 1
+    case " $* " in
+      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    esac
+    exit 0
+    ;;
   list-panes) exit 0 ;;
-  kill-window) rm -f "$FM_FAKE_PARENT_LIVE"; exit 0 ;;
+  list-windows)
+    [ ! -f "$FM_FAKE_PARENT_LIVE" ] || printf '%s\n' fm-task-x1
+    [ ! -f "$child_live" ] || printf '%s\n' "$child_label"
+    exit 0
+    ;;
+  kill-window)
+    case "$*" in
+      *fm-task-x1*) rm -f "$FM_FAKE_PARENT_LIVE" ;;
+      *"$child_label"*) rm -f "$child_live" ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
+  } > "$FORCED_CHILD_CASE_DIR/fakebin/tmux"
   chmod +x "$FORCED_CHILD_CASE_DIR/fakebin/tmux"
 }
 
@@ -2662,16 +2791,18 @@ SH
 }
 
 test_forced_secondmate_retains_unverified_process_group() {
-  local case_dir child_worktree child_id lock child_pid_file rc group anchor_state owner
+  local case_dir child_worktree child_id lock child_pid_file rc group anchor_state owner ps_broken
   child_id=child-return-unverified-x8
   setup_forced_secondmate_child_case secondmate-child-return-unverified "$child_id"
   case_dir=$FORCED_CHILD_CASE_DIR
   child_worktree=$FORCED_CHILD_WORKTREE
   lock=$(checkout_lock_path "$child_worktree" "$case_dir/checkout-locks")
   child_pid_file="$case_dir/treehouse-unverified-child.pid"
+  ps_broken="$case_dir/ps-broken"
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = return ]; then
+  : > "$FM_FAKE_PS_BROKEN"
   (
     trap '' TERM
     while :; do
@@ -2682,14 +2813,20 @@ if [ "${1:-}" = return ]; then
 fi
 exit 0
 SH
+  # Break `ps` only from the Treehouse return onward. An unconditionally failing
+  # `ps` also breaks the earlier bounded upstream probe of the firstmate source,
+  # which refuses long before any child cleanup and hides the behaviour under
+  # test - the process-tree reap of THIS return being unverifiable.
   cat > "$case_dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
-exit 1
+[ ! -f "$FM_FAKE_PS_BROKEN" ] || exit 1
+exec "${REAL_PS_FOR_TEST:?}" "$@"
 SH
   chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/ps"
 
   set +e
   FM_FAKE_PARENT_LIVE="$FORCED_CHILD_PARENT_LIVE" \
+  FM_FAKE_PS_BROKEN="$ps_broken" \
   TREEHOUSE_RETURN_CHILD_PID_FILE="$child_pid_file" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -2761,7 +2898,7 @@ test_forced_secondmate_retains_child_when_treehouse_unavailable() {
 }
 
 test_forced_secondmate_retains_child_on_checkout_lock_contention() {
-  local case_dir child_project child_worktree child_id lock_root lock parent_live rc
+  local case_dir child_project child_worktree child_id lock_root lock parent_live child_live rc
   case_dir=$(make_case secondmate-child-checkout-contention)
   child_project="$case_dir/child-project"
   child_worktree="$case_dir/child-worktree"
@@ -2772,7 +2909,7 @@ test_forced_secondmate_retains_child_on_checkout_lock_contention() {
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
     "worktree=$case_dir/wt" \
-    "project=$case_dir/project" \
+    "project=$case_dir/wt" \
     'kind=secondmate' \
     'mode=secondmate' \
     "home=$case_dir/wt"
@@ -2780,6 +2917,7 @@ test_forced_secondmate_retains_child_on_checkout_lock_contention() {
   write_treehouse_lease "$child_worktree" "firstmate-$child_id"
   fm_write_meta "$case_dir/wt/state/$child_id.meta" \
     "window=fm-$child_id" \
+    "tmux_session_target=firstmate:fm-$child_id" \
     "worktree=$child_worktree" \
     "project=$child_project" \
     'kind=ship' \
@@ -2788,20 +2926,48 @@ test_forced_secondmate_retains_child_on_checkout_lock_contention() {
   mkdir -p "$lock"
   printf '%s\n' "$$" > "$lock/pid"
   parent_live="$case_dir/parent-live"
+  child_live="$case_dir/child-live"
   : > "$parent_live"
+  : > "$child_live"
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+set -u
+live_marker() {
+  case "$*" in
+    *fm-task-x1*) printf '%s' "$FM_FAKE_PARENT_LIVE" ;;
+    *fm-child-contention-x5*) printf '%s' "$FM_FAKE_CHILD_LIVE" ;;
+  esac
+}
 case "${1:-}" in
-  display-message) [ -f "$FM_FAKE_PARENT_LIVE" ]; exit $? ;;
+  display-message)
+    marker=$(live_marker "$@")
+    [ -n "$marker" ] && [ -f "$marker" ] || exit 1
+    case " $* " in
+      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    esac
+    exit 0
+    ;;
   list-panes) exit 0 ;;
-  kill-window) rm -f "$FM_FAKE_PARENT_LIVE"; exit 0 ;;
+  list-windows)
+    [ ! -f "$FM_FAKE_PARENT_LIVE" ] || printf '%s\n' fm-task-x1
+    [ ! -f "$FM_FAKE_CHILD_LIVE" ] || printf '%s\n' fm-child-contention-x5
+    exit 0
+    ;;
+  kill-window)
+    case "$*" in
+      *fm-task-x1*) rm -f "$FM_FAKE_PARENT_LIVE" ;;
+      *fm-child-contention-x5*) rm -f "$FM_FAKE_CHILD_LIVE" ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tmux"
 
   set +e
-  FM_FAKE_PARENT_LIVE="$parent_live" FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
+  FM_FAKE_PARENT_LIVE="$parent_live" FM_FAKE_CHILD_LIVE="$child_live" \
+  FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -2824,8 +2990,16 @@ test_herdr_teardown_clears_escalation_marker() {
   sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
   rm -f "$case_dir/state/task-x1.meta.bak"
   printf '%s\n' 'backend=herdr' >> "$case_dir/state/task-x1.meta"
+  # fm_backend_target_state validates `session list --json` with jq before it will
+  # call an endpoint absent; a stub that answers every subcommand with silent
+  # exit 0 leaves the state `unknown`, which correctly retains metadata and never
+  # reaches the marker cleanup this case is about. Report the pane's session as
+  # gone - the endpoint really is absent by teardown time.
   cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
+case "$*" in
+  'session list --json') printf '{"sessions":[]}\n' ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/herdr"
@@ -2852,11 +3026,22 @@ test_required_report_blocks_then_publishes_before_cleanup() {
   mkdir -p "$data/task-x1"
   printf '# Task\n\nPublish before cleanup\n' > "$data/task-x1/brief.md"
   printf 'done: implementation landed\n' > "$case_dir/state/task-x1.status"
+  # Answer #{pane_current_command} and list-windows too: a present pane whose
+  # foreground command is unreadable classifies as `unknown`, which retains
+  # metadata before teardown ever reaches kill-window, so the quiescence this
+  # case asserts could never happen. A bare shell is a present-but-idle endpoint.
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) [ -f "$FM_FAKE_REPORT_LIVE" ]; exit $? ;;
+  display-message)
+    [ -f "$FM_FAKE_REPORT_LIVE" ] || exit 1
+    case " $* " in
+      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    esac
+    exit 0
+    ;;
   list-panes) exit 0 ;;
+  list-windows) [ ! -f "$FM_FAKE_REPORT_LIVE" ] || printf '%s\n' fm-task-x1; exit 0 ;;
   kill-window)
     if [ -f "$FM_FAKE_COMPLETION_PATH" ]; then
       printf '\nQuiesced final state.\n' >> "$FM_FAKE_COMPLETION_PATH"
@@ -2985,8 +3170,15 @@ test_required_report_revalidates_after_quiescence() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) [ -f "$FM_FAKE_REPORT_LIVE" ]; exit $? ;;
+  display-message)
+    [ -f "$FM_FAKE_REPORT_LIVE" ] || exit 1
+    case " $* " in
+      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    esac
+    exit 0
+    ;;
   list-panes) exit 0 ;;
+  list-windows) [ ! -f "$FM_FAKE_REPORT_LIVE" ] || printf '%s\n' fm-task-x1; exit 0 ;;
   kill-window)
     printf 'late work\n' > "$FM_FAKE_WORKTREE/late-work.txt"
     rm -f "$FM_FAKE_REPORT_LIVE"
@@ -3022,8 +3214,14 @@ test_legacy_teardown_revalidates_after_quiescence() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) [ -f "$FM_FAKE_REPORT_LIVE" ]; exit $? ;;
-  list-windows) exit 0 ;;
+  display-message)
+    [ -f "$FM_FAKE_REPORT_LIVE" ] || exit 1
+    case " $* " in
+      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    esac
+    exit 0
+    ;;
+  list-windows) [ ! -f "$FM_FAKE_REPORT_LIVE" ] || printf '%s\n' fm-task-x1; exit 0 ;;
   kill-window)
     printf 'late work\n' > "$FM_FAKE_WORKTREE/late-work.txt"
     rm -f "$FM_FAKE_REPORT_LIVE"
@@ -3163,13 +3361,21 @@ SH
 test_secondmate_rejects_drifted_home_repository_identity() {
   local case_dir marker rc
   case_dir=$(make_case secondmate-home-identity-drift)
-  mkdir -p "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" "$case_dir/wt/projects"
+  mkdir -p "$case_dir/data" "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" \
+    "$case_dir/wt/projects"
   printf '%s\n' task-x1 > "$case_dir/wt/.fm-secondmate-home"
+  # Registration is proved before the repository-identity check, so without a
+  # registry entry teardown refuses for a missing registration and never reaches
+  # the drift this case exists to pin. The home keeps make_case's own origin,
+  # which is what makes its repository identity genuinely differ from the source.
+  printf '%s\n' \
+    "- task-x1 - test secondmate (home: $(cd "$case_dir/wt" && pwd -P); scope: test; projects: test; added 2026-07-23)" \
+    > "$case_dir/data/secondmates.md"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
     "worktree=$case_dir/wt" \
-    "project=$case_dir/project" \
+    "project=$case_dir/wt" \
     'kind=secondmate' \
     'mode=secondmate' \
     "home=$case_dir/wt"
@@ -3203,7 +3409,7 @@ test_normal_secondmate_retires_proven_detached_head() {
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
     "worktree=$case_dir/wt" \
-    "project=$case_dir/project" \
+    "project=$case_dir/wt" \
     'kind=secondmate' \
     'mode=secondmate' \
     "home=$case_dir/wt"
@@ -3342,7 +3548,7 @@ test_forced_secondmate_retains_unquiesced_unmanaged_child() {
     'window=fm-task-x1' \
     'tmux_session_target=firstmate:fm-task-x1' \
     "worktree=$case_dir/wt" \
-    "project=$case_dir/project" \
+    "project=$case_dir/wt" \
     'kind=secondmate' \
     'mode=secondmate' \
     "home=$case_dir/wt"
@@ -3369,15 +3575,21 @@ done
 case "${1:-}" in
   display-message)
     case "$target" in
-      *task-x1) [ -f "$FM_FAKE_PARENT_LIVE" ] ;;
-      *child-live-x9) [ -f "$FM_FAKE_CHILD_LIVE" ] ;;
+      *task-x1) [ -f "$FM_FAKE_PARENT_LIVE" ] || exit 1 ;;
+      *child-live-x9) [ -f "$FM_FAKE_CHILD_LIVE" ] || exit 1 ;;
       *) exit 1 ;;
     esac
-    exit $?
+    # Both endpoints are running agents. Without a #{pane_current_command}
+    # answer the pane classifies as `unknown`, which blocks cleanup for an
+    # unprovable state rather than for the live child this case is about.
+    case " $* " in
+      *' #{pane_current_command} '*) printf '%s\n' claude ;;
+    esac
+    exit 0
     ;;
   list-windows)
-    [ -f "$FM_FAKE_PARENT_LIVE" ] && printf '%s\n' fm-task-x1
-    [ -f "$FM_FAKE_CHILD_LIVE" ] && printf '%s\n' fm-child-live-x9
+    [ ! -f "$FM_FAKE_PARENT_LIVE" ] || printf '%s\n' fm-task-x1
+    [ ! -f "$FM_FAKE_CHILD_LIVE" ] || printf '%s\n' fm-child-live-x9
     ;;
   kill-window)
     case "$target" in
@@ -4515,8 +4727,10 @@ test_secondmate_retirement_serializes_child_spawn() {
   case_dir=$(make_case secondmate-retirement-child-race)
   prepare_secondmate_home_fixture "$case_dir"
   write_secondmate_meta "$case_dir"
-  child_project="$case_dir/wt/projects/child-project"
-  fm_git_init_commit "$child_project"
+  # Spawn the child into the home's ALREADY REGISTERED project clone. Adding a
+  # second, unregistered clone under the home makes retirement refuse for a
+  # registration mismatch before it reaches the quiescence boundary this case races.
+  child_project="$case_dir/wt/projects/test"
   mkdir -p "$case_dir/wt/data/child"
   printf '%s\n' 'Do bounded child work.' > "$case_dir/wt/data/child/brief.md"
   cat > "$case_dir/fakebin/tmux" <<'SH'
@@ -4525,7 +4739,13 @@ state="$(dirname "$0")/.tmux-live"
 started="$(dirname "$0")/.retirement-started"
 release="$(dirname "$0")/.retirement-release"
 case "${1:-}" in
-  display-message) [ -f "$state" ]; exit $? ;;
+  display-message)
+    [ -f "$state" ] || exit 1
+    case " $* " in
+      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    esac
+    exit 0
+    ;;
   list-windows) [ ! -f "$state" ] || printf '%s\n' fm-task-x1; exit 0 ;;
   kill-window)
     : > "$started"
@@ -4556,7 +4776,7 @@ SH
   FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 \
   FM_SPAWN_NO_GUARD=1 \
   PATH="$case_dir/fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" child child-project claude \
+    "$ROOT/bin/fm-spawn.sh" child test claude \
       > "$case_dir/spawn-stdout" 2> "$case_dir/spawn-stderr"
   spawn_rc=$?
   set -e

@@ -54,13 +54,18 @@
 # the handle stale, and remove the recorded worktree under its checkout lock;
 # teardown never substitutes the shared window alias for a missing terminal.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Teardown proves
-# the home clean and every ref and reflog commit landed, then quiesces its endpoint and
-# refuses while the home has in-flight crewmate meta files. --force authorizes
-# recursive retirement only after every child passes the same endpoint, identity,
-# cleanliness, stash, and landed-work proofs. Project retirement also rejects
-# mount boundaries, rewritten history, and landing authorities whose complete Git
-# object storage or network transport may depend on the retiring home or local machine. Removing a
-# leased home releases its durable treehouse lease so the pool slot is freed,
+# the home clean and every ref and reflog commit landed. Without --force it also
+# proves the child-secondmate registry empty before quiescing the endpoint, so a
+# known refusal never stops a live supervisor; the same proof is repeated after
+# quiescence. It still refuses while the home has in-flight crewmate meta files.
+# --force authorizes recursive retirement only after every child passes the same
+# endpoint, identity, cleanliness, stash, and landed-work proofs. A retiring
+# project's linked worktrees are admitted only when attributable to registered
+# child metadata. Project retirement also rejects symlinked operational
+# directories, mount boundaries, rewritten history, and landing authorities whose
+# complete Git object storage or network transport may depend on the retiring home
+# or local machine. Removing a leased home releases its durable treehouse lease so
+# the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch]
@@ -108,6 +113,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# Same canonical resolution every other script uses (fm-spawn, fm-bootstrap,
+# fm-home-seed, fm-fleet-sync, fm-fleet-snapshot, fm-checkout-refresh): with
+# FM_HOME set, `projects/` is an operational dir of the HOME, not of the repo.
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
@@ -2130,6 +2139,17 @@ validate_firstmate_operational_dirs_for_removal() {
       echo "REFUSED: unsafe $label $name directory $dir resolves outside the secondmate home" >&2
       return 1
     fi
+    # Refuse a symlinked operational directory outright, even one resolving inside
+    # the home. Teardown is destructive and proves what it deletes by exact physical
+    # identity - canonical paths and device:inode checks - and a symlink is precisely
+    # what makes the logical path differ from the physical target it would delete.
+    # secondmate_state_metadata already refuses any symlinked state directory for
+    # that reason; this closes the same hole for the other three instead of
+    # permitting a hazardous degree of freedom nothing asks for.
+    if [ -L "$dir" ]; then
+      echo "REFUSED: unsafe $label $name path $dir is a symlink to $abs_dir; teardown removes only physical directories it can prove by identity" >&2
+      return 1
+    fi
   done
 }
 
@@ -3239,13 +3259,24 @@ EOF
 }
 
 validate_surviving_repository_authority() {
-  local repository=$1 bare
+  local repository=$1 container=${3:-$1} bare
   bare=$(git -C "$repository" rev-parse --is-bare-repository 2>/dev/null) || return 1
   if [ "$bare" = true ]; then
     validate_surviving_repository_authority_locked "$@"
     return
   fi
-  fm_checkout_lock_run "$repository" "$CHECKOUT_LOCK_ROOT" \
+  # Serialize on the enclosing CONTAINER checkout, not on the nested repository
+  # itself. The proof below is read-only; the lock exists so a concurrent checkout
+  # mutation cannot invalidate it, and the container is the checkout that
+  # enumeration walked and whose mutation is the hazard. It is also the only shape
+  # that can be keyed: a submodule's .git is a gitlink FILE whose absolute git dir
+  # IS its common dir (verified with git 2.50.1: <super>/.git/modules/<path>), and
+  # `git worktree list` run inside one reports that git dir rather than the working
+  # tree, so fm_checkout_validate_git_metadata's registered-worktree assertion can
+  # never hold for it and the lock identity was simply unresolvable - which refused
+  # every retirement of a home whose project carries a submodule. For a top-level
+  # repository the container IS the repository, so that path is unchanged.
+  fm_checkout_lock_run "$container" "$CHECKOUT_LOCK_ROOT" \
     validate_surviving_repository_authority_locked "$@"
 }
 
@@ -3593,9 +3624,36 @@ except OSError:
 PY
 }
 
+# registered_child_project_worktrees: the canonical worktree path of every child
+# REGISTERED in <retiring-home>'s own state whose recorded project resolves to
+# <repository>, one per line. This is the only thing that may vouch for a linked
+# worktree of a secondmate's project clone (see
+# validate_secondmate_repository_worktree_graph). Attribution is deliberately
+# narrow: a child must record BOTH a worktree and a project, the project must
+# resolve to exactly this repository, and both paths are canonicalized before
+# comparison, so an arbitrary or unattributable worktree can never be admitted.
+# Fails closed - an unenumerable state directory is an error, never an empty set.
+registered_child_project_worktrees() {  # <retiring-home> <repository>
+  local home=$1 repository=$2 metas meta child_worktree child_project canonical
+  metas=$(secondmate_state_metadata "$home") || return 1
+  while IFS= read -r meta; do
+    [ -n "$meta" ] || continue
+    child_worktree=$(meta_value "$meta" worktree)
+    child_project=$(meta_value "$meta" project)
+    [ -n "$child_worktree" ] && [ -n "$child_project" ] || continue
+    child_project=$(fm_checkout_trusted_dir "$child_project" 2>/dev/null) || continue
+    [ "$child_project" = "$repository" ] || continue
+    canonical=$(fm_checkout_trusted_dir "$child_worktree" 2>/dev/null) || continue
+    printf '%s\n' "$canonical"
+  done <<EOF
+$metas
+EOF
+}
+
 validate_secondmate_repository_worktree_graph() {
   local repository=$1 retiring_home=$2 repository_container=${3:-$1}
   local common listed records path kind canonical count=0 bare_repository container_git submodule_admin=0
+  local registered_worktrees
   bare_repository=$(git -C "$repository" rev-parse --is-bare-repository 2>/dev/null) || return 1
   common=$(git -C "$repository" rev-parse --git-common-dir 2>/dev/null) || return 1
   case "$common" in /*) ;; *) common="$repository/$common" ;; esac
@@ -3614,6 +3672,17 @@ validate_secondmate_repository_worktree_graph() {
   fi
   listed=$(git -C "$repository" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || {
     echo "REFUSED: secondmate project linked-worktree graph is uninspectable at $repository" >&2
+    return 1
+  }
+  # A secondmate holds its project CLONES under home/projects while its crewmates'
+  # worktrees live outside in the Treehouse pool as LINKED worktrees of those
+  # clones - the ordinary running state of any secondmate with live crewmates. So
+  # this graph admits a linked worktree that a REGISTERED child of this home owns,
+  # and nothing else. It stays a pre-destruction guard: an unregistered, foreign,
+  # or unattributable worktree still refuses retirement here, before anything is
+  # removed.
+  registered_worktrees=$(registered_child_project_worktrees "$retiring_home" "$repository") || {
+    echo "REFUSED: secondmate child registration is unprovable while proving linked-worktree ownership at $repository" >&2
     return 1
   }
   records=$(printf '%s\n' "$listed" | awk '
@@ -3658,10 +3727,12 @@ validate_secondmate_repository_worktree_graph() {
         fi
         ;;
       worktree)
-        count=$((count + 1))
         if [ "$canonical" = "$repository" ]; then
-          :
+          count=$((count + 1))
         elif [ "$submodule_admin" -eq 1 ] && [ "$canonical" = "$common" ]; then
+          count=$((count + 1))
+        elif [ -n "$registered_worktrees" ] \
+          && printf '%s\n' "$registered_worktrees" | grep -qxF -- "$canonical"; then
           :
         else
           echo "REFUSED: secondmate project common Git directory owns another linked worktree at $canonical" >&2
@@ -3825,6 +3896,7 @@ EOF
 
 validate_secondmate_project_clones() {
   local home=$1 registry=$2 expected_id=$3 expected_source=$4 projects_root source_projects_root
+  local source_projects_candidate
   local expected listed project clone source_clone repositories relative repository source_repository
   if ! expected=$(fm_secondmate_registry_query "$registry" query "$expected_id" projects); then
     if [ "$registry" = "$PREPARED_REGISTRY_PATH" ] \
@@ -3871,13 +3943,20 @@ PY
     echo "REFUSED: secondmate project clones do not exactly match the registration for $expected_id" >&2
     return 1
   }
-  if [ "$expected_source" = "$FM_ROOT" ] && [ -n "${FM_PROJECTS_OVERRIDE:-}" ]; then
-    source_projects_root=$FM_PROJECTS_OVERRIDE
+  # When the source IS this firstmate's own repo, its projects live wherever THIS
+  # home puts them, exactly as the registry lookup above resolves through $DATA
+  # rather than "$expected_source/data". Requiring FM_PROJECTS_OVERRIDE to be set
+  # here meant that with FM_HOME pointing at a home outside the repo - the
+  # documented multi-home layout - teardown looked for the parent's clones in the
+  # repo root, found nothing, and refused to retire any secondmate.
+  # A source that is NOT this repo is a foreign home, so it keeps its own layout.
+  if [ "$expected_source" = "$FM_ROOT" ]; then
+    source_projects_candidate=$PROJECTS
   else
-    source_projects_root="$expected_source/projects"
+    source_projects_candidate="$expected_source/projects"
   fi
-  source_projects_root=$(fm_checkout_trusted_dir "$source_projects_root") || {
-    echo "REFUSED: registered source projects are unavailable or redirected at $source_projects_root" >&2
+  source_projects_root=$(fm_checkout_trusted_dir "$source_projects_candidate") || {
+    echo "REFUSED: registered source projects are unavailable or redirected at $source_projects_candidate" >&2
     return 1
   }
   while IFS= read -r project; do
@@ -3945,6 +4024,11 @@ validate_firstmate_home_for_removal() {
     return 1
   }
   validate_firstmate_home_repository_identity "$abs_home_path" "$expected_source" || return 1
+  # The operational-directory proof is the most specific statement available about a
+  # structurally broken home, and it is read-only, so it speaks before the proofs
+  # below - all of which also read the home's state directory and would otherwise
+  # answer first with a vaguer reason for the same underlying fault.
+  validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
   if [ "$source_authority" -eq 1 ]; then
     validate_surviving_repository_authority \
       "$expected_source" "$abs_home_path" "$expected_source" \
@@ -3953,12 +4037,21 @@ validate_firstmate_home_for_removal() {
   if [ -n "$expected_id" ] && firstmate_home_has_treehouse_slot "$abs_home_path" "$expected_source"; then
     require_treehouse_task_lease "$abs_home_path" "$expected_id" || return 1
   fi
-  validate_secondmate_home_landed_state "$abs_home_path" "$expected_source" || return 1
+  # Structural proofs run BEFORE the landed-state (cleanliness) proof. Every proof
+  # here is read-only and every one of them already runs before any destruction, so
+  # this only decides which refusal an operator is shown first - not whether any
+  # check happens. It matters because a structural violation manifests as untracked
+  # content: an operational directory symlinked out of the home, or a nested home
+  # inside it, both surface to `git status` as untracked paths, so the cleanliness
+  # proof used to answer first and report "has unlanded changes: ?? state" for a
+  # problem that has nothing to do with unlanded work. The more specific proof now
+  # speaks first. Each still returns non-zero on its own failure, so a home with
+  # both a structural violation and genuinely unlanded work is still refused.
   if [ -n "$expected_id" ]; then
     validate_secondmate_project_clones \
       "$abs_home_path" "$expected_registry" "$expected_id" "$expected_source" || return 1
   fi
-  validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
+  validate_secondmate_home_landed_state "$abs_home_path" "$expected_source" || return 1
   secondmate_state_metadata "$abs_home_path" >/dev/null || return 1
   fm_secondmate_registry_query "$abs_home_path/data/secondmates.md" validate >/dev/null || {
     echo "REFUSED: child secondmate registry is malformed or uninspectable at $abs_home_path/data/secondmates.md" >&2
@@ -4189,7 +4282,12 @@ cleanup_firstmate_home_children() {
     fi
     if [ "$child_kind" = secondmate ]; then
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home" || return 1
+        # Preserve the nested cleanup's own status: the retry-able checkout
+        # conditions below (75 contention, 76 unverified process cleanup, 124
+        # timeout, 127 Treehouse unavailable, or the return command's own status)
+        # are how an operator tells "retry this" from a safety refusal, and
+        # flattening them all to 1 would erase that distinction at every level.
+        cleanup_firstmate_home_children "$child_home" || return $?
         child_registry_lock=$(fm_secondmate_registry_lock_acquire "$CHECKOUT_LOCK_ROOT" "$home/data/secondmates.md") || return 1
         TEARDOWN_ACCOUNT_LOCKS+=("$child_registry_lock")
         validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" "$home/data/secondmates.md" "$child_proj" >/dev/null || return 1
@@ -4423,6 +4521,17 @@ if [ "$KIND" = secondmate ]; then
     >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+  else
+    # Prove the home registers no child homes BEFORE stopping its endpoint. Stopping
+    # a supervisor is irreversible - it cannot be un-stopped and its in-flight context
+    # is gone - so a read-only proof that gates it must run first, or an operator loses
+    # a live secondmate to a teardown that was always going to refuse. The same proof
+    # still runs at its original place below, so nothing is skipped.
+    # Non-force only, deliberately: on the --force path cleanup_firstmate_home_children
+    # removes child registry entries before the later check, so that check legitimately
+    # observes post-cleanup state and hoisting it there would change what it observes,
+    # not merely when it runs.
+    require_empty_secondmate_registry "$HOME_PATH" || exit 1
   fi
   quiesce_secondmate_endpoint || exit 1
   if [ "$FORCE" = "--force" ]; then
@@ -4596,7 +4705,7 @@ if [ "$MANAGED_ACCOUNT" = 1 ]; then
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH" || exit 1
+  cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
 [ "$KIND" = secondmate ] || validate_teardown_target_identity || exit 1

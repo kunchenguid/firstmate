@@ -30,28 +30,58 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def host_system_tool_paths() -> dict[str, Path]:
+def host_system_tool_paths() -> dict[str, Path] | None:
+    """Map each pinned system tool to a host path the BUILDER will also accept.
+
+    The fixture must never accept a tool the builder then rejects: every case
+    would die on that rejection instead of its own assertion. So usability is the
+    builder's own validation - which carries the ancestry rule - plus the
+    manifest's separate root-ownership requirement (load_manifest refuses any
+    system tool whose st_uid is not 0).
+
+    Returns None when nothing qualifies. That is a real host condition rather
+    than a bug: a runner image whose /usr is owned by neither root nor the
+    invoking uid leaves no usable root-owned system tool, and a test-created
+    fallback cannot stand in because a test process cannot own a file as root.
+    Callers skip, so the gap is visible and states its reason. Do NOT substitute
+    a relaxed ancestry rule here - that would silently stop exercising the
+    ownership property these tests exist to cover.
+    """
+
     def usable(path: Path) -> bool:
         try:
             metadata = path.lstat()
         except OSError:
             return False
-        return (
+        if not (
             stat.S_ISREG(metadata.st_mode)
             and metadata.st_uid == 0
             and not stat.S_IMODE(metadata.st_mode) & 0o022
             and Path(os.path.realpath(path)) == path
             and os.access(path, os.X_OK)
-        )
+        ):
+            return False
+        try:
+            builder._require_regular(
+                path, "fixture system tool", executable=True, allow_root_owner=True
+            )
+        except (OSError, builder.BuildError):
+            return False
+        return True
 
     fallback = next(
-        path
-        for path in map(
-            Path,
-            ("/usr/bin/true", "/bin/true", "/usr/bin/env", "/bin/echo"),
-        )
-        if usable(path)
+        (
+            path
+            for path in map(
+                Path,
+                ("/usr/bin/true", "/bin/true", "/usr/bin/env", "/bin/echo"),
+            )
+            if usable(path)
+        ),
+        None,
     )
+    if fallback is None:
+        return None
     return {
         name: path if usable(path) else fallback
         for name, path in builder.SYSTEM_TOOL_PATHS.items()
@@ -180,8 +210,13 @@ class SealedRuntimeBuilderTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="sealed-builder-test-")
         self.root = Path(os.path.realpath(self.temporary.name))
+        system_tools = host_system_tool_paths()
+        if system_tools is None:
+            raise unittest.SkipTest(
+                "no root-owned system tool with builder-safe ancestry on this host"
+            )
         self.system_tools_patch = mock.patch.object(
-            builder, "SYSTEM_TOOL_PATHS", host_system_tool_paths()
+            builder, "SYSTEM_TOOL_PATHS", system_tools
         )
         self.system_tools_patch.start()
         self.fixture = ManifestFixture(self.root)

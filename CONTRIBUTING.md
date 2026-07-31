@@ -70,7 +70,7 @@ Check and test the toolbelt before pushing:
 ```sh
 for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
 bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
-for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
+for test_script in tests/*.test.sh; do case "$test_script" in tests/fm-afk-launch.test.sh|tests/fm-backend-autodetect-smoke.test.sh|tests/fm-backend-herdr-workspace-per-home-e2e.test.sh) continue ;; esac; bash "$test_script"; done   # behavior tests safe for a developer checkout
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
@@ -80,7 +80,14 @@ Agent Fleet is independently packaged under `tools/agent-fleet` and requires Pyt
 Run the complete locked verification in [`tools/agent-fleet/RELEASING.md`](tools/agent-fleet/RELEASING.md) before pushing; that document also owns versioning, tagging, and clean-install verification.
 
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
-Tests that need a real optional backend, an explicit opt-in, or an ambient toolchain capability (real herdr/zellij/cmux smoke tests, the live Pi regression, the Pi TypeScript-extension checks when node cannot import `.ts` modules directly) skip themselves and print the tool or environment gate needed to enable them, so the run-all loop above is always safe.
+When triaging a red `Behavior tests` job, remember that CI runs that loop under `set -eu` while the local loop above does not: CI stops at the first failing script, so its log proves nothing about the suites that sort after it, and a red job is a lower bound on the failure count rather than the whole list.
+Reproduce with the exclusion-aware local loop to see every safe failure at once before concluding which ones are real.
+Reproduce in a checkout whose `origin` is the repository's https URL, as CI's own checkout is: the secondmate network-authority fixtures assert that the product pins the resolved address of the origin host, and a checkout whose `origin` is a local filesystem path has no host to pin, so those cases refuse for a reason that exists only locally.
+Run the suites from a checkout sitting on its default branch, not from a task-branch worktree - the worktree-tangle guard fires and several secondmate suites require the default branch, which produces more failures that are pure local artifacts.
+Do not run `tests/fm-afk-launch.test.sh`, `tests/fm-backend-autodetect-smoke.test.sh`, or `tests/fm-backend-herdr-workspace-per-home-e2e.test.sh` on a developer checkout: they act on the DEFAULT Herdr workspace where the live crewmate fleet runs and can destroy other agents' unlanded work.
+CI runs them safely only because its runner is disposable and carries no fleet.
+Use `bin/fm-brief.sh --herdr-lab` for these suites; it owns the isolation contract requiring a never-default lab session, a trailing `--session` on every Herdr call, guarded teardown, and a before/after fleet-state tripwire.
+Other tests that need a real optional backend, an explicit opt-in, or an ambient toolchain capability (real zellij/cmux smoke tests, the live Pi regression, the Pi TypeScript-extension checks when node cannot import `.ts` modules directly) skip themselves and print the tool or environment gate needed to enable them.
 
 ## Questions
 

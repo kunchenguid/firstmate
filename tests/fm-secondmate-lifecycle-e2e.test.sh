@@ -30,6 +30,16 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-lifecycle)
 export FM_BACKEND=tmux
 
+# Seeding proves a home against its source repo's DEFAULT-branch tip, so pointing
+# FM_ROOT at the live checkout made this whole lifecycle pass only while that
+# checkout sat on its default branch - it could not run from a task branch at all.
+# Stand up an isolated default-branch repo carrying this checkout's content and
+# use it as the source of record instead.
+PRIMARY_ROOT="$TMP_ROOT/primary"
+git init -q -b main "$PRIMARY_ROOT"
+git -C "$PRIMARY_ROOT" fetch -q --no-tags "$ROOT" HEAD
+git -C "$PRIMARY_ROOT" reset -q --hard FETCH_HEAD
+
 HOME_DIR="$TMP_ROOT/main home"
 SUB="$TMP_ROOT/design-home"
 SUB_ABS=
@@ -70,7 +80,7 @@ EOF
 
 phase_seed() {
   local out
-  out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
+  out=$(PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
     "$ROOT/bin/fm-home-seed.sh" design "$SUB" alpha beta gamma) \
     || fail "seed failed"
   SUB_ABS=$(cd "$SUB" && pwd -P)
@@ -93,6 +103,13 @@ phase_seed() {
   assert_present "$SUB/projects/gamma/.no-mistakes-init" "no-mistakes project was not initialized in the subhome"
   assert_present "$SUB/projects/gamma/.no-mistakes-doctor" "no-mistakes project was not doctored in the subhome"
   assert_absent "$HOME_DIR/projects/gamma/.no-mistakes-init" "seed wrote no-mistakes state through the parent project"
+  # Those two markers are how the FAKE no-mistakes proves it ran; the real one
+  # sets up a bare repo, remote, and db record and leaves the clone with nothing
+  # to commit (AGENTS.md section 6). Having asserted the calls, drop the markers
+  # so the clone matches that reality - otherwise the later teardown phase meets
+  # untracked files and correctly refuses the home as holding unlanded work,
+  # which would be the fixture failing the assertion rather than the product.
+  rm -f "$SUB/projects/gamma/.no-mistakes-init" "$SUB/projects/gamma/.no-mistakes-doctor"
 
   # Registry line: scope from the filled brief, project list, no legacy owns field.
   assert_grep '- design - customer onboarding charter' "$HOME_DIR/data/secondmates.md" "registry summary not from the charter"
@@ -112,7 +129,7 @@ phase_seed() {
 
 phase_spawn() {
   : > "$LOG"
-  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" \
+  PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-spawn.sh" design "$SUB" codex --secondmate >/dev/null \
     || fail "secondmate spawn failed"
@@ -198,7 +215,7 @@ phase_recovery() {
   # Simulate a restart: drop the live meta, then respawn from the registry +
   # persistent home (no explicit home argument).
   rm -f "$HOME_DIR/state/design.meta"
-  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+  PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-spawn.sh" design "echo relaunch" --secondmate >/dev/null 2>&1 \
     || fail "recovery respawn failed"
   local meta="$HOME_DIR/state/design.meta"
@@ -211,9 +228,9 @@ phase_recovery() {
 phase_teardown() {
   local teardown_out
   : > "$LOG"
-  teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+  teardown_out=$(PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-teardown.sh" design 2>&1) \
-    || fail "teardown failed for the empty secondmate home"
+    || fail "teardown failed for the empty secondmate home: $teardown_out"
   printf '%s\n' "$teardown_out" | grep -F 'Backlog:' >/dev/null \
     && fail "secondmate teardown emitted a main-backlog completion reminder"
   assert_absent "$SUB" "teardown did not remove the retired secondmate home"

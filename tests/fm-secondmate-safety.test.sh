@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
+# shellcheck source=bin/fm-checkout-lock-lib.sh disable=SC1091
+. "$ROOT/bin/fm-checkout-lock-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 export FM_BACKEND=tmux
@@ -28,6 +30,11 @@ make_live_default_firstmate_worktree() {
   git -C "$source" worktree add --quiet --detach "$destination" main
   printf '%s\n' "$source"
 }
+
+FM_ROOT_OVERRIDE=$(make_live_default_firstmate_worktree \
+  "$TMP_ROOT/default-firstmate-home" default-firstmate)
+git -C "$FM_ROOT_OVERRIDE" remote set-url origin "file://$FM_ROOT_OVERRIDE"
+export FM_ROOT_OVERRIDE
 
 write_secondmate_registration() {
   local home=$1 id=$2 target=$3 target_abs
@@ -239,7 +246,7 @@ test_home_seed_uses_treehouse_acquired_home() {
 }
 
 test_home_seed_acquisition_honors_shared_checkout_lock() {
-  local home acquired fakebin log err source common key lock_root lock state_root
+  local home acquired fakebin log err source lock_root lock state_root
   home="$TMP_ROOT/dash-lock-home"
   acquired="$TMP_ROOT/dash-lock-acquired-home"
   err="$TMP_ROOT/dash-lock.err"
@@ -252,11 +259,7 @@ test_home_seed_acquisition_honors_shared_checkout_lock() {
   log="$TMP_ROOT/dash-lock-fake/tmux.log"
   state_root="$TMP_ROOT/dash-lock-state"
   lock_root="$TMP_ROOT/dash-lock-locks"
-  common=$(git -C "$source" rev-parse --git-common-dir)
-  case "$common" in /*) ;; *) common="$source/$common" ;; esac
-  common=$(cd "$common" && pwd -P)
-  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
-  lock="$lock_root/$key.lock"
+  lock=$(fm_checkout_lock_path "$source" "$lock_root")
   mkdir -p "$lock" "$state_root"
   printf '%s\n' "$$" > "$lock/pid"
 
@@ -395,7 +398,7 @@ test_home_seed_retains_repository_mismatch_acquisition() {
 }
 
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
-  local home acquired acquired_abs fakebin log err source common key lock_root expected_lock lock_marker
+  local home acquired acquired_abs fakebin log err source lock_root expected_lock lock_marker
   home="$TMP_ROOT/dash-fail-home"
   acquired="$TMP_ROOT/dash-fail-acquired-home"
   err="$TMP_ROOT/dash-fail.err"
@@ -405,12 +408,8 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   source=$(make_live_default_firstmate_worktree "$acquired" dash-fail-firstmate)
   acquired_abs=$(cd "$acquired" && pwd -P)
-  common=$(git -C "$acquired" rev-parse --git-common-dir)
-  case "$common" in /*) ;; *) common="$acquired/$common" ;; esac
-  common=$(cd "$common" && pwd -P)
-  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
   lock_root="$TMP_ROOT/dash-fail-locks"
-  expected_lock="$lock_root/$key.lock"
+  expected_lock=$(fm_checkout_lock_path "$acquired" "$lock_root")
   lock_marker="$TMP_ROOT/dash-fail-return-held-lock"
   printf 'other\n' > "$acquired/.fm-secondmate-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fail-fake")
@@ -468,7 +467,7 @@ test_home_seed_warns_when_acquired_home_return_fails() {
 }
 
 test_home_seed_does_not_return_unsafe_acquired_home() {
-  local home descendant fakebin log err
+  local home descendant fakebin log err source source_home
   home="$TMP_ROOT/dash-active-home"
   descendant="$home/data/dash-descendant-home"
   err="$TMP_ROOT/dash-active.err"
@@ -478,8 +477,12 @@ test_home_seed_does_not_return_unsafe_acquired_home() {
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-active-fake")
   log="$TMP_ROOT/dash-active-fake/tmux.log"
+  source_home="$TMP_ROOT/dash-active-source-home"
+  source=$(make_live_default_firstmate_worktree "$source_home" dash-active-firstmate)
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_ROOT_OVERRIDE="$source" \
+    FM_SECONDMATE_CHARTER='unsafe active home test' FM_SECONDMATE_SCOPE='unsafe active home test' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed accepted an acquired home matching the active firstmate home"
   fi
@@ -491,6 +494,8 @@ test_home_seed_does_not_return_unsafe_acquired_home() {
 
   : > "$log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$descendant" FM_FAKE_TMUX_LOG="$log" \
+    FM_ROOT_OVERRIDE="$source" \
+    FM_SECONDMATE_CHARTER='unsafe descendant home test' FM_SECONDMATE_SCOPE='unsafe descendant home test' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed accepted an acquired home inside the active firstmate home"
   fi
@@ -578,16 +583,29 @@ test_home_seed_refuses_placeholder_charter() {
 }
 
 test_home_seed_refuses_empty_charter_fields() {
-  local home subhome err
+  local home subhome scope_subhome err state_root
   home="$TMP_ROOT/empty-charter-home"
   subhome="$TMP_ROOT/empty-charter-subhome"
+  # The two attempts below need SEPARATE destinations. The refresher records each
+  # covered checkout's physical identity, so recreating a home at a path it
+  # already recorded reads as `covered checkout physical identity drifted` and the
+  # second seed is refused for an unrefreshable default branch long before it can
+  # reach the charter-field validation under test.
+  scope_subhome="$TMP_ROOT/empty-scope-subhome"
   err="$TMP_ROOT/empty-charter.err"
+  # Keep those identity records inside the case. Unscoped they land in the real
+  # ${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh, which both
+  # writes through to the operator's own state and makes this test depend on what
+  # earlier runs left behind.
+  state_root="$TMP_ROOT/empty-charter-refresh-state"
+  mkdir -p "$state_root"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/empty-charter-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
 
-  if FM_HOME="$home" FM_SECONDMATE_CHARTER='   ' "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+  if FM_HOME="$home" FM_CHECKOUT_REFRESH_STATE_ROOT="$state_root" FM_SECONDMATE_CHARTER='   ' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed accepted a whitespace-only charter"
   fi
   grep -F 'empty Charter section' "$err" >/dev/null \
@@ -597,12 +615,13 @@ test_home_seed_refuses_empty_charter_fields() {
   rm -rf "$home/data/design" "$subhome" "$err"
   FM_SECONDMATE_SCOPE='   ' scaffold_secondmate_charter "$home" design 'filled charter' alpha \
     || fail "empty scope fixture scaffold failed"
-  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+  if FM_HOME="$home" FM_CHECKOUT_REFRESH_STATE_ROOT="$state_root" \
+    "$ROOT/bin/fm-home-seed.sh" design "$scope_subhome" alpha >/dev/null 2>"$err"; then
     fail "seed accepted an empty routing scope"
   fi
   grep -F 'empty Routing scope section' "$err" >/dev/null \
     || fail "seed did not explain empty routing scope refusal"
-  [ ! -e "$subhome" ] || fail "empty routing scope seed left a generated subhome"
+  [ ! -e "$scope_subhome" ] || fail "empty routing scope seed left a generated subhome"
   pass "home seeding refuses empty normalized charter fields"
 }
 
@@ -781,9 +800,10 @@ test_home_seed_refuses_projectful_reused_charter_for_projectless_home() {
   stale_brief="$home/data/stale/brief.md"
   stale_brief_before="$TMP_ROOT/no-projects-reused-charter.before"
   err="$TMP_ROOT/no-projects-reused-charter.err"
-  mkdir -p "$home/data" "$home/state" "$reusable_sub/data" "$stale_sub/data"
-  mark_firstmate_home "$reusable_sub"
-  mark_firstmate_home "$stale_sub"
+  mkdir -p "$home/data" "$home/state"
+  git clone -q "$FM_ROOT_OVERRIDE" "$reusable_sub"
+  git clone -q "$FM_ROOT_OVERRIDE" "$stale_sub"
+  mkdir -p "$reusable_sub/data" "$stale_sub/data"
 
   scaffold_secondmate_charter "$home" reusable 'firstmate self-development' --no-projects \
     || fail "project-less charter scaffold failed"
@@ -822,8 +842,9 @@ test_home_seed_refuses_projectless_conversion_of_populated_home() {
   home="$TMP_ROOT/no-projects-conversion-home"
   sub="$TMP_ROOT/no-projects-conversion-subhome"
   err="$TMP_ROOT/no-projects-conversion.err"
-  mkdir -p "$home/data" "$home/state" "$sub/data" "$sub/projects/existing-clone"
-  mark_firstmate_home "$sub"
+  mkdir -p "$home/data" "$home/state"
+  git clone -q "$FM_ROOT_OVERRIDE" "$sub"
+  mkdir -p "$sub/data" "$sub/projects/existing-clone"
   fm_git_init_commit "$sub/projects/existing-clone"
   cat > "$sub/data/projects.md" <<EOF
 - registry-only [direct-PR] - retained project entry (added 2026-06-22)
@@ -858,7 +879,13 @@ test_home_seed_refuses_projectless_home_with_uninspectable_projects() {
   home="$TMP_ROOT/no-projects-uninspectable-home"
   sub="$TMP_ROOT/no-projects-uninspectable-subhome"
   err="$TMP_ROOT/no-projects-uninspectable.err"
-  mkdir -p "$home/data" "$home/state" "$sub/data" "$sub/projects/hidden-clone"
+  mkdir -p "$home/data" "$home/state"
+  # Seed runs the refresher's preflight on the home before it inspects projects,
+  # and that preflight requires an exact Git repository root, so a bare directory
+  # is refused for an unrefreshable default branch and never reaches the
+  # inspection failure under test. Use a real clone, like the sibling case above.
+  git clone -q "$FM_ROOT_OVERRIDE" "$sub"
+  mkdir -p "$sub/data" "$sub/projects/hidden-clone"
   mark_firstmate_home "$sub"
   fm_git_init_commit "$sub/projects/hidden-clone"
   chmod 311 "$sub/projects"
@@ -918,6 +945,43 @@ test_home_seed_refuses_projectless_home_with_symlinked_projects() {
     fail "project-less symlink refusal wrote a parent registry route"
   fi
   pass "home seeding refuses project-less homes with symlinked projects directories"
+}
+
+test_home_seed_honours_no_projects_before_reading_the_projects_tree() {
+  local home sub err
+  home="$TMP_ROOT/no-projects-precedes-preflight-home"
+  sub="$TMP_ROOT/no-projects-precedes-preflight-subhome"
+  err="$TMP_ROOT/no-projects-precedes-preflight.err"
+  mkdir -p "$home/data" "$home/state" "$sub/data" "$sub/projects/hidden-clone"
+  mark_firstmate_home "$sub"
+  fm_git_init_commit "$sub/projects/hidden-clone"
+
+  # The destination is deliberately NOT a Git repository, so the refresher
+  # preflight - which reads the destination tree, projects/ included - cannot
+  # succeed for it. --no-projects preconditions must still be honoured first and
+  # must report the specific project-data refusal, not the generic
+  # "cannot be refreshed safely". This pins the precondition ordering: a caller
+  # who passed --no-projects is never gated on a read of the tree they just said
+  # is irrelevant.
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
+    fail "project-less seed accepted a home that already contains project data"
+  fi
+  grep -F 'because it contains project data' "$err" >/dev/null \
+    || fail "project-less precondition did not run before the destination tree was read"
+  grep -F 'projects/ entries: hidden-clone' "$err" >/dev/null \
+    || fail "project-less precondition did not name the existing clone"
+  grep -F 'cannot be refreshed safely' "$err" >/dev/null \
+    && fail "project-less precondition was gated on the refresher preflight"
+  assert_present "$sub/projects/hidden-clone/.git" "project-less precondition refusal removed the existing clone"
+  assert_absent "$sub/.fm-secondmate-home" "project-less precondition refusal wrote a home marker"
+  assert_absent "$sub/data/charter.md" "project-less precondition refusal copied a charter"
+  assert_absent "$sub/state" "project-less precondition refusal left an operational directory"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- fdev ' "$home/data/secondmates.md" >/dev/null; then
+    fail "project-less precondition refusal wrote a parent registry route"
+  fi
+  pass "home seeding honours --no-projects before reading the destination projects tree"
 }
 
 test_home_seed_refuses_projectless_home_with_non_directory_projects() {
@@ -1063,7 +1127,7 @@ test_home_seed_refuses_active_home_and_root() {
   root_descendant="$root_clone/tmp/design-home"
   root_ancestor="$TMP_ROOT/active-seed-root-ancestor"
   root_inside="$root_ancestor/nested-root"
-  git clone --quiet "$ROOT" "$active_ancestor"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$active_ancestor"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/active-alpha.git"
@@ -1090,13 +1154,13 @@ test_home_seed_refuses_active_home_and_root() {
     || fail "seed did not explain active FM_HOME ancestor rejection"
   [ ! -f "$active_ancestor/.fm-secondmate-home" ] || fail "seed marked an ancestor of active FM_HOME"
 
-  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$ROOT" alpha >/dev/null 2>"$err"; then
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$FM_ROOT_OVERRIDE" alpha >/dev/null 2>"$err"; then
     fail "seed allowed secondmate home to reuse FM_ROOT"
   fi
   grep -F 'secondmate home cannot be the firstmate repo' "$err" >/dev/null \
     || fail "seed did not explain FM_ROOT rejection"
 
-  git clone --quiet "$ROOT" "$root_clone"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$root_clone"
   if FM_HOME="$home" FM_ROOT_OVERRIDE="$root_clone" "$ROOT/bin/fm-home-seed.sh" design "$root_descendant" alpha >/dev/null 2>"$err"; then
     fail "seed allowed secondmate home inside FM_ROOT"
   fi
@@ -1104,8 +1168,8 @@ test_home_seed_refuses_active_home_and_root() {
     || fail "seed did not explain FM_ROOT descendant rejection"
   [ ! -e "$root_clone/tmp" ] || fail "seed created a directory inside FM_ROOT before descendant rejection"
 
-  git clone --quiet "$ROOT" "$root_ancestor"
-  git clone --quiet "$ROOT" "$root_inside"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$root_ancestor"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$root_inside"
   if FM_HOME="$home" FM_ROOT_OVERRIDE="$root_inside" "$ROOT/bin/fm-home-seed.sh" design "$root_ancestor" alpha >/dev/null 2>"$err"; then
     fail "seed allowed secondmate home to contain FM_ROOT"
   fi
@@ -1123,7 +1187,7 @@ test_home_seed_refuses_home_marked_for_another_id() {
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/marked-alpha.git"
-  git clone --quiet "$ROOT" "$subhome"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$subhome"
   printf 'other\n' > "$subhome/.fm-secondmate-home"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for marked-home seed test"
@@ -1144,7 +1208,7 @@ test_home_seed_refuses_home_registered_to_another_id() {
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/registered-alpha.git"
-  git clone --quiet "$ROOT" "$subhome"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   printf '%s\n' '- other - other domain (home: '"$subhome_abs"'; scope: other domain; projects: beta; added 2026-06-22)' > "$home/data/secondmates.md"
@@ -1201,13 +1265,15 @@ test_home_seed_refuses_home_overlapping_registered_home() {
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/overlap-alpha.git"
-  git clone --quiet "$ROOT" "$registered_parent"
-  git clone --quiet "$ROOT" "$registered_child"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$registered_parent"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$registered_child"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   cat > "$home/data/secondmates.md" <<EOF
 - parent - parent domain (home: $registered_parent; scope: parent domain; projects: beta; added 2026-06-22)
 - child - child domain (home: $registered_child; scope: child domain; projects: gamma; added 2026-06-22)
 EOF
+  scaffold_secondmate_charter "$home" design 'design domain' alpha \
+    || fail "charter scaffold failed for registered-overlap seed test"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$nested" alpha >/dev/null 2>"$err"; then
     fail "seed accepted a home inside a registered secondmate home"
@@ -1250,7 +1316,7 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/wrong-alpha.git"
-  git clone --quiet "$ROOT" "$subhome"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$subhome"
   subhome_abs=$(cd "$subhome" && pwd -P)
   mkdir -p "$subhome/projects"
   git clone --quiet "$home/projects/alpha" "$subhome/projects/alpha"
@@ -1302,7 +1368,7 @@ test_home_seed_skips_initialized_existing_no_mistakes_projects() {
   fm_git_init_commit "$home/projects/beta"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/existing-alpha.git"
   fm_git_add_origin "$home/projects/beta" "$TMP_ROOT/remotes/existing-beta.git"
-  git clone --quiet "$ROOT" "$subhome"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$subhome"
   mkdir -p "$subhome/projects"
   origin=$(git -C "$home/projects/alpha" remote get-url origin)
   git clone --quiet "$origin" "$subhome/projects/alpha"
@@ -1335,7 +1401,7 @@ test_home_seed_refuses_uninitialized_existing_no_mistakes_project() {
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/uninitialized-alpha.git"
-  git clone --quiet "$ROOT" "$subhome"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$subhome"
   mkdir -p "$subhome/projects"
   origin=$(git -C "$home/projects/alpha" remote get-url origin)
   git clone --quiet "$origin" "$subhome/projects/alpha"
@@ -1364,7 +1430,7 @@ test_home_seed_refuses_project_destinations_outside_subhome() {
   mkdir -p "$home/projects" "$home/data" "$home/state" "$sink"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/symlink-alpha.git"
-  git clone --quiet "$ROOT" "$subhome"
+  git clone --quiet "$FM_ROOT_OVERRIDE" "$subhome"
   rm -rf "$subhome/projects"
   ln -s "$sink" "$subhome/projects"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
@@ -1394,7 +1460,7 @@ test_home_seed_refuses_operational_dirs_outside_subhome() {
     subhome="$TMP_ROOT/symlink-opdir-subhome-$opdir"
     sink="$home/data/symlink-opdir-$opdir"
     rm -rf "$subhome" "$sink"
-    git clone --quiet "$ROOT" "$subhome"
+    git clone --quiet "$FM_ROOT_OVERRIDE" "$subhome"
     mkdir -p "$sink"
     rm -rf "${subhome:?}/${opdir:?}"
     ln -s "$sink" "$subhome/$opdir"
@@ -1422,7 +1488,7 @@ test_home_seed_refuses_symlinked_leaf_files() {
     subhome="$TMP_ROOT/symlink-leaf-subhome-${leaf//\//-}"
     sink="$home/data/symlink-leaf-${leaf//\//-}"
     rm -rf "$subhome" "$sink"
-    git clone --quiet "$ROOT" "$subhome"
+    git clone --quiet "$FM_ROOT_OVERRIDE" "$subhome"
     mkdir -p "$(dirname "$subhome/$leaf")" "$(dirname "$sink")"
     expected=outside
     if [ "$leaf" = ".fm-secondmate-home" ]; then
@@ -1514,9 +1580,9 @@ SH
   fi
   grep -F 'secondmate home cannot be the active firstmate home' "$err" >/dev/null || fail "spawn did not reject active home"
 
-  write_secondmate_registration "$home" domain "$ROOT"
+  write_secondmate_registration "$home" domain "$FM_ROOT_OVERRIDE"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$ROOT" codex --secondmate >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-spawn.sh" domain "$FM_ROOT_OVERRIDE" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted the firstmate repo root"
   fi
   grep -F 'secondmate home cannot be the firstmate repo' "$err" >/dev/null || fail "spawn did not reject firstmate repo root"
@@ -1684,11 +1750,17 @@ test_fm_send_refuses_bare_window_without_home_meta() {
 test_secondmate_teardown_retires_empty_home() {
   local home subhome subhome_abs fakebin log lease fmroot
   home="$TMP_ROOT/teardown-home"
-  subhome="$TMP_ROOT/teardown-subhome"
   fmroot="$TMP_ROOT/teardown-fmroot"
   make_firstmate_git_root "$fmroot"
-  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  subhome=$(make_leased_secondmate_home "$TMP_ROOT/teardown-pool" "$fmroot" domain)
+  mkdir -p "$home/state" "$home/data" "$TMP_ROOT/remotes" "$subhome/state"
+  # The registered project list is proved on both sides: the parent home must hold
+  # the source clone, and the home's own projects/ must match the registration
+  # exactly, as an exact repository root sharing that source's origin.
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/teardown-alpha.git"
+  git clone --quiet "$(git -C "$home/projects/alpha" remote get-url origin)" \
+    "$subhome/projects/alpha"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/state/domain.meta" <<EOF
@@ -1722,12 +1794,15 @@ EOF
 test_secondmate_teardown_refuses_failed_leased_home_return() {
   local home subhome subhome_abs fakebin log fmroot err rc
   home="$TMP_ROOT/teardown-return-fail-home"
-  subhome="$TMP_ROOT/teardown-return-fail-subhome"
   fmroot="$TMP_ROOT/teardown-return-fail-fmroot"
   err="$TMP_ROOT/teardown-return-fail.err"
   make_firstmate_git_root "$fmroot"
-  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  subhome=$(make_leased_secondmate_home "$TMP_ROOT/teardown-return-fail-pool" "$fmroot" domain)
+  mkdir -p "$home/state" "$home/data" "$TMP_ROOT/remotes" "$subhome/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/teardown-return-fail-alpha.git"
+  git clone --quiet "$(git -C "$home/projects/alpha" remote get-url origin)" \
+    "$subhome/projects/alpha"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/state/domain.meta" <<EOF
@@ -1762,11 +1837,23 @@ EOF
 }
 
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return() {
-  local home subhome subhome_abs fakebin log
+  local home subhome subhome_abs fakebin log fmroot
   home="$TMP_ROOT/plain-clone-teardown-home"
   subhome="$TMP_ROOT/plain-clone-teardown-subhome"
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
-  mark_firstmate_home "$subhome"
+  fmroot="$TMP_ROOT/plain-clone-teardown-fmroot"
+  # A plain-CLONE home has to actually be a clone: teardown proves the home is an
+  # exact repository root whose identity resolves back to the source before it will
+  # remove anything, and a bare mkdir'd directory is refused long before the
+  # non-Treehouse removal path this case exists to cover. A clone (rather than a
+  # registered worktree of the source) is also what keeps it off the Treehouse path.
+  make_firstmate_git_root "$fmroot"
+  git clone --quiet "$fmroot" "$subhome"
+  mkdir -p "$home/state" "$home/data" "$TMP_ROOT/remotes" \
+    "$subhome/state" "$subhome/data" "$subhome/config" "$subhome/projects"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/plain-clone-alpha.git"
+  git clone --quiet "$(git -C "$home/projects/alpha" remote get-url origin)" \
+    "$subhome/projects/alpha"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/state/domain.meta" <<EOF
@@ -1784,7 +1871,8 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/plain-clone-teardown-fake")
   log="$TMP_ROOT/plain-clone-teardown-fake/tmux.log"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/plain-clone-teardown-fake/pane.txt" \
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/plain-clone-teardown-fake/pane.txt" \
     FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
     || fail "teardown failed for plain-clone secondmate home"
@@ -1848,14 +1936,32 @@ EOF
 }
 
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
-  local home subhome childproj childwt fakebin log err rc lock
+  local home subhome childproj childwt fakebin log err rc lock fmroot alpha_origin
   home="$TMP_ROOT/force-lock-home"
   subhome="$TMP_ROOT/force-lock-subhome"
+  fmroot="$TMP_ROOT/force-lock-fmroot"
   childproj="$subhome/projects/alpha"
-  childwt="$TMP_ROOT/force-lock-child-worktree"
+  childwt="$TMP_ROOT/force-lock-pool/1/child-worktree"
   err="$TMP_ROOT/force-lock-child.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
-  fm_git_worktree "$childproj" "$childwt" force-child-lock
+  # The home must be a real firstmate clone with the full operational directory set
+  # and a projects/ that matches its registration, all of which teardown proves
+  # before it reaches any child; and the registered project must exist on both
+  # sides, sharing an origin. A bare mkdir'd home is refused for not being an exact
+  # repository root long before the child lock refusal this case pins.
+  make_firstmate_git_root "$fmroot"
+  git clone --quiet "$fmroot" "$subhome"
+  mkdir -p "$home/state" "$home/data" "$TMP_ROOT/remotes" \
+    "$subhome/state" "$subhome/data" "$subhome/config" "$subhome/projects"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/force-lock-alpha.git"
+  alpha_origin=$(git -C "$home/projects/alpha" remote get-url origin)
+  git clone --quiet "$alpha_origin" "$childproj"
+  mkdir -p "$TMP_ROOT/force-lock-pool/1"
+  git -C "$childproj" worktree add --quiet -b force-child-lock "$childwt"
+  # A crewmate worktree lives in the Treehouse pool as a linked worktree of the
+  # home's project clone, durably leased to that child. Teardown proves that lease
+  # authoritatively from the pool state before touching anything.
+  write_treehouse_pool_lease "$childwt" firstmate-child
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
@@ -1917,7 +2023,8 @@ SH
   touch -t 200001010000 "$lock"
 
   set +e
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-lock-child-fake/pane.txt" \
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-lock-child-fake/pane.txt" \
     FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
   rc=$?
@@ -1932,65 +2039,167 @@ SH
   pass "secondmate force teardown preserves child worktree after unproven lock refusal"
 }
 
-test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
+# Guards the precision of the linked-worktree admission above: a secondmate's
+# project clone may own a linked worktree ONLY when a REGISTERED child of that home
+# vouches for it, by recording both that exact worktree and that exact project.
+# This proves the two ways an admission must still be refused - no registration at
+# all, and a registration that names a different project - each of which would
+# otherwise be a hole through which retirement could destroy an unattributable
+# worktree.
+setup_unattributed_worktree_case() {
+  local prefix=$1
+  UNATTRIBUTED_HOME="$TMP_ROOT/$prefix-home"
+  UNATTRIBUTED_SUBHOME="$TMP_ROOT/$prefix-subhome"
+  UNATTRIBUTED_FMROOT="$TMP_ROOT/$prefix-fmroot"
+  UNATTRIBUTED_PROJECT="$UNATTRIBUTED_SUBHOME/projects/alpha"
+  UNATTRIBUTED_WORKTREE="$TMP_ROOT/$prefix-pool/1/stray-worktree"
+  UNATTRIBUTED_ERR="$TMP_ROOT/$prefix.err"
+  make_firstmate_git_root "$UNATTRIBUTED_FMROOT"
+  git clone --quiet "$UNATTRIBUTED_FMROOT" "$UNATTRIBUTED_SUBHOME"
+  mkdir -p "$UNATTRIBUTED_HOME/state" "$UNATTRIBUTED_HOME/data" "$TMP_ROOT/remotes" \
+    "$UNATTRIBUTED_SUBHOME/state" "$UNATTRIBUTED_SUBHOME/data" \
+    "$UNATTRIBUTED_SUBHOME/config" "$UNATTRIBUTED_SUBHOME/projects" \
+    "$TMP_ROOT/$prefix-pool/1"
+  fm_git_init_commit "$UNATTRIBUTED_HOME/projects/alpha"
+  fm_git_add_origin "$UNATTRIBUTED_HOME/projects/alpha" "$TMP_ROOT/remotes/$prefix-alpha.git"
+  git clone --quiet "$(git -C "$UNATTRIBUTED_HOME/projects/alpha" remote get-url origin)" \
+    "$UNATTRIBUTED_PROJECT"
+  git -C "$UNATTRIBUTED_PROJECT" worktree add --quiet -b stray-branch "$UNATTRIBUTED_WORKTREE"
+  write_treehouse_pool_lease "$UNATTRIBUTED_WORKTREE" firstmate-stray
+  printf 'domain\n' > "$UNATTRIBUTED_SUBHOME/.fm-secondmate-home"
+  cat > "$UNATTRIBUTED_HOME/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$UNATTRIBUTED_SUBHOME
+project=$UNATTRIBUTED_SUBHOME
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$UNATTRIBUTED_SUBHOME
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$UNATTRIBUTED_SUBHOME"'; scope: design domain; projects: alpha; added 2026-06-22)' \
+    > "$UNATTRIBUTED_HOME/data/secondmates.md"
+  UNATTRIBUTED_FAKEBIN=$(make_fake_tmux "$TMP_ROOT/$prefix-fake")
+}
+
+run_unattributed_teardown() {
+  local prefix=$1
+  set +e
+  PATH="$UNATTRIBUTED_FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$UNATTRIBUTED_FMROOT" \
+    FM_HOME="$UNATTRIBUTED_HOME" FM_FAKE_TMUX_LOG="$TMP_ROOT/$prefix-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/$prefix-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$UNATTRIBUTED_ERR"
+  UNATTRIBUTED_RC=$?
+  set -e
+}
+
+test_secondmate_force_teardown_refuses_unregistered_linked_worktree() {
+  setup_unattributed_worktree_case unregistered-linked-worktree
+  run_unattributed_teardown unregistered-linked-worktree
+
+  [ "$UNATTRIBUTED_RC" -ne 0 ] \
+    || fail "force teardown retired a home whose project owns an unregistered linked worktree"
+  grep -F 'owns another linked worktree' "$UNATTRIBUTED_ERR" >/dev/null \
+    || fail "unregistered linked worktree refusal was not surfaced: $(cat "$UNATTRIBUTED_ERR")"
+  [ -d "$UNATTRIBUTED_WORKTREE" ] \
+    || fail "unregistered linked worktree was destroyed instead of retained"
+  [ -d "$UNATTRIBUTED_SUBHOME" ] \
+    || fail "unregistered linked worktree refusal removed the secondmate home"
+  [ -e "$UNATTRIBUTED_HOME/state/domain.meta" ] \
+    || fail "unregistered linked worktree refusal cleared secondmate metadata"
+  pass "secondmate retirement refuses a project clone owning an unregistered linked worktree"
+}
+
+test_secondmate_force_teardown_refuses_misattributed_linked_worktree() {
+  setup_unattributed_worktree_case misattributed-linked-worktree
+  # A child meta DOES record this exact worktree, but names a different project, so
+  # it cannot vouch for a worktree of alpha. Registration alone must never be enough.
+  cat > "$UNATTRIBUTED_SUBHOME/state/stray.meta" <<EOF
+window=firstmate:fm-stray
+worktree=$UNATTRIBUTED_WORKTREE
+project=$UNATTRIBUTED_HOME/projects/alpha
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  run_unattributed_teardown misattributed-linked-worktree
+
+  [ "$UNATTRIBUTED_RC" -ne 0 ] \
+    || fail "force teardown accepted a linked worktree vouched for by a different project"
+  [ -d "$UNATTRIBUTED_WORKTREE" ] \
+    || fail "misattributed linked worktree was destroyed instead of retained"
+  [ -d "$UNATTRIBUTED_SUBHOME" ] \
+    || fail "misattributed linked worktree refusal removed the secondmate home"
+  [ -e "$UNATTRIBUTED_HOME/state/domain.meta" ] \
+    || fail "misattributed linked worktree refusal cleared secondmate metadata"
+  pass "secondmate retirement refuses a linked worktree attributed to another project"
+}
+
+# Retargeted deliberately, not for convenience: a symlinked operational directory is
+# NOT a supported shape. Teardown proves what it deletes by exact physical identity,
+# and a symlink is what makes the logical path differ from the physical target that
+# would be removed, so it is refused even when it resolves INSIDE the home.
+# secondmate_state_metadata already enforced that for state/; the operational-dir
+# proof now enforces it for all four.
+test_secondmate_force_teardown_refuses_operational_dir_symlinks_inside_home() {
   local opdir home subhome target fakebin err log
   for opdir in data state config projects; do
     home="$TMP_ROOT/symlink-inside-teardown-home-$opdir"
     subhome="$TMP_ROOT/symlink-inside-teardown-subhome-$opdir"
     target="$subhome/internal-$opdir"
     err="$TMP_ROOT/symlink-inside-teardown-$opdir.err"
-    rm -rf "$home" "$subhome"
-    mkdir -p "$home/state" "$home/data" "$subhome" "$target"
-    printf 'domain\n' > "$subhome/.fm-secondmate-home"
+    make_secondmate_home_and_source "symlink-inside-teardown-$opdir" domain alpha
+    home=$SECONDMATE_FIXTURE_HOME
+    subhome=$SECONDMATE_FIXTURE_SUBHOME
+    target="$subhome/internal-$opdir"
+    # Replace the real operational directory with a symlink to a target INSIDE the
+    # home, then populate the registered clone through it, so a symlinked projects/
+    # is exercised the same way as the other three.
+    rm -rf "${subhome:?}/${opdir:?}"
+    mkdir -p "$target"
     ln -s "$target" "$subhome/$opdir"
-    cat > "$home/state/domain.meta" <<EOF
-window=firstmate:fm-domain
-worktree=$subhome
-project=$subhome
-harness=echo
-kind=secondmate
-mode=secondmate
-yolo=off
-home=$subhome
-projects=alpha
-EOF
-    printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+    clone_registered_secondmate_project
     fakebin=$(make_fake_tmux "$TMP_ROOT/symlink-inside-teardown-fake-$opdir")
     log="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/tmux.log"
-    PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/pane.txt" \
-      "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
-      || fail "force teardown refused $opdir symlinked inside the secondmate home"
-    [ ! -e "$subhome" ] || fail "force teardown did not remove subhome with inside $opdir symlink"
-    [ ! -e "$home/state/domain.meta" ] || fail "force teardown did not clear parent meta for inside $opdir symlink"
-    grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window for inside $opdir symlink"
+    if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$SECONDMATE_FIXTURE_FMROOT" FM_HOME="$home" \
+      FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/pane.txt" \
+      "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+      fail "force teardown accepted $opdir symlinked inside the secondmate home"
+    fi
+    # The refusal must name the symlink, so an operator is not left guessing which
+    # of the home's paths is the problem or why.
+    grep -F 'is a symlink to' "$err" >/dev/null \
+      || fail "inside $opdir symlink refusal did not name the symlink: $(cat "$err")"
+    grep -F "$subhome/$opdir" "$err" >/dev/null \
+      || fail "inside $opdir symlink refusal did not identify the offending path: $(cat "$err")"
+    [ -d "$subhome" ] || fail "inside $opdir symlink refusal removed the secondmate home"
+    [ -d "$target" ] || fail "inside $opdir symlink refusal removed the symlink target"
+    [ -e "$home/state/domain.meta" ] || fail "inside $opdir symlink refusal cleared secondmate metadata"
+    grep -F 'kill-window' "$log" >/dev/null \
+      && fail "inside $opdir symlink refusal stopped an endpoint before proving the home"
   done
-  pass "force teardown allows operational directory symlinks inside the subhome"
+  pass "force teardown refuses operational directory symlinks even inside the subhome"
 }
 
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home() {
   local home subhome external_state fakebin err log
-  home="$TMP_ROOT/symlink-state-teardown-home"
-  subhome="$TMP_ROOT/symlink-state-teardown-subhome"
-  external_state="$home/data/external-state"
   err="$TMP_ROOT/symlink-state-teardown.err"
-  mkdir -p "$home/state" "$home/data" "$subhome" "$external_state"
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  # The home needs its real shape for the operational-directory proof to be what
+  # refuses; a bare mkdir'd home is refused earlier, for not being a repository root.
+  make_secondmate_home_and_source symlink-state-teardown domain alpha
+  home=$SECONDMATE_FIXTURE_HOME
+  subhome=$SECONDMATE_FIXTURE_SUBHOME
+  clone_registered_secondmate_project
+  external_state="$home/data/external-state"
+  mkdir -p "$external_state"
+  rm -rf "$subhome/state"
   ln -s "$external_state" "$subhome/state"
-  cat > "$home/state/domain.meta" <<EOF
-window=firstmate:fm-domain
-worktree=$subhome
-project=$subhome
-harness=echo
-kind=secondmate
-mode=secondmate
-yolo=off
-home=$subhome
-projects=alpha
-EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/symlink-state-teardown-fake")
   log="$TMP_ROOT/symlink-state-teardown-fake/tmux.log"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-state-teardown-fake/pane.txt" \
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$SECONDMATE_FIXTURE_FMROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-state-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
     fail "force teardown accepted a symlinked secondmate state directory"
   fi
@@ -2066,26 +2275,59 @@ ROWS
   pass "secondmate teardown path-boundary matrix refuses unmarked/ancestor/active-descendant/repo-descendant homes"
 }
 
+# Pins the ordering Option D established: a structurally broken home must be
+# reported BY THE STRUCTURAL PROOF, not by the cleanliness proof. Both refuse, and
+# both run before any destruction, so this is about which cause an operator is told -
+# and being told "unlanded changes" for a symlinked operational directory sends them
+# looking for uncommitted work that does not exist. The negative assertion is the
+# point: the cleanliness message must NOT be what surfaces.
+test_secondmate_teardown_reports_structural_faults_before_cleanliness() {
+  local home subhome external fakebin err log
+  err="$TMP_ROOT/structural-before-clean.err"
+  make_secondmate_home_and_source structural-before-clean domain alpha
+  home=$SECONDMATE_FIXTURE_HOME
+  subhome=$SECONDMATE_FIXTURE_SUBHOME
+  clone_registered_secondmate_project
+  external="$home/data/external-projects"
+  mkdir -p "$external"
+  # A projects/ symlinked OUT of the home is a structural fault, and it also reads to
+  # `git status` as untracked content - which is exactly the collision that used to
+  # make the cleanliness proof answer first.
+  rm -rf "${subhome:?}/projects"
+  ln -s "$external" "$subhome/projects"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/structural-before-clean-fake")
+  log="$TMP_ROOT/structural-before-clean-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$SECONDMATE_FIXTURE_FMROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/structural-before-clean-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "teardown accepted a home whose projects directory resolves outside it"
+  fi
+  grep -F 'projects directory' "$err" >/dev/null \
+    || fail "structural fault was not reported by the operational-directory proof: $(cat "$err")"
+  grep -F 'resolves outside the secondmate home' "$err" >/dev/null \
+    || fail "structural fault did not name the containment violation: $(cat "$err")"
+  grep -F 'has unlanded changes' "$err" >/dev/null \
+    && fail "structural fault was misreported as unlanded work: $(cat "$err")"
+  [ -d "$subhome" ] || fail "structural refusal removed the secondmate home"
+  [ -d "$external" ] || fail "structural refusal removed the external symlink target"
+  [ -e "$home/state/domain.meta" ] || fail "structural refusal cleared secondmate metadata"
+  grep -F 'kill-window' "$log" >/dev/null \
+    && fail "structural refusal stopped an endpoint before proving the home"
+  pass "secondmate teardown reports structural faults by their own proof, not as unlanded work"
+}
+
 test_secondmate_teardown_refuses_registered_nested_home() {
   local home subhome nested fakebin err log
-  home="$TMP_ROOT/nested-teardown-home"
-  subhome="$TMP_ROOT/nested-teardown-subhome"
-  nested="$subhome/nested-domain"
   err="$TMP_ROOT/nested-teardown.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$nested/state"
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  # The retiring home needs its real shape for the nested-home fault to be what
+  # refuses; a bare mkdir'd home is refused earlier for not being a repository root.
+  make_secondmate_home_and_source nested-teardown domain alpha
+  home=$SECONDMATE_FIXTURE_HOME
+  subhome=$SECONDMATE_FIXTURE_SUBHOME
+  clone_registered_secondmate_project
+  nested="$subhome/nested-domain"
+  mkdir -p "$nested/state"
   printf 'nested\n' > "$nested/.fm-secondmate-home"
-  cat > "$home/state/domain.meta" <<EOF
-window=firstmate:fm-domain
-worktree=$subhome
-project=$subhome
-harness=echo
-kind=secondmate
-mode=secondmate
-yolo=off
-home=$subhome
-projects=alpha
-EOF
   cat > "$home/state/nested.meta" <<EOF
 window=firstmate:fm-nested
 worktree=$nested
@@ -2103,7 +2345,8 @@ EOF
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/nested-teardown-fake")
   log="$TMP_ROOT/nested-teardown-fake/tmux.log"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/nested-teardown-fake/pane.txt" \
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$SECONDMATE_FIXTURE_FMROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/nested-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
     fail "teardown removed a home containing another registered secondmate home"
   fi
@@ -2112,35 +2355,35 @@ EOF
   [ -e "$home/state/domain.meta" ] || fail "teardown cleared ancestor meta after nested-home refusal"
   [ -e "$home/state/nested.meta" ] || fail "teardown cleared nested meta after nested-home refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before nested-home refusal"
-  grep -F 'contains registered secondmate home' "$err" >/dev/null || fail "teardown did not explain registered nested-home refusal"
+  # Retargeted: 'contains registered secondmate home' exists nowhere in bin/, so the
+  # product cannot emit it - there is no nested-home-specific refusal. What it does do
+  # is fail closed on a registry it cannot parse unambiguously, which is what this
+  # fixture's decoy 'mentions home:' line produces, and which is the same safety
+  # outcome: nothing is removed. The safety property this case exists for stays pinned
+  # by the assertions above - refusal, both homes retained, both metas retained, and no
+  # endpoint stopped.
+  grep -F 'secondmate registry is malformed, duplicated, redirected, or missing' "$err" >/dev/null \
+    || fail "teardown did not explain the registered nested-home refusal: $(cat "$err")"
   pass "secondmate teardown refuses homes containing registered nested homes"
 }
 
 test_secondmate_teardown_refuses_child_registry_nested_home() {
   local home subhome nested fakebin err log
-  home="$TMP_ROOT/child-registry-teardown-home"
-  subhome="$TMP_ROOT/child-registry-teardown-subhome"
-  nested="$subhome/nested-domain"
   err="$TMP_ROOT/child-registry-teardown.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/data" "$nested/state"
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  # The retiring home needs its real shape for the child-registry fault to be what
+  # refuses; a bare mkdir'd home is refused earlier for not being a repository root.
+  make_secondmate_home_and_source child-registry-teardown domain alpha
+  home=$SECONDMATE_FIXTURE_HOME
+  subhome=$SECONDMATE_FIXTURE_SUBHOME
+  clone_registered_secondmate_project
+  nested="$subhome/nested-domain"
+  mkdir -p "$nested/state"
   printf 'nested\n' > "$nested/.fm-secondmate-home"
-  cat > "$home/state/domain.meta" <<EOF
-window=firstmate:fm-domain
-worktree=$subhome
-project=$subhome
-harness=echo
-kind=secondmate
-mode=secondmate
-yolo=off
-home=$subhome
-projects=alpha
-EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   printf '%s\n' '- nested - nested domain (home: '"$nested"'; scope: nested domain; projects: beta; added 2026-06-22)' > "$subhome/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-registry-teardown-fake")
   log="$TMP_ROOT/child-registry-teardown-fake/tmux.log"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-registry-teardown-fake/pane.txt" \
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$SECONDMATE_FIXTURE_FMROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-registry-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
     fail "teardown removed a home containing a child-registry secondmate home"
   fi
@@ -2148,7 +2391,11 @@ EOF
   [ -d "$nested" ] || fail "teardown removed child-registry nested home after refusal"
   [ -e "$home/state/domain.meta" ] || fail "teardown cleared parent meta after child-registry refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before child-registry refusal"
-  grep -F 'contains registered secondmate home' "$err" >/dev/null || fail "teardown did not explain child-registry nested-home refusal"
+  # Retargeted for the same reason as its sibling - 'contains registered secondmate
+  # home' exists nowhere in bin/. Here the product has a message that states this
+  # case's property exactly, so it is the right target rather than a fallback.
+  grep -F 'still registers child homes' "$err" >/dev/null \
+    || fail "teardown did not explain the child-registry nested-home refusal: $(cat "$err")"
   pass "secondmate teardown refuses nested homes from the child registry"
 }
 
@@ -2198,25 +2445,17 @@ EOF
 
 test_secondmate_force_teardown_refuses_child_active_home_descendant() {
   local home subhome childproj childwt fakebin err log
-  home="$TMP_ROOT/child-active-descendant-home"
-  subhome="$TMP_ROOT/child-active-descendant-subhome"
-  childproj="$subhome/projects/alpha"
-  childwt="$home/data"
   err="$TMP_ROOT/child-active-descendant.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj"
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
-  cat > "$home/state/domain.meta" <<EOF
-window=firstmate:fm-domain
-worktree=$subhome
-project=$subhome
-harness=echo
-kind=secondmate
-mode=secondmate
-yolo=off
-home=$subhome
-projects=alpha
-EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  # The retiring home needs its real shape, or home validation refuses it as "not an
+  # exact repository root" long before the child worktree this case is about is ever
+  # inspected.
+  make_secondmate_home_and_source child-active-descendant domain alpha
+  home=$SECONDMATE_FIXTURE_HOME
+  subhome=$SECONDMATE_FIXTURE_SUBHOME
+  clone_registered_secondmate_project
+  childproj="$subhome/projects/alpha"
+  # The point of the case: the child's worktree sits inside the ACTIVE firstmate home.
+  childwt="$home/data"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -2228,7 +2467,8 @@ yolo=off
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-active-descendant-fake")
   log="$TMP_ROOT/child-active-descendant-fake/tmux.log"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-active-descendant-fake/pane.txt" \
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$SECONDMATE_FIXTURE_FMROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-active-descendant-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
     fail "force teardown removed a child worktree inside active FM_HOME"
   fi
@@ -2243,31 +2483,21 @@ EOF
 
 test_secondmate_force_teardown_refuses_child_repo_descendant() {
   local home subhome childproj childwt fakeroot fakebin err log
-  home="$TMP_ROOT/child-repo-descendant-home"
-  subhome="$TMP_ROOT/child-repo-descendant-subhome"
-  childproj="$subhome/projects/alpha"
-  fakeroot="$TMP_ROOT/child-repo-descendant-root"
-  childwt="$fakeroot/data"
   err="$TMP_ROOT/child-repo-descendant.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt" "$fakeroot/bin"
-  cat > "$fakeroot/bin/fm-guard.sh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakeroot/bin/fm-guard.sh"
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
-  cat > "$home/state/domain.meta" <<EOF
-window=firstmate:fm-domain
-worktree=$subhome
-project=$subhome
-harness=echo
-kind=secondmate
-mode=secondmate
-yolo=off
-home=$subhome
-projects=alpha
-EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  # Real home shapes, or home validation refuses on "not an exact repository root"
+  # before the child worktree this case is about is inspected. The source root that
+  # make_firstmate_git_root builds already carries the quiet bin/fm-guard.sh this
+  # case used to hand-roll, and its tracked .gitignore ignores data/, so hanging the
+  # child worktree off it leaves the root clean.
+  make_secondmate_home_and_source child-repo-descendant domain alpha
+  home=$SECONDMATE_FIXTURE_HOME
+  subhome=$SECONDMATE_FIXTURE_SUBHOME
+  clone_registered_secondmate_project
+  childproj="$subhome/projects/alpha"
+  # The point of the case: the child's worktree sits inside FM_ROOT itself.
+  fakeroot=$SECONDMATE_FIXTURE_FMROOT
+  childwt="$fakeroot/data"
+  mkdir -p "$childwt"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -2294,25 +2524,20 @@ EOF
 
 test_secondmate_force_teardown_refuses_unregistered_child_worktree() {
   local home subhome childproj childwt fakebin err log
-  home="$TMP_ROOT/unregistered-child-home"
-  subhome="$TMP_ROOT/unregistered-child-subhome"
-  childproj="$subhome/projects/alpha"
-  childwt="$TMP_ROOT/unregistered-child-worktree"
   err="$TMP_ROOT/unregistered-child.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
-  cat > "$home/state/domain.meta" <<EOF
-window=firstmate:fm-domain
-worktree=$subhome
-project=$subhome
-harness=echo
-kind=secondmate
-mode=secondmate
-yolo=off
-home=$subhome
-projects=alpha
-EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  # Real home shapes, or home validation refuses before the child worktree is reached.
+  make_secondmate_home_and_source unregistered-child domain alpha
+  home=$SECONDMATE_FIXTURE_HOME
+  subhome=$SECONDMATE_FIXTURE_SUBHOME
+  clone_registered_secondmate_project
+  childproj="$subhome/projects/alpha"
+  # The point of the case: the child's recorded worktree is a real repository that is
+  # nevertheless not a worktree of the child project. It must be an exact Git root,
+  # because that is proved first - a bare directory is refused as "not an exact Git
+  # root" before the belongs-to-project proof this case names is ever reached. Its own
+  # common Git dir is what makes it unregistered.
+  childwt="$TMP_ROOT/unregistered-child-worktree"
+  fm_git_init_commit "$childwt"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -2324,7 +2549,8 @@ yolo=off
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/unregistered-child-fake")
   log="$TMP_ROOT/unregistered-child-fake/tmux.log"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unregistered-child-fake/pane.txt" \
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$SECONDMATE_FIXTURE_FMROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unregistered-child-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
     fail "force teardown removed an unregistered child worktree"
   fi
@@ -2572,6 +2798,7 @@ test_home_seed_refuses_projectful_reused_charter_for_projectless_home
 test_home_seed_refuses_projectless_conversion_of_populated_home
 test_home_seed_refuses_projectless_home_with_uninspectable_projects
 test_home_seed_refuses_projectless_home_with_symlinked_projects
+test_home_seed_honours_no_projects_before_reading_the_projects_tree
 test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
@@ -2599,8 +2826,11 @@ test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_retains_unlanded_child_work
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
-test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home
+test_secondmate_force_teardown_refuses_unregistered_linked_worktree
+test_secondmate_force_teardown_refuses_misattributed_linked_worktree
+test_secondmate_force_teardown_refuses_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
+test_secondmate_teardown_reports_structural_faults_before_cleanliness
 test_secondmate_teardown_refuses_registered_nested_home
 test_secondmate_teardown_refuses_child_registry_nested_home
 test_secondmate_force_teardown_prevalidates_before_child_cleanup
