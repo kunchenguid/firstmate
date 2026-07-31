@@ -4,8 +4,12 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Each provider is read through its own standard CLI: gh for GitHub, glab for
+# GitLab, and tea for Gitea/Forgejo, so an upstream checkout needs no extra
+# tooling to follow any of them. Forgejo is a protocol-compatible fork of
+# Gitea, so tea serves both under the "gitea" provider tag; the captain found
+# tea more reliable than Forgejo's own fj CLI in manual testing against a real
+# Forgejo instance, so tea is used here rather than fj.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -103,6 +107,65 @@ case "$provider" in
     # unreadable merge request stays silent instead of reporting a merge.
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
+    [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  gitea)
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    [ "$host" != github.com ] || exit 0
+    [ "$host" != gitlab.com ] || exit 0
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    owner=${path%%/*}
+    repo=${path#*/}
+    [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
+    case "$owner" in
+      *[!A-Za-z0-9-]*|-*|*-|*--*) exit 0 ;;
+    esac
+    [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || exit 0
+    case "$repo" in
+      .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
+    esac
+    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
+    # tea addresses a self-hosted instance through a configured login rather
+    # than through the URL the way gh and glab do, so the login whose own
+    # host matches this record's host is picked here. Any ambiguity or
+    # missing login stays silent rather than guessing or prompting: an absent
+    # or misconfigured login is indistinguishable from "not merged yet".
+    login=
+    matches=0
+    logins=$(tea login list -o csv 2>/dev/null) || exit 0
+    [ -n "$logins" ] || exit 0
+    while IFS=, read -r name login_url _rest; do
+      [ -n "$name" ] || continue
+      lhost=${login_url#http://}
+      lhost=${lhost#https://}
+      lhost=${lhost%%/*}
+      lhost=${lhost%%:*}
+      case "$lhost" in
+        *[A-Z]*) lhost=$(printf '%s' "$lhost" | tr '[:upper:]' '[:lower:]') ;;
+      esac
+      if [ "$lhost" = "$host" ]; then
+        matches=$((matches + 1))
+        login=$name
+      fi
+    done < <(printf '%s\n' "$logins" | tail -n +2)
+    [ "$matches" -eq 1 ] && [ -n "$login" ] || exit 0
+    # tea's list command has no per-index field selector: "tea pulls <index>"
+    # ignores -f/-o and prints a fixed detail view, so the closed+merged list
+    # is read instead and matched down to the one recorded index. --state
+    # closed already includes merged results because merged is a derived
+    # display value over the same underlying closed state, so no open pull
+    # request can ever be misread as merged.
+    raw=$(tea pulls list --repo "$owner/$repo" --login "$login" --state closed \
+      --limit 1000 -f index,state -o csv 2>/dev/null) || exit 0
+    [ -n "$raw" ] || exit 0
+    state=
+    while IFS=, read -r idx st; do
+      [ "$idx" = "$number" ] || continue
+      state=$st
+      break
+    done < <(printf '%s\n' "$raw" | tail -n +2)
     [ "$state" = merged ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;

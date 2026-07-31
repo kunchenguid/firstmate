@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # Merge a task's PR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
-# The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
-# owner/repository and PR number are passed to gh-axi as separate arguments.
+# The full canonical GitHub or Gitea/Forgejo PR URL is parsed by
+# bin/fm-pr-lib.sh and the derived owner/repository and PR number are passed
+# to gh-axi (GitHub) or tea (Gitea/Forgejo) as separate arguments. GitLab merge
+# request URLs still parse, for the watcher, but this path still refuses them:
+# no owner/repository pair can address GitLab's arbitrary-depth namespace, so
+# merging a merge request stays a deliberate manual step.
 #
-# Merge method defaults to --squash when the caller passes none of --squash,
-# --merge, --rebase, or --method after the optional -- separator. Extra args
-# must not include --repo or -R because the repository comes only from the URL.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# Merge method defaults to a squash merge when the caller passes no explicit
+# merge-method flag after the optional -- separator: --squash, --merge,
+# --rebase, or --method(=...) for GitHub, --style(=...)/-s for Gitea/Forgejo.
+# Extra args must not override the repository or, for Gitea/Forgejo, the tea
+# login, because both come only from the URL.
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,21 +31,24 @@ fi
 ID=$1
 RAW_URL=$2
 # bin/fm-pr-lib.sh parses GitLab merge request URLs so the watcher can follow
-# them, but this path still addresses only GitHub by owner/repository. The
-# provider check holds that refusal exactly as it was until merge parity lands.
+# them, but this path still refuses them: no owner/repository pair can address
+# GitLab's arbitrary-depth namespace, so merging a merge request stays a
+# deliberate manual step until GitLab merge parity is a separate change.
 if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL" \
-  || [ "$FM_PR_PROVIDER" != github ]; then
+  || { [ "$FM_PR_PROVIDER" != github ] && [ "$FM_PR_PROVIDER" != gitea ]; }; then
   echo "error: invalid PR merge request" >&2
   exit 2
 fi
 URL=$FM_PR_URL
+PROVIDER=$FM_PR_PROVIDER
+HOST=$FM_PR_HOST
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
 [ "${1:-}" = "--" ] && shift
 
-caller_has_merge_method() {
+caller_has_github_merge_method() {
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -49,16 +58,57 @@ caller_has_merge_method() {
   return 1
 }
 
+caller_has_gitea_merge_method() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --style|--style=*|-s) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# The repository must come only from the validated URL, for both providers,
+# and for Gitea/Forgejo the tea login (which instance is addressed) must too.
 reject_repo_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --repo|--repo=*|-R|-R?*)
+      --repo|--repo=*|-R|-R?*|-r|-r?*|--login|--login=*|-l|-l?*)
         echo "error: extra merge arguments must not override the repository" >&2
         return 1
         ;;
     esac
   done
+}
+
+# tea addresses a self-hosted instance through a configured login rather than
+# through the URL, so the login whose own host matches the validated record's
+# host is picked here, exactly as bin/fm-pr-poll.sh picks it for polling. Any
+# ambiguity or missing login is a real blocker here, unlike the silent poll,
+# because merging is a deliberate action with one clear point to report it.
+gitea_login_for_host() {
+  local target=$1 logins name login_url lhost login matches
+  login=
+  matches=0
+  logins=$(tea login list -o csv 2>/dev/null) || return 1
+  [ -n "$logins" ] || return 1
+  while IFS=, read -r name login_url _rest; do
+    [ -n "$name" ] || continue
+    lhost=${login_url#http://}
+    lhost=${lhost#https://}
+    lhost=${lhost%%/*}
+    lhost=${lhost%%:*}
+    case "$lhost" in
+      *[A-Z]*) lhost=$(printf '%s' "$lhost" | tr '[:upper:]' '[:lower:]') ;;
+    esac
+    if [ "$lhost" = "$target" ]; then
+      matches=$((matches + 1))
+      login=$name
+    fi
+  done < <(printf '%s\n' "$logins" | tail -n +2)
+  [ "$matches" -eq 1 ] && [ -n "$login" ] || return 1
+  printf '%s\n' "$login"
 }
 
 reject_repo_overrides "$@" || exit 1
@@ -76,9 +126,25 @@ grep -qxF "pr=$URL" "$META" || {
   exit 1
 }
 
-merge_args=()
-if ! caller_has_merge_method "$@"; then
-  merge_args=(--squash)
+if [ "$PROVIDER" = github ]; then
+  merge_args=()
+  if ! caller_has_github_merge_method "$@"; then
+    merge_args=(--squash)
+  fi
+  gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+else
+  if ! command -v tea >/dev/null 2>&1; then
+    echo "error: merging a Gitea/Forgejo pull request requires tea on PATH" >&2
+    exit 1
+  fi
+  GITEA_LOGIN=$(gitea_login_for_host "$HOST") || {
+    echo "error: could not resolve exactly one tea login for $HOST" >&2
+    exit 1
+  }
+  merge_args=()
+  if ! caller_has_gitea_merge_method "$@"; then
+    merge_args=(--style squash)
+  fi
+  tea pulls merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --login "$GITEA_LOGIN" \
+    "${merge_args[@]+"${merge_args[@]}"}" "$@"
 fi
-
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
