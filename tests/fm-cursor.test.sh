@@ -29,8 +29,11 @@
 #       uses the default, and filtering happens before run resolution
 #   (o) an --env that matches nothing still reports the fetched count and the
 #       --limit caveat, so an empty view never reads as an empty fleet
-#   (p) a per-agent run request that fails degrades that ONE agent to an unknown
-#       run status and the listing still prints; show stays strict
+#   (p) a run request that fails degrades only that run to an unknown status,
+#       carrying the reason so a 429 never reads like a 404 or a rejected key:
+#       list keeps every other row, show still renders the agent it fetched, and
+#       only a top-level fetch still exits 4. The ad-hoc environment label is
+#       asserted through show as well as list, since each has its own renderer
 #   (q) FM_CURSOR_ENV_FILE takes precedence over $FM_HOME/.env
 #   (r) FM_CURSOR_TIMEOUT is validated before it reaches curl's config file
 set -u
@@ -177,6 +180,8 @@ AGENT_NORUNID=bc-3333cccc
 AGENT_ARCHIVED=bc-4444dddd
 AGENT_STALERUN=bc-5555eeee
 AGENT_STALERUN_SHOW=bc-6666ffff
+AGENT_ADHOC_SHOW=bc-7777gggg
+AGENT_THROTTLED=bc-8888hhhh
 
 fixture "/v1/agents?limit=20&includeArchived=false" '{"items":[
   {"id":"bc-1111aaaa","name":"Severity sorting","status":"ACTIVE","latestRunId":"run-aaa1",
@@ -234,10 +239,29 @@ fixture "/v1/agents?limit=5&includeArchived=false" '{"items":[
    "url":"https://cursor.com/agents/bc-5555eeee","env":{"type":"cloud","name":"AgentScan E2E"},
    "repos":[{"url":"https://github.com/snyk/minired"}]}
 ]}'
-# The same stale pointer through show, where a hard failure is the right outcome:
-# the latest run IS what a single-agent view was asked for.
+# The same stale pointer through show, where the agent's OWN fetch succeeds: the
+# run alone is unresolvable, so show must render the agent and report unknown.
 fixture "/v1/agents/$AGENT_STALERUN_SHOW" \
   '{"id":"bc-6666ffff","name":"Stale run pointer","status":"ACTIVE","latestRunId":"run-gone2","createdAt":"2026-07-27T09:00:00.000Z","updatedAt":"2026-07-27T10:00:00.000Z","url":"https://cursor.com/agents/bc-6666ffff","env":{"type":"cloud","name":"AgentScan E2E"},"repos":[{"url":"https://github.com/snyk/minired"}]}'
+
+# An agent built from a bare repo list, for the show side of the ad-hoc label.
+fixture "/v1/agents/$AGENT_ADHOC_SHOW" \
+  '{"id":"bc-7777gggg","name":"Ad-hoc repo list","status":"ACTIVE","latestRunId":"run-ggg1","createdAt":"2026-07-26T09:00:00.000Z","updatedAt":"2026-07-26T10:00:00.000Z","url":"https://cursor.com/agents/bc-7777gggg","env":{"type":"cloud"},"repos":[{"url":"https://github.com/snyk/minired"}]}'
+fixture "/v1/agents/$AGENT_ADHOC_SHOW/runs/run-ggg1" \
+  '{"id":"run-ggg1","agentId":"bc-7777gggg","status":"FINISHED","createdAt":"2026-07-26T09:10:00.000Z","durationMs":1000,"git":{"branches":[]}}'
+
+# A page whose only agent is throttled on BOTH run requests. A 429 and a 404 must
+# never produce the same output, because the operator's next move differs.
+fixture "/v1/agents?limit=6&includeArchived=false" '{"items":[
+  {"id":"bc-8888hhhh","name":"Throttled resolution","status":"ACTIVE","latestRunId":"run-throttled",
+   "createdAt":"2026-07-25T09:00:00.000Z","updatedAt":"2026-07-25T10:00:00.000Z",
+   "url":"https://cursor.com/agents/bc-8888hhhh","env":{"type":"cloud","name":"AgentScan E2E"},
+   "repos":[{"url":"https://github.com/snyk/minired"}]}
+]}'
+fixture "/v1/agents/$AGENT_THROTTLED/runs/run-throttled" '{"code":"error","message":"Too Many Requests"}'
+fixture_code "/v1/agents/$AGENT_THROTTLED/runs/run-throttled" 429
+fixture "/v1/agents/$AGENT_THROTTLED/runs?limit=1" '{"code":"error","message":"Too Many Requests"}'
+fixture_code "/v1/agents/$AGENT_THROTTLED/runs?limit=1" 429
 
 fixture "/v1/agents/$AGENT_SINGLE" \
   '{"id":"bc-2222bbbb","name":"Single repo work","status":"ACTIVE","latestRunId":"run-bbb1","createdAt":"2026-07-29T09:00:00.000Z","updatedAt":"2026-07-29T10:00:00.000Z","url":"https://cursor.com/agents/bc-2222bbbb","env":{"type":"cloud","name":"prod"},"repos":[{"url":"https://github.com/snyk/minired"}]}'
@@ -514,12 +538,33 @@ assert_contains "$OUT" "Stale run pointer" "the agent whose run failed is still 
 assert_contains "$OUT" "2 agent(s) shown" "every fetched agent survives a failed resolution"
 assert_contains "$OUT" "unknown" "an unresolvable latest run degrades to unknown"
 assert_contains "$OUT" "could not be fetched" "the footer states how many runs went unresolved"
+# A bare count cannot be acted on: the footer must name the reason too.
+assert_contains "$OUT" "1 of them: not found (HTTP 404)" \
+  "the footer names the reason a run went unresolved, grouped by reason"
+assert_not_contains "$OUT" "$KEY" "no footer reason ever contains the key"
 # The fast path failing must fall THROUGH to the runs-list fallback, not abort.
 assert_grep "/v1/agents/$AGENT_STALERUN/runs/run-gone" "$CALLS" \
   "the stale latestRunId is still tried first"
 assert_grep "/v1/agents/$AGENT_STALERUN/runs?limit=1" "$CALLS" \
   "a failed fast path must fall through to the runs-list fallback"
 pass "a per-agent run request that fails costs one row, not the whole view"
+
+# A 429 and a 401 must never read identically: the operator's next move differs.
+run_cursor list --limit 6
+expect_code 0 "$RC" "a rate-limited run resolution must not abort the listing"
+assert_contains "$OUT" "rate limited by the Cursor API (HTTP 429)" \
+  "a throttled resolution is reported as rate limiting, not as a missing run"
+assert_contains "$OUT" "Too Many Requests" "the API's own message is carried into the reason"
+assert_not_contains "$OUT" "not found" "a 429 must not be reported as a 404"
+assert_not_contains "$OUT" "rejected the key" "a 429 must not be reported as a key problem"
+run_cursor list --limit 6 --json
+printf '%s' "$OUT" | jq -e '[.agents[] | select(.runStatusSource == "resolution-failed")
+  | .runStatusReason] | length == 1 and (.[0] | test("429"))' >/dev/null \
+  || fail "--json must carry the per-agent reason: $(printf '%s' "$OUT" | jq -c '[.agents[] | {runStatusSource, runStatusReason}]')"
+printf '%s' "$OUT" | jq -e --arg k "$KEY" '[.agents[] | .runStatusReason // ""]
+  | map(select(contains($k))) | length == 0' >/dev/null \
+  || fail "a per-agent reason must never contain the key"
+pass "a degraded row carries WHY, so rate limiting and a rejected key never look alike"
 
 run_cursor list --limit 5 --json
 expect_code 0 "$RC" "list --json succeeds with a failed resolution"
@@ -530,14 +575,49 @@ printf '%s' "$OUT" | jq -e '[.agents[] | select(.runStatusSource == "resolution-
   || fail "--json must distinguish a failed resolution: $(printf '%s' "$OUT" | jq -c '[.agents[] | {runStatus, runStatusSource}]')"
 printf '%s' "$OUT" | jq -e '[.agents[] | select(.runStatusSource == "latestRunId")] | length == 1' >/dev/null \
   || fail "--json must still record the fast path for the agent that resolved"
+printf '%s' "$OUT" | jq -e '[.agents[] | select(.runStatusSource == "latestRunId")
+  | .runStatusReason] == [null]' >/dev/null \
+  || fail "a resolved agent must carry no reason"
 pass "runStatusSource tells a failed resolution apart from the fast path, fallback, and --no-runs"
 
-# show is deliberately NOT tolerant: the latest run is what it was asked for.
+# show degrades the same way list does. Dying with "not found (HTTP 404)" would
+# read as "no such agent" for an agent GET /v1/agents/<id> just proved exists.
 run_cursor show "$AGENT_STALERUN_SHOW"
-expect_code 4 "$RC" "show still fails hard when its latest run cannot be fetched"
-assert_contains "$OUT" "not found" "show reports the API status it got"
-assert_not_contains "$OUT" "$KEY" "a failed show never contains the key"
-pass "list degrades per agent while show, runs, and usage still fail loudly"
+expect_code 0 "$RC" "show renders the agent it fetched even when the latest run will not resolve"
+assert_contains "$OUT" "latest run   unknown" "an unresolvable latest run shows as unknown"
+assert_contains "$OUT" "not found (HTTP 404)" "show names why the run is unknown"
+assert_contains "$OUT" "not because the agent is idle" "show says unknown is an absence of data"
+assert_contains "$OUT" "Stale run pointer" "the agent's own detail is still rendered"
+assert_not_contains "$OUT" "$KEY" "a degraded show never contains the key"
+assert_grep "/v1/agents/$AGENT_STALERUN_SHOW/runs?limit=1" "$CALLS" \
+  "show must try the runs-list fallback before giving up on the run"
+run_cursor show "$AGENT_STALERUN_SHOW" --json
+expect_code 0 "$RC" "show --json succeeds with an unresolvable latest run"
+printf '%s' "$OUT" | jq -e '.latestRun.status == "unknown"
+  and .latestRun.source == "resolution-failed"
+  and (.latestRun.reason | test("404"))' >/dev/null \
+  || fail "show --json must carry the unknown status with its reason: $(printf '%s' "$OUT" | jq -c .latestRun)"
+printf '%s' "$OUT" | jq -e '.agent.id == "bc-6666ffff"' >/dev/null \
+  || fail "show --json must still carry the agent that was fetched successfully"
+pass "show reports an unresolvable run as unknown with the reason instead of dying"
+
+# The TOP-LEVEL fetch of a subcommand is where a non-200 still means failure.
+run_cursor show bc-9999zzzz
+expect_code 4 "$RC" "a failed top-level agent fetch still exits 4"
+run_cursor runs bc-9999zzzz
+expect_code 4 "$RC" "a failed runs fetch still exits 4"
+run_cursor usage bc-9999zzzz
+expect_code 4 "$RC" "a failed usage fetch still exits 4"
+pass "run resolution degrades while every top-level fetch still fails loudly"
+
+# The ad-hoc environment label has two owners now - the shell env_label used by
+# show and the inline jq used by list - so assert the show side too.
+run_cursor show "$AGENT_ADHOC_SHOW"
+expect_code 0 "$RC" "show succeeds for an agent with no named environment"
+assert_contains "$OUT" "environment  (ad-hoc cloud) (cloud)" \
+  "show renders an unnamed environment with the same ad-hoc label list uses"
+assert_contains "$OUT" "created from a repository list" "show explains the ad-hoc case"
+pass "list and show describe an unnamed environment identically"
 
 # --- (q) FM_CURSOR_ENV_FILE --------------------------------------------------
 

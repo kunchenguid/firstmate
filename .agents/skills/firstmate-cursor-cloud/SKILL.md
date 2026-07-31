@@ -42,6 +42,15 @@ A finished agent stays `ACTIVE` indefinitely until somebody archives it, so a fl
 Never report agent lifecycle as though it were activity.
 Take the run status from the latest run, which `bin/fm-cursor.sh list` resolves and reports as its primary column: `CREATING` and `RUNNING` mean work is in flight, and `FINISHED`, `ERROR`, `CANCELLED`, and `EXPIRED` are terminal.
 
+That enum is not the whole column, and the two values outside it are the ones most likely to be misread.
+`unknown` is a third category that is neither in flight nor terminal: it means resolving that agent's latest run failed, so its real state was never observed.
+`unresolved` is the same absence by choice rather than by failure, and appears only under `--no-runs`, which skips resolution entirely.
+Never read either value as idle, finished, or terminal, and never fold an `unknown` row into a "nothing running" count.
+The honest report is "could not tell for that agent, and here is why", because guessing at an unobserved state is the same fleet misread this whole environment-and-run-status design exists to prevent.
+Only the affected rows degrade: every other row in the same listing was resolved normally.
+`list` prints the reasons grouped under its unresolved count, and `--json` carries each one in `runStatusReason` alongside a `runStatusSource` of `resolution-failed`, which distinguishes a failed resolution from the `latestRunId` fast path, the `runs-list` fallback, and the `skipped` case under `--no-runs`.
+A rate limit and a rejected key therefore read differently, so use the reason rather than retrying blind.
+
 ## Reading the fleet
 
 1. `bin/fm-cursor.sh list` for the current picture, or `--json` when you need to compute over it.
@@ -67,6 +76,7 @@ When the captain asks about "the environment" without naming one, the configured
 Run status resolution prefers a `latestRunId` field that list items carry in practice but that is **not** in Cursor's published schema, falling back to a per-agent runs lookup.
 `--json` records which source answered in `runStatusSource`.
 If the fast path ever disappears the fallback keeps working, so treat a change there as a Cursor-side change rather than a firstmate defect.
+The fallback is always attempted when the fast path fails, and neither `list` nor `show` aborts when both fail: a stale run id says nothing about the agent, which the helper has usually just fetched successfully, so the run alone degrades to `unknown` with its reason.
 
 ## What this surface cannot do
 
@@ -92,4 +102,5 @@ Include the full Cursor Web URL when the captain will want to open the agent, ex
 - Helper reports it is not configured: the home has no `CURSOR_API_KEY` in its `.env`. Relay that and the dashboard link; do not go looking for a key in a keychain or another tool's credential store.
 - Helper reports the key was rejected: the key is wrong, revoked, or belongs to another account. Ask the captain to regenerate it; never fall back to another credential source.
 - Helper reports rate limiting: back off rather than retrying in a loop, and prefer `--limit` or `--no-runs` to shrink the request count.
+- Helper reports `RUN` unknown for some rows: read the grouped reasons printed under that count, because they say whether Cursor throttled the run lookups, rejected the key, or no longer has those runs. Report which it was, and never present those rows as idle.
 - Every listed agent reads terminal but the captain expects work in flight: check whether he is looking at a different Cursor account, since this view is per-user.

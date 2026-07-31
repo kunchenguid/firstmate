@@ -72,12 +72,18 @@
 # `runs?limit=1` fallback covers both its absence AND a fast path whose request
 # fails, and the JSON output records which source answered in `runStatusSource`:
 # `latestRunId`, `runs-list`, `resolution-failed`, or `skipped` for --no-runs.
-# Per-agent resolution inside `list` is deliberately NON-FATAL, because it is the
-# one place a single request failure could discard an otherwise good answer: a 404
-# on a stale run id, or a 429 partway through 1+N serial requests, degrades that
-# one agent's RUN to `unknown` and the rest of the listing still prints. Every
-# other fetch - the list call itself, and all of `show`, `runs`, and `usage` -
-# still fails loudly, because there a failed request leaves nothing worth showing.
+# Run resolution is deliberately NON-FATAL, in `show` exactly as in `list`. The
+# fast path is reached through that undocumented field, so a stale value there
+# says nothing about whether the agent exists, and exiting with "not found" for an
+# agent whose own GET just succeeded would be actively misleading. A failed fast
+# path therefore ALWAYS falls through to the fallback, and when both fail the run
+# is reported as `unknown` WITH its reason - the HTTP status and the API's own
+# message - so a 429 mid-listing can never be mistaken for a rejected key or for
+# runs that are simply gone. `list` groups those reasons into its footer and
+# degrades only the rows that failed; `--json` carries one per agent in
+# `runStatusReason`. What still fails loudly is the TOP-LEVEL request of each
+# subcommand - the agent list, one agent, its runs, its usage - because there a
+# non-200 means the operation itself failed and nothing is left to show.
 #
 # Activation: read-only, and inert until this home opts in by putting a non-empty
 # CURSOR_API_KEY in its gitignored .env, mirroring how X mode gates on
@@ -235,6 +241,13 @@ api_try_get() {  # <path>
     429) API_ERROR="rate limited by the Cursor API (HTTP 429)$(api_message). Retry in a minute" ;;
     *) API_ERROR="the Cursor API returned HTTP $code$(api_message)" ;;
   esac
+  # Collapse to one line here, at the single point every explanation is built:
+  # callers carry it through newline- and unit-separator-delimited records, and
+  # the API's `message` field is data this helper does not control.
+  API_ERROR=${API_ERROR//$'\n'/ }
+  API_ERROR=${API_ERROR//$'\r'/ }
+  API_ERROR=${API_ERROR//$'\t'/ }
+  API_ERROR=${API_ERROR//$'\037'/ }
   return 1
 }
 
@@ -277,40 +290,55 @@ valid_timeout() {  # <seconds>
   esac
 }
 
-# Latest run status for one agent. Echoes "<status> <runId> <source>".
+# One resolution record: status, run id, provenance, and the reason the status is
+# `unknown`, joined by unit separators so a reason containing spaces survives.
+run_status_record() {  # <status> <run-id> <source> [reason]
+  printf '%s\037%s\037%s\037%s' "$1" "$2" "$3" "${4:-}"
+}
+RUN_STATUS=
+RUN_ID=
+RUN_SOURCE=
+RUN_REASON=
+
+# Read one record back into RUN_STATUS, RUN_ID, RUN_SOURCE, and RUN_REASON.
+read_run_status_record() {  # <record>
+  IFS=$(printf '\037') read -r RUN_STATUS RUN_ID RUN_SOURCE RUN_REASON <<EOF
+$1
+EOF
+}
+
+# Latest run status for one agent, as a run_status_record.
 # Prefers the caller-supplied latestRunId, falls back to the runs list, and
-# reports "none none none" for an agent that has no run yet.
+# reports "none" for an agent that has no run yet.
 #
-# A failed fast-path request falls THROUGH to the runs-list fallback: the
+# A failed fast-path request ALWAYS falls through to the runs-list fallback: the
 # latestRunId that drove it is not in Cursor's published schema, so a stale or
-# removed run id answering 404 is an expected shape, not a fatal one. When the
-# fallback fails too, resolution degrades to "unknown none resolution-failed" so
-# one bad request costs one row rather than the whole view. Pass strict=1 for a
-# single-agent view, where an unresolvable latest run is the answer being asked
-# for and hiding the reason would be worse than failing.
-latest_run_status() {  # <agent-id> <latest-run-id-or-empty> [strict]
-  local agent=$1 run=$2 strict=${3:-0} status
+# removed run id answering 404 says nothing about the agent itself. When the
+# fallback fails too, resolution reports `unknown` with the reason attached and
+# never exits, in every caller: `list` degrades that one row and keeps going, and
+# `show` renders the agent it already fetched successfully rather than dying with
+# a status that would read as "no such agent".
+latest_run_status() {  # <agent-id> <latest-run-id-or-empty>
+  local agent=$1 run=$2 status
   if [ -n "$run" ] && [ "$run" != null ]; then
     if valid_agent_id "$run"; then
       if api_try_get "/v1/agents/$agent/runs/$run"; then
         status=$(jq -r '.status // "none"' "$BODY")
-        printf '%s %s %s' "$status" "$run" latestRunId
+        run_status_record "$status" "$run" latestRunId
         return 0
       fi
-      [ "$strict" -eq 0 ] || die 4 "$API_ERROR"
     fi
   fi
   if ! api_try_get "/v1/agents/$agent/runs?limit=1"; then
-    [ "$strict" -eq 0 ] || die 4 "$API_ERROR"
-    printf 'unknown none resolution-failed'
+    run_status_record unknown none resolution-failed "$API_ERROR"
     return 0
   fi
   status=$(jq -r '(.items // [])[0].status // "none"' "$BODY")
   run=$(jq -r '(.items // [])[0].id // "none"' "$BODY")
   if [ "$status" = none ]; then
-    printf 'none none none'
+    run_status_record none none none
   else
-    printf '%s %s %s' "$status" "$run" runs-list
+    run_status_record "$status" "$run" runs-list
   fi
 }
 
@@ -402,33 +430,37 @@ cmd_list() {
 
   # Resolve each agent's latest run one at a time. Serial on purpose: a burst of
   # parallel requests is the fastest way to meet the API's rate limiter. The ids
-  # come out of one jq pass and the resolved triples are stitched back on in one
+  # come out of one jq pass and the resolved records are stitched back on in one
   # more, rather than rebuilding the whole accumulating array once per agent.
   local resolved='[]'
   if [ "$resolve_runs" -eq 1 ]; then
-    local statuses='' agent_id run_id triple
+    local statuses='' agent_id run_id record
     while IFS=$(printf '\t') read -r agent_id run_id; do
-      # One triple per line, unconditionally: the stitch below matches triples to
+      # One record per line, unconditionally: the stitch below matches records to
       # agents by position, so skipping an unusable row would shift every status
       # after it onto the wrong agent.
       if valid_agent_id "$agent_id"; then
-        triple=$(latest_run_status "$agent_id" "$run_id")
+        record=$(latest_run_status "$agent_id" "$run_id")
       else
-        triple='none none none'
+        record=$(run_status_record none none none)
       fi
-      statuses="$statuses$triple"$'\n'
+      statuses="$statuses$record"$'\n'
     done <<EOF
 $(printf '%s' "$agents" | jq -r '.[] | [.id, .latestRunId] | @tsv')
 EOF
     resolved=$(printf '%s' "$agents" | jq -c --arg statuses "$statuses" '
-      ($statuses | split("\n") | map(select(length > 0) | split(" "))) as $t
+      ($statuses | split("\n") | map(select(length > 0) | split("\u001f"))) as $t
       | to_entries
       | map(.value + {
-          runStatus: $t[.key][0], runId: $t[.key][1], runStatusSource: $t[.key][2]
+          runStatus: $t[.key][0], runId: $t[.key][1], runStatusSource: $t[.key][2],
+          runStatusReason: (if ($t[.key][3] // "") == "" then null else $t[.key][3] end)
         })')
   else
     resolved=$(printf '%s' "$agents" | jq -c \
-      'map(. + {runStatus: "unresolved", runId: "", runStatusSource: "skipped"})')
+      'map(. + {
+        runStatus: "unresolved", runId: "", runStatusSource: "skipped",
+        runStatusReason: null
+      })')
   fi
 
   if [ "$json" -eq 1 ]; then
@@ -540,6 +572,13 @@ EOF
     if [ "$unresolved" -gt 0 ]; then
       printf 'RUN is unknown for %s agent(s) whose latest run could not be fetched; every other row is unaffected.\n' \
         "$unresolved"
+      # Name the reasons, grouped, so a mid-listing 429 reads as rate limiting and
+      # can never look identical to a rejected key or to runs that are simply gone.
+      printf '%s' "$resolved" | jq -r '
+        [.[] | select(.runStatusSource == "resolution-failed")
+             | (.runStatusReason // "no reason reported")]
+        | group_by(.) | map({reason: .[0], n: length}) | sort_by(-.n)[]
+        | "  " + (.n | tostring) + " of them: " + .reason'
     fi
   else
     echo 'RUN was not resolved (--no-runs), so nothing here says whether work is happening.'
@@ -579,17 +618,20 @@ cmd_show() {
   valid_agent_id "$agent" || die 2 "not a valid agent id: $agent"
 
   api_get "/v1/agents/$agent"
-  local agent_json triple
+  local agent_json
   agent_json=$(jq -c '.' "$BODY")
-  triple=$(latest_run_status "$agent" "$(printf '%s' "$agent_json" | jq -r '.latestRunId // ""')" 1)
-  # shellcheck disable=SC2086  # triple is three space-free tokens by construction
-  set -- $triple
+  read_run_status_record \
+    "$(latest_run_status "$agent" "$(printf '%s' "$agent_json" | jq -r '.latestRunId // ""')")"
 
   if [ "$json" -eq 1 ]; then
     printf '%s' "$agent_json" | jq \
-      --arg s "$1" --arg r "$2" --arg src "$3" '{
+      --arg s "$RUN_STATUS" --arg r "$RUN_ID" --arg src "$RUN_SOURCE" \
+      --arg reason "$RUN_REASON" '{
         schema: "fm-cursor-show.v1",
-        latestRun: {status: $s, id: $r, source: $src},
+        latestRun: {
+          status: $s, id: $r, source: $src,
+          reason: (if $reason == "" then null else $reason end)
+        },
         agent: .
       }'
     return 0
@@ -603,7 +645,11 @@ cmd_show() {
   printf '%s\n' "$(printf '%s' "$agent_json" | jq -r '.name // "(unnamed)"')"
   printf '  id           %s\n' "$(printf '%s' "$agent_json" | jq -r '.id')"
   printf '  environment  %s (%s)\n' "$(env_label "$env_name" "$env_type")" "${env_type:-unknown}"
-  printf '  latest run   %s\n' "$1"
+  if [ -n "$RUN_REASON" ]; then
+    printf '  latest run   %s (%s)\n' "$RUN_STATUS" "$RUN_REASON"
+  else
+    printf '  latest run   %s\n' "$RUN_STATUS"
+  fi
   printf '  lifecycle    %s\n' "$(printf '%s' "$agent_json" | jq -r '.status // "UNKNOWN" | ascii_downcase')"
   printf '  created      %s\n' "$(printf '%s' "$agent_json" | jq -r '.createdAt // "-"')"
   printf '  updated      %s\n' "$(printf '%s' "$agent_json" | jq -r '.updatedAt // "-"')"
@@ -622,6 +668,9 @@ cmd_show() {
     echo 'This agent was created from a repository list rather than a named environment, so it carries no predefined environment secrets.'
   fi
   echo 'lifecycle active means "not archived"; the latest run status above is what says whether work is happening.'
+  if [ -n "$RUN_REASON" ]; then
+    echo 'That latest run status is unknown because the request for it failed, not because the agent is idle; everything above it came back fine.'
+  fi
 }
 
 cmd_runs() {
