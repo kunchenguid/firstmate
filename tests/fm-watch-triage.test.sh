@@ -677,6 +677,146 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+# Stage <n> parked lanes that are all individually overdue for a recheck: a
+# declared pause whose status file is old, an idle pane already counted stale,
+# and a primed .seen-* so the signal scan stays out of the way.
+stage_parked_lanes() {  # <state> <capture-file> <count> <backdate-secs>
+  local state=$1 capture=$2 count=$3 back_secs=$4 i window key sig statusf back
+  back=$(( $(date +%s) - back_secs ))
+  i=1
+  while [ "$i" -le "$count" ]; do
+    window="test:fm-park$i"
+    statusf="$state/park$i.status"
+    printf 'window=%s\nkind=ship\n' "$window" > "$state/park$i.meta"
+    printf 'paused: holding for an external decision\n' > "$statusf"
+    set_mtime "$back" "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-park${i}_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    printf '%s' "$(hash_text "$(cat "$capture")")" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    i=$((i + 1))
+  done
+}
+
+# Defect 2. A lane parked awaiting a captain decision cannot clear until a human
+# acts, so it must not carry a standing per-cycle trigger. In the preserved
+# capture (tests/fixtures/watch-cycle-exits.fixture.log) 112 of 499 cycles ended
+# within five seconds of starting, every one on a parked lane: independently
+# phased lanes each ended a cycle of their own, so a fresh watcher died on
+# whichever one happened to be next overdue. Due lanes now batch into one
+# check-in, rate-limited home-wide, and the cadence survives a restart because
+# it is anchored on a file mtime rather than in-process state.
+test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence() {
+  local dir state fakebin out drain_out capture_file pid i key back
+  dir=$(make_case parked-checkin-cadence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  printf 'idle, awaiting a decision' > "$capture_file"
+  stage_parked_lanes "$state" "$capture_file" 3 500
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an external decision'
+
+  # Phase A: every lane is overdue and no check-in has ever run, so one cycle
+  # surfaces one wake carrying all three - not three cycles carrying one each.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-park1" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "no parked check-in fired for three overdue lanes"
+  i=1
+  while [ "$i" -le 3 ]; do
+    grep -F "test:fm-park$i" "$out" >/dev/null || fail "lane park$i was left out of the batched check-in"
+    i=$((i + 1))
+  done
+  [ "$(grep -c '^stale:' "$out")" -eq 1 ] || fail "the check-in printed more than one wake reason"$'\n'"$(cat "$out")"
+  [ -e "$state/.last-parked-checkin" ] || fail "the shared check-in cadence marker was not recorded"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the parked check-in failed"
+  i=1
+  while [ "$i" -le 3 ]; do
+    grep "$(printf '\tstale\t')" "$drain_out" | grep -F "test:fm-park$i" >/dev/null \
+      || fail "lane park$i was not queued by the batched check-in"
+    i=$((i + 1))
+  done
+
+  # Phase B: the churn case. Clear every per-lane throttle so all three are
+  # individually due again - exactly the independently-phased fleet the capture
+  # recorded - and confirm the shared cadence, not the per-lane one, keeps the
+  # cycle alive. This is the sub-5s exit that must no longer happen.
+  i=1
+  while [ "$i" -le 3 ]; do
+    key=$(printf '%s' "test:fm-park$i" | tr ':/.' '___')
+    rm -f "$state/.paused-resurfaced-$key"
+    i=$((i + 1))
+  done
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-park1" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 50; then
+    reap "$pid"; fail "a fresh cycle died again on parked lanes inside the check-in cadence: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a parked lane surfaced inside the shared cadence: $(cat "$out")"
+  reap "$pid"
+
+  # Phase C: cadence, not silence. Age the shared marker past the window and the
+  # same parked lanes get their next check-in.
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$state/.last-parked-checkin"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-park1" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "the parked check-in never fired again once its cadence came due"
+  grep -F 'awaiting external' "$out" >/dev/null || fail "the next check-in was not labeled a parked recheck"
+  grep -F 'possible wedge' "$out" >/dev/null && fail "a parked check-in was mislabeled a possible wedge"
+  pass "parked lanes batch into one check-in per cadence window, and the cadence still comes due"
+}
+
+# The other half of the contract: a cadence must not become silence. A parked
+# lane whose wait has ACTUALLY cleared has to be noticed on the spot, even deep
+# inside a closed check-in window - the pause is a reason to re-check on a
+# cadence, never a reason to stop watching the lane.
+test_a_cleared_park_is_noticed_promptly_inside_a_closed_cadence() {
+  local dir state fakebin out capture_file pid key sig statusf back
+  dir=$(make_case parked-clears-promptly); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  printf 'idle, awaiting a decision' > "$capture_file"
+  stage_parked_lanes "$state" "$capture_file" 1 500
+  statusf="$state/park1.status"
+  key=$(printf '%s' "test:fm-park1" | tr ':/.' '___')
+  # Already parked and already checked in: both throttles are fully closed.
+  : > "$state/.paused-$key"
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.stale-$key"
+  date +%s > "$state/.paused-resurfaced-$key"
+  touch "$state/.last-parked-checkin"
+  # The wait cleared. Keep .seen-* primed to the NEW signature so the signal
+  # scan cannot be what notices it: the parked stale path itself must.
+  printf 'done: the external decision landed\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-park1_status"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · agent stopped'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-park1" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 \
+    || fail "a parked lane whose wait had cleared stayed silent inside the check-in cadence: $(cat "$out")"
+  grep -F 'stale: test:fm-park1' "$out" >/dev/null || fail "the cleared lane did not surface its own stale wake"
+  grep -F 'awaiting external' "$out" >/dev/null && fail "a cleared lane was still reported as a parked recheck"
+  assert_absent "$state/.paused-$key" "a cleared lane kept its parked marker"
+  pass "a parked lane whose wait has cleared is surfaced at once, even inside a closed check-in cadence"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -1578,6 +1718,8 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence
+test_a_cleared_park_is_noticed_promptly_inside_a_closed_cadence
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

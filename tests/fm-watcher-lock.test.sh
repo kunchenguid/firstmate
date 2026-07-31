@@ -857,6 +857,185 @@ SH
   pass "cycle-exit ledger links a verified successor and remains size-capped"
 }
 
+# Stage a home that needs supervision and has exactly one actionable signal
+# waiting: a captain-relevant status, no recorded window (so the stale loop has
+# nothing to scan), and no check or heartbeat cadence. One arm cycle therefore
+# surfaces exactly one "signal:" wake and closes. Echoes "<state> <fakebin>".
+stage_one_signal_home() {  # <case-name>
+  local dir state fakebin
+  dir=$(make_case "$1")
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  # A meta with no window= keeps fm_supervision_needed true (in-flight work)
+  # while recorded_windows stays empty, so nothing but the signal can wake.
+  printf 'kind=ship\n' > "$state/task.meta"
+  printf 'done: ready for review\n' > "$state/task.status"
+  printf '%s\n' "$dir"
+}
+
+# Defect 1. A delivered wake must arm the next cycle BEFORE it is handled.
+# The captured evidence in tests/fixtures/watch-cycle-exits.fixture.log shows
+# what the other ordering costs: 499 of 499 real cycles closed with
+# successor=none, so supervision ended on every single delivered wake and came
+# back only if something above this layer happened to re-arm. The window that
+# opens is exactly as wide as the handling turn, which is why arming has to
+# happen first rather than afterwards.
+test_delivered_wake_arms_its_successor_before_it_is_handled() {
+  local dir state fakebin armout armpid i lock_at_wake successor_pid status
+  dir=$(stage_one_signal_home wake-arms-successor)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+
+  # Sample the lock the instant the wake first becomes visible. Arming completes
+  # before the reason is printed, so a healthy successor must already hold the
+  # singleton at that moment; the reverse ordering leaves this empty.
+  lock_at_wake=
+  i=0
+  while [ "$i" -lt 600 ]; do
+    if grep -q '^signal:' "$armout" 2>/dev/null; then
+      lock_at_wake=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+      break
+    fi
+    sleep 0.01
+    i=$((i + 1))
+  done
+  grep -q '^signal:' "$armout" || fail "arm never surfaced the staged signal wake"
+  is_live_non_zombie "$lock_at_wake" \
+    || fail "no live successor held the watcher lock when the wake was delivered (got '$lock_at_wake')"
+
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -eq 0 ] || fail "arm did not exit cleanly after delivering its wake (status $status)"
+
+  successor_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$successor_pid" \
+    || fail "supervision ended with the arm: no live watcher remains (lock pid '$successor_pid')"
+  [ "$successor_pid" = "$lock_at_wake" ] || fail "the watcher armed before the wake is not the one that survived it"
+  grep -q "arm_pid=$armpid.*reason=actionable-signal.*successor=started:$successor_pid" "$state/.watch-cycle-exits.log" \
+    || fail "the delivered wake's ledger record did not name its armed successor"
+
+  kill -TERM "$successor_pid" 2>/dev/null || true
+  pass "a delivered wake arms its successor before the wake is handled, and supervision survives the arm"
+}
+
+# The successor outlives the arm that started it, so a LATER arm attaches to it
+# rather than owning it as a child. When that attached cycle closes on a real
+# wake, the arm must deliver that reason. Before this, an attached close could
+# only be reported as "cycle ended without an actionable reason" - a genuine
+# wake rendered as a failure, and a third exit shape observed in the field.
+test_attached_arm_delivers_its_successor_cycle_wake() {
+  local dir state fakebin armout armpid successor_pid attach_out attach_pid i status
+  dir=$(stage_one_signal_home attached-delivers-wake)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  attach_out="$dir/attach.out"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 120 || true
+  successor_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$successor_pid" || fail "no successor was left running to attach to"
+
+  # A second arm now finds that live successor and follows it.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$attach_out" &
+  attach_pid=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF "watcher: attached pid=$successor_pid" "$attach_out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$successor_pid" "$attach_out" || fail "second arm did not attach to the successor"
+
+  # Give the attached cycle something actionable, so it closes on a real wake.
+  printf 'blocked: needs a decision\n' > "$state/second.status"
+  wait_for_exit "$attach_pid" 300
+  status=$?
+  [ "$status" -eq 0 ] || fail "attached arm reported a failure for a cycle that woke for a real reason (status $status)"
+  grep -q '^signal:' "$attach_out" || fail "attached arm did not deliver its successor cycle's wake"
+  ! grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$attach_out" \
+    || fail "a genuine attached-cycle wake was reported as an unexplained empty close"
+
+  kill -TERM "$(cat "$state/.watch.lock/pid" 2>/dev/null || echo 0)" 2>/dev/null || true
+  pass "an attached arm delivers the wake its successor cycle closed on, never a false empty-close failure"
+}
+
+# An idle or away home must NOT be left with a detached watcher: the successor
+# exists to cover a handling turn, not to outlive the work it supervises.
+test_successor_is_not_armed_without_supervision_need() {
+  local dir state fakebin armout armpid status leftover
+  dir=$(stage_one_signal_home successor-need-gate)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  rm -f "$state/task.meta"   # no in-flight work and no relay poll: nothing to supervise
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -eq 0 ] || fail "arm on an idle home did not deliver its wake cleanly (status $status)"
+  grep -q '^signal:' "$armout" || fail "arm on an idle home swallowed the staged wake"
+  grep -q "arm_pid=$armpid.*successor=none" "$state/.watch-cycle-exits.log" \
+    || fail "an idle home recorded a successor it should not have armed"
+  leftover=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if is_live_non_zombie "$leftover"; then
+    kill -TERM "$leftover" 2>/dev/null || true
+    fail "an idle home was left with a detached watcher still running"
+  fi
+  pass "no successor is armed for a home with nothing left to supervise"
+}
+
+# The preserved capture is the reason this contract exists, so it is checked as
+# evidence rather than trusted as prose: if the fixture ever stops showing the
+# defect it recorded, these tests are guarding nothing and must say so.
+test_preserved_capture_still_shows_the_defect_a_fresh_cycle_no_longer_has() {
+  local fixture total no_successor short_stale dir state fakebin armout armpid successor_pid
+  fixture="$ROOT/tests/fixtures/watch-cycle-exits.fixture.log"
+  [ -s "$fixture" ] || fail "the preserved cycle-exit capture is missing"
+  total=$(grep -c '^arm_pid=' "$fixture")
+  no_successor=$(grep -c 'successor=none$' "$fixture")
+  [ "$total" -ge 400 ] || fail "the preserved capture shrank below its recorded size ($total records)"
+  [ "$no_successor" -eq "$total" ] \
+    || fail "the preserved capture no longer shows successor=none on every record ($no_successor/$total)"
+  # The same file is the parked-lane evidence: cycles that closed within five
+  # seconds of starting, all on actionable-stale.
+  short_stale=$(awk -F '\t' '
+    { split($4, s, "="); split($5, e, "="); if (e[2] - s[2] < 5 && $8 == "reason=actionable-stale") n += 1 }
+    END { print n + 0 }
+  ' "$fixture")
+  [ "$short_stale" -ge 100 ] \
+    || fail "the preserved capture no longer shows its sub-5s parked-lane churn ($short_stale records)"
+
+  # Same field, same format, opposite verdict on a freshly produced cycle.
+  dir=$(stage_one_signal_home fixture-contrast)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 120 || true
+  grep -q 'reason=actionable-signal.*successor=started:' "$state/.watch-cycle-exits.log" \
+    || fail "a fresh actionable cycle still closes with no armed successor, exactly as the capture recorded"
+  ! grep -q 'reason=actionable-.*successor=none$' "$state/.watch-cycle-exits.log" \
+    || fail "a fresh actionable cycle reproduced the captured successor=none defect"
+
+  successor_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill -TERM "$successor_pid" 2>/dev/null || true
+  pass "the preserved 499-record capture still shows the defect, and a fresh cycle no longer reproduces it"
+}
+
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   local dir state fakebin armout armpid watcher_pid i status
   dir=$(make_case stopped-watcher)
@@ -1038,4 +1217,8 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
+test_delivered_wake_arms_its_successor_before_it_is_handled
+test_attached_arm_delivers_its_successor_cycle_wake
+test_successor_is_not_armed_without_supervision_need
+test_preserved_capture_still_shows_the_defect_a_fresh_cycle_no_longer_has
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
