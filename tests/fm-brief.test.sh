@@ -598,6 +598,34 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_ship_and_scout_forbid_ai_attribution() {
+  local home brief
+  home="$TMP_ROOT/no-attribution-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-no-attribution-ship firstmate >/dev/null 2>&1
+  brief="$home/data/brief-no-attribution-ship/brief.md"
+  assert_grep "Add no Claude or AI attribution to any output." "$brief" \
+    "ship brief did not forbid Claude/AI attribution"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep 'No `Co-Authored-By` trailer on commits' "$brief" \
+    "ship brief did not name the commit co-author trailer"
+  assert_grep "Commits stay signed regardless." "$brief" \
+    "ship brief dropped the signing requirement alongside the attribution guard"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-no-attribution-scout firstmate --scout >/dev/null 2>&1
+  brief="$home/data/brief-no-attribution-scout/brief.md"
+  assert_grep "Add no Claude or AI attribution to any output." "$brief" \
+    "scout brief did not forbid Claude/AI attribution"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep 'No `Co-Authored-By` trailer on commits' "$brief" \
+    "scout brief did not name the commit co-author trailer"
+  assert_grep "Commits stay signed regardless." "$brief" \
+    "scout brief dropped the signing requirement alongside the attribution guard"
+
+  pass "fm-brief.sh: ship and scout briefs both forbid Claude/AI attribution while keeping commits signed"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -634,4 +662,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_ship_and_scout_forbid_ai_attribution
 test_scout_and_secondmate_scaffold
