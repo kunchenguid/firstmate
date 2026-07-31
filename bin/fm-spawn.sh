@@ -1686,6 +1686,11 @@ fi
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
+# Bind this task to its own chrome-devtools-axi browser session so concurrent
+# crewmates never share one Chrome instance (and thus each other's tabs/auth).
+# Same pattern and timing as GOTMPDIR above.
+spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_SESSION=$ID"
+sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
