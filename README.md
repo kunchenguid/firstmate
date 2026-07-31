@@ -128,7 +128,7 @@ The preference persists for the effective Firstmate home, and toggling it off re
 
 ### More backends
 
-Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
+Setup guides for tmux (the default) and every other supported backend (psmux on Windows, herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
 
 ## How It Works
 
@@ -202,6 +202,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.
+- [docs/psmux-backend.md](docs/psmux-backend.md) - current setup and limits for the experimental native-Windows psmux backend.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - current setup, safety boundaries, and limits for the experimental Herdr backend.
 - [docs/zellij-backend.md](docs/zellij-backend.md) - current setup and limits for the experimental Zellij backend.
 - [docs/orca-backend.md](docs/orca-backend.md) - current setup and limits for the experimental Orca backend.
