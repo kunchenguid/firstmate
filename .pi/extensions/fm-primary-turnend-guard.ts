@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 let guardFollowupActive = false;
 
@@ -111,7 +112,12 @@ export default function (pi: ExtensionAPI) {
     markLoaded();
     if (!nudge) return;
     try {
-      pi.sendMessage({ customType: "firstmate-sessionstart-nudge", content: nudge, display: false });
+      pi.sendMessage({
+        customType: "firstmate-sessionstart-nudge",
+        content: nudge,
+        display: false,
+        details: { kind: "session-start" },
+      });
     } catch {
     }
   });
@@ -140,12 +146,13 @@ export default function (pi: ExtensionAPI) {
 
     guardFollowupActive = true;
     try {
-      await pi.sendUserMessage(
+      const content = encodeFirstmateOperationalInput(
+        "turn-end-guard",
         "TURN WOULD END BLIND - supervision is off. " +
           "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
           result.stderr,
-        { deliverAs: "followUp" },
       );
+      await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {
       guardFollowupActive = false;
     }

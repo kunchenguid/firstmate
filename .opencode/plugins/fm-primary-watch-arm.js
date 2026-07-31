@@ -1,9 +1,14 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
-const ARM_READY_TIMEOUT_MS = Number(process.env.FM_OPENCODE_ARM_READY_TIMEOUT_MS || 12000);
+// 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
+// bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
+// SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
+const ARM_READY_TIMEOUT_DEFAULT_MS = process.platform === "win32" ? 35000 : 12000;
+const ARM_READY_TIMEOUT_MS = positiveInteger("FM_OPENCODE_ARM_READY_TIMEOUT_MS", ARM_READY_TIMEOUT_DEFAULT_MS);
 const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const REARM_RETRY_BASE_MS = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const REARM_RETRY_MAX_MS = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
@@ -178,16 +183,12 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
   }
 }
 
-async function sendPrompt(client, sessionID, text) {
+async function sendPrompt(paths, client, sessionID, text) {
+  const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
   await client.session.promptAsync({
     path: { id: sessionID },
     body: {
-      parts: [
-        {
-          type: "text",
-          text,
-        },
-      ],
+      parts: [{ type: "text", text: encoded }],
     },
   });
 }
@@ -196,8 +197,8 @@ function wakePrompt(reason) {
   return `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh and handle the reported wake. Watcher continuity is plugin-owned.\n\n${reason}`;
 }
 
-function surfaceFailure(client, sessionID, reason) {
-  void sendPrompt(client, sessionID, wakePrompt(reason)).catch(() => {
+function surfaceFailure(paths, client, sessionID, reason) {
+  void sendPrompt(paths, client, sessionID, wakePrompt(reason)).catch(() => {
   });
 }
 
@@ -259,13 +260,13 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
   if (child || retryTimer) return;
   if (!(await sessionOwnsLock(paths))) {
     setArmStatus("failed");
-    surfaceFailure(client, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
+    surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
     return;
   }
   retryFailures += 1;
   if (retryFailures > REARM_RETRY_LIMIT) {
     setArmStatus("failed");
-    surfaceFailure(client, sessionID, `watcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries\n${reason}`);
+    surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries\n${reason}`);
     return;
   }
   setArmStatus("retrying");
@@ -273,7 +274,7 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
     if (retryTimer === timer) retryTimer = null;
     void ensureArm(paths, sessionID, client, predecessorArmPid).then((status) => {
       if (["armed", "starting", "wake"].includes(status)) return;
-      surfaceFailure(client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
+      surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
     });
   }, retryDelay(retryFailures));
   timer.unref();
@@ -344,7 +345,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       void restoration.then((failure) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
         const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
-        return sendPrompt(client, sessionID, wakePrompt(message));
+        return sendPrompt(paths, client, sessionID, wakePrompt(message));
       }).catch(() => {
       });
       return;

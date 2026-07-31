@@ -437,7 +437,7 @@ test_dispatch_routes_zellij_backend() {
 }
 
 test_dispatch_busy_state_unknown_for_zellij() {
-  # shellcheck source=bin/fm-backend.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
   [ "$(fm_backend_busy_state zellij 'firstmate:5')" = unknown ] \
     || fail "fm_backend_busy_state should report unknown for zellij (no native agent-state primitive; D5: watcher falls back to regex, same as tmux)"
@@ -664,18 +664,18 @@ test_current_path_probes_with_marker_and_ignores_prompt_paths() {
   zellij_pane_response "$dir" 4 7 3
   zellij_pane_response "$dir" 6 7 3
   printf '%s\n' 'scratch-e2e-project HEAD' \
-    '/Users/kunchen/src/project ❯ printf marker' \
+    '/home/fixture/src/project ❯ printf marker' \
     '__FM_ZELLIJ_CWD_BEGIN__' \
-    '/Users/kunchen/.treehouse/fake-' \
+    '/home/fixture/.treehouse/fake-' \
     'worktree' \
     '__FM_ZELLIJ_CWD_END__' \
-    '/Users/kunchen/.treehouse/fake-worktree ❯' \
+    '/home/fixture/.treehouse/fake-worktree ❯' \
     > "$dir/responses/7.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_current_path firstmate:7' "$ROOT" )
-  [ "$out" = "/Users/kunchen/.treehouse/fake-worktree" ] || fail "current_path should read only the marked cwd line, got '$out'"
+  [ "$out" = "/home/fixture/.treehouse/fake-worktree" ] || fail "current_path should read only the marked cwd line, got '$out'"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''paste' \
     "current_path did not verify the pane before the cwd probe paste"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''dump-screen' \
@@ -695,13 +695,13 @@ test_current_path_ignores_tilde_prefixed_banner_lines() {
   zellij_pane_response "$dir" 4 7 3
   zellij_pane_response "$dir" 6 7 3
   printf '%s\n' "🌳 Entered worktree at ~/.treehouse/scratch-e2e-project/1. Type 'exit' to return." \
-    'scratch-e2e-project HEAD' '__FM_ZELLIJ_CWD_BEGIN__' '/Users/kunchen/.treehouse/real-worktree' '__FM_ZELLIJ_CWD_END__' '❯' \
+    'scratch-e2e-project HEAD' '__FM_ZELLIJ_CWD_BEGIN__' '/home/fixture/.treehouse/real-worktree' '__FM_ZELLIJ_CWD_END__' '❯' \
     > "$dir/responses/7.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_current_path firstmate:7' "$ROOT" )
-  [ "$out" = "/Users/kunchen/.treehouse/real-worktree" ] || fail "current_path should skip the ~-prefixed banner line and read the marked cwd output, got '$out'"
+  [ "$out" = "/home/fixture/.treehouse/real-worktree" ] || fail "current_path should skip the ~-prefixed banner line and read the marked cwd output, got '$out'"
   pass "fm_backend_zellij_current_path: never picks up a ~-prefixed banner line as the answer"
 }
 
@@ -796,8 +796,11 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   printf 'report\n' > "$data/zghost/report.md"
   fm_write_meta "$state/zghost.meta" \
     "window=firstmate:7" \
+    "endpoint_task_id=zghost" \
     "backend=zellij" \
+    "zellij_session=firstmate" \
     "zellij_tab_id=3" \
+    "zellij_pane_id=7" \
     "worktree=$dir/missing-worktree" \
     "project=$project" \
     "kind=scout" \
@@ -827,7 +830,11 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
   printf 'smz\n' > "$home/.fm-secondmate-home"
   fm_write_meta "$state/smz.meta" \
     "window=firstmate:99" \
+    "endpoint_task_id=smz" \
     "backend=zellij" \
+    "zellij_session=firstmate" \
+    "zellij_tab_id=99" \
+    "zellij_pane_id=99" \
     "worktree=$home" \
     "project=$home" \
     "kind=secondmate" \
@@ -835,8 +842,11 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
     "home=$home"
   fm_write_meta "$home/state/childz.meta" \
     "window=firstmate:7" \
+    "endpoint_task_id=childz" \
     "backend=zellij" \
+    "zellij_session=firstmate" \
     "zellij_tab_id=4" \
+    "zellij_pane_id=7" \
     "worktree=$dir/missing-child-worktree" \
     "project=$project" \
     "kind=scout"
@@ -1010,7 +1020,7 @@ test_scripts_reject_fm_target_label_mismatch() {
   pass "fm-send: fm-id zellij targets reject pane ids whose tab label no longer matches"
 }
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
 test_version_check_accepts_current_version

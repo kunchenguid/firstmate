@@ -27,16 +27,28 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   A herdr crewmate or scout is placed in the exact workspace of the firstmate
+#   or secondmate process launching it, resolved from that process's own herdr
+#   pane rather than from a workspace label (herdr enforces no label uniqueness,
+#   so a label cannot tell two "firstmate" workspaces apart). A claimed parent
+#   identity that is unreadable, contradictory, stale, or from another herdr
+#   session stops the spawn before any worker endpoint exists. A launcher
+#   outside herdr has no workspace to inherit and uses this home's own labeled
+#   workspace, which must then match exactly one. --secondmate is the deliberate
+#   exception: it stands up that secondmate home's own workspace.
 #   Herdr additionally supports a default-off presentation-only layout when the
 #   local config/herdr-presentation-spaces flag exists. A clean fresh task first
 #   writes state/<id>.herdr-presentation atomically, then creates a disposable
-#   workspace containing only the ordinary task pane. The journal and visible
-#   random token are never endpoint or ownership authority. Existing, ambiguous,
-#   or recovered state is never adopted, reused, closed, or deleted through that
-#   presentation path; a flat launch is allowed only after duplicate-agent risk
-#   is independently absent. Treehouse allocation and task metadata are unchanged.
-#   A clean projected create makes one bounded attempt to hold the one
-#   session-scoped presentation-order lock (keyed by named session plus
+#   workspace containing only the ordinary task pane. A successful clean create
+#   upgrades its attempt journal with exact home, session, workspace, tab, pane,
+#   parent, and label bindings. On a same-identity restart, that complete binding
+#   plus authoritative metadata may replace one exact agent-free husk in place.
+#   The journal, visible token, and labels alone are never endpoint or ownership
+#   authority, and every ambiguous recovery stays on the flat fallback after
+#   duplicate-agent risk is independently absent. Treehouse allocation and task
+#   metadata are unchanged.
+#   A clean projected create or exact resume makes one bounded attempt to hold
+#   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
 #   contention warns and falls back to the ordinary flat layout before any
 #   projection mutation. The exact response-derived new workspace is inserted
@@ -56,10 +68,11 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters.
+#   new adapters. pi-signed launches that exact executable name from PATH and
+#   refuses before endpoint creation when it is unavailable; it never falls back to pi.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -97,7 +110,10 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
-# Per-harness turn-end hooks are installed automatically; some live outside the worktree.
+#     __OPINPUT__   absolute path to the canonical operational-input encoder
+# Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
+# a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
@@ -108,7 +124,10 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  # The whole leading comment block, ending at the first line that is not a
+  # comment. Derived rather than a fixed line range, which silently truncated
+  # this help mid-sentence every time the header above grew.
+  sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -117,6 +136,26 @@ esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+
+resolve_directory_input() {
+  local name=$1 path=$2 resolved
+  case "$path" in
+    /*) printf '%s\n' "$path"; return 0 ;;
+  esac
+  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || {
+    echo "error: $name directory cannot be resolved: $path" >&2
+    return 1
+  }
+  printf '%s\n' "$resolved"
+}
+
+FM_HOME=$(resolve_directory_input FM_HOME "$FM_HOME") || exit 1
+if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+  FM_STATE_OVERRIDE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
+fi
+if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+  FM_DATA_OVERRIDE=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
+fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
@@ -382,7 +421,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -419,20 +458,20 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
-    pi)
+    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    pi|pi-signed)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
+        printf '%s%s' "$harness" ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
+        printf '%s%s' "$harness" ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -442,7 +481,12 @@ launch_template() {
     # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Kimi Code rejects a positional prompt, so it launches bare and receives
+    # only an absolute brief pointer after the TUI readiness gate below.
+    # Its turn-end signal is a globally configured Stop hook plus a guarded
+    # per-task worktree token, so no launch placeholder belongs here.
+    kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     *) return 1 ;;
   esac
 }
@@ -482,6 +526,18 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+case "$HARNESS" in
+  pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
+esac
+
+# pi-signed is an explicitly selected executable identity, not an alias that may
+# silently fall back to pi. Resolve it from PATH before creating an endpoint and
+# retain the literal name in the launch command and task metadata.
+if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
+  echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
+  exit 1
+fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
@@ -526,11 +582,35 @@ shell_quote() {
   printf "'"
 }
 
+resolve_kimi_binary() {
+  local candidate dir fallback
+  candidate=$(command -v kimi 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  fallback="${HOME:-}/.kimi-code/bin/kimi"
+  if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  echo "error: kimi executable not found; searched PATH for 'kimi' and fallback '$fallback'" >&2
+  return 1
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|pi-signed|grok|kimi)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -562,7 +642,7 @@ effort_flag_for_harness() {
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
-    pi)
+    pi|pi-signed)
       # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
       # its --thinking flag.
       case "$effort" in
@@ -572,8 +652,23 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # kimi likewise has no reasoning-effort flag; the requested axis stays in
+    # task metadata but never reaches the launch command.
   esac
 }
+
+case "$LAUNCH" in
+  *__KIMIBIN__*)
+    KIMI_BIN=$(resolve_kimi_binary) || exit 1
+    LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
+    if [ "$KIND" != secondmate ]; then
+      "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
+        echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
+        exit 1
+      }
+    fi
+    ;;
+esac
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -750,6 +845,8 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
+BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -798,25 +895,59 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+herdr_projection_meta_field_exact() {  # <meta> <key>
+  local meta=$1 key=$2 count
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  count=$(grep -c "^${key}=" "$meta" 2>/dev/null || true)
+  [ "$count" = 1 ] || return 1
+  grep "^${key}=" "$meta" 2>/dev/null | cut -d= -f2-
+}
+
 # A stale presentation journal never grants launch authority.
-# When authoritative metadata already exists, require its endpoint to be
-# positively dead before the journal's read-only token inspection may allow a
-# flat fallback.
+# Under the session lock, authoritative metadata must identify one positively
+# dead or agent-free endpoint before token inspection may allow flat fallback.
+# Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
-  local meta=$1 old_backend old_target old_session old_pane old_state
+  local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
+  HERDR_RECOVERY_BACKEND=""
+  HERDR_RECOVERY_WORKSPACE_ID=""
+  HERDR_RECOVERY_TAB_ID=""
+  HERDR_RECOVERY_PANE_ID=""
   old_backend=$(fm_backend_of_meta "$meta")
   old_target=$(fm_backend_target_of_meta "$meta")
   [ -n "$old_target" ] || {
     echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
     return 1
   }
+  HERDR_RECOVERY_BACKEND=$old_backend
   if [ "$old_backend" = herdr ]; then
     fm_backend_herdr_parse_target "$old_target" || {
       echo "error: existing herdr endpoint for $ID is malformed; refusing duplicate launch" >&2
       return 1
     }
-    old_session=$FM_BACKEND_HERDR_SESSION
-    old_pane=$FM_BACKEND_HERDR_PANE
+    target_session=$FM_BACKEND_HERDR_SESSION
+    target_pane=$FM_BACKEND_HERDR_PANE
+    old_session=$(herdr_projection_meta_field_exact "$meta" herdr_session) || {
+      echo "error: existing herdr metadata for $ID has an ambiguous session; refusing duplicate launch" >&2
+      return 1
+    }
+    HERDR_RECOVERY_WORKSPACE_ID=$(herdr_projection_meta_field_exact "$meta" herdr_workspace_id) || {
+      echo "error: existing herdr metadata for $ID has an ambiguous workspace; refusing duplicate launch" >&2
+      return 1
+    }
+    HERDR_RECOVERY_TAB_ID=$(herdr_projection_meta_field_exact "$meta" herdr_tab_id) || {
+      echo "error: existing herdr metadata for $ID has an ambiguous tab; refusing duplicate launch" >&2
+      return 1
+    }
+    old_pane=$(herdr_projection_meta_field_exact "$meta" herdr_pane_id) || {
+      echo "error: existing herdr metadata for $ID has an ambiguous pane; refusing duplicate launch" >&2
+      return 1
+    }
+    [ "$target_session" = "$old_session" ] && [ "$target_pane" = "$old_pane" ] || {
+      echo "error: existing herdr metadata for $ID has inconsistent endpoint identities; refusing duplicate launch" >&2
+      return 1
+    }
+    HERDR_RECOVERY_PANE_ID=$old_pane
     fm_backend_herdr_server_ensure "$old_session" || {
       echo "error: existing herdr endpoint for $ID could not be inspected; refusing duplicate launch" >&2
       return 1
@@ -866,60 +997,137 @@ case "$BACKEND" in
     # to PROJ_ABS for just these two calls (bash restores it automatically
     # after each prefixed simple-command call) so the secondmate's tab lands
     # in the secondmate's own workspace, not the primary's "firstmate" one.
+    #
+    # Placement, separately from labeling: a crewmate/scout belongs in the
+    # EXACT herdr workspace this launching process is itself running in, which
+    # only its own herdr pane identity can name (a same-labeled sibling
+    # workspace must never be adopted). A --secondmate launch is the exception -
+    # it stands up a DIFFERENT home's own workspace by design - so it asks for
+    # the per-home container instead of inheriting this launcher's.
     HERDR_LABEL_HOME=$FM_HOME
+    HERDR_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
+      HERDR_LAUNCHER_RELATIONSHIP=other-home
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
     if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
+      HERDR_SES=$(fm_backend_herdr_session)
+      HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+        fm_backend_herdr_server_ensure "$HERDR_SES" || {
+          echo "error: herdr presentation recovery could not ensure its exact named session" >&2
+          exit 1
+        }
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+          echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
+          exit 1
+        }
         if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
           herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
         fi
-        HERDR_RECOVERY_SESSION=$(fm_backend_herdr_session)
         fm_backend_herdr_projection_recovery_allows_flat \
-          "$HERDR_RECOVERY_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+        if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+          set +e
+          FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
+            "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
+            "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
+            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+          HERDR_RECLAIM_STATUS=$?
+          set -e
+          case "$HERDR_RECLAIM_STATUS" in
+            0)
+              HERDR_PROJECTED=1
+              HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
+              HERDR_SEEDED_DEFAULT_TAB_ID=""
+              HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+              HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+              HERDR_PROJECTION_ABORT_CLEANUP=1
+              HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+              HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+              HERDR_PROJECTION_ABORT_SEEDED_PANE=""
+              ;;
+            2)
+              spawn_herdr_presentation_order_lock_release
+              ;;
+            *) exit 1 ;;
+          esac
+        else
+          spawn_herdr_presentation_order_lock_release
+        fi
       elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-        HERDR_SES=$(fm_backend_herdr_session)
-        HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
-        # Session lock path resolution needs a live named-session socket.
-        # Ensure the server before journal publication so lock failure degrades
-        # to flat without ever creating an unlocked projection.
+        # Session lock path resolution and exact parent binding both need a
+        # live named-session socket before journal publication.
         if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
           echo "warning: herdr presentation could not ensure its session server; using the ordinary flat layout without projection" >&2
         elif spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
-          HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
-          HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
-          if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-            "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
-            if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
-              HERDR_PROJECTION_ABORT_CLEANUP=1
-              HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
-              HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-              HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+          # The projected child is placed and bound UNDER this launcher's exact
+          # parent workspace. Its own herdr pane identity names that workspace
+          # directly; the label lookup is only the fallback for a launcher with
+          # no herdr ancestry at all. A claimed-but-broken identity refuses here
+          # rather than projecting under a guessed parent.
+          set +e
+          fm_backend_herdr_launcher_identity "$HERDR_SES"
+          HERDR_LAUNCHER_STATUS=$?
+          set -e
+          case "$HERDR_LAUNCHER_STATUS" in
+            0) HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID ;;
+            2) HERDR_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_parent_workspace_exact \
+                 "$HERDR_SES" "$HERDR_PARENT_LABEL" 2>/dev/null || true) ;;
+            *) spawn_herdr_presentation_order_lock_release; exit 1 ;;
+          esac
+          if [ -z "$HERDR_PARENT_WORKSPACE_ID" ]; then
+            echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
+            spawn_herdr_presentation_order_lock_release
+          else
+            HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
+            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
+              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
+                HERDR_PROJECTION_ABORT_CLEANUP=1
+                HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
+                HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+                HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+              fi
+              exit 1
             fi
-            exit 1
+            HERDR_PROJECTED=1
+            HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
+            HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+            HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+            HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+            HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+            HERDR_PROJECTION_ABORT_CLEANUP=1
+            HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+            HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            fm_backend_herdr_projection_order_best_effort \
+              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
+            HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
+            if [ -n "$HERDR_HOME_ID" ] \
+               && fm_backend_herdr_projection_live_binding_matches \
+                 "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
+                 "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
+                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" \
+               && fm_backend_herdr_projection_journal_bind \
+                 "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
+                 "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
+              :
+            else
+              echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
+            fi
           fi
-          HERDR_PROJECTED=1
-          HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
-          HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
-          HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
-          HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-          HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-          HERDR_PROJECTION_ABORT_CLEANUP=1
-          HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-          HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-          HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-          fm_backend_herdr_projection_order_best_effort \
-            "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL"
         else
           echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection" >&2
         fi
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
-      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
       # rather than creating a fresh one). Split on the guaranteed single tab
@@ -1032,6 +1240,58 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
+
+kimi_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+kimi_capture_has_empty_composer() {  # <plain-pane-capture>
+  printf '%s\n' "$1" \
+    | grep -Eq '^[[:space:]]*(│|┃|\|)[[:space:]]*>[[:space:]]*(│|┃|\|)[[:space:]]*$'
+}
+
+kimi_wait_for_ready() {
+  local pane i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(kimi_capture)
+    if printf '%s\n' "$pane" | grep -Fq 'Welcome to Kimi Code!' \
+       || kimi_capture_has_empty_composer "$pane"; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+kimi_delivery_is_confirmed() {  # <plain-pane-capture>
+  local pane=$1
+  kimi_capture_has_empty_composer "$pane" || return 1
+  if { printf '%s\n' "$pane" | grep -Fq '✨' \
+       && printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; } \
+     || printf '%s\n' "$pane" \
+       | grep -qiE 'context:[[:space:]]*(0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*([.][0-9]+)?)[[:space:]]*%'; then
+    return 0
+  fi
+  return 1
+}
+
+kimi_wait_for_delivery() {
+  local pane i=0 max=${FM_KIMI_DELIVERY_POLLS:-40} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(kimi_capture)
+    kimi_delivery_is_confirmed "$pane" && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+kimi_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -1090,9 +1350,10 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
-# Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
-# agent finishes a turn. Worktree-resident hooks are kept out of git's view so
-# they never block teardown's dirty check or leak into a commit.
+# Per-harness turn-end hook where enabled: a file that touches
+# state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
+# and token pointers stay out of git's view so they never block teardown's dirty
+# check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
@@ -1123,7 +1384,7 @@ export const FmTurnEnd = async ({ \$ }) => ({
 EOF
       exclude_path '.opencode/plugins/fm-turn-end.js'
       ;;
-    pi*)
+    pi|pi-signed)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
@@ -1190,6 +1451,21 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    kimi*)
+      # Kimi's Stop hook is global, but it is inert unless cwd contains this
+      # task's token pointer and the token resolves through Firstmate's private
+      # registry. The installer above owns the format-preserving config edit and
+      # the always-zero, silent hook script.
+      KIMI_AUTH_DIR="$HOME/.kimi-code/fm-turn-end.d"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
+      exclude_path '.fm-kimi-turnend'
+      ;;
   esac
 fi
 
@@ -1213,6 +1489,7 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
   echo "window=$META_WINDOW"
+  echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
@@ -1257,6 +1534,7 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -1266,6 +1544,17 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
+# inherit firstmate's current environment, so a bare `claude` in the pane falls
+# back to the default ~/.claude store even when firstmate itself runs under a
+# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
+# Forward firstmate's own resolved store onto the claude launch so the crewmate
+# uses the same credential/config firstmate is authenticated with. Only when set;
+# an unset value is the single-store default and needs no prefix.
+if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
@@ -1282,6 +1571,30 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = kimi ]; then
+  if ! kimi_wait_for_ready; then
+    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    exit 1
+  fi
+  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
+  KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
+  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
+  KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+    "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
+    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
+    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    exit 1
+  }
+  if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
+    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    exit 1
+  fi
+  if ! kimi_wait_for_delivery; then
+    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    exit 1
+  fi
+fi
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
