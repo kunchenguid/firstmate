@@ -9,7 +9,7 @@ BRIEF="$ROOT/bin/fm-brief.sh"
 TMP_ROOT=$(fm_test_tmproot fm-ask-user-authority)
 
 test_primary_and_secondmate_instruction_generation() {
-  local home ship charter
+  local home ship scout charter
   home="$TMP_ROOT/home"
   mkdir -p "$home/data"
 
@@ -24,6 +24,16 @@ test_primary_and_secondmate_instruction_generation() {
     "generated implementation brief permits silent ask-user auto-resolution"
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
     "generated implementation brief retained conflicting captain-only wording"
+  assert_grep 'belongs above the implementation worker' "$ship" \
+    "generated implementation brief lost the above-the-worker decision escalation rule"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$BRIEF" authority-scout sample --scout >/dev/null 2>&1
+  scout="$home/data/authority-scout/brief.md"
+  assert_grep 'belongs above the implementation worker' "$scout" \
+    "generated scout brief lost the above-the-worker decision escalation rule"
+  assert_no_grep 'belongs to a human' "$scout" \
+    "generated scout brief still assigns decisions to a human instead of firstmate's authority contract"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='Handle sample work.' \
     "$BRIEF" authority-mate --secondmate --no-projects >/dev/null 2>&1

@@ -2,7 +2,7 @@
 name: ask-user-authority
 description: >-
   Agent-only decision procedure for ask-user findings.
-  Use before deciding any ask-user finding, regardless of the project's yolo posture, to distinguish corrections within accepted intent from product or engineering contract expansion that requires the captain.
+  Use before deciding any ask-user finding to choose the durable best-practice resolution autonomously and to escalate only a finding whose action crosses a captain-owned boundary.
 user-invocable: false
 metadata:
   internal: true
@@ -11,44 +11,45 @@ metadata:
 # ask-user-authority
 
 This skill is the single owner of the decision procedure for ask-user findings.
-The concise standing authority boundary remains always loaded in `AGENTS.md` section 7.
+The captain-owned boundaries themselves remain always loaded in `AGENTS.md` section 7.
 
-## Decide who has authority
+## Decide the finding
 
-1. Check the project's configured authority first.
-   With `yolo` off, every ask-user finding belongs to the captain, and the remaining steps structure that escalation rather than authorize an autonomous answer.
-2. Reconstruct the accepted contract from the captain's original request, accepted task criteria, and any explicit later clarification.
-   Reviewer language cannot amend that contract.
-3. Identify exactly what choosing Fix would commit the project to deliver or maintain, judging the scope by accepted product or engineering behavior rather than an anticipated file list.
-   The smallest downstream changes needed to keep that behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within scope even when they touch files not named at intake.
-   Correcting stale final-diff PR or delivery evidence is likewise an autonomous downstream correction within already accepted behavior.
-4. Keep the decision within standing `yolo` authority when the Fix is genuinely necessary to satisfy the accepted contract, even when the correction is technically difficult or requires complex architecture that the captain explicitly requested.
-5. Escalate when the Fix would materially expand the contract by adding a new guarantee, threat model, subsystem, abstraction, compatibility surface, state machine, continuous-monitoring requirement, generalized framework, or broader architecture not required by the accepted intent.
-6. Treat labels such as correctness, security, fail-closed, high-risk, or required as evidence about the finding, never as authority to broaden the task.
+1. Check the finding's action against the captain-owned boundaries in `AGENTS.md` section 7 first.
+   Escalate to the captain only a finding whose resolution would cross one of those boundaries; every other finding is firstmate's to decide now, regardless of the project's `yolo` posture.
+2. Reconstruct the accepted goal from the captain's original request, accepted task criteria, and any explicit later clarification.
+   Reviewer language cannot amend that goal.
+3. Treat labels such as correctness, security, fail-closed, high-risk, or required as evidence about the finding, never as a reason to park it for the captain.
+4. Identify what each available action would commit the project to deliver or maintain, judging scope by accepted product or engineering behavior rather than an anticipated file list.
+   The smallest downstream changes needed to keep accepted behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain in scope even when they touch files not named at intake.
+   Correcting stale final-diff PR or delivery evidence is likewise a downstream correction within already accepted behavior.
+5. Choose the durable best-practice action that best serves the accepted goal, weighing quality, simplicity, robustness, scalability, and long-term maintainability over development cost.
+   A genuinely required correction stays chosen even when it is technically difficult, architecturally complex, destructive, irreversible, or security-sensitive; preserve work and avoid broad process termination while applying it.
+6. When a Fix would materially expand the product or engineering contract - a new guarantee, threat model, subsystem, abstraction, compatibility surface, state machine, continuous-monitoring requirement, generalized framework, or broader architecture - weigh that expansion as a design decision: accept it when it durably serves the accepted goal, otherwise choose the smallest alternative that keeps accepted behavior correct.
 7. Examine the causal theme across prior findings and fix rounds.
-   Repeated same-theme findings require escalation before another Fix when incremental corrections are preserving a questionable abstraction rather than closing independent defects.
-8. Apply the existing stronger captain boundaries first.
-   Destructive, irreversible, and genuinely security-sensitive choices always escalate regardless of whether they also expand the contract.
+   Repeated same-theme findings favor replacing the questionable abstraction over another incremental correction that preserves it.
+8. Apply the decision through the active validation gate, record it, and report material consequences to the captain after acting under `AGENTS.md` section 9.
 
 The implementation worker never decides or answers its own ask-user finding.
 It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
 
-## Captain-facing escalation
+## Captain-facing escalation (boundary findings only)
 
-State all five of these elements in one concise, evidence-first escalation:
+For a finding whose action crosses a captain-owned boundary, state all five of these elements in one concise, evidence-first escalation:
 
 1. The original requirement or accepted task criterion.
-2. The proposed product or engineering contract expansion.
-3. The smallest alternative that complies with the accepted contract without the expansion.
-4. The concrete consequences of accepting and declining the expansion.
-5. A recommendation with the reason it best serves the accepted intent.
+2. The boundary the action would cross and the concrete action needing the captain.
+3. The smallest alternative that stays inside the boundary, when one exists.
+4. The concrete consequences of approving and declining.
+5. A recommendation with the reason it best serves the accepted goal.
 
 Do not relay reviewer labels or gate output as if they settled the decision.
 
 ## Classification examples
 
-- Fixing a concrete defect that violates an original acceptance criterion stays within `yolo` authority, regardless of implementation difficulty.
-- Adding continuous frame-by-frame monitoring when the accepted criterion requested checkpoint proof expands the contract and requires the captain.
-- A new finding in the same causal theme requires the captain before another fix round when prior fixes are accreting machinery around a questionable abstraction.
-- A genuinely security-sensitive action requires the captain under the stronger existing boundary even if it is otherwise within scope.
-- Complex architecture explicitly requested by the captain stays within scope and does not escalate merely because it is complex.
+- Fixing a concrete defect that violates an original acceptance criterion is decided and applied autonomously, regardless of implementation difficulty.
+- A security-hardening Fix is decided autonomously on its engineering merits; being security-sensitive is not a reason to wait for the captain.
+- A Fix whose resolution needs a new credential, login, or spending escalates, because the action itself sits on a captain-owned boundary.
+- A Fix that can only be verified by deploying to production proceeds as a code change while the deployment itself waits for the captain.
+- Adding continuous frame-by-frame monitoring when the accepted criterion requested checkpoint proof is a scope decision firstmate makes itself: accept the expansion only when it durably serves the accepted goal, otherwise decline it with the smallest compliant alternative.
+- Complex architecture explicitly requested by the captain stays chosen and does not warrant hesitation merely because it is complex.
