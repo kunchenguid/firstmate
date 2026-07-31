@@ -15,9 +15,11 @@
 #       we-pack-together's docs/pr-assets/sidebar-silent-discard)
 #   (g) a before/after set with no shared suffix or ordinal refuses loudly
 #       rather than printing a bare "ok" having verified nothing
-#   (h) the .allow-identical marker opts an identical pair back in
-#   (i) --local mode hashes files on disk instead of reading a git ref
-#   (j) usage errors exit 2 without touching git
+#   (h) a leftover, differently-named pair beside an already-matched pair in
+#       the same directory still refuses instead of being silently dropped
+#   (i) the .allow-identical marker opts an identical pair back in
+#   (j) --local mode hashes files on disk instead of reading a git ref
+#   (k) usage errors exit 2 without touching git
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -195,6 +197,36 @@ test_unpairable_set_refuses_not_silent_ok() {
   pass "fm-evidence-check refuses (not a silent ok) when before/after images cannot be paired at all"
 }
 
+test_leftover_pair_beside_matched_pair_refuses() {
+  # A directory can hold one legitimately matched pair alongside a second,
+  # differently-named pair that never matched by suffix or ordinal. The
+  # leftover pair must still be reported as unpaired rather than silently
+  # dropped just because the directory already matched something else.
+  local dir rc out err
+  dir="$TMP_ROOT/leftover-beside-matched"
+  init_repo "$dir"
+  write_png "$dir/before-desktop.png" OLDBYTES
+  write_png "$dir/after-desktop.png" NEWBYTES
+  write_png "$dir/before-extra-thing.png" SNEAKYBYTES
+  write_png "$dir/after-different-name.png" SNEAKYBYTES
+  commit_all "$dir"
+
+  out="$dir/stdout"; err="$dir/stderr"
+  set +e
+  "$CHECK" --ref HEAD --root "$dir" > "$out" 2> "$err"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "leftover-beside-matched: a leftover pair must refuse even beside a matched pair"
+  assert_no_grep 'fm-evidence-check: ok' "$out" \
+    "leftover-beside-matched: a bare ok was printed despite an unpaired leftover"
+  assert_grep 'before-extra-thing.png' "$err" \
+    "leftover-beside-matched: refusal did not name the leftover before image"
+  assert_grep 'after-different-name.png' "$err" \
+    "leftover-beside-matched: refusal did not name the leftover after image"
+  pass "fm-evidence-check refuses a leftover unpaired image even beside a matched pair"
+}
+
 test_allow_identical_marker_opts_in() {
   local dir rc out
   dir="$TMP_ROOT/opt-out"
@@ -266,6 +298,7 @@ test_no_images_passes_silently
 test_reversed_convention_paired
 test_ordinal_pairs_state_described_suffixes
 test_unpairable_set_refuses_not_silent_ok
+test_leftover_pair_beside_matched_pair_refuses
 test_allow_identical_marker_opts_in
 test_local_mode_hashes_disk_files
 test_usage_errors_exit_2

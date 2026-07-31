@@ -13,10 +13,11 @@
 #
 # An unpaired image (a legitimate after-only set, or any image that does not
 # follow either convention) is never a failure and is silently ignored. But a
-# directory holding both before-* and after-* images that could not be paired
-# by either rule at all is never silently "ok" either - that means the check
-# did not verify anything, which is worse than a missed case, so it is a
-# refusal that names the unpaired files.
+# directory holding both before-* and after-* images that includes any image
+# left unpaired after matching - whether the directory paired nothing at all
+# or paired some images and left others over - is never silently "ok" either.
+# A leftover image is unverified evidence, even alongside a genuine pair in
+# the same directory, so it is a refusal that names the unpaired files.
 #
 # Usage:
 #   fm-evidence-check.sh --ref <git-ref> [--root <repo>] [--] [<pathspec>...]
@@ -44,8 +45,8 @@
 # Exit 0: no evidence images, no before/after pairs, or every identical pair
 #         carries its .allow-identical marker.
 # Exit 1: at least one before/after pair is byte-identical with no marker, or a
-#         directory holds both before-* and after-* images with zero pairs
-#         matched between them.
+#         directory holds both before-* and after-* images and at least one of
+#         them was left unpaired after matching.
 # Exit 2: usage error, or the git ref/repo could not be read.
 set -eu
 
@@ -289,9 +290,9 @@ def main():
             )
             (opted_out if allowed else failures).append((before_path, after_path))
 
-        if not pairs:
-            leftover_before = [p for i, (p, _i, _k) in enumerate(befores) if i not in matched_before]
-            leftover_after = [p for i, (p, _i, _k) in enumerate(afters) if i not in matched_after]
+        leftover_before = [p for i, (p, _i, _k) in enumerate(befores) if i not in matched_before]
+        leftover_after = [p for i, (p, _i, _k) in enumerate(afters) if i not in matched_after]
+        if leftover_before or leftover_after:
             unpaired.append((leftover_before, leftover_after))
 
     for before_path, after_path in opted_out:

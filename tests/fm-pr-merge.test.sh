@@ -17,6 +17,8 @@
 #   (i) a byte-identical before/after evidence pair in the worktree's HEAD
 #       refuses the merge before gh-axi pr merge is invoked
 #   (j) a worktree with a real, non-identical evidence pair still merges
+#   (k) the evidence check verifies the freshly fetched remote PR head, not a
+#       stale local worktree HEAD that gh-axi pr merge will not actually land
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -356,6 +358,53 @@ test_different_evidence_pair_still_merges() {
   pass "fm-pr-merge merges a worktree whose evidence pair genuinely differs"
 }
 
+test_evidence_check_uses_fetched_remote_pr_head_not_stale_local_worktree() {
+  # The task worktree can be stale relative to the actual PR branch on GitHub
+  # (e.g. a pooled project clone that has not fetched the latest push).
+  # gh-axi pr merge lands whatever is on GitHub, so the evidence check must
+  # verify the freshly fetched remote PR head, not the local worktree's HEAD.
+  # Build a stale local worktree whose HEAD carries a byte-identical (bad)
+  # evidence pair, and a remote "origin" whose refs/pull/<n>/head carries a
+  # genuinely different (good) evidence pair. The merge must succeed because
+  # the real remote PR head is what actually gets merged and verified.
+  local case_dir rc origin real_dir
+  case_dir=$(make_case fresh-remote-head)
+  origin="$case_dir/origin.git"
+  real_dir="$case_dir/real"
+
+  git init -q --bare "$origin"
+
+  mkdir -p "$real_dir/docs/pr-assets/widget"
+  git -C "$real_dir" init -q
+  printf OLDBYTES > "$real_dir/docs/pr-assets/widget/before-desktop.png"
+  printf NEWBYTES > "$real_dir/docs/pr-assets/widget/after-desktop.png"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "real pr head"
+  git -C "$real_dir" push -q "$origin" "HEAD:refs/pull/41/head"
+
+  mkdir -p "$case_dir/wt/docs/pr-assets/widget"
+  git -C "$case_dir/wt" init -q
+  git -C "$case_dir/wt" remote add origin "$origin"
+  printf SAMEBYTES > "$case_dir/wt/docs/pr-assets/widget/before-desktop.png"
+  printf SAMEBYTES > "$case_dir/wt/docs/pr-assets/widget/after-desktop.png"
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -qm "stale local worktree"
+
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/41 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "fresh-remote-head: fm-pr-merge should merge using the real remote PR head"
+  grep -qxF 'pr merge 41 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "fresh-remote-head: gh-axi pr merge was not invoked despite a good remote PR head"
+  pass "fm-pr-merge checks evidence against the fetched remote PR head, not a stale local worktree"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -368,3 +417,4 @@ test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_identical_evidence_pair_refuses_merge
 test_different_evidence_pair_still_merges
+test_evidence_check_uses_fetched_remote_pr_head_not_stale_local_worktree

@@ -7,8 +7,13 @@
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
-# Before merging, bin/fm-evidence-check.sh runs against the recorded worktree's
-# HEAD; a byte-identical before/after evidence image pair with no opt-out
+# Before merging, bin/fm-evidence-check.sh runs against the actual GitHub PR
+# head - gh-axi pr merge lands whatever is currently on the PR branch on
+# GitHub, not necessarily the local task worktree's HEAD, so the head is
+# resolved the same way bin/fm-review-diff.sh does: a freshly fetched
+# refs/pull/<n>/head first, falling back to the pr_head= recorded by
+# bin/fm-pr-check.sh, and only then to the local worktree HEAD with a
+# warning. A byte-identical before/after evidence image pair with no opt-out
 # marker refuses the merge. See bin/fm-evidence-check.sh --help for the pairing
 # convention and opt-out mechanism.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
@@ -80,16 +85,48 @@ grep -qxF "pr=$URL" "$META" || {
   exit 1
 }
 
-# The task worktree is a checkout of the exact branch about to be merged, so
-# its HEAD is the tree gh-axi is about to land. Only run the check when that
-# tree is actually a readable git commit; a task with no worktree, or one gh
-# has never checked out, has nothing evidence-checkable to skip past.
+# gh-axi pr merge lands whatever is currently on GitHub as the PR head, which
+# may differ from the local task worktree's HEAD (e.g. a pooled project clone
+# that has not fetched the latest push). Resolve the actual remote PR head the
+# same way bin/fm-review-diff.sh does before running the evidence check
+# against it, so stale local state can never hide the real, mergeable content.
+fetch_pull_head() {
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin \
+    "+refs/pull/$PR_NUMBER/head:refs/fm-merge/pull/$PR_NUMBER/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" rev-parse --verify "refs/fm-merge/pull/$PR_NUMBER/head^{commit}" 2>/dev/null
+}
+
+resolve_pr_head() {
+  local recorded_head=$1 resolved
+  if resolved=$(fetch_pull_head) && [ -n "$resolved" ]; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+  if [ -n "$recorded_head" ] \
+    && git -C "$WT" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
+    printf '%s' "$recorded_head"
+    return 0
+  fi
+  return 1
+}
+
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-if [ -n "$WT" ] && git -C "$WT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
-  "$SCRIPT_DIR/fm-evidence-check.sh" --ref HEAD --root "$WT" || {
-    echo "error: byte-identical before/after evidence image pair detected, merge refused" >&2
-    exit 1
-  }
+if [ -n "$WT" ] && [ -d "$WT" ] && git -C "$WT" rev-parse --git-dir >/dev/null 2>&1; then
+  PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  EVIDENCE_REF=
+  if PR_HEAD=$(resolve_pr_head "$PR_HEAD_RECORDED"); then
+    EVIDENCE_REF=$PR_HEAD
+  elif git -C "$WT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    EVIDENCE_REF=$(git -C "$WT" rev-parse HEAD)
+    echo "warning: PR head unavailable; evidence check may lag the open PR (using local worktree HEAD)" >&2
+  fi
+  if [ -n "$EVIDENCE_REF" ]; then
+    "$SCRIPT_DIR/fm-evidence-check.sh" --ref "$EVIDENCE_REF" --root "$WT" || {
+      echo "error: byte-identical before/after evidence image pair detected, merge refused" >&2
+      exit 1
+    }
+  fi
 fi
 
 merge_args=()
