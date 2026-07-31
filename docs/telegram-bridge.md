@@ -52,6 +52,7 @@ Remove the temporary token file through your normal secure local-file procedure 
 Run `bin/fm-session-start.sh` once in the lock-owning primary session to generate the trusted poll shim and cadence file.
 Follow the emitted harness-specific supervision instructions so the new cadence reaches the next watcher process.
 The bridge uses Telegram's documented [`getUpdates` offset](https://core.telegram.org/bots/api#getupdates) and long-poll timeout contract.
+The watcher's terminal wait observes the generated one-second Telegram deadline without accelerating unrelated registered checks.
 
 ## Check or disable
 
@@ -75,7 +76,7 @@ Use BotFather separately if you also need to revoke the bot token.
 ## Requests, replies, and notifications
 
 Accepted inbound text is persisted before the long-poll offset advances, assigned an exact `tg-<update_id>-<message_id>` correlation, and offered through one durable wake correlation at a time.
-An uncompleted request is re-offered after its current offer or acknowledgement lease expires, so a primary-session crash cannot strand it.
+An unacknowledged request is re-offered after its current offer expires, while an acknowledged request stays bound to the exact live lock-owning session and is re-offered only after that owner is gone or replaced.
 Firstmate replies through a durable outbound receipt and Telegram's [`sendMessage`](https://core.telegram.org/bots/api#sendmessage) reply parameters so the answer stays threaded to the request.
 Every reply and every allowed captain-relevant supervised worker update from every project crosses one deterministic presentation boundary.
 The supported source semantics are headings, lists, HTTP or HTTPS links, quotes, inline and fenced code, and simple tables.
@@ -85,7 +86,9 @@ Emoji, combining marks, CJK characters, and UTF-16 message limits are measured b
 Each split is delivered sequentially to the same chat under one receipt.
 The restart-stable protected snapshot contains both safe rich text and a readable plain version whose links include their full URLs.
 A definite Telegram entity-validation rejection may fall back once to that plain version, while an ambiguous send never retries.
-The inbound message body and rendered snapshot are deleted after a matching sent receipt and otherwise expire after seven days with an operator notification.
+The inbound message body is deleted after a matching sent receipt and otherwise expires seven days after its immutable receive time with an operator notification.
+Each terminal request leaves a compact body-free retirement tombstone so a crash cannot resurrect a completed or expired request.
+Rendered snapshots expire after seven days.
 Terminal outbound receipts compact after seven days into body-free identity tombstones that continue to block blind reuse, including uncertain delivery.
 Telegram names, usernames, and profile fields are not retained.
 

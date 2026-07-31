@@ -78,6 +78,29 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+fm_wake_sync_file() {
+  perl -MFcntl=:DEFAULT -MIO::Handle -e '
+    my ($path) = @ARGV;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    my @st = stat($fh) or exit 1;
+    exit 1 unless -f _;
+    exit 1 unless $st[3] == 1;
+    exit 1 unless $st[4] == $<;
+    $fh->sync or exit 1;
+  ' "$1" 2>/dev/null
+}
+
+fm_wake_sync_dir() {
+  perl -MFcntl=:DEFAULT -MIO::Handle -e '
+    my ($path) = @ARGV;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    my @st = stat($fh) or exit 1;
+    exit 1 unless -d _;
+    exit 1 unless $st[4] == $<;
+    $fh->sync or exit 1;
+  ' "$1" 2>/dev/null
+}
+
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
   lockdir="$state/.watch.lock"
@@ -443,6 +466,8 @@ fm_wake_remove_locked() {
     rm -f -- "$tmp"
     return 1
   fi
+  fm_wake_sync_file "$FM_WAKE_QUEUE" || return 1
+  fm_wake_sync_dir "$STATE"
 }
 
 fm_wake_append() {

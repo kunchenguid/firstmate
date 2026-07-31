@@ -28,6 +28,13 @@ request_file="$FMTG_STATE/inbox/$request_id.json"
 case "$command" in
   show)
     [ "$#" -eq 2 ] || { usage; exit 2; }
+    fmtg_retirement_matches "$request_id"
+    retirement_status=$?
+    case "$retirement_status" in
+      0) echo "telegram request: request is already retired" >&2; exit 1 ;;
+      1) ;;
+      *) echo "telegram request: unsafe request retirement record" >&2; exit 1 ;;
+    esac
     raw=$(fm_private_read_file "$request_file" 600) \
       || { echo "telegram request: unavailable or unsafe request record" >&2; exit 1; }
     view=$(printf '%s' "$raw" | jq -e '
@@ -58,7 +65,7 @@ case "$command" in
       echo "telegram request: matching sent receipt is required" >&2
       exit 1
     fi
-    fmtg_retire_request "$request_id" \
+    fmtg_retire_request "$request_id" "$receipt_id" \
       || { echo "telegram request: could not retire request body" >&2; exit 1; }
     ;;
   *) usage; exit 2 ;;

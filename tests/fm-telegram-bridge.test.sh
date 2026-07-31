@@ -114,6 +114,12 @@ count_wake_key() {
   awk -F '\t' -v key="$key" 'NF >= 5 && $4 == key {n++} END {print n+0}' "$file" 2>/dev/null
 }
 
+bind_live_session() {
+  local home=$1
+  printf '%s\n' "$$" > "$home/state/.lock"
+  chmod 600 "$home/state/.lock"
+}
+
 test_disabled_and_protected_config() {
   local home fakebin updates out rc external hard alias publish_dir
   home=$(new_home disabled)
@@ -272,12 +278,16 @@ test_persist_before_offset_and_one_wake() {
   FMTG_WAKE_OFFER_TTL_SECS=0 run_poll "$home" "$fakebin" "$updates" >/dev/null
   [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "drained unacknowledged request was not re-offered"
   FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" >/dev/null
+  bind_live_session "$home"
   request=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-request.sh" show tg-200-77)
   [ "$(printf '%s' "$request" | jq -r .text)" = "$hostile" ] || fail "request text encoding changed"
   run_poll "$home" "$fakebin" "$updates" >/dev/null
-  [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 0 ] || fail "acknowledged request was re-offered during its handling lease"
-  FMTG_WAKE_ACK_TTL_SECS=0 run_poll "$home" "$fakebin" "$updates" >/dev/null
-  [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "incomplete acknowledged request was stranded after its recovery lease"
+  [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 0 ] || fail "acknowledged request was re-offered while its session owner remained live"
+  FMTG_WAKE_OFFER_TTL_SECS=0 run_poll "$home" "$fakebin" "$updates" >/dev/null
+  [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 0 ] || fail "live acknowledged request was re-offered by a fixed lease"
+  rm -f "$home/state/.lock"
+  run_poll "$home" "$fakebin" "$updates" >/dev/null
+  [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "abandoned acknowledged request was not re-offered"
   fields=$(awk -F '\t' '$4 == "tg-200-77" {print NF ":" $5}' "$home/state/.wake-queue")
   [ "$fields" = '5:telegram-request tg-200-77' ] || fail "wake payload included body data or invalid fields"
   run_poll "$home" "$fakebin" "$updates" >/dev/null
@@ -292,8 +302,9 @@ send_file() {
 }
 
 test_exact_approval_and_sent_receipts() {
-  local home fakebin counts updates send_body text out rc request saved approval_tmp receipt_tmp
+  local home fakebin counts updates send_body text out rc request saved approval_tmp receipt_tmp expires
   home=$(new_home approval); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
+  bind_live_session "$home"
   counts="$home/counts"; mkdir -p "$counts"
   updates="$home/request.json"; write_update "$updates" 1 10 42 42 'prepare the release decision'
   FAKE_CURL_COUNT_DIR="$counts" run_poll "$home" "$fakebin" "$updates" >/dev/null
@@ -308,7 +319,15 @@ test_exact_approval_and_sent_receipts() {
   assert_contains "$out" 'sent reply-1 900' "sent receipt output missing"
   [ "$(jq -r .state "$home/state/telegram/outbound/reply-1.json")" = sent ] || fail "sent receipt state missing"
   assert_absent "$home/state/telegram/inbox/tg-1-10.json" "sent reply retained inbound message body"
+  assert_present "$home/state/telegram/retired/tg-1-10.json" "sent reply did not publish a request retirement tombstone"
+  [ "$(jq -r .receipt_id "$home/state/telegram/retired/tg-1-10.json")" = reply-1 ] \
+    || fail "request retirement tombstone lost its sent receipt identity"
   [ "$(jq -r .status "$home/state/telegram/approvals/release-42.json")" = pending ] || fail "approval binding not pending"
+
+  cp "$saved" "$home/state/telegram/inbox/tg-1-10.json"; chmod 600 "$home/state/telegram/inbox/tg-1-10.json"
+  run_poll "$home" "$fakebin" "$updates" >/dev/null
+  assert_absent "$home/state/telegram/inbox/tg-1-10.json" "retired request body was resurrected during recovery"
+  [ "$(count_wake_key "$home/state/.wake-queue" tg-1-10)" = 0 ] || fail "retired request was re-offered"
 
   cp "$saved" "$home/state/telegram/inbox/tg-1-10.json"; chmod 600 "$home/state/telegram/inbox/tg-1-10.json"
   approval_tmp="$home/state/telegram/approvals/release-42.recovery"
@@ -348,6 +367,58 @@ test_exact_approval_and_sent_receipts() {
   # approval authority even when the text and approval ID still match.
   [ "$(FM_HOME="$home" "$ROOT/bin/fm-telegram-request.sh" show tg-4-13 | jq -r .approval_id)" = null ] \
     || fail "negative control failed: wrong reply correlation authorized the action"
+
+  expires=$(( $(date +%s) + 1000 ))
+  jq -n --argjson expires "$expires" '
+    {schema:"firstmate.telegram-approval.v1",approval_id:"sync-once",receipt_id:"sync-receipt-1",
+     request_id:"sync-prompt-1",status:"pending",telegram_message_id:901,created_at:1,expires_at:$expires}
+  ' > "$home/state/telegram/approvals/sync-once.json"
+  chmod 600 "$home/state/telegram/approvals/sync-once.json"
+  (
+    FM_HOME="$home"
+    FMTG_INBOUND_TEXT='/approve sync-once'
+    . "$ROOT/bin/fm-telegram-lib.sh"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    sync_marker="$home/approval-sync-failed-once"
+    fm_private_sync_dir() {
+      if [ "$1" = "$FMTG_STATE/approval-claims" ]; then
+        if [ ! -e "$sync_marker" ]; then
+          : > "$sync_marker"
+          return 1
+        fi
+      fi
+      return 0
+    }
+    fmtg_approval_binding sync-once 901 tg-sync-once
+  ); rc=$?
+  expect_code 0 "$rc" "approval claim post-link sync recovery"
+  [ "$(jq -r .request_id "$home/state/telegram/approval-claims/sync-once.json")" = tg-sync-once ] \
+    || fail "post-link approval claim recovery lost request identity"
+
+  jq -n --argjson expires "$expires" '
+    {schema:"firstmate.telegram-approval.v1",approval_id:"sync-retry",receipt_id:"sync-receipt-2",
+     request_id:"sync-prompt-2",status:"pending",telegram_message_id:902,created_at:1,expires_at:$expires}
+  ' > "$home/state/telegram/approvals/sync-retry.json"
+  chmod 600 "$home/state/telegram/approvals/sync-retry.json"
+  (
+    FM_HOME="$home"
+    FMTG_INBOUND_TEXT='/approve sync-retry'
+    . "$ROOT/bin/fm-telegram-lib.sh"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_private_sync_dir() {
+      [ "$1" != "$FMTG_STATE/approval-claims" ]
+    }
+    fmtg_approval_binding sync-retry 902 tg-sync-retry
+  ); rc=$?
+  expect_code 2 "$rc" "approval claim unresolved directory sync"
+  (
+    FM_HOME="$home"
+    FMTG_INBOUND_TEXT='/approve sync-retry'
+    . "$ROOT/bin/fm-telegram-lib.sh"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fmtg_approval_binding sync-retry 902 tg-sync-retry
+  ); rc=$?
+  expect_code 0 "$rc" "approval claim retry after directory sync recovery"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_SEND_FILE="$send_body" \
     FAKE_CURL_COUNT_DIR="$counts" "$ROOT/bin/fm-telegram-send.sh" reply tg-1-10 reply-1 \
@@ -537,21 +608,25 @@ EOF
 }
 
 test_retention_and_runtime_harness_matrix() {
-  local home fakebin updates old backend out harness text rc counts custom sentinel
+  local home fakebin updates old backend out harness text rc counts custom sentinel wait_budget
   home=$(new_home retention); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
   updates="$home/empty.json"; write_empty_updates "$updates"
   text="$home/retained-text"; send_file "$text" 'Ambiguous delivery must remain deduplicated.'
   PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_CURL_FAIL_METHOD=sendMessage \
     "$ROOT/bin/fm-telegram-send.sh" notify deployment old --text-file "$text" >/dev/null 2>&1; rc=$?
   expect_code 3 "$rc" "retained uncertain receipt fixture"
-  printf '{"schema":"firstmate.telegram-request.v1"}\n' > "$home/state/telegram/inbox/tg-old.json"
+  jq -n '{schema:"firstmate.telegram-request.v1",request_id:"tg-old",text:"old private body",received_at:1,
+    wake_queued:false,wake_state:"idle",wake_state_at:0,wake_offer_count:0}' \
+    > "$home/state/telegram/inbox/tg-old.json"
   printf '{}\n' > "$home/state/telegram/updates/1.json"
   chmod 600 "$home/state/telegram/inbox/tg-old.json" "$home/state/telegram/updates/1.json"
   old=200001010000
-  touch -t "$old" "$home/state/telegram/inbox/tg-old.json" "$home/state/telegram/updates/1.json" "$home/state/telegram/outbound/old.json" "$home/state/telegram/rendered/old.json"
+  touch -t "$old" "$home/state/telegram/updates/1.json" "$home/state/telegram/outbound/old.json" "$home/state/telegram/rendered/old.json"
   PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMTG_RETENTION_SECS=1 FAKE_GETUPDATES_FILE="$updates" \
     "$ROOT/bin/fm-telegram-poll.sh" >/dev/null
   assert_absent "$home/state/telegram/inbox/tg-old.json" "expired request body was retained"
+  [ "$(jq -r .status "$home/state/telegram/retired/tg-old.json")" = expired ] \
+    || fail "expired request did not leave a durable retirement tombstone"
   assert_absent "$home/state/telegram/updates/1.json" "expired update journal was retained"
   assert_present "$home/state/telegram/outbound/old.json" "expired uncertain receipt lost its dedupe tombstone"
   [ "$(jq -r '.state' "$home/state/telegram/outbound/old.json")" = uncertain ] || fail "uncertain tombstone changed delivery state"
@@ -570,6 +645,12 @@ test_retention_and_runtime_harness_matrix() {
     "Telegram config did not own a separate poll interval"
   assert_no_grep 'export FM_CHECK_INTERVAL=' "$home/config/telegram-mode.env" \
     "Telegram config still accelerated the shared check sweep"
+  touch "$home/state/.last-telegram-check"
+  wait_budget=$(FM_HOME="$home" FM_POLL=15 FM_TELEGRAM_CHECK_INTERVAL=1 \
+    bash -c '. "$1/bin/fm-watch.sh"; telegram_wait_budget' _ "$ROOT")
+  case "$wait_budget" in ''|*[!0-9]*) fail "Telegram terminal wait budget was not numeric" ;; esac
+  [ "$wait_budget" -le 1 ] || fail "watcher terminal wait ignored the Telegram deadline"
+  rm -f "$home/state/.last-telegram-check"
   custom="$home/state/expensive.check.sh"
   sentinel="$home/expensive-check-ran"
   cat > "$custom" <<EOF

@@ -265,7 +265,8 @@ The watcher validates the shim and invokes the tracked poll implementation direc
 No state file is executed as arbitrary code.
 
 One bounded Bot API long poll persists a minimal update disposition before advancing its offset.
-Accepted text is stored first under an exact correlation, and a locked offer/acknowledgement lease keeps one pending wake at a time while re-offering any incomplete request after a primary-session crash.
+Accepted text is stored first under an exact correlation, and a locked offer plus live lock-owner acknowledgement keeps one pending wake at a time while re-offering an incomplete request only after its handling session is gone or replaced.
+Completion and immutable receive-time expiry durably publish a body-free retirement tombstone before synchronously removing the wake and private inbox record.
 Rejected updates retain only a disposition and update ID, while unauthorized sender and chat data is not retained or answered.
 
 Outbound sends use caller-supplied idempotency receipts with `prepared`, `dispatching`, `sent`, `definite-failure`, or `uncertain` state, and terminal states compact into retained identity tombstones after bulky snapshots expire.
@@ -275,7 +276,7 @@ The sender alone adds the hardcoded `HTML` parse mode and never accepts model-co
 Split parts are sent sequentially under the same-chat lock and receipted in order.
 The receipt reaches `dispatching` before network I/O.
 An interrupted or ambiguous send wakes Firstmate for reconciliation and cannot be retried with that receipt.
-Exact approval bindings connect one approval ID to the Telegram decision message and permit one matching direct-reply claim before expiry, with exact same-request claim and sent-receipt finalization recovery across publication crashes.
+Exact approval bindings connect one approval ID to the Telegram decision message and permit one matching direct-reply claim before expiry, with exact same-request claim publication recovery and sent-receipt finalization recovery across crashes.
 
 Connector-specific code owns Telegram update, presentation, and receipt semantics.
 The shared private-file library owns regular-file, ownership, link-count, mode, no-follow read, and atomic-publication checks.

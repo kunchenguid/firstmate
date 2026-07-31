@@ -600,9 +600,26 @@ heartbeat_scan_finds_actionable() {
 # loop is the permanent fail-closed backstop). This preserves the single live
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
+telegram_wait_budget() {
+  local budget=$POLL telegram_check age remaining
+  telegram_check="$STATE/telegram-watch.check.sh"
+  if [ -e "$telegram_check" ] || [ -L "$telegram_check" ]; then
+    age=$(age_of "$STATE/.last-telegram-check")
+    if [ "$age" -ge "$TELEGRAM_CHECK_INTERVAL" ]; then
+      budget=0
+    else
+      remaining=$((TELEGRAM_CHECK_INTERVAL - age))
+      [ "$remaining" -ge "$budget" ] || budget=$remaining
+    fi
+  fi
+  printf '%s\n' "$budget"
+}
+
 event_wait_or_sleep() {
-  local w b session first_backend="" first_session="" rec rc
+  local w b session first_backend="" first_session="" rec rc wait_budget
   local windows=()
+  wait_budget=$(telegram_wait_budget) || wait_budget=$POLL
+  [ "$wait_budget" -gt 0 ] || return
   while IFS= read -r w; do
     b=$(window_backend "$w")
     fm_backend_has_push "$b" || continue
@@ -623,7 +640,7 @@ event_wait_or_sleep() {
   done < <(recorded_windows)
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    sleep "$wait_budget"
     return
   fi
 
@@ -639,11 +656,11 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    sleep "$POLL"
+    sleep "$wait_budget"
     return
   fi
 
-  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
+  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$wait_budget" "$STATE" "${windows[@]}")
   rc=$?
   case "$rc" in
     0)
@@ -656,7 +673,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      sleep "$POLL"
+      sleep "$wait_budget"
       ;;
     *)
       # 1: a clean full-budget wait with no actionable edge - the reader already

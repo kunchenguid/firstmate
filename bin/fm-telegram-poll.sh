@@ -173,10 +173,16 @@ process_update() {
       /approve\ *|/deny\ *)
         approval_intent=true
         approval_candidate=${FMTG_INBOUND_TEXT#* }
-        if fmtg_approval_binding "$approval_candidate" "$reply_id" "$request_id"; then
-          approval_id=$approval_candidate
-          approval_decision=$FMTG_APPROVAL_DECISION
-        fi
+        fmtg_approval_binding "$approval_candidate" "$reply_id" "$request_id"
+        rc=$?
+        case "$rc" in
+          0)
+            approval_id=$approval_candidate
+            approval_decision=$FMTG_APPROVAL_DECISION
+            ;;
+          1) ;;
+          *) return 1 ;;
+        esac
         ;;
     esac
     now=$(date +%s)
