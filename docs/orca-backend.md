@@ -52,8 +52,8 @@ Exact command flags and response parsing are owned by `bin/backends/orca.sh` and
 `fm-send.sh` types and verifies composer clearance, follows `oldestCursor` when Orca returns a limited page, and retries Enter without retyping when a slash popup first fills an argument placeholder.
 The composer verifier first recognizes Agy's separator-pair composer through the shared, harness-scoped `fm_composer_separated_state` proof (only when `FM_COMPOSER_HARNESS` records `agy`) before its own row classification.
 A bare shell row is `unknown`, not an empty agent composer.
-The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
-Grok alone retains its isolated rendered-tail fallback.
+The watcher has no native Orca busy signal, so each harness adapter's classifier supplies worker state.
+Grok and Agy retain isolated rendered-tail fallbacks because neither has a verified semantic turn-start source.
 
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
