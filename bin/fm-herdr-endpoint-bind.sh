@@ -21,7 +21,11 @@
 # Mutable labels alone never authorize the binding. A missing endpoint, a
 # stopped session, an exited agent whose pane returned outside the worktree, a
 # changed label or topology, duplicate labels, ambiguous metadata, or any read
-# error refuses without changing metadata. After a successful binding,
+# error refuses without changing metadata. If publication succeeds but the
+# post-publication validation of the resulting record fails, the script reports
+# a distinct PUBLISHED_THEN_FAILED hard error and preserves the published record
+# for inspection rather than rolling back over a possible concurrent writer.
+# After a successful binding,
 # fm-teardown.sh still runs its unchanged metadata-only validation before any
 # runtime command or cleanup mutation.
 set -eu
@@ -44,6 +48,14 @@ usage() {
 
 refuse() {
   echo "REFUSED: $*; preserving task metadata." >&2
+  exit 1
+}
+
+# Used only after the binding has already replaced the task's metadata. The
+# older snapshot is never restored, because a concurrent metadata writer need
+# not hold the spawn lock and a rollback could clobber newer state.
+published_failure() {
+  echo "PUBLISHED_THEN_FAILED: $*; the published record at $META is preserved unchanged for inspection." >&2
   exit 1
 }
 
@@ -195,8 +207,8 @@ mv -f -- "$META_TMP" "$META" \
   || refuse "could not publish task $ID endpoint binding"
 META_TMP=
 fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" \
-  || refuse "published endpoint binding for task $ID failed validation"
+  || published_failure "the endpoint binding for task $ID was published but then failed private-file validation"
 fm_backend_validate_task_endpoint "$META" "$ID" \
-  || refuse "published endpoint binding for task $ID failed validation"
+  || published_failure "the endpoint binding for task $ID was published but then failed endpoint validation"
 
 printf 'Bound legacy Herdr endpoint metadata for task %s after exact live topology and worktree verification.\n' "$ID"

@@ -525,7 +525,41 @@ test_legacy_herdr_binding_requires_exact_live_proof() {
   cmp -s "$before" "$dir/home/state/$id.meta" \
     || fail "topology refusal changed legacy Herdr metadata"
 
-  pass "legacy Herdr binding verifies exact live topology and worktree before enabling unchanged teardown safety"
+  local faultbin
+  dir=$(make_case legacy-herdr-post-publication)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p2" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" "kind=scout"
+  faultbin="$dir/faultroot/bin"
+  mkdir -p "$faultbin"
+  ln -s "$ROOT"/bin/* "$faultbin/"
+  rm -f "$faultbin/fm-herdr-endpoint-bind.sh"
+  # shellcheck disable=SC2016 # The pattern matches the script's literal text.
+  sed 's|^fm_pr_private_file_valid "\$META" 600 "\$STATE_DEVICE" \\$|false \\|' \
+    "$ROOT/bin/fm-herdr-endpoint-bind.sh" > "$faultbin/fm-herdr-endpoint-bind.sh"
+  chmod +x "$faultbin/fm-herdr-endpoint-bind.sh"
+  grep -q '^false \\$' "$faultbin/fm-herdr-endpoint-bind.sh" \
+    || fail "post-publication fault injection did not patch the published-record validator"
+  local real_bind=$HERDR_BIND
+  HERDR_BIND="$faultbin/fm-herdr-endpoint-bind.sh"
+  set +e
+  run_herdr_bind_case "$dir" "$id" > "$dir/bind.out" 2> "$dir/bind.err"
+  rc=$?
+  set -e
+  HERDR_BIND=$real_bind
+  [ "$rc" -ne 0 ] || fail "post-publication validation failure did not stop the binding"
+  grep -F "PUBLISHED_THEN_FAILED" "$dir/bind.err" >/dev/null \
+    || fail "post-publication failure did not use its distinct diagnostic: $(cat "$dir/bind.err")"
+  if grep -F "preserving task metadata" "$dir/bind.err" >/dev/null; then
+    fail "post-publication failure falsely claimed metadata was preserved unchanged"
+  fi
+  grep -F "$dir/home/state/$id.meta" "$dir/bind.err" >/dev/null \
+    || fail "post-publication failure did not name the published record: $(cat "$dir/bind.err")"
+  grep -qxF "endpoint_task_id=$id" "$dir/home/state/$id.meta" \
+    || fail "post-publication failure did not preserve the published record for inspection"
+
+  pass "legacy Herdr binding verifies exact live topology and worktree before enabling unchanged teardown safety, and a post-publication validation failure reports distinctly while preserving the published record"
 }
 
 test_invalid_endpoint_records_refuse_before_mutation

@@ -169,12 +169,12 @@ tests/fm-backend-cmux.test.sh
 Bounded output from the incident regression:
 
 ```text
-ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
+ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call, and an unbound legacy Herdr record names its migration command
 ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
 ok - fm-teardown: exact tmux cleanup preserves invalid and prefix-matched neighbors while removing only the recorded target
-ok - legacy Herdr binding verifies exact live topology and worktree before enabling unchanged teardown safety
+ok - legacy Herdr binding verifies exact live topology and worktree before enabling unchanged teardown safety, and a post-publication validation failure reports distinctly while preserving the published record
 ok - real guarded Herdr lab bound one exact legacy endpoint and refused a duplicate task label without metadata mutation
 ```
 

@@ -958,6 +958,8 @@ families_for_changed_path() {
       # The guard banner renders the supervision instructions, so the
       # watcher-lock suite asserts this owner's exact wording too.
       printf '%s\n' watcher-wake-lock
+      # The X-mode suite asserts this renderer's exact supervision wording.
+      printf '%s\n' pr-forge
       ;;
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
