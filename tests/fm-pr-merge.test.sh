@@ -14,6 +14,25 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) a byte-identical before/after evidence pair in the worktree's HEAD
+#       refuses the merge before gh-axi pr merge is invoked
+#   (j) a worktree with a real, non-identical evidence pair still merges
+#   (k) the evidence check verifies the freshly fetched remote PR head, not a
+#       stale local worktree HEAD that gh-axi pr merge will not actually land
+#   (l) when the evidence check cannot run at all (missing/non-git worktree,
+#       or a valid worktree with no resolvable ref), a loud warning is printed
+#       to stderr and the merge still proceeds rather than failing closed
+#   (m) same as (l): a valid worktree with no recorded pr_head at all (the gh
+#       headRefOid lookup never succeeded) and no fetchable/local ref still
+#       warns and merges, per the same never-fail-closed decision
+#   (n) the evidence check is scoped to directories this PR's own commits
+#       touched: an unrelated pre-existing leftover (unpaired) evidence pair
+#       on the origin default branch, outside the PR's changed paths, must
+#       not block a merge whose own evidence pair is fine
+#   (o) a PR that only changes root-level files (no directory component to
+#       scope the evidence check to) skips the check entirely rather than
+#       widening back to an unscoped whole-tree scan, so it still does not
+#       trip over an unrelated pre-existing leftover pair elsewhere
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -61,6 +80,22 @@ case "\${1:-} \${2:-}" in
     ;;
 esac
 exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# gh-axi mock whose gh companion never answers headRefOid, so fm-pr-check.sh
+# records no pr_head= at all (distinct from a recorded-but-unresolvable head).
+add_gh_mocks_no_head() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
@@ -119,7 +154,9 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr_head= was not recorded"
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
-  pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "records-before-merge: missing worktree git repo should still warn that the evidence check was skipped"
+  pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge, warning that evidence check was skipped"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -138,6 +175,8 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "merge-fails: missing worktree git repo should still warn that the evidence check was skipped"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
 }
 
@@ -153,6 +192,8 @@ test_extra_merge_args_forwarded() {
 
   grep -qxF 'pr merge 15 --repo example/repo --squash --delete-branch' "$case_dir/gh-axi.log" \
     || fail "extra-args: extra gh-axi pr merge flags were not forwarded"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "extra-args: missing worktree git repo should still warn that the evidence check was skipped"
   pass "fm-pr-merge forwards extra flags to gh-axi pr merge after the -- separator"
 }
 
@@ -268,6 +309,8 @@ test_explicit_merge_method_not_overridden() {
 
   grep -qxF 'pr merge 22 --repo example/repo --merge' "$case_dir/gh-axi.log" \
     || fail "explicit-merge-method: caller --merge was not forwarded without an extra default --squash"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "explicit-merge-method: missing worktree git repo should still warn that the evidence check was skipped"
   pass "fm-pr-merge does not add default --squash when the caller passes an explicit merge method"
 }
 
@@ -283,6 +326,8 @@ test_method_equals_merge_method_not_overridden() {
 
   grep -qxF 'pr merge 23 --repo example/repo --method=merge' "$case_dir/gh-axi.log" \
     || fail "method-equals-merge-method: caller --method=merge was not forwarded without an extra default --squash"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "method-equals-merge-method: missing worktree git repo should still warn that the evidence check was skipped"
   pass "fm-pr-merge respects --method=<value> as an explicit merge method"
 }
 
@@ -298,7 +343,312 @@ test_parses_pr_url_for_gh_axi() {
 
   grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
     || fail "url-parsing: gh-axi pr merge was not invoked as number + --repo + default --squash"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "url-parsing: missing worktree git repo should still warn that the evidence check was skipped"
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
+}
+
+test_identical_evidence_pair_refuses_merge() {
+  local case_dir rc
+  case_dir=$(make_case identical-evidence)
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  mkdir -p "$case_dir/wt/docs/pr-assets/widget"
+  printf SAMEBYTES > "$case_dir/wt/docs/pr-assets/widget/before-desktop.png"
+  printf SAMEBYTES > "$case_dir/wt/docs/pr-assets/widget/after-desktop.png"
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -qm evidence
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "identical-evidence: fm-pr-merge should refuse"
+  assert_grep 'byte-identical before/after evidence image pair detected' "$case_dir/stderr" \
+    "identical-evidence: refusal did not explain the evidence check failure"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "identical-evidence: gh-axi pr merge was invoked despite the identical pair"
+  pass "fm-pr-merge refuses to merge a worktree with a byte-identical before/after evidence pair"
+}
+
+test_different_evidence_pair_still_merges() {
+  local case_dir rc
+  case_dir=$(make_case different-evidence)
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  mkdir -p "$case_dir/wt/docs/pr-assets/widget"
+  printf OLDBYTES > "$case_dir/wt/docs/pr-assets/widget/before-desktop.png"
+  printf NEWBYTES > "$case_dir/wt/docs/pr-assets/widget/after-desktop.png"
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -qm evidence
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/32 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "different-evidence: fm-pr-merge should still merge a real before/after change"
+  grep -qxF 'pr merge 32 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "different-evidence: gh-axi pr merge was not invoked"
+  pass "fm-pr-merge merges a worktree whose evidence pair genuinely differs"
+}
+
+test_evidence_check_uses_fetched_remote_pr_head_not_stale_local_worktree() {
+  # The task worktree can be stale relative to the actual PR branch on GitHub
+  # (e.g. a pooled project clone that has not fetched the latest push).
+  # gh-axi pr merge lands whatever is on GitHub, so the evidence check must
+  # verify the freshly fetched remote PR head, not the local worktree's HEAD.
+  # Build a stale local worktree whose HEAD carries a byte-identical (bad)
+  # evidence pair, and a remote "origin" whose refs/pull/<n>/head carries a
+  # genuinely different (good) evidence pair. The merge must succeed because
+  # the real remote PR head is what actually gets merged and verified.
+  local case_dir rc origin real_dir
+  case_dir=$(make_case fresh-remote-head)
+  origin="$case_dir/origin.git"
+  real_dir="$case_dir/real"
+
+  git init -q --bare "$origin"
+
+  mkdir -p "$real_dir/docs/pr-assets/widget"
+  git -C "$real_dir" init -q
+  printf OLDBYTES > "$real_dir/docs/pr-assets/widget/before-desktop.png"
+  printf NEWBYTES > "$real_dir/docs/pr-assets/widget/after-desktop.png"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "real pr head"
+  git -C "$real_dir" push -q "$origin" "HEAD:refs/pull/41/head"
+
+  mkdir -p "$case_dir/wt/docs/pr-assets/widget"
+  git -C "$case_dir/wt" init -q
+  git -C "$case_dir/wt" remote add origin "$origin"
+  printf SAMEBYTES > "$case_dir/wt/docs/pr-assets/widget/before-desktop.png"
+  printf SAMEBYTES > "$case_dir/wt/docs/pr-assets/widget/after-desktop.png"
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -qm "stale local worktree"
+
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/41 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "fresh-remote-head: fm-pr-merge should merge using the real remote PR head"
+  grep -qxF 'pr merge 41 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "fresh-remote-head: gh-axi pr merge was not invoked despite a good remote PR head"
+  pass "fm-pr-merge checks evidence against the fetched remote PR head, not a stale local worktree"
+}
+
+test_unresolvable_ref_warns_and_still_merges() {
+  # A valid git worktree with no commits and no fetchable/recorded PR head has
+  # no ref the evidence check could ever run against: this must still warn
+  # loudly and merge, per the captain's decision to never fail closed.
+  local case_dir rc
+  case_dir=$(make_case unresolvable-ref)
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  add_gh_mocks "$case_dir" ffffffffffffffffffffffffffffffffffffffff
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/51 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "unresolvable-ref: fm-pr-merge should still merge with no resolvable ref"
+  grep -qxF 'pr merge 51 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "unresolvable-ref: gh-axi pr merge was not invoked"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "unresolvable-ref: a valid git worktree with no resolvable ref should still warn that the evidence check was skipped"
+  pass "fm-pr-merge warns and still merges when no ref can be resolved in a valid worktree"
+}
+
+test_no_recorded_head_and_unresolvable_ref_warns_and_still_merges() {
+  # A valid git worktree with no commits, no fetchable remote, and no
+  # recorded pr_head at all (the gh headRefOid lookup never succeeded, so
+  # fm-pr-check.sh wrote no pr_head= line) still has no ref the evidence
+  # check could run against: same never-fail-closed treatment as (l), just
+  # reached via an empty pr_head= rather than a recorded-but-invalid one.
+  local case_dir rc
+  case_dir=$(make_case no-recorded-head)
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  add_gh_mocks_no_head "$case_dir"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/61 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-recorded-head: fm-pr-merge should still merge with no recorded pr_head or resolvable ref"
+  grep -qxF 'pr merge 61 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "no-recorded-head: gh-axi pr merge was not invoked"
+  assert_no_grep 'pr_head=' "$case_dir/state/task-x1.meta" \
+    "no-recorded-head: pr_head= should not have been recorded when headRefOid lookup failed"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "no-recorded-head: a valid git worktree with no recorded pr_head or resolvable ref should still warn that the evidence check was skipped"
+  pass "fm-pr-merge warns and still merges when no pr_head was recorded and no ref can be resolved"
+}
+
+test_scoped_evidence_check_ignores_unrelated_leftover() {
+  # A directory outside this PR's changed paths that has a real leftover
+  # (unpaired) evidence shape must not refuse a merge whose own evidence pair
+  # is fine, since the check must scope to what this PR's commits touched.
+  local case_dir rc origin real_dir
+  case_dir=$(make_case scoped-evidence)
+  origin="$case_dir/origin.git"
+  real_dir="$case_dir/real"
+
+  git init -q --bare "$origin"
+
+  mkdir -p "$real_dir/docs/pr-assets/leftover"
+  git -C "$real_dir" init -q
+  printf BEFOREBYTES > "$real_dir/docs/pr-assets/leftover/before-alpha.png"
+  printf AFTERBYTES > "$real_dir/docs/pr-assets/leftover/after-beta.png"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "pre-existing leftover evidence"
+  git -C "$real_dir" branch -M main
+  git -C "$real_dir" push -q "$origin" main
+
+  mkdir -p "$real_dir/docs/pr-assets/widget"
+  printf OLDBYTES > "$real_dir/docs/pr-assets/widget/before-desktop.png"
+  printf NEWBYTES > "$real_dir/docs/pr-assets/widget/after-desktop.png"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "add widget evidence"
+  git -C "$real_dir" push -q "$origin" "HEAD:refs/pull/71/head"
+
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  git -C "$case_dir/wt" remote add origin "$origin"
+
+  add_gh_mocks "$case_dir" dddddddddddddddddddddddddddddddddddddddd
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scoped-evidence: fm-pr-merge should ignore an unrelated pre-existing leftover pair outside the PR's changed paths"
+  grep -qxF 'pr merge 71 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "scoped-evidence: gh-axi pr merge was not invoked despite an unrelated leftover pair elsewhere in the tree"
+  pass "fm-pr-merge scopes the evidence check to the PR's changed paths and ignores an unrelated leftover pair"
+}
+
+test_root_level_only_change_skips_evidence_check() {
+  # A dirname of "." (a changed file with no directory component, e.g. a
+  # root-level doc) must never be passed through as a pathspec: git ls-tree
+  # -- . matches the whole tree, which would silently defeat scoping. When
+  # a base resolves but every changed path is root-level, the check must be
+  # skipped outright rather than falling back to an unscoped whole-tree scan
+  # that would trip over an unrelated pre-existing leftover pair.
+  local case_dir rc origin real_dir
+  case_dir=$(make_case root-level-only)
+  origin="$case_dir/origin.git"
+  real_dir="$case_dir/real"
+
+  git init -q --bare "$origin"
+
+  mkdir -p "$real_dir/docs/pr-assets/leftover"
+  git -C "$real_dir" init -q
+  printf BEFOREBYTES > "$real_dir/docs/pr-assets/leftover/before-alpha.png"
+  printf AFTERBYTES > "$real_dir/docs/pr-assets/leftover/after-beta.png"
+  printf 'root doc\n' > "$real_dir/AGENTS.md"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "pre-existing leftover evidence plus root doc"
+  git -C "$real_dir" branch -M main
+  git -C "$real_dir" push -q "$origin" main
+
+  printf 'root doc updated\n' > "$real_dir/AGENTS.md"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "update root-level doc only"
+  git -C "$real_dir" push -q "$origin" "HEAD:refs/pull/81/head"
+
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  git -C "$case_dir/wt" remote add origin "$origin"
+
+  add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/81 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "root-level-only: fm-pr-merge should merge a PR that only touches root-level files despite an unrelated pre-existing leftover pair elsewhere"
+  grep -qxF 'pr merge 81 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "root-level-only: gh-axi pr merge was not invoked"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "root-level-only: a PR touching only root-level paths should skip the evidence check rather than falling back to a whole-tree scan"
+  pass "fm-pr-merge skips the evidence check (rather than scanning the whole tree) for a PR that only touches root-level files"
+}
+
+test_evidence_base_diff_failure_falls_back_to_unscoped_scan() {
+  # When the resolved base and the PR head share no common history at all,
+  # `git diff base...head` itself fails (fatal: no merge base), rather than
+  # returning an empty changed-paths list. That failure must not be treated
+  # the same as a PR that genuinely changed zero paths (which skips the
+  # check outright, per test_root_level_only_change_skips_evidence_check):
+  # it must instead fall back to an unscoped whole-ref scan, same as when no
+  # base can be resolved at all, so a real byte-identical pair in the PR
+  # head's own tree still refuses the merge instead of silently passing.
+  local case_dir rc origin real_dir unrelated_dir
+  case_dir=$(make_case unrelated-history)
+  origin="$case_dir/origin.git"
+  real_dir="$case_dir/real"
+  unrelated_dir="$case_dir/unrelated"
+
+  git init -q --bare "$origin"
+
+  mkdir -p "$real_dir"
+  git -C "$real_dir" init -q
+  printf 'root doc\n' > "$real_dir/AGENTS.md"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "origin default branch history"
+  git -C "$real_dir" branch -M main
+  git -C "$real_dir" push -q "$origin" main
+
+  mkdir -p "$unrelated_dir/docs/pr-assets/widget"
+  git -C "$unrelated_dir" init -q
+  printf BYTES > "$unrelated_dir/docs/pr-assets/widget/before-desktop.png"
+  printf BYTES > "$unrelated_dir/docs/pr-assets/widget/after-desktop.png"
+  git -C "$unrelated_dir" add -A
+  git -C "$unrelated_dir" commit -qm "unrelated PR head history"
+  git -C "$unrelated_dir" push -q "$origin" "HEAD:refs/pull/91/head"
+
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  git -C "$case_dir/wt" remote add origin "$origin"
+
+  add_gh_mocks "$case_dir" ffffffffffffffffffffffffffffffffffffffff
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unrelated-history: fm-pr-merge should refuse on a byte-identical pair caught by the unscoped fallback scan"
+  assert_grep 'byte-identical before/after evidence image pair detected' "$case_dir/stderr" \
+    "unrelated-history: a diff failure against an unrelated base should fall back to scanning the whole PR head ref, not skip the check"
+  grep -qxF 'pr merge 91 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    && fail "unrelated-history: gh-axi pr merge was invoked despite the identical pair"
+  pass "fm-pr-merge falls back to an unscoped scan when the base diff itself fails, rather than skipping the check"
 }
 
 test_records_pr_and_head_before_merging
@@ -311,3 +661,11 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_identical_evidence_pair_refuses_merge
+test_different_evidence_pair_still_merges
+test_evidence_check_uses_fetched_remote_pr_head_not_stale_local_worktree
+test_unresolvable_ref_warns_and_still_merges
+test_no_recorded_head_and_unresolvable_ref_warns_and_still_merges
+test_scoped_evidence_check_ignores_unrelated_leftover
+test_root_level_only_change_skips_evidence_check
+test_evidence_base_diff_failure_falls_back_to_unscoped_scan
