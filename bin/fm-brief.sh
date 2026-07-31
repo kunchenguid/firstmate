@@ -30,8 +30,11 @@
 #   for browsing several related tasks (usually a project name, or an initiative
 #   spanning several tasks against the same project) as one folder. The authoritative
 #   path stays flat data/<task-id>/ - every other script keys off that path unchanged.
-#   Optional, not applicable to --secondmate. Refuses rather than overwriting an
-#   existing non-matching path at data/<name>/<task-id>.
+#   Optional, not applicable to --secondmate. <name> must be a single path component
+#   (not '.', '..', or containing '/') and must not equal the task id. Refuses rather
+#   than overwriting an existing non-matching path at data/<name>/<task-id>, refuses
+#   a <name> that already names a task's own directory, and refuses a task id that
+#   already names an existing --group folder.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
