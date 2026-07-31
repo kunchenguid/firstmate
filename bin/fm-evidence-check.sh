@@ -6,10 +6,17 @@
 # correctly named. This scans for the two before/after naming conventions in
 # use across the fleet's history - before-<suffix> / after-<suffix>, and the
 # reversed <prefix>-before / <prefix>-after - pairs images that share a suffix
-# or prefix in the same directory, and compares content.
+# or prefix in the same directory, and compares content. When the suffix
+# itself differs (a worker describing state rather than viewport, e.g.
+# before-1-typed-not-saved.png / after-1-typed-with-save-button.png), a
+# leading "<N>-" ordinal shared by both sides pairs them too.
 #
 # An unpaired image (a legitimate after-only set, or any image that does not
-# follow either convention) is never a failure and is silently ignored.
+# follow either convention) is never a failure and is silently ignored. But a
+# directory holding both before-* and after-* images that could not be paired
+# by either rule at all is never silently "ok" either - that means the check
+# did not verify anything, which is worse than a missed case, so it is a
+# refusal that names the unpaired files.
 #
 # Usage:
 #   fm-evidence-check.sh --ref <git-ref> [--root <repo>] [--] [<pathspec>...]
@@ -36,7 +43,9 @@
 #
 # Exit 0: no evidence images, no before/after pairs, or every identical pair
 #         carries its .allow-identical marker.
-# Exit 1: at least one before/after pair is byte-identical with no marker.
+# Exit 1: at least one before/after pair is byte-identical with no marker, or a
+#         directory holds both before-* and after-* images with zero pairs
+#         matched between them.
 # Exit 2: usage error, or the git ref/repo could not be read.
 set -eu
 
@@ -117,6 +126,9 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MARKER_SUFFIX = ".allow-identical"
 
 
+LEADING_ORDINAL_RE = re.compile(r"^(\d+)-")
+
+
 def classify(basename):
     """Return (side, pair_key_suffix) for a before/after evidence filename, or None."""
     lower = basename.lower()
@@ -131,6 +143,13 @@ def classify(basename):
     if match:
         return "after", match.group(1) + match.group(2)
     return None
+
+
+def leading_ordinal(key_material):
+    """A shared leading "<N>-" ordinal pairs before/after images whose
+    remaining suffix describes state rather than a shared viewport name."""
+    match = LEADING_ORDINAL_RE.match(key_material)
+    return match.group(1) if match else None
 
 
 def is_image(path):
@@ -203,38 +222,89 @@ def main():
     else:
         entries = load_local_entries(rest)
 
-    groups = {}
+    by_dir = {}
     for path, ident in entries:
         classified = classify(os.path.basename(path))
         if classified is None:
             continue
-        side, suffix = classified
-        key = (os.path.dirname(path), suffix)
-        groups.setdefault(key, {"before": [], "after": []})[side].append((path, ident))
+        side, key_material = classified
+        d = os.path.dirname(path)
+        by_dir.setdefault(d, {"before": [], "after": []})[side].append(
+            (path, ident, key_material)
+        )
 
     failures = []
     opted_out = []
+    unpaired = []
     pairs_checked = 0
-    for _key, sides in sorted(groups.items()):
+
+    for _d, sides in sorted(by_dir.items()):
         befores = sides["before"]
         afters = sides["after"]
         if not befores or not afters:
             continue
-        for before_path, before_ident in befores:
-            for after_path, after_ident in afters:
-                pairs_checked += 1
-                if before_ident != after_ident:
+
+        matched_before = set()
+        matched_after = set()
+        pairs = []
+
+        # Exact key match first: same suffix (before-<suffix>/after-<suffix>)
+        # or same prefix+ext (<prefix>-before/<prefix>-after).
+        for bi, (_bp, _bi_ident, bkey) in enumerate(befores):
+            for ai, (_ap, _ai_ident, akey) in enumerate(afters):
+                if ai in matched_after:
                     continue
-                marker_path = after_path + MARKER_SUFFIX
-                allowed = (
-                    marker_exists_ref(root, ref, marker_path)
-                    if mode == "ref"
-                    else marker_exists_local(marker_path)
-                )
-                (opted_out if allowed else failures).append((before_path, after_path))
+                if bkey == akey:
+                    pairs.append((befores[bi], afters[ai]))
+                    matched_before.add(bi)
+                    matched_after.add(ai)
+                    break
+
+        # A shared leading ordinal pairs whatever exact matching left over.
+        for bi, (_bp, _bi_ident, bkey) in enumerate(befores):
+            if bi in matched_before:
+                continue
+            b_ord = leading_ordinal(bkey)
+            if b_ord is None:
+                continue
+            for ai, (_ap, _ai_ident, akey) in enumerate(afters):
+                if ai in matched_after:
+                    continue
+                if leading_ordinal(akey) == b_ord:
+                    pairs.append((befores[bi], afters[ai]))
+                    matched_before.add(bi)
+                    matched_after.add(ai)
+                    break
+
+        pairs_checked += len(pairs)
+
+        for (before_path, before_ident, _bkey), (after_path, after_ident, _akey) in pairs:
+            if before_ident != after_ident:
+                continue
+            marker_path = after_path + MARKER_SUFFIX
+            allowed = (
+                marker_exists_ref(root, ref, marker_path)
+                if mode == "ref"
+                else marker_exists_local(marker_path)
+            )
+            (opted_out if allowed else failures).append((before_path, after_path))
+
+        if not pairs:
+            leftover_before = [p for i, (p, _i, _k) in enumerate(befores) if i not in matched_before]
+            leftover_after = [p for i, (p, _i, _k) in enumerate(afters) if i not in matched_after]
+            unpaired.append((leftover_before, leftover_after))
 
     for before_path, after_path in opted_out:
         print(f"fm-evidence-check: identical-ok (opted out): {before_path} == {after_path}")
+
+    if unpaired:
+        for leftover_before, leftover_after in unpaired:
+            sys.stderr.write(
+                "fm-evidence-check: refused: before/after images present but none could be "
+                "paired by suffix or leading ordinal:\n"
+                f"fm-evidence-check:   before: {', '.join(leftover_before)}\n"
+                f"fm-evidence-check:   after:  {', '.join(leftover_after)}\n"
+            )
 
     if failures:
         for before_path, after_path in failures:
@@ -244,6 +314,8 @@ def main():
                 "fm-evidence-check: if this is intentional, commit an empty marker "
                 f"file: {after_path}{MARKER_SUFFIX}\n"
             )
+
+    if unpaired or failures:
         return 1
 
     print(

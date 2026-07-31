@@ -10,9 +10,14 @@
 #   (c) an after-only set passes silently (no before counterpart)
 #   (d) a tree with no images passes silently
 #   (e) the reversed <prefix>-before/<prefix>-after convention is also paired
-#   (f) the .allow-identical marker opts an identical pair back in
-#   (g) --local mode hashes files on disk instead of reading a git ref
-#   (h) usage errors exit 2 without touching git
+#   (f) a shared leading ordinal pairs images whose suffix describes state
+#       rather than a shared viewport name (real filenames from
+#       we-pack-together's docs/pr-assets/sidebar-silent-discard)
+#   (g) a before/after set with no shared suffix or ordinal refuses loudly
+#       rather than printing a bare "ok" having verified nothing
+#   (h) the .allow-identical marker opts an identical pair back in
+#   (i) --local mode hashes files on disk instead of reading a git ref
+#   (j) usage errors exit 2 without touching git
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -135,6 +140,61 @@ test_reversed_convention_paired() {
   pass "fm-evidence-check pairs the reversed <prefix>-before/<prefix>-after convention"
 }
 
+test_ordinal_pairs_state_described_suffixes() {
+  # Real filenames from we-pack-together's docs/pr-assets/sidebar-silent-discard
+  # (commit d71bc9c): the suffix after before-/after- describes the state
+  # rather than a shared viewport name, so only a shared leading "<N>-"
+  # ordinal pairs them.
+  local dir rc
+  dir="$TMP_ROOT/ordinal"
+  init_repo "$dir"
+  write_png "$dir/before-1-typed-not-saved.png" DRAFTBYTES
+  write_png "$dir/after-1-typed-with-save-button.png" SAVEDBYTES
+  write_png "$dir/before-2-reopened-empty-data-lost.png" LOSTBYTES
+  write_png "$dir/after-2-reopened-persisted.png" KEPTBYTES
+  commit_all "$dir"
+
+  set +e
+  "$CHECK" --ref HEAD --root "$dir" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ordinal: a genuinely different ordinal-paired set must pass"
+  assert_grep 'pairs_checked=2' "$dir/stdout" \
+    "ordinal: both ordinal pairs were not counted as checked"
+  pass "fm-evidence-check pairs before/after images on a shared leading ordinal"
+}
+
+test_unpairable_set_refuses_not_silent_ok() {
+  # An honest worker's before/after set whose suffixes differ with no shared
+  # leading ordinal either: exact-suffix and ordinal matching both find
+  # nothing, so this must be a loud refusal, never a silent "ok" that implies
+  # verification happened when it did not.
+  local dir rc out err
+  dir="$TMP_ROOT/unpairable"
+  init_repo "$dir"
+  write_png "$dir/before-empty-cart.png" EMPTYBYTES
+  write_png "$dir/after-checkout-complete.png" DONEBYTES
+  commit_all "$dir"
+
+  out="$dir/stdout"; err="$dir/stderr"
+  set +e
+  "$CHECK" --ref HEAD --root "$dir" > "$out" 2> "$err"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unpairable: an unpaired before/after set must refuse, not pass"
+  assert_no_grep 'fm-evidence-check: ok' "$out" \
+    "unpairable: a bare ok was printed despite pairing nothing"
+  assert_grep 'none could be paired' "$err" \
+    "unpairable: refusal did not explain that nothing could be paired"
+  assert_grep 'before-empty-cart.png' "$err" \
+    "unpairable: refusal did not name the unpaired before image"
+  assert_grep 'after-checkout-complete.png' "$err" \
+    "unpairable: refusal did not name the unpaired after image"
+  pass "fm-evidence-check refuses (not a silent ok) when before/after images cannot be paired at all"
+}
+
 test_allow_identical_marker_opts_in() {
   local dir rc out
   dir="$TMP_ROOT/opt-out"
@@ -204,6 +264,8 @@ test_different_pair_passes
 test_after_only_set_passes_silently
 test_no_images_passes_silently
 test_reversed_convention_paired
+test_ordinal_pairs_state_described_suffixes
+test_unpairable_set_refuses_not_silent_ok
 test_allow_identical_marker_opts_in
 test_local_mode_hashes_disk_files
 test_usage_errors_exit_2
