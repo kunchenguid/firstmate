@@ -168,7 +168,7 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+  if windows=$(LC_ALL=C tmux list-windows -t "$session:" -F '#{window_name}' 2>&1); then
     inventory_status=0
   else
     inventory_status=$?
