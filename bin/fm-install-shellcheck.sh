@@ -28,7 +28,7 @@ case "${os}-${arch}" in
     ASSET_PLATFORM=linux.aarch64
     SHA256=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
     ;;
-  Linux-armv6l|Linux-armv6hf)
+  Linux-armv6l)
     ASSET_PLATFORM=linux.armv6hf
     SHA256=8afc50b302d5feeac9381ea114d563f0150d061520042b254d6eb715797c8223
     ;;
@@ -78,6 +78,8 @@ tar -xJf "$TMP/$ARCHIVE" -C "$TMP"
 mkdir -p "$DESTINATION"
 install -m 0755 "$TMP/shellcheck-v${VERSION}/shellcheck" "$DESTINATION/shellcheck"
 installed_version=$("$DESTINATION/shellcheck" --version 2>/dev/null | awk '/^version:/ {print $2; exit}')
-[ "$installed_version" = "$VERSION" ] \
-  || die "installed ShellCheck version is '${installed_version:-<empty>}', expected exact pin $VERSION"
+[ "$installed_version" = "$VERSION" ] || {
+  rm -f "$DESTINATION/shellcheck"
+  die "installed ShellCheck version is '${installed_version:-<empty>}', expected exact pin $VERSION"
+}
 "$DESTINATION/shellcheck" --version
