@@ -211,12 +211,15 @@ test_missing_dirty_allowlist_derivation_refuses_teardown() {
   # shellcheck disable=SC1090  # deliberate: extracting the production safety check under test
   eval "$(sed -n '/^validate_worktree_teardown_safety()/,/^}/p' "$ROOT/bin/fm-teardown.sh")"
   worktree_safety_blocked_by_lock() { return 1; }
+  # shellcheck disable=SC2034  # read by the extracted fm-teardown function under test
   TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=90
-  WT=$repo FORCE= KIND=ship MODE=github PROJ=$repo
+  # shellcheck disable=SC2034  # read by the extracted fm-teardown function under test
+  WT=$repo FORCE='' KIND=ship MODE=github PROJ=$repo
 
   # An empty derivation once collapsed the filter to '^\?\? ()', which matches
   # EVERY untracked line - real work included - and let teardown sail past the
   # uncommitted-work check. It must refuse instead.
+  # shellcheck disable=SC2329  # invoked indirectly by the production function under test; the override simulates a failed derivation
   out=$(fm_harness_dirty_allow_re() { :; }; validate_worktree_teardown_safety 2>&1); rc=$?
   [ "$rc" -ne 0 ] \
     || fail "an empty allowlist derivation must refuse teardown, not filter away every untracked file"
@@ -224,6 +227,7 @@ test_missing_dirty_allowlist_derivation_refuses_teardown() {
   assert_contains "$out" 'allowlist' "the refusal must name the missing artifact allowlist"
 
   # A failing derivation must refuse the same way.
+  # shellcheck disable=SC2329  # invoked indirectly by the production function under test; the override simulates a failed derivation
   out=$(fm_harness_dirty_allow_re() { return 1; }; validate_worktree_teardown_safety 2>&1); rc=$?
   [ "$rc" -ne 0 ] \
     || fail "a failing allowlist derivation must refuse teardown"
@@ -237,6 +241,7 @@ test_missing_dirty_allowlist_derivation_refuses_teardown() {
   git -C "$passing" fetch -q origin
   mkdir -p "$passing/.claude"
   printf '{}\n' > "$passing/.claude/settings.local.json"
+  # shellcheck disable=SC2034  # read by the extracted fm-teardown function under test
   WT=$passing
   out=$(validate_worktree_teardown_safety 2>&1); rc=$?
   [ "$rc" -eq 0 ] \
