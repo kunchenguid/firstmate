@@ -124,6 +124,13 @@ snapshot_refs() {
   git -C "$1" for-each-ref --format='%(refname)%09%(objectname)%09%(symref)' > "$2"
 }
 
+snapshot_object_files() {
+  local object_dir
+  object_dir=$(git -C "$1" rev-parse --path-format=absolute --git-path objects) \
+    || fail "cannot resolve object directory for snapshot"
+  find "$object_dir" \( -type f -o -type l \) -print | LC_ALL=C sort > "$2"
+}
+
 test_help_documents_operator_quiescence() {
   new_case_root help
   run_helper --help env
@@ -250,6 +257,39 @@ test_configured_pruning_is_suppressed() {
   pass "configured branch and tag pruning are suppressed"
 }
 
+test_source_fetch_disables_auto_maintenance() {
+  local fakebin real_git marker
+  new_divergent_fixture no-auto-maintenance
+  fakebin="$CASE_ROOT/fakebin"
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  marker="$CASE_ROOT/fetches"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+is_fetch=0
+no_auto_maintenance=0
+for arg in "$@"; do
+  [ "$arg" = fetch ] && is_fetch=1
+  [ "$arg" = --no-auto-maintenance ] && no_auto_maintenance=1
+done
+if [ "$is_fetch" -eq 1 ]; then
+  [ "$no_auto_maintenance" -eq 1 ] || exit 91
+  printf 'fetch\n' >> "${FETCH_MARKER:?}"
+fi
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  run_helper "$REPO" env PATH="$fakebin:$PATH" REAL_GIT_FOR_TEST="$real_git" \
+    FETCH_MARKER="$marker"
+
+  expect_code 0 "$RUN_RC" "no auto maintenance"
+  [ "$(wc -l < "$marker" | tr -d ' ')" -eq 1 ] \
+    || fail "source acquisition did not use exactly one guarded fetch"
+  assert_direct_ref "$REPO" refs/heads/main "$REMOTE_NEW" "no auto maintenance branch"
+  pass "source-only fetch explicitly disables automatic maintenance"
+}
+
 test_ambient_git_overrides_refuse() {
   local name
   new_divergent_fixture ambient-git-overrides
@@ -277,6 +317,51 @@ test_ambient_git_overrides_refuse() {
       "ambient $name refusal did not precede repository resolution"
   done
   pass "ambient repository, object, index, and graph overrides refuse before resolution"
+}
+
+test_repository_local_alternates_refuse() {
+  local refs_before refs_after
+  new_divergent_fixture repository-local-alternates
+  refs_before="$CASE_ROOT/refs.before"
+  refs_after="$CASE_ROOT/refs.after"
+  printf '%s\n' "$SEED/.git/objects" > "$REPO/.git/objects/info/alternates"
+  snapshot_refs "$REPO" "$refs_before"
+
+  run_helper_plain "$REPO"
+
+  assert_refused_without_move "$REPO" "$LOCAL_OLD" repository-local-alternates
+  snapshot_refs "$REPO" "$refs_after"
+  cmp -s "$refs_before" "$refs_after" \
+    || fail "repository-local alternates refusal changed a ref"
+  assert_grep "repository-local object alternates are present" "$RUN_ERR" \
+    "repository-local alternates refusal was not actionable"
+  pass "repository-local object alternates refuse without ref movement"
+}
+
+test_partial_or_promisor_storage_refuses_without_acquisition() {
+  local refs_before refs_after objects_before objects_after
+  new_divergent_fixture partial-or-promisor
+  refs_before="$CASE_ROOT/refs.before"
+  refs_after="$CASE_ROOT/refs.after"
+  objects_before="$CASE_ROOT/objects.before"
+  objects_after="$CASE_ROOT/objects.after"
+  git -C "$REPO" config remote.origin.promisor true
+  git -C "$REPO" config remote.origin.partialclonefilter tree:0
+  snapshot_refs "$REPO" "$refs_before"
+  snapshot_object_files "$REPO" "$objects_before"
+
+  run_helper_plain "$REPO"
+
+  assert_refused_without_move "$REPO" "$LOCAL_OLD" partial-or-promisor
+  snapshot_refs "$REPO" "$refs_after"
+  snapshot_object_files "$REPO" "$objects_after"
+  cmp -s "$refs_before" "$refs_after" \
+    || fail "partial or promisor refusal changed a ref"
+  cmp -s "$objects_before" "$objects_after" \
+    || fail "partial or promisor refusal acquired an object"
+  assert_grep "partial or promisor object storage is configured" "$RUN_ERR" \
+    "partial or promisor refusal was not actionable"
+  pass "partial or promisor storage refuses without object acquisition or ref movement"
 }
 
 test_virtual_or_incomplete_history_refuses() {
@@ -709,7 +794,10 @@ test_help_documents_operator_quiescence
 test_divergent_identical_succeeds_and_repeats
 test_submodules_are_not_fetched
 test_configured_pruning_is_suppressed
+test_source_fetch_disables_auto_maintenance
 test_ambient_git_overrides_refuse
+test_repository_local_alternates_refuse
+test_partial_or_promisor_storage_refuses_without_acquisition
 test_virtual_or_incomplete_history_refuses
 test_dirty_refuses
 test_detached_refuses

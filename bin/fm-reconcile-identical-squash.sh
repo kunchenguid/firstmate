@@ -4,17 +4,19 @@
 # identical root trees.
 #
 # The operator must quiesce every other Git claimant before invoking this helper.
-# The helper proves the local repository shape, obtains origin's current default
-# branch object with a source-only fetch, and atomically creates or verifies a
-# deterministic preservation ref while moving only the direct local default
-# branch ref. It never changes ordinary fm-fleet-sync.sh behavior.
+# The helper proves the local repository shape, refuses repository-local object
+# alternates and partial or promisor object storage, obtains origin's current
+# default branch object with a source-only fetch, and atomically creates or
+# verifies a deterministic preservation ref while moving only the direct local
+# default branch ref. It never changes ordinary fm-fleet-sync.sh behavior.
 #
 # Source acquisition uses an empty --refmap together with a source-only refspec,
 # --no-write-fetch-head, --no-tags, --no-prune, --no-prune-tags, and
-# --no-recurse-submodules. This suppresses configured destination refspecs,
-# remote-tracking updates, FETCH_HEAD writes, tag following, pruning, and
-# submodule recursion. A fixed three-attempt loop tolerates a source tip
-# advancing between fetch and source-backed observation.
+# --no-recurse-submodules, and --no-auto-maintenance. This suppresses configured
+# destination refspecs, remote-tracking updates, FETCH_HEAD writes, tag
+# following, pruning, submodule recursion, and automatic maintenance. A fixed
+# three-attempt loop tolerates a source tip advancing between fetch and
+# source-backed observation.
 #
 # Preservation refs have this form:
 #   refs/firstmate/identical-squash/<hex-encoded-default-branch>/<full-old-oid>
@@ -118,6 +120,77 @@ trap 'exit 143' TERM
 
 repo_git() {
   git -C "$REPO" "$@"
+}
+
+object_storage_state_valid() {
+  local alternates object_dir config_output rc line value marker
+  OBJECT_STORAGE_ERROR=
+  if ! alternates=$(repo_git rev-parse --path-format=absolute \
+      --git-path objects/info/alternates 2>/dev/null); then
+    OBJECT_STORAGE_ERROR="cannot resolve the repository-local object alternates path"
+    return 1
+  fi
+  if [ -e "$alternates" ] || [ -L "$alternates" ]; then
+    OBJECT_STORAGE_ERROR="repository-local object alternates are present"
+    return 1
+  fi
+  set +e
+  repo_git config --local --get extensions.partialClone >/dev/null 2>&1
+  rc=$?
+  set -e
+  case "$rc" in
+    0)
+      OBJECT_STORAGE_ERROR="partial or promisor object storage is configured"
+      return 1
+      ;;
+    1) ;;
+    *)
+      OBJECT_STORAGE_ERROR="cannot determine partial-clone repository state"
+      return 1
+      ;;
+  esac
+  set +e
+  config_output=$(repo_git config --type=bool --get-regexp \
+    '^remote\..*\.promisor$' 2>/dev/null)
+  rc=$?
+  set -e
+  case "$rc" in
+    0)
+      while IFS= read -r line || [ -n "${line:-}" ]; do
+        value=${line##* }
+        case "$value" in
+          true)
+            OBJECT_STORAGE_ERROR="partial or promisor object storage is configured"
+            return 1
+            ;;
+          false) ;;
+          *)
+            OBJECT_STORAGE_ERROR="promisor remote state is ambiguous"
+            return 1
+            ;;
+        esac
+      done <<EOF
+$config_output
+EOF
+      ;;
+    1) ;;
+    *)
+      OBJECT_STORAGE_ERROR="cannot determine promisor remote state"
+      return 1
+      ;;
+  esac
+  if ! object_dir=$(repo_git rev-parse --path-format=absolute \
+      --git-path objects 2>/dev/null); then
+    OBJECT_STORAGE_ERROR="cannot resolve the repository object directory"
+    return 1
+  fi
+  for marker in "$object_dir"/pack/*.promisor; do
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      OBJECT_STORAGE_ERROR="partial or promisor object storage is present"
+      return 1
+    fi
+  done
+  return 0
 }
 
 history_state_valid() {
@@ -372,6 +445,7 @@ post_commit_fail() {
   exit 1
 }
 
+object_storage_state_valid || refuse "$OBJECT_STORAGE_ERROR"
 history_state_valid || refuse "$HISTORY_ERROR"
 if ! HEAD_REF=$(repo_git symbolic-ref --no-recurse -q HEAD 2>/dev/null); then
   refuse "HEAD is detached"
@@ -443,7 +517,7 @@ REMOTE_OID=
 REMOTE_TREE=
 while [ "$attempt" -le "$MAX_SOURCE_ATTEMPTS" ]; do
   if ! repo_git fetch --quiet --no-write-fetch-head --no-tags --no-prune \
-      --no-prune-tags --no-recurse-submodules --refmap= \
+      --no-prune-tags --no-recurse-submodules --no-auto-maintenance --refmap= \
       "$AUTHORITATIVE_REMOTE" "$REMOTE_REF" \
       >"$TMP_ROOT/fetch.out" 2>"$TMP_ROOT/fetch.err"; then
     refuse "source-only fetch from origin failed; inspect remote access without exposing credentials"
