@@ -14,6 +14,9 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) a byte-identical before/after evidence pair in the worktree's HEAD
+#       refuses the merge before gh-axi pr merge is invoked
+#   (j) a worktree with a real, non-identical evidence pair still merges
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -301,6 +304,58 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_identical_evidence_pair_refuses_merge() {
+  local case_dir rc
+  case_dir=$(make_case identical-evidence)
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  mkdir -p "$case_dir/wt/docs/pr-assets/widget"
+  printf SAMEBYTES > "$case_dir/wt/docs/pr-assets/widget/before-desktop.png"
+  printf SAMEBYTES > "$case_dir/wt/docs/pr-assets/widget/after-desktop.png"
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -qm evidence
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "identical-evidence: fm-pr-merge should refuse"
+  assert_grep 'byte-identical before/after evidence image pair detected' "$case_dir/stderr" \
+    "identical-evidence: refusal did not explain the evidence check failure"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "identical-evidence: gh-axi pr merge was invoked despite the identical pair"
+  pass "fm-pr-merge refuses to merge a worktree with a byte-identical before/after evidence pair"
+}
+
+test_different_evidence_pair_still_merges() {
+  local case_dir rc
+  case_dir=$(make_case different-evidence)
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  mkdir -p "$case_dir/wt/docs/pr-assets/widget"
+  printf OLDBYTES > "$case_dir/wt/docs/pr-assets/widget/before-desktop.png"
+  printf NEWBYTES > "$case_dir/wt/docs/pr-assets/widget/after-desktop.png"
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -qm evidence
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/32 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "different-evidence: fm-pr-merge should still merge a real before/after change"
+  grep -qxF 'pr merge 32 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "different-evidence: gh-axi pr merge was not invoked"
+  pass "fm-pr-merge merges a worktree whose evidence pair genuinely differs"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +366,5 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_identical_evidence_pair_refuses_merge
+test_different_evidence_pair_still_merges

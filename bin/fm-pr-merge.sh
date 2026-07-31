@@ -7,6 +7,10 @@
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
+# Before merging, bin/fm-evidence-check.sh runs against the recorded worktree's
+# HEAD; a byte-identical before/after evidence image pair with no opt-out
+# marker refuses the merge. See bin/fm-evidence-check.sh --help for the pairing
+# convention and opt-out mechanism.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -75,6 +79,18 @@ grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+
+# The task worktree is a checkout of the exact branch about to be merged, so
+# its HEAD is the tree gh-axi is about to land. Only run the check when that
+# tree is actually a readable git commit; a task with no worktree, or one gh
+# has never checked out, has nothing evidence-checkable to skip past.
+WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "$WT" ] && git -C "$WT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+  "$SCRIPT_DIR/fm-evidence-check.sh" --ref HEAD --root "$WT" || {
+    echo "error: byte-identical before/after evidence image pair detected, merge refused" >&2
+    exit 1
+  }
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then
