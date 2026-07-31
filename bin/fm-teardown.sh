@@ -458,6 +458,12 @@ local_work_is_in_pr_head() {
     || unpushed_patches_are_in_pr_head "$pr_head"
 }
 
+local_head_is_ancestor_of_pr_head() {
+  local pr_head=$1 current
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  git -C "$WT" merge-base --is-ancestor "$current" "$pr_head" 2>/dev/null
+}
+
 single_top_level_api_field() {
   local text=$1 key=$2 values count
   values=$(printf '%s\n' "$text" | awk -v prefix="$key: " \
@@ -531,7 +537,7 @@ parse_check_summary_counts() {
 TEARDOWN_PRESERVE_TASK_BRANCH=0
 TEARDOWN_PR_EVIDENCE_ERROR=
 pr_is_complete_green_and_mergeable() {
-  local branch=$1 status_file last_status provider url path number
+  local branch=$1 status_file last_status completion_count provider url path number
   local recorded_head_count recorded_head api state draft mergeable live_head
   local checks summary_body parsed_summary parsed_count
   local passed failed skipped pending total
@@ -561,6 +567,11 @@ pr_is_complete_green_and_mergeable() {
   fi
   last_status=$(awk 'NF { line = $0 } END { print line }' "$status_file" 2>/dev/null) || {
     TEARDOWN_PR_EVIDENCE_ERROR="the task completion record is unreadable"
+    return 1
+  }
+  completion_count=$(grep -c '^done: PR ' "$status_file" 2>/dev/null || true)
+  [ "$completion_count" -eq 1 ] || {
+    TEARDOWN_PR_EVIDENCE_ERROR="the task completion record is absent or duplicated"
     return 1
   }
   case "$last_status" in
@@ -641,7 +652,7 @@ pr_is_complete_green_and_mergeable() {
 $parsed_summary
 EOF
   if [ "$total" -eq 0 ] || [ "$passed" -eq 0 ] || [ "$failed" -ne 0 ] \
-    || [ "$pending" -ne 0 ] || [ $((passed + skipped)) -ne "$total" ]; then
+    || [ "$skipped" -ne 0 ] || [ "$pending" -ne 0 ] || [ "$passed" -ne "$total" ]; then
     TEARDOWN_PR_EVIDENCE_ERROR="the recorded PR does not have an all-passing completed check suite"
     return 1
   fi
@@ -650,7 +661,7 @@ EOF
     TEARDOWN_PR_EVIDENCE_ERROR="the validated live PR head is unavailable in the task repository"
     return 1
   }
-  local_work_is_in_pr_head "$live_head" || {
+  local_head_is_ancestor_of_pr_head "$live_head" || {
     TEARDOWN_PR_EVIDENCE_ERROR="local HEAD is not contained in the validated live PR head; genuinely unpublished commits may be present"
     return 1
   }
@@ -725,6 +736,21 @@ work_is_landed() {
 announce_preserved_task_branch() {
   local branch=$1 pr=${PR_URL:-the recorded PR}
   printf '%s\n' "Preserved local branch $branch: $ID was cleaned up before $pr merged. Delete the branch once that PR lands."
+}
+
+finalize_task_branch() {
+  local branch
+  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  [ "$branch" != HEAD ] || return 0
+  git -C "$WT" checkout --detach -q 2>/dev/null || {
+    [ "$TEARDOWN_PRESERVE_TASK_BRANCH" = 1 ] && announce_preserved_task_branch "$branch"
+    return 0
+  }
+  if [ "$TEARDOWN_PRESERVE_TASK_BRANCH" = 1 ]; then
+    announce_preserved_task_branch "$branch"
+  else
+    git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+  fi
 }
 
 backlog_refresh_reminder() {
@@ -1471,16 +1497,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        if [ "$TEARDOWN_PRESERVE_TASK_BRANCH" = 1 ]; then
-          announce_preserved_task_branch "$branch"
-        else
-          git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-        fi
-      fi
-    fi
+    finalize_task_branch
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
@@ -1488,16 +1505,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      if [ "$TEARDOWN_PRESERVE_TASK_BRANCH" = 1 ]; then
-        announce_preserved_task_branch "$branch"
-      else
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
-  fi
+  finalize_task_branch
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"

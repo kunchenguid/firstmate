@@ -44,10 +44,12 @@
 #   (ab) green PR + later local commit                           -> REFUSE (unpublished)
 #   (ac) absent/ambiguous completion, check, mergeability,
 #        identity, or head evidence                              -> REFUSE (evidence)
-#   (ad) green PR whose suite also reports skipped checks         -> ALLOW  (skipped)
+#   (ad) green PR whose suite also reports skipped checks         -> REFUSE (skipped)
 #   (ae) PR with no CI checks configured                          -> REFUSE (no suite)
 #   (af) check summary in an unrecognized shape                   -> REFUSE (fail-safe)
 #   (ag) suite where every check is skipped                       -> REFUSE (nothing passed)
+#   (ah) green PR with only patch-equivalent divergent HEAD       -> REFUSE (not contained)
+#   (ai) preserve-path detach failure                              -> ALLOW + print identity
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -546,6 +548,19 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
+add_git_detach_failure() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+case " $* " in
+  *" checkout --detach -q "*) exit 1 ;;
+esac
+exec "$real" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -675,14 +690,33 @@ EOF
   pass "completed green mergeable PR is cleaned before merge with its local branch preserved"
 }
 
-test_green_pr_with_skipped_checks_allows_cleanup() {
+test_preserve_notice_survives_detach_failure() {
+  local setup case_dir head rc
+  setup=$(setup_open_green_case preserve-detach-failure)
+  IFS=$'\t' read -r case_dir head <<EOF
+$setup
+EOF
+  add_git_detach_failure "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "preserve-detach-failure: teardown should retain best-effort detach behavior"
+  assert_grep 'Preserved local branch fm/task-x1' "$case_dir/stdout" \
+    "preserve-detach-failure: preserve notice was lost"
+  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/stdout" \
+    "preserve-detach-failure: notice omitted the PR identity"
+  pass "preserved branch identity survives detach failure"
+}
+
+test_green_pr_with_skipped_checks_refuses_cleanup() {
   local setup case_dir head rc
   setup=$(setup_open_green_case green-skipped)
   IFS=$'\t' read -r case_dir head <<EOF
 $setup
 EOF
-  # gh-axi emits an extra "<n> skipped" segment whenever a conditional job does
-  # not run. Every check that ran passed, so the suite is still complete.
   printf '%s\n' 'summary: "3 passed, 0 failed, 1 skipped, 4 total"' > "$case_dir/gh-checks"
 
   set +e
@@ -690,11 +724,12 @@ EOF
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "green-skipped: a green suite with a skipped check should allow cleanup"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "green-skipped: teardown printed a REFUSED line"
+  expect_code 1 "$rc" "green-skipped: a suite with a skipped check should refuse cleanup"
+  assert_grep "all-passing completed check suite" "$case_dir/stderr" \
+    "green-skipped: refusal did not identify skipped checks"
   git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1 >/dev/null 2>&1 \
-    || fail "green-skipped: cleanup deleted the task branch"
-  pass "green PR whose suite reports skipped checks is cleaned before merge"
+    || fail "green-skipped: refusal deleted the task branch"
+  pass "green PR whose suite reports skipped checks refuses cleanup"
 }
 
 test_unusable_check_suites_refuse_cleanup() {
@@ -848,10 +883,36 @@ EOF
   pass "green PR does not authorize cleanup of a genuinely unpublished later commit"
 }
 
+test_green_pr_with_patch_equivalent_divergent_head_refuses() {
+  local case_dir local_head pr_head rc tmp
+  case_dir=$(make_case divergent-equivalent-head)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "replay feature")
+  printf '%s\n' \
+    'pr=https://github.com/example/repo/pull/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  write_pr_completion "$case_dir"
+  add_gh_pr_open_evidence "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "divergent-equivalent-head: patch equivalence must not prove containment"
+  assert_grep "local HEAD is not contained" "$case_dir/stderr" \
+    "divergent-equivalent-head: refusal did not identify failed ancestry"
+  tmp=$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)
+  [ "$tmp" = "$local_head" ] || fail "divergent-equivalent-head: refusal changed the task branch"
+  pass "patch-equivalent divergent local HEAD refuses pre-merge cleanup"
+}
+
 test_absent_and_ambiguous_pr_cleanup_evidence_refuses() {
   local variant setup case_dir head rc expected tmp
   for variant in \
-    completion-absent completion-ambiguous \
+    completion-absent completion-ambiguous completion-duplicated \
     checks-absent checks-ambiguous \
     mergeability-absent mergeability-ambiguous \
     identity-absent identity-ambiguous \
@@ -869,6 +930,12 @@ EOF
       completion-ambiguous)
         printf '%s\n' 'working: completion was reopened' >> "$case_dir/state/task-x1.status"
         expected="not an unambiguous completion"
+        ;;
+      completion-duplicated)
+        write_pr_completion "$case_dir"
+        printf '%s\n' 'done: PR https://github.com/example/repo/pull/7 checks green' \
+          >> "$case_dir/state/task-x1.status"
+        expected="completion record is absent or duplicated"
         ;;
       checks-absent)
         : > "$case_dir/gh-checks"
@@ -1716,13 +1783,15 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_completed_green_mergeable_pr_allows_and_preserves_branch
-test_green_pr_with_skipped_checks_allows_cleanup
+test_preserve_notice_survives_detach_failure
+test_green_pr_with_skipped_checks_refuses_cleanup
 test_unusable_check_suites_refuse_cleanup
 test_no_mistakes_truly_unpushed_refuses
 test_red_pr_refuses_cleanup
 test_pending_pr_refuses_cleanup
 test_conflicted_pr_refuses_cleanup
 test_green_pr_with_genuinely_unpublished_commit_refuses
+test_green_pr_with_patch_equivalent_divergent_head_refuses
 test_absent_and_ambiguous_pr_cleanup_evidence_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
