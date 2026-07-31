@@ -8,6 +8,7 @@ set -u
 
 ENTRY="$ROOT/bin/fm-wsl-entry.sh"
 BATCH="$ROOT/firstmate.bat"
+ATTRIBUTES="$ROOT/.gitattributes"
 TMP_ROOT=$(fm_test_tmproot fm-wsl-entry)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P) || fail "could not resolve the test temp root"
@@ -135,6 +136,28 @@ test_batch_constructs_one_deterministic_wsl_command() {
   pass "firstmate.bat: one explicit WSL command preserves a spaced root, arguments, and exit status"
 }
 
+test_checkout_pins_bridge_line_endings() {
+  local attrs
+
+  assert_present "$ATTRIBUTES" \
+    "the repository must ship .gitattributes so every checkout normalizes the bridge"
+
+  if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    pass "bridge line endings: checkout normalization is covered from a git checkout"
+    return 0
+  fi
+
+  attrs=$(git -C "$ROOT" check-attr eol -- firstmate.bat bin/fm-wsl-entry.sh 2>&1) \
+    || fail "could not read the checkout attributes for the bridge"
+
+  assert_contains "$attrs" "firstmate.bat: eol: crlf" \
+    "cmd.exe terminates lines with CRLF, so checkouts must deliver firstmate.bat as CRLF"
+  assert_contains "$attrs" "bin/fm-wsl-entry.sh: eol: lf" \
+    "bash rejects CR-terminated scripts, so checkouts must deliver the WSL entry as LF"
+  pass "bridge line endings: checkouts deliver a CRLF batch launcher and an LF WSL entry"
+}
+
 test_wsl_entry_preserves_root_arguments_and_status
 test_wsl_entry_missing_launcher_is_actionable
 test_batch_constructs_one_deterministic_wsl_command
+test_checkout_pins_bridge_line_endings
