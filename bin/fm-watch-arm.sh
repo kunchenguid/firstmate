@@ -299,41 +299,64 @@ successor_wanted() {
 }
 
 # Start one detached watcher and confirm it through the same honesty gate an
-# owned child passes. Prints "started:<pid>" once confirmed and "none"
-# otherwise. It NEVER fails the wake delivery it precedes: a home left without a
-# successor is recorded as such in the ledger and still gets its reason.
+# owned child passes. Prints "started:<pid>" once confirmed, "attached:<pid>"
+# when another watcher won the singleton instead, and "none" otherwise. It NEVER
+# fails the wake delivery it precedes: a home left without a successor is
+# recorded as such in the ledger and still gets its reason.
 arm_successor() {  # <just-closed-watcher-pid>
-  local closed_pid=${1:-none} tmp deadline pid target
+  local closed_pid=${1:-none} tmp pidfile forked deadline pid target
   successor_wanted || { printf 'none'; return 0; }
   prune_successor_outputs
   tmp=$(mktemp "$SUCCESSOR_OUT_PREFIX.pending.XXXXXX" 2>/dev/null) || { printf 'none'; return 0; }
+  pidfile=$(mktemp "$SUCCESSOR_OUT_PREFIX.forkpid.XXXXXX" 2>/dev/null) || {
+    rm -f "$tmp" 2>/dev/null || true
+    printf 'none'
+    return 0
+  }
   # Double-fork so the watcher is reparented away from this arm: it must survive
   # the exit that delivers the wake. setsid additionally detaches the controlling
   # terminal where it exists; the bare subshell fallback covers hosts without it.
+  # The double fork hides the watcher's pid from $!, so the forked shell records
+  # its own pid and then execs the watcher into it: the pid it wrote IS the
+  # watcher's, whether or not setsid inserted a fork of its own.
+  # shellcheck disable=SC2016 # $$ and $1/$2 must expand in the forked shell, not here.
   if command -v setsid >/dev/null 2>&1; then
-    ( setsid "$WATCH" >"$tmp" 2>/dev/null </dev/null & ) 2>/dev/null
+    ( setsid "${BASH:-bash}" -c 'printf "%s" "$$" > "$1"; exec "$2"' fm-successor "$pidfile" "$WATCH" \
+        >"$tmp" 2>/dev/null </dev/null & ) 2>/dev/null
   else
-    ( "$WATCH" >"$tmp" 2>/dev/null </dev/null & ) 2>/dev/null
+    ( "${BASH:-bash}" -c 'printf "%s" "$$" > "$1"; exec "$2"' fm-successor "$pidfile" "$WATCH" \
+        >"$tmp" 2>/dev/null </dev/null & ) 2>/dev/null
   fi
   deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
   while :; do
     if healthy_watcher && [ "$HEALTHY_PID" != "$closed_pid" ]; then
       pid=$HEALTHY_PID
-      target=$(successor_output_path "$pid")
-      # Another arm may already own this watcher and its output file. Never
-      # clobber a reason someone else is still owed.
-      if [ -e "$target" ]; then
-        rm -f "$tmp" 2>/dev/null || true
-      else
-        mv -f "$tmp" "$target" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+      forked=$(cat "$pidfile" 2>/dev/null || true)
+      if [ -n "$forked" ] && [ "$forked" = "$pid" ]; then
+        target=$(successor_output_path "$pid")
+        # Another arm may already own this watcher and its output file. Never
+        # clobber a reason someone else is still owed.
+        if [ -e "$target" ]; then
+          rm -f "$tmp" 2>/dev/null || true
+        else
+          mv -f "$tmp" "$target" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+        fi
+        rm -f "$pidfile" 2>/dev/null || true
+        printf 'started:%s' "$pid"
+        return 0
       fi
-      printf 'started:%s' "$pid"
+      # Someone else's watcher holds the singleton, so our fork stood down and
+      # its stdout is a "already running" note, not that cycle's reason. The
+      # winner's reason lands under its own arm's file; publishing ours there
+      # would make a later attached arm read a genuine wake as an empty close.
+      rm -f "$tmp" "$pidfile" 2>/dev/null || true
+      printf 'attached:%s' "$pid"
       return 0
     fi
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 0.2
   done
-  rm -f "$tmp" 2>/dev/null || true
+  rm -f "$tmp" "$pidfile" 2>/dev/null || true
   printf 'none'
 }
 
@@ -378,16 +401,21 @@ attach_and_wait() {
     # something real its reason is already complete on disk. Deliver it - an
     # attached close carrying a genuine wake is a wake, not the unexplained
     # empty completion this used to report.
+    # The rename is the claim: with two arms attached to the same watcher only
+    # one can win it. The loser did NOT get the reason, so it must not report a
+    # delivery - it falls through to the successor path and either follows the
+    # cycle the winner armed or fails loudly, never exits clean and empty.
     out=$(successor_output_path "$attached_pid")
     if watch_output_has_wake "$out"; then
       reason_type=$(watch_output_reason_type "$out")
       claimed="$out.claimed.$ARM_PID"
-      mv -f "$out" "$claimed" 2>/dev/null || claimed=$out
-      successor=$(arm_successor "$attached_pid")
-      cycle_log_append 0 none "$reason_type" "$successor"
-      print_watch_output "$claimed"
-      rm -f "$claimed" 2>/dev/null || true
-      return 0
+      if mv -f "$out" "$claimed" 2>/dev/null; then
+        successor=$(arm_successor "$attached_pid")
+        cycle_log_append 0 none "$reason_type" "$successor"
+        print_watch_output "$claimed"
+        rm -f "$claimed" 2>/dev/null || true
+        return 0
+      fi
     fi
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"

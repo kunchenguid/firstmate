@@ -226,10 +226,13 @@ A failing case aborts its suite, so each mutation was run twice: once to see whi
 | Drop the successor-output claim in `attach_and_wait` | `test_attached_arm_delivers_its_successor_cycle_wake` | 33 cases clean |
 | Arm a successor regardless of supervision need | `test_successor_is_not_armed_without_supervision_need` | 33 cases clean |
 | Ignore the shared parked check-in cadence | `test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence` | 41 cases clean |
+| Accumulate the due parked lanes without their record separator | `test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence` | 41 cases clean |
 | Flip 200 `successor=none` rows in the preserved capture | `test_preserved_capture_still_shows_the_defect_a_fresh_cycle_no_longer_has` | 33 cases clean |
 | Stop releasing a lane whose pause verb has gone | `test_a_cleared_park_is_noticed_promptly_inside_a_closed_cadence` | `test_secondmate_unpause_clears_pause_tracking` next, then 40 cases clean |
 
 The last row is the one mutation two cases share: both guard the same pause release, one for an ordinary parked lane inside a closed cadence and one for a secondmate, and no unrelated case fails once both are removed.
+The two parked check-in rows are the inverse pairing: one case carries both protections, because a batched check-in has to fire on the shared cadence *and* carry every lane that came due, and each is killed by its own mutation.
+The second of those was added after review found the accumulator concatenating its lanes into a single glued record, which the case as first written passed over.
 
 An earlier pass of this matrix failed instead at `test_watch_restart_attaches_to_healthy_peer`, whose TERM-resistant peer must install its signal handler before `--restart` signals it.
 The cause was host load from watcher successors left behind by leaked test temp roots, not the peer contract; with `fm_test_tmproot` registration repaired, both suites run with zero stray watcher processes and zero leftover temp roots, and the mutation matrix reproduces the table above.

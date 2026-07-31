@@ -707,7 +707,7 @@ stage_parked_lanes() {  # <state> <capture-file> <count> <backdate-secs>
 # check-in, rate-limited home-wide, and the cadence survives a restart because
 # it is anchored on a file mtime rather than in-process state.
 test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence() {
-  local dir state fakebin out drain_out capture_file pid i key back
+  local dir state fakebin out drain_out capture_file pid i key back lanes joins queued
   dir=$(make_case parked-checkin-cadence); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   printf 'idle, awaiting a decision' > "$capture_file"
@@ -723,18 +723,35 @@ test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 60 || fail "no parked check-in fired for three overdue lanes"
+  # One printed wake, and it must CARRY every due lane: three "stale: " reasons
+  # joined by exactly two "; " separators. Substring-matching a window name is
+  # not enough - a batch that lost its record separator still contains all three
+  # names on one glued line while delivering only the first lane.
+  [ "$(grep -c '^stale:' "$out")" -eq 1 ] || fail "the check-in printed more than one wake reason"$'\n'"$(cat "$out")"
+  lanes=$(grep -o 'stale: test:fm-park[0-9]* (paused ' "$out" | wc -l | tr -d '[:space:]')
+  [ "$lanes" -eq 3 ] || fail "the batched check-in carried $lanes parked reasons, not 3: $(cat "$out")"
+  joins=$(grep -o '; stale: ' "$out" | wc -l | tr -d '[:space:]')
+  [ "$joins" -eq 2 ] || fail "the batched reasons were not joined by '; ' ($joins separators): $(cat "$out")"
   i=1
   while [ "$i" -le 3 ]; do
-    grep -F "test:fm-park$i" "$out" >/dev/null || fail "lane park$i was left out of the batched check-in"
+    [ "$(grep -o "stale: test:fm-park$i (paused " "$out" | wc -l | tr -d '[:space:]')" -eq 1 ] \
+      || fail "lane park$i was left out of the batched check-in: $(cat "$out")"
+    key=$(printf '%s' "test:fm-park$i" | tr ':/.' '___')
+    [ -e "$state/.paused-resurfaced-$key" ] \
+      || fail "lane park$i was carried by the check-in but its cadence was never stamped"
     i=$((i + 1))
   done
-  [ "$(grep -c '^stale:' "$out")" -eq 1 ] || fail "the check-in printed more than one wake reason"$'\n'"$(cat "$out")"
   [ -e "$state/.last-parked-checkin" ] || fail "the shared check-in cadence marker was not recorded"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the parked check-in failed"
+  # One durable record PER LANE, keyed on that lane's own window. The key field
+  # is matched whole so a lane's name buried inside another lane's payload
+  # cannot stand in for its own record.
+  queued=$(awk -F'\t' '$3 == "stale"' "$drain_out" | wc -l | tr -d '[:space:]')
+  [ "$queued" -eq 3 ] || fail "the batched check-in queued $queued stale records, not one per lane: $(cat "$drain_out")"
   i=1
   while [ "$i" -le 3 ]; do
-    grep "$(printf '\tstale\t')" "$drain_out" | grep -F "test:fm-park$i" >/dev/null \
-      || fail "lane park$i was not queued by the batched check-in"
+    [ "$(awk -F'\t' -v w="test:fm-park$i" '$3 == "stale" && $4 == w' "$drain_out" | wc -l | tr -d '[:space:]')" -eq 1 ] \
+      || fail "lane park$i was not queued by the batched check-in: $(cat "$drain_out")"
     i=$((i + 1))
   done
 

@@ -353,8 +353,9 @@ handle_paused_stale() {  # <window> <task> <hash>
       wake "$reason"
     fi
     # Due, but not surfaced here: collect it and let flush_parked_checkin decide
-    # once, for the whole fleet, whether this poll is a check-in.
-    parked_due=$(printf '%s%s\t%s\n' "$parked_due" "$win" "$reason")
+    # once, for the whole fleet, whether this poll is a check-in. One line per
+    # lane: flush_parked_checkin reads this back a record at a time.
+    parked_due="${parked_due}${win}"$'\t'"${reason}"$'\n'
     triage_log "parked check-in due (paused ${age}s): $win"
     return 0
   fi

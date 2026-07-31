@@ -287,6 +287,7 @@ EOF
     LAB_READY=0
   fi
   rm -rf "$TMP_ROOT"
+  fm_test_cleanup
 }
 trap cleanup_all EXIT
 

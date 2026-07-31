@@ -37,6 +37,7 @@ GLOBAL_CLEANUP() {
   for s in $TRACK_TMUX_SESSIONS; do
     tmux kill-session -t "$s" 2>/dev/null || true
   done
+  fm_test_cleanup
 }
 trap GLOBAL_CLEANUP EXIT
 

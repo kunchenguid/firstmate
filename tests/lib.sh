@@ -67,11 +67,14 @@ FM_TEST_CLEANUP_DIRS=()
 # inherits the EXIT trap must never delete a root its parent is still using -
 # the exact hazard that made registering from inside the subshell unusable.
 FM_TEST_CLEANUP_OWNER=${BASHPID:-$$}
-# Named rather than mktemp'd, so the path is known to the subshell that appends
-# to it AND nothing is created for a suite that never takes a temp root. A
-# recycled pid must not inherit a previous run's entries.
-FM_TEST_CLEANUP_REGISTRY="${TMPDIR:-/tmp}/fm-test-cleanup.$FM_TEST_CLEANUP_OWNER"
-rm -f "$FM_TEST_CLEANUP_REGISTRY"
+# Created here, at source time, because a subshell can only append to a path it
+# already inherited. mktemp rather than a pid-derived name: this file's contents
+# drive rm -rf, and a predictable path in a shared sticky /tmp can be
+# pre-created as a symlink that the appends would then follow. mktemp's atomic
+# 0600 create closes that and cannot inherit a recycled pid's entries.
+# fm_test_cleanup removes it, so it leaves nothing behind.
+FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/fm-test-cleanup.XXXXXX")
+export FM_TEST_CLEANUP_REGISTRY
 
 fm_test_cleanup() {
   local d
