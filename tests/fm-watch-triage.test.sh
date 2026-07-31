@@ -685,7 +685,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # must surface once, while the unchanged hash must not append the same wake on
 # every watcher re-arm.
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare before current i
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
@@ -703,12 +703,36 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
 
   round=1
   while [ "$round" -le 6 ]; do
+    before=$(cat "$state/.count-$key" 2>/dev/null || echo 0)
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    if wait_live "$pid" 15; then reap "$pid"; else wait "$pid" || fail "dead-agent watcher round $round failed"; fi
+    if [ "$round" -eq 1 ]; then
+      # The status is already backdated past the pause window with no throttle
+      # marker yet, so this round owes exactly one bounded recheck. A cold-started
+      # watcher pays several seconds of per-window capture/classify work before its
+      # first stale classification, so wait on the exit rather than a fixed budget
+      # that a loaded runner turns into a reap-before-classify race.
+      wait_for_exit "$pid" 100 || { reap "$pid"; fail "dead-agent declared pause did not emit its bounded recheck: $(cat "$out")"; }
+    else
+      # Every later round must classify the unchanged pane and stay quiet. Wait on
+      # that classification (the poll counter advancing), not on the clock, so the
+      # no-flood assertion cannot pass vacuously against a watcher reaped before it
+      # ever looked at the window.
+      i=0
+      current=$before
+      while [ "$i" -lt 100 ] && is_live_non_zombie "$pid"; do
+        current=$(cat "$state/.count-$key" 2>/dev/null || echo 0)
+        [ "$current" -gt "$before" ] && break
+        sleep 0.1
+        i=$((i + 1))
+      done
+      is_live_non_zombie "$pid" || { reap "$pid"; fail "dead-agent declared pause re-surfaced on round $round, inside its pause window: $(cat "$out")"; }
+      [ "$current" -gt "$before" ] || { reap "$pid"; fail "dead-agent watcher round $round never classified the unchanged pane"; }
+      reap "$pid"
+    fi
     round=$((round + 1))
   done
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
@@ -737,7 +761,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "captain-held dead-agent pane did not re-surface on the bounded cadence"
+  wait_for_exit "$pid" 100 || fail "captain-held dead-agent pane did not re-surface on the bounded cadence"
   grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
     || fail "captain-held dead-agent pane surfaced as a stopped crew"
 
@@ -760,7 +784,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "live external-decision gate did not surface immediately"
+  wait_for_exit "$pid" 100 || fail "live external-decision gate did not surface immediately"
 
   # Re-arm with the stale timer already beyond the wedge threshold. This is the
   # exact unchanged-hash fallback after the immediate surface: it must retain
@@ -772,7 +796,15 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  # Discarding the residual wedge timer is what this re-arm must do, so wait on
+  # that instead of a fixed liveness budget a cold-started watcher can outlast.
+  i=0
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$pid"; do
+    [ ! -e "$state/.stale-since-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! is_live_non_zombie "$pid"; then
     reap "$pid"
     fail "live external-decision gate escalated on the wedge timer after its immediate surface: $(cat "$out")"
   fi
@@ -792,7 +824,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
 # Both content paths must retain the same throttle until the worker resumes, at
 # which point normal stale-work escalation must take over.
 test_live_paused_content_churn_keeps_throttle_until_resume() {
-  local mode dir state fakebin out capture_file statusf window key pane_hash sig pid round wakes i current target expected_hash back rechecks
+  local mode dir state fakebin out capture_file statusf window key pane_hash sig pid round wakes i current target expected_hash back rechecks absorbs
   for mode in static changing; do
     dir=$(make_case "live-paused-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -852,6 +884,12 @@ test_live_paused_content_churn_keeps_throttle_until_resume() {
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
     [ "$wakes" -eq 1 ] || fail "$mode live pause emitted $wakes notices inside one pause interval"
     [ -e "$state/.paused-resurfaced-$key" ] || fail "$mode live pause lost its re-surface throttle"
+    # The absorbed-pause debug line is a diagnostic, not a per-poll trace: every
+    # quiet poll above re-absorbs the same parked pane, and one line per poll
+    # would roll the size-capped triage log past the rest of the absorbed-wake
+    # history within hours.
+    absorbs=$(awk '/absorbed stale \(paused/ { n++ } END { print n + 0 }' "$state/.watch-triage.log" 2>/dev/null || echo 0)
+    [ "$absorbs" -eq 1 ] || fail "$mode live pause wrote $absorbs absorbed-pause debug lines inside one pause interval, expected one"
   done
 
   # The preserved throttle is a finite interval, not a suspension. Still on the

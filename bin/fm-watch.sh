@@ -309,6 +309,20 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
+# One absorbed-pause debug line per key per PAUSE_RESURFACE_SECS window: the
+# first absorb of a pause episode always logs, the identical repeats an idle
+# parked pane would otherwise append on every poll do not, so a long or churny
+# pause cannot evict the rest of the absorbed-wake history from the size-capped
+# triage log. clear_pause_state drops the throttle with the rest of the pause
+# tracking, so the next episode logs its own first absorb.
+triage_log_pause_absorb() {  # <key> <message>
+  local key=$1 msg=$2 lf
+  lf="$STATE/.paused-logged-$key"
+  [ "$(age_of "$lf")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
+  triage_log "$msg"
+  date +%s > "$lf"
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
@@ -339,7 +353,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     date +%s > "$rf"
     wake "$reason"
   fi
-  triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+  triage_log_pause_absorb "$key" "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
 clear_pause_state() {  # <window>
@@ -347,7 +361,8 @@ clear_pause_state() {  # <window>
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
+    "$STATE/.paused-logged-$key"
 }
 
 clear_pause_tracking() {  # <window>
@@ -416,12 +431,11 @@ surface_nonterminal_stale() {  # <window> <hash>
   rm -f "$STATE/.stale-since-$key"
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
+  clear_pause_state "$win"
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
-  else
-    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
   wake "stale: $win"
 }
