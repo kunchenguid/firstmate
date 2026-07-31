@@ -17,6 +17,14 @@
 # instead of silently leaving an unsubmitted instruction.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
+# For a task resolved through this home's meta, fm-send passes the task's id,
+# state dir, and harness so the tmux adapter can confirm delivery from the
+# harness's own lifecycle record when a trusted semantic source exists
+# (claude/opencode/pi today; bin/backends/tmux.sh owns the routing), with the
+# rendered-composer scraper demoted to an explicitly labelled fallback for
+# harnesses that have no semantic source yet (codex, kimi, grok). A verdict's
+# optional second token names how delivery was confirmed and is surfaced in
+# error output; confirmation still requires exact `empty` in the first token.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
@@ -309,17 +317,29 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  # Type once, submit, verify. Only exact empty confirms delivery; every other
-  # verdict preserves the loud refusal boundary.
+  # Semantic submit-confirm context: a target resolved through this home's
+  # meta carries its task id, state dir, and recorded harness so the backend
+  # can confirm delivery from the harness's own lifecycle record when one
+  # exists (bin/backends/tmux.sh owns eligibility and the labelled fallback).
+  # An explicit backend-target escape hatch has no meta and keeps the
+  # context-free path.
+  SEMANTIC_ID=
+  if [ -n "$TARGET_META" ]; then
+    SEMANTIC_ID=$(fm_send_id_from_meta "$TARGET_META")
+  fi
+  # Type once, submit, verify. Only exact empty in the first verdict token
+  # confirms delivery; every other verdict preserves the loud refusal
+  # boundary. The optional second token names how delivery was confirmed.
   send_rc=0
   if [ "$TARGET_BACKEND" = remote ]; then
     if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" >/dev/null; then
-      verdict=empty
+      verdict_out=empty
     else
       send_rc=$?
-      verdict=send-failed
+      verdict_out=send-failed
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  elif verdict_out=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" \
+      "${SEMANTIC_ID:+$STATE}" "$SEMANTIC_ID" "$TARGET_HARNESS"); then
     :
   else
     send_rc=$?
@@ -336,6 +356,9 @@ else
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
+  verdict=${verdict_out%% *}
+  confirm=${verdict_out#* }
+  [ "$confirm" != "$verdict_out" ] || confirm=
   case "$verdict" in
     empty)
       ;;
@@ -350,7 +373,7 @@ else
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
-      echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
+      echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}${confirm:+ confirm=$confirm}; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
   esac

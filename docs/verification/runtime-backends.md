@@ -133,7 +133,17 @@ tests/fm-tmux-submit-busy.test.sh
 ```
 
 Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
-Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
+Expected fallback submit matrix (harnesses with no semantic lifecycle source, and context-free sends): proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
+
+Semantic submit confirmation was validated on 2026-07-31 against the armed busy-record contract with fixture lifecycle events written through the real `bin/fm-busy-event.sh`:
+
+```sh
+bash tests/fm-tmux-submit-semantic.test.sh
+```
+
+All eleven cases passed, including the call-count proof that a record-confirmed submit performs zero `capture-pane` and zero `display-message` reads with the bake-in comparison off.
+Expected semantic submit matrix: a trusted busy record with an advanced sequence confirms `empty turn-opened`; a record-proven mid-turn pane that keeps running reports `empty enter-queued`; no new turn on an idle baseline stays `pending no-turn`; the bake-in comparison warns loudly in both disagreement directions; codex, kimi, and unarmed tasks fall back with the `composer-fallback` label; and a context-free call keeps the bare single-token verdict.
+The turn-open signals themselves reuse the #1327 hook, plugin, and extension wiring whose live-harness evidence is recorded in [supervision.md](supervision.md).
 
 ### Cleanup endpoint identity
 

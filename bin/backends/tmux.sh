@@ -49,11 +49,37 @@ fm_backend_tmux_send_key() {  # <target> <key>
 }
 
 # fm_backend_tmux_send_text_submit: type <text> into <target> once, then
-# submit with Enter, retried (Enter only, never retyped) until the composer
-# clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
-# that file for the composer-verification contract and echoed verdicts.
-fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  fm_tmux_submit_core "$@"
+# submit with Enter (retried, never retyped) and verify. This is the routing
+# owner between the two confirmation paths in bin/fm-tmux-lib.sh:
+#   - With semantic context ([state-dir] [id] [harness], passed by fm-send
+#     for a task resolved through this home's meta) and a harness holding a
+#     trusted lifecycle source with an armed busy contract, confirmation
+#     comes from the harness's own lifecycle record
+#     (fm_tmux_submit_semantic); the composer-geometry and luminance readers
+#     never decide the verdict on this path.
+#   - Otherwise the rendered-composer core runs as the EXPLICITLY LABELLED
+#     FALLBACK for harnesses with no verified semantic source yet (codex,
+#     kimi, grok): its verdict carries a `composer-fallback` second token so
+#     a structurally inferred result is never presented as
+#     lifecycle-confirmed.
+#   - Called with no semantic context at all (the away-mode daemon's
+#     supervisor injection), it remains the bare verbatim re-export of
+#     fm_tmux_submit_core, single-token verdicts included, so that caller's
+#     exact `empty` match is untouched.
+# Callers match the FIRST token and must require exact `empty` there for
+# confirmed delivery; the optional second token names how it was confirmed.
+fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [state-dir] [id] [harness]
+  local state=${7:-} id=${8:-} harness=${9:-} verdict
+  if fm_tmux_submit_semantic_eligible "$harness" "$state" "$id"; then
+    fm_tmux_submit_semantic "$1" "$2" "$3" "$4" "$5" "$state" "$id" "$harness"
+    return 0
+  fi
+  verdict=$(fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5")
+  if [ -n "$state" ] && [ -n "$id" ]; then
+    printf '%s composer-fallback' "$verdict"
+  else
+    printf '%s' "$verdict"
+  fi
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when

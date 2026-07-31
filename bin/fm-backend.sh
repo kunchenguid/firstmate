@@ -723,8 +723,13 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
-# proof-carrying verdict; callers require exact empty for confirmed delivery.
-fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
+# proof-carrying verdict; callers require exact empty in the FIRST verdict
+# token for confirmed delivery. A backend may append a second token naming
+# how the verdict was confirmed (the tmux adapter's semantic lifecycle path
+# and its labelled composer-fallback do); the optional trailing
+# [state-dir] [id] [harness] semantic context is consumed by the tmux
+# adapter only and safely ignored by every other backend.
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [state-dir] [id] [harness]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
