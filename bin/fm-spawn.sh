@@ -1259,9 +1259,12 @@ publish_bootstrap_endpoint_state() {
 }
 
 publish_task_metadata() {
+  local tmp
   META_WINDOW=$T
   [ "$BACKEND" = orca ] && META_WINDOW=$W
-  {
+  mkdir -p "$STATE" || return 1
+  tmp=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || return 1
+  if ! {
     echo "window=$META_WINDOW"
     echo "endpoint_task_id=$ID"
     echo "worktree=$WT"
@@ -1298,7 +1301,14 @@ publish_task_metadata() {
       echo "home=$PROJ_ABS"
       echo "projects=$SECONDMATE_PROJECTS"
     fi
-  } > "$STATE/$ID.meta"
+  } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$STATE/$ID.meta"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 if [ "$BACKEND" != orca ] \
@@ -1455,7 +1465,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   MODE=no-mistakes
   YOLO=off
   SECONDMATE_PROJECTS=
-  publish_task_metadata
+  publish_task_metadata || {
+    echo "error: could not promote task metadata for $ID" >&2
+    exit 1
+  }
   SPAWN_BOOTSTRAP_STATE_ACTIVE=0
 fi
 
@@ -1472,7 +1485,10 @@ if [ "$KIND" != secondmate ]; then
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
-  publish_task_metadata
+  publish_task_metadata || {
+    echo "error: could not publish task metadata for $ID" >&2
+    exit 1
+  }
 fi
 
 # Per-harness turn-end hook where enabled: a file that touches
@@ -1719,7 +1735,10 @@ if [ "$KIND" = secondmate ]; then
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 fi
-publish_task_metadata
+publish_task_metadata || {
+  echo "error: could not finalize task metadata for $ID" >&2
+  exit 1
+}
 SPAWN_BOOTSTRAP_STATE_ACTIVE=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 

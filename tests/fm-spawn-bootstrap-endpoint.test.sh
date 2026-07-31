@@ -8,6 +8,7 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-bootstrap-endpoint)
+REAL_MV=$(command -v mv)
 
 make_fakebin() {  # <case-dir>
   local dir=$1 fakebin
@@ -55,7 +56,23 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$fakebin/herdr" "$fakebin/sleep"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_META_MV_FAIL_ONCE:-}" ]; then
+  source=${2:-}
+  case "$source" in
+    */.*.meta.*)
+      if [ ! -e "$FM_FAKE_META_MV_FAIL_ONCE" ]; then
+        : > "$FM_FAKE_META_MV_FAIL_ONCE"
+        exit 91
+      fi
+      ;;
+  esac
+fi
+exec "${FM_REAL_MV:?}" "$@"
+SH
+  chmod +x "$fakebin/herdr" "$fakebin/sleep" "$fakebin/mv"
   printf '%s\n' "$fakebin"
 }
 
@@ -79,17 +96,37 @@ $1
 EOF
 }
 
-run_spawn() {  # <id> <reported-pane-cwd>
-  local id=$1 cwd=$2
+run_spawn() {  # <id> <reported-pane-cwd> [fail-first-meta-promotion-marker]
+  local id=$1 cwd=$2 fail_meta=${3:-}
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_SPAWN_NO_GUARD=1 \
     HERDR_SESSION=default FM_FAKE_HERDR_LOG="$HERDR_LOG" \
     FM_FAKE_HERDR_CASE="$CASE_DIR" \
+    FM_FAKE_META_MV_FAIL_ONCE="$fail_meta" FM_REAL_MV="$REAL_MV" \
     FM_FAKE_HERDR_CLOSED="$CLOSED_FILE" FM_FAKE_HERDR_CWD="$cwd" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" "sh -c 'true'" --backend herdr 2>&1
+}
+
+test_failed_metadata_promotion_preserves_bootstrap_record() {
+  local rec id=herdr-bootstrap-promote-fail-c3 out status
+  rec=$(make_case promotion-failed "$id")
+  read_case "$rec"
+
+  out=$(run_spawn "$id" "$WT_DIR" "$CASE_DIR/meta-mv-failed")
+  status=$?
+  expect_code 1 "$status" "spawn should fail when ordinary metadata promotion cannot publish"
+  assert_contains "$out" "could not promote task metadata" \
+    "metadata promotion failure was not reported"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "failed metadata promotion destroyed the prior endpoint record"
+  assert_grep 'spawn_phase=bootstrap' "$HOME_DIR/state/$id.meta" \
+    "failed metadata promotion replaced the guarded bootstrap record"
+  assert_grep 'failed: spawn bootstrap did not complete' "$HOME_DIR/state/$id.status" \
+    "failed metadata promotion did not retain a terminal reconciliation signal"
+  pass "fm-spawn: failed metadata promotion preserves the prior bootstrap endpoint record"
 }
 
 test_failed_flat_herdr_bootstrap_stays_discoverable_and_tears_down_exactly() {
@@ -141,6 +178,7 @@ test_successful_spawn_replaces_bootstrap_record_with_normal_metadata() {
 }
 
 test_failed_flat_herdr_bootstrap_stays_discoverable_and_tears_down_exactly
+test_failed_metadata_promotion_preserves_bootstrap_record
 test_successful_spawn_replaces_bootstrap_record_with_normal_metadata
 
 echo "# all fm-spawn-bootstrap-endpoint tests passed"

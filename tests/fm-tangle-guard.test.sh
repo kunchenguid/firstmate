@@ -207,6 +207,10 @@ test_spawn_isolation_abort() {
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
   assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
+  assert_present "$home/state/abort-primary-ee5.meta" \
+    "primary-checkout abort must retain bootstrap endpoint metadata"
+  assert_grep 'spawn_phase=bootstrap' "$home/state/abort-primary-ee5.meta" \
+    "primary-checkout abort metadata must be marked for endpoint-only teardown"
 
   # Proceed: the pane resolves to a genuine, isolated worktree.
   out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
