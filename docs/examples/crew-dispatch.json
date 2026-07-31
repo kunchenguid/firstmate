@@ -16,7 +16,7 @@
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "why": "Firstmate compares every candidate with current relevant quota and pace before dispatch, so use a strong coding profile."
+      "why": "Firstmate compares every candidate with current effective headroom and usable runway before dispatch, using pace only as later diagnostic evidence, so use a strong coding profile."
     }
   ],
   "default": [
