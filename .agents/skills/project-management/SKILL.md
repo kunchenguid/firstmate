@@ -4,7 +4,7 @@ description: >-
   Agent-only procedure for Firstmate project management.
   Use before adding, creating, removing, or initializing a project.
   Cloning or registering a project is add intake and uses the same trigger.
-  Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, and outward-consent decisions.
+  Owns project add, create, clone, remove, initialization, registry, delivery-mode, merge-approval posture, and outward-consent decisions.
 user-invocable: false
 metadata:
   internal: true
@@ -29,7 +29,7 @@ Apply `AGENTS.md` section 7's authoritative secondmate routing rules; if an exis
 Absence from the main `data/projects.md` registry is never evidence that no second mate owns the domain.
 If the owning second mate cannot accept the route, report that concrete blocker or obtain an explicit captain redirection rather than silently duplicating the project in the main home.
 
-Resolve the project name, destination, delivery mode, and autonomy posture before changing local or remote state.
+Resolve the project name, destination, delivery mode, and merge-approval posture before changing local or remote state.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
 
@@ -46,7 +46,7 @@ Default it off, and enable it only on the captain's explicit instruction.
 
 ## Add or clone an existing project
 
-Confirm the source URL, local project name, delivery mode, and autonomy posture.
+Confirm the source URL, local project name, delivery mode, and merge-approval posture.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` project must have an `origin` remote and must complete the initialization procedure below.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.

@@ -75,7 +75,7 @@ a false exit is self-correcting (the captain re-runs `/afk`).
 
 afk changes how aggressively firstmate surfaces things, **not who approves what**.
 "Away" never means "approves more" or "approves less."
-A PR ready for merge or a needs-decision finding keeps the same configured authority and exceptions from `AGENTS.md` section 7, while anything requiring the captain still waits for the captain's explicit word.
+A PR ready for merge or a needs-decision finding follows the authority contract in `AGENTS.md` section 7; away mode changes only when the result is surfaced.
 The daemon only batches the notification.
 
 ## Operational prefix contract
