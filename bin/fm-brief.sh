@@ -50,6 +50,11 @@
 # also restates that escalation is the status file, because the opposite failure
 # is silent: a gate parked with only "Captain, ..." in a pane nobody reads stalls
 # the task with no wake and no visible symptom.
+# Ship and scout tasks include the Claude context-pressure snapshot path and
+# the host-computed 70%-used /compact trigger. Other harnesses see the section
+# but do not fabricate a reading when the optional snapshot is absent.
+# Secondmate charters carry the same 70%-used /compact trigger read from the
+# bottom CTX status-line row, with no snapshot file.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -138,6 +143,15 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+IFS= read -r -d '' CONTEXT_SECTION <<EOF || true
+# Context pressure
+Claude Code sessions receive host-computed context-window telemetry in the bottom status line.
+For a spawned Claude worker, the same reading is written to \`/tmp/fm-$ID/context-pressure.json\`.
+At natural phase boundaries, read that file when it exists and use it instead of a self-estimate.
+When \`compact_recommended\` is \`true\` (70 percent used or higher), run \`/compact\` before continuing.
+The file is optional because other worker runtimes do not expose this verified telemetry contract; never fabricate a reading when it is absent.
+EOF
+CONTEXT_SECTION=${CONTEXT_SECTION%$'\n'}
 
 # The one owner of the marker's SHAPE, shared by all three scaffolds so a crewmate
 # and a secondmate cannot be taught different bytes. Each scaffold supplies its
@@ -186,6 +200,7 @@ Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+In Claude Code, the bottom \`CTX\` row is host-computed context pressure; when it shows \`COMPACT NOW: /compact\` at 70 percent used or higher, run \`/compact\` before continuing instead of relying on a self-estimate.
 
 # Requests from the main firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.
@@ -286,6 +301,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$CONTEXT_SECTION
 
 $HERDR_SECTION
 
@@ -396,6 +413,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$CONTEXT_SECTION
 
 $HERDR_SECTION
 
