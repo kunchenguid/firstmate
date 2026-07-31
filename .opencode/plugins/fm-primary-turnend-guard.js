@@ -47,6 +47,11 @@ function runGuard(root) {
   return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], '{"stop_hook_active":false}');
 }
 
+function runTurnEndMarker(root) {
+  if (!root) return Promise.resolve({ code: 0, stderr: "" });
+  return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], '{"stop_hook_active":true}');
+}
+
 async function letWatchArmRun(sessionID, client) {
   const coordinator = globalThis[COORDINATOR_KEY];
   if (!coordinator?.ensureArmed) return false;
@@ -60,6 +65,8 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
   return {
     event: async ({ event }) => {
       if (event.type !== "session.idle") return;
+
+      await runTurnEndMarker(root);
 
       if (skipNextIdle) {
         skipNextIdle = false;

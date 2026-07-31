@@ -80,6 +80,16 @@ command -v curl >/dev/null 2>&1 || { echo "telegram send: curl is required" >&2;
 command -v jq >/dev/null 2>&1 || { echo "telegram send: jq is required" >&2; exit 1; }
 fmtg_prepare_state || { echo "telegram send: private state is unsafe" >&2; exit 1; }
 
+REQUEST_LOCK=
+PAYLOAD=
+BODY=
+PART_TEXT=
+cleanup() {
+  [ -z "$REQUEST_LOCK" ] || fm_lock_release "$REQUEST_LOCK"
+  rm -f -- "$PAYLOAD" "$BODY" "$PART_TEXT"
+}
+trap cleanup EXIT
+
 "$SCRIPT_DIR/fm-telegram-render.sh" "$RECEIPT_ID" --text-file "$TEXT_FILE" >/dev/null \
   || { echo "telegram send: presentation could not be prepared" >&2; exit 1; }
 SNAPSHOT_FILE="$FMTG_STATE/rendered/$RECEIPT_ID.json"
@@ -97,6 +107,11 @@ fi
 RECEIPT_FILE="$FMTG_STATE/outbound/$RECEIPT_ID.json"
 existing_state=
 approval_reserved=0
+if [ "$mode" = reply ]; then
+  REQUEST_LOCK=$(fmtg_request_lock_path "$REQUEST_ID") \
+    || { echo "telegram send: request identity is unsafe" >&2; exit 1; }
+  fm_lock_acquire_wait "$REQUEST_LOCK"
+fi
 
 finalize_approval_binding() {
   local receipt=$1 sent_at message_id expires now file raw state approval_receipt approval_request approval_name final_status
@@ -156,7 +171,7 @@ finalize_sent_receipt() {
   case "$message_id" in ''|*[!0-9]*) return 1 ;; esac
   finalize_approval_binding "$receipt" || return 1
   if [ "$mode" = reply ]; then
-    "$SCRIPT_DIR/fm-telegram-request.sh" complete "$REQUEST_ID" "$RECEIPT_ID" || return 1
+    fmtg_retire_request_locked "$REQUEST_ID" "$RECEIPT_ID" || return 1
   fi
   finalized=$(printf '%s' "$receipt" | jq -r '.post_send_finalized_at // 0') || return 1
   case "$finalized" in ''|*[!0-9]*) return 1 ;; esac
@@ -263,8 +278,6 @@ PAYLOAD=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-telegram-send.XXXXXX") || exit 1
 BODY=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-telegram-send-body.XXXXXX") || { rm -f -- "$PAYLOAD"; exit 1; }
 PART_TEXT=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-telegram-send-text.XXXXXX") || { rm -f -- "$PAYLOAD" "$BODY"; exit 1; }
 chmod 0600 "$PAYLOAD" "$BODY" "$PART_TEXT" || { rm -f -- "$PAYLOAD" "$BODY" "$PART_TEXT"; exit 1; }
-trap 'rm -f -- "$PAYLOAD" "$BODY" "$PART_TEXT"' EXIT
-
 # Reload immediately before API work so the token remains confined to this
 # process and the owner-only curl config created by fmtg_api_call.
 unset FMTG_TOKEN

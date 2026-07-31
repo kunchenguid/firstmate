@@ -76,6 +76,17 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
   });
 }
 
+function runTurnEndMarker(): Promise<void> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    child.on("error", () => resolveResult());
+    child.on("close", () => resolveResult());
+    child.stdin.end('{"stop_hook_active":true}');
+  });
+}
+
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
 // bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
 // extension file rather than separate ones so no extra Pi -e flag is needed at
@@ -136,6 +147,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async () => {
+    await runTurnEndMarker();
     if (guardFollowupActive) {
       guardFollowupActive = false;
       return;

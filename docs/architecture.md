@@ -265,8 +265,8 @@ The watcher validates the shim and invokes the tracked poll implementation direc
 No state file is executed as arbitrary code.
 
 One bounded Bot API long poll persists a minimal update disposition before advancing its offset.
-Accepted text is stored first under an exact correlation, and a locked offer plus live lock-owner and watcher-cycle acknowledgement keeps one pending wake at a time while re-offering an incomplete request after its handling turn yields or its session is gone or replaced.
-Completion and immutable receive-time expiry durably publish a body-free retirement tombstone before synchronously removing the wake and private inbox record, with a validated matching sent completion taking monotonic precedence over a racing expiry.
+Accepted text is stored first under an exact correlation, and a locked offer plus live lock-owner and harness-turn acknowledgement keeps one pending wake at a time while re-offering an incomplete request after its actual handling turn yields or its session is gone or replaced.
+Completion and immutable receive-time expiry share a per-request lifecycle lock, durably publish a body-free retirement tombstone before synchronously removing the wake and private inbox record, and recover a validated matching sent completion before any expiry alert.
 Rejected updates retain only a disposition and update ID, while unauthorized sender and chat data is not retained or answered.
 
 Outbound sends use caller-supplied idempotency receipts with `prepared`, `dispatching`, `sent`, `definite-failure`, or `uncertain` state, and terminal states compact into retained identity tombstones after bulky snapshots expire.

@@ -126,9 +126,22 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-private-lib.sh" "$dir/bin/fm-private-lib.sh"
+  cp "$ROOT/bin/fm-telegram-lib.sh" "$dir/bin/fm-telegram-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
+}
+
+activate_telegram_turn_epoch() {
+  local dir=$1
+  dir=$(cd "$dir" && pwd)
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" bash -c '
+    . "$1/bin/fm-telegram-lib.sh"
+    fmtg_prepare_state
+    fmtg_poll_shim_content "$1" "$1" > "$1/state/telegram-watch.check.sh"
+    chmod 700 "$1/state/telegram-watch.check.sh"
+  ' _ "$dir"
 }
 
 mark_codex_hook_root() {
@@ -601,6 +614,24 @@ test_hook_runs_fast() {
   pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
 }
 
+test_hook_advances_telegram_turn_epoch_before_loop_allow() {
+  local dir first second out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-telegram-turn-epoch")
+  activate_telegram_turn_epoch "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "unwatched Telegram turn must block after publishing its handling epoch"
+  assert_contains "$out" 'TURN WOULD END BLIND' "unwatched Telegram turn did not retain the supervision guard"
+  first=$(cat "$dir/state/telegram/turn-epoch")
+  out=$(run_hook "$dir" true); status=$?
+  expect_code 0 "$status" "loop-guarded turn end must still publish the Telegram handling epoch"
+  [ -z "$out" ] || fail "loop-guarded Telegram turn-end marker printed output: $out"
+  second=$(cat "$dir/state/telegram/turn-epoch")
+  [ "$first" != "$second" ] || fail "loop-guarded turn end did not release acknowledged Telegram work"
+  case "$second" in *[!0-9a-f]*) fail "turn-end hook published a malformed Telegram epoch" ;; esac
+  [ "${#second}" -eq 64 ] || fail "turn-end hook published an unbounded Telegram epoch"
+  pass "fm-turnend-guard: every primary turn end releases acknowledged Telegram work"
+}
+
 test_grok_adapter_forces_one_resume_when_unhealthy() {
   local dir fakebin log out status
   dir=$(make_primary_dir "$TMP_ROOT/grok-adapter-block")
@@ -812,6 +843,59 @@ EOF
   pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
 }
 
+test_opencode_plugin_forces_followup() {
+  local plugin content
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
+  content=$(cat "$plugin")
+  assert_contains "$content" 'session.idle' "OpenCode plugin must run on session.idle"
+  assert_contains "$content" 'fm-turnend-guard.sh' "OpenCode plugin must invoke the shared guard"
+  assert_contains "$content" 'promptAsync' "OpenCode plugin must force a follow-up turn"
+  assert_contains "$content" 'encodeFirstmateOperationalInput' "OpenCode plugin must use the typed operational-input constructor"
+  assert_contains "$content" 'skipNextIdle' "OpenCode plugin must carry a loop guard"
+  assert_contains "$content" 'runTurnEndMarker' "OpenCode plugin must release Telegram work on coordinator-owned turn ends"
+  assert_contains "$content" 'worktree' "OpenCode plugin must anchor the guard from the git worktree path"
+  assert_contains "$content" 'watcher cycle is missing, failed, or unhealthy' "OpenCode plugin must identify a blind turn as watcher recovery"
+  assert_contains "$content" 'harness recovery instruction below' "OpenCode plugin must delegate recovery action to the shared guard line"
+  assert_not_contains "$content" 'Resume supervision according to the session-start operating block' "OpenCode plugin must not route a blind turn through ordinary continuity"
+  pass ".opencode primary plugin: session.idle forces one follow-up through the shared guard"
+}
+
+test_opencode_coordinator_marks_turn_without_guard_followup() {
+  local plugin worktree_dir log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  worktree_dir="$TMP_ROOT/opencode-coordinator-turnend"
+  log="$TMP_ROOT/opencode-coordinator-turnend.log"
+  mkdir -p "$worktree_dir/bin"
+  cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >> "${FM_GUARD_LOG:?}"
+EOF
+  chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" WORKTREE="$worktree_dir" FM_GUARD_LOG="$log" node 2>&1 <<'EOF'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+globalThis.__firstmateOpenCodeWatchArm = { ensureArmed: async () => "armed" };
+let prompts = 0;
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const hooks = await mod.FmPrimaryTurnendGuard({
+  client: { session: { promptAsync: async () => { prompts += 1; } } },
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+if (prompts !== 0) throw new Error(`coordinator-owned idle forced ${prompts} guard follow-ups`);
+const payload = JSON.parse(readFileSync(process.env.FM_GUARD_LOG, "utf8"));
+if (payload.stop_hook_active !== true) throw new Error(`coordinator-owned idle did not publish a terminal marker: ${JSON.stringify(payload)}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode coordinator-owned idle must publish one terminal marker"
+  [ -z "$out" ] || fail "OpenCode coordinator terminal-marker test printed output: $out"
+  pass ".opencode primary plugin: coordinator-owned idle releases acknowledged Telegram work"
+}
+
 test_opencode_plugin_anchors_guard_to_worktree() {
   local plugin parent worktree_dir wrong_dir out status
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
@@ -871,6 +955,31 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
+test_pi_extension_forces_followup() {
+  local ext content
+  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
+  [ -f "$ext" ] || fail "tracked pi primary extension is missing"
+  content=$(cat "$ext")
+  assert_contains "$content" 'agent_settled' "pi extension must run after one logical agent run settles"
+  assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
+  assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
+  assert_contains "$content" 'encodeFirstmateOperationalInput' "pi extension must use the typed operational-input constructor"
+  assert_contains "$content" 'deliverAs: "followUp"' "pi extension must queue the follow-up safely"
+  assert_contains "$content" 'guardFollowupActive' "pi extension must carry a logical-run loop guard"
+  assert_contains "$content" 'runTurnEndMarker' "pi extension must release Telegram work after its guard follow-up settles"
+  assert_not_contains "$content" 'skipNextTurnEnd' "pi extension kept the internal-turn loop guard"
+  assert_contains "$content" 'watcher cycle is missing, failed, or unhealthy' "pi extension must identify a blind turn as watcher recovery"
+  assert_contains "$content" 'harness recovery instruction below' "pi extension must delegate recovery action to the shared guard line"
+  assert_not_contains "$content" 'Resume supervision according to the session-start operating block' "pi extension must not route a blind turn through ordinary continuity"
+  assert_contains "$content" '.pi-turnend-extension-loaded' "pi extension must write its loaded marker for session-start diagnostics"
+  assert_contains "$content" 'lockOwnership' "pi extension loaded marker must respect the session lock"
+  assert_contains "$content" 'const command = String((event.input as { command?: unknown })?.command ?? "")' "pi extension changed bash command extraction for the PreToolUse contract"
+  assert_contains "$content" 'runPretoolCheck(command)' "pi extension changed the PreToolUse checker invocation"
+  assert_contains "$content" 'return { block: true, reason:' "pi extension changed the checker exit-2 block result"
+  assert_not_contains "$content" 'Run bin/fm-watch-arm.sh as a background task' "pi extension must not hardcode the old watcher-arm instruction"
+  pass ".pi primary extension: agent_settled forces one follow-up through the shared guard"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -883,8 +992,9 @@ test_pi_extension_injects_once_per_logical_agent_run() {
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
-cat >/dev/null
-printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+payload=$(cat)
+printf '%s\n' "$payload" >> "${FM_GUARD_LOG:?}"
+case "$payload" in *'"stop_hook_active":true'*) exit 0 ;; esac
 printf 'logical-run guard fired\n' >&2
 exit 2
 SH
@@ -928,8 +1038,11 @@ for (let i = 0; i < 3; i += 1) {
 await settled({ type: "agent_settled" }, {});
 if (prompts !== 2) throw new Error(`multi-tool run produced ${prompts - 1} follow-ups`);
 
-const guardRuns = readFileSync(process.env.FM_GUARD_LOG, "utf8").trim().split("\n").length;
-if (guardRuns !== 2) throw new Error(`guard predicate ran ${guardRuns} times for two logical runs`);
+const guardRuns = readFileSync(process.env.FM_GUARD_LOG, "utf8").trim().split("\n").map(JSON.parse);
+const predicates = guardRuns.filter((payload) => payload.stop_hook_active === false).length;
+const terminals = guardRuns.filter((payload) => payload.stop_hook_active === true).length;
+if (predicates !== 2) throw new Error(`guard predicate ran ${predicates} times for two logical runs`);
+if (terminals !== 4) throw new Error(`Pi published ${terminals} terminal markers for four settled turns`);
 EOF
 )
   status=$?
@@ -949,7 +1062,8 @@ test_pi_extension_retries_after_followup_delivery_failure() {
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
-cat >/dev/null
+payload=$(cat)
+case "$payload" in *'"stop_hook_active":true'*) exit 0 ;; esac
 printf 'delivery failure guard\n' >&2
 exit 2
 SH
@@ -1180,6 +1294,7 @@ test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
+test_hook_advances_telegram_turn_epoch_before_loop_allow
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_grok_adapter_native_false_blocks_without_resume
@@ -1189,7 +1304,10 @@ test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
+test_opencode_plugin_forces_followup
 test_opencode_plugin_anchors_guard_to_worktree
+test_opencode_coordinator_marks_turn_without_guard_followup
+test_pi_extension_forces_followup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy

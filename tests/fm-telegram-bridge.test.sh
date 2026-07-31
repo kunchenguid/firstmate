@@ -46,6 +46,15 @@ if [ -n "${FAKE_CURL_COUNT_DIR:-}" ]; then
   count=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
   printf '%s\n' "$count" > "$count_file"
 fi
+if [ "$method" = sendMessage ] && [ -n "${FAKE_SEND_BLOCK_READY:-}" ]; then
+  : > "$FAKE_SEND_BLOCK_READY"
+  block_wait=0
+  while [ ! -e "${FAKE_SEND_BLOCK_RELEASE:?}" ]; do
+    block_wait=$((block_wait + 1))
+    [ "$block_wait" -lt 400 ] || exit 97
+    sleep 0.05
+  done
+fi
 if [ -n "${FAKE_PAYLOAD_DIR:-}" ]; then
   mkdir -p "$FAKE_PAYLOAD_DIR"
   cp "$data" "$FAKE_PAYLOAD_DIR/$method.$count.json"
@@ -288,8 +297,8 @@ test_persist_before_offset_and_one_wake() {
   (
     FM_HOME="$home"
     . "$ROOT/bin/fm-telegram-lib.sh"
-    fmtg_wake_cycle_advance
-  ) || fail "could not advance the supervised wake cycle"
+    fmtg_turn_epoch_advance
+  ) || fail "could not advance the handling turn epoch"
   run_poll "$home" "$fakebin" "$updates" >/dev/null
   [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "ended handling turn did not re-offer its acknowledged request"
   FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" >/dev/null
@@ -622,8 +631,51 @@ EOF
   pass "one renderer owns safe rich/plain semantics, Unicode width, snapshots, splitting, fallback, and ordered delivery"
 }
 
+test_expiry_serializes_with_inflight_reply() {
+  local home fakebin updates send_body text ready release sender_out poll_out sender_pid poll_pid sender_rc poll_rc i
+  home=$(new_home expiry-dispatch-race); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
+  updates="$home/empty.json"; write_empty_updates "$updates"
+  run_poll "$home" "$fakebin" "$updates" >/dev/null
+  jq -n '{schema:"firstmate.telegram-request.v1",request_id:"tg-race",text:"private body",telegram_message_id:77,
+    received_at:1,wake_queued:false,wake_state:"idle",wake_state_at:0,wake_offer_count:0}' \
+    > "$home/state/telegram/inbox/tg-race.json"
+  chmod 600 "$home/state/telegram/inbox/tg-race.json"
+  send_body="$home/send.json"; printf '{"ok":true,"result":{"message_id":901}}\n' > "$send_body"
+  text="$home/reply.txt"; send_file "$text" 'Reply completing the retained request.'
+  ready="$home/send-ready"; release="$home/send-release"
+  sender_out="$home/sender.out"; poll_out="$home/poll.out"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_SEND_FILE="$send_body" \
+    FAKE_SEND_BLOCK_READY="$ready" FAKE_SEND_BLOCK_RELEASE="$release" \
+    "$ROOT/bin/fm-telegram-send.sh" reply tg-race reply-race --text-file "$text" >"$sender_out" 2>&1 &
+  sender_pid=$!
+  i=0
+  while [ ! -e "$ready" ] && kill -0 "$sender_pid" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -lt 200 ] || break
+    sleep 0.05
+  done
+  assert_present "$ready" "reply dispatch did not reach the controlled in-flight boundary"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMTG_RETENTION_SECS=1 FAKE_GETUPDATES_FILE="$updates" \
+    "$ROOT/bin/fm-telegram-poll.sh" >"$poll_out" 2>&1 &
+  poll_pid=$!
+  sleep 0.2
+  kill -0 "$poll_pid" 2>/dev/null || fail "expiry did not wait for the in-flight reply lifecycle"
+  assert_present "$home/state/telegram/inbox/tg-race.json" "expiry removed a request while its reply was in flight"
+  assert_absent "$home/state/telegram/retired/tg-race.json" "expiry published a terminal state during reply dispatch"
+  : > "$release"
+  if wait "$sender_pid"; then sender_rc=0; else sender_rc=$?; fi
+  if wait "$poll_pid"; then poll_rc=0; else poll_rc=$?; fi
+  expect_code 0 "$sender_rc" "in-flight reply completion"
+  expect_code 0 "$poll_rc" "expiry poll after reply completion"
+  [ "$(jq -r '.status + ":" + .receipt_id' "$home/state/telegram/retired/tg-race.json")" = completed:reply-race ] \
+    || fail "reply completion did not win terminal arbitration"
+  [ ! -e "$home/state/.wake-queue" ] \
+    || assert_no_grep 'request-retention-expired' "$home/state/.wake-queue" "delivered request emitted a false expiry alert"
+  pass "request expiry waits for in-flight reply completion without a false alert"
+}
+
 test_retention_and_runtime_harness_matrix() {
-  local home fakebin updates old backend out harness text rc counts custom sentinel wait_budget wake_cycle
+  local home fakebin updates old backend out harness text rc counts custom sentinel wait_budget
   home=$(new_home retention); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
   updates="$home/empty.json"; write_empty_updates "$updates"
   text="$home/retained-text"; send_file "$text" 'Ambiguous delivery must remain deduplicated.'
@@ -685,11 +737,6 @@ EOF
     bash -c '. "$1/config/telegram-mode.env"; exec "$2/bin/fm-watch.sh"' _ "$home" "$ROOT")
   assert_contains "$out" 'cadence.status' "cadence-isolation watcher did not reach its terminating signal"
   [ "$(cat "$counts/getUpdates")" = 1 ] || fail "dedicated Telegram cadence did not run its poll"
-  wake_cycle=$(cat "$home/state/telegram/wake-cycle")
-  case "$wake_cycle" in
-    *[!0-9a-f]*) fail "watcher published a malformed wake-cycle claim" ;;
-  esac
-  [ "${#wake_cycle}" -eq 64 ] || fail "watcher did not publish a bounded wake-cycle claim"
   assert_absent "$sentinel" "Telegram cadence accelerated an unrelated registered check"
 
   for harness in claude codex opencode pi grok; do
@@ -721,6 +768,7 @@ test_persist_before_offset_and_one_wake
 test_exact_approval_and_sent_receipts
 test_outbound_failure_states_quiet_filter_and_redaction
 test_deterministic_rich_plain_presentation
+test_expiry_serializes_with_inflight_reply
 test_retention_and_runtime_harness_matrix
 
 echo "All Telegram bridge tests passed."

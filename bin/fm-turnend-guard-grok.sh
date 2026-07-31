@@ -11,6 +11,16 @@ set -u
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 
+ROOT=${GROK_WORKSPACE_ROOT:-${CLAUDE_PROJECT_DIR:-}}
+[ -n "$ROOT" ] || exit 0
+ROOT=${ROOT%/}
+[ -x "$ROOT/bin/fm-turnend-guard.sh" ] || exit 0
+
+if [ -n "${GROK_TURNEND_GUARD_ACTIVE:-}" ]; then
+  printf '%s' '{"stop_hook_active":true}' | "$ROOT/bin/fm-turnend-guard.sh" >/dev/null 2>&1 || true
+  exit 0
+fi
+
 command -v jq >/dev/null 2>&1 || exit 0
 printf '%s' "$PAYLOAD" | jq -n --stream -e '
   reduce inputs as $item (
@@ -44,11 +54,6 @@ CAPABILITY=$(printf '%s' "$PAYLOAD" | jq -ser '
   end
 ' 2>/dev/null) || exit 0
 
-ROOT=${GROK_WORKSPACE_ROOT:-${CLAUDE_PROJECT_DIR:-}}
-[ -n "$ROOT" ] || exit 0
-ROOT=${ROOT%/}
-[ -x "$ROOT/bin/fm-turnend-guard.sh" ] || exit 0
-
 if [ "$CAPABILITY" = native ]; then
   printf '%s' "$PAYLOAD" | "$ROOT/bin/fm-turnend-guard.sh"
   RC=$?
@@ -59,7 +64,6 @@ if [ "$CAPABILITY" = native ]; then
 fi
 
 # Only a genuine pre-native payload reaches this bounded compatibility path.
-[ -n "${GROK_TURNEND_GUARD_ACTIVE:-}" ] && exit 0
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -er '
   .sessionId | select(type == "string" and length > 0)
 ' 2>/dev/null) || exit 0

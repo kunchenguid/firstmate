@@ -76,8 +76,8 @@ Use BotFather separately if you also need to revoke the bot token.
 ## Requests, replies, and notifications
 
 Accepted inbound text is persisted before the long-poll offset advances, assigned an exact `tg-<update_id>-<message_id>` correlation, and offered through one durable wake correlation at a time.
-An unacknowledged request is re-offered after its current offer expires, while an acknowledged request stays bound to the exact live lock-owning session and supervised watcher cycle that delivered it.
-The next lock-owning watcher cycle re-offers an incomplete request even when the same long-lived harness session remains open.
+An unacknowledged request is re-offered after its current offer expires, while an acknowledged request stays bound to the exact live lock-owning session and harness turn epoch that delivered it.
+Every supported harness advances that epoch at its actual turn-end boundary, so an interrupted incomplete request is re-offered even when the same long-lived session and watcher remain open.
 Firstmate replies through a durable outbound receipt and Telegram's [`sendMessage`](https://core.telegram.org/bots/api#sendmessage) reply parameters so the answer stays threaded to the request.
 Every reply and every allowed captain-relevant supervised worker update from every project crosses one deterministic presentation boundary.
 The supported source semantics are headings, lists, HTTP or HTTPS links, quotes, inline and fenced code, and simple tables.
@@ -88,7 +88,8 @@ Each split is delivered sequentially to the same chat under one receipt.
 The restart-stable protected snapshot contains both safe rich text and a readable plain version whose links include their full URLs.
 A definite Telegram entity-validation rejection may fall back once to that plain version, while an ambiguous send never retries.
 The inbound message body is deleted after a matching sent receipt and otherwise expires seven days after its immutable receive time with an operator notification.
-Each terminal request leaves a compact body-free retirement tombstone so a crash cannot resurrect a completed or expired request, and a matching sent receipt monotonically supersedes expiry if delivery was already in flight.
+Reply dispatch and expiry share one request lifecycle lock, so expiry waits for an in-flight reply and recovers a matching sent receipt before publishing an expiry alert.
+Each terminal request leaves a compact body-free retirement tombstone so a crash cannot resurrect a completed or expired request, and a matching sent receipt monotonically supersedes legacy expiry if delivery was already in flight.
 Rendered snapshots expire after seven days.
 Terminal outbound receipts compact after seven days into body-free identity tombstones that continue to block blind reuse, including uncertain delivery.
 Telegram names, usernames, and profile fields are not retained.

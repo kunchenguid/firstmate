@@ -37,19 +37,19 @@ It never reads a live token, contacts Telegram, or writes a live Firstmate home.
 
 ## Covered guarantees
 
-The focused suite covers protected config modes, regular-file and no-symlink/no-hardlink checks, post-publication failure preservation, exact local pairing, authorized and unauthorized updates, strict update ordering and deduplication, persist-before-offset crash recovery, live-session and watcher-cycle wake ownership, exact approval correlation and publication recovery, durable request retirement, sent-receipt precedence and finalization recovery, outbound receipt states and tombstones, definite rejection versus ambiguous delivery, diagnostic redaction, immutable receive-time retention, isolated watcher deadlines, quiet event filtering, and malformed, oversized, edited, and media inputs.
+The focused suite covers protected config modes, regular-file and no-symlink/no-hardlink checks, post-publication failure preservation, exact local pairing, authorized and unauthorized updates, strict update ordering and deduplication, persist-before-offset crash recovery, live-session and harness-turn wake ownership, exact approval correlation and publication recovery, durable request retirement, request-locked expiry versus reply dispatch, sent-receipt precedence and finalization recovery, outbound receipt states and tombstones, definite rejection versus ambiguous delivery, diagnostic redaction, immutable receive-time retention, isolated watcher deadlines, quiet event filtering, and malformed, oversized, edited, and media inputs.
 It also covers the one cross-project reply/update presentation boundary: semantic headings, lists, links, quotes, code, mobile table fallback, entity neutralization, no-button payloads, emoji and combining-mark width, oversized-grapheme code-point fallback, readable plain URLs, immutable restart snapshots, final rich/plain UTF-16 postconditions, ordered same-chat part receipts, and one definite rich-validation fallback.
 
 Its threat-oriented negative controls remove the exact allowlist or exact approval correlation and prove the request or approval is rejected.
-Its crash controls cover persistence before offset advancement, drained-offer requeue, exact claim publication before inbox publication, request resurrection after retirement, and sent-receipt replay before approval and request finalization.
-The harness matrix verifies Claude, Codex, OpenCode, Pi, and Grok inherit the generated Telegram cadence through their owned supervision path.
+Its crash controls cover persistence before offset advancement, drained-offer requeue, exact claim publication before inbox publication, request resurrection after retirement, sent-receipt replay before approval and request finalization, and expiry waiting for an in-flight reply before alert arbitration.
+The harness matrix verifies Claude, Codex, OpenCode, Pi, and Grok inherit the generated Telegram cadence and advance acknowledgement at their owned turn-end boundary.
 The runtime matrix verifies the watcher dispatch remains backend-neutral across tmux, Herdr, zellij, Orca, and cmux.
 
 ## Current evidence - 2026-07-31
 
 The implementation was exercised locally with ShellCheck 0.11.0, jq 1.8.1, Perl 5.34.1, GNU Bash 3.2.57, and no-mistakes 1.41.2.
 
-`tests/fm-telegram-bridge.test.sh` exited 0 with all eight public-interface groups passing, including the five-harness and five-runtime matrix.
+`tests/fm-telegram-bridge.test.sh` exited 0 with all public-interface groups passing, including the five-harness and five-runtime matrix.
 `bin/fm-lint.sh` exited 0 with the pinned ShellCheck version.
 `tests/fm-documentation-audiences.test.sh`, `tests/fm-instruction-owners.test.sh`, and `bin/fm-test-run.sh --check-coverage` exited 0; coverage reported `total=99 parallel=29 serial=60 herdr=10`.
 The affected supervision suites `fm-supervision-instructions`, `fm-turnend-guard`, `fm-claude-stop-autoarm`, `fm-pi-watch-extension`, `fm-arm-pretool-check`, `fm-bootstrap`, and `fm-pr-check-security` all exited 0 in the complete run.

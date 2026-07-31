@@ -91,6 +91,34 @@ done
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 
+# --- scope precisely to a PRIMARY checkout ----------------------------------
+# A genuinely-marked secondmate home runs its OWN primary firstmate session, so
+# force-INCLUDE it as a guarded primary whether treehouse leased it as a linked
+# worktree (git-dir != git-common-dir) or it is a git-cloned plain checkout. This
+# mirrors the cd-guard's intent that a secondmate's own session is a guarded
+# primary. Only an UNMARKED checkout (or one with an invalid marker) falls
+# through to the linked-worktree exemption: firstmate hands out crewmate/scout
+# task worktrees as genuine linked `git worktree`s (bin/fm-spawn.sh aborts
+# otherwise), whose git-dir lives under the parent repo's .git/worktrees/<name>
+# and differs from the common (shared) git-dir, while a main, non-worktree
+# checkout has the two equal. Child worktrees never carry the gitignored marker,
+# so this exempts them while guarding every real secondmate home.
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+telegram_check="$STATE/telegram-watch.check.sh"
+if [ -f "$SCRIPT_DIR/fm-telegram-lib.sh" ] && [ ! -L "$SCRIPT_DIR/fm-telegram-lib.sh" ]; then
+  # shellcheck source=bin/fm-telegram-lib.sh
+  . "$SCRIPT_DIR/fm-telegram-lib.sh"
+  if fmtg_poll_shim_valid "$telegram_check" "$FM_HOME" "$FM_ROOT"; then
+    if ! fmtg_prepare_state || ! fmtg_turn_epoch_advance; then
+      fmtg_error_once turn-epoch-failed >/dev/null || true
+    fi
+  fi
+fi
+
 # jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
 # "missing jq -> silent no-op" degrade). Without it we cannot safely read the
 # loop-guard field, so we must never block - fail open, not noisy.
@@ -109,23 +137,7 @@ if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
-# --- scope precisely to a PRIMARY checkout ----------------------------------
-# A genuinely-marked secondmate home runs its OWN primary firstmate session, so
-# force-INCLUDE it as a guarded primary whether treehouse leased it as a linked
-# worktree (git-dir != git-common-dir) or it is a git-cloned plain checkout. This
-# mirrors the cd-guard's intent that a secondmate's own session is a guarded
-# primary. Only an UNMARKED checkout (or one with an invalid marker) falls
-# through to the linked-worktree exemption: firstmate hands out crewmate/scout
-# task worktrees as genuine linked `git worktree`s (bin/fm-spawn.sh aborts
-# otherwise), whose git-dir lives under the parent repo's .git/worktrees/<name>
-# and differs from the common (shared) git-dir, while a main, non-worktree
-# checkout has the two equal. Child worktrees never carry the gitignored marker,
-# so this exempts them while guarding every real secondmate home.
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
-
 # --- the actual predicate ----------------------------------------------------
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 budget_reset() {
