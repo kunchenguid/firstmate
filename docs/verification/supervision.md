@@ -219,20 +219,28 @@ Every cycle completed normally and delivered a wake; none armed a successor.
 Supervision therefore ended on each delivered wake and resumed only when an adapter above the arm layer happened to re-arm.
 The 112 actionable-stale sub-5s exits are parked lanes at independent phases, each ending a cycle of its own.
 
-Guard-class mutation results, one mutation per protection.
-A failing case aborts its suite, so each mutation was run twice: once to see which case it kills, and once with that case's invocation removed to prove nothing else in the suite breaks.
+Guard-class mutation results, one mutation per protection, measured in full on 2026-07-31 against this tree.
+The clean baseline it is read against: `tests/fm-watcher-lock.test.sh` reports 35 `ok -` lines and `tests/fm-watch-triage.test.sh` 42, both exiting 0.
+Counts below are `ok -` lines rather than test functions, because a few lock cases report more than one.
+
+A failing case aborts its suite, so each mutation was run at least twice: once to see which case it kills, and once with that case's invocation removed to prove nothing else in the suite breaks.
+Where a further case then failed, its invocation was removed too and the suite re-run until it went clean, so a mutation several cases depend on is reported as such instead of forced into a one-to-one claim.
+Each mutation was applied to its own copy of the tree, never to a working checkout.
 
 | Mutation | Case killed | Rest of suite |
 | --- | --- | --- |
-| Deliver the wake before arming the successor | `test_delivered_wake_arms_its_successor_before_it_is_handled` | 33 cases clean |
-| Drop the successor-output claim in `attach_and_wait` | `test_attached_arm_delivers_its_successor_cycle_wake` | 33 cases clean |
-| Arm a successor regardless of supervision need | `test_successor_is_not_armed_without_supervision_need` | 33 cases clean |
-| Ignore the shared parked check-in cadence | `test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence` | 41 cases clean |
-| Accumulate the due parked lanes without their record separator | `test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence` | 41 cases clean |
-| Flip 200 `successor=none` rows in the preserved capture | `test_preserved_capture_still_shows_the_defect_a_fresh_cycle_no_longer_has` | 33 cases clean |
-| Stop releasing a lane whose pause verb has gone | `test_a_cleared_park_is_noticed_promptly_inside_a_closed_cadence` | `test_secondmate_unpause_clears_pause_tracking` next, then 40 cases clean |
+| Deliver the wake before arming the successor | `test_delivered_wake_arms_its_successor_before_it_is_handled` | 34 clean |
+| Drop the successor-output claim in `attach_and_wait` | `test_attached_arm_delivers_its_successor_cycle_wake` | 34 clean |
+| Arm a successor regardless of supervision need | `test_successor_is_not_armed_without_supervision_need` | 34 clean |
+| Arm a successor while away mode is active | `test_successor_is_not_armed_in_away_mode` | 34 clean |
+| Ignore the shared parked check-in cadence | `test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence` | 41 clean |
+| Accumulate the due parked lanes without their record separator | `test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence` | 41 clean |
+| Flip 200 `successor=none` rows in the preserved capture | `test_preserved_capture_still_shows_the_defect_a_fresh_cycle_no_longer_has` | 34 clean |
+| Never release a lane's pause markers, in `clear_pause_state` | `test_a_cleared_park_is_noticed_promptly_inside_a_closed_cadence` | then `test_secondmate_unpause_clears_pause_tracking`, `test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash`, `test_nonterminal_paused_rechecks_authoritative_state`, then 38 clean |
 
-The last row is the one mutation two cases share: both guard the same pause release, one for an ordinary parked lane inside a closed cadence and one for a secondmate, and no unrelated case fails once both are removed.
+The last row is the one mutation more than one case shares, and it is four, not the two an earlier pass of this matrix recorded.
+`clear_pause_state` is the single release primitive behind every exit from a declared pause - an ordinary parked lane inside a closed cadence, a resumed secondmate, a pause-to-working reclassification, and an authoritative recheck - so each of those four guards it from its own direction.
+Nothing beyond that release depends on it: with all four removed the suite is clean.
 The two parked check-in rows are the inverse pairing: one case carries both protections, because a batched check-in has to fire on the shared cadence *and* carry every lane that came due, and each is killed by its own mutation.
 The second of those was added after review found the accumulator concatenating its lanes into a single glued record, which the case as first written passed over.
 
