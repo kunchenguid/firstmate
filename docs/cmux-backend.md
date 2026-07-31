@@ -98,7 +98,7 @@ The composer verifier first recognizes Agy's separator-pair composer through the
 `read-screen` is plain text with no cursor primitive, so the shared classifier degrades a glyph row carrying trailing text to `unknown` rather than misreading a harness's own idle suggestion as unsent input.
 An unstructured bare prompt is `unknown`, and a slash-popup placeholder remains `pending`, so only Enter is retried and text is never retyped.
 cmux exposes no native generic agent busy signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
-Grok alone retains its isolated rendered-tail fallback.
+Grok and Agy retain isolated rendered-tail fallbacks because neither has a verified semantic turn-start source.
 
 A task workspace's last surface cannot be closed directly.
 Cleanup owns the whole workspace and uses `close-workspace`.

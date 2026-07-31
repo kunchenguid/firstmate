@@ -55,7 +55,7 @@ The composer verifier first recognizes Agy's separator-pair composer through the
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
-Grok alone retains its isolated rendered-tail fallback.
+Grok and Agy retain isolated rendered-tail fallbacks because neither has a verified semantic turn-start source.
 
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
