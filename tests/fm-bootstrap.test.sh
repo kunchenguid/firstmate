@@ -33,10 +33,25 @@ export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
 
+# Part 2 of that hermeticity: the env scrub above cannot neutralize cmux's
+# documented macOS fallback detection (__CFBundleIdentifier inheritance and
+# process ancestry, bin/fm-backend.sh), which still resolves cmux when this
+# suite itself runs inside a cmux terminal. make_fake_toolchain therefore pins
+# the tmux reference backend into each case home that has not already chosen
+# one, so backend-specific cases keep their explicit pin and every other case
+# resolves the reference backend regardless of the terminal running the suite.
+pin_reference_backend_if_unset() {
+  local home=$1
+  [ -e "$home/config/backend" ] && return 0
+  mkdir -p "$home/config"
+  printf '%s\n' tmux > "$home/config/backend"
+}
+
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
 make_fake_toolchain() {
   local dir=$1 fakebin
+  pin_reference_backend_if_unset "$dir/home"
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
   cat > "$fakebin/gh" <<'SH'
@@ -484,7 +499,9 @@ ROWS
 
 test_herdr_install_requires_manual_action() {
   local out status
-  out=$("$ROOT/bin/fm-bootstrap.sh" install herdr 2>&1)
+  # No case home exists here, so pin the backend by env: the install
+  # subcommand's combined output must stay free of ambient-runtime NOTICE lines.
+  out=$(FM_BACKEND=tmux "$ROOT/bin/fm-bootstrap.sh" install herdr 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "install herdr should fail instead of evaluating its manual-install hint"
   [ "$out" = "error: herdr requires manual installation (instructions: https://herdr.dev)" ] \
