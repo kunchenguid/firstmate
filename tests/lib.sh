@@ -63,11 +63,15 @@ FM_TEST_CLEANUP_DIRS=()
 # file, which does survive. Registering only in the array meant every suite
 # leaked its entire temp root, and once a suite could leave a detached process
 # inside one (a watcher successor), the process leaked with the directory.
-FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/fm-test-cleanup.XXXXXX")
 # Only the shell that sourced this file may run the cleanup. A subshell that
 # inherits the EXIT trap must never delete a root its parent is still using -
 # the exact hazard that made registering from inside the subshell unusable.
 FM_TEST_CLEANUP_OWNER=${BASHPID:-$$}
+# Named rather than mktemp'd, so the path is known to the subshell that appends
+# to it AND nothing is created for a suite that never takes a temp root. A
+# recycled pid must not inherit a previous run's entries.
+FM_TEST_CLEANUP_REGISTRY="${TMPDIR:-/tmp}/fm-test-cleanup.$FM_TEST_CLEANUP_OWNER"
+rm -f "$FM_TEST_CLEANUP_REGISTRY"
 
 fm_test_cleanup() {
   local d
