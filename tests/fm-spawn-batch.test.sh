@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
-# Behavior tests for fm-spawn.sh batch dispatch (`id=repo` pairs).
+# Behavior tests for fm-spawn.sh `id=repo` compatibility dispatch.
 #
-# These exercise argument routing only: each spawn attempt fails fast at the
-# missing-brief check, which is reached before any tmux/treehouse side effect, so
-# the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the
-# live watcher guard / state. Parser and path-scoping cases are table-driven; the
-# only behavior asserted on its own is "a multi-pair batch does not stop after the
-# first failure".
+# These exercise argument routing only.
+# A single pair reaches the ordinary missing-brief check before any backend effect.
+# Multiple legacy pairs must fail before the first task because unbound tasks are broadly exclusive.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -14,6 +11,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
+mkdir -p "$TMP_ROOT/config"
 export FM_BACKEND=tmux
 
 # Clear ambient firstmate overrides so the behavior test owns its environment.
@@ -23,31 +21,30 @@ run_spawn() {
     FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' \
-    FM_CONFIG_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE="$TMP_ROOT/config" \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$@" 2>&1
 }
 
-# Every pair in a batch is dispatched even though the first one fails; the loop
-# must not stop early. This is the load-bearing batch guarantee, kept explicit.
-test_batch_dispatches_every_pair() {
+# Multiple unbound pairs are rejected before any single-task re-exec.
+test_multi_pair_legacy_batch_is_rejected_atomically() {
   local out status
   out=$(run_spawn nope-batch-a-z1=projects/none-a nope-batch-b-z2=projects/none-b)
   status=$?
-  [ "$status" -ne 0 ] || fail "batch with missing briefs should exit non-zero"
-  printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-a-z1 (projects/none-a)' >/dev/null \
-    || fail "first pair was not dispatched/reported"
-  printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-b-z2 (projects/none-b)' >/dev/null \
-    || fail "second pair was not dispatched/reported (loop stopped early?)"
-  pass "batch dispatch re-execs and reports every id=repo pair"
+  expect_code 1 "$status" "multi-pair legacy dispatch should fail"
+  assert_contains "$out" "multi-task legacy batch is broadly exclusive" \
+    "legacy batch refusal did not explain the WorkGraph boundary"
+  assert_not_contains "$out" "error: no brief at" \
+    "legacy batch dispatched a task before completing preflight"
+  pass "multi-pair legacy dispatch is rejected atomically before the first spawn"
 }
 
 # Boundary cases for batch detection. Each row:
 #   <label>|<batch yes/no>|<expect substring>|<args>
-# batch=yes -> a 'batch:' line must appear; batch=no -> it must not.
+# alias=yes -> the single-pair re-exec or batch preflight diagnostic must appear.
 test_batch_mode_boundaries() {
-  local label batch expect args out status
-  while IFS='|' read -r label batch expect args; do
+  local label alias expect args out status
+  while IFS='|' read -r label alias expect args; do
     [ -n "$label" ] || continue
     # shellcheck disable=SC2086  # args is an intentional word-split arg list
     out=$(run_spawn $args)
@@ -56,17 +53,17 @@ test_batch_mode_boundaries() {
     if [ -n "$expect" ]; then
       printf '%s\n' "$out" | grep -F "$expect" >/dev/null || fail "$label: missing '$expect'"
     fi
-    case "$batch" in
-      yes) printf '%s\n' "$out" | grep -F 'batch:' >/dev/null || fail "$label: did not enter batch dispatch" ;;
-      no)  printf '%s\n' "$out" | grep -F 'batch:' >/dev/null && fail "$label: wrongly entered batch dispatch" ;;
+    case "$alias" in
+      yes) : ;;
+      no) assert_not_contains "$out" "batch dispatch expects" "$label: wrongly entered id=repo dispatch" ;;
     esac
   done <<'ROWS'
-single id=repo pair routes through batch|yes|batch: FAILED to spawn nope-batch-solo-z3 (projects/none-solo)|nope-batch-solo-z3=projects/none-solo
+single id=repo pair routes through ordinary spawn|yes|projects/none-solo: No such file or directory|nope-batch-solo-z3=projects/none-solo
 non-pair arg in batch is rejected|yes|batch dispatch expects every argument as id=repo; got 'bogus-no-equals'|nope-batch-mix-z5=projects/none-mix bogus-no-equals
 plain '<id> <repo>' is single-task|no||nope-single-z4 projects/none-single
 id part containing '/' is not a pair|no||weird/id-z6=projects/none projects/none
 ROWS
-  pass "batch detection: single pair batches, non-pair rejected, single-task and slash-id stay single"
+  pass "id=repo detection: single alias works, malformed pairs reject, and ordinary syntax stays ordinary"
 }
 
 # A projects/ path is resolved through the firstmate home, never the caller cwd,
@@ -102,6 +99,6 @@ ROWS
   pass "projects/ paths are scoped through the firstmate home for single-task spawn"
 }
 
-test_batch_dispatches_every_pair
+test_multi_pair_legacy_batch_is_rejected_atomically
 test_batch_mode_boundaries
 test_projects_path_scoping

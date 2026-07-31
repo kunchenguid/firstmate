@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://firstmate.invalid/schemas/workgraph/slice-contract-v1.json",
+  "title": "Firstmate WorkGraph slice contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "slice_id", "goal_id", "purpose", "type", "depends_on",
+    "immutable_inputs", "outputs", "claims", "worktree", "harness", "model",
+    "effort", "acceptance", "validation_commands", "expected_evidence",
+    "context_budget", "gates", "implementer", "independent_validators",
+    "authorized_exceptions"
+  ],
+  "properties": {
+    "schema_version": {"const": "slice-contract/v1"},
+    "slice_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "goal_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "purpose": {"type": "string", "minLength": 1},
+    "type": {"enum": ["ship", "scout", "audit", "integration"]},
+    "depends_on": {"type": "array", "items": {"type": "string"}, "maxItems": 255},
+    "immutable_inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "outputs": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string", "minLength": 1}},
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resource", "mode"],
+        "properties": {
+          "resource": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Resource URI is linted in advisory mode by fm-workgraph.sh; normalization never changes this sealed contract byte."
+          },
+          "mode": {"enum": ["read", "write", "exclusive"]}
+        }
+      }
+    },
+    "worktree": {"type": "string", "minLength": 1},
+    "harness": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "effort": {"type": "string", "minLength": 1},
+    "acceptance": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "validation_commands": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "expected_evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "context_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_tokens", "report_words"],
+      "properties": {
+        "source_tokens": {"type": "integer", "exclusiveMinimum": 0, "maximum": 9007199254740991},
+        "report_words": {"type": "integer", "exclusiveMinimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "gates": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "implementer": {"type": "string", "minLength": 1},
+    "independent_validators": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "authorized_exceptions": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}

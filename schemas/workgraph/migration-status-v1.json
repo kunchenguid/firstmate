@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://firstmate.invalid/schemas/workgraph/migration-status-v1.json",
+  "title": "Firstmate WorkGraph active-metadata migration status",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_count",
+    "workgraph_count",
+    "legacy_exclusive_count",
+    "invalid_count",
+    "tasks"
+  ],
+  "properties": {
+    "schema_version": {"const": "workgraph-migration-status/v1"},
+    "task_count": {"type": "integer", "minimum": 0},
+    "workgraph_count": {"type": "integer", "minimum": 0},
+    "legacy_exclusive_count": {"type": "integer", "minimum": 0},
+    "invalid_count": {"type": "integer", "minimum": 0},
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["task_id", "classification", "reason"],
+        "properties": {
+          "task_id": {"type": "string"},
+          "classification": {"enum": ["workgraph", "legacy-exclusive", "invalid"]},
+          "reason": {
+            "enum": [
+              "complete-held-binding",
+              "missing-workgraph-contract",
+              "unsafe-task-id",
+              "nonregular-or-malformed-metadata",
+              "partial-or-unknown-workgraph-binding",
+              "invalid-workgraph-binding",
+              "duplicate-worktree-owner"
+            ]
+          },
+          "goal_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+          "slice_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+          "worktree": {"type": "string", "pattern": "^/"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"classification": {"const": "workgraph"}}},
+            "then": {"required": ["goal_id", "slice_id", "worktree"]}
+          }
+        ]
+      }
+    }
+  }
+}

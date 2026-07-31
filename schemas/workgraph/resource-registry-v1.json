@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://firstmate.invalid/schemas/workgraph/resource-registry-v1.json",
+  "title": "Firstmate WorkGraph resource registry",
+  "description": "Strict advisory registry of canonical resource instances, aliases, and broad-container relationships.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "instances"],
+  "properties": {
+    "schema_version": {"const": "resource-registry/v1"},
+    "instances": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/instance"}
+    }
+  },
+  "$defs": {
+    "resource": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A resource URI. fm-workgraph.sh normalize owns canonicalization; the schema deliberately does not narrow unknown namespaces before advisory linting."
+    },
+    "instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "namespace", "resource", "aliases", "contains"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "namespace": {
+          "enum": ["path", "worktree", "branch", "docker", "port", "svc", "db", "ui", "lock"]
+        },
+        "resource": {"$ref": "#/$defs/resource"},
+        "aliases": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/resource"}
+        },
+        "contains": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/resource"}
+        }
+      }
+    }
+  }
+}

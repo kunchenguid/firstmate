@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://firstmate.invalid/schemas/workgraph/evidence-result-v1.json",
+  "title": "Firstmate WorkGraph content-addressed evidence record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "goal_id", "slice_id", "kind", "actor_id",
+    "content_sha256", "content_bytes", "source_name"
+  ],
+  "properties": {
+    "schema_version": {"const": "workgraph-evidence-result/v1"},
+    "goal_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "slice_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "kind": {"enum": ["gate", "validation", "output", "audit", "snapshot"]},
+    "actor_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "content_bytes": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "source_name": {"type": "string", "minLength": 1}
+  }
+}

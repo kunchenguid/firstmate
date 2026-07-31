@@ -7,6 +7,7 @@
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --workgraph <graph.json> --slice <slice-id>
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -73,17 +74,63 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+WORKGRAPH=
+WORKGRAPH_SLICE=
+WORKGRAPH_CONTRACT_TMP=
 POS=()
+want_value=
 for a in "$@"; do
+  if [ -n "$want_value" ]; then
+    case "$a" in
+      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+    esac
+    case "$want_value" in
+      workgraph) WORKGRAPH=$a ;;
+      slice) WORKGRAPH_SLICE=$a ;;
+    esac
+    want_value=
+    continue
+  fi
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --workgraph) want_value=workgraph ;;
+    --workgraph=*) WORKGRAPH=${a#--workgraph=} ;;
+    --slice) want_value=slice ;;
+    --slice=*) WORKGRAPH_SLICE=${a#--slice=} ;;
     *) POS+=("$a") ;;
   esac
 done
-ID=${POS[0]}
+[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+ID=${POS[0]:-}
+[ -n "$ID" ] || { usage >&2; exit 2; }
+
+cleanup_workgraph_contract() {
+  [ -z "$WORKGRAPH_CONTRACT_TMP" ] || rm -f "$WORKGRAPH_CONTRACT_TMP"
+}
+trap cleanup_workgraph_contract EXIT
+
+if [ -n "$WORKGRAPH" ] || [ -n "$WORKGRAPH_SLICE" ]; then
+  [ -n "$WORKGRAPH" ] && [ -n "$WORKGRAPH_SLICE" ] \
+    || { echo "error: --workgraph and --slice must be supplied together" >&2; exit 1; }
+  [ "$KIND" != secondmate ] \
+    || { echo "error: WorkGraph contracts do not apply to secondmate charters" >&2; exit 1; }
+  [ "$ID" = "$WORKGRAPH_SLICE" ] \
+    || { echo "error: task id must equal the WorkGraph slice id" >&2; exit 1; }
+  WORKGRAPH_CONTRACT_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-brief-contract.XXXXXX")
+  "$FM_ROOT/bin/fm-workgraph.sh" contract "$WORKGRAPH" "$WORKGRAPH_SLICE" \
+    >"$WORKGRAPH_CONTRACT_TMP"
+  WORKGRAPH_TYPE=$(node -e '
+    const fs = require("node:fs");
+    process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).type);
+  ' "$WORKGRAPH_CONTRACT_TMP")
+  case "$WORKGRAPH_TYPE:$KIND" in
+    ship:ship|integration:ship|scout:scout|audit:scout) ;;
+    *) echo "error: WorkGraph type $WORKGRAPH_TYPE is incompatible with brief kind $KIND" >&2; exit 1 ;;
+  esac
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -98,6 +145,116 @@ fi
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
+
+if [ -n "$WORKGRAPH_CONTRACT_TMP" ]; then
+  install -m 0600 "$WORKGRAPH_CONTRACT_TMP" "$DATA/$ID/slice-contract.json"
+fi
+
+workgraph_finalize_brief() {
+  [ -n "$WORKGRAPH_CONTRACT_TMP" ] || return 0
+  node - "$BRIEF" "$DATA/$ID/slice-contract.json" "$WORKGRAPH" \
+    "$STATE/$ID.status" "$HERDR_LAB" "$HERDR_SECTION" <<'NODE'
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const briefPath = process.argv[2];
+const contractPath = process.argv[3];
+const graphPath = process.argv[4];
+const statusPath = process.argv[5];
+const herdrLab = process.argv[6] === "1";
+const herdrSection = process.argv[7];
+const contractBytes = fs.readFileSync(contractPath);
+const contract = JSON.parse(contractBytes);
+const graphBytes = fs.readFileSync(graphPath);
+const list = (values) => values.length === 0 ? "- None" : values.map((value) => `- ${value}`).join("\n");
+const claims = contract.claims.map((claim) => `- \`${claim.mode}\` \`${claim.resource}\``).join("\n");
+const inputs = contract.immutable_inputs.length === 0
+  ? "- None"
+  : contract.immutable_inputs.map((input) => `- \`${input.path}\` — SHA-256 \`${input.sha256}\``).join("\n");
+const section = [
+  contract.purpose,
+  "",
+  "## WorkGraph contract",
+  "",
+  `- Goal: \`${contract.goal_id}\``,
+  `- Slice: \`${contract.slice_id}\``,
+  `- Type: \`${contract.type}\``,
+  `- Contract SHA-256: \`${crypto.createHash("sha256").update(contractBytes).digest("hex")}\``,
+  `- WorkGraph SHA-256: \`${crypto.createHash("sha256").update(graphBytes).digest("hex")}\``,
+  `- Worktree: \`${contract.worktree}\``,
+  `- Harness/model/effort: \`${contract.harness}\` / \`${contract.model}\` / \`${contract.effort}\``,
+  `- Context budget: ${contract.context_budget.source_tokens} source tokens; ${contract.context_budget.report_words} report words`,
+  "",
+  "### Dependencies",
+  "",
+  list(contract.depends_on),
+  "",
+  "### Immutable inputs",
+  "",
+  inputs,
+  "",
+  "### Outputs",
+  "",
+  list(contract.outputs),
+  "",
+  "### Resource claims",
+  "",
+  claims,
+  "",
+  "### Acceptance",
+  "",
+  list(contract.acceptance),
+  "",
+  "### Validation",
+  "",
+  list(contract.validation_commands.map((command) => `\`${command}\``)),
+  "",
+  "### Expected evidence",
+  "",
+  list(contract.expected_evidence),
+  "",
+  "### Gates",
+  "",
+  list(contract.gates),
+  "",
+  `Implementer: \`${contract.implementer}\`.`,
+  `Independent validators: ${contract.independent_validators.map((item) => `\`${item}\``).join(", ")}.`,
+  `Authorized exceptions: ${contract.authorized_exceptions.length === 0 ? "none" : contract.authorized_exceptions.map((item) => `\`${item}\``).join(", ")}.`,
+].join("\n");
+const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+const auditRule = ["audit", "scout"].includes(contract.type)
+  ? "Treat every task resource, including the source worktree, as read-only. Only the exact control-plane sinks listed under Outputs may receive the report, progress, evidence, or status bytes."
+  : "Write only within scopes carrying a write or exclusive claim; every other source and snapshot remains read-only.";
+const lifecycleRule = herdrLab
+  ? herdrSection
+  : "Do not issue Herdr, terminal-session, container, service, browser, database, or external lifecycle commands. Firstmate owns process creation and teardown.";
+const brief = [
+  "You are a crewmate: an autonomous worker agent managed by Firstmate. Work on your own; do not wait for a human.",
+  "",
+  "# Task",
+  section,
+  "",
+  "# WorkGraph execution contract",
+  "",
+  `1. Begin by proving \`pwd -P\` and \`git rev-parse --show-toplevel\` both equal \`${contract.worktree}\`. Stop and report blocked on any mismatch.`,
+  "2. Verify every immutable input against its declared SHA-256 before reading or executing it. Any mismatch is terminal and fail-closed.",
+  `3. ${auditRule}`,
+  "4. Resource claims are a hard capability boundary. Declared outputs are narrow control-plane sinks, not task-resource claims. Undeclared access is forbidden; read claims never authorize writes, and output paths never authorize broader parent-directory access.",
+  "5. Stay on the declared detached HEAD unless the contract explicitly contains a branch claim. Never push, open or merge a PR, invoke GitHub Actions, or publish canonical bytes.",
+  "6. Firstmate is the only canonical integrator. Preserve reproductions before any permitted fix and leave integration decisions to Firstmate.",
+  `7. ${lifecycleRule}`,
+  "8. Run only the declared validation commands plus strictly offline diagnostics needed to explain their results. Do not add network traffic, real services, secrets, fixtures outside the sealed scope, or operational probes.",
+  `9. Write progress, report, and evidence only to their declared outputs. Append sparse phase changes to ${shellQuote(statusPath)} as \`working:\`, \`blocked:\`, \`needs-decision:\`, \`failed:\`, or \`done:\`.`,
+  "10. Separate facts, inferences, hypotheses, and missing data. Record exact commands, environment, exit codes, complete failure traces, case counts, and SHA-256 for every new artifact.",
+  "",
+  "# Definition of done",
+  "",
+  "All acceptance clauses and gates are evidenced, every declared validation has a recorded result, the standalone report is complete, and no undeclared resource was accessed.",
+  "Append one terminal `done: {one-line conclusion}` status only after those conditions hold, then stop. On any unresolved contradiction or capability mismatch, append `blocked: {exact reason}` instead.",
+  "",
+].join("\n");
+fs.writeFileSync(briefPath, brief);
+NODE
+}
 
 shell_quote() {
   printf "'"
@@ -271,7 +428,12 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-l
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout; replace {TASK})"
+workgraph_finalize_brief
+if [ -n "$WORKGRAPH_CONTRACT_TMP" ]; then
+  echo "scaffolded: $BRIEF (scout; WorkGraph contract bound)"
+else
+  echo "scaffolded: $BRIEF (scout; replace {TASK})"
+fi
 exit 0
 fi
 
@@ -388,4 +550,9 @@ your memory; chat history is not. It does not replace the status file.
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+workgraph_finalize_brief
+if [ -n "$WORKGRAPH_CONTRACT_TMP" ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; WorkGraph contract bound)"
+else
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+fi

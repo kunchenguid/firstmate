@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Firstmate WorkGraph lease namespace v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "namespace_id", "goal_scope", "counter_floor"],
+  "properties": {
+    "schema_version": {"const": "lease-namespace/v1"},
+    "namespace_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "goal_scope": {"const": "all-goals"},
+    "counter_floor": {"const": "0"}
+  }
+}

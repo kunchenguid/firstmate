@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Firstmate WorkGraph lease record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "namespace_id", "goal_id", "slice_id", "lease_id", "graph_sha256", "contract_sha256", "registry_sha256", "state", "revision", "holder_id", "holder_process", "transaction_generation", "holder_fencing_token", "current_fencing_token", "resources", "terminal"],
+  "properties": {
+    "schema_version": {"const": "workgraph-lease/v1"},
+    "namespace_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "goal_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "slice_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "lease_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "graph_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "registry_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "state": {"enum": ["held", "released", "recovered"]},
+    "revision": {"enum": ["1", "2"]},
+    "holder_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "holder_process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "start_ticks", "cmdline_sha256", "boot_id", "hostname"],
+      "properties": {
+        "pid": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        "start_ticks": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        "cmdline_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "boot_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+        "hostname": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$"}
+      }
+    },
+    "transaction_generation": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "holder_fencing_token": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "current_fencing_token": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "resources": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resource", "mode", "lock_scopes"],
+        "properties": {
+          "resource": {"type": "string", "minLength": 1},
+          "mode": {"enum": ["read", "write", "exclusive"]},
+          "lock_scopes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "actor_id", "proof"],
+      "properties": {
+        "kind": {"enum": ["none", "release", "recover"]},
+        "actor_id": {"type": "string", "pattern": "^$|^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+        "proof": {"enum": ["", "holder-release", "pid-absent", "pid-identity-mismatch", "boot-changed"]}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"state": {"const": "held"}}},
+      "then": {
+        "properties": {
+          "revision": {"const": "1"},
+          "terminal": {
+            "properties": {
+              "kind": {"const": "none"},
+              "actor_id": {"const": ""},
+              "proof": {"const": ""}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"state": {"const": "released"}}},
+      "then": {
+        "properties": {
+          "revision": {"const": "2"},
+          "terminal": {
+            "properties": {
+              "kind": {"const": "release"},
+              "proof": {"const": "holder-release"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"state": {"const": "recovered"}}},
+      "then": {
+        "properties": {
+          "revision": {"const": "2"},
+          "terminal": {
+            "properties": {
+              "kind": {"const": "recover"},
+              "proof": {"enum": ["pid-absent", "pid-identity-mismatch", "boot-changed"]}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

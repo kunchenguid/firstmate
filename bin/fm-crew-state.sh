@@ -75,6 +75,7 @@ SEP=' · '
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  [ -z "${WORKGRAPH_CONTEXT:-}" ] || line="$line${SEP}$WORKGRAPH_CONTEXT"
   printf '%s\n' "$line"
   exit 0
 }
@@ -90,6 +91,45 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 [ -n "$KIND" ] || KIND=ship
+
+WORKGRAPH_CONTEXT=
+WG_GOAL=$(meta_value workgraph_goal)
+if [ -n "$WG_GOAL" ]; then
+  WG_SLICE=$(meta_value workgraph_slice)
+  WG_WAVE=$(meta_value workgraph_wave)
+  WG_GRAPH=$(meta_value workgraph_graph)
+  WG_LEASE=$(meta_value workgraph_lease_id)
+  WG_TOKEN=$(meta_value workgraph_fencing_token)
+  WG_CLAIMS=invalid
+  WG_GATES=invalid
+  WG_LEASE_STATE=invalid
+  if [ -f "$WG_GRAPH" ] && [ ! -L "$WG_GRAPH" ] && [ -n "$WG_SLICE" ]; then
+    WG_CONTRACT=$("$FM_ROOT/bin/fm-workgraph.sh" contract "$WG_GRAPH" "$WG_SLICE" 2>/dev/null || true)
+    if [ -n "$WG_CONTRACT" ]; then
+      WG_CLAIMS=$(node -e '
+        const value = JSON.parse(process.argv[1]);
+        process.stdout.write(JSON.stringify(value.claims));
+      ' "$WG_CONTRACT" 2>/dev/null || printf invalid)
+    fi
+    WG_GATE_OUTPUT=$("$FM_ROOT/bin/fm-workgraph.sh" gate-status "$WG_GRAPH" "$WG_SLICE" 2>/dev/null || true)
+    if [ -n "$WG_GATE_OUTPUT" ]; then
+      WG_GATES=$(printf '%s\n' "$WG_GATE_OUTPUT" \
+        | sed -n 's/^gate_slice\[0\]\.gate\[[0-9][0-9]*\]\.state=//p' \
+        | LC_ALL=C sort | uniq -c | awk '{printf "%s%s:%s", separator, $2, $1; separator=","}')
+      [ -n "$WG_GATES" ] || WG_GATES=none
+    fi
+  fi
+  if [ -n "$WG_LEASE" ]; then
+    WG_LEASE_RECORD=$("$FM_ROOT/bin/fm-workgraph.sh" inspect "$WG_GOAL" --lease-id "$WG_LEASE" 2>/dev/null || true)
+    if [ -n "$WG_LEASE_RECORD" ]; then
+      WG_LEASE_STATE=$(node -e '
+        const value = JSON.parse(process.argv[1]);
+        process.stdout.write(value.state);
+      ' "$WG_LEASE_RECORD" 2>/dev/null || printf invalid)
+    fi
+  fi
+  WORKGRAPH_CONTEXT="workgraph: $WG_GOAL/$WG_SLICE wave=${WG_WAVE:-?} claims=$WG_CLAIMS lease=$WG_LEASE_STATE/${WG_LEASE:-?}#${WG_TOKEN:-?} gates=$WG_GATES"
+fi
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then

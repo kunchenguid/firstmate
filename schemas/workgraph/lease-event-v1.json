@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Firstmate WorkGraph lease event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event", "namespace_id", "goal_id", "slice_id", "lease_id", "holder_id", "transaction_generation", "fencing_token", "record_revision", "proof", "record_sha256"],
+  "properties": {
+    "schema_version": {"const": "lease-event/v1"},
+    "event": {"enum": ["acquire", "release", "recover"]},
+    "namespace_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "goal_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "slice_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "lease_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "holder_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "transaction_generation": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "fencing_token": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "record_revision": {"enum": ["1", "2"]},
+    "proof": {"enum": ["", "holder-release", "pid-absent", "pid-identity-mismatch", "boot-changed"]},
+    "record_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "allOf": [
+    {"if": {"properties": {"event": {"const": "acquire"}}}, "then": {"properties": {"record_revision": {"const": "1"}, "proof": {"const": ""}}}},
+    {"if": {"properties": {"event": {"const": "release"}}}, "then": {"properties": {"record_revision": {"const": "2"}, "proof": {"const": "holder-release"}}}},
+    {"if": {"properties": {"event": {"const": "recover"}}}, "then": {"properties": {"record_revision": {"const": "2"}, "proof": {"enum": ["pid-absent", "pid-identity-mismatch", "boot-changed"]}}}}
+  ]
+}

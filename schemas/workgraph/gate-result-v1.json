@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://firstmate.invalid/schemas/workgraph/gate-result-v1.json",
+  "title": "Firstmate WorkGraph immutable gate result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "goal_id", "slice_id", "gate_id", "sequence",
+    "status", "actor_id", "contract_sha256", "evidence_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "workgraph-gate-result/v1"},
+    "goal_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "slice_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "gate_id": {"type": "string", "minLength": 1},
+    "sequence": {"type": "integer", "minimum": 1, "maximum": 999999},
+    "status": {"enum": ["passed", "failed"]},
+    "actor_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

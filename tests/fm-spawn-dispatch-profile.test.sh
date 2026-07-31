@@ -123,6 +123,80 @@ test_no_profile_keeps_claude_launch_unchanged() {
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
 }
 
+test_agy_threads_exact_model_effort_and_interactive_brief() {
+  local rec id out status launch hostile_home brief_content expected_brief interactive_prefix
+  id=profile-agy-z1
+  rec=$(make_spawn_case profile-agy agy "$id")
+  read_case_record "$rec"
+
+  hostile_home=$'\n'
+  hostile_home="$CASE_DIR/home with spaces 'apostrophe' \$dollar \`backtick\` unicode-é newline$hostile_home"
+  mv "$HOME_DIR" "$hostile_home"
+  HOME_DIR=$hostile_home
+  brief_content=$'brief with spaces, apostrophe: it\'s, dollar: $value, backtick: `quoted`, unicode: café\nsecond line\n'
+  printf '%s' "$brief_content" > "$HOME_DIR/data/$id/brief.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model gemini-3.1-pro-high --effort high)
+  status=$?
+  expect_code 0 "$status" "AGY spawn with sealed profile should succeed"
+  assert_contains "$out" "spawned $id harness=agy" "spawn did not report AGY"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" agy gemini-3.1-pro-high high
+
+  expected_brief=$(printf '%s' "$HOME_DIR/data/$id/brief.md" | sed "s/'/'\\\\''/g")
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "agy --dangerously-skip-permissions --new-project --add-dir \"\$PWD\" --model 'gemini-3.1-pro-high' --effort 'high' --prompt-interactive \"\$(cat '$expected_brief')\"" \
+    "AGY launch did not preserve autonomous flags, exact profile, and sealed brief path"
+  assert_not_contains "$launch" "__OPINPUT__" "AGY launch retained the removed operational-input placeholder"
+  assert_not_contains "$launch" "__BRIEF__" "AGY launch retained a brief placeholder"
+  interactive_prefix="--prompt-interactive \"\$(cat "
+  case "$launch" in
+    *"$interactive_prefix"*) : ;;
+    *) fail "AGY launch must feed the brief through --prompt-interactive, not a positional prompt fallback"$'\nactual:  '"$launch" ;;
+  esac
+  pass "AGY receives its exact profile and hostile brief path through interactive project isolation"
+}
+
+test_agy_omits_default_model_and_unsupported_effort() {
+  local rec id out status launch
+  id=profile-agy-defaults-z2
+  rec=$(make_spawn_case profile-agy-defaults agy "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --effort max)
+  status=$?
+  expect_code 0 "$status" "AGY spawn with unsupported effort should succeed without that flag"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" agy default max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "agy --dangerously-skip-permissions --new-project --add-dir \"\$PWD\" --prompt-interactive \"\$(cat " \
+    "AGY launch lost the autonomous interactive command when profile axes were omitted"
+  assert_not_contains "$launch" "--model" "AGY launch must omit an absent/default model"
+  assert_not_contains "$launch" "--effort" "AGY launch must omit unsupported effort"
+  assert_not_contains "$launch" "__OPINPUT__" "AGY launch retained the removed operational-input placeholder"
+  pass "AGY omits absent/default model and unsupported effort without positional prompt fallback"
+}
+
+test_minimax_preserves_no_separate_effort_axis() {
+  local rec id out status launch expected
+  id=profile-minimax-z2
+  rec=$(make_spawn_case profile-minimax minimax "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model MiniMax-M3)
+  status=$?
+  expect_code 0 "$status" "MiniMax spawn with exact model should succeed"
+  assert_contains "$out" "spawned $id harness=minimax" "spawn did not report MiniMax"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" minimax MiniMax-M3 default
+
+  launch=$(cat "$LAUNCH_LOG")
+  expected="FM_MINIMAX_KEY_FILE=/home/gary/firstmate/config/minimax-api-key /home/gary/firstmate/config/minimax \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] \
+    || fail "MiniMax launch invented a model/effort flag or changed its wrapper"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "MiniMax records MiniMax-M3 and preserves its no-separate-effort-axis launcher"
+}
+
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
   local rec id out status
   id=profile-required-ship-z11
@@ -347,7 +421,7 @@ test_pi_threads_model_and_max_effort() {
   pass "pi receives --model and --thinking max profile flags"
 }
 
-test_batch_forwards_shared_profile_flags() {
+test_multi_pair_profile_batch_is_rejected_before_spawn() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
@@ -358,12 +432,13 @@ test_batch_forwards_shared_profile_flags() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
-  expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
-  assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
-  assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
-  assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
-  assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
-  pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
+  expect_code 1 "$status" "multi-pair profile batch should fail closed"
+  assert_contains "$out" "multi-task legacy batch is broadly exclusive" \
+    "profile batch refusal did not explain the WorkGraph boundary"
+  assert_absent "$HOME_DIR/state/$id1.meta" "profile batch spawned its first legacy task"
+  assert_absent "$HOME_DIR/state/$id2.meta" "profile batch spawned its second legacy task"
+  [ ! -s "$LAUNCH_LOG" ] || fail "profile batch reached backend launch before refusal"
+  pass "multi-pair profile batch is rejected before any legacy task launches"
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
@@ -385,6 +460,9 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_launch_unchanged
+test_agy_threads_exact_model_effort_and_interactive_brief
+test_agy_omits_default_model_and_unsupported_effort
+test_minimax_preserves_no_separate_effort_axis
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
@@ -398,7 +476,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
-test_batch_forwards_shared_profile_flags
+test_multi_pair_profile_batch_is_rejected_before_spawn
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

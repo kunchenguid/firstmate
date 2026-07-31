@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Firstmate WorkGraph lease command result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "command", "goal_id", "slice_id", "lease_id", "state", "actor_id", "holder_fencing_token", "current_fencing_token", "resource_count"],
+  "properties": {
+    "schema_version": {"const": "lease-command-result/v1"},
+    "command": {"enum": ["acquire", "release", "recover", "fence"]},
+    "goal_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "slice_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "lease_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "state": {"enum": ["held", "released", "recovered"]},
+    "actor_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "holder_fencing_token": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "current_fencing_token": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "resource_count": {"type": "string", "pattern": "^[1-9][0-9]*$"}
+  },
+  "allOf": [
+    {"if": {"properties": {"command": {"enum": ["acquire", "fence"]}}}, "then": {"properties": {"state": {"const": "held"}}}},
+    {"if": {"properties": {"command": {"const": "release"}}}, "then": {"properties": {"state": {"const": "released"}}}},
+    {"if": {"properties": {"command": {"const": "recover"}}}, "then": {"properties": {"state": {"const": "recovered"}}}}
+  ]
+}

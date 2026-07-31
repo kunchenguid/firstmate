@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Firstmate WorkGraph lease transaction owner v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "namespace_id", "state", "generation", "pid", "start_ticks", "cmdline_sha256", "boot_id", "hostname"],
+  "properties": {
+    "schema_version": {"const": "lease-transaction-owner/v1"},
+    "namespace_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "state": {"enum": ["held", "released"]},
+    "generation": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "pid": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "start_ticks": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "cmdline_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "boot_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "hostname": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$"}
+  }
+}

@@ -339,6 +339,123 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+write_workgraph_brief_fixture() {
+  local root=$1 slice_id=$2 type=$3
+  mkdir -p "$root/contracts" "$root/worktree"
+  node - "$root" "$slice_id" "$type" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const root = process.argv[2];
+const sliceId = process.argv[3];
+const type = process.argv[4];
+const contract = {
+  schema_version: "slice-contract/v1",
+  slice_id: sliceId,
+  goal_id: "brief-goal",
+  purpose: "Render this exact WorkGraph slice.",
+  type,
+  depends_on: [],
+  immutable_inputs: [{path: "input.tar", sha256: "a".repeat(64)}],
+  outputs: ["result.txt"],
+  claims: [{resource: "lock://brief-test", mode: type === "audit" ? "read" : "write"}],
+  worktree: path.join(root, "worktree"),
+  harness: "codex",
+  model: "gpt-test",
+  effort: "high",
+  acceptance: ["The rendered brief is contract-derived."],
+  validation_commands: ["bash tests/example.test.sh"],
+  expected_evidence: ["result.sha256"],
+  context_budget: {source_tokens: 1000, report_words: 500},
+  gates: ["tests-green"],
+  implementer: type === "integration" ? "Firstmate" : "worker",
+  independent_validators: ["reviewer"],
+  authorized_exceptions: [],
+};
+if (type === "integration") {
+  contract.claims = [{resource: "lock://FIRSTMATE-INTEGRATION", mode: "exclusive"}];
+}
+const bytes = Buffer.from(JSON.stringify(contract, null, 2) + "\n");
+fs.writeFileSync(path.join(root, "contracts", `${sliceId}.json`), bytes);
+const graph = {
+  schema_version: "workgraph/v1",
+  goal_id: "brief-goal",
+  slices: [{
+    slice_id: sliceId,
+    contract_path: `contracts/${sliceId}.json`,
+    contract_sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+  }],
+};
+fs.writeFileSync(path.join(root, "graph.json"), JSON.stringify(graph, null, 2) + "\n");
+NODE
+}
+
+test_workgraph_contract_drives_brief() {
+  local fixture="$TMP_ROOT/workgraph-brief" home="$TMP_ROOT/workgraph-brief-home"
+  local brief snapshot
+  write_workgraph_brief_fixture "$fixture" wg-brief ship
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" wg-brief firstmate \
+      --workgraph "$fixture/graph.json" --slice wg-brief >/dev/null \
+    || fail "WorkGraph ship brief was rejected"
+  brief="$home/data/wg-brief/brief.md"
+  snapshot="$home/data/wg-brief/slice-contract.json"
+  assert_present "$brief" "WorkGraph brief was not created"
+  assert_present "$snapshot" "sealed WorkGraph contract snapshot was not created"
+  cmp -s "$fixture/contracts/wg-brief.json" "$snapshot" \
+    || fail "brief contract snapshot differs from the selected sealed bytes"
+  [ "$(stat -c '%a' "$snapshot")" = 600 ] \
+    || fail "brief contract snapshot mode is not 0600"
+  assert_grep 'Render this exact WorkGraph slice.' "$brief" \
+    "WorkGraph purpose did not replace the task placeholder"
+  assert_grep '## WorkGraph contract' "$brief" \
+    "WorkGraph brief omitted its contract section"
+  assert_grep 'The rendered brief is contract-derived.' "$brief" \
+    "WorkGraph acceptance was not rendered"
+  assert_grep 'lock://brief-test' "$brief" \
+    "WorkGraph claims were not rendered"
+  ! grep -Fx -- '{TASK}' "$brief" >/dev/null \
+    || fail "WorkGraph brief retained the task placeholder"
+  pass "fm-brief: sealed WorkGraph contract drives the generated brief"
+}
+
+test_workgraph_brief_binding_fails_closed() {
+  local fixture="$TMP_ROOT/workgraph-brief-errors" home="$TMP_ROOT/workgraph-brief-errors-home"
+  local out rc
+  write_workgraph_brief_fixture "$fixture" wg-audit audit
+  mkdir -p "$home/data"
+  set +e
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" wrong-id firstmate \
+      --workgraph "$fixture/graph.json" --slice wg-audit --scout 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "WorkGraph brief accepted a task/slice mismatch"
+  assert_contains "$out" 'task id must equal the WorkGraph slice id' \
+    "task/slice mismatch diagnostic changed"
+  set +e
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" wg-audit firstmate --workgraph "$fixture/graph.json" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "WorkGraph brief accepted an incomplete binding"
+  assert_contains "$out" '--workgraph and --slice must be supplied together' \
+    "incomplete binding diagnostic changed"
+  set +e
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" wg-audit firstmate \
+      --workgraph "$fixture/graph.json" --slice wg-audit 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "WorkGraph audit contract accepted a ship brief"
+  assert_contains "$out" 'incompatible with brief kind ship' \
+    "contract/brief kind diagnostic changed"
+  [ ! -e "$home/data/wg-audit/brief.md" ] \
+    || fail "failed WorkGraph brief binding wrote a brief"
+  pass "fm-brief: malformed WorkGraph bindings fail closed before publication"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -353,3 +470,5 @@ test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_workgraph_contract_drives_brief
+test_workgraph_brief_binding_fails_closed

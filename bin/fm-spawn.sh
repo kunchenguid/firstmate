@@ -2,6 +2,7 @@
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+#        fm-spawn.sh <task-id> <project-dir> --workgraph <graph.json> --slice <slice-id> --registry <registry.json> [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -57,14 +58,10 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-# Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
-#     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
-#   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend applies to every pair.
-#   If config/crew-dispatch.json exists, shared --harness is required for crewmate
-#   and scout batches. The loop lives here, in bash, so callers never hand-write a
-#   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
-#   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
+# The `id=repo` spelling remains a single-task compatibility alias.
+#   Multi-task legacy batches are rejected before the first spawn because tasks
+#   without contracts are broadly exclusive. Bind and launch each WorkGraph slice
+#   explicitly so compatibility, gates, mode capacity, and leases are enforced.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -100,6 +97,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -108,6 +107,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-workgraph-dispatch-lib.sh
+. "$SCRIPT_DIR/fm-workgraph-dispatch-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -119,6 +120,9 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+WORKGRAPH_ARG=
+WORKGRAPH_SLICE_ARG=
+WORKGRAPH_REGISTRY_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -135,6 +139,9 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      workgraph) WORKGRAPH_ARG=$a ;;
+      slice) WORKGRAPH_SLICE_ARG=$a ;;
+      registry) WORKGRAPH_REGISTRY_ARG=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -151,6 +158,12 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --workgraph) want_value=workgraph ;;
+    --workgraph=*) WORKGRAPH_ARG=${a#--workgraph=} ;;
+    --slice) want_value=slice ;;
+    --slice=*) WORKGRAPH_SLICE_ARG=${a#--slice=} ;;
+    --registry) want_value=registry ;;
+    --registry=*) WORKGRAPH_REGISTRY_ARG=${a#--registry=} ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -192,6 +205,7 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+WORKGRAPH_ENDPOINT_ABORT_CLEANUP=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -210,74 +224,89 @@ parse_orca_worktree_result() {
   fi
 }
 
-orca_spawn_abort_cleanup() {
+spawn_abort_cleanup() {
   local status=$?
-  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
-  ORCA_ABORT_CLEANUP=0
-  if [ -n "${ORCA_TERMINAL:-}" ]; then
-    fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
-  fi
-  if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-    if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-      mkdir -p "$STATE" 2>/dev/null || true
-      if [ -d "$STATE" ]; then
-        {
-          echo "window=$W"
-          echo "worktree=${WT:-}"
-          echo "project=$PROJ_ABS"
-          echo "harness=$HARNESS"
-          echo "kind=$KIND"
-          echo "mode=${MODE:-no-mistakes}"
-          echo "yolo=${YOLO:-off}"
-          echo "tasktmp=${TASK_TMP:-}"
-          echo "model=${MODEL:-default}"
-          echo "effort=${EFFORT:-default}"
-          echo "backend=orca"
-          echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-          [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-        } > "$STATE/$ID.meta" 2>/dev/null || true
+  if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
+    ORCA_ABORT_CLEANUP=0
+    if [ -n "${ORCA_TERMINAL:-}" ]; then
+      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+    fi
+    if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+        mkdir -p "$STATE" 2>/dev/null || true
+        if [ -d "$STATE" ]; then
+          {
+            echo "window=$W"
+            echo "worktree=${WT:-}"
+            echo "project=$PROJ_ABS"
+            echo "harness=$HARNESS"
+            echo "kind=$KIND"
+            echo "mode=${MODE:-no-mistakes}"
+            echo "yolo=${YOLO:-off}"
+            echo "tasktmp=${TASK_TMP:-}"
+            echo "model=${MODEL:-default}"
+            echo "effort=${EFFORT:-default}"
+            echo "backend=orca"
+            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+          } > "$STATE/$ID.meta" 2>/dev/null || true
+        fi
       fi
     fi
   fi
+  if [ "$status" -ne 0 ]; then
+    fm_workgraph_abort_release
+    if [ "$WORKGRAPH_ENDPOINT_ABORT_CLEANUP" = 1 ]; then
+      WORKGRAPH_ENDPOINT_ABORT_CLEANUP=0
+      fm_backend_kill "$BACKEND" "${T:-}" "${ZELLIJ_TAB_ID:-}" "${W:-}" \
+        >/dev/null 2>&1 || true
+    fi
+  fi
+  fm_workgraph_dispatch_unlock || true
   return "$status"
 }
-trap orca_spawn_abort_cleanup EXIT
+trap spawn_abort_cleanup EXIT
 
-# Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
-# positional as one and spawn each by re-execing this script in single-task mode. We use
-# the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
-# the single path verbatim. A failed pair is reported and skipped; the rest still launch;
-# exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
-# one (task ids are bare slugs), so they fall straight through to the logic below.
+# The `id=repo` compatibility alias re-execs this script in single-task mode.
+# Validate the complete positional set before mutation and reject a multi-task
+# legacy batch atomically; compatible parallel work must carry per-slice contracts.
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  if [ -n "$WORKGRAPH_ARG$WORKGRAPH_SLICE_ARG$WORKGRAPH_REGISTRY_ARG" ]; then
+    echo "error: WorkGraph dispatch does not accept batch id=repo syntax; bind and launch each slice explicitly" >&2
+    exit 1
+  fi
+  for pair in "${POS[@]}"; do
+    case "$pair" in
+      *=*) : ;;
+      *) echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2; exit 2 ;;
+    esac
+  done
+  if [ "${#POS[@]}" -ne 1 ]; then
+    echo "error: multi-task legacy batch is broadly exclusive; bind and launch each WorkGraph slice explicitly" >&2
+    exit 1
+  fi
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
-  rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
-  for pair in "${POS[@]}"; do
-    case "$pair" in
-      *=*) : ;;
-      *) echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2; rc=2; continue ;;
-    esac
-    if [ "$KIND" = secondmate ]; then
-      echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
-      rc=2
-      continue
-    elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
-    else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
-    fi
-  done
-  exit "$rc"
+  pair=${POS[0]}
+  if [ "$KIND" = secondmate ]; then
+    echo "error: id=repo dispatch does not support --secondmate; spawn the secondmate explicitly" >&2
+    exit 2
+  elif [ "$KIND" = scout ]; then
+    exec env FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" \
+      "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout
+  else
+    exec env FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" \
+      "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"
+  fi
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
@@ -309,12 +338,47 @@ else
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
+fm_workgraph_load_contract \
+  "$ID" "$KIND" "$WORKGRAPH_ARG" "$WORKGRAPH_SLICE_ARG" "$WORKGRAPH_REGISTRY_ARG" \
+  || exit 1
+if [ "$FM_WORKGRAPH_ENABLED" = 1 ]; then
+  if [ -n "$ARG3" ] && [ "$ARG3" != "$FM_WORKGRAPH_HARNESS" ]; then
+    echo "error: WorkGraph dispatch: requested harness differs from the sealed contract" >&2
+    exit 1
+  fi
+  if [ "$MODEL_SET" -eq 1 ] && [ "$MODEL" != "$FM_WORKGRAPH_MODEL" ]; then
+    echo "error: WorkGraph dispatch: requested model differs from the sealed contract" >&2
+    exit 1
+  fi
+  if [ "$EFFORT_SET" -eq 1 ] && [ "$EFFORT" != "$FM_WORKGRAPH_EFFORT" ]; then
+    echo "error: WorkGraph dispatch: requested effort differs from the sealed contract" >&2
+    exit 1
+  fi
+  HARNESS_ARG=$FM_WORKGRAPH_HARNESS
+  HARNESS_SET=1
+  ARG3=$FM_WORKGRAPH_HARNESS
+  MODEL=$FM_WORKGRAPH_MODEL
+  MODEL_SET=1
+  EFFORT=$FM_WORKGRAPH_EFFORT
+  EFFORT_SET=1
+fi
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
+    # AGY owns an isolated project session and consumes its brief through the
+    # verified interactive prompt entrypoint.
+    agy)
+      printf '%s' 'agy --dangerously-skip-permissions --new-project --add-dir "$PWD" __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(cat __BRIEF__)"'
+      ;;
+    # MiniMax-M3 has no separate reasoning-effort axis. The wrapper owns its
+    # credential file and receives only the exact sealed brief bytes.
+    minimax)
+      printf '%s' 'FM_MINIMAX_KEY_FILE=/home/gary/firstmate/config/minimax-api-key /home/gary/firstmate/config/minimax "$(cat __BRIEF__)"'
+      ;;
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
     # predicted-next-prompt ghost text, which renders as dim/faint text inside an
     # otherwise-empty composer and would otherwise read like real typed input when
@@ -324,17 +388,11 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    agy)
-      printf '%s' 'agy --dangerously-skip-permissions --new-project --add-dir "$PWD" --model "Gemini 3.1 Pro (Low)" --prompt-interactive "$(cat __BRIEF__)"'
-      ;;
     glm|zai)
       printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false ANTHROPIC_AUTH_TOKEN="${ZAI_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}" ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic API_TIMEOUT_MS=3000000 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2 ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2 ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7 claude --dangerously-skip-permissions "$(cat __BRIEF__)"'
       ;;
     deepseek)
       printf '%s' '/home/newball/firstmate/bin/fm-claude-deepseek.sh "$(cat __BRIEF__)"'
-      ;;
-    minimax)
-      printf '%s' 'FM_MINIMAX_KEY_FILE=/home/newball/firstmate/config/minimax-api-key /home/newball/firstmate/config/minimax "$(cat __BRIEF__)"'
       ;;
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
@@ -447,7 +505,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    agy|claude|codex|opencode|pi|grok)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -457,6 +515,11 @@ effort_flag_for_harness() {
   local harness=$1 effort=$2
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
+    agy)
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
     claude)
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
@@ -667,6 +730,18 @@ fi
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+if [ "$FM_WORKGRAPH_ENABLED" = 1 ] && [ "$BACKEND" = orca ]; then
+  echo "error: WorkGraph dispatch: backend=orca cannot consume a predeclared worktree" >&2
+  exit 1
+fi
+if [ "$FM_WORKGRAPH_ENABLED" = 1 ]; then
+  fm_workgraph_holder_start || {
+    echo "error: WorkGraph lease holder guardian could not be started" >&2
+    exit 1
+  }
+fi
+fm_workgraph_enforce_dispatch "$ID" "$PROJ_ABS" || exit 1
+
 real_path_or_raw() {  # <path>
   local path=$1 real
   if real=$(cd "$path" 2>/dev/null && pwd -P); then
@@ -700,6 +775,46 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+}
+
+spawn_workgraph_endpoint_holder_pid() {
+  local first second first_pid second_pid
+  case "$BACKEND" in
+    herdr)
+      command -v jq >/dev/null 2>&1 || return 1
+      first=$(fm_backend_herdr_cli "$HERDR_SES" pane process-info \
+        --pane "$HERDR_PANE_ID" 2>/dev/null) || return 1
+      second=$(fm_backend_herdr_cli "$HERDR_SES" pane process-info \
+        --pane "$HERDR_PANE_ID" 2>/dev/null) || return 1
+      first_pid=$(printf '%s' "$first" | jq -er --arg pane "$HERDR_PANE_ID" '
+        select(.result.type == "pane_process_info")
+        | select(.result.process_info.pane_id == $pane)
+        | .result.process_info.shell_pid
+        | select(type == "number" and . > 1 and floor == .)
+      ' 2>/dev/null) || return 1
+      second_pid=$(printf '%s' "$second" | jq -er --arg pane "$HERDR_PANE_ID" '
+        select(.result.type == "pane_process_info")
+        | select(.result.process_info.pane_id == $pane)
+        | .result.process_info.shell_pid
+        | select(type == "number" and . > 1 and floor == .)
+      ' 2>/dev/null) || return 1
+      ;;
+    tmux)
+      first_pid=$(tmux display-message -p -t "$WT_TARGET" '#{pane_pid}' 2>/dev/null) \
+        || return 1
+      second_pid=$(tmux display-message -p -t "$WT_TARGET" '#{pane_pid}' 2>/dev/null) \
+        || return 1
+      ;;
+    *)
+      echo "error: WorkGraph dispatch: backend $BACKEND has no persistent endpoint holder identity" >&2
+      return 1
+      ;;
+  esac
+  case "$first_pid:$second_pid" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  [ "$first_pid" = "$second_pid" ] || return 1
+  printf '%s\n' "$first_pid"
 }
 
 W="fm-$ID"
@@ -803,6 +918,14 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+if [ "$FM_WORKGRAPH_ENABLED" = 1 ]; then
+  WORKGRAPH_ENDPOINT_ABORT_CLEANUP=1
+  WORKGRAPH_ENDPOINT_HOLDER_PID=$(spawn_workgraph_endpoint_holder_pid) || {
+    echo "error: WorkGraph dispatch: persistent endpoint holder could not be resolved" >&2
+    exit 1
+  }
+  fm_workgraph_handoff_to_endpoint "$WORKGRAPH_ENDPOINT_HOLDER_PID" || exit 1
+fi
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
 # Every other backend addresses its pane/surface by the id already in $T, so default
@@ -845,7 +968,15 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if [ "$FM_WORKGRAPH_ENABLED" = 1 ]; then
+    WORKTREE_SOURCE="sealed WorkGraph contract"
+    WORKTREE_EXPECTED=$FM_WORKGRAPH_WORKTREE
+    spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WORKTREE_EXPECTED")"
+  else
+    WORKTREE_SOURCE="treehouse get"
+    WORKTREE_EXPECTED=
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -855,20 +986,32 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
+  candidate=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+    if [ -n "$p" ]; then
+      p_real=$(real_path_or_raw "$p")
+      if { [ "$FM_WORKGRAPH_ENABLED" = 1 ] && [ "$p_real" = "$WORKTREE_EXPECTED" ]; } \
+        || { [ "$FM_WORKGRAPH_ENABLED" != 1 ] && [ "$p_real" != "$PROJ_ABS_REAL" ]; }; then
+        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+          WT="$p"
+          break
+        fi
+        candidate="$p_real"
+      else
+        candidate=""
+      fi
+    else
+      candidate=""
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: $WORKTREE_SOURCE did not enter its declared worktree within 60s; inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "$WORKTREE_SOURCE" "$T"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -1000,6 +1143,17 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+HERDR_AUTO_CLOSE_PANE=off
+if [ "$BACKEND" = herdr ] && [ -f "$CONFIG/herdr-auto-close" ] && [ ! -L "$CONFIG/herdr-auto-close" ]; then
+  HERDR_AUTO_CLOSE_PANE=$(awk 'NR == 1 { value=$0 } END { if (NR == 1) print value }' "$CONFIG/herdr-auto-close")
+  case "$HERDR_AUTO_CLOSE_PANE" in
+    on|off) ;;
+    *)
+      echo "warning: config/herdr-auto-close must contain exactly 'on' or 'off'; treating it as off" >&2
+      HERDR_AUTO_CLOSE_PANE=off
+      ;;
+  esac
+fi
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
@@ -1011,6 +1165,20 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ "$FM_WORKGRAPH_ENABLED" = 1 ]; then
+    echo "workgraph_goal=$FM_WORKGRAPH_GOAL"
+    echo "workgraph_slice=$FM_WORKGRAPH_SLICE"
+    echo "workgraph_wave=$FM_WORKGRAPH_WAVE"
+    echo "workgraph_graph=$FM_WORKGRAPH_GRAPH"
+    echo "workgraph_graph_sha256=$FM_WORKGRAPH_GRAPH_SHA256"
+    echo "workgraph_contract_sha256=$FM_WORKGRAPH_CONTRACT_SHA256"
+    echo "workgraph_registry=$FM_WORKGRAPH_REGISTRY"
+    echo "workgraph_registry_sha256=$FM_WORKGRAPH_REGISTRY_SHA256"
+    echo "workgraph_lease_id=$FM_WORKGRAPH_LEASE_ID"
+    echo "workgraph_fencing_token=$FM_WORKGRAPH_FENCING_TOKEN"
+    echo "workgraph_holder_pid=$FM_WORKGRAPH_HOLDER_PID"
+    echo "workgraph_holder_start_ticks=$FM_WORKGRAPH_HOLDER_START_TICKS"
+  fi
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
@@ -1020,6 +1188,7 @@ META_WINDOW=$T
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    [ "$HERDR_AUTO_CLOSE_PANE" = on ] && echo "auto_close_pane=on"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
@@ -1039,6 +1208,11 @@ META_WINDOW=$T
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+fm_workgraph_dispatch_unlock || {
+  echo "error: WorkGraph dispatch lock could not be released after metadata publication" >&2
+  exit 1
+}
+WORKGRAPH_ENDPOINT_ABORT_CLEANUP=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

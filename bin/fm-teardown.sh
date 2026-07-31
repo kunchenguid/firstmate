@@ -98,6 +98,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-workgraph-dispatch-lib.sh
+. "$SCRIPT_DIR/fm-workgraph-dispatch-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -119,6 +121,41 @@ BACKEND=$(fm_backend_of_meta "$META")
 if [ "$BACKEND" = orca ]; then
   T_ORCA=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$T_ORCA" ] && T=$T_ORCA
+fi
+WORKGRAPH_META_COUNT=$(grep -c '^workgraph_' "$META" 2>/dev/null || true)
+WORKGRAPH_BOUND=0
+WORKGRAPH_GOAL=
+WORKGRAPH_SLICE=
+WORKGRAPH_GRAPH=
+WORKGRAPH_LEASE_ID=
+WORKGRAPH_FENCING_TOKEN=
+WORKGRAPH_HOLDER_PID=
+WORKGRAPH_HOLDER_START_TICKS=
+if [ "$WORKGRAPH_META_COUNT" -gt 0 ]; then
+  WORKGRAPH_GOAL=$(fm_workgraph_meta_exact "$META" workgraph_goal) \
+    || { echo "REFUSED: WorkGraph metadata has an ambiguous goal; preserving task state." >&2; exit 1; }
+  WORKGRAPH_SLICE=$(fm_workgraph_meta_exact "$META" workgraph_slice) \
+    || { echo "REFUSED: WorkGraph metadata has an ambiguous slice; preserving task state." >&2; exit 1; }
+  WORKGRAPH_GRAPH=$(fm_workgraph_meta_exact "$META" workgraph_graph) \
+    || { echo "REFUSED: WorkGraph metadata has an ambiguous graph; preserving task state." >&2; exit 1; }
+  WORKGRAPH_GRAPH_SHA256=$(fm_workgraph_meta_exact "$META" workgraph_graph_sha256) \
+    || { echo "REFUSED: WorkGraph metadata has an ambiguous graph digest; preserving task state." >&2; exit 1; }
+  WORKGRAPH_LEASE_ID=$(fm_workgraph_meta_exact "$META" workgraph_lease_id) \
+    || { echo "REFUSED: WorkGraph metadata has an ambiguous lease; preserving task state." >&2; exit 1; }
+  WORKGRAPH_FENCING_TOKEN=$(fm_workgraph_meta_exact "$META" workgraph_fencing_token) \
+    || { echo "REFUSED: WorkGraph metadata has an ambiguous fencing token; preserving task state." >&2; exit 1; }
+  WORKGRAPH_HOLDER_PID=$(fm_workgraph_meta_exact "$META" workgraph_holder_pid) \
+    || { echo "REFUSED: WorkGraph metadata has an ambiguous holder PID; preserving task state." >&2; exit 1; }
+  WORKGRAPH_HOLDER_START_TICKS=$(fm_workgraph_meta_exact "$META" workgraph_holder_start_ticks) \
+    || { echo "REFUSED: WorkGraph metadata has ambiguous holder start ticks; preserving task state." >&2; exit 1; }
+  [ -f "$WORKGRAPH_GRAPH" ] && [ ! -L "$WORKGRAPH_GRAPH" ] \
+    && [ "$(sha256sum "$WORKGRAPH_GRAPH" | awk '{print $1}')" = "$WORKGRAPH_GRAPH_SHA256" ] \
+    || { echo "REFUSED: WorkGraph graph binding is missing or changed; preserving task state." >&2; exit 1; }
+  fm_workgraph_active_lease_valid "$META" \
+    || { echo "REFUSED: WorkGraph held lease cannot be verified; preserving task state." >&2; exit 1; }
+  "$FM_ROOT/bin/fm-workgraph.sh" completion-check "$WORKGRAPH_GRAPH" "$WORKGRAPH_SLICE" >/dev/null \
+    || { echo "REFUSED: WorkGraph gates or evidence are pending; preserving task state." >&2; exit 1; }
+  WORKGRAPH_BOUND=1
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -1136,6 +1173,15 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+if [ "$WORKGRAPH_BOUND" = 1 ]; then
+  fm_workgraph_holder_stop_exact "$WORKGRAPH_HOLDER_PID" "$WORKGRAPH_HOLDER_START_TICKS" \
+    || { echo "error: WorkGraph holder shutdown failed; preserving task metadata" >&2; exit 1; }
+  "$FM_ROOT/bin/fm-workgraph.sh" release "$WORKGRAPH_GOAL" \
+    --lease-id "$WORKGRAPH_LEASE_ID" \
+    --holder-id "$ID" \
+    --fencing-token "$WORKGRAPH_FENCING_TOKEN" >/dev/null \
+    || { echo "error: WorkGraph lease release failed; preserving task metadata" >&2; exit 1; }
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

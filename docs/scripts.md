@@ -17,8 +17,11 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and secondmate homes from origin          |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-decision-hold.sh`    | Create, verify, complete, and resolve durable captain-held decisions                 |
-| `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs                       |
+| `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, Herdr-lab, and sealed WorkGraph-derived briefs |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
+| `fm-parallelism.sh`      | Resolve or persist the mode consumed by future WorkGraph admissions                   |
+| `fm-workgraph.sh`        | Validate, project, lease, gate, snapshot, and inspect sealed digest-bound WorkGraphs  |
+| `fm-workgraph-migrate.sh` | Inventory legacy or bound active metadata and rebuild disposable WorkGraph state     |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and stale watcher liveness   |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
@@ -30,7 +33,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-continuity-command-policy.mjs` | Semantic owner of Claude continuity-gate fleet-command classification (docs/arm-pretool-check.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
-| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates; enforce explicitly bound WorkGraph admission |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
@@ -84,3 +87,17 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+# WorkGraph lease commands
+
+`bin/fm-workgraph-lease-lib.sh` is the implementation owner for durable lease transactions and is invoked by `bin/fm-workgraph.sh` for Slice 5 commands.
+`bin/fm-workgraph-dispatch-lib.sh` is the sourced Slice 6 owner for sealed
+contract binding, legacy-exclusive admission, mode capacity, predeclared
+worktree validation, and lease-backed spawn metadata.
+`bin/fm-workgraph-gate-lib.sh` is the Slice 7 owner for immutable gate history,
+content-addressed evidence, clean Git snapshots, dependency admission and
+completion checks. It is invoked only through `bin/fm-workgraph.sh`.
+`bin/fm-workgraph-migrate.sh` is the Slice 8 owner for read-only active-metadata classification and deterministic reconstruction of the disposable runtime projection from sealed graph bytes and durable lease/gate data.
+
+Mutating commands emit one canonical JSON line on success and one exact `WG-L-E-*` diagnostic on failure.
+
+The command grammar is closed. Acquire captures the graph, selected contract, registry, and helper/source bytes before the transaction lock, binds their descriptors and digests, then revalidates the same bytes and metadata after the lock is acquired. Release, recover, fence, and inspect capture and validate their source/helper inputs before any authority mutation; all durable reads are no-follow and revalidated. Recovery is accepted only with positive process evidence.

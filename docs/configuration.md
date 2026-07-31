@@ -23,6 +23,25 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## WorkGraph storage and parallelism
+
+The global WorkGraph parallelism mode is stored in local, gitignored `config/parallelism`, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+Project-scoped modes are stored in `config/parallelism-projects/<project-id>` under the same effective configuration directory.
+Goal-local WorkGraph data is rooted at `data/workgraphs/<goal-id>/`, or under `FM_DATA_OVERRIDE`, and its parallelism mode is stored in the `parallelism` child file.
+Graphs, contract snapshots and resource registries remain explicit digest-bound inputs.
+Durable lease authority is stored below `data/workgraphs/.leases/v1/`.
+Gate histories are immutable revisions below
+`data/workgraphs/<goal-id>/gates/<slice-id>/<gate-digest>/`; evidence is
+content-addressed below `data/workgraphs/<goal-id>/evidence/<sha256>/`; and
+clean Git snapshots are stored below
+`data/workgraphs/<goal-id>/snapshots/<slice-id>/<archive-sha256>/`.
+Short gate-mutation and dispatch locks live only in `state/`; they are
+process-identity guarded and are not durable authority.
+The derived per-goal runtime projection is also volatile and can be recreated with `bin/fm-workgraph-migrate.sh rebuild-state <graph>`.
+Its `status` command classifies active metadata without rewriting it.
+[`workgraph.md`](workgraph.md) owns current mode semantics, precedence, bounded DAG validation, resource normalization, linting, registry validation, compatibility, leases, contract-bound dispatch, gates, evidence, snapshots, and teardown protection.
+The headers and help for [`fm-parallelism.sh`](../bin/fm-parallelism.sh) and [`fm-workgraph.sh`](../bin/fm-workgraph.sh) own their exact commands and mutation mechanics. Resource linting accepts only an explicit `--registry <regular-file>` input and never discovers or creates a registry.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -451,3 +470,10 @@ Only after those retries exhaust does it remove the lock, and only when it is pr
 A live lock, a missing `lsof`, any failed check, or any other fetch failure keeps today's behavior.
 Every wait, retry, and removal is printed to stderr, and a successful recovery also prints one `recovered:` summary line to stdout so a session-start refresh - which discards fleet-sync stderr and relays only stdout - still surfaces it.
 The shared staleness proof lives in `bin/fm-lock-lib.sh`, which both `fm-teardown.sh` and `fm-fleet-sync.sh` use.
+# WorkGraph lease storage
+
+Slice 5 uses `FM_DATA_OVERRIDE` when set, otherwise `FM_HOME/data`, as the durable lease data boundary.
+
+The lease authority is `workgraphs/.leases/v1`; its namespace, counters, transaction owner, records, events, and lock parent are local durable state and are never shared through the runtime backend.
+
+The pre-existing data boundary is validated for ownership and symlink safety without being chmodded; authority descendants are mode 0700 and authority files are mode 0600.
