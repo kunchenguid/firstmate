@@ -244,6 +244,11 @@ Nothing beyond that release depends on it: with all four removed the suite is cl
 The two parked check-in rows are the inverse pairing: one case carries both protections, because a batched check-in has to fire on the shared cadence *and* carry every lane that came due, and each is killed by its own mutation.
 The second of those was added after review found the accumulator concatenating its lanes into a single glued record, which the case as first written passed over.
 
+One surviving mutant is known, at the redundant release site in `surface_nonterminal_stale`: the `else` branch that drops `.paused-<key>`, `.paused-rechecked-<key>` and `.paused-resurfaced-<key>` when the lane's declared pause verb has gone.
+Replacing that branch with `:` leaves `tests/fm-watch-triage.test.sh` entirely green, 42 `ok -` lines and exit 0, killing no case.
+The cleared-park protection itself is proven at `clear_pause_state`, the single release primitive behind all four exits from a declared pause, which is why this second path can be neutered without a case noticing.
+The site predates this change - it arrives with `ab8cea6` `fix(watcher): bound stale wakes for parked crew (#743)` - and closing it needs a case that does not exist yet, so it is recorded here as a known gap rather than claimed as covered.
+
 An earlier pass of this matrix failed instead at `test_watch_restart_attaches_to_healthy_peer`, whose TERM-resistant peer must install its signal handler before `--restart` signals it.
 The cause was host load from watcher successors left behind by leaked test temp roots, not the peer contract; with `fm_test_tmproot` registration repaired, both suites run with zero stray watcher processes and zero leftover temp roots, and the mutation matrix reproduces the table above.
 
