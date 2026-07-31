@@ -104,6 +104,38 @@ run_herdr_bind_case() {  # <case> <id>
   PATH="$dir/fakebin:$PATH" "$HERDR_BIND" "$id"
 }
 
+# Same binding run as run_herdr_bind_case, but from an explicit working
+# directory and without the suite-wide gate-refusal bypass, so the real
+# no-mistakes gate-agent guard decides (bin/fm-gate-refuse-lib.sh).
+run_herdr_bind_gate_case() {  # <case> <id> <cwd> [ASSIGN...]
+  local dir=$1 id=$2 cwd=$3; shift 3
+  ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+      "FM_HOME=$dir/home" "FM_ROOT_OVERRIDE=$ROOT" "FM_RUNTIME_LOG=$dir/runtime.log" \
+      FM_TEST_HERDR_SESSION=lab FM_TEST_HERDR_WORKSPACE=w1 \
+      FM_TEST_HERDR_TAB=w1:t2 FM_TEST_HERDR_PANE=w1:p2 \
+      "FM_TEST_HERDR_LABEL=fm-$id" "FM_TEST_HERDR_CWD=$dir/worktree" \
+      FM_TEST_HERDR_REPORTED_TAB=w1:t2 FM_TEST_HERDR_DUPLICATE_LABEL=0 \
+      "PATH=$dir/fakebin:$PATH" "$@" \
+      "$HERDR_BIND" "$id" )
+}
+
+# A worktree whose git-common-dir resolves under a no-mistakes gate repo,
+# reproducing the gate topology the unspoofable backstop keys on.
+make_gate_worktree() {  # <root>
+  local root=$1 id=016d88035d58 run=01KXC3SD5NZYMERGDS68Z1C8ER seed
+  mkdir -p "$root/.no-mistakes/repos"
+  git init -q --bare "$root/origin.git"
+  seed="$root/seed"
+  git init -q -b main "$seed"
+  git -C "$seed" commit -q --allow-empty -m init
+  git -C "$seed" push -q "$root/origin.git" HEAD:refs/heads/main
+  rm -rf "$seed"
+  git clone -q --bare "$root/origin.git" "$root/.no-mistakes/repos/$id.git"
+  git -C "$root/.no-mistakes/repos/$id.git" worktree add --detach \
+    "$root/.no-mistakes/worktrees/$id/$run" main >/dev/null 2>&1
+  printf '%s\n' "$root/.no-mistakes/worktrees/$id/$run"
+}
+
 run_case() {  # <case> <id>
   local dir=$1 id=$2
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -581,8 +613,8 @@ test_legacy_herdr_binding_requires_exact_live_proof() {
   rc=$?
   set -e
   HERDR_BIND=$real_bind
-  [ "$rc" -eq 3 ] \
-    || fail "post-publication validation failure did not exit with its distinct status 3: got $rc"
+  [ "$rc" -eq 4 ] \
+    || fail "post-publication validation failure did not exit with its distinct status 4: got $rc"
   grep -F "PUBLISHED_THEN_FAILED" "$dir/bind.err" >/dev/null \
     || fail "post-publication failure did not use its distinct diagnostic: $(cat "$dir/bind.err")"
   if grep -F "preserving task metadata" "$dir/bind.err" >/dev/null; then
@@ -596,10 +628,86 @@ test_legacy_herdr_binding_requires_exact_live_proof() {
   pass "legacy Herdr binding verifies exact live topology and worktree before enabling unchanged teardown safety, and a post-publication validation failure reports distinctly while preserving the published record"
 }
 
+# A no-mistakes gate agent must not publish an endpoint binding, because that
+# binding is exactly what unlocks the task's cleanup. Both gate signals must
+# refuse before any metadata mutation or Herdr access, while a normal session -
+# and firstmate's own bypassed suite - still binds.
+test_gate_context_refuses_binding_before_mutation() {
+  local dir id=legacy-herdr rc out before gate_wt
+
+  command -v jq >/dev/null 2>&1 || {
+    echo "skip: jq not found (required by the herdr adapter)"
+    return 0
+  }
+  fm_git_identity fmtest fmtest@example.invalid
+
+  seed_gate_case() {  # <name> -> case dir with unbound legacy Herdr metadata
+    local case_dir
+    case_dir=$(make_case "$1")
+    fm_write_meta "$case_dir/home/state/$id.meta" \
+      "window=lab:w1:p2" "worktree=$case_dir/worktree" "project=$case_dir/project" \
+      "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+      "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" "kind=scout"
+    cp "$case_dir/home/state/$id.meta" "$case_dir/meta.before"
+    git init -q -b main "$case_dir/project"
+    git -C "$case_dir/project" commit -q --allow-empty -m init
+    : > "$case_dir/runtime.log"
+    printf '%s\n' "$case_dir"
+  }
+
+  dir=$(seed_gate_case legacy-herdr-gate-env)
+  before="$dir/meta.before"
+  set +e
+  out=$(run_herdr_bind_gate_case "$dir" "$id" "$dir/project" NO_MISTAKES_GATE=1 2>&1)
+  rc=$?
+  set -e
+  expect_code 3 "$rc" "gate marker must refuse the legacy Herdr binding"
+  assert_contains "$out" "NO_MISTAKES_GATE set" "gate marker refusal message"
+  cmp -s "$before" "$dir/home/state/$id.meta" \
+    || fail "gate-marker refusal changed legacy Herdr metadata"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "gate-marker refusal reached Herdr: $(cat "$dir/runtime.log")"
+
+  dir=$(seed_gate_case legacy-herdr-gate-backstop)
+  before="$dir/meta.before"
+  gate_wt=$(make_gate_worktree "$dir/gate")
+  set +e
+  out=$(run_herdr_bind_gate_case "$dir" "$id" "$gate_wt" 2>&1)
+  rc=$?
+  set -e
+  expect_code 3 "$rc" "gate worktree must refuse the legacy Herdr binding with the marker unset"
+  assert_contains "$out" "no-mistakes gate worktree" "gate worktree refusal message"
+  assert_not_contains "$out" "NO_MISTAKES_GATE set" \
+    "gate worktree refusal must not be attributed to the marker"
+  cmp -s "$before" "$dir/home/state/$id.meta" \
+    || fail "gate-worktree refusal changed legacy Herdr metadata"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "gate-worktree refusal reached Herdr: $(cat "$dir/runtime.log")"
+
+  dir=$(seed_gate_case legacy-herdr-gate-normal)
+  set +e
+  out=$(run_herdr_bind_gate_case "$dir" "$id" "$dir/project" 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a normal session must still bind the legacy Herdr endpoint"
+  assert_not_contains "$out" "gate" "normal binding must not print a gate refusal"
+  grep -qxF "endpoint_task_id=$id" "$dir/home/state/$id.meta" \
+    || fail "normal binding did not publish the task id: $out"
+
+  dir=$(seed_gate_case legacy-herdr-gate-bypass)
+  run_herdr_bind_case "$dir" "$id" > "$dir/bind.out" 2> "$dir/bind.err" \
+    || fail "bypassed test-harness binding failed: $(cat "$dir/bind.err")"
+  grep -qxF "endpoint_task_id=$id" "$dir/home/state/$id.meta" \
+    || fail "bypassed test-harness binding did not publish the task id"
+
+  pass "legacy Herdr binding refuses from a no-mistakes gate context before metadata publication or Herdr access, and normal and bypassed test operation still bind"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
+test_gate_context_refuses_binding_before_mutation
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup

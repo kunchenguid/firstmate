@@ -5,7 +5,9 @@
 # Usage: fm-herdr-endpoint-bind.sh <task-id>
 #
 # Exit status: 0 the binding was published and validated; 1 the binding was
-# refused and the task's metadata is unchanged; 2 usage error; 3 the binding was
+# refused and the task's metadata is unchanged; 2 usage error; 3 the shared
+# no-mistakes gate-agent refusal fired before any metadata mutation or Herdr
+# access (bin/fm-gate-refuse-lib.sh owns that status); 4 the binding was
 # published but its post-publication validation failed and the published record
 # is preserved for inspection.
 #
@@ -28,7 +30,7 @@
 # changed label or topology, duplicate labels, ambiguous metadata, or any read
 # error refuses without changing metadata. If publication succeeds but the
 # post-publication validation of the resulting record fails, the script reports
-# a distinct PUBLISHED_THEN_FAILED hard error with its own exit status 3 and
+# a distinct PUBLISHED_THEN_FAILED hard error with its own exit status 4 and
 # preserves the published record for inspection rather than rolling back over a
 # possible concurrent writer.
 # After a successful binding,
@@ -47,6 +49,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+
+# Fail closed before any metadata mutation or Herdr access: a no-mistakes gate
+# agent must never publish an endpoint binding on a live task, which is what
+# unlocks that task's cleanup (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
 
 usage() {
   echo "usage: fm-herdr-endpoint-bind.sh <task-id>" >&2
@@ -60,11 +69,12 @@ refuse() {
 # Used only after the binding has already replaced the task's metadata. The
 # older snapshot is never restored, because a concurrent metadata writer need
 # not hold the spawn lock and a rollback could clobber newer state. Its exit
-# status 3 is distinct from refuse()'s 1 so a caller can tell a published record
-# that failed validation from an untouched one without parsing stderr.
+# status 4 is distinct from refuse()'s 1 and from the gate refusal's
+# FM_GATE_REFUSE_EXIT 3 so a caller can tell a published record that failed
+# validation from an untouched one without parsing stderr.
 published_failure() {
   echo "PUBLISHED_THEN_FAILED: $*; the published record at $META is preserved unchanged for inspection." >&2
-  exit 3
+  exit 4
 }
 
 [ "$#" -eq 1 ] || { usage; exit 2; }
