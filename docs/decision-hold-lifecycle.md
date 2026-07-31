@@ -21,11 +21,14 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
+Verification accepts a listed decision only when tasks-axi parses it as a resolved captain row in the live backlog or as one unique resolved captain row in `data/done-archive.md`.
+An active unresolved row, an absent row, a duplicate archived identity, a malformed row, or an indeterminate live lookup keeps teardown refusing.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
+A later tasks-axi prune moves the resolved row to `data/done-archive.md` without invalidating the teardown proof.
 A failed intermediate step leaves the hold open.
 
 ## Structured read surfaces
@@ -43,6 +46,7 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Resolved-row archive verification date: 2026-07-30.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -55,7 +59,10 @@ The final verification commands and their exact summarized outputs follow.
 $ bash tests/fm-decision-hold-lifecycle.test.sh
 ok - report-only unresolved decision is reproduced and completion refuses before loss
 ok - non-forced scout teardown always requires durable inventory verification
-ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
+ok - resolved and durably pruned captain decision allows teardown
+ok - unresolved captain decision still refuses teardown
+ok - never-existing or indeterminate captain decision still refuses teardown
+ok - captain holds are idempotent, distinct, teardown-blocking until resolved, and durably routed
 ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds

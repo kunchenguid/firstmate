@@ -31,7 +31,9 @@
 # metadata inventory is unioned idempotently. A post-teardown visual review can
 # complete against the surviving report and holds without recreating task state.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
-# source before this gate has succeeded.
+# source before every inventoried decision has a positive durable resolution.
+# A resolved row may have moved from the live backlog into its configured archive.
+# Missing, duplicated, malformed, or still-open records keep teardown refusing.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
@@ -110,6 +112,46 @@ task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
 }
 
+archived_task_show() {  # <id>
+  local id=$1 archive="$DATA/done-archive.md" prefix matches
+  [ -f "$archive" ] || return 1
+  prefix="- [x] $id - "
+  matches=$(awk -v prefix="$prefix" '
+    index($0, prefix) == 1 { count++ }
+    END { print count + 0 }
+  ' "$archive") || return 1
+  [ "$matches" -eq 1 ] || return 1
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    awk -v prefix="$prefix" '
+      /^- \[[ x]\] / {
+        if (capture) exit
+        if (index($0, prefix) == 1) {
+          capture = 1
+          print
+        }
+        next
+      }
+      capture {
+        if ($0 ~ /^## /) exit
+        print
+      }
+    ' "$archive"
+  } | tasks_axi show "$id" --full --file /dev/stdin 2>/dev/null
+}
+
+task_show_durable() {  # <id>
+  local id=$1 show
+  if show=$(tasks_axi show "$id" --full 2>&1); then
+    printf '%s\n' "$show"
+    return 0
+  fi
+  case "$show" in
+    *"code: NOT_FOUND"*) archived_task_show "$id" ;;
+    *) return 1 ;;
+  esac
+}
+
 show_field() {  # <show-output> <field>
   local output=$1 field=$2
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
@@ -172,7 +214,7 @@ verify_hold_active() {  # <hold-id>
 
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
-  show=$(task_show "$id") || return 1
+  show=$(task_show_durable "$id") || return 1
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -186,7 +228,8 @@ verify_hold_resolved() {  # <hold-id>
 
 verify_hold_durable() {  # <hold-id>
   local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show_durable "$id") \
+    || fail "captain decision $id is absent or indeterminate in the live backlog and durable archive"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -249,7 +292,7 @@ command_hold() {
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   id=$(hold_id "$origin" "$key")
-  if show=$(task_show "$id"); then
+  if show=$(task_show_durable "$id"); then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
@@ -350,7 +393,8 @@ command_verify() {
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
-      verify_hold_durable "$(hold_id "$origin" "$key")"
+      verify_hold_resolved "$(hold_id "$origin" "$key")" \
+        || fail "captain decision $(hold_id "$origin" "$key") is unresolved, absent, or indeterminate"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -360,7 +404,8 @@ EOF
     [ -n "$key" ] || continue
     list_has_key "$keys" "$key" \
       || fail "open structured decision $origin/$key is outside the reviewed inventory"
-    verify_hold_durable "$(hold_id "$origin" "$key")"
+    verify_hold_resolved "$(hold_id "$origin" "$key")" \
+      || fail "captain decision $(hold_id "$origin" "$key") is unresolved, absent, or indeterminate"
   done <<EOF
 $open
 EOF
@@ -394,7 +439,8 @@ command_resolve() {
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show "$id")
+    hold_show=$(task_show_durable "$id") \
+      || fail "captain hold $id disappeared after its durable resolution was verified"
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"

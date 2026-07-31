@@ -39,7 +39,8 @@ run_bearings() {  # <home>
 
 run_teardown() {  # <home> <id>
   local home=$1 id=$2
-  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id"
 }
@@ -181,21 +182,6 @@ EOF
       and (.gates | any(.id == $route or .id == $access) | not)
   ' >/dev/null || fail "Bearings did not surface structured captain holds: $json"
 
-  run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
-    || fail "reviewed investigation teardown failed: $(cat "$home/teardown.err")"
-  tasks_in "$home" "done" "$id" --report "data/$id/report.md" --keep 0 >/dev/null \
-    || fail "could not archive completed investigation"
-  ! grep -E "^- \[[ x]\] $id -" "$home/data/backlog.md" >/dev/null \
-    || fail "origin remained in the live backlog after archival"
-  grep -E "^- \[x\] $id -" "$home/data/done-archive.md" >/dev/null \
-    || fail "origin was not durably archived"
-  json=$(run_bearings "$home") || fail "Bearings failed after source teardown and archival"
-  printf '%s' "$json" | jq -e --arg route "$route_hold" --arg access "$access_hold" '
-    (.decisions_open | any(.id == $route and .verb == "captain-hold"))
-      and (.decisions_open | any(.id == $access and .verb == "captain-hold"))
-      and (.in_flight | any(.id == "sample-systems-review") | not)
-  ' >/dev/null || fail "teardown or archival erased a captain-held decision: $json"
-
   tasks_in "$home" add sample-route-implementation "Apply the selected sample route" \
     --kind ship --repo sample >/dev/null \
     || fail "could not create dependent work fixture"
@@ -273,7 +259,28 @@ EOF
       and (.gates | any(.id == "sample-route-implementation"))
       and (.decisions_open | any(.id == "sample-systems-review") | not)
   ' >/dev/null || fail "resolved or decision-like report prose produced a false hold: $json"
-  pass "captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close"
+
+  tasks_in "$home" add sample-access-implementation "Apply the selected sample access" \
+    --kind ship --repo sample --blocked-by "$access_hold" >/dev/null \
+    || fail "could not create access dependent work fixture"
+  printf 'Use restricted sample access.\n' > "$home/access-decision.txt"
+  run_decisions "$home" resolve "$id" access --decision-file "$home/access-decision.txt" \
+    --routed-to sample-access-implementation >/dev/null \
+    || fail "could not resolve the access decision"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
+    || fail "fully resolved investigation teardown failed: $(cat "$home/teardown.err")"
+  tasks_in "$home" "done" "$id" --report "data/$id/report.md" --keep 0 >/dev/null \
+    || fail "could not archive completed investigation"
+  ! grep -E "^- \[[ x]\] $id -" "$home/data/backlog.md" >/dev/null \
+    || fail "origin remained in the live backlog after archival"
+  grep -E "^- \[x\] $id -" "$home/data/done-archive.md" >/dev/null \
+    || fail "origin was not durably archived"
+  json=$(run_bearings "$home") || fail "Bearings failed after source teardown and archival"
+  printf '%s' "$json" | jq -e --arg route "$route_hold" --arg access "$access_hold" '
+    (.decisions_open | any(.id == $route or .id == $access) | not)
+      and (.in_flight | any(.id == "sample-systems-review") | not)
+  ' >/dev/null || fail "resolved teardown left an open decision or live origin: $json"
+  pass "captain holds are idempotent, distinct, teardown-blocking until resolved, and durably routed"
 }
 
 test_scout_teardown_always_requires_inventory_verification() {
@@ -303,6 +310,113 @@ EOF
   fi
   assert_present "$home/state/$id.meta" "refused unavailable-task teardown removed metadata"
   pass "non-forced scout teardown always requires durable inventory verification"
+}
+
+test_resolved_pruned_hold_allows_teardown() {
+  local home id hold filler
+  home=$(make_home resolved-pruned-teardown)
+  id=sample-pruned-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review the pruned sample decision" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create pruned-decision origin fixture"
+  write_origin_meta "$home" "$id"
+  printf 'needs-decision [key=route]: choose the sample route\ndone: report complete\n' \
+    > "$home/state/$id.status"
+  printf '# Pruned sample review\n\nThe route decision was inventoried.\n' \
+    > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" route \
+    --title "Choose the pruned sample route" --reason "captain route pending" --repo sample) \
+    || fail "could not register pruned-decision hold"
+  run_decisions "$home" complete "$id" route >/dev/null \
+    || fail "could not complete the pruned-decision inventory"
+  tasks_in "$home" add sample-pruned-route "Apply the pruned sample route" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create pruned-decision routed work"
+  printf 'Use the north sample route.\n' > "$home/route-decision.txt"
+  run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-pruned-route >/dev/null \
+    || fail "could not resolve the pruned-decision hold"
+
+  filler=1
+  while [ "$filler" -le 10 ]; do
+    tasks_in "$home" add "done-filler-$filler" "Done filler $filler" \
+      --kind ship --repo sample >/dev/null \
+      || fail "could not create done filler $filler"
+    tasks_in "$home" "done" "done-filler-$filler" >/dev/null \
+      || fail "could not close done filler $filler"
+    filler=$((filler + 1))
+  done
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "resolved hold remained in the live backlog instead of being pruned"
+  fi
+  assert_grep "$hold" "$home/data/done-archive.md" \
+    "resolved hold was not durably archived after pruning"
+  assert_grep "Resolution recorded by fm-decision-hold" "$home/data/done-archive.md" \
+    "pruned hold archive lost the resolution record"
+  run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-pruned-route >/dev/null \
+    || fail "identical resolution retry could not use the durable archive"
+  if run_decisions "$home" hold "$id" route \
+    --title "Choose the pruned sample route" --reason "captain route pending" --repo sample \
+    > "$home/reopened-hold.out" 2> "$home/reopened-hold.err"; then
+    fail "resolved archived identity was reopened as a new hold"
+  fi
+  assert_grep "already durably resolved" "$home/reopened-hold.err" \
+    "archived identity refusal did not preserve the resolved-key contract"
+
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "resolved and durably pruned decision blocked teardown: $(cat "$home/teardown.err")"
+  pass "resolved and durably pruned captain decision allows teardown"
+}
+
+test_unresolved_hold_refuses_teardown() {
+  local home id hold
+  home=$(make_home unresolved-teardown)
+  id=sample-unresolved-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review the unresolved sample decision" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create unresolved origin fixture"
+  write_origin_meta "$home" "$id"
+  printf 'needs-decision [key=route]: choose the sample route\ndone: report complete\n' \
+    > "$home/state/$id.status"
+  printf '# Unresolved sample review\n\nThe route decision remains open.\n' \
+    > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" route \
+    --title "Choose the unresolved sample route" --reason "captain route pending" --repo sample) \
+    || fail "could not register unresolved-decision hold"
+  run_decisions "$home" complete "$id" route >/dev/null \
+    || fail "could not complete the unresolved-decision inventory"
+  assert_grep "$hold" "$home/data/backlog.md" "unresolved hold is not in the live backlog"
+
+  if run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"; then
+    fail "unresolved captain decision allowed teardown"
+  fi
+  assert_present "$home/state/$id.meta" "unresolved-decision refusal removed origin metadata"
+  assert_grep "is unresolved, absent, or indeterminate" "$home/teardown.err" \
+    "unresolved-decision refusal did not identify the failed resolution gate"
+  pass "unresolved captain decision still refuses teardown"
+}
+
+test_never_existed_inventory_refuses_teardown() {
+  local home id
+  home=$(make_home never-existed-teardown)
+  id=sample-never-existed-review
+  mkdir -p "$home/data/$id"
+  write_origin_meta "$home" "$id"
+  printf 'decisions_reviewed=1\ndecision_keys=missing-route\n' >> "$home/state/$id.meta"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Never-existing sample review\n\nThe recorded identity has no durable row.\n' \
+    > "$home/data/$id/report.md"
+
+  if run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"; then
+    fail "never-existing captain decision allowed teardown"
+  fi
+  assert_present "$home/state/$id.meta" "indeterminate-decision refusal removed origin metadata"
+  assert_grep "is unresolved, absent, or indeterminate" "$home/teardown.err" \
+    "indeterminate-decision refusal did not identify the failed resolution gate"
+  pass "never-existing or indeterminate captain decision still refuses teardown"
 }
 
 test_origin_slug_validation_precedes_path_construction() {
@@ -438,9 +552,6 @@ EOF
     || fail "secondmate-owned hold creation failed"
   run_decisions "$mate" complete "$origin" release >/dev/null \
     || fail "secondmate-owned completion failed"
-  run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
-    || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
-  tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
 
   printf -- '- sample-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
     "$mate" > "$parent/data/secondmates.md"
@@ -452,6 +563,23 @@ EOF
   ' >/dev/null || fail "secondmate captain hold did not surface with authoritative owner: $json"
   assert_no_grep "$hold" "$parent/data/backlog.md" "secondmate hold leaked into the main backlog"
   assert_grep "$hold" "$mate/data/backlog.md" "secondmate hold left its authoritative backlog"
+
+  tasks_in "$mate" add sample-mate-release "Apply the sample mate release" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create secondmate-owned routed work"
+  printf 'Use the stable sample release.\n' > "$mate/release-decision.txt"
+  run_decisions "$mate" resolve "$origin" release --decision-file "$mate/release-decision.txt" \
+    --routed-to sample-mate-release >/dev/null \
+    || fail "could not resolve the secondmate-owned decision"
+  run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
+    || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
+  tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
+  json=$(run_bearings "$parent") || fail "parent Bearings failed after secondmate resolution"
+  printf '%s' "$json" | jq -e --arg hold "$hold" '
+    .decisions_open | any(.id == $hold) | not
+  ' >/dev/null || fail "resolved secondmate hold remained in Captain's Call: $json"
+  assert_grep "$hold" "$mate/data/done-archive.md" \
+    "resolved secondmate hold was not archived in its authoritative home"
   pass "main-home and secondmate-home captain holds remain correctly routed"
 }
 
@@ -553,6 +681,9 @@ test_resolve_matches_quoted_blocked_by_edges() {
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
+test_resolved_pruned_hold_allows_teardown
+test_unresolved_hold_refuses_teardown
+test_never_existed_inventory_refuses_teardown
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
