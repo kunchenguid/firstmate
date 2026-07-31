@@ -8,6 +8,7 @@ The water fills the usable width in standard ANSI blue and the complete boat is 
 The boat is deliberately calm: it moves one column every 880ms, while the water ripples on its own faster cadence so the surface stays alive between boat steps.
 Its mainsail is directional, showing `<|` while travelling right and `|>` while travelling left, and it flips on the exact frame the boat turns at either edge.
 Every resize reflows the sprite without wrapping, and it disappears when the run settles, aborts, or fails.
+Within one Pi session, the next working period resumes the boat from that frozen column and travel direction rather than restarting at the left edge; a fresh Pi session starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, the shells for Pi's seven built-in tools, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.

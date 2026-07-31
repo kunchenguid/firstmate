@@ -1646,6 +1646,7 @@ const {
   CALM_WORKING_SHIP_TICK_MS,
   CALM_WORKING_SHIP_TICKS_PER_MOVE,
   createCalmWorkingShipAnimation,
+  createCalmWorkingShipWidget,
 } = ship;
 
 const ESC = "\u001b";
@@ -1919,6 +1920,134 @@ for (const width of [40, 16, 8, 6, 5, 4, 3, 2]) {
   }
 }
 
+// --- Freeze/resume continuity on one shared animation instance ---------------------
+// Hiding the working presentation must freeze column and direction. The next widget
+// bound to the same animation resumes exactly there; hidden wall time must not jump.
+{
+  const animation = createCalmWorkingShipAnimation();
+  const tui = { requestRender() {} };
+  animation.render(40);
+  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE * 7; step += 1) animation.tick();
+  const frozenColumn = animation.position();
+  const frozenDirection = animation.direction();
+  const frozenPhase = animation.waterPhase();
+  check(frozenColumn > 0, `continuity setup never left the left edge: ${frozenColumn}`);
+
+  const first = createCalmWorkingShipWidget(tui, animation);
+  check(first.render(40) && animation.position() === frozenColumn, "binding a widget moved the frozen boat");
+  first.dispose();
+  // Dispose freezes; further wall time without ticks must not change logical state.
+  check(animation.position() === frozenColumn, "dispose changed the frozen column");
+  check(animation.direction() === frozenDirection, "dispose changed the frozen direction");
+  check(animation.waterPhase() === frozenPhase, "dispose changed the frozen water phase");
+
+  const resumed = createCalmWorkingShipWidget(tui, animation);
+  const firstFrame = resumed.render(40);
+  check(
+    animation.position() === frozenColumn && animation.direction() === frozenDirection,
+    `resume first frame left frozen state: col=${animation.position()} dir=${animation.direction()}`,
+  );
+  check(sailOf(firstFrame) === (frozenDirection >= 0 ? "<|" : "|>"), "resume first frame lost sail heading");
+  check(animation.waterPhase() === frozenPhase, "resume advanced water phase without a tick");
+  // After resume, motion continues from the frozen state rather than restarting.
+  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) animation.tick();
+  check(
+    animation.position() === frozenColumn + frozenDirection,
+    `post-resume motion did not continue from frozen column: ${animation.position()}`,
+  );
+  resumed.dispose();
+
+  // Hidden resize clamps without needing a live widget, and preserves a valid heading.
+  animation.render(80);
+  while (animation.position() < 76) animation.tick();
+  check(animation.position() === 76 && animation.direction() === -1, "endpoint setup failed before hidden resize");
+  const beforeHiddenResize = { column: animation.position(), direction: animation.direction(), phase: animation.waterPhase() };
+  animation.clampToWidth(20);
+  check(animation.position() === 16, `hidden shrink did not clamp: ${animation.position()}`);
+  check(animation.direction() === -1, "hidden shrink lost the leftward heading at the right edge");
+  check(animation.waterPhase() === beforeHiddenResize.phase, "hidden clamp advanced water phase");
+  // Growing while hidden must not invent motion either.
+  animation.clampToWidth(60);
+  check(animation.position() === 16, `hidden grow moved the boat: ${animation.position()}`);
+  check(animation.direction() === -1, "hidden grow changed direction without cause");
+
+  // Endpoint and bounce continuity: pause immediately before, at, and after each edge.
+  for (const scenario of [
+    { label: "before-right", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 7) anim.tick();
+      check(anim.position() === 7 && anim.direction() === 1, "before-right setup");
+    }},
+    { label: "at-right", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 8) anim.tick();
+      check(anim.position() === 8 && anim.direction() === -1, "at-right setup");
+    }},
+    { label: "after-right", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 8) anim.tick();
+      for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) anim.tick();
+      check(anim.position() === 7 && anim.direction() === -1, "after-right setup");
+    }},
+    { label: "before-left", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 8) anim.tick();
+      while (!(anim.position() === 1 && anim.direction() === -1)) anim.tick();
+    }},
+    { label: "at-left", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 8) anim.tick();
+      while (!(anim.position() === 0 && anim.direction() === 1)) anim.tick();
+    }},
+    { label: "after-left", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 8) anim.tick();
+      while (!(anim.position() === 0 && anim.direction() === 1)) anim.tick();
+      for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) anim.tick();
+      check(anim.position() === 1 && anim.direction() === 1, "after-left setup");
+    }},
+  ]) {
+    const edge = createCalmWorkingShipAnimation();
+    scenario.setup(edge);
+    const frozen = { column: edge.position(), direction: edge.direction(), phase: edge.waterPhase() };
+    const paused = createCalmWorkingShipWidget(tui, edge);
+    paused.dispose();
+    const again = createCalmWorkingShipWidget(tui, edge);
+    again.render(12);
+    check(
+      edge.position() === frozen.column && edge.direction() === frozen.direction && edge.waterPhase() === frozen.phase,
+      `${scenario.label} resume changed frozen edge state`,
+    );
+    for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) edge.tick();
+    const expectedColumn = Math.min(8, Math.max(0, frozen.column + frozen.direction));
+    let expectedDirection = frozen.direction;
+    if (expectedColumn >= 8) expectedDirection = -1;
+    else if (expectedColumn <= 0) expectedDirection = 1;
+    check(
+      edge.position() === expectedColumn && edge.direction() === expectedDirection,
+      `${scenario.label} post-resume bounce drifted: col=${edge.position()} dir=${edge.direction()}`,
+    );
+    again.dispose();
+  }
+
+  // reset() returns a genuine fresh-session initial state.
+  animation.reset();
+  check(
+    animation.position() === 0 && animation.direction() === 1 && animation.waterPhase() === 0,
+    "reset() did not restore the normal initial boat state",
+  );
+  animation.render(40);
+  check(sailOf(animation.render(40)) === "<|", "reset() first frame was not the initial rightward sail");
+
+  // Two controller instances never share motion state.
+  const left = createCalmWorkingShipAnimation();
+  const right = createCalmWorkingShipAnimation();
+  left.render(40);
+  right.render(40);
+  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE * 3; step += 1) left.tick();
+  check(left.position() === 3 && right.position() === 0, "separate animations leaked motion state");
+}
+
 // --- Lifecycle through the Calm extension's registered handlers --------------------
 let liveTimers = 0;
 const realSetInterval = globalThis.setInterval;
@@ -2068,6 +2197,19 @@ check(shipWidget() === widget, "repeated starts replaced the running widget");
 }
 
 // --- Settling removes the boat, stops the animation, and restores the stock row ----
+// Drive the live widget far enough that a left-edge reset would be observable.
+{
+  const moving = shipWidget();
+  check(!!moving, "continuity setup lost the live working widget");
+  moving.render(40);
+  await new Promise((resolve) => setTimeout(resolve, CALM_WORKING_SHIP_TICK_MS * CALM_WORKING_SHIP_TICKS_PER_MOVE * 5 + 40));
+  moving.render(40);
+}
+const hullColumn = (widget) => strip(widget.render(40)[1]).indexOf("\\__/");
+const freezeColumn = hullColumn(shipWidget());
+const freezeSail = sailOf(shipWidget().render(40));
+check(freezeColumn > 0, `lifecycle continuity setup never left the left edge: ${freezeColumn}`);
+
 reset();
 await fire("agent_settled");
 check(
@@ -2085,12 +2227,49 @@ check(
 {
   // No stale rows survive the removal: the widget renders nothing once disposed.
   const renderRequestsAfterDispose = renderRequests;
-  await new Promise((resolve) => setTimeout(resolve, CALM_WORKING_SHIP_TICK_MS * 3));
+  await new Promise((resolve) => setTimeout(resolve, CALM_WORKING_SHIP_TICK_MS * CALM_WORKING_SHIP_TICKS_PER_MOVE * 3));
   check(
     renderRequests === renderRequestsAfterDispose,
     "the animation kept running after the widget was removed",
   );
 }
+
+// --- Later working period resumes the frozen column and direction -----------------
+reset();
+await fire("agent_start");
+check(liveTimers === 1, `resume start left ${liveTimers} animation timers instead of one`);
+check(ui.widgets.size === 1, "resume start did not install exactly one working widget");
+const resumedWidget = shipWidget();
+const resumeColumn = hullColumn(resumedWidget);
+const resumeSail = sailOf(resumedWidget.render(40));
+check(
+  resumeColumn === freezeColumn && resumeSail === freezeSail,
+  `resume reset the boat instead of continuing: froze ${freezeColumn}/${freezeSail}, resumed ${resumeColumn}/${resumeSail}`,
+);
+// Repeated start/settle cycles must not duplicate scheduler or widget ownership.
+for (let cycle = 0; cycle < 3; cycle += 1) {
+  await fire("agent_settled");
+  check(liveTimers === 0, `cycle ${cycle} settle left ${liveTimers} timers`);
+  check(ui.widgets.size === 0, `cycle ${cycle} settle left a residual widget`);
+  await fire("agent_start");
+  check(liveTimers === 1, `cycle ${cycle} start left ${liveTimers} timers`);
+  check(ui.widgets.size === 1, `cycle ${cycle} start left ${ui.widgets.size} widgets`);
+  check(
+    hullColumn(shipWidget()) >= freezeColumn,
+    `cycle ${cycle} lost continuity after repeated settle/start`,
+  );
+}
+await fire("agent_settled");
+check(liveTimers === 0 && ui.widgets.size === 0, "repeated continuity cycles did not finish clean");
+
+// A genuine fresh session resets to the normal initial position.
+reset();
+await fire("session_start", { reason: "new" });
+check(liveTimers === 0 && ui.widgets.size === 0, "fresh session left a stale boat");
+await fire("agent_start");
+check(hullColumn(shipWidget()) === 0, "fresh session did not restart at the left edge");
+check(sailOf(shipWidget().render(40)) === "<|", "fresh session lost the initial rightward sail");
+await fire("agent_settled");
 
 // --- Abort and failure share Pi's agent_settled path ------------------------------
 // Pi emits agent_settled from a finally block, so an aborted or failed run reaches
@@ -2173,11 +2352,11 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi Calm working-ship checks failed: $out"
   [ -z "$out" ] || fail "Pi Calm working-ship test printed output: $out"
-  pass "Pi Calm working ship moves on a slow independent cadence over faster fixed-cell blue water, paints the complete boat standard yellow with balanced resets, keeps ANSI-stripped width exact, flips the directional sail on the exact bounce at both edges and every width, clamps resizes, falls back deterministically when narrow, and installs and removes one scheduler-owning widget across starts, settle, abort, failure, shutdown, reload, replacement, and Calm toggles while leaving Calm-off visibility untouched"
+  pass "Pi Calm working ship moves on a slow independent cadence over faster fixed-cell blue water, paints the complete boat standard yellow with balanced resets, keeps ANSI-stripped width exact, flips the directional sail on the exact bounce at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes column/direction across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and installs and removes one scheduler-owning widget across starts, settle, abort, failure, shutdown, reload, replacement, and Calm toggles while leaving Calm-off visibility untouched"
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -2208,6 +2387,8 @@ test_interactive_terminal_e2e() {
   boat_color_snapshot="$TMP_ROOT/boat-color.txt"
   boat_water_snapshot="$TMP_ROOT/boat-water.txt"
   boat_narrow_snapshot="$TMP_ROOT/boat-narrow.txt"
+  boat_freeze_snapshot="$TMP_ROOT/boat-freeze.txt"
+  boat_resume_snapshot="$TMP_ROOT/boat-resume.txt"
   restarted_snapshot="$TMP_ROOT/restarted.txt"
   resumed_restored_snapshot="$TMP_ROOT/resumed-restored.txt"
   mkdir -p "$project/.pi/extensions/lib" "$project/bin" "$project/state" "$config" "$home/config"
@@ -2828,6 +3009,19 @@ JS
     i=$((i + 1))
   done
 
+  # Capture the last on-screen column and sail before settling so the next working
+  # period in this same Pi session can prove freeze/resume continuity.
+  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_freeze_snapshot"
+  boat_freeze_column=$(awk 'index($0,"\\__/"){print index($0,"\\__/"); exit}' "$boat_freeze_snapshot")
+  boat_freeze_sail=$(grep -E '<\||\|>' "$boat_freeze_snapshot" | tail -1 || true)
+  case "$boat_freeze_sail" in
+    *'<|'*) boat_freeze_sail='<|' ;;
+    *'|>'*) boat_freeze_sail='|>' ;;
+    *) fail "could not read the freeze-frame sail heading" ;;
+  esac
+  [ -n "$boat_freeze_column" ] && [ "$boat_freeze_column" -gt 1 ] \
+    || fail "freeze frame never left the left edge (column '${boat_freeze_column:-empty}')"
+
   # Escape aborts the run, and the abort path removes the ship with no residue.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
   active_screen_wait=0
@@ -2842,6 +3036,50 @@ JS
   assert_not_contains "$(cat "$boat_cleared_snapshot")" '\__/' "Escape did not remove the working ship"
   assert_not_contains "$(cat "$boat_cleared_snapshot")" "CALM_WORKING_E2E_RESPONSE" "the long-delay fixture settled instead of aborting on Escape"
   assert_not_contains "$(cat "$boat_cleared_snapshot")" "FOCUSPROBE" "the editor kept the focus probe text after Escape"
+
+  # A later working period in the same Pi process must resume the frozen column and
+  # sail rather than recreating the boat at the left edge. Capture the first resumed
+  # frames quickly so the slow boat cadence cannot advance before the assertion.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  boat_resume_column=""
+  boat_resume_sail=""
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resume_snapshot"
+    if grep -Fq '\__/' "$boat_resume_snapshot"; then
+      boat_resume_column=$(awk 'index($0,"\\__/"){print index($0,"\\__/"); exit}' "$boat_resume_snapshot")
+      boat_resume_sail=$(grep -E '<\||\|>' "$boat_resume_snapshot" | tail -1 || true)
+      case "$boat_resume_sail" in
+        *'<|'*) boat_resume_sail='<|' ;;
+        *'|>'*) boat_resume_sail='|>' ;;
+      esac
+      break
+    fi
+    sleep 0.025
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ -n "$boat_resume_column" ] \
+    || fail "the second working period never showed the working ship"
+  [ "$boat_resume_column" -eq "$boat_freeze_column" ] \
+    || fail "the second working period reset the boat from column $boat_freeze_column to $boat_resume_column instead of resuming"
+  [ "$boat_resume_sail" = "$boat_freeze_sail" ] \
+    || fail "the second working period changed sail from $boat_freeze_sail to $boat_resume_sail"
+  assert_not_contains "$(cat "$boat_resume_snapshot")" "Working..." \
+    "the second working period left Pi's stock working row visible"
+
+  # Clear the resumed run before the Calm-off stock-row probe.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_cleared_snapshot"
+    if ! grep -Fq '\__/' "$boat_cleared_snapshot"; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" '\__/' "Escape did not remove the resumed working ship"
 
   # Calm off restores Pi's stock working row and never shows the ship.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
@@ -2923,7 +3161,7 @@ JS
   [ "$(cat "$home/config/calm")" = off ] || fail "/calm after restart did not persist the inactive choice"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
+  pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
 test_home_resolution
