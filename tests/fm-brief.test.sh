@@ -618,6 +618,53 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# --group=<name> adds a relative symlink data/<name>/<id> -> ../<id>, without
+# changing the authoritative flat data/<id> path other scripts key off.
+test_group_symlink_behavior() {
+  local home id1 id2 link1 link2 status err
+  home="$TMP_ROOT/group-home"
+  mkdir -p "$home/data"
+
+  id1="brief-group-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id1" alpha --scout --group=my-initiative >/dev/null 2>&1
+  status=$?
+  expect_code 0 "$status" "fm-brief.sh with --group should exit 0"
+  assert_present "$home/data/$id1/brief.md" "grouped brief was not scaffolded at its authoritative flat path"
+  link1="$home/data/my-initiative/$id1"
+  [ -L "$link1" ] || fail "--group did not create a symlink at $link1"
+  [ "$(readlink "$link1")" = "../$id1" ] || fail "$link1 must be a relative symlink to ../$id1, got $(readlink "$link1")"
+
+  # A second task under the same --group must add a second symlink alongside
+  # the first, not fail or clobber it (the group directory already exists).
+  id2="brief-group-e2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id2" alpha --scout --group=my-initiative >/dev/null 2>&1
+  status=$?
+  expect_code 0 "$status" "a second task under the same --group should exit 0"
+  link2="$home/data/my-initiative/$id2"
+  [ -L "$link2" ] || fail "second --group task did not get its own symlink at $link2"
+  [ -L "$link1" ] || fail "second --group task removed the first task's symlink at $link1"
+
+  # Omitting --group must not create any grouping folder for that task.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-group-e3 alpha --scout >/dev/null 2>&1
+  [ -e "$home/data/ungrouped-should-not-exist" ] && fail "a task without --group unexpectedly created a group folder"
+
+  # An invalid group name (path separator, or . / ..) must refuse loudly.
+  err="$TMP_ROOT/group-invalid.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-group-e4 alpha --scout --group=../escape >/dev/null 2>"$err"
+  status=$?
+  expect_code 1 "$status" "--group with a path separator must be refused"
+  assert_present "$err" "invalid --group must print an error"
+
+  # --group is not applicable to --secondmate charters.
+  err="$TMP_ROOT/group-secondmate.err"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=x \
+    "$ROOT/bin/fm-brief.sh" brief-group-e5 --secondmate --group=my-initiative alpha >/dev/null 2>"$err"
+  status=$?
+  expect_code 1 "$status" "--group combined with --secondmate must be refused"
+
+  pass "fm-brief.sh: --group creates additive, idempotent-per-task symlinks without touching the flat data/<id> path"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -635,3 +682,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_group_symlink_behavior

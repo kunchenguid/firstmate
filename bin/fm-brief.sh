@@ -26,6 +26,12 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --group=<name> adds data/<name>/<task-id> as a relative symlink to data/<task-id>,
+#   for browsing several related tasks (usually a project name, or an initiative
+#   spanning several tasks against the same project) as one folder. The authoritative
+#   path stays flat data/<task-id>/ - every other script keys off that path unchanged.
+#   Optional, not applicable to --secondmate. Refuses rather than overwriting an
+#   existing non-matching path at data/<name>/<task-id>.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
@@ -94,6 +100,7 @@ fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+GROUP=""
 POS=()
 for a in "$@"; do
   case "$a" in
@@ -101,10 +108,24 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --group=*) GROUP="${a#--group=}" ;;
     *) POS+=("$a") ;;
   esac
 done
 ID=${POS[0]}
+
+if [ -n "$GROUP" ]; then
+  case "$GROUP" in
+    */* | . | ..)
+      echo "error: --group=$GROUP must be a single path component, not '.', '..', or contain '/'" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ -n "$GROUP" ] && [ "$KIND" = secondmate ]; then
+  echo "error: --group does not apply to --secondmate charters" >&2
+  exit 1
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -119,6 +140,19 @@ fi
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
+
+if [ -n "$GROUP" ]; then
+  mkdir -p "$DATA/$GROUP"
+  GROUP_LINK="$DATA/$GROUP/$ID"
+  if [ -L "$GROUP_LINK" ] && [ "$(readlink "$GROUP_LINK")" = "../$ID" ]; then
+    : # already correct, idempotent
+  elif [ -e "$GROUP_LINK" ] || [ -L "$GROUP_LINK" ]; then
+    echo "error: $GROUP_LINK already exists and is not the expected symlink to ../$ID" >&2
+    exit 1
+  else
+    ln -s "../$ID" "$GROUP_LINK"
+  fi
+fi
 
 shell_quote() {
   printf "'"
