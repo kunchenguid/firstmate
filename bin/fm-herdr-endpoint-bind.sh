@@ -4,6 +4,11 @@
 #
 # Usage: fm-herdr-endpoint-bind.sh <task-id>
 #
+# Exit status: 0 the binding was published and validated; 1 the binding was
+# refused and the task's metadata is unchanged; 2 usage error; 3 the binding was
+# published but its post-publication validation failed and the published record
+# is preserved for inspection.
+#
 # This is the supported bridge for Herdr metadata created before
 # endpoint_task_id= became mandatory. It never closes a pane or tears down a
 # task. It acquires the task's spawn lock, requires a regular single-link meta
@@ -23,8 +28,9 @@
 # changed label or topology, duplicate labels, ambiguous metadata, or any read
 # error refuses without changing metadata. If publication succeeds but the
 # post-publication validation of the resulting record fails, the script reports
-# a distinct PUBLISHED_THEN_FAILED hard error and preserves the published record
-# for inspection rather than rolling back over a possible concurrent writer.
+# a distinct PUBLISHED_THEN_FAILED hard error with its own exit status 3 and
+# preserves the published record for inspection rather than rolling back over a
+# possible concurrent writer.
 # After a successful binding,
 # fm-teardown.sh still runs its unchanged metadata-only validation before any
 # runtime command or cleanup mutation.
@@ -53,10 +59,12 @@ refuse() {
 
 # Used only after the binding has already replaced the task's metadata. The
 # older snapshot is never restored, because a concurrent metadata writer need
-# not hold the spawn lock and a rollback could clobber newer state.
+# not hold the spawn lock and a rollback could clobber newer state. Its exit
+# status 3 is distinct from refuse()'s 1 so a caller can tell a published record
+# that failed validation from an untouched one without parsing stderr.
 published_failure() {
   echo "PUBLISHED_THEN_FAILED: $*; the published record at $META is preserved unchanged for inspection." >&2
-  exit 1
+  exit 3
 }
 
 [ "$#" -eq 1 ] || { usage; exit 2; }

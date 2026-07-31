@@ -548,7 +548,8 @@ test_legacy_herdr_binding_requires_exact_live_proof() {
   rc=$?
   set -e
   HERDR_BIND=$real_bind
-  [ "$rc" -ne 0 ] || fail "post-publication validation failure did not stop the binding"
+  [ "$rc" -eq 3 ] \
+    || fail "post-publication validation failure did not exit with its distinct status 3: got $rc"
   grep -F "PUBLISHED_THEN_FAILED" "$dir/bind.err" >/dev/null \
     || fail "post-publication failure did not use its distinct diagnostic: $(cat "$dir/bind.err")"
   if grep -F "preserving task metadata" "$dir/bind.err" >/dev/null; then
