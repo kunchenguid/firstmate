@@ -911,7 +911,8 @@ test_bootstrap_opt_out_cleanup() {
   printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
-  out=$(env -u CLAUDECODE GROK_AGENT=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  out=$(env -u CLAUDECODE PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT=1 \
+    FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "Grok tracked background task" \
     "opt-out remediation must keep the repair instruction for model-driven harnesses"
   # Away mode owns supervision, so the Stop-owned auto-arm never fires; the
