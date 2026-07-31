@@ -22,5 +22,132 @@
   "default": [
     { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
     { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
-  ]
+  ],
+  "_scheduling": {
+    "_note": "Optional. Delete this whole block to leave fleet admission control inert.",
+    "admission_control": {
+      "_note": "Third layer above routing and scheduling: whether the fleet should accept another task at all right now, from fleet state only. Every numeric threshold is deliberately null and observation-only until production evidence justifies a value.",
+      "schema_version": 1,
+      "enabled": true,
+      "enforcement_mode": "safety-only",
+      "fleet_id": "example-fleet",
+      "combine": "most_restrictive",
+      "severity_order": ["preferred", "soft", "hard"],
+      "unknown_band": "hard",
+      "bands": {
+        "preferred": { "action": "admit" },
+        "soft": { "action": "queue", "hold_kind": "load", "auto_reconsider": true },
+        "hard": { "action": "refuse", "hold_kind": "load", "auto_reconsider": true }
+      },
+      "signals": {
+        "census_integrity": {
+          "enabled": true,
+          "required": true,
+          "source": "fresh-authority-census",
+          "unknown_band": "hard",
+          "max_snapshot_age_seconds": null
+        },
+        "backlog_consistency": {
+          "enabled": true,
+          "enforce": false,
+          "source": "main-inventory",
+          "unknown_band": "hard"
+        },
+        "admission_queue_pressure": {
+          "enabled": true,
+          "enforce": false,
+          "source": "tasks-axi-load-holds-plus-ledger",
+          "queued_soft_count": null,
+          "queued_hard_count": null,
+          "oldest_wait_soft_seconds": null,
+          "oldest_wait_hard_seconds": null
+        },
+        "active_workers": {
+          "enabled": true,
+          "enforce": false,
+          "source": "fresh-authority-census",
+          "soft_count": null,
+          "hard_count": null
+        },
+        "coordination_debt": {
+          "enabled": false,
+          "enforce": false,
+          "source": "wake-outcome-ledger",
+          "pending_wakes_soft_count": null,
+          "pending_wakes_hard_count": null,
+          "oldest_unhandled_wake_soft_seconds": null,
+          "oldest_unhandled_wake_hard_seconds": null,
+          "handled_wake_latency_window_seconds": null,
+          "handled_wake_latency_soft_seconds": null,
+          "handled_wake_latency_hard_seconds": null
+        },
+        "host_resources": {
+          "enabled": false,
+          "enforce": false,
+          "source": "node-summaries",
+          "metrics": {}
+        },
+        "reservation_pressure": {
+          "enabled": false,
+          "enforce": false,
+          "source": "admission-registry",
+          "soft_count": null,
+          "hard_count": null
+        }
+      },
+      "authority": {
+        "mode": "single-primary",
+        "authority_id": "example-primary",
+        "config_mismatch_band": "hard",
+        "unreachable_band": "hard"
+      },
+      "reservations": {
+        "enabled": false,
+        "ttl_seconds": null,
+        "heartbeat_seconds": null,
+        "clock_skew_tolerance_seconds": null,
+        "release_on": ["spawn-failure", "teardown"],
+        "reconcile_on": ["session-start"]
+      },
+      "queue": {
+        "substrate": "tasks-axi hold --kind load",
+        "release_triggers": ["teardown", "session-start"],
+        "already_empty_fleet_recheck": "session-start-only"
+      },
+      "notifications": {
+        "policy_ref": "/_scheduling/notification_bands",
+        "episode_dedupe_seconds": null
+      },
+      "telemetry": {
+        "sink": "wake-outcome-ledger",
+        "record_every_decision": true,
+        "record_signal_values": true,
+        "record_config_paths": true,
+        "record_config_digest": true,
+        "credentials_forbidden": true
+      },
+      "dormant_triggers": {
+        "distributed_registry": {
+          "registered_independent_authorities_gte": 2,
+          "checkpoint": "before provisioning or authorizing a second intake authority"
+        },
+        "remote_nodes": {
+          "registered_remote_nodes_gte": 1,
+          "checkpoint": "before the first remote worker machine joins the fleet"
+        },
+        "empty_fleet_recheck": {
+          "missed_eligible_release_events_gte": 1,
+          "checkpoint": "first session-start review after each measured event"
+        },
+        "numeric_admission_enforcement": {
+          "ledger_observation_days_gte": 30,
+          "checkpoint": "first fleet review after the observation period completes"
+        },
+        "host_resource_enforcement": {
+          "resource_caused_failures_gte": 1,
+          "checkpoint": "post-incident retrospective with a controlled reproduction"
+        }
+      }
+    }
+  }
 }
