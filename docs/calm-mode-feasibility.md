@@ -424,4 +424,3 @@ right-heading:  <|          over  \__/~~-~~~-~
 
 At 3 columns the sprite fell back to a single exact-width row, `<|~`.
 Escape aborted the run leaving `Operation aborted`, no boat, and no stale sprite rows, and the trial exited 0 after deleting its temporary state.
-
