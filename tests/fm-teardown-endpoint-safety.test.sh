@@ -44,6 +44,12 @@ pane=${FM_TEST_HERDR_PANE:-w1:p2}
 reported_tab=${FM_TEST_HERDR_REPORTED_TAB:-$tab}
 label=${FM_TEST_HERDR_LABEL:-fm-legacy-herdr}
 cwd=${FM_TEST_HERDR_CWD:-/unmatched}
+protocol=${FM_TEST_HERDR_PROTOCOL:-14}
+if [ "$#" -eq 2 ] && [ "$1" = status ] && [ "$2" = --json ]; then
+  jq -cn --argjson protocol "$protocol" \
+    '{client:{protocol:$protocol,version:"0.7.1"},server:{running:true}}'
+  exit 0
+fi
 last=
 previous=
 for arg in "$@"; do
@@ -506,6 +512,9 @@ test_legacy_herdr_binding_requires_exact_live_proof() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "legacy Herdr binding guessed among duplicate task labels"
+  grep -F "live Herdr endpoint does not exactly match task $id topology, label, and worktree" \
+    "$dir/bind.err" >/dev/null \
+    || fail "duplicate-label case did not refuse for the label-uniqueness reason: $(cat "$dir/bind.err")"
   cmp -s "$before" "$dir/home/state/$id.meta" \
     || fail "duplicate-label refusal changed legacy Herdr metadata"
 
@@ -522,8 +531,32 @@ test_legacy_herdr_binding_requires_exact_live_proof() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "legacy Herdr binding accepted contradictory pane topology"
+  grep -F "live Herdr endpoint does not exactly match task $id topology, label, and worktree" \
+    "$dir/bind.err" >/dev/null \
+    || fail "topology case did not refuse for the topology reason: $(cat "$dir/bind.err")"
   cmp -s "$before" "$dir/home/state/$id.meta" \
     || fail "topology refusal changed legacy Herdr metadata"
+
+  dir=$(make_case legacy-herdr-old-protocol)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p2" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" "kind=scout"
+  before="$dir/meta.before"
+  cp "$dir/home/state/$id.meta" "$before"
+  set +e
+  FM_TEST_HERDR_PROTOCOL=1 run_herdr_bind_case "$dir" "$id" \
+    > "$dir/bind.out" 2> "$dir/bind.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "legacy Herdr binding trusted an unverified Herdr build"
+  grep -F "older than the verified minimum" "$dir/bind.err" >/dev/null \
+    || fail "unverified Herdr build did not report the version blocker: $(cat "$dir/bind.err")"
+  if grep -F "does not exactly match task" "$dir/bind.err" >/dev/null; then
+    fail "unverified Herdr build was misreported as a stale or missing endpoint"
+  fi
+  cmp -s "$before" "$dir/home/state/$id.meta" \
+    || fail "unverified Herdr build refusal changed legacy Herdr metadata"
 
   local faultbin
   dir=$(make_case legacy-herdr-post-publication)

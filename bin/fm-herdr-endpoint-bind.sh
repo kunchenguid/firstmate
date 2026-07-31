@@ -150,8 +150,8 @@ WORKTREE_REAL=$(CDPATH='' cd -- "$WORKTREE" 2>/dev/null && pwd -P) \
 
 fm_backend_source herdr \
   || refuse "could not load the Herdr backend"
-fm_backend_herdr_tool_check \
-  || refuse "the Herdr CLI tooling required to verify task $ID is unavailable"
+fm_backend_herdr_version_check \
+  || refuse "the Herdr CLI required to verify task $ID is unavailable or is an unverified build"
 
 live_binding_matches() {
   local pane_out tab_out tabs_out panes_out live_cwd live_cwd_real expected_label

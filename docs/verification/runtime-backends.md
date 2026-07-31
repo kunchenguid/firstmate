@@ -231,8 +231,8 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-herdr-endpoint-bind-e2e.test.sh
 ```
 
 The real endpoint's recorded pane, tab, workspace, unique `fm-<task-id>` label, and physical foreground worktree agreed on both read passes before `endpoint_task_id=` was published.
-A second real endpoint with a duplicate task label was refused without changing its metadata, and guarded lab teardown preserved the default-session fleet-state tripwire.
-The deterministic suite also refuses wrong foreground worktrees and cross-wired topology, then proves that a successfully bound record passes the unchanged teardown validator and closes only its exact pane.
+A second real endpoint with a duplicate task label was refused for the exact label-uniqueness reason without changing its metadata, and guarded lab teardown preserved the default-session fleet-state tripwire.
+The deterministic suite also refuses wrong foreground worktrees and cross-wired topology, reports an under-minimum Herdr protocol as the version blocker it is rather than as a stale endpoint, then proves that a successfully bound record passes the unchanged teardown validator and closes only its exact pane.
 
 ### Prune and respawn
 

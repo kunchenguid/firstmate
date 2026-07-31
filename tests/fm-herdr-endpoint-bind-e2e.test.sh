@@ -110,6 +110,9 @@ if FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" PATH="$FAKEBIN:$HERDR_ORIGINAL_P
   "$ROOT/bin/fm-herdr-endpoint-bind.sh" "$DUP_ID" >"$TMP_ROOT/duplicate.out" 2>"$TMP_ROOT/duplicate.err"; then
   fail 'duplicate task labels incorrectly authorized a binding'
 fi
+grep -F "live Herdr endpoint does not exactly match task $DUP_ID topology, label, and worktree" \
+  "$TMP_ROOT/duplicate.err" >/dev/null \
+  || fail "duplicate task label case refused for another reason: $(cat "$TMP_ROOT/duplicate.err")"
 ! grep -q '^endpoint_task_id=' "$HOME_DIR/state/$DUP_ID.meta" \
   || fail 'duplicate task label refusal changed legacy metadata'
 

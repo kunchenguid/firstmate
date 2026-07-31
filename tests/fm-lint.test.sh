@@ -303,6 +303,86 @@ SH
   pass "ShellCheck installer retries a transient download failure"
 }
 
+# The macOS route: no sha256sum on PATH, so the shasum -a 256 fallback is the
+# branch that actually verifies the downloaded asset there.
+test_installer_verifies_with_shasum_when_sha256sum_is_absent() {
+  local tmp fakebin destination out rc tool real
+  tmp=$(fm_test_tmproot fm-shellcheck-shasum)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf 'Darwin\n' ;;
+  -m) printf 'arm64\n' ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    : > "$2"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  cat > "$fakebin/shasum" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$SHASUM_ARGS"
+[ "${1:-}" = -a ] && [ "${2:-}" = 256 ] || exit 2
+printf '56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79  %s\n' "$3"
+SH
+  cat > "$fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -C ]; then
+    mkdir -p "$2/shellcheck-v$FAKE_SHELLCHECK_VERSION"
+    cat > "$2/shellcheck-v$FAKE_SHELLCHECK_VERSION/shellcheck" <<EOF
+#!/usr/bin/env bash
+printf 'ShellCheck - shell script analysis tool\nversion: $FAKE_SHELLCHECK_VERSION\n'
+EOF
+    chmod +x "$2/shellcheck-v$FAKE_SHELLCHECK_VERSION/shellcheck"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  chmod +x "$fakebin/uname" "$fakebin/curl" "$fakebin/shasum" "$fakebin/tar"
+
+  # An isolated PATH is the only way to prove the fallback: prepending a fakebin
+  # cannot hide a real sha256sum further down the host's PATH.
+  for tool in bash env dirname mktemp mkdir install awk cat rm chmod sleep; do
+    real=$(command -v "$tool" 2>/dev/null) || continue
+    ln -sf "$real" "$fakebin/$tool"
+  done
+  [ ! -e "$fakebin/sha256sum" ] || fail "the isolated PATH still exposes sha256sum"
+
+  out=$(FAKE_SHELLCHECK_VERSION="$REQUIRED" SHASUM_ARGS="$tmp/shasum-args" \
+    PATH="$fakebin" "$INSTALLER" "$destination" 2>&1) \
+    || fail "installer did not verify the asset through shasum"$'\n'"$out"
+  assert_contains "$(cat "$tmp/shasum-args")" "-a 256" \
+    "installer did not request a SHA-256 digest from shasum"
+  [ -x "$destination/shellcheck" ] \
+    || fail "installer did not install ShellCheck through the shasum path"
+
+  rm -f "$fakebin/shasum" "$tmp/shasum-args"
+  rc=0
+  out=$(FAKE_SHELLCHECK_VERSION="$REQUIRED" SHASUM_ARGS="$tmp/shasum-args" \
+    PATH="$fakebin" "$INSTALLER" "$tmp/unverifiable" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer installed an unverified asset with no digest tool"
+  assert_contains "$out" "need sha256sum or shasum" \
+    "installer did not name the missing digest tool"
+  [ ! -e "$tmp/unverifiable/shellcheck" ] \
+    || fail "installer installed a binary it could not verify"
+
+  pass "ShellCheck installer verifies through shasum -a 256 when sha256sum is absent and refuses without either"
+}
+
 test_installer_selects_verified_platform_asset() {
   local tmp fakebin os arch platform checksum destination out rc
   tmp=$(fm_test_tmproot fm-shellcheck-platform)
@@ -713,6 +793,7 @@ test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
 test_installer_selects_verified_platform_asset
+test_installer_verifies_with_shasum_when_sha256sum_is_absent
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
