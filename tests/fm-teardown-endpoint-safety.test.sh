@@ -432,6 +432,11 @@ SH
 test_legacy_herdr_binding_requires_exact_live_proof() {
   local before dir id=legacy-herdr rc
 
+  command -v jq >/dev/null 2>&1 || {
+    echo "skip: jq not found (required by the herdr adapter)"
+    return 0
+  }
+
   dir=$(make_case legacy-herdr-valid)
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=lab:w1:p2" "worktree=$dir/worktree" "project=$dir/project" \

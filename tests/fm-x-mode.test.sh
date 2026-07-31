@@ -914,6 +914,18 @@ test_bootstrap_opt_out_cleanup() {
   out=$(env -u CLAUDECODE GROK_AGENT=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "Grok tracked background task" \
     "opt-out remediation must keep the repair instruction for model-driven harnesses"
+  # Away mode owns supervision, so the Stop-owned auto-arm never fires; the
+  # transition must point at the away daemon instead of promising a turn-end arm.
+  printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
+  FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
+  : > "$home/state/.afk"
+  out=$(CLAUDECODE=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  rm -f "$home/state/.afk"
+  assert_contains "$out" "Away mode owns watcher supervision" \
+    "opt-out remediation during away mode must defer to the away daemon"
+  assert_not_contains "$out" "let the Stop-owned auto-arm establish watcher supervision" \
+    "opt-out remediation during away mode must not promise a Stop-owned arm"
   # Steady-state off: another run with nothing to remove is silent.
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_not_contains "$out" "FMX:" "steady-state off must be silent"
