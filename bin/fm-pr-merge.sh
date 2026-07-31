@@ -13,12 +13,18 @@
 # resolved the same way bin/fm-review-diff.sh does: a freshly fetched
 # refs/pull/<n>/head first, falling back to the pr_head= recorded by
 # bin/fm-pr-check.sh, and only then to the local worktree HEAD with a
-# warning. A byte-identical before/after evidence image pair with no opt-out
-# marker refuses the merge. See bin/fm-evidence-check.sh --help for the pairing
+# warning. The check is scoped to the directories this PR's own commits
+# touched (a best-effort diff against the worktree's origin default branch,
+# or the local main/master branch when no remote default can be resolved),
+# so a pre-existing unrelated leftover pair elsewhere in the repo tree can
+# never refuse a merge it has nothing to do with; when no base can be
+# determined at all, the check falls back to scanning the whole ref. A
+# byte-identical before/after evidence image pair with no opt-out marker
+# refuses the merge. See bin/fm-evidence-check.sh --help for the pairing
 # convention and opt-out mechanism. If the task's recorded worktree is
-# missing or not a git repository, or no ref can be resolved at all, the
-# check cannot run: a loud warning goes to stderr and the merge still
-# proceeds unverified rather than failing closed.
+# missing or not a git repository, no ref can be resolved at all, or the
+# check itself cannot run (e.g. missing python3), a loud warning goes to
+# stderr and the merge still proceeds unverified rather than failing closed.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -114,6 +120,47 @@ resolve_pr_head() {
   return 1
 }
 
+# Best-effort base for scoping the evidence check to paths this PR actually
+# changed. Prints nothing and fails when no base can be determined; the
+# caller then falls back to scanning the whole ref rather than treating that
+# as an error.
+resolve_evidence_base() {
+  local remote_default resolved branch
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    remote_default=$(git -C "$WT" ls-remote --symref origin HEAD 2>/dev/null \
+      | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }')
+    if [ -n "$remote_default" ] && git -C "$WT" fetch --quiet origin \
+      "+refs/heads/$remote_default:refs/fm-merge/base/$remote_default" >/dev/null 2>&1; then
+      resolved=$(git -C "$WT" rev-parse --verify -q \
+        "refs/fm-merge/base/$remote_default^{commit}" 2>/dev/null || true)
+      if [ -n "$resolved" ]; then
+        printf '%s' "$resolved"
+        return 0
+      fi
+    fi
+  fi
+  for branch in main master; do
+    if resolved=$(git -C "$WT" rev-parse --verify -q "refs/heads/$branch^{commit}" 2>/dev/null); then
+      printf '%s' "$resolved"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Directories this PR's commits actually touched, relative to a best-effort
+# base, one per line. Passed to fm-evidence-check.sh as pathspecs so its
+# per-directory refusal can only fire on this PR's own evidence images.
+# Prints nothing when no base is available or nothing changed; the caller
+# then falls back to an unscoped scan of the whole ref.
+evidence_pathspecs() {
+  local base
+  base=$(resolve_evidence_base) || return 0
+  git -C "$WT" diff --name-only "$base...$EVIDENCE_REF" -- 2>/dev/null \
+    | while IFS= read -r changed_path; do dirname "$changed_path"; done \
+    | sort -u
+}
+
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ -n "$WT" ] && [ -d "$WT" ] && git -C "$WT" rev-parse --git-dir >/dev/null 2>&1; then
   PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -125,10 +172,24 @@ if [ -n "$WT" ] && [ -d "$WT" ] && git -C "$WT" rev-parse --git-dir >/dev/null 2
     echo "warning: PR head unavailable; evidence check may lag the open PR (using local worktree HEAD)" >&2
   fi
   if [ -n "$EVIDENCE_REF" ]; then
-    "$SCRIPT_DIR/fm-evidence-check.sh" --ref "$EVIDENCE_REF" --root "$WT" || {
-      echo "error: byte-identical before/after evidence image pair detected, merge refused" >&2
-      exit 1
-    }
+    EVIDENCE_PATHSPECS=()
+    while IFS= read -r changed_dir; do
+      [ -n "$changed_dir" ] || continue
+      EVIDENCE_PATHSPECS+=("$changed_dir")
+    done < <(evidence_pathspecs)
+    evidence_rc=0
+    "$SCRIPT_DIR/fm-evidence-check.sh" --ref "$EVIDENCE_REF" --root "$WT" -- \
+      "${EVIDENCE_PATHSPECS[@]+"${EVIDENCE_PATHSPECS[@]}"}" || evidence_rc=$?
+    case "$evidence_rc" in
+      0) ;;
+      1)
+        echo "error: byte-identical before/after evidence image pair detected, merge refused" >&2
+        exit 1
+        ;;
+      *)
+        echo "warning: evidence check for task $ID could not run (exit $evidence_rc); merging unverified" >&2
+        ;;
+    esac
   else
     echo "warning: evidence check SKIPPED for task $ID; no resolvable PR head or worktree HEAD, merging unverified" >&2
   fi

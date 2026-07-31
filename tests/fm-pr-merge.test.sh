@@ -25,6 +25,10 @@
 #   (m) same as (l): a valid worktree with no recorded pr_head at all (the gh
 #       headRefOid lookup never succeeded) and no fetchable/local ref still
 #       warns and merges, per the same never-fail-closed decision
+#   (n) the evidence check is scoped to directories this PR's own commits
+#       touched: an unrelated pre-existing leftover (unpaired) evidence pair
+#       on the origin default branch, outside the PR's changed paths, must
+#       not block a merge whose own evidence pair is fine
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -493,6 +497,52 @@ test_no_recorded_head_and_unresolvable_ref_warns_and_still_merges() {
   pass "fm-pr-merge warns and still merges when no pr_head was recorded and no ref can be resolved"
 }
 
+test_scoped_evidence_check_ignores_unrelated_leftover() {
+  # A directory outside this PR's changed paths that has a real leftover
+  # (unpaired) evidence shape must not refuse a merge whose own evidence pair
+  # is fine, since the check must scope to what this PR's commits touched.
+  local case_dir rc origin real_dir
+  case_dir=$(make_case scoped-evidence)
+  origin="$case_dir/origin.git"
+  real_dir="$case_dir/real"
+
+  git init -q --bare "$origin"
+
+  mkdir -p "$real_dir/docs/pr-assets/leftover"
+  git -C "$real_dir" init -q
+  printf BEFOREBYTES > "$real_dir/docs/pr-assets/leftover/before-alpha.png"
+  printf AFTERBYTES > "$real_dir/docs/pr-assets/leftover/after-beta.png"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "pre-existing leftover evidence"
+  git -C "$real_dir" branch -M main
+  git -C "$real_dir" push -q "$origin" main
+
+  mkdir -p "$real_dir/docs/pr-assets/widget"
+  printf OLDBYTES > "$real_dir/docs/pr-assets/widget/before-desktop.png"
+  printf NEWBYTES > "$real_dir/docs/pr-assets/widget/after-desktop.png"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "add widget evidence"
+  git -C "$real_dir" push -q "$origin" "HEAD:refs/pull/71/head"
+
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  git -C "$case_dir/wt" remote add origin "$origin"
+
+  add_gh_mocks "$case_dir" dddddddddddddddddddddddddddddddddddddddd
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scoped-evidence: fm-pr-merge should ignore an unrelated pre-existing leftover pair outside the PR's changed paths"
+  grep -qxF 'pr merge 71 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "scoped-evidence: gh-axi pr merge was not invoked despite an unrelated leftover pair elsewhere in the tree"
+  pass "fm-pr-merge scopes the evidence check to the PR's changed paths and ignores an unrelated leftover pair"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -508,3 +558,4 @@ test_different_evidence_pair_still_merges
 test_evidence_check_uses_fetched_remote_pr_head_not_stale_local_worktree
 test_unresolvable_ref_warns_and_still_merges
 test_no_recorded_head_and_unresolvable_ref_warns_and_still_merges
+test_scoped_evidence_check_ignores_unrelated_leftover
