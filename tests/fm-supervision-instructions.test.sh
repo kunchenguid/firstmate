@@ -63,6 +63,7 @@ test_repair_lines() {
 
   out=$(FM_HOME="$home" "$RENDER" --harness pi --repair-line)
   assert_contains "$out" "Pi tool fm_watch_arm_pi" "pi repair line does not direct the model to the extension-owned tool"
+  assert_contains "$out" ".pi/extensions/fm-lavish-poll.ts" "pi repair line omits the Lavish relay extension"
   assert_not_contains "$out" "extension command /fm-watch-arm-pi" "pi repair line still directs the model to the human slash command"
   pass "renderer repair-line mode is harness-aware and honors conditional state"
 }
@@ -156,17 +157,20 @@ test_grok_command_sources_effective_config() {
 }
 
 test_pi_snippet_uses_effective_extension_path() {
-  local home out turnend watch
+  local home out turnend watch lavish
   home="$TMP_ROOT/pi-home"
   turnend="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
   watch="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+  lavish="$ROOT/.pi/extensions/fm-lavish-poll.ts"
   mkdir -p "$home/state" "$home/config"
   out=$(FM_HOME="$home" "$RENDER" --harness pi)
-  assert_contains "$out" "-e $turnend -e $watch" "pi snippet did not render both effective extension launch paths"
+  assert_contains "$out" "-e $turnend -e $watch -e $lavish" "pi snippet did not render all effective extension launch paths"
   assert_contains "$out" "The turn-end guard extension lives at \`$turnend\`" "pi snippet did not render the turn-end guard extension path"
   assert_contains "$out" "The watcher extension lives at \`$watch\`" "pi snippet did not render the watcher extension path"
+  assert_contains "$out" "The Lavish relay extension lives at \`$lavish\`" "pi snippet did not render the Lavish relay extension path"
   assert_not_contains "$out" "__FM_PI_EXT__" "renderer leaked the Pi extension path placeholder"
   assert_not_contains "$out" "__FM_PI_TURNEND_EXT__" "renderer leaked the Pi turn-end extension path placeholder"
+  assert_not_contains "$out" "__FM_PI_LAVISH_EXT__" "renderer leaked the Pi Lavish extension path placeholder"
   assert_not_contains "$out" "state/fm-primary-pi-watch.ts" "pi snippet kept the old generated state-relative extension path"
   pass "pi supervision snippet renders the effective extension path"
 }

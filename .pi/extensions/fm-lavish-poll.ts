@@ -47,6 +47,7 @@ type RelayGeneration = {
   ui: ExtensionUIContext;
   directory: string | null;
   polls: Map<string, RelayPoll>;
+  artifactAliases: Map<string, string>;
   exitHandler: (() => void) | null;
 };
 
@@ -71,6 +72,11 @@ type RelayResult = {
   message: string;
   artifact?: string;
   active?: number;
+};
+
+type NormalizedArtifact = {
+  artifact: string;
+  inputPath: string;
 };
 
 class BoundedBytes {
@@ -181,7 +187,7 @@ function classifyResult(
   return { kind: "fatal", terminal };
 }
 
-function normalizeArtifact(cwd: string, value: string, mustExist: boolean): string {
+function normalizeArtifact(cwd: string, value: string, mustExist: boolean): NormalizedArtifact {
   const stripped = value.startsWith("@") ? value.slice(1) : value;
   if (!stripped || stripped.includes("\0") || byteLength(stripped) > 4096) {
     throw new Error("artifact must be a non-empty bounded HTML file path");
@@ -197,7 +203,7 @@ function normalizeArtifact(cwd: string, value: string, mustExist: boolean): stri
     throw new Error("artifact must end in .html or .htm");
   }
   if (mustExist && !statSync(canonical).isFile()) throw new Error("artifact must be a regular file");
-  return canonical;
+  return { artifact: canonical, inputPath: absolute };
 }
 
 function artifactKey(artifact: string): string {
@@ -230,7 +236,18 @@ function removeArtifactRecords(generation: RelayGeneration, artifact: string): v
   const key = artifactKey(artifact);
   rmSync(resolve(generation.directory, `${key}.result.json`), { force: true });
   rmSync(resolve(generation.directory, `${key}.diagnostic.txt`), { force: true });
+  removeArtifactAliases(generation, artifact);
   pruneGenerationDirectory(generation);
+}
+
+function removeArtifactAliases(generation: RelayGeneration, artifact: string): void {
+  for (const [inputPath, canonical] of generation.artifactAliases) {
+    if (inputPath === artifact || canonical === artifact) generation.artifactAliases.delete(inputPath);
+  }
+}
+
+function resolveArtifactLookup(generation: RelayGeneration, artifact: string): string {
+  return generation.polls.has(artifact) ? artifact : generation.artifactAliases.get(artifact) ?? artifact;
 }
 
 function removePrivateFiles(poll: RelayPoll): void {
@@ -310,7 +327,10 @@ function cleanupPoll(poll: RelayPoll, removeRecords: boolean): void {
   poll.child.stdout.removeAllListeners();
   poll.child.stderr.removeAllListeners();
   poll.child.removeAllListeners();
-  if (removeRecords) removePrivateFiles(poll);
+  if (removeRecords) {
+    removePrivateFiles(poll);
+    removeArtifactAliases(poll.generation, poll.artifact);
+  }
   updateStatus(poll.generation);
   removeExitHandlerIfIdle(poll.generation);
 }
@@ -428,6 +448,7 @@ function startPoll(
   pi: ExtensionAPI,
   generation: RelayGeneration,
   artifact: string,
+  inputPath: string,
   agentReply: string | undefined,
 ): RelayResult {
   if (!generation.active || activeGeneration !== generation) {
@@ -483,6 +504,8 @@ function startPoll(
     closed,
   };
   generation.polls.set(artifact, poll);
+  generation.artifactAliases.set(inputPath, artifact);
+  generation.artifactAliases.set(artifact, artifact);
   installExitHandler(generation);
   child.stdout.on("data", (chunk: Buffer) => poll.stdout.append(chunk));
   child.stderr.on("data", (chunk: Buffer) => poll.stderr.append(chunk));
@@ -576,6 +599,7 @@ export default function (pi: ExtensionAPI) {
       ui: ctx.ui,
       directory: null,
       polls: new Map(),
+      artifactAliases: new Map(),
       exitHandler: null,
     };
     activeGeneration = generation;
@@ -621,9 +645,12 @@ export default function (pi: ExtensionAPI) {
       }
 
       let artifact: string | undefined;
+      let inputPath: string | undefined;
       if (params.artifact !== undefined) {
         try {
-          artifact = normalizeArtifact(ctx.cwd, params.artifact, params.action === "start");
+          const normalized = normalizeArtifact(ctx.cwd, params.artifact, params.action === "start");
+          artifact = resolveArtifactLookup(generation, normalized.artifact);
+          inputPath = normalized.inputPath;
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           const invalid: RelayResult = {
@@ -640,7 +667,7 @@ export default function (pi: ExtensionAPI) {
         if (!artifact) {
           result = { ok: false, action: "start", message: "Lavish relay start requires artifact." };
         } else {
-          result = startPoll(pi, generation, artifact, params.agent_reply);
+          result = startPoll(pi, generation, artifact, inputPath ?? artifact, params.agent_reply);
         }
       } else if (params.action === "status") {
         result = statusResult(generation, artifact);

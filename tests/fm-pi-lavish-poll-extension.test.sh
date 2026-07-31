@@ -97,7 +97,7 @@ session:
 prompts[1]{tag,text}:
   review,"MUST_NOT_DELIVER_AFTER_STOP"
 EOF
-python3 - "$CONTROL/stdout.5" <<'PY'
+python3 - "$CONTROL/stdout.6" <<'PY'
 import sys
 with open(sys.argv[1], "w", encoding="utf-8") as f:
     f.write("session:\n  status: feedback\n")
@@ -105,7 +105,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
     f.write('prompts[1]{tag,text}:\n  review,"BOUNDED_PROMPT_SURVIVES"\n')
     f.write("next_step: continue review\n")
 PY
-cat >"$CONTROL/stdout.6" <<'EOF'
+cat >"$CONTROL/stdout.7" <<'EOF'
 session:
   status: feedback
   session_ended: true
@@ -114,11 +114,11 @@ prompts[1]{tag,text}:
   review,"FINAL_SYNTHETIC_FEEDBACK"
 next_step: stop polling
 EOF
-cat >"$CONTROL/stdout.9" <<'EOF'
+cat >"$CONTROL/stdout.10" <<'EOF'
 error: synthetic replacement-generation failure
 code: SERVER_ERROR
 EOF
-printf '9\n' >"$CONTROL/code.9"
+printf '9\n' >"$CONTROL/code.10"
 
 out=$(cd "$PROJECT" && \
   PLUGIN="$PROJECT/.pi/extensions/fm-lavish-poll.ts" \
@@ -126,7 +126,7 @@ out=$(cd "$PROJECT" && \
   FM_LAVISH_AXI_BIN="$FAKE" \
   FM_FAKE_LAVISH_CONTROL="$CONTROL" \
   node --input-type=module 2>&1 <<'JS'
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -241,10 +241,25 @@ await waitFor(() => !pidAlive(stoppedPid), "stopped child exit");
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
 if (messages.length !== 3) throw new Error("explicit stop delivered a late feedback message");
 
+symlinkSync(artifact("two.html"), artifact("alias.html"));
+const deletedAliasStart = await invoke({ action: "start", artifact: "alias.html" });
+if (!deletedAliasStart.details?.ok) throw new Error("deleted-alias fixture did not start");
+await waitFor(() => existsSync(control("pid.5")), "deleted-alias fake poll");
+unlinkSync(artifact("alias.html"));
+const deletedAliasStatus = await invoke({ action: "status", artifact: "alias.html" });
+if (!deletedAliasStatus.content[0]?.text.includes("waiting for")) throw new Error(`deleted-alias status missed active poll: ${deletedAliasStatus.content[0]?.text}`);
+const deletedAliasStop = await invoke({ action: "stop", artifact: "alias.html" });
+if (!deletedAliasStop.details?.ok || !deletedAliasStop.content[0]?.text.includes("stopped for")) throw new Error(`deleted-alias stop failed: ${JSON.stringify(deletedAliasStop)}`);
+await waitFor(() => readFileSync(control("term.log"), "utf8").includes("term=5"), "deleted-alias TERM delivery");
+const deletedAliasPid = readFileSync(control("pid.5"), "utf8").trim();
+await waitFor(() => !pidAlive(deletedAliasPid), "deleted-alias stopped child exit");
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+if (messages.length !== 3) throw new Error("deleted-alias stop delivered a late feedback message");
+
 const boundedStart = await invoke({ action: "start", artifact: "one.html" });
 if (!boundedStart.details?.ok) throw new Error("bounded fixture did not start");
-await waitFor(() => existsSync(control("pid.5")), "bounded fake poll");
-release(5);
+await waitFor(() => existsSync(control("pid.6")), "bounded fake poll");
+release(6);
 await waitFor(() => messages.length === 4, "bounded feedback wake");
 assertMessage(3, "feedback", "BOUNDED_PROMPT_SURVIVES");
 const boundedContent = messages[3].message.content;
@@ -255,9 +270,9 @@ if (!boundedDiagnostic || !existsSync(boundedDiagnostic)) throw new Error("bound
 
 const finalStart = await invoke({ action: "start", artifact: "one.html", agent_reply: "Applied bounded feedback" });
 if (!finalStart.details?.ok) throw new Error("terminal fixture did not start");
-await waitFor(() => existsSync(control("pid.6")), "terminal fake poll");
+await waitFor(() => existsSync(control("pid.7")), "terminal fake poll");
 if (existsSync(boundedDiagnostic)) throw new Error("re-arm did not retire bounded private diagnostics");
-release(6);
+release(7);
 await waitFor(() => messages.length === 5, "terminal wake");
 assertMessage(4, "terminal", "FINAL_SYNTHETIC_FEEDBACK");
 const relayDirectory = resolve(process.env.FM_HOME, "state/.pi-lavish-relay");
@@ -268,10 +283,10 @@ if (!idle.content[0]?.text.includes("no active polls")) throw new Error(`termina
 const shutdownOne = await invoke({ action: "start", artifact: "one.html" });
 const shutdownTwo = await invoke({ action: "start", artifact: "two.html" });
 if (!shutdownOne.details?.ok || !shutdownTwo.details?.ok) throw new Error("shutdown fixtures did not start");
-await waitFor(() => existsSync(control("pid.7")) && existsSync(control("pid.8")), "shutdown fake polls");
+await waitFor(() => existsSync(control("pid.8")) && existsSync(control("pid.9")), "shutdown fake polls");
 const beforeShutdownMessages = messages.length;
 await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "reload" }, ctx);
-for (const n of [7, 8]) {
+for (const n of [8, 9]) {
   const pid = readFileSync(control(`pid.${n}`), "utf8").trim();
   await waitFor(() => !pidAlive(pid), `shutdown child ${n}`);
 }
@@ -295,8 +310,8 @@ const replacementFailure = await tool.execute(
   replacementCtx,
 );
 if (!replacementFailure.details?.ok) throw new Error("replacement-generation failure fixture did not start");
-await waitFor(() => existsSync(control("pid.9")), "replacement-generation fake poll");
-release(9);
+await waitFor(() => existsSync(control("pid.10")), "replacement-generation fake poll");
+release(10);
 await waitFor(() => messages.length === beforeShutdownMessages + 1, "replacement-generation fatal wake");
 const replacementDiagnostic = messages.at(-1)?.message.details?.diagnosticPath;
 if (!replacementDiagnostic || !existsSync(replacementDiagnostic)) throw new Error("replacement generation did not retain its fatal diagnostic");
