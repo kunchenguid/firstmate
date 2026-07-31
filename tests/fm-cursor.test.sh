@@ -27,6 +27,12 @@
 #   (n) config/cursor-environment: absent means no default; present marks the
 #       default in list WITHOUT filtering it away; --env filters, a bare --env
 #       uses the default, and filtering happens before run resolution
+#   (o) an --env that matches nothing still reports the fetched count and the
+#       --limit caveat, so an empty view never reads as an empty fleet
+#   (p) a per-agent run request that fails degrades that ONE agent to an unknown
+#       run status and the listing still prints; show stays strict
+#   (q) FM_CURSOR_ENV_FILE takes precedence over $FM_HOME/.env
+#   (r) FM_CURSOR_TIMEOUT is validated before it reaches curl's config file
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -143,12 +149,34 @@ run_cursor() {
   set -e
 }
 
+# run_cursor with extra environment assignments, for the cases that are ABOUT the
+# environment rather than the arguments. The later `env` assignments win, so a
+# case can override FM_HOME or supply a value the shell could not pass inline.
+run_cursor_env() {  # <VAR=VALUE>... -- <args>...
+  local envs=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -eq 0 ] || shift
+  : > "$CALLS"
+  : > "$VIOLATIONS"
+  : > "$CFGS"
+  set +e
+  OUT=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$CONFIG_DIR" \
+    FM_CURSOR_API_BASE="https://api.cursor.com" env "${envs[@]}" "$CURSOR" "$@" 2>&1)
+  RC=$?
+  set -e
+}
+
 # --- fixtures ----------------------------------------------------------------
 
 AGENT_MULTI=bc-1111aaaa
 AGENT_SINGLE=bc-2222bbbb
 AGENT_NORUNID=bc-3333cccc
 AGENT_ARCHIVED=bc-4444dddd
+AGENT_STALERUN=bc-5555eeee
+AGENT_STALERUN_SHOW=bc-6666ffff
 
 fixture "/v1/agents?limit=20&includeArchived=false" '{"items":[
   {"id":"bc-1111aaaa","name":"Severity sorting","status":"ACTIVE","latestRunId":"run-aaa1",
@@ -191,6 +219,25 @@ fixture "/v1/agents/$AGENT_ARCHIVED/runs/run-ddd1" \
 # The fallback path: this agent had no latestRunId in the list payload.
 fixture "/v1/agents/$AGENT_NORUNID/runs?limit=1" \
   '{"items":[{"id":"run-ccc9","status":"ERROR","createdAt":"2026-07-28T09:10:00.000Z","durationMs":4200,"git":{"branches":[]}}]}'
+
+# A page whose second agent points at a run that no longer resolves: latestRunId
+# is not in Cursor's published schema, so a stale pointer is an expected shape.
+# NEITHER of its run requests has a fixture, so the fake curl answers both with
+# 404 and this page exercises a completely failed resolution.
+fixture "/v1/agents?limit=5&includeArchived=false" '{"items":[
+  {"id":"bc-1111aaaa","name":"Severity sorting","status":"ACTIVE","latestRunId":"run-aaa1",
+   "createdAt":"2026-07-30T14:57:06.760Z","updatedAt":"2026-07-31T11:44:22.735Z",
+   "url":"https://cursor.com/agents/bc-1111aaaa","env":{"type":"cloud","name":"AgentScan E2E"},
+   "repos":[{"url":"https://github.com/snyk/agent-scan"}]},
+  {"id":"bc-5555eeee","name":"Stale run pointer","status":"ACTIVE","latestRunId":"run-gone",
+   "createdAt":"2026-07-27T09:00:00.000Z","updatedAt":"2026-07-27T10:00:00.000Z",
+   "url":"https://cursor.com/agents/bc-5555eeee","env":{"type":"cloud","name":"AgentScan E2E"},
+   "repos":[{"url":"https://github.com/snyk/minired"}]}
+]}'
+# The same stale pointer through show, where a hard failure is the right outcome:
+# the latest run IS what a single-agent view was asked for.
+fixture "/v1/agents/$AGENT_STALERUN_SHOW" \
+  '{"id":"bc-6666ffff","name":"Stale run pointer","status":"ACTIVE","latestRunId":"run-gone2","createdAt":"2026-07-27T09:00:00.000Z","updatedAt":"2026-07-27T10:00:00.000Z","url":"https://cursor.com/agents/bc-6666ffff","env":{"type":"cloud","name":"AgentScan E2E"},"repos":[{"url":"https://github.com/snyk/minired"}]}'
 
 fixture "/v1/agents/$AGENT_SINGLE" \
   '{"id":"bc-2222bbbb","name":"Single repo work","status":"ACTIVE","latestRunId":"run-bbb1","createdAt":"2026-07-29T09:00:00.000Z","updatedAt":"2026-07-29T10:00:00.000Z","url":"https://cursor.com/agents/bc-2222bbbb","env":{"type":"cloud","name":"prod"},"repos":[{"url":"https://github.com/snyk/minired"}]}'
@@ -435,6 +482,12 @@ run_cursor list --env "Nonexistent Env"
 expect_code 0 "$RC" "an --env with no matches still succeeds"
 assert_contains "$OUT" "No Cursor Cloud agents found." "an unmatched --env reports an empty result"
 assert_not_contains "$OUT" "AgentScan E2E *" "an unmatched --env must not fall back to the default"
+# (o) An empty view under a filter must not read as "this home has no agents":
+# the fetched count and the --limit caveat are exactly what turns "none" into
+# "none on this page of the fetch".
+assert_contains "$OUT" "0 of 3 fetched" "an unmatched --env still counts matches against the fetch"
+assert_contains "$OUT" "--limit bounds the fetch" "an unmatched --env still carries the --limit caveat"
+assert_contains "$OUT" "not an empty fleet" "an unmatched --env says agents were fetched"
 run_cursor list --env ""
 expect_code 2 "$RC" "an empty --env name exits 2 rather than selecting ad-hoc agents"
 assert_contains "$OUT" "non-empty environment name" "an empty --env name is refused explicitly"
@@ -451,5 +504,80 @@ printf '%s' "$OUT" | jq -e '.defaultEnvironment == "AgentScan E2E" and .environm
 printf '%s' "$OUT" | jq -e '.fetched == 3 and .count == 3' >/dev/null \
   || fail "an unfiltered list --json must report fetched == count"
 pass "list --json reports the default environment separately from any filter"
+
+# --- (p) one failed run resolution must not discard the listing --------------
+
+run_cursor list --limit 5
+expect_code 0 "$RC" "a failed per-agent run resolution must not abort the listing"
+assert_contains "$OUT" "RUNNING" "the agent whose run resolves is still reported"
+assert_contains "$OUT" "Stale run pointer" "the agent whose run failed is still listed"
+assert_contains "$OUT" "2 agent(s) shown" "every fetched agent survives a failed resolution"
+assert_contains "$OUT" "unknown" "an unresolvable latest run degrades to unknown"
+assert_contains "$OUT" "could not be fetched" "the footer states how many runs went unresolved"
+# The fast path failing must fall THROUGH to the runs-list fallback, not abort.
+assert_grep "/v1/agents/$AGENT_STALERUN/runs/run-gone" "$CALLS" \
+  "the stale latestRunId is still tried first"
+assert_grep "/v1/agents/$AGENT_STALERUN/runs?limit=1" "$CALLS" \
+  "a failed fast path must fall through to the runs-list fallback"
+pass "a per-agent run request that fails costs one row, not the whole view"
+
+run_cursor list --limit 5 --json
+expect_code 0 "$RC" "list --json succeeds with a failed resolution"
+printf '%s' "$OUT" | jq -e '.count == 2' >/dev/null \
+  || fail "a failed resolution must not drop the agent from --json"
+printf '%s' "$OUT" | jq -e '[.agents[] | select(.runStatusSource == "resolution-failed")]
+  | length == 1 and .[0].runStatus == "unknown"' >/dev/null \
+  || fail "--json must distinguish a failed resolution: $(printf '%s' "$OUT" | jq -c '[.agents[] | {runStatus, runStatusSource}]')"
+printf '%s' "$OUT" | jq -e '[.agents[] | select(.runStatusSource == "latestRunId")] | length == 1' >/dev/null \
+  || fail "--json must still record the fast path for the agent that resolved"
+pass "runStatusSource tells a failed resolution apart from the fast path, fallback, and --no-runs"
+
+# show is deliberately NOT tolerant: the latest run is what it was asked for.
+run_cursor show "$AGENT_STALERUN_SHOW"
+expect_code 4 "$RC" "show still fails hard when its latest run cannot be fetched"
+assert_contains "$OUT" "not found" "show reports the API status it got"
+assert_not_contains "$OUT" "$KEY" "a failed show never contains the key"
+pass "list degrades per agent while show, runs, and usage still fail loudly"
+
+# --- (q) FM_CURSOR_ENV_FILE --------------------------------------------------
+
+ALT_ENV="$TMP_ROOT/alt.env"
+printf 'CURSOR_API_KEY=%s\n' "$KEY" > "$ALT_ENV"
+DECOY_HOME="$TMP_ROOT/decoyhome"
+mkdir -p "$DECOY_HOME"
+printf 'CURSOR_API_KEY=decoy_key_from_the_home_env\n' > "$DECOY_HOME/.env"
+run_cursor_env FM_HOME="$DECOY_HOME" FM_CURSOR_ENV_FILE="$ALT_ENV" -- list --no-runs
+expect_code 0 "$RC" "FM_CURSOR_ENV_FILE supplies the key"
+# The fake curl asserts the config file carries the FIXTURE key, so a decoy key in
+# $FM_HOME/.env winning would be recorded as a missing header rather than pass.
+[ ! -s "$VIOLATIONS" ] || fail "FM_CURSOR_ENV_FILE must take precedence over \$FM_HOME/.env: $(cat "$VIOLATIONS")"
+assert_not_contains "$OUT" "decoy_key_from_the_home_env" "no key is ever echoed back"
+
+KEYLESS_ENV="$TMP_ROOT/keyless.env"
+printf '# no key here\n' > "$KEYLESS_ENV"
+run_cursor_env FM_CURSOR_ENV_FILE="$KEYLESS_ENV" -- list
+expect_code 3 "$RC" "a keyless FM_CURSOR_ENV_FILE is not configured, even with a good \$FM_HOME/.env"
+assert_contains "$OUT" "$KEYLESS_ENV" "the not-configured message names the overridden file"
+[ ! -s "$CALLS" ] || fail "a keyless FM_CURSOR_ENV_FILE must be refused before any request"
+pass "FM_CURSOR_ENV_FILE is the key's source when set, in both directions"
+
+# --- (r) FM_CURSOR_TIMEOUT validation ----------------------------------------
+
+# The timeout is interpolated into the same 0600 config file that carries the
+# bearer header, and curl config syntax is one directive per line, so a value
+# holding a newline would append directives of the attacker's choosing.
+run_cursor_env FM_CURSOR_TIMEOUT="$(printf '30\nproxy = http://127.0.0.1:9')" -- list
+expect_code 3 "$RC" "a timeout carrying a newline is refused"
+assert_contains "$OUT" "FM_CURSOR_TIMEOUT" "the refusal names the variable"
+[ ! -s "$CALLS" ] || fail "an injectable timeout must be refused before any request"
+run_cursor_env FM_CURSOR_TIMEOUT=abc -- list
+expect_code 3 "$RC" "a non-numeric timeout is refused instead of degrading to a reach error"
+run_cursor_env FM_CURSOR_TIMEOUT=0 -- list
+expect_code 3 "$RC" "a zero timeout is refused"
+run_cursor_env FM_CURSOR_TIMEOUT=99999 -- list
+expect_code 3 "$RC" "an out-of-range timeout is refused"
+run_cursor_env FM_CURSOR_TIMEOUT=5 -- list --no-runs
+expect_code 0 "$RC" "a plain numeric timeout is accepted"
+pass "FM_CURSOR_TIMEOUT is validated before it can inject into the key's config file"
 
 printf '\nall fm-cursor tests passed\n'

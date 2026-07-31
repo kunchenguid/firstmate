@@ -69,8 +69,15 @@
 # (CREATING|RUNNING|FINISHED|ERROR|CANCELLED|EXPIRED) as the primary column.
 # Resolution prefers the `latestRunId` field that list items carry in practice;
 # that field is NOT in Cursor's published schema, so a per-agent
-# `runs?limit=1` fallback covers its absence and the JSON output records which
-# source answered in `runStatusSource`.
+# `runs?limit=1` fallback covers both its absence AND a fast path whose request
+# fails, and the JSON output records which source answered in `runStatusSource`:
+# `latestRunId`, `runs-list`, `resolution-failed`, or `skipped` for --no-runs.
+# Per-agent resolution inside `list` is deliberately NON-FATAL, because it is the
+# one place a single request failure could discard an otherwise good answer: a 404
+# on a stale run id, or a 429 partway through 1+N serial requests, degrades that
+# one agent's RUN to `unknown` and the rest of the listing still prints. Every
+# other fetch - the list call itself, and all of `show`, `runs`, and `usage` -
+# still fails loudly, because there a failed request leaves nothing worth showing.
 #
 # Activation: read-only, and inert until this home opts in by putting a non-empty
 # CURSOR_API_KEY in its gitignored .env, mirroring how X mode gates on
@@ -101,12 +108,14 @@
 #   FM_CURSOR_ENV_FILE    read the key from this .env-style file instead
 #   FM_CONFIG_OVERRIDE    read config/ from this directory instead
 #   FM_CURSOR_API_BASE    API base URL (default https://api.cursor.com)
-#   FM_CURSOR_TIMEOUT     per-request timeout in seconds (default 30)
+#   FM_CURSOR_TIMEOUT     per-request timeout in seconds, a whole number from 1
+#                         to 3600 (default 30)
 #
 # Exit status:
 #   0  success
 #   2  usage error
-#   3  not configured (no CURSOR_API_KEY) or a required tool is missing
+#   3  not configured (no CURSOR_API_KEY), misconfigured (a key or timeout this
+#      helper refuses to hand to curl), or a required tool is missing
 #   4  the API rejected or failed the request
 set -eu
 
@@ -192,6 +201,13 @@ arm_auth() {
     *[!A-Za-z0-9._~+/=-]*)
       die 3 "the CURSOR_API_KEY in $env_file contains unexpected characters; re-copy it from https://cursor.com/dashboard/api" ;;
   esac
+  # The same config file carries the bearer header, and curl config syntax is one
+  # directive per line, so an unvalidated timeout is an injection point: a value
+  # holding a newline would append arbitrary directives (proxy, url, output) next
+  # to the key. Digits only, and a range, so a typo also fails legibly instead of
+  # degrading into an opaque "could not reach" error.
+  valid_timeout "$TIMEOUT" \
+    || die 3 "FM_CURSOR_TIMEOUT must be a whole number of seconds from 1 to 3600"
   umask 077
   CFG=$(mktemp "${TMPDIR:-/tmp}/.fm-cursor-auth.XXXXXX") \
     || die 3 "could not create a private file for the API key"
@@ -202,19 +218,30 @@ arm_auth() {
     || die 3 "could not create a response file"
 }
 
-# GET <path>; leaves the response body in $BODY. Fails loudly with the API's own
-# message, never with raw headers.
-api_get() {  # <path>
+# GET <path>; leaves the response body in $BODY. Returns 0 only on HTTP 200, and
+# otherwise returns non-zero with the explanation in $API_ERROR instead of
+# exiting, so a caller can choose between dying and degrading one row of a view.
+# The explanation carries the status and the API's own message, never raw headers.
+API_ERROR=
+api_try_get() {  # <path>
   local path=$1 code
+  API_ERROR=
   code=$(curl --config "$CFG" -o "$BODY" -w '%{http_code}' "$API_BASE$path" 2>/dev/null) || code=000
   case $code in
     200) return 0 ;;
-    000) die 4 "could not reach ${API_BASE} (network, proxy, or timeout after ${TIMEOUT}s)" ;;
-    401|403) die 4 "the Cursor API rejected the key (HTTP $code)$(api_message). Check CURSOR_API_KEY, or regenerate it at https://cursor.com/dashboard/api" ;;
-    404) die 4 "not found (HTTP 404)$(api_message)" ;;
-    429) die 4 "rate limited by the Cursor API (HTTP 429)$(api_message). Retry in a minute" ;;
-    *) die 4 "the Cursor API returned HTTP $code$(api_message)" ;;
+    000) API_ERROR="could not reach ${API_BASE} (network, proxy, or timeout after ${TIMEOUT}s)" ;;
+    401|403) API_ERROR="the Cursor API rejected the key (HTTP $code)$(api_message). Check CURSOR_API_KEY, or regenerate it at https://cursor.com/dashboard/api" ;;
+    404) API_ERROR="not found (HTTP 404)$(api_message)" ;;
+    429) API_ERROR="rate limited by the Cursor API (HTTP 429)$(api_message). Retry in a minute" ;;
+    *) API_ERROR="the Cursor API returned HTTP $code$(api_message)" ;;
   esac
+  return 1
+}
+
+# GET <path> or die. The right shape for a fetch whose failure leaves nothing to
+# show: every top-level fetch, including the `list` page itself.
+api_get() {  # <path>
+  api_try_get "$1" || die 4 "$API_ERROR"
 }
 
 # The API's own error text, when the body is JSON carrying one. Never the body
@@ -241,20 +268,43 @@ valid_limit() {  # <n>
   esac
 }
 
+# Digits only, then a range. The 5-or-more-digit pattern is refused before any
+# arithmetic so an absurd value cannot reach `[ -ge ]` at all.
+valid_timeout() {  # <seconds>
+  case $1 in
+    '' | *[!0-9]* | ?????*) return 1 ;;
+    *) [ "$1" -ge 1 ] && [ "$1" -le 3600 ] ;;
+  esac
+}
+
 # Latest run status for one agent. Echoes "<status> <runId> <source>".
 # Prefers the caller-supplied latestRunId, falls back to the runs list, and
 # reports "none none none" for an agent that has no run yet.
-latest_run_status() {  # <agent-id> <latest-run-id-or-empty>
-  local agent=$1 run=$2 status
+#
+# A failed fast-path request falls THROUGH to the runs-list fallback: the
+# latestRunId that drove it is not in Cursor's published schema, so a stale or
+# removed run id answering 404 is an expected shape, not a fatal one. When the
+# fallback fails too, resolution degrades to "unknown none resolution-failed" so
+# one bad request costs one row rather than the whole view. Pass strict=1 for a
+# single-agent view, where an unresolvable latest run is the answer being asked
+# for and hiding the reason would be worse than failing.
+latest_run_status() {  # <agent-id> <latest-run-id-or-empty> [strict]
+  local agent=$1 run=$2 strict=${3:-0} status
   if [ -n "$run" ] && [ "$run" != null ]; then
     if valid_agent_id "$run"; then
-      api_get "/v1/agents/$agent/runs/$run"
-      status=$(jq -r '.status // "none"' "$BODY")
-      printf '%s %s %s' "$status" "$run" latestRunId
-      return 0
+      if api_try_get "/v1/agents/$agent/runs/$run"; then
+        status=$(jq -r '.status // "none"' "$BODY")
+        printf '%s %s %s' "$status" "$run" latestRunId
+        return 0
+      fi
+      [ "$strict" -eq 0 ] || die 4 "$API_ERROR"
     fi
   fi
-  api_get "/v1/agents/$agent/runs?limit=1"
+  if ! api_try_get "/v1/agents/$agent/runs?limit=1"; then
+    [ "$strict" -eq 0 ] || die 4 "$API_ERROR"
+    printf 'unknown none resolution-failed'
+    return 0
+  fi
   status=$(jq -r '(.items // [])[0].status // "none"' "$BODY")
   run=$(jq -r '(.items // [])[0].id // "none"' "$BODY")
   if [ "$status" = none ]; then
@@ -276,12 +326,16 @@ env_label() {  # <env-name> <env-type>
   fi
 }
 
-trunc() {  # <string> <width>
-  local s=$1 w=$2
-  if [ "${#s}" -gt "$w" ]; then
-    printf '%s...' "${s:0:$((w - 3))}"
-  else
-    printf '%s' "$s"
+# Footer for an --env-narrowed view. Emitted whatever the match count is,
+# including zero: Cursor's list endpoint has no environment filter, so --limit
+# bounds the FETCH and a missing match may simply be on the next page. Reporting
+# only "none found" would read as "this home has no cloud agents".
+filtered_footer() {  # <matched> <fetched> <env-name>
+  printf 'Filtered to environment %s: %s of %s fetched agent(s) match. --limit bounds the fetch, not the matches, so raise it if a match is missing.\n' \
+    "$3" "$1" "$2"
+  if [ "$1" -eq 0 ] && [ "$2" -gt 0 ]; then
+    printf 'Agents were fetched, so this is not an empty fleet: none of the %s fetched is in %s. Drop --env to see every environment.\n' \
+      "$2" "$3"
   fi
 }
 
@@ -347,28 +401,31 @@ cmd_list() {
   fi
 
   # Resolve each agent's latest run one at a time. Serial on purpose: a burst of
-  # parallel requests is the fastest way to meet the API's rate limiter.
+  # parallel requests is the fastest way to meet the API's rate limiter. The ids
+  # come out of one jq pass and the resolved triples are stitched back on in one
+  # more, rather than rebuilding the whole accumulating array once per agent.
   local resolved='[]'
   if [ "$resolve_runs" -eq 1 ]; then
-    local n i row agent_id run_id triple
-    n=$(printf '%s' "$agents" | jq 'length')
-    i=0
-    while [ "$i" -lt "$n" ]; do
-      row=$(printf '%s' "$agents" | jq -c ".[$i]")
-      agent_id=$(printf '%s' "$row" | jq -r '.id')
-      run_id=$(printf '%s' "$row" | jq -r '.latestRunId')
+    local statuses='' agent_id run_id triple
+    while IFS=$(printf '\t') read -r agent_id run_id; do
+      # One triple per line, unconditionally: the stitch below matches triples to
+      # agents by position, so skipping an unusable row would shift every status
+      # after it onto the wrong agent.
       if valid_agent_id "$agent_id"; then
         triple=$(latest_run_status "$agent_id" "$run_id")
       else
         triple='none none none'
       fi
-      # shellcheck disable=SC2086  # triple is three space-free tokens by construction
-      set -- $triple
-      resolved=$(printf '%s' "$resolved" | jq -c \
-        --argjson row "$row" --arg s "$1" --arg r "$2" --arg src "$3" \
-        '. + [$row + {runStatus: $s, runId: $r, runStatusSource: $src}]')
-      i=$((i + 1))
-    done
+      statuses="$statuses$triple"$'\n'
+    done <<EOF
+$(printf '%s' "$agents" | jq -r '.[] | [.id, .latestRunId] | @tsv')
+EOF
+    resolved=$(printf '%s' "$agents" | jq -c --arg statuses "$statuses" '
+      ($statuses | split("\n") | map(select(length > 0) | split(" "))) as $t
+      | to_entries
+      | map(.value + {
+          runStatus: $t[.key][0], runId: $t[.key][1], runStatusSource: $t[.key][2]
+        })')
   else
     resolved=$(printf '%s' "$agents" | jq -c \
       'map(. + {runStatus: "unresolved", runId: "", runStatusSource: "skipped"})')
@@ -403,10 +460,25 @@ cmd_list() {
     return 0
   fi
 
-  local count
-  count=$(printf '%s' "$resolved" | jq 'length')
+  # One pass for every count the footer needs, rather than one jq per number.
+  local counts count running named unresolved
+  counts=$(printf '%s' "$resolved" | jq -r '[
+      length,
+      ([.[] | select(.runStatus == "RUNNING" or .runStatus == "CREATING")] | length),
+      ([.[] | select(.envName != "") | .envName] | unique | length),
+      ([.[] | select(.runStatusSource == "resolution-failed")] | length)
+    ] | @tsv')
+  IFS=$(printf '\t') read -r count running named unresolved <<EOF
+$counts
+EOF
+
   if [ "$count" -eq 0 ]; then
     echo "No Cursor Cloud agents found."
+    # An empty FILTERED view is a different fact from an empty fleet, and the
+    # --limit caveat matters most exactly here: the match may be one page away.
+    if [ "$filtering" -eq 1 ]; then
+      filtered_footer "$count" "$fetched" "$env_filter"
+    fi
     return 0
   fi
 
@@ -421,49 +493,54 @@ cmd_list() {
     # shellcheck disable=SC2059
     printf "$row_fmt" AGENT RUN UPDATED ENVIRONMENT REPOS NAME
   fi
-  local i=0 row
-  while [ "$i" -lt "$count" ]; do
-    row=$(printf '%s' "$resolved" | jq -c ".[$i]")
-    local id run life upd envl repos name
-    id=$(printf '%s' "$row" | jq -r '.id')
-    run=$(printf '%s' "$row" | jq -r '.runStatus')
-    life=$(printf '%s' "$row" | jq -r '.lifecycle | ascii_downcase')
-    upd=$(printf '%s' "$row" | jq -r '.updatedAt' | tr T ' ' | cut -c1-16)
-    local env_name
-    env_name=$(printf '%s' "$row" | jq -r '.envName')
-    envl=$(env_label "$env_name" "$(printf '%s' "$row" | jq -r '.envType')")
-    # Truncate first, then append the default marker, so a long environment name
-    # can never swallow the marker the way it would if the assembled label were
-    # cut to width.
-    envl=$(trunc "$envl" 18)
-    if [ -n "$default_env" ] && [ "$env_name" = "$default_env" ]; then
-      envl="$envl *"
-    fi
-    repos=$(printf '%s' "$row" | jq -r '.repos | length')
-    name=$(printf '%s' "$row" | jq -r '.name')
+  # One jq pass renders every cell, including the environment label, its
+  # truncation, and the default marker, then the read loop only pads columns.
+  # A unit separator rather than a tab, because tab is IFS whitespace to `read`
+  # and an empty middle cell - an agent with no updatedAt - would collapse the
+  # row by one column.
+  local sep
+  sep=$(printf '\037')
+  # Truncate the environment label first, then append the default marker, so a
+  # long environment name can never swallow the marker the way it would if the
+  # assembled label were cut to width.
+  printf '%s' "$resolved" | jq -r --arg defaultEnv "$default_env" '
+    def trunc($w): if length > $w then .[0:($w - 3)] + "..." else . end;
+    .[]
+    | ((if .envName != "" then .envName
+        else "(ad-hoc " + (if .envType != "" then .envType else "cloud" end) + ")" end)
+       | trunc(18)) as $envl
+    | [
+        .id,
+        .runStatus,
+        (.lifecycle | ascii_downcase),
+        (.updatedAt | gsub("T"; " ") | .[0:16]),
+        (if $defaultEnv != "" and .envName == $defaultEnv then $envl + " *" else $envl end),
+        (.repos | length | tostring),
+        (.name | trunc(34))
+      ] | join("\u001f")' |
+  while IFS="$sep" read -r id run life upd envl repos name; do
     if [ "$include_archived" = true ]; then
       # shellcheck disable=SC2059
-      printf "$row_fmt" "${id: -8}" "$run" "$life" "$upd" "$envl" "$repos" "$(trunc "$name" 34)"
+      printf "$row_fmt" "${id: -8}" "$run" "$life" "$upd" "$envl" "$repos" "$name"
     else
       # shellcheck disable=SC2059
-      printf "$row_fmt" "${id: -8}" "$run" "$upd" "$envl" "$repos" "$(trunc "$name" 34)"
+      printf "$row_fmt" "${id: -8}" "$run" "$upd" "$envl" "$repos" "$name"
     fi
-    i=$((i + 1))
   done
 
-  local running named
-  running=$(printf '%s' "$resolved" | jq '[.[] | select(.runStatus == "RUNNING" or .runStatus == "CREATING")] | length')
-  named=$(printf '%s' "$resolved" | jq -r '[.[] | select(.envName != "") | .envName] | unique | length')
   echo
   printf '%s agent(s) shown, %s with a run in flight' "$count" "$running"
   [ "$named" -eq 0 ] || printf ', across %s named environment(s)' "$named"
   printf '.\n'
   if [ "$filtering" -eq 1 ]; then
-    printf 'Filtered to environment %s: %s of %s fetched agent(s) match. --limit bounds the fetch, not the matches, so raise it if a match is missing.\n' \
-      "$env_filter" "$count" "$fetched"
+    filtered_footer "$count" "$fetched" "$env_filter"
   fi
   if [ "$resolve_runs" -eq 1 ]; then
     echo 'RUN is the latest run status and is what says whether work is happening.'
+    if [ "$unresolved" -gt 0 ]; then
+      printf 'RUN is unknown for %s agent(s) whose latest run could not be fetched; every other row is unaffected.\n' \
+        "$unresolved"
+    fi
   else
     echo 'RUN was not resolved (--no-runs), so nothing here says whether work is happening.'
   fi
@@ -504,7 +581,7 @@ cmd_show() {
   api_get "/v1/agents/$agent"
   local agent_json triple
   agent_json=$(jq -c '.' "$BODY")
-  triple=$(latest_run_status "$agent" "$(printf '%s' "$agent_json" | jq -r '.latestRunId // ""')")
+  triple=$(latest_run_status "$agent" "$(printf '%s' "$agent_json" | jq -r '.latestRunId // ""')" 1)
   # shellcheck disable=SC2086  # triple is three space-free tokens by construction
   set -- $triple
 
