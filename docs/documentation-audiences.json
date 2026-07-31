@@ -25,6 +25,7 @@
   ],
   "readmeSetupTargets": [
     "docs/configuration.md",
+    "docs/telegram-bridge.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -100,6 +101,10 @@
     {
       "source": "docs/codex-app-backend.md",
       "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/telegram-bridge.md",
+      "target": "docs/verification/telegram-bridge.md"
     }
   ],
   "surfaces": [
@@ -173,6 +178,10 @@
     },
     {
       "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/telegram-respond/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -304,6 +313,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/telegram-bridge.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
     },
@@ -329,6 +342,10 @@
     },
     {
       "path": "docs/verification/supervision.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/telegram-bridge.md",
       "audience": "maintainer-verification"
     },
     {

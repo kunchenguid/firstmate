@@ -9,7 +9,7 @@ firstmate's always-loaded operating contract and routing index for conditional p
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
-Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or an X-mode mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist without provable pipeline advancement past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
+Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or a configured remote-channel request, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist without provable pipeline advancement past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 A busy pane is otherwise exempt from staleness, but only until its latest `state/<id>.turn-ended` marker reaches `FM_BUSY_TURN_MAX_SECS`, or its `state/<id>.meta` spawn record reaches that age before any turn completes; past that bound it is routed through the same wedge escalation, with the identical reason, escalation count, and `demand-deep-inspection` marker, for inspection only - never an automatic interrupt, signal, or restart.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
@@ -53,6 +53,7 @@ A bounded direct-report terminal tail can help diagnose a mismatch by showing th
 The snapshot strips control sequences, retains only capture metadata and literal event-corroboration flags, and never lets terminal evidence override a valid structured classification.
 The default path remains local-only; live GitHub enrichment exists only behind the bearings `--include-prs` opt-in.
 Optional X mode integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) owns its generated-artifact and dispatch mechanics.
+The optional private Telegram bridge uses the same authenticated check and durable wake path after exact local pairing; [telegram-bridge.md](telegram-bridge.md) owns operator setup and current limits.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, and OpenCode uses its TUI plugin.
@@ -255,6 +256,32 @@ Work routed to another home reports a *typed* terminal result through `bin/fm-pu
 Because a terminal event's id is derived from its identity tuple rather than generated, duplicate reports and restart replay converge without coordination.
 Reconciliation rides the existing relay poll and the session-start digest instead of a new watcher, daemon, or timer, and both are gated on the same `.env` activation contract so a home that never opted into the relay executes none of it.
 The [X mode configuration reference](configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, and the `fmx-respond` skill owns the procedure.
+
+## Optional private Telegram bridge
+
+The private Telegram bridge is a second connector layered on the existing watcher and durable wake queue rather than a parallel control plane.
+Locked bootstrap generates a byte-identified `state/telegram-watch.check.sh` only when `config/telegram/bridge.json` is complete, enabled, owner-only, regular, single-link, and exact for one user whose private chat ID matches.
+The watcher validates the shim and invokes the tracked poll implementation directly.
+No state file is executed as arbitrary code.
+
+One bounded Bot API long poll persists a minimal update disposition before advancing its offset.
+Accepted text is stored first under an exact correlation, and the wake queue's locked one-time append makes crash recovery idempotent across the inbox and queue boundary.
+Rejected updates retain only a disposition and update ID, while unauthorized sender and chat data is not retained or answered.
+
+Outbound sends use caller-supplied idempotency receipts with `prepared`, `dispatching`, `sent`, `definite-failure`, or `uncertain` state.
+All direct replies and all allowed captain-relevant supervised worker updates share one deterministic Markdown-subset presentation owner.
+That owner produces escaped Telegram HTML plus a readable plain form, applies mobile table fallback and Unicode display width, and publishes one restart-stable protected split snapshot before delivery.
+The sender alone adds the hardcoded `HTML` parse mode and never accepts model-controlled Telegram entities, parse modes, or buttons.
+Split parts are sent sequentially under the same-chat lock and receipted in order.
+The receipt reaches `dispatching` before network I/O.
+An interrupted or ambiguous send wakes Firstmate for reconciliation and cannot be retried with that receipt.
+Exact approval bindings connect one approval ID to the Telegram decision message and permit one matching direct-reply claim before expiry.
+
+Connector-specific code owns Telegram update, presentation, and receipt semantics.
+The shared private-file library owns regular-file, ownership, link-count, mode, no-follow read, and atomic-publication checks.
+The existing wake queue, watcher, session-start renderer, and harness supervision adapters remain the owners of activation and primary-session delivery.
+The agent-only `telegram-respond` skill owns request interpretation, approval use, quiet notification policy, and captain replies.
+The [operator guide](telegram-bridge.md) and [maintainer verification record](verification/telegram-bridge.md) own current setup and test evidence.
 
 ## Project memory belongs to projects
 

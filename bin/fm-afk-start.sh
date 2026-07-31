@@ -36,6 +36,7 @@ FM_AFK_START_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_AFK_START_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_AFK_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+FM_AFK_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_AFK_LOCK="$FM_AFK_STATE/.supervise-daemon.lock"
 FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
@@ -142,6 +143,10 @@ fm_afk_start_main() {
   fi
 
   echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
+  # shellcheck source=/dev/null
+  [ -f "$FM_AFK_CONFIG/x-mode.env" ] && . "$FM_AFK_CONFIG/x-mode.env"
+  # shellcheck source=/dev/null
+  [ -f "$FM_AFK_CONFIG/telegram-mode.env" ] && . "$FM_AFK_CONFIG/telegram-mode.env"
   exec "$FM_AFK_DAEMON"
 }
 

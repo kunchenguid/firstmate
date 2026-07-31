@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated remote-channel artifacts, private Telegram receipts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -323,11 +323,33 @@ The watcher accepts the shim only when its bytes match the expected generated co
 This section is the single owner of the X-mode cadence contract: an X instance polls every 30 seconds instead of the default 300, only an X instance speeds up because a non-X home has no `config/x-mode.env`, and the session-start supervision operating block includes the cadence instruction when that file exists.
 The active primary-harness supervision protocol owns how that sourced cadence reaches the watcher process.
 Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence transition - opt-in while a watcher is already running, or opt-out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
-While away mode is active the daemon owns the watcher and its default cadence applies; away-mode X cadence is a deferred follow-up.
+While away mode is active the daemon owns the watcher and the away entry sources the same generated remote-channel cadence files before starting it.
 When the token is removed or empty, the next locked session-start bootstrap step removes those artifacts.
 Steady-state off is silent and writes nothing.
 X mode remains additive to non-X lifecycle behavior: homes without the generated artifacts keep the default watcher cadence and do not run the X poll.
 Its request handling remains in X-specific `bin/` scripts and the `fmx-respond` skill, while the watcher owns authenticated dispatch from the generated local identity shim.
+
+## Private Telegram bridge
+
+The bridge's complete owner-facing setup, pairing, opt-out, retention, and v1 limitations live in [the private Telegram bridge guide](telegram-bridge.md).
+It is off unless `config/telegram/bridge.json` is complete, enabled, mode `0600`, owned by the current user, regular, single-link, and stored in a non-symlink owner-only directory.
+The file contains the bot token, exact allowed Telegram user ID, and exact allowed direct-chat ID, and must never be committed or copied into another configuration surface.
+
+The locked bootstrap step writes `state/telegram-watch.check.sh` as the byte-static identity shim and `config/telegram-mode.env` with `FM_CHECK_INTERVAL=1`.
+The one-second sweep interval starts the next bounded long poll promptly after the prior long poll returns; it is not one Bot API request per second while a poll is pending.
+Every harness-owned watcher launch sources the active generated cadence files, and away mode sources them before its daemon starts.
+Bootstrap does not restart a running watcher.
+
+Private Telegram runtime data lives under `state/telegram/` in mode-`0700` directories and mode-`0600` regular single-link files.
+It includes minimal update dispositions, the next long-poll offset, accepted request bodies, restart-stable rendered rich/plain snapshots, approval bindings and claims, outbound delivery receipts, and redacted error state.
+Message bodies are removed after a matching sent reply and expire after seven days if unresolved.
+Update journals, rendered snapshots, receipts, and approval records have the same bounded local retention.
+
+`bin/fm-private-lib.sh` is the shared owner of local protected-file validation and atomic publication.
+`bin/fm-telegram-lib.sh` owns connector config, Bot API transport, correlation, retention, and approval primitives.
+`bin/fm-telegram-present.pl` is the one deterministic semantic presentation owner, while `bin/fm-telegram-render.sh` binds its output to a protected receipt snapshot.
+Every reply and every allowed cross-project supervised worker notification reaches `sendMessage` only through that snapshot.
+The watcher invokes `bin/fm-telegram-poll.sh` only after validating the generated shim bytes, and Telegram code uses the existing durable wake queue rather than a connector-specific scheduler.
 
 `bin/fm-x-poll.sh` calls `GET /connector/poll` with `Authorization: Bearer <FMX_PAIRING_TOKEN>`.
 HTTP 204 is silent.

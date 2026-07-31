@@ -99,7 +99,7 @@ Approved setup nodes are:
 - `source <x-mode path>` or `. <x-mode path>`.
 - `[ -f <x-mode path> ] && source <x-mode path>` and the equivalent dot form.
 
-The allowed x-mode paths are `config/x-mode.env`, `./config/x-mode.env`, and an absolute path that normalizes to `<active-firstmate-home>/config/x-mode.env`.
+The allowed remote-mode paths are `config/x-mode.env`, `config/telegram-mode.env`, their `./config/` forms, and absolute paths that normalize to those exact files under the active Firstmate home.
 An absolute x-mode path outside the active home is not an approved setup node.
 
 Approved nodes may be separated by `;`, a real newline, or `&&`.

@@ -68,6 +68,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-telegram-lib.sh
+. "$SCRIPT_DIR/fm-telegram-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
@@ -766,7 +768,18 @@ while :; do
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
-      if [ "$(basename "$c")" = x-watch.check.sh ]; then
+      check_wake_persisted=0
+      if [ "$(basename "$c")" = telegram-watch.check.sh ]; then
+        if fmtg_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
+          && [ -f "$FM_ROOT/bin/fm-telegram-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-telegram-poll.sh" ]; then
+          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-telegram-poll.sh" || exit 1
+          out=$FM_CHECK_RESULT
+          check_wake_persisted=1
+        else
+          rejected_checks="$rejected_checks $c"
+          continue
+        fi
+      elif [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
@@ -800,7 +813,9 @@ while :; do
       fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
-        fm_wake_append check "$c" "$reason" || exit 1
+        if [ "$check_wake_persisted" -ne 1 ]; then
+          fm_wake_append check "$c" "$reason" || exit 1
+        fi
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \

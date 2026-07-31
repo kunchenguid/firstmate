@@ -74,6 +74,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, emit bounded best-effort status-event annotations, then assert watcher liveness |
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |
+| `fm-private-lib.sh`      | Validate and atomically publish owner-only regular single-link local files            |
 | `fm-classify-lib.sh`     | Shared watcher-wake, declared-wait, and pipeline-progress classification predicates |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, and per-harness sources |
@@ -100,3 +101,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-public-followup-lib.sh` | Shared relay-activation gate, O(1) presence checks, and private transport paths for promised public replies |
 | `fm-public-followup.sh`  | Reconcile typed terminal work results into a public commitment and deliver its final reply once |
 | `fm-public-followup-emit.sh` | Report one typed terminal work result into the home that owes the public reply    |
+| `fm-telegram-lib.sh`     | Own protected Telegram config, Bot API transport, receipts, retention, and approval bindings |
+| `fm-telegram-setup.sh`   | Pair, inspect, or disable one owner-only private Telegram captain chat               |
+| `fm-telegram-poll.sh`    | Run one bounded idempotent Telegram long poll and publish accepted request wakes     |
+| `fm-telegram-request.sh` | Read or retire one exact accepted Telegram request correlation                      |
+| `fm-telegram-present.pl` | Render the safe deterministic semantic Telegram HTML/plain presentation             |
+| `fm-telegram-render.sh`  | Bind one presentation to a restart-stable owner-only outbound snapshot              |
+| `fm-telegram-send.sh`    | Send one receipt-bound Telegram reply or quiet captain-relevant notification         |

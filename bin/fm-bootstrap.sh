@@ -17,7 +17,8 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "TELEGRAM: private bridge on ..." or a redacted off diagnostic.
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
@@ -67,6 +68,9 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          The private Telegram bridge is OPTIONAL and inert unless the guarded
+#          local config/telegram/bridge.json is complete and enabled. When opted
+#          in, bootstrap writes its trusted poll shim and long-poll cadence file.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -76,9 +80,9 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          x_mode_setup, telegram_mode_setup, fleet_sync) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -112,6 +116,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-telegram-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-telegram-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 
@@ -562,7 +568,7 @@ tool_version_at_least() {  # <tool> <min-version>
   [ "$patch" -ge "$min_patch" ]
 }
 
-x_mode_write_if_changed() {
+remote_mode_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
   parent=${dest%/*}
   [ "$parent" != "$dest" ] || return 1
@@ -606,16 +612,16 @@ x_mode_write_if_changed() {
   fi
 }
 
-x_mode_artifact_present() {
+remote_mode_artifact_present() {
   [ -e "$1" ] || [ -L "$1" ]
 }
 
-x_mode_remove_artifact() {
+remote_mode_remove_artifact() {
   local artifact=$1 parent=${1%/*}
-  x_mode_artifact_present "$artifact" || return 0
+  remote_mode_artifact_present "$artifact" || return 0
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
   rm -f -- "$artifact" 2>/dev/null || return 1
-  ! x_mode_artifact_present "$artifact"
+  ! remote_mode_artifact_present "$artifact"
 }
 
 # X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
@@ -643,8 +649,8 @@ x_mode_setup() {
 
   x_mode_remove_artifacts() {
     local failed=0
-    x_mode_remove_artifact "$shim" || failed=1
-    x_mode_remove_artifact "$cadence" || failed=1
+    remote_mode_remove_artifact "$shim" || failed=1
+    remote_mode_remove_artifact "$cadence" || failed=1
     [ "$failed" -eq 0 ]
   }
 
@@ -658,7 +664,7 @@ x_mode_setup() {
   if [ -z "$token" ]; then
     # Opt-out (or never opted in): drop any X artifacts; stay silent unless we
     # actually removed something.
-    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
+    if remote_mode_artifact_present "$shim" || remote_mode_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
         echo "FMX: X mode off - removed relay poll shim and 30s cadence; default cadence applies on the next supervision cycle; $(x_mode_supervision_repair)"
       else
@@ -676,7 +682,7 @@ x_mode_setup() {
     fi
   done
   if [ "$missing" -ne 0 ]; then
-    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
+    if remote_mode_artifact_present "$shim" || remote_mode_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
         echo "FMX: X mode off - missing relay poll dependencies; install them and rerun bootstrap"
       else
@@ -704,7 +710,7 @@ x_mode_setup() {
       ;;
   esac
   shim_body=$(fmx_poll_shim_content "$shim_home" "$FM_ROOT")
-  x_mode_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
+  remote_mode_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
   fmx_poll_shim_valid "$shim" "$shim_home" "$FM_ROOT" \
     || { fmx_arm_failed; return 0; }
 
@@ -716,9 +722,80 @@ x_mode_setup() {
 export FM_CHECK_INTERVAL=30
 EOF
 )
-  x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fmx_arm_failed; return 0; }
+  remote_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fmx_arm_failed; return 0; }
 
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
+}
+
+# Private Telegram bridge (opt-in): a complete owner-only config enables one
+# authenticated long-poll check in the existing watcher and a one-second check
+# sweep cadence. The poll itself blocks up to ten seconds, so the effective API
+# request rate remains bounded while pending messages wake promptly.
+telegram_mode_setup() {
+  local shim cadence shim_body cadence_body tool missing removed=0
+  shim="$STATE/telegram-watch.check.sh"
+  cadence="$CONFIG/telegram-mode.env"
+
+  telegram_remove_artifacts() {
+    local failed=0
+    remote_mode_artifact_present "$shim" && removed=1
+    remote_mode_artifact_present "$cadence" && removed=1
+    remote_mode_remove_artifact "$shim" || failed=1
+    remote_mode_remove_artifact "$cadence" || failed=1
+    [ "$failed" -eq 0 ]
+  }
+
+  if ! fmtg_load_config; then
+    if ! telegram_remove_artifacts; then
+      echo "TELEGRAM: private bridge off - failed to retire local poll artifacts"
+      return 0
+    fi
+    if [ "$FMTG_CONFIG_STATUS" = invalid ]; then
+      echo "TELEGRAM: private bridge off - local config is unsafe or incomplete"
+    elif [ "$removed" -eq 1 ]; then
+      echo "TELEGRAM: private bridge off - local polling artifacts removed"
+    fi
+    return 0
+  fi
+
+  missing=0
+  for tool in curl jq perl; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "MISSING: $tool (install: $(install_cmd "$tool"))"
+      missing=1
+    fi
+  done
+  if [ "$missing" -ne 0 ]; then
+    telegram_remove_artifacts || true
+    echo "TELEGRAM: private bridge off - missing local poll dependencies"
+    return 0
+  fi
+
+  mkdir -p "$STATE" "$CONFIG" 2>/dev/null || {
+    telegram_remove_artifacts || true
+    echo "TELEGRAM: private bridge off - failed to prepare local poll artifacts"
+    return 0
+  }
+  shim_body=$(fmtg_poll_shim_content "$FM_HOME" "$FM_ROOT")
+  if ! remote_mode_write_if_changed "$shim" "$shim_body" 700 \
+    || ! fmtg_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT"; then
+    telegram_remove_artifacts || true
+    echo "TELEGRAM: private bridge off - failed to arm trusted local poll"
+    return 0
+  fi
+  cadence_body=$(cat <<'EOF'
+# Auto-generated by fm-bootstrap.sh - private Telegram long-poll cadence.
+# The watcher check sweep starts the next bounded long poll promptly after the
+# prior long poll returns. The poll's own timeout bounds the request rate.
+export FM_CHECK_INTERVAL=1
+EOF
+)
+  remote_mode_write_if_changed "$cadence" "$cadence_body" 600 || {
+    telegram_remove_artifacts || true
+    echo "TELEGRAM: private bridge off - failed to publish local poll cadence"
+    return 0
+  }
+  echo "TELEGRAM: private bridge on - trusted long polling armed for one private captain chat"
 }
 
 crew_dispatch_validate() {
@@ -908,6 +985,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
   x_mode_setup
+  telegram_mode_setup
   fleet_sync
 fi
 exit 0

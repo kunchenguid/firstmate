@@ -18,7 +18,7 @@
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
-# bootstrap running its detect-only diagnostics without its five mutating
+# bootstrap running its detect-only diagnostics without its six mutating
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
@@ -29,9 +29,10 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's five MUTATING sweeps
+#                       diagnostics always run. Bootstrap's six MUTATING sweeps
 #                       (legacy PR-check migration, secondmate fast-forward,
-#                       secondmate liveness, X-mode artifact writes, fleet sync)
+#                       secondmate liveness, X-mode artifact writes, Telegram
+#                       bridge artifact writes, fleet sync)
 #                       also run only when locked.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
@@ -52,7 +53,7 @@
 #
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - fast-forwarding
-# secondmate homes, writing X-mode artifacts, fetching/fast-forwarding every
+# secondmate homes, writing remote-channel artifacts, fetching/fast-forwarding every
 # project clone - before ever discovering another session already holds the
 # lock. Two sessions racing those sweeps is exactly the hazard the lock
 # exists to prevent, so locking first closes the hole outright: only the
@@ -65,7 +66,7 @@
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute without
 # verified lock ownership.
-# Only projection cleanup, the five bootstrap mutating sweeps, and the
+# Only projection cleanup, the six bootstrap mutating sweeps, and the
 # wake-queue drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
@@ -259,7 +260,7 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: PR-check migration, stale Herdr child cleanup,\n'
-    printf '●  secondmate sync, X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
+    printf '●  secondmate sync, remote-channel artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
     printf '●  otherwise mutate fleet state from this session.\n'
@@ -312,6 +313,8 @@ AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
+TELEGRAM_MODE_PRESENT=0
+[ -f "$CONFIG/telegram-mode.env" ] && TELEGRAM_MODE_PRESENT=1
 
 if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -332,7 +335,8 @@ fi
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
-  --x-mode "$X_MODE_PRESENT"
+  --x-mode "$X_MODE_PRESENT" \
+  --telegram-mode "$TELEGRAM_MODE_PRESENT"
 
 # --- 4. context digest -----------------------------------------------------
 section "CONTEXT"
@@ -429,10 +433,10 @@ load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
-elif [ -f "$CONFIG/x-mode.env" ]; then
+elif [ -f "$CONFIG/x-mode.env" ] || [ -f "$CONFIG/telegram-mode.env" ]; then
   cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
-X mode is active, so the emitted block's cadence instruction applies.
+A remote channel is active, so the emitted block's cadence instruction applies.
 This script never starts supervision itself.
 
 EOF
