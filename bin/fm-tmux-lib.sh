@@ -489,16 +489,24 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
 # block legitimate sends). Correlation needs a per-submit token the harness
 # echoes back, not more shell on this side.
 #
-# Confirmation window tuning, mirroring herdr's sampled confirmation
-# (fm_backend_herdr_wait_for_working): each Enter attempt spreads
+# Confirmation window tuning. The sampled-confirmation shape is borrowed from
+# herdr (fm_backend_herdr_wait_for_working): each Enter attempt spreads
 # FM_SUBMIT_SEMANTIC_POLLS record reads across a per-attempt budget of
-# max(<enter-sleep>, FM_SUBMIT_SEMANTIC_MIN_BUDGET) seconds. The hook writes
-# its record within milliseconds of the harness event, but the harness event
-# itself (the turn opening) trails Enter by up to ~500ms on real harnesses
-# (herdr measured first-working at 90-490ms), so the caller's bare
-# enter-sleep alone would under-sample.
+# max(<enter-sleep>, FM_SUBMIT_SEMANTIC_MIN_BUDGET) seconds. The herdr
+# precedent is the pattern only, never the latency basis: herdr confirms from
+# a native in-process agent state, whereas here the busy record has to travel
+# the whole writer chain (harness event dispatch, a bash process spawn for
+# bin/fm-busy-event.sh, writer-lock acquisition, then the atomic record
+# write). That chain's live latency on the tmux semantic writers (the claude
+# UserPromptSubmit hook, the opencode plugin, the pi extension) is
+# deliberately unmeasured here, so the floor is sized conservatively to cover
+# it on a loaded machine rather than tuned to a measurement. A budget too
+# short does not lose the instruction, it reports 'pending no-turn' on a
+# delivered send, so the floor errs long. Override per environment with the
+# env vars; the poll count stays at 6 so the samples spread across the wider
+# window.
 FM_SUBMIT_SEMANTIC_POLLS=${FM_SUBMIT_SEMANTIC_POLLS:-6}
-FM_SUBMIT_SEMANTIC_MIN_BUDGET=${FM_SUBMIT_SEMANTIC_MIN_BUDGET:-0.9}
+FM_SUBMIT_SEMANTIC_MIN_BUDGET=${FM_SUBMIT_SEMANTIC_MIN_BUDGET:-2}
 
 # fm_tmux_submit_semantic_eligible: 0 iff <harness> has a trusted semantic
 # lifecycle source (bin/fm-busy-lib.sh's per-harness trust table, so codex
