@@ -246,6 +246,8 @@ Send in-scope work to the fitting secondmate unless it is blocked or the captain
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
+When the global ambiguous multi-session planning rule applies, create backlog work only for decisions that can be stated precisely now; keep the rest in the scout report or parent backlog body as `Not yet specified` until prerequisite decisions resolve.
+Use only the existing backlog, scout, dependency, and decision-hold owners; do not create a parallel map or ticket lifecycle, and planning completion never authorizes a Ship.
 
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
