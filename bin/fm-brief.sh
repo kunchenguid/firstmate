@@ -46,7 +46,10 @@
 # Only the destination sentence varies, because preservation must name a place
 # that outlives the task: a ship task commits to its surviving branch, while a
 # scout's worktree is discarded at teardown, so its raw evidence is copied into
-# the report directory that survives instead.
+# the report directory that survives instead. The scout write boundary grants
+# only what the scout itself puts there, not the directory wholesale: fm-spawn.sh
+# reads brief.md back out of it and hard-fails when it is missing, so a scout
+# tidying its own report directory could otherwise break its respawn path.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -303,7 +306,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the status file below and the contents of your report directory \`$DATA/$ID/\`, which holds the report and any raw evidence you preserve.
+2. Stay inside this worktree; the only files you may write outside it are the status file below and the contents of your report directory \`$DATA/$ID/\` that you put there yourself: the report and any raw evidence you preserve. Leave the rest of that directory as you found it - firstmate needs \`brief.md\` intact to respawn you.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
