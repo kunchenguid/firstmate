@@ -54,6 +54,43 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
   pass "fm-afk-start.sh ignores stale pidfile-only live pids"
 }
 
+test_afk_start_no_identity_fallback_ignores_terminal_width() {
+  local dir state lock live full prefix matched
+  dir=$(make_supercase afk-start-no-identity-width)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  bash -c 'while :; do sleep 1; done' \
+    fm-daemon-width-regression-padding-abcdefghijklmnopqrstuvwxyz \
+    fm-supervise-daemon.sh &
+  live=$!
+  mkdir -p "$lock"
+  printf '%s\n' "$live" > "$lock/pid"
+
+  full=$(COLUMNS=200 ps -ww -p "$live" -o command= 2>/dev/null || true)
+  prefix=${full%%fm-supervise-daemon.sh*}
+  matched=0
+  if COLUMNS=40 FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090
+    . "$1"
+    daemon_lock_held_by_live_daemon
+  ' _ "$AFK_START"; then
+    matched=1
+  fi
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  case "$full" in
+    *fm-supervise-daemon.sh*) ;;
+    *) fail "daemon fallback fixture did not expose the script marker ('$full')" ;;
+  esac
+  [ "${#prefix}" -ge 40 ] \
+    || fail "daemon fallback fixture placed the script marker before narrow column 40 ('$full')"
+  [ ! -e "$lock/pid-identity" ] || fail "daemon fallback fixture unexpectedly wrote a pid identity"
+  [ "$matched" -eq 1 ] \
+    || fail "daemon no-identity fallback missed a live marker beyond narrow column 40"
+  pass "fm-afk-start.sh no-identity fallback recognizes a daemon marker beyond narrow terminal width"
+}
+
 test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   local dir state out status lock
   dir=$(make_supercase afk-start-stale-lock-reused-pid)
@@ -1818,6 +1855,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
+test_afk_start_no_identity_fallback_ignores_terminal_width
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
