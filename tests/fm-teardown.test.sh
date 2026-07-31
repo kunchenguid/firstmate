@@ -49,6 +49,8 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (z) worktree and project identify the same directory      -> REFUSE unchanged
+#   (aa) non-lock treehouse return failure                    -> branch preserved
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -394,6 +396,16 @@ if [ "${1:-}" = return ]; then
   exit 128
 fi
 exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+add_failing_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+echo "treehouse: simulated non-lock return failure" >&2
+exit 9
 SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
@@ -1264,6 +1276,70 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+test_same_directory_metadata_refuses_without_changing_project() {
+  local case_dir rc branch_before branch_after
+  case_dir=$(make_case same-directory-metadata)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/project" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+  branch_before=$(git -C "$case_dir/project" symbolic-ref --quiet --short HEAD)
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "same-directory-metadata: teardown should refuse even with --force"
+  assert_grep "REFUSED: task task-x1 records the project clone as its worktree." "$case_dir/stderr" \
+    "same-directory-metadata: refusal did not explain the metadata defect"
+  assert_grep "Recorded worktree: $case_dir/project" "$case_dir/stderr" \
+    "same-directory-metadata: refusal did not name the worktree path"
+  assert_grep "Recorded project: $case_dir/project" "$case_dir/stderr" \
+    "same-directory-metadata: refusal did not name the project path"
+  assert_grep "$case_dir/state/task-x1.meta" "$case_dir/stderr" \
+    "same-directory-metadata: refusal did not name the suspect metadata"
+  branch_after=$(git -C "$case_dir/project" symbolic-ref --quiet --short HEAD)
+  [ "$branch_after" = "$branch_before" ] \
+    || fail "same-directory-metadata: teardown changed the project branch"
+  git -C "$case_dir/project" show-ref --verify --quiet "refs/heads/$branch_before" \
+    || fail "same-directory-metadata: teardown deleted the project branch"
+  pass "teardown refuses same-directory metadata before changing the project clone"
+}
+
+test_treehouse_return_failure_preserves_task_branch() {
+  local case_dir rc branch_before branch_after
+  case_dir=$(make_case treehouse-return-abort)
+  write_meta "$case_dir" local-only ship
+  add_failing_treehouse "$case_dir"
+  mkdir -p "$case_dir/wt/.claude"
+  : > "$case_dir/wt/.claude/settings.local.json"
+  : > "$case_dir/wt/.fm-grok-turnend"
+  branch_before=$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "treehouse-return-abort: teardown should report the provider failure"
+  assert_grep "treehouse: simulated non-lock return failure" "$case_dir/stderr" \
+    "treehouse-return-abort: teardown hid the provider failure"
+  branch_after=$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)
+  [ "$branch_after" = "$branch_before" ] \
+    || fail "treehouse-return-abort: teardown detached the task worktree"
+  git -C "$case_dir/project" show-ref --verify --quiet "refs/heads/$branch_before" \
+    || fail "treehouse-return-abort: teardown deleted the task branch"
+  assert_present "$case_dir/wt/.claude/settings.local.json" \
+    "treehouse-return-abort: teardown removed the Claude hook before return succeeded"
+  assert_present "$case_dir/wt/.fm-grok-turnend" \
+    "treehouse-return-abort: teardown removed the Grok hook before return succeeded"
+  pass "treehouse return failure leaves the task worktree and branch unchanged"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -1833,6 +1909,8 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_same_directory_metadata_refuses_without_changing_project
+test_treehouse_return_failure_preserves_task_branch
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

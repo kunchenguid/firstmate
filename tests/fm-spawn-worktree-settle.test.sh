@@ -12,6 +12,12 @@
 # transient-then-settled pane_current_path sequence with a fake tmux and
 # asserts the recorded worktree resolves to the real, settled worktree, never
 # the stale first read.
+#
+# It also reproduces a case-variant project path without requiring a
+# case-insensitive host filesystem. The fake tmux renames `coding` to `Coding`
+# after spawn records the original physical project path. On a case-sensitive
+# host, it adds a symlink at the original spelling. Both spellings then identify
+# the same real directory, but their strings remain different.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -49,7 +55,17 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_CASE_RENAME_FROM:-}" ] \
+       && [ ! -e "${FM_FAKE_CASE_RENAME_MARKER:?}" ]; then
+      mv "$FM_FAKE_CASE_RENAME_FROM" "${FM_FAKE_CASE_RENAME_TO:?}"
+      if [ ! -e "$FM_FAKE_CASE_RENAME_FROM" ]; then
+        ln -s "$FM_FAKE_CASE_RENAME_TO" "$FM_FAKE_CASE_RENAME_FROM"
+      fi
+      : > "$FM_FAKE_CASE_RENAME_MARKER"
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -64,13 +80,24 @@ SH
 # entirely, distinct from both the project and the worktree - mirroring the
 # live incident where the stale read was another real firstmate home).
 make_settle_case() {
-  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile
+  local name=$1 id=$2 stale_reads=$3 rename_case=${4:-0}
+  local case_dir home proj wt stale fakebin countfile case_from case_to case_marker
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
-  proj="$case_dir/project"
   wt="$case_dir/wt"
   stale="$case_dir/stale-other-checkout"
   countfile="$case_dir/pane-call-count"
+  case_from=
+  case_to=
+  case_marker=
+  if [ "$rename_case" = 1 ]; then
+    case_from="$case_dir/coding"
+    case_to="$case_dir/Coding"
+    case_marker="$case_dir/case-renamed"
+    proj="$case_from/project"
+  else
+    proj="$case_dir/project"
+  fi
   fakebin=$(make_settle_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
@@ -79,11 +106,11 @@ make_settle_case() {
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads|$case_from|$case_to|$case_marker"
 }
 
 read_settle_record() {
-  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS <<EOF
+  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS CASE_FROM CASE_TO CASE_MARKER <<EOF
 $1
 EOF
 }
@@ -96,6 +123,8 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_CASE_RENAME_FROM="$CASE_FROM" FM_FAKE_CASE_RENAME_TO="$CASE_TO" \
+    FM_FAKE_CASE_RENAME_MARKER="$CASE_MARKER" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" 2>&1
 }
@@ -141,7 +170,27 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_case_variant_project_alias_is_not_accepted() {
+  local rec id out status
+  id=settle-case-variant-z3
+  rec=$(make_settle_case settle-case-variant "$id" 2 1)
+  read_settle_record "$rec"
+  STALE_DIR="$CASE_TO/project"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should wait past a case-variant path to the project"
+  [ "$CASE_FROM/project" -ef "$CASE_TO/project" ] \
+    || fail "case-variant fixture paths do not identify the same directory"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the isolated worktree after the case-variant project reads"
+  assert_no_grep "worktree=$CASE_TO/project" "$HOME_DIR/state/$id.meta" \
+    "meta recorded the case-variant project clone as the worktree"
+  pass "case-variant path spellings of the project are treated as the same directory"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_case_variant_project_alias_is_not_accepted
 
 echo "# all fm-spawn-worktree-settle tests passed"

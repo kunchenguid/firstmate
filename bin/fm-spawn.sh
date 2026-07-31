@@ -684,6 +684,17 @@ resolved_existing_dir() {
   cd "$path" && pwd -P
 }
 
+same_directory() {
+  local left=$1 right=$2
+  [ -n "$left" ] || return 1
+  [ -n "$right" ] || return 1
+  if [ -e "$left" ] && [ -e "$right" ]; then
+    [ "$left" -ef "$right" ]
+  else
+    [ "$left" = "$right" ]
+  fi
+}
+
 resolve_project_dir_arg() {
   local path=$1
   case "$path" in
@@ -693,13 +704,16 @@ resolve_project_dir_arg() {
 }
 
 path_is_ancestor_of() {
-  local ancestor=$1 path=$2
+  local ancestor=$1 path=$2 parent
   [ -n "$ancestor" ] || return 1
   [ -n "$path" ] || return 1
-  [ "$ancestor" != "$path" ] || return 1
-  case "$path" in
-    "$ancestor"/*) return 0 ;;
-  esac
+  same_directory "$ancestor" "$path" && return 1
+  while [ "$path" != "/" ]; do
+    parent=${path%/*}
+    [ -n "$parent" ] || parent=/
+    same_directory "$ancestor" "$parent" && return 0
+    path=$parent
+  done
   return 1
 }
 
@@ -712,11 +726,11 @@ validate_firstmate_home_for_spawn() {
     echo "error: secondmate home cannot be the filesystem root: $home" >&2
     return 1
   fi
-  if [ "$abs_home" = "$abs_active_home" ]; then
+  if same_directory "$abs_home" "$abs_active_home"; then
     echo "error: secondmate home cannot be the active firstmate home: $home" >&2
     return 1
   fi
-  if [ "$abs_home" = "$abs_root" ]; then
+  if same_directory "$abs_home" "$abs_root"; then
     echo "error: secondmate home cannot be the firstmate repo: $home" >&2
     return 1
   fi
@@ -777,11 +791,11 @@ validate_firstmate_operational_dirs() {
       echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
       return 1
     fi
-    if [ "$abs_dir" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
+    if same_directory "$abs_dir" "$abs_active_home" || path_is_ancestor_of "$abs_active_home" "$abs_dir"; then
       echo "error: secondmate $name directory cannot be inside the active firstmate home: $dir" >&2
       return 1
     fi
-    if [ "$abs_dir" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_dir"; then
+    if same_directory "$abs_dir" "$abs_root" || path_is_ancestor_of "$abs_root" "$abs_dir"; then
       echo "error: secondmate $name directory cannot be inside the firstmate repo: $dir" >&2
       return 1
     fi
@@ -893,7 +907,9 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
     wt_top_real=
   fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] \
+     || ! same_directory "$wt_real" "$wt_top_real" \
+     || same_directory "$wt_real" "$proj_real"; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -1324,8 +1340,8 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+      if ! same_directory "$p_real" "$PROJ_ABS_REAL"; then
+        if [ -n "$candidate" ] && same_directory "$p_real" "$candidate"; then
           WT="$p"
           break
         fi
