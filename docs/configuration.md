@@ -188,6 +188,42 @@ This does not relax protection for any other untracked file.
 An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
 A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
 
+## Private upstream distribution (config/private-upstream)
+
+`config/private-upstream` opts one primary Firstmate home into a private distribution that keeps personal commits on private `origin/main` while incorporating a declared public branch.
+Without this file, `/updatefirstmate` retains its existing origin-only fast-forward behavior.
+The file is local and gitignored, is not inherited into secondmate homes, and must contain exactly these three non-comment records:
+
+```text
+private-origin-url=https://github.com/example/firstmate-private
+public-upstream=upstream/main
+public-upstream-url=https://github.com/kunchenguid/firstmate
+```
+
+Before enabling it, make the private repository `origin`, retain the public repository under the configured upstream name, and give the public remote the exact inert push URL `no_push://read-only`.
+For a checkout whose current `origin` is the public repository, the one-time setup is:
+
+```sh
+git remote rename origin upstream
+git remote set-url --push upstream no_push://read-only
+git remote add origin https://github.com/example/firstmate-private
+mkdir -p config
+```
+
+Inspect `git remote -v` before writing the config, especially when an older public fork remote also exists.
+The configured private URL must match the only effective fetch and push URL of `origin`.
+The configured public URL must match the only effective fetch URL of the named upstream remote, its only effective push URL must be `no_push://read-only`, and the private and public URLs must differ.
+Common GitHub HTTPS and SSH spellings plus an optional `.git` suffix compare as the same repository.
+Any missing, duplicate, unknown, malformed, ambiguous, or role-inconsistent setting stops before network work.
+
+When configured, `/updatefirstmate` requires the running checkout to be clean and on `main`.
+It clones private `origin/main` beneath `state/private-update-evidence/`, fetches the declared public branch there, verifies that running `main` has no commits absent from private main, merges in the disposable clone, and runs repository lint plus the complete test suite.
+Only a clean validated result is pushed without force to the explicitly declared private URL.
+The existing guarded updater then fast-forwards the running Firstmate and registered secondmate homes from private `origin/main`.
+Successful and no-op disposable clones are removed.
+Conflict, divergence, validation, verification, and push failures leave an inspectable evidence directory and leave private main plus the running fleet unchanged.
+`bin/fm-private-update.sh` owns the exact config parser, validation commands, evidence files, output, and publication mechanics.
+
 ## FM_HOME
 
 `FM_HOME` selects the operational home for one firstmate instance.

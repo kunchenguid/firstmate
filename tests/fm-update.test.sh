@@ -92,6 +92,86 @@ run_update() {
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
+# Build an opt-in private-distribution world with distinct public and private
+# bare remotes, a clean running clone of private main, strict remote roles, and
+# the local config/private-upstream declaration.
+# The validation entrypoints are fixture-owned executable interfaces so the
+# production updater exercises its real lint/test orchestration without running
+# this repository's complete suite recursively from inside this test.
+new_private_world() {
+  local name=$1 w
+  w="$TMP_ROOT/$name"
+  mkdir -p "$w/home/state" "$w/home/config"
+  touch "$w/home/state/.last-watcher-beat"
+
+  git init -q --bare "$w/public.git"
+  git -C "$w/public.git" symbolic-ref HEAD refs/heads/main
+  git init -q --bare "$w/private.git"
+  git -C "$w/private.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$w/public.git" "$w/public-seed" 2>/dev/null
+
+  printf 'base\n' > "$w/public-seed/AGENTS.md"
+  printf 'base\n' > "$w/public-seed/README.md"
+  mkdir -p "$w/public-seed/bin"
+  cat > "$w/public-seed/bin/fm-lint.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ ! -e FAIL_LINT ]
+SH
+  cat > "$w/public-seed/bin/fm-test-run.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${1:-}" = --all ]
+[ ! -e FAIL_TESTS ]
+SH
+  chmod +x "$w/public-seed/bin/fm-lint.sh" "$w/public-seed/bin/fm-test-run.sh"
+  git -C "$w/public-seed" add -A
+  git -C "$w/public-seed" commit -qm base
+  git -C "$w/public-seed" push -q origin main
+  git -C "$w/public-seed" remote add private "$w/private.git"
+  git -C "$w/public-seed" push -q private main
+
+  git clone -q "$w/private.git" "$w/main"
+  git -C "$w/main" remote add upstream "$w/public.git"
+  git -C "$w/main" remote set-url --push upstream no_push://read-only
+  {
+    printf 'private-origin-url=%s/private.git\n' "$w"
+    printf 'public-upstream=upstream/main\n'
+    printf 'public-upstream-url=%s/public.git\n' "$w"
+  } > "$w/home/config/private-upstream"
+
+  printf '%s\n' "$w"
+}
+
+run_private_update() {
+  local w=$1
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_CONFIG_OVERRIDE="$w/home/config" \
+    "$UPDATE"
+}
+
+bump_public_file() {
+  local w=$1 file=$2 value=$3 message=$4
+  printf '%s\n' "$value" > "$w/public-seed/$file"
+  git -C "$w/public-seed" add -A
+  git -C "$w/public-seed" commit -qm "$message"
+  git -C "$w/public-seed" push -q origin main
+}
+
+commit_private_running() {
+  local w=$1 file=$2 value=$3 message=$4
+  printf '%s\n' "$value" > "$w/main/$file"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "$message"
+  git -C "$w/main" push -q origin main
+}
+
+latest_private_evidence() {
+  local w=$1
+  find "$w/home/state/private-update-evidence" -mindepth 1 -maxdepth 1 \
+    -type d -name 'run.*' 2>/dev/null | sort | tail -1
+}
+
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
 # Combines the former T1 (fast-forward + reread + nudge signalling) and T2
 # (the advance is a single-parent fast-forward, never a merge commit) into one
@@ -291,6 +371,192 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- P1: private personal commit + public advance integrate and publish -----
+test_private_update_success_preserves_personal_history() {
+  local w out personal public published
+  w=$(new_private_world p1)
+  commit_private_running "$w" PRIVATE.md personal private-personal
+  personal=$(git -C "$w/main" rev-parse HEAD)
+  bump_public_file "$w" UPSTREAM.md public public-update
+  public=$(git --git-dir="$w/public.git" rev-parse refs/heads/main)
+
+  out=$(run_private_update "$w" 2>&1)
+  published=$(git --git-dir="$w/private.git" rev-parse refs/heads/main)
+
+  assert_contains "$out" "private-upstream: published " "private integration published"
+  assert_contains "$out" "from upstream/main" "public source named"
+  assert_contains "$out" "firstmate: updated " "running copy fast-forwarded only after publication"
+  git --git-dir="$w/private.git" merge-base --is-ancestor "$personal" "$published" \
+    || fail "private personal commit was not preserved"
+  git --git-dir="$w/private.git" merge-base --is-ancestor "$public" "$published" \
+    || fail "public upstream commit was not incorporated"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$published" ] \
+    || fail "running firstmate did not fast-forward to validated private main"
+  [ -z "$(latest_private_evidence "$w")" ] \
+    || fail "successful disposable integration clone was not removed"
+  pass "P1 private update preserves personal history, publishes, then fast-forwards running main"
+}
+
+# --- P2: upstream already contained by private main is an idempotent no-op --
+test_private_update_noop() {
+  local w out before
+  w=$(new_private_world p2)
+  before=$(git --git-dir="$w/private.git" rev-parse refs/heads/main)
+
+  out=$(run_private_update "$w" 2>&1)
+
+  assert_contains "$out" "private-upstream: already current at" "private no-op reported"
+  assert_contains "$out" "firstmate: already current" "legacy fast-forward still runs after private no-op"
+  [ "$(git --git-dir="$w/private.git" rev-parse refs/heads/main)" = "$before" ] \
+    || fail "private main moved during a no-op"
+  [ -z "$(latest_private_evidence "$w")" ] \
+    || fail "no-op disposable clone was not removed"
+  pass "P2 private update no-op leaves both private and running main unchanged"
+}
+
+# --- P3: dirty running copy stops before integration -----------------------
+test_private_update_dirty_copy_stops() {
+  local w out status before
+  w=$(new_private_world p3)
+  bump_public_file "$w" UPSTREAM.md public public-update
+  before=$(git --git-dir="$w/private.git" rev-parse refs/heads/main)
+  printf 'dirty\n' >> "$w/main/README.md"
+
+  out=$(run_private_update "$w" 2>&1); status=$?
+
+  expect_code 1 "$status" "dirty private update"
+  assert_contains "$out" "running firstmate has a dirty working tree" "dirty copy refusal explained"
+  grep -q '^dirty$' "$w/main/README.md" || fail "dirty running edit was lost"
+  [ "$(git --git-dir="$w/private.git" rev-parse refs/heads/main)" = "$before" ] \
+    || fail "dirty-copy refusal changed private main"
+  pass "P3 dirty running copy stops before private integration and remains untouched"
+}
+
+# --- P4: unpushed/diverged running main is preserved and reported ----------
+test_private_update_divergence_stops() {
+  local w out status before running evidence
+  w=$(new_private_world p4)
+  bump_public_file "$w" UPSTREAM.md public public-update
+  before=$(git --git-dir="$w/private.git" rev-parse refs/heads/main)
+  printf 'local-only\n' > "$w/main/LOCAL.md"
+  git -C "$w/main" add LOCAL.md
+  git -C "$w/main" commit -qm local-unpushed
+  running=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(run_private_update "$w" 2>&1); status=$?
+  evidence=$(latest_private_evidence "$w")
+
+  expect_code 1 "$status" "diverged private update"
+  assert_contains "$out" "running main has commits not present on private origin/main" "divergence refusal explained"
+  [ -d "$evidence/repo" ] || fail "divergence evidence clone was not preserved"
+  [ "$(git --git-dir="$w/private.git" rev-parse refs/heads/main)" = "$before" ] \
+    || fail "divergence refusal changed private main"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$running" ] \
+    || fail "divergence refusal moved running main"
+  pass "P4 diverged running main stops with inspectable evidence and no history change"
+}
+
+# --- P5: merge conflict preserves the disposable conflict evidence ---------
+test_private_update_merge_conflict_stops() {
+  local w out status before running evidence unresolved
+  w=$(new_private_world p5)
+  commit_private_running "$w" README.md private private-conflict-side
+  running=$(git -C "$w/main" rev-parse HEAD)
+  before=$(git --git-dir="$w/private.git" rev-parse refs/heads/main)
+  bump_public_file "$w" README.md public public-conflict-side
+
+  out=$(run_private_update "$w" 2>&1); status=$?
+  evidence=$(latest_private_evidence "$w")
+  unresolved=$(git -C "$evidence/repo" diff --name-only --diff-filter=U)
+
+  expect_code 1 "$status" "conflicting private update"
+  assert_contains "$out" "merge conflict while integrating upstream/main" "merge conflict explained"
+  assert_contains "$unresolved" "README.md" "conflicted file remains inspectable"
+  [ "$(git --git-dir="$w/private.git" rev-parse refs/heads/main)" = "$before" ] \
+    || fail "merge conflict changed private main"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$running" ] \
+    || fail "merge conflict moved running main"
+  pass "P5 merge conflict preserves evidence and leaves both main refs unchanged"
+}
+
+# --- P6: failed validation blocks publication and preserves logs -----------
+test_private_update_failed_validation_stops() {
+  local w out status before running evidence
+  w=$(new_private_world p6)
+  before=$(git --git-dir="$w/private.git" rev-parse refs/heads/main)
+  running=$(git -C "$w/main" rev-parse HEAD)
+  bump_public_file "$w" FAIL_TESTS fail public-breaks-validation
+
+  out=$(run_private_update "$w" 2>&1); status=$?
+  evidence=$(latest_private_evidence "$w")
+
+  expect_code 1 "$status" "validation-failing private update"
+  assert_contains "$out" "test suite failed" "failed validation explained"
+  [ -f "$evidence/validation.log" ] || fail "validation log was not preserved"
+  [ "$(git --git-dir="$w/private.git" rev-parse refs/heads/main)" = "$before" ] \
+    || fail "failed validation changed private main"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$running" ] \
+    || fail "failed validation moved running main"
+  pass "P6 failed validation preserves logs and blocks private publication"
+}
+
+# --- P7: swapped public/private roles fail before any network integration --
+test_private_update_wrong_remote_roles_stop() {
+  local w out status before out_pushable status_pushable
+  w=$(new_private_world p7)
+  before=$(git --git-dir="$w/private.git" rev-parse refs/heads/main)
+  git -C "$w/main" remote set-url origin "$w/public.git"
+
+  out=$(run_private_update "$w" 2>&1); status=$?
+
+  expect_code 1 "$status" "wrong-role private update"
+  assert_contains "$out" "origin fetch URL does not match private-origin-url" "wrong origin role explained"
+  [ "$(git --git-dir="$w/private.git" rev-parse refs/heads/main)" = "$before" ] \
+    || fail "wrong remote role changed private main"
+  [ -z "$(latest_private_evidence "$w")" ] \
+    || fail "wrong remote role performed network integration"
+
+  git -C "$w/main" remote set-url origin "$w/private.git"
+  git -C "$w/main" config --unset-all remote.upstream.pushurl
+  out_pushable=$(run_private_update "$w" 2>&1); status_pushable=$?
+
+  expect_code 1 "$status_pushable" "pushable-public-remote private update"
+  assert_contains "$out_pushable" "upstream push URL must be no_push://read-only" \
+    "pushable public upstream refusal explained"
+  [ "$(git --git-dir="$w/private.git" rev-parse refs/heads/main)" = "$before" ] \
+    || fail "pushable public upstream changed private main"
+  [ -z "$(latest_private_evidence "$w")" ] \
+    || fail "pushable public upstream performed network integration"
+  pass "P7 wrong private/public roles and a pushable public remote both fail before integration"
+}
+
+# --- P8: rejected private push keeps validated result as evidence ----------
+test_private_update_push_failure_stops() {
+  local w out status before running evidence
+  w=$(new_private_world p8)
+  before=$(git --git-dir="$w/private.git" rev-parse refs/heads/main)
+  running=$(git -C "$w/main" rev-parse HEAD)
+  bump_public_file "$w" UPSTREAM.md public public-update
+  cat > "$w/private.git/hooks/pre-receive" <<'SH'
+#!/usr/bin/env bash
+echo 'private push rejected for test' >&2
+exit 1
+SH
+  chmod +x "$w/private.git/hooks/pre-receive"
+
+  out=$(run_private_update "$w" 2>&1); status=$?
+  evidence=$(latest_private_evidence "$w")
+
+  expect_code 1 "$status" "push-failing private update"
+  assert_contains "$out" "push to private origin/main failed" "push failure explained"
+  assert_contains "$(cat "$evidence/push.log")" "private push rejected for test" "push evidence preserved"
+  [ "$(git --git-dir="$w/private.git" rev-parse refs/heads/main)" = "$before" ] \
+    || fail "rejected push changed private main"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$running" ] \
+    || fail "rejected push moved running main"
+  pass "P8 private push failure preserves validated evidence and leaves running main unchanged"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -300,5 +566,13 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_private_update_success_preserves_personal_history
+test_private_update_noop
+test_private_update_dirty_copy_stops
+test_private_update_divergence_stops
+test_private_update_merge_conflict_stops
+test_private_update_failed_validation_stops
+test_private_update_wrong_remote_roles_stop
+test_private_update_push_failure_stops
 
 echo "# all fm-update tests passed"

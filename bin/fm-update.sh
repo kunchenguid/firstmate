@@ -19,6 +19,13 @@
 # The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
 # the same library drives the local-HEAD secondmate sync used by fm-spawn.sh and
 # fm-bootstrap.sh, so there is one ff implementation, not several.
+# When the active home has config/private-upstream, this script first invokes
+# bin/fm-private-update.sh.
+# That helper owns the optional private-distribution config schema, disposable
+# public-upstream integration, validation, evidence, and private-only push.
+# A failed private integration exits before this script can touch the running
+# checkout; a successful or already-current integration falls through to the
+# same guarded origin fast-forward used by every legacy installation.
 #
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics
@@ -34,6 +41,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
@@ -47,6 +55,12 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 [ $# -eq 0 ] || { usage; exit 1; }
+
+# --- optional private-distribution integration -----------------------------
+
+if [ -e "$CONFIG_DIR/private-upstream" ]; then
+  "$SCRIPT_DIR/fm-private-update.sh"
+fi
 
 # --- main firstmate repo ---------------------------------------------------
 
