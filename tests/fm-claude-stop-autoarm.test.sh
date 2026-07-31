@@ -294,6 +294,25 @@ test_inert_when_fleet_idle() {
   pass "auto-arm: inert with nothing in flight and no X-mode need"
 }
 
+test_inert_with_only_done_ship_and_idle_secondmate() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/terminal-and-idle")
+  printf 'kind=ship\n' > "$dir/state/done-ship.meta"
+  printf 'done: ready for captain review\n' > "$dir/state/done-ship.status"
+  printf 'kind=secondmate\n' > "$dir/state/idle-mate.meta"
+  cat > "$dir/bin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: unknown · source: none · no current-state source available\n'
+SH
+  chmod +x "$dir/bin/fm-crew-state.sh"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "hook must exit 0 when metadata contains only terminal or idle records"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed for a done ship or idle secondmate"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch with no actionable active work"
+  pass "auto-arm: done ship and idle secondmate create no background watcher cycle"
+}
+
 # --- the armed cycle ----------------------------------------------------------
 
 test_actionable_close_rewakes_with_reason() {
@@ -424,6 +443,7 @@ test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
+test_inert_with_only_done_ship_and_idle_secondmate
 test_actionable_close_rewakes_with_reason
 test_failed_close_rewakes_with_failure_banner
 test_clean_close_exits_silently

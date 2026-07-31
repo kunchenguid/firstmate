@@ -106,6 +106,26 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 
+The actionable-work eligibility was revalidated deterministically on 2026-07-31 with Bash 3.2.57(1)-release.
+
+```sh
+tests/fm-turnend-guard.test.sh
+tests/fm-claude-stop-autoarm.test.sh
+tests/fm-backend.test.sh
+```
+
+Observed boundary output:
+
+```text
+ok - fm_supervision_status: done ship without resumed-work evidence does not need supervision
+ok - fm_supervision_status: positive current work overrides a trailing done event
+ok - fm_supervision_status: unknown/none secondmate is healthy idle
+ok - fm_supervision_status: active ship still needs supervision
+ok - auto-arm: done ship and idle secondmate create no background watcher cycle
+ok - auto-arm: actionable close translates to exactly one exit-2 rewake with reason
+ok - auto-arm: X-mode poll need arms the cycle even with no tasks in flight
+```
+
 The Grok adaptive matrix ran on 2026-07-28 with separate scratch repositories and homes, dedicated tmux sockets, one target plus one control window, ambient tmux variables removed, and a socket-bound wrapper first in `PATH`.
 
 ```sh

@@ -33,6 +33,67 @@ test_predicate_healthy_no_inflight() {
   pass "fm_supervision_unhealthy: false with no state/*.meta at all"
 }
 
+make_current_state_stub() {  # <path> <state>
+  local path=$1 state=$2
+  printf '#!/usr/bin/env bash\nprintf '\''state: %%s · source: test\\n'\'' %s\n' "$state" > "$path"
+  chmod +x "$path"
+}
+
+test_predicate_done_ship_not_counted() {
+  local dir="$TMP_ROOT/pred-done-ship" state reader
+  state="$dir/state"
+  reader="$dir/crew-state"
+  mkdir -p "$state"
+  printf 'kind=ship\n' > "$state/done-ship.meta"
+  printf 'done: ready for captain review\n' > "$state/done-ship.status"
+  make_current_state_stub "$reader" unknown
+  FM_CREW_STATE_BIN="$reader" fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "done ship was still counted as in flight"
+  [ "$FM_SUP_NEEDED" = false ] || fail "done ship still required supervision"
+  pass "fm_supervision_status: done ship without resumed-work evidence does not need supervision"
+}
+
+test_predicate_resumed_ship_after_done_still_counted() {
+  local dir="$TMP_ROOT/pred-resumed-ship" state reader
+  state="$dir/state"
+  reader="$dir/crew-state"
+  mkdir -p "$state"
+  printf 'kind=ship\n' > "$state/resumed-ship.meta"
+  printf 'done: initial delivery finished\n' > "$state/resumed-ship.status"
+  make_current_state_stub "$reader" working
+  FM_CREW_STATE_BIN="$reader" fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "ship with positive resumed-work evidence was not counted"
+  [ "$FM_SUP_NEEDED" = true ] || fail "resumed ship no longer required supervision"
+  pass "fm_supervision_status: positive current work overrides a trailing done event"
+}
+
+test_predicate_idle_secondmate_not_counted() {
+  local dir="$TMP_ROOT/pred-idle-secondmate" state reader
+  state="$dir/state"
+  reader="$dir/crew-state"
+  mkdir -p "$state"
+  printf 'kind=secondmate\n' > "$state/mate.meta"
+  make_current_state_stub "$reader" unknown
+  FM_CREW_STATE_BIN="$reader" fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "idle secondmate was still counted as in flight"
+  [ "$FM_SUP_NEEDED" = false ] || fail "idle secondmate still required supervision"
+  pass "fm_supervision_status: unknown/none secondmate is healthy idle"
+}
+
+test_predicate_active_ship_still_counted() {
+  local dir="$TMP_ROOT/pred-active-ship" state reader
+  state="$dir/state"
+  reader="$dir/crew-state"
+  mkdir -p "$state"
+  printf 'kind=ship\n' > "$state/active-ship.meta"
+  printf 'working: implementation under way\n' > "$state/active-ship.status"
+  make_current_state_stub "$reader" working
+  FM_CREW_STATE_BIN="$reader" fm_supervision_status "$state" 300
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "active ship was not counted as in flight"
+  [ "$FM_SUP_NEEDED" = true ] || fail "active ship no longer required supervision"
+  pass "fm_supervision_status: active ship still needs supervision"
+}
+
 test_predicate_unhealthy_no_beacon() {
   local state="$TMP_ROOT/pred-nobeat/state"
   mkdir -p "$state"
@@ -1105,6 +1166,10 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
 }
 
 test_predicate_healthy_no_inflight
+test_predicate_done_ship_not_counted
+test_predicate_resumed_ship_after_done_still_counted
+test_predicate_idle_secondmate_not_counted
+test_predicate_active_ship_still_counted
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon

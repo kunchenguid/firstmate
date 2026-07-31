@@ -25,7 +25,9 @@ An unmarked checkout or invalid marker falls through to the git-dir check.
 That check keeps crewmate and scout linked worktrees inert because their git dir differs from their git common dir.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
-For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
+For an in-scope primary, the shared supervision predicate starts from `state/*.meta` and uses `bin/fm-crew-state.sh` only where a record may no longer require primary supervision.
+An ordinary task remains active unless it has a trailing `done:` event and current state provides no positive evidence that work resumed, while a persistent secondmate in its canonical `unknown · source: none` state is healthy and idle.
+A failed or malformed current-state read and any positive contradictory state remain active so the guard continues to fail closed.
 The default cross-harness mode exits silently with no work in flight.
 Claude's `--claude` mode also treats `state/x-watch.check.sh` as supervision need, so X-mode relay polling remains guarded without an in-flight task.
 Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`.
@@ -90,7 +92,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-turnend-guard.test.sh` covers the active-work predicate including done ships, idle secondmates, and resumed ships, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-claude-stop-autoarm.test.sh` verifies that done ships and idle secondmates create no background watcher cycle while active work and X relay polling still arm normally.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
