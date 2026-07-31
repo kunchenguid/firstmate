@@ -199,7 +199,9 @@ test_spawn_isolation_abort() {
   out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
   assert_contains "$out" "did not yield an isolated worktree" "non-worktree spawn lacked the isolation error"
-  assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
+  assert_present "$home/state/abort-notgit-dd4.meta" "aborted spawn must retain bootstrap endpoint metadata"
+  assert_grep 'spawn_phase=bootstrap' "$home/state/abort-notgit-dd4.meta" \
+    "aborted spawn metadata must be marked for endpoint-only teardown"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?

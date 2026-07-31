@@ -148,6 +148,7 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+SPAWN_PHASE=$(fm_backend_meta_exact_value "$META" spawn_phase 2>/dev/null || true)
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -1290,6 +1291,37 @@ remove_secondmate_registry_entry() {
   grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv "$tmp" "$SECONDMATE_REG"
 }
+
+# A bootstrap-phase record is published immediately after an ordinary flat
+# backend endpoint exists, before treehouse can allocate its isolated
+# worktree. It intentionally names the primary checkout as a placeholder
+# worktree, so normal task teardown must never reach the worktree-return path.
+# Reclaim only the already-validated exact endpoint, and retain the record if
+# the backend cannot confirm that endpoint is gone.
+if [ "$SPAWN_PHASE" = bootstrap ]; then
+  if [ "$BACKEND" = herdr ]; then
+    teardown_herdr_preflight_target "$T" "$ID" || exit 1
+    fm_backend_herdr_parse_target "$T" || exit 1
+    if teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
+      fm_backend_herdr_kill_serialized \
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true
+    fi
+    if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+      echo "REFUSED: failed bootstrap endpoint for $ID could not be confirmed removed; preserving task state." >&2
+      exit 1
+    fi
+  else
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+    if [ "$(fm_backend_agent_state "$BACKEND" "$T")" != missing ]; then
+      echo "REFUSED: failed bootstrap endpoint for $ID could not be confirmed removed; preserving task state." >&2
+      exit 1
+    fi
+  fi
+  rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+    "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/$ID.kimi-turnend-token"
+  echo "tore down failed bootstrap endpoint for $ID"
+  exit 0
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

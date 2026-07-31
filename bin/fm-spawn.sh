@@ -269,6 +269,7 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_BOOTSTRAP_STATE_ACTIVE=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -291,6 +292,10 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$status" -ne 0 ] && [ "$SPAWN_BOOTSTRAP_STATE_ACTIVE" = 1 ]; then
+    printf 'failed: spawn bootstrap did not complete; endpoint remains recorded for guarded cleanup\n' \
+      >> "$STATE/$ID.status" 2>/dev/null || true
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -419,6 +424,10 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+if [ -f "$STATE/$ID.meta" ] && grep -qx 'spawn_phase=bootstrap' "$STATE/$ID.meta" 2>/dev/null; then
+  echo "error: task $ID has a failed bootstrap endpoint record; run fm-teardown.sh $ID after reviewing its state before retrying" >&2
+  exit 1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1209,6 +1218,98 @@ esac
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+
+# Publish every endpoint before bootstrap can fail.  The worktree field is the
+# primary checkout only while spawn_phase=bootstrap; fm-teardown recognizes
+# that terminal record and may reclaim its exact endpoint, but never touches
+# the project checkout or a secondmate home.  Successful spawns replace this
+# record with their ordinary metadata after worktree allocation completes.
+publish_bootstrap_endpoint_state() {
+  mkdir -p "$STATE" || return 1
+  {
+    echo "window=$T"
+    echo "endpoint_task_id=$ID"
+    echo "worktree=$PROJ_ABS"
+    echo "project=$PROJ_ABS"
+    echo "harness=$HARNESS"
+    echo "kind=$KIND"
+    echo "mode=bootstrap"
+    echo "yolo=off"
+    echo "spawn_phase=bootstrap"
+    [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+    if [ "$BACKEND" = herdr ]; then
+      echo "herdr_session=$HERDR_SES"
+      echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+      echo "herdr_tab_id=$HERDR_TAB_ID"
+      echo "herdr_pane_id=$HERDR_PANE_ID"
+    fi
+    if [ "$BACKEND" = zellij ]; then
+      echo "zellij_session=$ZELLIJ_SES"
+      echo "zellij_tab_id=$ZELLIJ_TAB_ID"
+      echo "zellij_pane_id=$ZELLIJ_PANE_ID"
+    fi
+    if [ "$BACKEND" = cmux ]; then
+      echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
+      echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    fi
+    if [ "$KIND" = secondmate ]; then
+      echo "home=$PROJ_ABS"
+    fi
+  } > "$STATE/$ID.meta"
+}
+
+publish_task_metadata() {
+  META_WINDOW=$T
+  [ "$BACKEND" = orca ] && META_WINDOW=$W
+  {
+    echo "window=$META_WINDOW"
+    echo "endpoint_task_id=$ID"
+    echo "worktree=$WT"
+    echo "project=$PROJ_ABS"
+    echo "harness=$HARNESS"
+    echo "kind=$KIND"
+    echo "mode=$MODE"
+    echo "yolo=$YOLO"
+    echo "tasktmp=${TASK_TMP:-}"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
+    [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+    if [ "$BACKEND" = herdr ]; then
+      echo "herdr_session=$HERDR_SES"
+      echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+      echo "herdr_tab_id=$HERDR_TAB_ID"
+      echo "herdr_pane_id=$HERDR_PANE_ID"
+    fi
+    if [ "$BACKEND" = zellij ]; then
+      echo "zellij_session=$ZELLIJ_SES"
+      echo "zellij_tab_id=$ZELLIJ_TAB_ID"
+      echo "zellij_pane_id=$ZELLIJ_PANE_ID"
+    fi
+    if [ "$BACKEND" = orca ]; then
+      echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+      echo "terminal=$ORCA_TERMINAL"
+    fi
+    if [ "$BACKEND" = cmux ]; then
+      echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
+      echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    fi
+    if [ "$KIND" = secondmate ]; then
+      echo "home=$PROJ_ABS"
+      echo "projects=$SECONDMATE_PROJECTS"
+    fi
+  } > "$STATE/$ID.meta"
+}
+
+if [ "$BACKEND" != orca ] \
+   && { [ "$BACKEND" != herdr ] || [ "${HERDR_PROJECTED:-0}" -ne 1 ]; }; then
+  publish_bootstrap_endpoint_state || {
+    echo "error: could not publish bootstrap endpoint state for $ID" >&2
+    exit 1
+  }
+  SPAWN_BOOTSTRAP_STATE_ACTIVE=1
+fi
+
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -1346,6 +1447,18 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Once treehouse has yielded a real worktree, promote the endpoint record to
+  # ordinary metadata before any later setup can fail.  The real project mode
+  # is resolved below; this conservative fallback is only observable if that
+  # later setup aborts, where ordinary guarded teardown remains safe.
+  MODE=no-mistakes
+  YOLO=off
+  SECONDMATE_PROJECTS=
+  publish_task_metadata
+  SPAWN_BOOTSTRAP_STATE_ACTIVE=0
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -1353,6 +1466,14 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
+
+if [ "$KIND" != secondmate ]; then
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  read -r MODE YOLO <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+EOF
+  publish_task_metadata
+fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -1593,61 +1714,13 @@ fi
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.
-SECONDMATE_PROJECTS=
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
-else
-  PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
 fi
-
-META_WINDOW=$T
-[ "$BACKEND" = orca ] && META_WINDOW=$W
-{
-  echo "window=$META_WINDOW"
-  echo "endpoint_task_id=$ID"
-  echo "worktree=$WT"
-  echo "project=$PROJ_ABS"
-  echo "harness=$HARNESS"
-  echo "kind=$KIND"
-  echo "mode=$MODE"
-  echo "yolo=$YOLO"
-  echo "tasktmp=$TASK_TMP"
-  echo "model=${MODEL:-default}"
-  echo "effort=${EFFORT:-default}"
-  [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
-  # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
-  [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
-  if [ "$BACKEND" = herdr ]; then
-    echo "herdr_session=$HERDR_SES"
-    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
-    echo "herdr_tab_id=$HERDR_TAB_ID"
-    echo "herdr_pane_id=$HERDR_PANE_ID"
-  fi
-  if [ "$BACKEND" = zellij ]; then
-    echo "zellij_session=$ZELLIJ_SES"
-    echo "zellij_tab_id=$ZELLIJ_TAB_ID"
-    echo "zellij_pane_id=$ZELLIJ_PANE_ID"
-  fi
-  if [ "$BACKEND" = orca ]; then
-    echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-    echo "terminal=$ORCA_TERMINAL"
-  fi
-  if [ "$BACKEND" = cmux ]; then
-    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
-    echo "cmux_surface_id=$CMUX_SURFACE_ID"
-  fi
-  if [ "$KIND" = secondmate ]; then
-    echo "home=$PROJ_ABS"
-    echo "projects=$SECONDMATE_PROJECTS"
-  fi
-} > "$STATE/$ID.meta"
+publish_task_metadata
+SPAWN_BOOTSTRAP_STATE_ACTIVE=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
