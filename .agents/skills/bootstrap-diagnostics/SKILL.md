@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, MODEL_REGISTRY, MODEL_PRICE, MODEL_VERIFY, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, MODEL_REGISTRY, MODEL_PRICE, MODEL_VERIFY, ADMISSION_CONTROL, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -39,6 +39,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Suspend that route immediately, then re-verify its cost class before it is routed to again.
 - `MODEL_PRICE: <model> price drifted ...` or `... catalogue source is unreadable` - re-verify the cost class and update the recorded price, or repair the declared catalogue path so the check stops being blind.
 - `MODEL_VERIFY: <model> ...` - a live probe failed. Load `model-onboarding` and read the shape before reacting: a provider refusal means this account can never use that model and it must leave routing, while a local failure is a configuration error on this machine and not a provider fact.
+- `ADMISSION_CONTROL: invalid config/crew-dispatch.json _scheduling.admission_control - <reason>` - the optional fleet-admission policy exists but failed schema validation, so the fleet's admission layer cannot resolve a band.
+  Do not dispatch new work in this home until the named field is corrected; an unknown field is refused rather than ignored precisely so a typo cannot silently disable a safety condition.
+  `docs/configuration.md` "Fleet admission control" owns the schema, and `fleet-admission` owns what firstmate does with a resolved band.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - a benign one-off skip (offline, no origin, local-only); bootstrap continued, investigate only if it blocks work.
   A skip can also report the bounded fleet-refresh timeout (`FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT`, or a fleet-size-aware default with a 20 second floor); a timeout never blocks startup.
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.

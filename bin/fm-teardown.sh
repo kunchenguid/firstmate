@@ -4,6 +4,10 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+# A home with an active fleet-admission policy also gets the admission release
+# reminder on the same seam: successful cleanup is admission's primary release
+# trigger, so the fleet band is recomputed before any load-held request is
+# released. Homes without that policy see no extra line.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -108,6 +112,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
+# shellcheck source=bin/fm-admission-lib.sh
+. "$SCRIPT_DIR/fm-admission-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -533,6 +539,18 @@ backlog_refresh_reminder() {
   else
     printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi
+}
+
+# Successful cleanup is admission control's primary release trigger: capacity is
+# freed when a worker actually goes away, not when a task reports done. This adds
+# one deterministic re-examination step to the existing backlog re-scan seam and
+# stays silent for every home that has not configured an admission policy.
+admission_release_reminder() {
+  local state
+  [ "$KIND" = secondmate ] && return 0
+  state=$(fm_admission_state "$(fm_admission_config_file "$CONFIG")")
+  [ "$state" = active ] || return 0
+  printf '%s\n' "Admission: $ID released its worker. Run bin/fm-admission.sh to recompute the fleet band before releasing any load-held request, then admit at most one at a time, re-evaluating between each."
 }
 
 registry_home_for_line() {
@@ -1353,3 +1371,4 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder
+admission_release_reminder
