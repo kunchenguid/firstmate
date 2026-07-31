@@ -56,8 +56,7 @@ fm_backend_tmux_send_key() {  # <target> <key>
 #     trusted lifecycle source with an armed busy contract, and a
 #     record-proven IDLE baseline, confirmation comes from the harness's own
 #     lifecycle record (fm_tmux_submit_semantic): only an observed
-#     idle-to-busy transition after a delivered Enter confirms, under the
-#     per-task submit lock.
+#     idle-to-busy transition after a delivered Enter confirms.
 #   - Every other case with task context - a mid-turn, unknown, or unreadable
 #     baseline (the 'fallback not-idle-baseline' sentinel), a harness with no
 #     verified semantic source yet (codex, kimi, grok), or an unarmed task -

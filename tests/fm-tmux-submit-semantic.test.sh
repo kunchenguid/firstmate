@@ -11,14 +11,15 @@
 #   - an unchanged record never confirms: a busy baseline (spawn seed or a
 #     real trusted mid-turn event) routes to the labelled composer fallback,
 #   - a failed Enter keystroke is send-failed, never a confirmation,
-#   - a contended submit lock fails closed without typing; a stale lock from
-#     a dead holder is broken and the send proceeds,
 #   - a contradicted confirmation is DOWNGRADED to unconfirmed and recorded
 #     durably; the reverse disagreement stays unconfirmed and is recorded,
 #   - harnesses with no semantic source (codex/kimi) keep the scraper with an
 #     explicit composer-fallback label, and a context-free call (the
 #     away-mode daemon's shape) keeps the bare single-token verdict,
 #   - fm-send plumbs the semantic context end to end.
+# Send-to-turn correlation and concurrent-send serialisation are deliberately
+# NOT covered: they are not addressed by this change and are owned by the
+# queued fm-submit-correlation follow-up.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -32,10 +33,9 @@ SEND="$ROOT/bin/fm-send.sh"
 BUSY_EVENT="$ROOT/bin/fm-busy-event.sh"
 TMP_ROOT=$(fm_test_tmproot fm-tmux-submit-semantic)
 
-# Fast confirmation and lock windows for every case in this file.
+# Fast confirmation windows for every case in this file.
 export FM_SUBMIT_SEMANTIC_MIN_BUDGET=0.05
 export FM_SUBMIT_SEMANTIC_POLLS=3
-export FM_SUBMIT_LOCK_WAIT=1
 
 # Fake tmux: logs every pane-touching call so the pane-read assertions are
 # call-count facts, optionally runs a "lifecycle hook" script on Enter to
@@ -126,8 +126,6 @@ test_semantic_confirm_no_pane_capture_when_compare_off() {
     || fail "with the comparison off the semantic path must not read pane geometry"
   [ "$(count_log "$log" Enter)" -eq 1 ] \
     || fail "a first-attempt confirm should send exactly one Enter"
-  [ ! -e "$state/$id.submit-lock" ] \
-    || fail "the submit lock must be released after the send"
   pass "semantic submit: confirmed from the lifecycle record with zero pane reads (comparison off)"
 }
 
@@ -276,50 +274,6 @@ test_busy_baseline_routes_to_labelled_fallback() {
   pass "semantic submit: busy baselines never confirm from the record and route to the labelled fallback"
 }
 
-test_send_contended_fails_closed() {
-  local dir fb state id lockdir log vfile
-  dir="$TMP_ROOT/contended"; state="$dir/state"; mkdir -p "$state"
-  fb=$(make_fake_tmux "$dir"); log="$dir/tmux.log"; : > "$log"; vfile="$dir/verdict"
-  id=task-g
-  arm_idle "$state" "$id" >/dev/null
-  # Hold the per-task lock from this live test process.
-  lockdir="$state/$id.submit-lock"
-  mkdir "$lockdir" || fail "could not pre-hold the submit lock"
-  printf '%s\n' "$$" > "$lockdir/pid"
-  PATH="$fb:$PATH" FM_FAKE_TMUX_LOG="$log" FM_SUBMIT_SEMANTIC_COMPARE=0 \
-    fm_backend_tmux_send_text_submit "sess:win" "steer" 3 0.02 0 "" "$state" "$id" claude \
-    > "$vfile" 2>/dev/null
-  rm -rf "$lockdir"
-  [ "$(cat "$vfile")" = "unknown send-contended" ] \
-    || fail "a contended submit lock must fail closed, got '$(cat "$vfile")'"
-  [ "$(count_log "$log" typed)" -eq 0 ] \
-    || fail "a contended send must not type anything into the pane"
-  pass "semantic submit: concurrent sends serialize on the per-task lock and fail closed when contended"
-}
-
-test_stale_lock_is_broken_and_send_proceeds() {
-  local dir fb state id gen lockdir dead_pid log vfile
-  dir="$TMP_ROOT/stale-lock"; state="$dir/state"; mkdir -p "$state"
-  fb=$(make_fake_tmux "$dir"); log="$dir/tmux.log"; : > "$log"; vfile="$dir/verdict"
-  id=task-h
-  gen=$(arm_idle "$state" "$id")
-  write_hook "$dir/hook.sh" "$state" "$id" "$gen"
-  # A lock held by a process that no longer exists.
-  dead_pid=$(bash -c 'echo $$')
-  while kill -0 "$dead_pid" 2>/dev/null; do sleep 0.05; done
-  lockdir="$state/$id.submit-lock"
-  mkdir "$lockdir" || fail "could not stage the stale lock"
-  printf '%s\n' "$dead_pid" > "$lockdir/pid"
-  PATH="$fb:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_HOOK_ON_ENTER="$dir/hook.sh" \
-    FM_SUBMIT_SEMANTIC_COMPARE=0 \
-    fm_backend_tmux_send_text_submit "sess:win" "steer" 3 0.02 0 "" "$state" "$id" claude \
-    > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = "empty turn-opened" ] \
-    || fail "a stale lock from a dead holder must be broken, got '$(cat "$vfile")'"
-  [ ! -e "$lockdir" ] || fail "the reacquired lock must be released after the send"
-  pass "semantic submit: a dead holder's stale lock is broken and the send confirms normally"
-}
-
 test_codex_keeps_labelled_composer_fallback() {
   local dir fb state log vfile
   dir="$TMP_ROOT/codex-fallback"; state="$dir/state"; mkdir -p "$state"
@@ -444,8 +398,6 @@ test_disagreement_no_turn_composer_empty
 test_swallowed_enter_stays_pending
 test_enter_keystroke_failure_reports_send_failed
 test_busy_baseline_routes_to_labelled_fallback
-test_send_contended_fails_closed
-test_stale_lock_is_broken_and_send_proceeds
 test_codex_keeps_labelled_composer_fallback
 test_unarmed_task_falls_back_labelled
 test_context_free_call_keeps_bare_verdict

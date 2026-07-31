@@ -50,7 +50,7 @@
 # armed busy contract (bin/fm-busy-lib.sh: claude, opencode, pi, pi-signed
 # today) AND a record-proven idle baseline, fm_tmux_submit_semantic confirms
 # "a turn opened, per the harness's own lifecycle signal, after my delivered
-# Enter" from the task's busy record, under a per-task submit lock, mirroring
+# Enter" from the task's busy record, mirroring
 # herdr's native agent-state confirmation on legibly idle baselines
 # (bin/backends/herdr.sh fm_backend_herdr_send_text_submit). An unchanged
 # record never confirms anything, so every other baseline (mid-turn, unknown,
@@ -473,15 +473,21 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
 #     confirm a swallowed Enter.
 #   - The Enter keystroke's exit status is tracked; if no Enter was
 #     delivered, the verdict is send-failed, never a confirmation.
-#   - The whole read-baseline/type/Enter/confirm window runs under a
-#     per-task lock, so two concurrent sends cannot both claim one turn;
-#     a contended lock fails closed as unknown send-contended.
 #   - While FM_SUBMIT_SEMANTIC_COMPARE=1 (the bake-in default) the rendered
 #     composer is read once AFTER the semantic verdict, and a contradiction
 #     DOWNGRADES a confirmation to unknown semantic-contradicted (the
 #     rendered signal can veto a confirmation, never grant one) and is
 #     recorded durably in state/<id>.submit-disagreement as well as on
 #     stderr.
+#
+# KNOWN GAPS, deliberately not addressed here and owned by the queued
+# fm-submit-correlation follow-up (captain decision, 2026-07-31): there is
+# no send-to-turn correlation, so any later trusted busy sequence can be
+# credited to this send when the composer reads empty or unknown, and
+# concurrent sends to one task are not serialised (a previous per-task lock
+# was removed because busy and ineligible sends bypassed it while it could
+# block legitimate sends). Correlation needs a per-submit token the harness
+# echoes back, not more shell on this side.
 #
 # Confirmation window tuning, mirroring herdr's sampled confirmation
 # (fm_backend_herdr_wait_for_working): each Enter attempt spreads
@@ -493,8 +499,6 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
 # enter-sleep alone would under-sample.
 FM_SUBMIT_SEMANTIC_POLLS=${FM_SUBMIT_SEMANTIC_POLLS:-6}
 FM_SUBMIT_SEMANTIC_MIN_BUDGET=${FM_SUBMIT_SEMANTIC_MIN_BUDGET:-0.9}
-FM_SUBMIT_LOCK_WAIT=${FM_SUBMIT_LOCK_WAIT:-10}
-FM_SUBMIT_LOCK_STALE=${FM_SUBMIT_LOCK_STALE:-60}
 
 # fm_tmux_submit_semantic_eligible: 0 iff <harness> has a trusted semantic
 # lifecycle source (bin/fm-busy-lib.sh's per-harness trust table, so codex
@@ -524,65 +528,6 @@ fm_tmux_submit_record_read() {  # <state-dir> <id> <harness>
   printf '%s %s' "$r_state" "$r_seq"
 }
 
-# fm_tmux_submit_lock_path: the per-task send-serialization lock directory.
-fm_tmux_submit_lock_path() {  # <state-dir> <id>
-  printf '%s/%s.submit-lock' "$1" "$2"
-}
-
-fm_tmux_submit_lock_age() {  # <dir> -> whole seconds since last mtime (0 on any failure)
-  local m now
-  m=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null) || { printf '0'; return 0; }
-  case "$m" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
-  now=$(date +%s)
-  if [ "$now" -ge "$m" ]; then printf '%s' $((now - m)); else printf '0'; fi
-}
-
-# fm_tmux_submit_lock_acquire: bounded-wait atomic mkdir lock with a PID
-# stamp. A holder whose PID is dead is stale and is broken by a single
-# winner (atomic rename, then remove), so two waiters can never free-for-all
-# an in-use lock. A lock directory with no readable PID is broken only after
-# FM_SUBMIT_LOCK_STALE seconds, covering a holder killed between mkdir and
-# the stamp write. Returns non-zero after FM_SUBMIT_LOCK_WAIT seconds of
-# contention, and callers must fail closed on that.
-fm_tmux_submit_lock_acquire() {  # <state-dir> <id>
-  local dir pid stale waited=0 max_waits
-  dir=$(fm_tmux_submit_lock_path "$1" "$2")
-  max_waits=$(( ${FM_SUBMIT_LOCK_WAIT:-10} * 10 ))
-  while :; do
-    if mkdir "$dir" 2>/dev/null; then
-      printf '%s\n' "$$" > "$dir/pid"
-      return 0
-    fi
-    pid=$(cat "$dir/pid" 2>/dev/null || true)
-    stale=0
-    if [ -n "$pid" ]; then
-      case "$pid" in
-        *[!0-9]*) stale=1 ;;
-        *) kill -0 "$pid" 2>/dev/null || stale=1 ;;
-      esac
-    elif [ "$(fm_tmux_submit_lock_age "$dir")" -ge "${FM_SUBMIT_LOCK_STALE:-60}" ]; then
-      stale=1
-    fi
-    if [ "$stale" = 1 ]; then
-      if mv "$dir" "$dir.stale.$$" 2>/dev/null; then
-        rm -rf "$dir.stale.$$"
-      fi
-      continue
-    fi
-    waited=$((waited + 1))
-    [ "$waited" -le "$max_waits" ] || return 1
-    sleep 0.1
-  done
-}
-
-fm_tmux_submit_lock_release() {  # <state-dir> <id>
-  local dir pid
-  dir=$(fm_tmux_submit_lock_path "$1" "$2")
-  pid=$(cat "$dir/pid" 2>/dev/null || true)
-  [ "$pid" = "$$" ] && rm -rf "$dir"
-  return 0
-}
-
 # fm_tmux_submit_disagreement_record: durable append-only record of one
 # semantic-vs-rendered submit-confirm disagreement, written alongside the
 # stderr warning so the evidence survives the session
@@ -594,7 +539,7 @@ fm_tmux_submit_disagreement_record() {  # <state-dir> <id> <harness> <semantic-r
 }
 
 # fm_tmux_submit_semantic_core: type <text> ONCE into a task whose baseline
-# record the caller has proven idle under the submit lock, then submit with
+# record the caller has proven idle, then submit with
 # Enter and confirm delivery ONLY from the positive idle-to-busy transition:
 # a busy record with seq advanced past <base-seq>, written by a source the
 # task's harness trusts, observed after an Enter this process successfully
@@ -654,15 +599,13 @@ fm_tmux_submit_semantic_core() {  # <target> <text> <retries> <enter-sleep> <set
   printf 'pending no-turn'
 }
 
-# fm_tmux_submit_semantic: the locked semantic submit confirm plus the
-# bake-in cross-check. Under the per-task submit lock it reads the trusted
-# baseline record; anything but an exact idle baseline returns the
-# 'fallback not-idle-baseline' routing sentinel (the adapter then runs the
-# labelled rendered-composer core), because an unchanged record can never
-# confirm a delivery. On an idle baseline the core runs, and while
-# FM_SUBMIT_SEMANTIC_COMPARE=1 (the bake-in default) the rendered composer
-# is read once afterwards, still under the lock so a following send cannot
-# pollute the comparison:
+# fm_tmux_submit_semantic: the semantic submit confirm plus the bake-in
+# cross-check. It reads the trusted baseline record; anything but an exact
+# idle baseline returns the 'fallback not-idle-baseline' routing sentinel
+# (the adapter then runs the labelled rendered-composer core), because an
+# unchanged record can never confirm a delivery. On an idle baseline the
+# core runs, and while FM_SUBMIT_SEMANTIC_COMPARE=1 (the bake-in default)
+# the rendered composer is read once afterwards:
 #   - turn-opened contradicted by a still-pending composer DOWNGRADES the
 #     confirmation to unknown semantic-contradicted, so a mis-wired hook can
 #     never mark an undelivered instruction delivered (and never suppress a
@@ -672,13 +615,12 @@ fm_tmux_submit_semantic_core() {  # <target> <text> <retries> <enter-sleep> <set
 # Both directions print the loud stderr warning and append the durable
 # state/<id>.submit-disagreement record. Setting FM_SUBMIT_SEMANTIC_COMPARE=0
 # ends the bake-in, after which this path performs no pane capture at all.
-# A contended lock returns unknown send-contended without typing anything.
+# Concurrent sends to one task are NOT serialised here; see the KNOWN GAPS
+# note in the header (fm-submit-correlation owns it).
 fm_tmux_submit_semantic() {  # <target> <text> <retries> <enter-sleep> <settle> <state-dir> <id> <harness>
   local target=$1 state=$6 id=$7 harness=$8 base base_seq out verdict reason composer
-  fm_tmux_submit_lock_acquire "$state" "$id" || { printf 'unknown send-contended'; return 0; }
   base=$(fm_tmux_submit_record_read "$state" "$id" "$harness")
   if [ "$base" = none ] || [ "${base%% *}" != idle ]; then
-    fm_tmux_submit_lock_release "$state" "$id"
     printf 'fallback not-idle-baseline'
     return 0
   fi
@@ -700,6 +642,5 @@ fm_tmux_submit_semantic() {  # <target> <text> <retries> <enter-sleep> <settle> 
         ;;
     esac
   fi
-  fm_tmux_submit_lock_release "$state" "$id"
   printf '%s' "$out"
 }
