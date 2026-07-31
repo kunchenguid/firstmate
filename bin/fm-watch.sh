@@ -431,6 +431,9 @@ surface_nonterminal_stale() {  # <window> <hash>
   rm -f "$STATE/.stale-since-$key"
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
+  # A surface starts a new pause episode, so drop the previous one's tracking
+  # unconditionally rather than only on the not-paused branch: both the
+  # re-surface cadence and the absorb-log window restart from this surface.
   clear_pause_state "$win"
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"

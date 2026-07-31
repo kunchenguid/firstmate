@@ -268,10 +268,14 @@ test_handle_wake_terminal_signal_clears_pause_tracking() {
   : > "$state/.paused-$watcher_key"
   : > "$state/.stale-$watcher_key"
   : > "$state/.wedge-escalations-$watcher_key"
+  # The watcher's absorb-log throttle is pause tracking too: left behind, it would
+  # silence the first absorbed-pause line of the crew's NEXT pause episode.
+  : > "$state/.paused-logged-$watcher_key"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-terminal.status" "$state"
   [ ! -e "$state/.subsuper-paused-$key" ] || fail "terminal signal retained the daemon pause marker"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "terminal signal retained daemon stale tracking"
   [ ! -e "$state/.paused-$watcher_key" ] || fail "terminal signal retained watcher pause tracking"
+  [ ! -e "$state/.paused-logged-$watcher_key" ] || fail "terminal signal retained the watcher absorb-log throttle"
   [ ! -e "$state/.stale-$watcher_key" ] || fail "terminal signal retained watcher stale tracking"
   [ ! -e "$state/.wedge-escalations-$watcher_key" ] || fail "terminal signal retained watcher wedge tracking"
   FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"

@@ -974,6 +974,10 @@ test_live_paused_content_churn_keeps_throttle_until_resume() {
 
   # Resume the changing-content case. The pause throttle must clear before this
   # static working pane starts and eventually crosses the ordinary wedge timer.
+  # The absorb-log throttle is part of that tracking, so pin it as present here:
+  # a resume that leaves it behind would silence the next pause episode's first
+  # absorbed-pause line.
+  [ -e "$state/.paused-logged-$key" ] || fail "no absorb-log throttle to clear before resume"
   printf 'working: upstream landed, resuming\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
   printf 'working pane after resume\n' > "$capture_file"
@@ -987,7 +991,8 @@ test_live_paused_content_churn_keeps_throttle_until_resume() {
   i=0
   while [ "$i" -lt 100 ] && is_live_non_zombie "$pid"; do
     [ ! -e "$state/.paused-$key" ] && [ ! -e "$state/.paused-rechecked-$key" ] && \
-      [ ! -e "$state/.paused-resurfaced-$key" ] && [ -s "$state/.stale-since-$key" ] && break
+      [ ! -e "$state/.paused-resurfaced-$key" ] && [ ! -e "$state/.paused-logged-$key" ] && \
+      [ -s "$state/.stale-since-$key" ] && break
     sleep 0.1
     i=$((i + 1))
   done
@@ -995,6 +1000,7 @@ test_live_paused_content_churn_keeps_throttle_until_resume() {
   [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "resumed worker retained its pause marker"; }
   [ ! -e "$state/.paused-rechecked-$key" ] || { reap "$pid"; fail "resumed worker retained its pause-state recheck"; }
   [ ! -e "$state/.paused-resurfaced-$key" ] || { reap "$pid"; fail "resumed worker retained its pause throttle"; }
+  [ ! -e "$state/.paused-logged-$key" ] || { reap "$pid"; fail "resumed worker retained its absorb-log throttle"; }
   [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "resumed worker did not start normal stale tracking"; }
   reap "$pid"
 
