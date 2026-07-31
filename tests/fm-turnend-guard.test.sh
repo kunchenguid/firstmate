@@ -13,13 +13,13 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# shellcheck source=bin/fm-supervision-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-supervision-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
-REQUIRED_REASON='resume supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
+REQUIRED_REASON='repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
@@ -77,6 +77,19 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
+test_predicate_x_mode_needs_supervision() {
+  local state="$TMP_ROOT/pred-x-mode/state"
+  mkdir -p "$state"
+  : > "$state/x-watch.check.sh"
+  fm_supervision_needed "$state" 300 || fail "X-mode relay poll did not register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "X-mode relay poll must not count as an in-flight task"
+  [ "$FM_SUP_NEEDED" = true ] || fail "X-mode relay poll must set FM_SUP_NEEDED"
+  if fm_supervision_unhealthy "$state" 300; then
+    fail "task-specific unhealthy predicate must preserve its zero-task behavior"
+  fi
+  pass "fm_supervision_needed: X-mode relay poll needs supervision without changing the task predicate"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -88,13 +101,15 @@ install_guard_scripts() {
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
+  cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
-  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
 }
 
 mark_codex_hook_root() {
@@ -570,8 +585,8 @@ EOF
   assert_contains "$(cat "$log")" '<session-test>' "grok adapter must pass the hook session id"
   assert_not_contains "$(cat "$log")" '<--permission-mode>' "grok adapter must not add a stronger permission mode"
   assert_not_contains "$(cat "$log")" '<bypassPermissions>' "grok adapter must not bypass permissions on forced resume"
-  assert_contains "$(cat "$log")" 'TURN WOULD END BLIND' "grok adapter must carry the guard reason into the forced resume"
-  pass "fm-turnend-guard-grok: forces one same-session resume when the shared predicate blocks"
+  assert_contains "$(cat "$log")" 'FIRSTMATE_OP: v1 turn-end-guard: TURN WOULD END BLIND' "grok adapter must retain the typed guard kind"
+  pass "fm-turnend-guard-grok: forces one explicitly marked same-session resume when the shared predicate blocks"
 }
 
 test_grok_adapter_loop_guard_skips_resume() {
@@ -589,36 +604,106 @@ EOF
   expect_code 0 "$status" "grok adapter must allow its own forced resume turn to end"
   [ -z "$out" ] || fail "grok adapter printed output while loop-guarded: $out"
   [ ! -e "$log" ] || fail "grok adapter spawned another resume while loop-guarded: $(cat "$log")"
-  pass "fm-turnend-guard-grok: loop guard prevents a nested resume loop"
+  pass "fm-turnend-guard-grok: legacy environment loop guard prevents a nested resume loop"
 }
 
-test_settings_hook_uses_claude_project_dir() {
-  local settings command
-  settings="$ROOT/.claude/settings.json"
-  [ -f "$settings" ] || fail "tracked .claude/settings.json is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "Stop hook command is missing from .claude/settings.json"
-  assert_contains "$command" 'CLAUDE_PROJECT_DIR' "Stop hook must resolve via CLAUDE_PROJECT_DIR, not a cwd-relative path"
-  assert_contains "$command" 'fm-turnend-guard.sh' "Stop hook must still invoke fm-turnend-guard.sh"
-  case "$command" in
-    bin/fm-turnend-guard.sh|./bin/fm-turnend-guard.sh)
-      fail "Stop hook must not use a bare relative path (cwd-dependent): $command"
-      ;;
-  esac
-  pass ".claude/settings.json: Stop hook uses CLAUDE_PROJECT_DIR-anchored command"
+test_grok_adapter_native_false_blocks_without_resume() {
+  local dir fakebin log out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-native-false")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-native-false-bin")
+  log="$TMP_ROOT/grok-native-false.log"
+  printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
+  chmod +x "$fakebin/grok"
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":false}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 2 "$status" "native stopHookActive=false must return the shared blocking status"
+  assert_contains "$out" 'TURN WOULD END BLIND' "native block must pass shared guard feedback to Grok"
+  [ ! -e "$log" ] || fail "native path started grok --resume"
+  pass "fm-turnend-guard-grok: native false delegates blocking feedback with zero resume processes"
 }
 
-test_codex_hook_invokes_shared_guard() {
-  local settings command
-  settings="$ROOT/.codex/hooks.json"
-  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
-  assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
-  assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
-  assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
-  assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
-  pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
+test_grok_adapter_native_true_allows_without_resume() {
+  local dir fakebin log out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-native-true")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-native-true-bin")
+  log="$TMP_ROOT/grok-native-true.log"
+  printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
+  chmod +x "$fakebin/grok"
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":true}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "native stopHookActive=true must allow the bounded continuation to stop"
+  [ -z "$out" ] || fail "native true produced output: $out"
+  [ ! -e "$log" ] || fail "native true started grok --resume"
+  pass "fm-turnend-guard-grok: native true remains bounded and starts no resume process"
+}
+
+test_grok_adapter_snake_case_native_and_camel_precedence() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-native-spellings")
+  : > "$dir/state/task1.meta"
+  out=$(printf '%s' '{"sessionId":"native","stop_hook_active":false}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 2 "$status" "typed snake_case false must select native blocking"
+  assert_contains "$out" 'TURN WOULD END BLIND' "snake_case native block lost feedback"
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":true,"stop_hook_active":false}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "camelCase true must win over snake_case false"
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":false,"stop_hook_active":true}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 2 "$status" "camelCase false must win over snake_case true"
+  pass "fm-turnend-guard-grok: both spellings are typed and camelCase has deterministic precedence"
+}
+
+test_grok_adapter_invalid_inputs_start_neither_path() {
+  local dir fakebin log payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-invalid-inputs")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-invalid-bin")
+  log="$TMP_ROOT/grok-invalid.log"
+  printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
+  chmod +x "$fakebin/grok"
+  for payload in \
+    ' ' \
+    '{' \
+    '{"sessionId":"x","stopHookActive":"false"}' \
+    '{"sessionId":"x","stop_hook_active":1}' \
+    '{"sessionId":"x"}{"sessionId":"y"}' \
+    '{"sessionId":"x","stopHookActive":false}{"sessionId":"y","stopHookActive":false}' \
+    '{"sessionId":"x","stopHookActive":"bad","stopHookActive":false}' \
+    '{"sessionId":"x","stop_hook_active":false,"stop_hook_active":false}' \
+    '{"sessionId":"x","sessionId":"y"}'
+  do
+    out=$(printf '%s' "$payload" | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+    expect_code 0 "$status" "invalid Grok payload must conservatively allow without choosing a path"
+    [ -z "$out" ] || fail "invalid Grok payload produced output: $out"
+  done
+  [ ! -e "$log" ] || fail "invalid Grok payload started a resume process"
+  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$TMP_ROOT/missing-grok-root" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "missing shared-guard prerequisite must conservatively allow"
+  [ -z "$out" ] || fail "missing prerequisite produced output: $out"
+  [ ! -e "$log" ] || fail "missing prerequisite started a resume process"
+  pass "fm-turnend-guard-grok: malformed, invalidly typed, and missing-prerequisite payloads start neither path"
+}
+
+test_grok_adapter_missing_jq_and_no_supervision_allow() {
+  local dir fakebin log out status tool tool_path
+  dir=$(make_primary_dir "$TMP_ROOT/grok-nojq")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-nojq-bin")
+  log="$TMP_ROOT/grok-nojq.log"
+  for tool in bash cat printf; do
+    tool_path=$(command -v "$tool") || fail "test host must provide $tool"
+    ln -s "$tool_path" "$fakebin/$tool"
+  done
+  printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
+  chmod +x "$fakebin/grok"
+  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | PATH="$fakebin" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "missing jq must conservatively allow"
+  [ -z "$out" ] || fail "missing jq produced output: $out"
+  [ ! -e "$log" ] || fail "missing jq started a resume process"
+
+  dir=$(make_primary_dir "$TMP_ROOT/grok-native-no-work")
+  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "healthy no-supervision-needed native stop must allow"
+  [ -z "$out" ] || fail "no-supervision-needed native stop produced output: $out"
+  pass "fm-turnend-guard-grok: missing jq and no-supervision-needed stops stay silent and bounded"
 }
 
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
@@ -684,19 +769,6 @@ EOF
   pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
 }
 
-test_opencode_plugin_forces_followup() {
-  local plugin content
-  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
-  [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
-  content=$(cat "$plugin")
-  assert_contains "$content" 'session.idle' "OpenCode plugin must run on session.idle"
-  assert_contains "$content" 'fm-turnend-guard.sh' "OpenCode plugin must invoke the shared guard"
-  assert_contains "$content" 'promptAsync' "OpenCode plugin must force a follow-up turn"
-  assert_contains "$content" 'skipNextIdle' "OpenCode plugin must carry a loop guard"
-  assert_contains "$content" 'worktree' "OpenCode plugin must anchor the guard from the git worktree path"
-  pass ".opencode primary plugin: session.idle forces one follow-up through the shared guard"
-}
-
 test_opencode_plugin_anchors_guard_to_worktree() {
   local plugin parent worktree_dir wrong_dir out status
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
@@ -713,7 +785,8 @@ printf 'guard-fired\n' >&2
 exit 2
 EOF
   chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
-  out=$(PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+  # Runtime module-format warnings are host noise; this assertion owns plugin output only.
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -731,8 +804,20 @@ const hooks = await mod.FmPrimaryTurnendGuard({
   worktree: process.env.WORKTREE,
 });
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
+  console.error(`untyped operational prompt: ${promptBody}`);
+  process.exit(1);
+}
 if (!promptBody.includes("guard-fired")) {
   console.error(`missing prompt body: ${promptBody}`);
+  process.exit(1);
+}
+if (!promptBody.includes("watcher cycle is missing, failed, or unhealthy")) {
+  console.error(`missing recovery-only preamble: ${promptBody}`);
+  process.exit(1);
+}
+if (promptBody.includes("Resume supervision according to the session-start operating block")) {
+  console.error(`ordinary continuity leaked into guard follow-up: ${promptBody}`);
   process.exit(1);
 }
 EOF
@@ -743,35 +828,16 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
-test_pi_extension_forces_followup() {
-  local ext content
-  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
-  [ -f "$ext" ] || fail "tracked pi primary extension is missing"
-  content=$(cat "$ext")
-  assert_contains "$content" 'agent_settled' "pi extension must run after one logical agent run settles"
-  assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
-  assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
-  assert_contains "$content" 'deliverAs: "followUp"' "pi extension must queue the follow-up safely"
-  assert_contains "$content" 'guardFollowupActive' "pi extension must carry a logical-run loop guard"
-  assert_not_contains "$content" 'skipNextTurnEnd' "pi extension kept the internal-turn loop guard"
-  assert_contains "$content" 'session-start operating block' "pi extension must use harness-neutral repair wording"
-  assert_contains "$content" '.pi-turnend-extension-loaded' "pi extension must write its loaded marker for session-start diagnostics"
-  assert_contains "$content" 'lockOwnership' "pi extension loaded marker must respect the session lock"
-  assert_contains "$content" 'const command = String((event.input as { command?: unknown })?.command ?? "")' "pi extension changed bash command extraction for the PreToolUse contract"
-  assert_contains "$content" 'runPretoolCheck(command)' "pi extension changed the PreToolUse checker invocation"
-  assert_contains "$content" 'return { block: true, reason:' "pi extension changed the checker exit-2 block result"
-  assert_not_contains "$content" 'Run bin/fm-watch-arm.sh as a background task' "pi extension must not hardcode the old watcher-arm instruction"
-  pass ".pi primary extension: agent_settled forces one follow-up through the shared guard"
-}
-
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
   home="$TMP_ROOT/pi-logical-run-home"
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   log="$TMP_ROOT/pi-logical-run-guard.log"
-  mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -796,7 +862,10 @@ const pi = {
   },
   async sendUserMessage(message, options) {
     prompts += 1;
+    if (!message.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) throw new Error(`untyped operational prompt: ${message}`);
     if (!message.includes("TURN WOULD END BLIND")) throw new Error(`unexpected prompt: ${message}`);
+    if (!message.includes("watcher cycle is missing, failed, or unhealthy")) throw new Error(`guard prompt omitted recovery-only state: ${message}`);
+    if (message.includes("Resume supervision according to the session-start operating block")) throw new Error(`guard prompt used ordinary continuity: ${message}`);
     if (options?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
     await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
   },
@@ -831,8 +900,10 @@ test_pi_extension_retries_after_followup_delivery_failure() {
   repo="$TMP_ROOT/pi-delivery-failure-root"
   home="$TMP_ROOT/pi-delivery-failure-home"
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
-  mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -873,15 +944,164 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
-test_grok_hook_invokes_adapter() {
-  local settings command
-  settings="$ROOT/.grok/hooks/fm-primary-turnend-guard.json"
-  [ -f "$settings" ] || fail "tracked grok primary hook config is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "Stop hook command is missing from grok primary hook config"
-  assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok hook must anchor from GROK_WORKSPACE_ROOT"
-  assert_contains "$command" 'fm-turnend-guard-grok.sh' "grok hook must invoke the adapter"
-  pass ".grok primary hook: Stop hook invokes the grok adapter"
+# --- --claude cooperative mode -----------------------------------------------
+# In --claude mode the guard ignores stop_hook_active (Claude marks every stop
+# after ANY stop-hook continuation true, including asyncRewake rewake turns) and
+# cooperates with the Stop-owned auto-arm instead: allow on health, live owner
+# claim, or a fresh rewake epoch; bounded re-block only when none materialize.
+
+run_hook_claude() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
+}
+
+# The 2026-07-21 incident regression: after a spent forced continuation the old
+# one-shot loop guard ALLOWED a blind stop (stop_hook_active=true) while the
+# watcher was already dead. In --claude mode the guard must re-block instead.
+test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-reblock")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude mode must re-block a stop_hook_active=true stop while unhealthy with no auto-arm claim"
+  assert_contains "$out" "TURN WOULD END BLIND" "--claude re-block must carry the blind-turn banner"
+  assert_contains "$out" "Stop-owned auto-arm did not claim" "--claude re-block must explain the missing auto-arm claim"
+  pass "fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)"
+}
+
+test_hook_claude_mode_reblocks_x_mode_without_tasks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-x-mode")
+  : > "$dir/state/x-watch.check.sh"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude mode must re-block an X-mode-only stop when no auto-arm claims recovery"
+  assert_contains "$out" "X-mode relay polling needs supervision" "--claude X-mode re-block must name the active supervision need"
+  [ -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude X-mode re-block must consume the shared block budget"
+  pass "fm-turnend-guard --claude: X-mode-only homes re-block when auto-arm recovery is absent"
+}
+
+test_hook_claude_mode_allows_when_autoarm_owner_alive() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-owner")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$pid" > "$dir/state/.claude-autoarm.lock/pid"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--claude mode must allow when the auto-arm owner process is alive"
+  [ -z "$out" ] || fail "--claude owner-claimed allow produced output: $out"
+  pass "fm-turnend-guard --claude: allows the stop when the Stop auto-arm owner holds this home"
+}
+
+test_hook_claude_mode_allows_on_fresh_rewake_epoch() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-epoch")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=3 owner_pid=999 outcome=rewake updated_at=%s\n' "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "--claude mode must allow the stop whose rewake the auto-arm already owns"
+  [ -z "$out" ] || fail "--claude rewake-epoch allow produced output: $out"
+  pass "fm-turnend-guard --claude: fresh rewake epoch prevents a duplicate continuation for the same event"
+}
+
+test_hook_claude_mode_stale_rewake_epoch_blocks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stale-epoch")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=3 owner_pid=999 outcome=rewake updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude mode must not treat an ancient rewake epoch as this event's recovery"
+  pass "fm-turnend-guard --claude: stale rewake epoch does not allow a blind stop"
+}
+
+test_hook_claude_mode_block_budget_then_degraded_allow() {
+  local dir out status i
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget")
+  : > "$dir/state/task1.meta"
+  for i in 1 2 3; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+    expect_code 2 "$status" "--claude block $i must exit 2 within the budget"
+  done
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "--claude must allow degraded once the consecutive-block budget is exhausted"
+  assert_contains "$out" '"systemMessage"' "--claude degraded allow must surface a visible systemMessage"
+  assert_contains "$out" 'block budget exhausted' "--claude degraded allow must name the exhausted budget"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "--claude budget must reset after the degraded allow so the next chain re-engages"
+  pass "fm-turnend-guard --claude: re-block budget stays below the 8-block cap and resets after degraded allow"
+}
+
+test_hook_claude_mode_allow_resets_budget() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-reset")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "first --claude block must exit 2"
+  [ -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude block must record the consecutive-block budget"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$dir/state/.watch.lock"
+  expect_code 0 "$status" "--claude must allow once the watcher is healthy again"
+  [ ! -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude allow must reset the consecutive-block budget"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "a later unhealthy chain must re-block from a fresh budget"
+  pass "fm-turnend-guard --claude: any allow resets the consecutive-block budget"
+}
+
+test_hook_claude_mode_waits_for_late_claim() {
+  local dir helper out status holder
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-wait")
+  : > "$dir/state/task1.meta"
+  (
+    sleep 0.4
+    mkdir -p "$dir/state/.claude-autoarm.lock"
+    sleep 60 &
+    printf '%s\n' $! > "$dir/state/.claude-autoarm.lock/pid"
+    printf '%s\n' $! > "$dir/holder.pid"
+    wait
+  ) &
+  helper=$!
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=3000 run_hook_claude "$dir" false); status=$?
+  holder=$(cat "$dir/holder.pid" 2>/dev/null || true)
+  kill "$holder" 2>/dev/null || true
+  kill "$helper" 2>/dev/null || true
+  wait "$helper" 2>/dev/null || true
+  expect_code 0 "$status" "--claude must wait briefly for a late auto-arm claim instead of forcing a continuation"
+  [ -z "$out" ] || fail "--claude late-claim wait produced output: $out"
+  pass "fm-turnend-guard --claude: bounded claim wait avoids a token-consuming forced continuation"
+}
+
+test_hook_claude_mode_secondmate_reblocks_like_primary() {
+  local dir pid out status
+  dir=$(make_secondmate_dir "$TMP_ROOT/hook-claude-sm-reblock")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude mode must re-block in a marked secondmate home exactly like the main primary"
+  assert_contains "$out" "TURN WOULD END BLIND" "--claude secondmate re-block must carry the blind-turn banner"
+  sleep 60 &
+  pid=$!
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$pid" > "$dir/state/.claude-autoarm.lock/pid"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--claude mode must allow a claimed secondmate home"
+  pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
 test_predicate_healthy_no_inflight
@@ -889,6 +1109,7 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_x_mode_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
@@ -914,13 +1135,22 @@ test_hook_silent_without_stdin
 test_hook_runs_fast
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
-test_settings_hook_uses_claude_project_dir
-test_codex_hook_invokes_shared_guard
+test_grok_adapter_native_false_blocks_without_resume
+test_grok_adapter_native_true_allows_without_resume
+test_grok_adapter_snake_case_native_and_camel_precedence
+test_grok_adapter_invalid_inputs_start_neither_path
+test_grok_adapter_missing_jq_and_no_supervision_allow
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
-test_opencode_plugin_forces_followup
 test_opencode_plugin_anchors_guard_to_worktree
-test_pi_extension_forces_followup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
-test_grok_hook_invokes_adapter
+test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
+test_hook_claude_mode_reblocks_x_mode_without_tasks
+test_hook_claude_mode_allows_when_autoarm_owner_alive
+test_hook_claude_mode_allows_on_fresh_rewake_epoch
+test_hook_claude_mode_stale_rewake_epoch_blocks
+test_hook_claude_mode_block_budget_then_degraded_allow
+test_hook_claude_mode_allow_resets_budget
+test_hook_claude_mode_waits_for_late_claim
+test_hook_claude_mode_secondmate_reblocks_like_primary

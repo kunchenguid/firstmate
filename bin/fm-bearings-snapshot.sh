@@ -19,14 +19,25 @@
 # explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
 # absence is never ambiguous.
 #
-# This wrapper consumes the canonical snapshot's hints.open_decisions field.
-# fm-classify-lib.sh owns the durable keyed-decision contract.
+# This wrapper consumes canonical status decisions plus canonically normalized
+# backlog roles, unresolved blockers, and captain actionability. It never infers
+# decisions from report or visual-review prose or reimplements snapshot semantics.
+#
+# Main-home inventory validity comes from the canonical snapshot's main_inventory
+# object (orphan structured in-flight without meta, unstructured current rows).
+# Bearings never invents Underway rows from backlog-only ids; it discloses those
+# gaps in omitted[] and, when invalid, a Charted Next gate line so the four-section
+# chat cannot claim an empty fleet while main current state is broken.
 #
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
 # a per-home cap and an overall cap, with omitted[] disclosure of both and of any
 # secondmate home whose backlog was unreadable; no GitHub/network call is involved.
+# The default landed baseline is balanced across homes: each home keeps its internal
+# newest-first ordering, homes iterate in deterministic id order, sparse homes do not
+# waste capacity, and --all-landed switches back to the complete global newest-first
+# order.
 #
 # Flags:
 #   (default)        compact projection, TOON, local-only
@@ -35,9 +46,10 @@
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision
+#   --all-secondmates include every aggregated secondmate record
 #   --all-landed     include every landed record from every home (default: bounded)
 #   --all-reports    include the full scout-report inventory (default: relevant only)
-#   --all-queued     include superseded/held queued items (default: dropped)
+#   --all-queued     include superseded queued items (default: dropped)
 #   --all-recorded-prs include every locally recorded PR
 #   --all-unhealthy  include every unhealthy endpoint
 #   --all-pr-repos   query every discovered repository under --include-prs
@@ -54,6 +66,7 @@ FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
 FM_BEARINGS_LANDED_PER_HOME=${FM_BEARINGS_LANDED_PER_HOME:-$FM_BEARINGS_LANDED}
 FM_BEARINGS_IN_FLIGHT=${FM_BEARINGS_IN_FLIGHT:-20}
 FM_BEARINGS_DECISIONS=${FM_BEARINGS_DECISIONS:-20}
+FM_BEARINGS_SECONDMATES=${FM_BEARINGS_SECONDMATES:-20}
 FM_BEARINGS_GATES=${FM_BEARINGS_GATES:-20}
 FM_BEARINGS_REPORTS=${FM_BEARINGS_REPORTS:-20}
 FM_BEARINGS_RECORDED_PRS=${FM_BEARINGS_RECORDED_PRS:-20}
@@ -69,6 +82,7 @@ validate_bound FM_BEARINGS_LANDED "$FM_BEARINGS_LANDED"
 validate_bound FM_BEARINGS_LANDED_PER_HOME "$FM_BEARINGS_LANDED_PER_HOME"
 validate_bound FM_BEARINGS_IN_FLIGHT "$FM_BEARINGS_IN_FLIGHT"
 validate_bound FM_BEARINGS_DECISIONS "$FM_BEARINGS_DECISIONS"
+validate_bound FM_BEARINGS_SECONDMATES "$FM_BEARINGS_SECONDMATES"
 validate_bound FM_BEARINGS_GATES "$FM_BEARINGS_GATES"
 validate_bound FM_BEARINGS_REPORTS "$FM_BEARINGS_REPORTS"
 validate_bound FM_BEARINGS_RECORDED_PRS "$FM_BEARINGS_RECORDED_PRS"
@@ -79,7 +93,8 @@ validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 usage() {
   cat <<'EOF'
 usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
-                               [--all-in-flight] [--all-decisions] [--all-landed]
+                               [--all-in-flight] [--all-decisions]
+                               [--all-secondmates] [--all-landed]
                                [--all-reports] [--all-queued]
                                [--all-recorded-prs] [--all-unhealthy]
                                [--all-pr-repos]
@@ -88,14 +103,21 @@ Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
-  decisions_open{id,key,verb,summary}, landed{id,what,artifact},
-  gates{id,title,blocked_by,reason}, reports{id,path}, recorded_prs{id,url},
+  secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
+  decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
+  gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
-  with omitted[] disclosure; --all-landed reveals the full set.
+  with omitted[] disclosure. Default selection is balanced across deterministic home
+  order while preserving each home's internal newest-first order; sparse homes do
+  not waste capacity. --all-landed reveals the full global newest-first set.
+For every registered secondmate, readable structured facts from its own home are
+  authoritative, including independently trustworthy surfaces from a partial summary.
+  Parent events and bounded terminal reads are labeled fallback or contradiction
+  evidence and never become current work.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
-  --all-decisions, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
+  --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 EOF
@@ -107,6 +129,7 @@ ALL_REPORTS=0
 ALL_QUEUED=0
 ALL_IN_FLIGHT=0
 ALL_DECISIONS=0
+ALL_SECONDMATES=0
 ALL_LANDED=0
 ALL_RECORDED_PRS=0
 ALL_UNHEALTHY=0
@@ -120,6 +143,7 @@ while [ $# -gt 0 ]; do
     --all-queued) ALL_QUEUED=1 ;;
     --all-in-flight) ALL_IN_FLIGHT=1 ;;
     --all-decisions) ALL_DECISIONS=1 ;;
+    --all-secondmates) ALL_SECONDMATES=1 ;;
     --all-landed) ALL_LANDED=1 ;;
     --all-recorded-prs) ALL_RECORDED_PRS=1 ;;
     --all-unhealthy) ALL_UNHEALTHY=1 ;;
@@ -134,14 +158,23 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
-if [ "$ALL_LANDED" = 1 ]; then
-  SNAP=$(FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
+# The deterministic return-catch-up owner must clear before this or any other
+# ordinary captain request proceeds. Bearings does not reproduce that policy;
+# it only consults the shared read-only gate.
+"$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
+
+NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
+  if [ "$ALL_LANDED" = 1 ]; then
+    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
+  else
+    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 "$FLEET" --json) || exit $?
+  fi
 else
-  SNAP=$("$FLEET" --json) || exit $?
+  SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json) || exit $?
 fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
-NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 
 # --- optional live PR enrichment (the ONLY network path) --------------------
 PR_STATUS='not_requested (run: /bearings include PRs)'
@@ -250,6 +283,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson landed_per_home_n "$FM_BEARINGS_LANDED_PER_HOME" \
   --argjson in_flight_n "$FM_BEARINGS_IN_FLIGHT" \
   --argjson decisions_n "$FM_BEARINGS_DECISIONS" \
+  --argjson secondmates_n "$FM_BEARINGS_SECONDMATES" \
   --argjson gates_n "$FM_BEARINGS_GATES" \
   --argjson reports_n "$FM_BEARINGS_REPORTS" \
   --argjson recorded_prs_n "$FM_BEARINGS_RECORDED_PRS" \
@@ -257,6 +291,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson include_prs "$INCLUDE_PRS" \
   --argjson all_in_flight "$ALL_IN_FLIGHT" \
   --argjson all_decisions "$ALL_DECISIONS" \
+  --argjson all_secondmates "$ALL_SECONDMATES" \
   --argjson all_landed "$ALL_LANDED" \
   --argjson all_reports "$ALL_REPORTS" \
   --argjson all_queued "$ALL_QUEUED" \
@@ -269,46 +304,122 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def round_robin_landed($n):
+    . as $groups
+    | [range(0; (($groups | map(length) | max) // 0)) as $i
+       | $groups[]
+       | select(length > $i)
+       | .[$i]][:$n];
   ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
-  | ([ .backlog.records[] | select(.state == "done" and .structured)
+  | ([ .backlog.records[] | select(.state == "done" and .structured and .kind != "captain")
        | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
   | ((.secondmate_landed.records) // []) as $mate_done
   | ($main_done + $mate_done) as $all_landed_rows
   | ([ $all_landed_rows | group_by(.home_id)[]
        | sort_by([(.completion.date // ""), .id]) | reverse
-       | (if $all_landed == 1 then . else .[:$landed_per_home_n] end) ] | add // []) as $per_home_capped
+       | (if $all_landed == 1 then . else .[:$landed_per_home_n] end) ]) as $per_home_groups
+  | ($per_home_groups | add // []) as $per_home_capped
   | ([ $all_landed_rows | group_by(.home_id)[] | select(length > $landed_per_home_n) ] | length) as $home_cap_dropped
   | ($per_home_capped | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_sorted
-  | (if $all_landed == 1 then $landed_sorted else $landed_sorted[:$landed_n] end) as $done
+  | (if $all_landed == 1 then $landed_sorted else ($per_home_groups | round_robin_landed($landed_n)) end) as $done
   | ($done | map(.id)) as $done_ids
-  | (.tasks | map(.id)) as $live_ids
+  | ([.tasks[] | select(.kind != "secondmate") | .id]) as $live_ids
+  | ([.tasks[] | select(.kind != "secondmate" and .current_state.state == "working") | .id]) as $working_ids
   | ($live_ids + $done_ids) as $rel_ids
   | ([ .tasks[]
        | select(.endpoint.exists == false or .endpoint.agent_alive == "dead")
-       | {id, backend, target:(.endpoint.target // "-"), exists:.endpoint.exists, agent:.endpoint.agent_alive} ]) as $unhealthy_all
-  | ([ .tasks[] | {
-        id, kind,
+       | {id, backend, target:(.endpoint.target // "-"), exists:.endpoint.exists, agent:.endpoint.agent_alive} ]
+     + [ (.secondmate_current.records // [])[] as $m | $m.endpoints[]?
+         | select(.endpoint.exists == false or .endpoint.agent_alive == "dead")
+         | {id:($m.id + "/" + .id),backend:"secondmate-home",target:(.endpoint.target // "-"),exists:.endpoint.exists,agent:.endpoint.agent_alive} ]) as $unhealthy_all
+  | ([ (.secondmate_current.records // [])[]
+       | ([.decisions_open[]? | select(.source == "backlog" and .verb == "captain-hold")]) as $captain_holds
+       | ([.holds[]? | select(.source == "backlog")]) as $backlog_holds
+       | . + {
+           bearings_captain_holds:$captain_holds,
+           bearings_holds:(if .current.state == "captain_decision" then $backlog_holds else .holds end),
+           bearings_state:(
+             if .current.state == "captain_decision" then
+               if ($captain_holds | length) > 0 then "captain_decision"
+               elif (.active_children | length) > 0 then "active_child_work"
+               elif ($backlog_holds | length) > 0 then "externally_held"
+               else "unknown" end
+             else .current.state end)
+         } ]) as $secondmate_views
+  | ([ if .secondmate_current.registry.available == false then
+         {id:"(registry)",state:"unknown",doing:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
+          provenance:(.secondmate_current.registry.provenance // "registered-table"),
+          freshness:(.secondmate_current.registry.freshness.status // "unavailable"),
+          age_seconds:null,contradiction:false,reason:(.secondmate_current.registry.reason // "Registered secondmate table unavailable")}
+       else empty end ]
+     + [ $secondmate_views[]
+       | {id,state:.bearings_state,
+          doing:((if .bearings_state == "active_child_work" then
+                    ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))
+                  elif .bearings_state == "captain_decision" then
+                    ([.bearings_captain_holds[] | .summary] | join("; "))
+                  elif .bearings_state == "externally_held" then
+                    ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
+                  elif .bearings_state == "no_active_work" then "No active child work"
+                  else (.current.reason // "Current home state unavailable") end) | trunc(120)),
+          provenance:.provenance.selected,freshness:.freshness.status,
+          age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
+          reason:(.current.reason // "-")} ]) as $secondmates_all
+  | ([ .tasks[]
+       | select(.kind != "secondmate")
+       | select(.backlog.current_role != "program")
+       | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | {id, kind,
         state: .current_state.state,
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
-      } ]) as $in_flight_all
-  | ([ .tasks[] as $t | ($t.hints.open_decisions // [])[]
-       | {id:$t.id, key, verb, summary:(.summary | trunc(90))} ]) as $decisions_all
+      } ]
+     + [ $secondmate_views[]
+         | select(.bearings_state == "active_child_work")
+         | {id,kind:"secondmate",state:.bearings_state,
+            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
-       | select(.state == "queued" and .structured)
-       | select(($all_queued == 1)
-                or (((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")) | not))
-       | {id, title:(.title | trunc(60)), blocked_by:(.blocked_by // "-"),
-          reason:((.blocked_reason // "-") | trunc(40))} ]) as $gates_all
+         | select(.structured and .captain_actionable == true)
+         | {id,key:.id,verb:"captain-hold",
+            summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
+     + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
+         | select(.source == "backlog" and .verb == "captain-hold")
+         | {id:($m.id + "/" + .id),key,verb,
+            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
+  | ((if (.main_inventory.valid == false) then
+        [{id:"(main-inventory)",
+          title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
+          blocked_by:"-",
+          reason:"main inventory",
+          owner:"(main)"}]
+      else [] end)
+     + [ .backlog.records[]
+         | . as $record
+         | select(.structured and
+             (.state == "queued" or
+              (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
+         | select(.captain_actionable != true)
+         | select(($all_queued == 1)
+                  or (((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")) | not))
+         | {id, title:(.title | trunc(60)),
+            blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
+            reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:"(main)"} ]
+     + [ (.secondmate_current.records // [])[] as $m
+         | select($m.provenance.selected == "structured-home")
+         | $m.queued[]?
+         | select(.captain_actionable != true)
+         | {id,title:(.title | trunc(60)),
+            blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
+            reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:$m.id} ]) as $gates_all
   | ([ .scout_reports[]
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
-  | ([ .tasks[] | select(.pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
+  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
   | . as $snap
   | {
       schema: "fm-bearings.v1",
@@ -316,9 +427,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       generated: $now,
       prs: $prs,
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
+      secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
-                            artifact:(.pr_url // .report_path // .local_note // "-")})),
+                            artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
       gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
@@ -337,12 +449,23 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $f_actions then empty else {surface:"watch/steer actions", reveal:"--fields actions"} end),
         (if $f_endpoints then empty else {surface:"healthy endpoint detail", reveal:"--fields endpoints"} end),
         (if $all_reports == 1 then empty else {surface:"full scout-report inventory", reveal:"--all-reports"} end),
-        (if $all_queued == 1 then empty else {surface:"superseded/held queued items", reveal:"--all-queued"} end),
+        (if $all_queued == 1 then empty else {surface:"superseded queued items", reveal:"--all-queued"} end),
         (if $all_landed == 0 and ($per_home_capped | length) > ($done | length) then {surface:("landed showing \($done | length) of \($per_home_capped | length)" + (($done | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"--all-landed"} else empty end),
         (if $all_landed == 0 and $home_cap_dropped > 0 then {surface:("landed per-home capped at \($landed_per_home_n) for \($home_cap_dropped) home(s)"), reveal:"--all-landed"} else empty end),
         (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable backlog: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home backlogs"} else empty end),
         (if $all_landed == 0 and (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"--all-landed"} else empty end),
+        ((($snap.main_inventory.orphan_in_flight // []) | length) as $n
+         | if $n > 0 then {surface:("main in-flight backlog item(s) have no child metadata: \($n)"), reveal:"inspect main data/backlog.md In flight vs state/*.meta"} else empty end),
+        ((($snap.main_inventory.unstructured_current_count // 0)) as $n
+         | if $n > 0 then {surface:("main unstructured current backlog row(s): \($n)"), reveal:"inspect main data/backlog.md In flight and Queued free-form rows"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
+        (if $all_secondmates == 0 and ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"--all-secondmates"} else empty end),
+        (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
+        (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
+        (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
+        (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),
+        (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.input_truncated == true or .parent_event.activity_scan.retained_truncated == true)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence truncated for \($n) record(s)"), reveal:"raise FM_SNAPSHOT_PARENT_ACTIVITY_LINES, FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, or FM_SNAPSHOT_PARENT_ACTIVITIES"} else empty end),
+        (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.available == false)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence unavailable for \($n) record(s)"), reveal:"inspect the parent status logs"} else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
         (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
         (if $all_reports == 0 and ($reports_all | length) > $reports_n then {surface:("reports showing \($reports_n) of \($reports_all | length)"), reveal:"--all-reports"} else empty end),

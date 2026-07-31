@@ -22,11 +22,21 @@
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
 # From-firstmate marker: when the resolved target is a task selector whose meta
-# records kind=secondmate, the text is prefixed with the from-firstmate marker
-# (bin/fm-marker-lib.sh) so the secondmate routes its reply via its status file
-# or a status-pointed doc instead of stranding it in chat the main firstmate
-# never reads. A crewmate/scout target, an explicit backend-target escape-hatch
-# target, and the --key path are never marked - their behavior is unchanged.
+# records kind=secondmate, the text uses the live-charter-compatible
+# from-firstmate carrier owned by bin/fm-operational-input.sh so the secondmate
+# routes its reply via its status file or a status-pointed doc instead of
+# stranding it in chat the main firstmate never reads. A crewmate/scout target,
+# an explicit backend-target escape-hatch target, and the --key path are never
+# marked - their behavior is unchanged.
+#
+# Parent-owned pending-reply expectation: every newly marked secondmate request
+# also receives a privacy-safe correlation id and a durable parent record under
+# state/pending-replies/ before delivery (bin/fm-pending-reply-lib.sh). Delivery
+# success and reply success are separate facts: a successful submit never
+# resolves the expectation. Set FM_PENDING_REPLY_EXISTING_CORR=<id> when
+# re-sending a recovery request for an already-open expectation so a second
+# record is not created. Direct unmarked captain input never creates one.
+#
 # After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
 # 0 disables) before returning: submit confirmation only proves the text was
 # accepted, but the harness needs a beat to spin up the turn before its busy
@@ -63,6 +73,8 @@ fi
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -70,6 +82,26 @@ fm_send_id_from_meta() {  # <meta-file>
   local base
   base=${1##*/}
   printf '%s' "${base%.meta}"
+}
+
+fm_send_record_interrupt() {  # <key>
+  local key=$1 id gen
+  [ "$key" = Escape ] || return 0
+  case "$TARGET_HARNESS" in claude*) : ;; *) return 0 ;; esac
+  [ -n "$TARGET_META" ] || return 0
+  id=$(fm_send_id_from_meta "$TARGET_META")
+  [ -f "$STATE/$id.busy-gen" ] || return 0
+  gen=$(fm_meta_get "$TARGET_META" busy_gen)
+  if [ -n "$gen" ]; then
+    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
+      --gen "$gen" --source fm-interrupt --event interrupt
+  else
+    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
+      --current-gen --source fm-interrupt --event interrupt
+  fi || {
+    echo "error: key '$key' reached $T, but the Claude interrupt state could not be recorded for $id" >&2
+    return 1
+  }
 }
 
 fm_send_meta_for_key_value() {  # <state-dir> <key> <value>
@@ -187,8 +219,12 @@ fm_backend_validate "$TARGET_BACKEND" || exit 1
 # An explicit backend target (the escape hatch for endpoints outside this home)
 # and any crewmate/scout target are left unmarked, and so is the --key path.
 MARK_FROM_FIRSTMATE=0
+PENDING_REPLY_CORR=
+PENDING_REPLY_CREATED=0
+TARGET_TASK_ID=
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
+  TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
 fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
@@ -208,10 +244,33 @@ if [ "${1:-}" = "--key" ]; then
     echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
+  fm_send_record_interrupt "$2" || exit 1
 else
   MESSAGE=$*
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
-    fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
+    # Reuse an existing correlation id for recovery resends; otherwise create a
+    # durable parent expectation before delivery. Transport success never
+    # resolves that expectation (see fm-pending-reply-lib.sh).
+    existing_corr=${FM_PENDING_REPLY_EXISTING_CORR:-$(fm_pending_reply_extract_corr "$MESSAGE")}
+    if [ -n "$existing_corr" ] \
+      && fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then
+      PENDING_REPLY_CORR=$existing_corr
+    else
+      if [ -z "$TARGET_TASK_ID" ]; then
+        echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
+        exit 1
+      fi
+      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE") \
+        || { echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1; }
+      PENDING_REPLY_CREATED=1
+    fi
+    fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
+    if [ "$PENDING_REPLY_CREATED" = 1 ] \
+      && ! fm_pending_reply_prepare_delivery "$STATE" "$PENDING_REPLY_CORR"; then
+      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
+      exit 1
+    fi
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
@@ -230,24 +289,50 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  # Type once, submit, verify. Lenient: only a positively-confirmed swallow
-  # (text still in the composer) is an error; an unreadable pane is assumed sent.
+  # Type once, submit, verify. Only exact empty confirms delivery; every other
+  # verdict preserves the loud refusal boundary.
   if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+    if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+    fi
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
   case "$verdict" in
-    pending)
-      echo "error: text not submitted to $T (Enter swallowed; text left in composer; tried $RESOLUTION_TRIED)" >&2
-      exit 1
+    empty)
       ;;
     send-failed)
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
+    *)
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+      ;;
   esac
-  # Submit landed (verdict was not pending/send-failed). Confirmation only proves
-  # the text was accepted; the harness still needs a beat to spin up the
+  # Delivery confirmed. Mark the pending expectation delivered without resolving
+  # it: only a correlated parent report acknowledges the request.
+  if [ -n "$PENDING_REPLY_CORR" ]; then
+    if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
+      :
+    else
+      delivery_commit_status=$?
+      if [ "$delivery_commit_status" = 2 ]; then
+        echo "error: text was delivered to $T, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
+      else
+        echo "error: text was delivered to $T, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
+      fi
+      exit 1
+    fi
+  fi
+  # Submit landed with exact empty. Confirmation only proves the text was
+  # accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
   # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0
   # disables it. Scoped to this path only, never the shared submit core.

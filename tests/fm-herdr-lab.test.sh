@@ -12,7 +12,7 @@ FAKE_LOG="$TMP_ROOT/herdr.log"
 TRIPWIRES="$TMP_ROOT/tripwires"
 REAL_SLEEP=$(command -v sleep)
 mkdir -p "$FAKE_STATE"
-printf '%s\n' '/Users/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
 : > "$FAKE_LOG"
 
 cat > "$FAKEBIN/herdr" <<'SH'
@@ -71,7 +71,7 @@ esac
 SH
 chmod +x "$FAKEBIN/herdr"
 
-# shellcheck source=bin/fm-herdr-lab.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-herdr-lab.sh"
 
 run_with_fake() {
@@ -87,13 +87,16 @@ run_with_fake() {
 }
 
 test_refuses_unsafe_names() {
-  local status=0
+  local status=0 generated
   fm_herdr_lab_validate_name default >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "literal default must be refused"
   status=0
   fm_herdr_lab_validate_name arbitrary-session >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "non-lab prefix must be refused"
   fm_herdr_lab_validate_name fm-lab-safe-123 || fail "valid lab session name was refused"
+  generated=$(fm_herdr_lab_name fm-autodetect-smoke-concurrency-h3)
+  fm_herdr_lab_validate_name "$generated" || fail "generated lab session name was refused"
+  [ "${#generated}" -le 40 ] || fail "generated lab session name is too long for Herdr socket paths: $generated"
   pass "fm-herdr-lab: names fail closed and require the lab prefix"
 }
 
@@ -173,7 +176,7 @@ test_changed_default_trips_after_teardown() {
   run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "changed default fleet state must fail teardown"
   assert_present "$TRIPWIRES/$name.fleet-state.json" "failed tripwire should retain evidence"
-  printf '%s\n' '/Users/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+  printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
   rm -f "$TRIPWIRES/$name.fleet-state.json"
   pass "fm-herdr-lab: changed default fleet state is a hard failure"
 }
