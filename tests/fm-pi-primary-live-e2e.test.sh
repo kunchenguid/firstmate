@@ -254,6 +254,7 @@ cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-pri
 cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$PROJECT/.pi/extensions/lib/fm-calm-visibility.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$PROJECT/.pi/extensions/lib/fm-calm-working-ship.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/lib/fm-operational-input.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
@@ -282,17 +283,21 @@ send_prompt "Reply exactly CALM_LIVE_WORKING_VISIBLE"
 i=0
 while [ "$i" -lt 240 ]; do
   pane=$(capture)
-  if printf '%s\n' "$pane" | grep -Fq "Working..."; then
+  if printf '%s\n' "$pane" | grep -Fq '\__/'; then
     break
   fi
   sleep 0.05
   i=$((i + 1))
 done
+printf '%s\n' "$pane" | grep -Fq '\__/' \
+  || fail "Calm did not show the working ship on the credentialed provider path"
 printf '%s\n' "$pane" | grep -Fq "Working..." \
-  || fail "Calm hid Pi's built-in Working row on the credentialed provider path"
+  && fail "Calm left Pi's stock working row visible on the credentialed provider path"
 wait_for_exact_line "CALM_LIVE_WORKING_VISIBLE" 120 \
-  || fail "Pi did not settle the Calm Working-row provider probe"
+  || fail "Pi did not settle the Calm working-ship provider probe"
 pane=$(capture)
+printf '%s\n' "$pane" | grep -Fq '\__/' \
+  && fail "Calm left the working ship on screen after the run settled"
 printf '%s\n' "$pane" | grep -Fq "calm transcript" \
   && fail "Calm added a persistent Calm status row on the credentialed provider path"
 send_prompt "/calm"
@@ -336,4 +341,4 @@ wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E covered native Calm Working visibility, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E covered the Calm working ship, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"
