@@ -228,7 +228,7 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter first recognizes Agy's separator-pair composer through the shared `fm_composer_separated_state` proof, then locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
+The adapter first recognizes Agy's separator-pair composer through the shared, harness-scoped `fm_composer_separated_state` proof (only when `FM_COMPOSER_HARNESS` records `agy`), then locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
 
 ANSI capture preserves de-emphasized placeholder style.
