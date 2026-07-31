@@ -345,6 +345,13 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+    if afk_present; then
+      # The away-mode daemon owns triage and classifies one window per printed
+      # reason, so it keeps the unbatched one-shot form it was built to read.
+      fm_wake_append stale "$win" "$reason" || exit 1
+      date +%s > "$rf"
+      wake "$reason"
+    fi
     # Due, but not surfaced here: collect it and let flush_parked_checkin decide
     # once, for the whole fleet, whether this poll is a check-in.
     parked_due=$(printf '%s%s\t%s\n' "$parked_due" "$win" "$reason")

@@ -36,6 +36,7 @@ Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains 
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
+The arm layer's own successor is not that pattern: it is deliberately double-forked so it outlives the arm that delivers the wake, and it is then verified through the same live-process-plus-fresh-beacon gate as an owned child, so it is never reported off a process that is already dying.
 
 The turn-end guard remains the final backstop rather than the normal continuity mechanism and cooperates with the auto-arm in its `--claude` mode.
 

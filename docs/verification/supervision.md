@@ -198,6 +198,42 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+### Arm-layer successor and parked check-in cadence
+
+Captured 2026-07-31 from a live home's `state/.watch-cycle-exits.log`, preserved verbatim at `tests/fixtures/watch-cycle-exits.fixture.log` because the file accumulates over days and cannot be regenerated.
+
+```text
+records                       499
+exit_code=0                   499 / 499
+signal=none                   499 / 499
+successor=none                499 / 499
+reason=actionable-stale       293
+reason=actionable-signal      198
+reason=actionable-check         8
+sub-5s exits, actionable-stale 112 (22% of all cycles)
+```
+
+Every cycle completed normally and delivered a wake; none armed a successor.
+Supervision therefore ended on each delivered wake and resumed only when an adapter above the arm layer happened to re-arm.
+The sub-5s exits are parked lanes at independent phases, each ending a cycle of its own.
+
+Guard-class mutation results, one mutation per protection.
+A failing case aborts its suite, so each mutation was run twice: once to see which case it kills, and once with that case's invocation removed to prove nothing else in the suite breaks.
+
+| Mutation | Case killed | Rest of suite |
+| --- | --- | --- |
+| Deliver the wake before arming the successor | `test_delivered_wake_arms_its_successor_before_it_is_handled` | 33 cases clean |
+| Drop the successor-output claim in `attach_and_wait` | `test_attached_arm_delivers_its_successor_cycle_wake` | 33 cases clean |
+| Arm a successor regardless of supervision need | `test_successor_is_not_armed_without_supervision_need` | 33 cases clean |
+| Ignore the shared parked check-in cadence | `test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence` | 41 cases clean |
+
+Deterministic entry points for this contract:
+
+```sh
+tests/fm-watcher-lock.test.sh
+tests/fm-watch-triage.test.sh
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

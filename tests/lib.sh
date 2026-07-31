@@ -58,20 +58,38 @@ pass() {
 # call fm_test_cleanup from inside it so registered dirs are still removed.
 
 FM_TEST_CLEANUP_DIRS=()
+# fm_test_tmproot is almost always called through a command substitution, and a
+# subshell cannot write back to the array above - so registration also goes to a
+# file, which does survive. Registering only in the array meant every suite
+# leaked its entire temp root, and once a suite could leave a detached process
+# inside one (a watcher successor), the process leaked with the directory.
+FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/fm-test-cleanup.XXXXXX")
+# Only the shell that sourced this file may run the cleanup. A subshell that
+# inherits the EXIT trap must never delete a root its parent is still using -
+# the exact hazard that made registering from inside the subshell unusable.
+FM_TEST_CLEANUP_OWNER=${BASHPID:-$$}
 
 fm_test_cleanup() {
   local d
+  [ "${BASHPID:-$$}" = "$FM_TEST_CLEANUP_OWNER" ] || return 0
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
+    while IFS= read -r d; do
+      case "$d" in
+        /*) rm -rf "$d" ;;
+      esac
+    done < "$FM_TEST_CLEANUP_REGISTRY"
+    rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  fi
 }
+trap fm_test_cleanup EXIT
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
+  printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"
   FM_TEST_CLEANUP_DIRS+=("$root")
   printf '%s\n' "$root"
 }
