@@ -339,38 +339,28 @@ assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name
   [ -z "$changed" ] || fail "$case_name changed active workspace/tab inside a create, move, or seeded cleanup: $changed"
 }
 
-assert_cleanup_focus_steal_was_restored() {  # <line-count> <pane-id> <expected-focus>
-  local start=$1 pane_id=$2 expected=$3
-  sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane_id" -v expected="$expected" '
-    $1 == "pane-close" && $4 == pane && $2 == expected && $3 != expected {
-      drift = $3
-      saw_close = 1
-      next
-    }
-    saw_close && $1 == "tab-focus" && $2 == drift && $3 == expected {
-      restored = 1
-    }
-    END { exit(restored ? 0 : 1) }
-  ' || fail "projected task-pane close did not demonstrate and immediately restore the exact focus-steal regression"
-}
-
+# The focus-safe emptying-close plan removes a last pane through Herdr's
+# pane-death path with no pane.close mutation at all (the raw explicit-close
+# defect is demonstrated by tests/fm-backend-herdr-focus-flash-e2e.test.sh);
+# a fallback plain close must preserve or immediately restore exact focus.
 assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
   local start=$1 pane_id=$2 expected=$3
   sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane_id" -v expected="$expected" '
-    $1 == "pane-close" && $4 == pane && $2 == expected {
+    $1 == "pane-close" && $4 == pane {
       saw_close = 1
-      if ($3 == expected) {
-        preserved = 1
-      } else {
-        drift = $3
-      }
+      if ($2 != expected) { bad = 1 }
+      else if ($3 == expected) { preserved = 1 }
+      else { drift = $3 }
       next
     }
     saw_close && drift != "" && $1 == "tab-focus" && $2 == drift && $3 == expected {
       preserved = 1
     }
-    END { exit(saw_close && preserved ? 0 : 1) }
+    END { exit(bad || (saw_close && !preserved) ? 1 : 0) }
   ' || fail "projected pane close did not preserve or restore the exact active workspace and tab"
+  if lab pane get "$pane_id" >/dev/null 2>&1; then
+    fail "projected cleanup left exact pane $pane_id alive"
+  fi
 }
 
 remember_meta_worktree() {  # <meta>
@@ -796,7 +786,7 @@ SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "projected teardown"
-assert_cleanup_focus_steal_was_restored "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS"
+assert_cleanup_focus_preserved "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS"
 pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for Herdr container IDs"
 if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
   fail "closing the exact projected task pane did not remove its last-tab workspace"
@@ -804,7 +794,7 @@ fi
 lab pane get "$SECOND_TWO_PANE" >/dev/null 2>&1 \
   || fail "projected teardown affected the focused secondmate workspace"
 [ ! -e "$JOURNAL" ] || fail "confirmed projected teardown did not retire its presentation journal"
-pass "real Herdr lab: exact task-pane close restores the exact captain workspace/tab after Herdr's raw focus steal"
+pass "real Herdr lab: exact task-pane close removes the projected workspace with no unrestored wrong-focus interval"
 
 teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_ROOT/order-a-teardown.err" &
 ORDER_A_TEARDOWN_PID=$!
