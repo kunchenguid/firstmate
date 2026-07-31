@@ -29,6 +29,10 @@
 #       touched: an unrelated pre-existing leftover (unpaired) evidence pair
 #       on the origin default branch, outside the PR's changed paths, must
 #       not block a merge whose own evidence pair is fine
+#   (o) a PR that only changes root-level files (no directory component to
+#       scope the evidence check to) skips the check entirely rather than
+#       widening back to an unscoped whole-tree scan, so it still does not
+#       trip over an unrelated pre-existing leftover pair elsewhere
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -543,6 +547,56 @@ test_scoped_evidence_check_ignores_unrelated_leftover() {
   pass "fm-pr-merge scopes the evidence check to the PR's changed paths and ignores an unrelated leftover pair"
 }
 
+test_root_level_only_change_skips_evidence_check() {
+  # A dirname of "." (a changed file with no directory component, e.g. a
+  # root-level doc) must never be passed through as a pathspec: git ls-tree
+  # -- . matches the whole tree, which would silently defeat scoping. When
+  # a base resolves but every changed path is root-level, the check must be
+  # skipped outright rather than falling back to an unscoped whole-tree scan
+  # that would trip over an unrelated pre-existing leftover pair.
+  local case_dir rc origin real_dir
+  case_dir=$(make_case root-level-only)
+  origin="$case_dir/origin.git"
+  real_dir="$case_dir/real"
+
+  git init -q --bare "$origin"
+
+  mkdir -p "$real_dir/docs/pr-assets/leftover"
+  git -C "$real_dir" init -q
+  printf BEFOREBYTES > "$real_dir/docs/pr-assets/leftover/before-alpha.png"
+  printf AFTERBYTES > "$real_dir/docs/pr-assets/leftover/after-beta.png"
+  printf 'root doc\n' > "$real_dir/AGENTS.md"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "pre-existing leftover evidence plus root doc"
+  git -C "$real_dir" branch -M main
+  git -C "$real_dir" push -q "$origin" main
+
+  printf 'root doc updated\n' > "$real_dir/AGENTS.md"
+  git -C "$real_dir" add -A
+  git -C "$real_dir" commit -qm "update root-level doc only"
+  git -C "$real_dir" push -q "$origin" "HEAD:refs/pull/81/head"
+
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  git -C "$case_dir/wt" remote add origin "$origin"
+
+  add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/81 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "root-level-only: fm-pr-merge should merge a PR that only touches root-level files despite an unrelated pre-existing leftover pair elsewhere"
+  grep -qxF 'pr merge 81 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "root-level-only: gh-axi pr merge was not invoked"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "root-level-only: a PR touching only root-level paths should skip the evidence check rather than falling back to a whole-tree scan"
+  pass "fm-pr-merge skips the evidence check (rather than scanning the whole tree) for a PR that only touches root-level files"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -559,3 +613,4 @@ test_evidence_check_uses_fetched_remote_pr_head_not_stale_local_worktree
 test_unresolvable_ref_warns_and_still_merges
 test_no_recorded_head_and_unresolvable_ref_warns_and_still_merges
 test_scoped_evidence_check_ignores_unrelated_leftover
+test_root_level_only_change_skips_evidence_check
