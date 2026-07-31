@@ -336,12 +336,12 @@ SH
 #!/usr/bin/env bash
 while [ "$#" -gt 0 ]; do
   if [ "$1" = -C ]; then
-    mkdir -p "$2/shellcheck-v0.11.0"
-    cat > "$2/shellcheck-v0.11.0/shellcheck" <<'EOF'
+    mkdir -p "$2/shellcheck-v$FAKE_SHELLCHECK_VERSION"
+    cat > "$2/shellcheck-v$FAKE_SHELLCHECK_VERSION/shellcheck" <<EOF
 #!/usr/bin/env bash
-printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+printf 'ShellCheck - shell script analysis tool\nversion: $FAKE_SHELLCHECK_VERSION\n'
 EOF
-    chmod +x "$2/shellcheck-v0.11.0/shellcheck"
+    chmod +x "$2/shellcheck-v$FAKE_SHELLCHECK_VERSION/shellcheck"
     exit 0
   fi
   shift
@@ -354,11 +354,12 @@ SH
     [ -n "$os" ] || continue
     destination="$tmp/bin-${os}-${arch}"
     out=$(FAKE_UNAME_OS="$os" FAKE_UNAME_ARCH="$arch" \
+      FAKE_SHELLCHECK_VERSION="$REQUIRED" \
       EXPECTED_SHA256="$checksum" CURL_ARGS="$tmp/curl-args" \
       PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
       || fail "installer refused supported platform $os-$arch"$'\n'"$out"
     assert_contains "$(cat "$tmp/curl-args")" \
-      "shellcheck-v0.11.0.${platform}.tar.xz" \
+      "shellcheck-v${REQUIRED}.${platform}.tar.xz" \
       "installer selected the wrong asset for $os-$arch"
     [ -x "$destination/shellcheck" ] \
       || fail "installer did not install an executable for $os-$arch"

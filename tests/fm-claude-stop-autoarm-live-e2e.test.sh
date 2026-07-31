@@ -85,7 +85,6 @@ cat > "$PROJECT/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 N=$(cat "$FM_HOME/state/arm-count" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$FM_HOME/state/arm-count"
 echo "arm-run=$N pid=$$" >> "$FM_HOME/state/arm-ran"
-touch "$FM_HOME/state/.last-watcher-beat"
 if [ "$N" -ge 3 ]; then
   rm -f "$FM_HOME/state/task.meta"
   printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"

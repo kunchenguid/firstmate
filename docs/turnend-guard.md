@@ -93,6 +93,7 @@ Grok's project hook requires the checkout to be trusted with `/hooks-trust` or l
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --liveness-line`, so it always points to the active harness protocol rather than embedding another repair command.
 For Claude, the non-blocking pull warning leaves routine recovery to the upcoming Stop auto-arm; `--repair-line` remains reserved for a turn-end no-claim continuation or another confirmed failure.
+The bootstrap X-mode cadence transition is routine, not a confirmed failure, so it uses `--liveness-line` too.
 
 ## Compatibility limits
 

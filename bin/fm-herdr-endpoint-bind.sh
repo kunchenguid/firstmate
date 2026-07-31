@@ -83,6 +83,9 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") \
   || refuse "task $ID metadata is not a single-link file on the task state device"
 
 BINDING_COUNT=$(grep -c '^endpoint_task_id=' "$META" 2>/dev/null || true)
+case "$BINDING_COUNT" in
+  ''|*[!0-9]*) refuse "could not read task $ID endpoint metadata" ;;
+esac
 if [ "$BINDING_COUNT" -ne 0 ]; then
   if fm_backend_validate_task_endpoint "$META" "$ID"; then
     printf 'Herdr endpoint metadata for task %s is already exactly bound.\n' "$ID"
@@ -109,7 +112,8 @@ printf 'endpoint_task_id=%s\n' "$ID" >> "$META_TMP" \
 chmod 0600 "$META_SNAPSHOT" "$META_TMP" \
   || refuse "could not protect task $ID migration files"
 fm_pr_private_file_valid "$META_SNAPSHOT" 600 "$STATE_DEVICE" \
-  && fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" \
+  || refuse "task $ID migration files failed private-file validation"
+fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" \
   || refuse "task $ID migration files failed private-file validation"
 fm_backend_validate_task_endpoint "$META_TMP" "$ID" \
   || refuse "task $ID legacy Herdr metadata is malformed or inconsistent"
@@ -181,13 +185,16 @@ cmp -s "$META" "$META_SNAPSHOT" \
   || refuse "task $ID metadata changed during live verification; retry"
 live_binding_matches \
   || refuse "live Herdr endpoint changed during task $ID verification"
+cmp -s "$META" "$META_SNAPSHOT" \
+  || refuse "task $ID metadata changed during live verification; retry"
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" \
   || refuse "task $ID metadata destination changed before publication"
 mv -f -- "$META_TMP" "$META" \
   || refuse "could not publish task $ID endpoint binding"
 META_TMP=
 fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" \
-  && fm_backend_validate_task_endpoint "$META" "$ID" \
+  || refuse "published endpoint binding for task $ID failed validation"
+fm_backend_validate_task_endpoint "$META" "$ID" \
   || refuse "published endpoint binding for task $ID failed validation"
 
 printf 'Bound legacy Herdr endpoint metadata for task %s after exact live topology and worktree verification.\n' "$ID"

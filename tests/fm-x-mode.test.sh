@@ -898,11 +898,22 @@ test_bootstrap_opt_out_cleanup() {
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
   out=$(CLAUDECODE=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "FMX: X mode off" "opt-out must announce X mode off when it removed artifacts"
-  assert_contains "$out" "watcher supervision needs Stop-owned automatic recovery" "opt-out remediation must use neutral automatic-recovery guidance"
+  assert_contains "$out" "let the Stop-owned auto-arm establish watcher supervision" \
+    "opt-out remediation must use the harness-aware continuity renderer"
   assert_not_contains "$out" "is broken" "opt-out remediation claimed an unverified mechanism failure"
+  assert_not_contains "$out" "Claude Code background task" \
+    "opt-out remediation must not tell Claude to start a model-driven background arm"
   assert_not_contains "$out" "bin/fm-watch-arm.sh --restart" "opt-out remediation must not hardcode a background-arm restart"
   assert_absent "$home/state/x-watch.check.sh" "opt-out must remove the shim"
   assert_absent "$home/config/x-mode.env" "opt-out must remove the cadence config"
+  # A harness whose watcher continuity is model-driven still gets its own repair
+  # instruction on the same transition.
+  printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
+  FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
+  out=$(env -u CLAUDECODE GROK_AGENT=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "Grok tracked background task" \
+    "opt-out remediation must keep the repair instruction for model-driven harnesses"
   # Steady-state off: another run with nothing to remove is silent.
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_not_contains "$out" "FMX:" "steady-state off must be silent"
