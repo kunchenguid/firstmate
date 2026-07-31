@@ -427,6 +427,24 @@ fm_wake_append_locked_once() {
   fm_wake_append_locked "$kind" "$key" "$payload" || return 2
 }
 
+fm_wake_remove_locked() {
+  local kind=$1 key=$2 clean_key tmp
+  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
+  if [ ! -e "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ]; then
+    return 0
+  fi
+  [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
+  tmp=$(umask 077; mktemp "$STATE/.wake-queue.filter.XXXXXX" 2>/dev/null) || return 1
+  if ! awk -F '\t' -v kind="$kind" -v key="$clean_key" '
+    !(NF >= 5 && $3 == kind && $4 == key) { print }
+  ' "$FM_WAKE_QUEUE" > "$tmp" \
+    || ! chmod 0600 "$tmp" 2>/dev/null \
+    || ! mv -f -- "$tmp" "$FM_WAKE_QUEUE" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 fm_wake_append() {
   local status
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"

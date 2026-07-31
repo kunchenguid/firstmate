@@ -97,6 +97,77 @@ fi
 RECEIPT_FILE="$FMTG_STATE/outbound/$RECEIPT_ID.json"
 existing_state=
 approval_reserved=0
+
+finalize_approval_binding() {
+  local receipt=$1 sent_at message_id expires now file raw state approval_receipt approval_request approval_name final_status
+  [ -n "$APPROVAL_ID" ] || return 0
+  sent_at=$(printf '%s' "$receipt" | jq -r '.sent_at // .updated_at // 0') || return 1
+  message_id=$(printf '%s' "$receipt" | jq -r '.telegram_message_id // empty') || return 1
+  case "$sent_at:$message_id" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  expires=$((sent_at + FMTG_APPROVAL_TTL_SECS))
+  now=$(date +%s)
+  file="$FMTG_STATE/approvals/$APPROVAL_ID.json"
+  state=
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    raw=$(fm_private_read_file "$file" 600) || return 1
+    state=$(printf '%s' "$raw" | jq -r '.status // empty') || return 1
+    approval_receipt=$(printf '%s' "$raw" | jq -r '.receipt_id // empty') || return 1
+    approval_request=$(printf '%s' "$raw" | jq -r '.request_id // empty') || return 1
+    approval_name=$(printf '%s' "$raw" | jq -r '.approval_id // empty') || return 1
+    [ "$approval_receipt" = "$RECEIPT_ID" ] \
+      && [ "$approval_request" = "$REQUEST_ID" ] \
+      && [ "$approval_name" = "$APPROVAL_ID" ] \
+      || return 1
+    case "$state" in
+      pending)
+        printf '%s' "$raw" | jq -e --arg message_id "$message_id" --argjson expires "$expires" '
+          .telegram_message_id == ($message_id | tonumber) and .expires_at == $expires
+        ' >/dev/null 2>&1
+        return
+        ;;
+      expired) return 0 ;;
+      preparing) ;;
+      *) return 1 ;;
+    esac
+  fi
+  final_status=pending
+  if [ "$now" -gt "$expires" ]; then
+    [ -n "$state" ] || return 0
+    final_status=expired
+  fi
+  jq -n --arg approval_id "$APPROVAL_ID" --arg receipt_id "$RECEIPT_ID" \
+    --arg request_id "$REQUEST_ID" --arg message_id "$message_id" \
+    --arg status "$final_status" --argjson at "$sent_at" --argjson expires "$expires" '
+      {schema:"firstmate.telegram-approval.v1",approval_id:$approval_id,receipt_id:$receipt_id,request_id:$request_id,
+       status:$status,telegram_message_id:($message_id|tonumber),created_at:$at,expires_at:$expires}
+    ' | fmtg_json_publish "$FMTG_STATE/approvals" "$APPROVAL_ID.json"
+}
+
+finalize_sent_receipt() {
+  local receipt=$1 message_id finalized now
+  if ! printf '%s' "$receipt" | jq -e --arg receipt_id "$RECEIPT_ID" '
+    .schema == "firstmate.telegram-outbound.v1"
+    and .receipt_id == $receipt_id
+    and .state == "sent"
+  ' >/dev/null 2>&1; then
+    return 1
+  fi
+  message_id=$(printf '%s' "$receipt" | jq -r '.telegram_message_id // empty') || return 1
+  case "$message_id" in ''|*[!0-9]*) return 1 ;; esac
+  finalize_approval_binding "$receipt" || return 1
+  if [ "$mode" = reply ]; then
+    "$SCRIPT_DIR/fm-telegram-request.sh" complete "$REQUEST_ID" "$RECEIPT_ID" || return 1
+  fi
+  finalized=$(printf '%s' "$receipt" | jq -r '.post_send_finalized_at // 0') || return 1
+  case "$finalized" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$finalized" -gt 0 ] && return 0
+  now=$(date +%s)
+  printf '%s' "$receipt" | jq --argjson at "$now" '
+    .sent_at=(.sent_at // .updated_at) | .post_send_finalized_at=$at
+  ' \
+    | fmtg_json_publish "$FMTG_STATE/outbound" "$RECEIPT_ID.json"
+}
+
 if fm_private_file_valid "$RECEIPT_FILE" 600; then
   existing=$(fm_private_read_file "$RECEIPT_FILE" 600) || exit 1
   existing_state=$(printf '%s' "$existing" | jq -r '.state // empty')
@@ -116,6 +187,8 @@ if fm_private_file_valid "$RECEIPT_FILE" 600; then
   case "$existing_state" in
     sent)
       message_id=$(printf '%s' "$existing" | jq -r '.telegram_message_id')
+      finalize_sent_receipt "$existing" \
+        || { echo "telegram send: sent receipt finalization is incomplete" >&2; exit 1; }
       rm -f -- "$SNAPSHOT_FILE" 2>/dev/null || true
       printf 'sent %s %s\n' "$RECEIPT_ID" "$message_id"
       exit 0
@@ -311,7 +384,6 @@ while [ "$PART" -lt "$CHUNKS_TOTAL" ]; do
   next=$((PART + 1))
   current=$(fm_private_read_file "$RECEIPT_FILE" 600) || { FINAL_STATE=uncertain; break; }
   next_state=prepared
-  [ "$next" -lt "$CHUNKS_TOTAL" ] || next_state=sent
   printf '%s' "$current" | jq --argjson at "$(date +%s)" --argjson part "$PART" \
     --argjson next "$next" --arg message_id "$message_id" --arg format "${format:-rich}" --arg state "$next_state" '
       .state=$state | .updated_at=$at | .next_part=$next |
@@ -350,19 +422,12 @@ fm_lock_release "$OUTBOUND_LOCK"
 
 case "$FINAL_STATE" in
   sent)
-    if [ -n "$APPROVAL_ID" ]; then
-      expires=$((now + FMTG_APPROVAL_TTL_SECS))
-      jq -n --arg approval_id "$APPROVAL_ID" --arg receipt_id "$RECEIPT_ID" \
-        --arg request_id "$REQUEST_ID" --arg message_id "$LAST_MESSAGE_ID" \
-        --argjson at "$now" --argjson expires "$expires" '
-          {schema:"firstmate.telegram-approval.v1",approval_id:$approval_id,receipt_id:$receipt_id,request_id:$request_id,
-           status:"pending",telegram_message_id:($message_id|tonumber),created_at:$at,expires_at:$expires}
-        ' | fmtg_json_publish "$FMTG_STATE/approvals" "$APPROVAL_ID.json" \
-        || fmtg_error_once approval-binding-publication-failed >/dev/null || true
-    fi
-    if [ "$mode" = reply ]; then
-      "$SCRIPT_DIR/fm-telegram-request.sh" complete "$REQUEST_ID" "$RECEIPT_ID" \
-        || fmtg_error_once request-retirement-failed >/dev/null || true
+    sent_receipt=$(fm_private_read_file "$RECEIPT_FILE" 600) \
+      || { echo "telegram send: sent receipt is unavailable" >&2; exit 1; }
+    if ! finalize_sent_receipt "$sent_receipt"; then
+      fmtg_error_once sent-receipt-finalization-failed >/dev/null || true
+      echo "telegram send: delivery succeeded but durable finalization is incomplete" >&2
+      exit 1
     fi
     rm -f -- "$SNAPSHOT_FILE" 2>/dev/null || true
     printf 'sent %s %s\n' "$RECEIPT_ID" "$LAST_MESSAGE_ID"

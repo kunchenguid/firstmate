@@ -115,7 +115,7 @@ count_wake_key() {
 }
 
 test_disabled_and_protected_config() {
-  local home fakebin updates out rc external hard alias
+  local home fakebin updates out rc external hard alias publish_dir
   home=$(new_home disabled)
   fakebin=$(make_fake_curl "$home")
   updates="$home/updates.json"; write_empty_updates "$updates"
@@ -124,6 +124,26 @@ test_disabled_and_protected_config() {
   [ -z "$out" ] || fail "disabled bridge must be silent"
   assert_absent "$home/state/telegram" "disabled bridge created runtime state"
   assert_contains "$(cat "$ROOT/bin/fm-private-lib.sh")" "\$fh->sync" "private publication does not fsync file and directory state"
+
+  publish_dir="$home/publication"
+  mkdir -p "$publish_dir"; chmod 700 "$publish_dir"
+  printf 'old\n' > "$publish_dir/replaced"; chmod 600 "$publish_dir/replaced"
+  (
+    # shellcheck source=bin/fm-private-lib.sh
+    . "$ROOT/bin/fm-private-lib.sh"
+    fm_private_sync_dir() { return 1; }
+    printf 'new\n' | fm_private_publish_stdin "$publish_dir" replaced 600
+  ); rc=$?
+  expect_code 1 "$rc" "post-rename directory sync failure"
+  [ "$(cat "$publish_dir/replaced")" = new ] || fail "post-rename failure erased the recoverable destination"
+  (
+    # shellcheck source=bin/fm-private-lib.sh
+    . "$ROOT/bin/fm-private-lib.sh"
+    fm_private_sync_dir() { return 1; }
+    printf 'once\n' | fm_private_publish_stdin_once "$publish_dir" published-once 600
+  ); rc=$?
+  expect_code 2 "$rc" "post-link directory sync failure"
+  [ "$(cat "$publish_dir/published-once")" = once ] || fail "post-link failure erased the recoverable destination"
 
   write_valid_config "$home"
   [ "$(path_mode "$home/config/telegram")" = 700 ] || fail "config directory mode is not 0700"
@@ -228,7 +248,7 @@ test_authorization_shape_order_and_media() {
 }
 
 test_persist_before_offset_and_one_wake() {
-  local home fakebin updates out rc request hostile fields
+  local home fakebin updates out rc request hostile fields drained
   home=$(new_home crash-recovery); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
   # shellcheck disable=SC2016 # Literal command-substitution text is an encoding fixture.
   hostile=$(printf 'line one\nline two\t$(touch /tmp/not-run)')
@@ -246,13 +266,23 @@ test_persist_before_offset_and_one_wake() {
   expect_code 0 "$rc" "crash recovery poll"
   [ "$(cat "$home/state/telegram/offset")" = 201 ] || fail "recovery did not advance offset exactly once"
   [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "recovery queued the request more than once"
+  drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" 'telegram-request tg-200-77' "drain did not surface the exact request correlation"
+  [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 0 ] || fail "drain left the request offer pending"
+  FMTG_WAKE_OFFER_TTL_SECS=0 run_poll "$home" "$fakebin" "$updates" >/dev/null
+  [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "drained unacknowledged request was not re-offered"
+  FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" >/dev/null
   request=$(FM_HOME="$home" "$ROOT/bin/fm-telegram-request.sh" show tg-200-77)
   [ "$(printf '%s' "$request" | jq -r .text)" = "$hostile" ] || fail "request text encoding changed"
+  run_poll "$home" "$fakebin" "$updates" >/dev/null
+  [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 0 ] || fail "acknowledged request was re-offered during its handling lease"
+  FMTG_WAKE_ACK_TTL_SECS=0 run_poll "$home" "$fakebin" "$updates" >/dev/null
+  [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "incomplete acknowledged request was stranded after its recovery lease"
   fields=$(awk -F '\t' '$4 == "tg-200-77" {print NF ":" $5}' "$home/state/.wake-queue")
   [ "$fields" = '5:telegram-request tg-200-77' ] || fail "wake payload included body data or invalid fields"
   run_poll "$home" "$fakebin" "$updates" >/dev/null
   [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "replay duplicated the durable wake"
-  pass "inbound persistence precedes offset advancement and crash recovery emits one body-free wake"
+  pass "inbound persistence and offer acknowledgements recover one body-free wake without overlap"
 }
 
 send_file() {
@@ -262,11 +292,13 @@ send_file() {
 }
 
 test_exact_approval_and_sent_receipts() {
-  local home fakebin counts updates send_body text out rc request
+  local home fakebin counts updates send_body text out rc request saved approval_tmp receipt_tmp
   home=$(new_home approval); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
   counts="$home/counts"; mkdir -p "$counts"
   updates="$home/request.json"; write_update "$updates" 1 10 42 42 'prepare the release decision'
   FAKE_CURL_COUNT_DIR="$counts" run_poll "$home" "$fakebin" "$updates" >/dev/null
+  saved="$home/request-saved.json"
+  cp "$home/state/telegram/inbox/tg-1-10.json" "$saved"; chmod 600 "$saved"
   send_body="$home/send.json"; printf '{"ok":true,"result":{"message_id":900}}\n' > "$send_body"
   text="$home/text"; send_file "$text" 'Approve with /approve release-42 or deny with /deny release-42.'
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_SEND_FILE="$send_body" \
@@ -277,6 +309,29 @@ test_exact_approval_and_sent_receipts() {
   [ "$(jq -r .state "$home/state/telegram/outbound/reply-1.json")" = sent ] || fail "sent receipt state missing"
   assert_absent "$home/state/telegram/inbox/tg-1-10.json" "sent reply retained inbound message body"
   [ "$(jq -r .status "$home/state/telegram/approvals/release-42.json")" = pending ] || fail "approval binding not pending"
+
+  cp "$saved" "$home/state/telegram/inbox/tg-1-10.json"; chmod 600 "$home/state/telegram/inbox/tg-1-10.json"
+  approval_tmp="$home/state/telegram/approvals/release-42.recovery"
+  jq '.status="preparing" | del(.telegram_message_id,.expires_at)' \
+    "$home/state/telegram/approvals/release-42.json" > "$approval_tmp"
+  chmod 600 "$approval_tmp"
+  mv "$approval_tmp" "$home/state/telegram/approvals/release-42.json"
+  receipt_tmp="$home/state/telegram/outbound/reply-1.recovery"
+  jq 'del(.post_send_finalized_at)' "$home/state/telegram/outbound/reply-1.json" > "$receipt_tmp"
+  chmod 600 "$receipt_tmp"
+  mv "$receipt_tmp" "$home/state/telegram/outbound/reply-1.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_SEND_FILE="$send_body" \
+    FAKE_CURL_COUNT_DIR="$counts" "$ROOT/bin/fm-telegram-send.sh" reply tg-1-10 reply-1 \
+    --text-file "$text" --approval-id release-42 2>&1); rc=$?
+  expect_code 0 "$rc" "sent receipt finalization recovery"
+  assert_absent "$home/state/telegram/inbox/tg-1-10.json" "sent receipt replay did not retire the restored request"
+  [ "$(jq -r .status "$home/state/telegram/approvals/release-42.json")" = pending ] \
+    || fail "sent receipt replay did not finish the approval binding"
+  [ "$(cat "$counts/sendMessage")" = 1 ] || fail "sent receipt finalization replay dispatched again"
+
+  jq -n '{schema:"firstmate.telegram-approval-claim.v1",approval_id:"release-42",request_id:"tg-2-11",decision:"approve",claimed_at:1}' \
+    > "$home/state/telegram/approval-claims/release-42.json"
+  chmod 600 "$home/state/telegram/approval-claims/release-42.json"
 
   jq -n '{ok:true,result:[
     {update_id:2,message:{message_id:11,from:{id:42,is_bot:false},chat:{id:42,type:"private"},text:"/approve release-42",reply_to_message:{message_id:900}}},
@@ -299,7 +354,7 @@ test_exact_approval_and_sent_receipts() {
     --text-file "$text" --approval-id release-42 2>&1); rc=$?
   expect_code 0 "$rc" "sent receipt dedupe"
   [ "$(cat "$counts/sendMessage")" = 1 ] || fail "sent receipt was dispatched twice"
-  pass "approval authority requires one exact direct-reply correlation and sent receipts deduplicate"
+  pass "approval claims and sent receipts recover exact identity transitions without redispatch"
 }
 
 test_outbound_failure_states_quiet_filter_and_redaction() {
@@ -348,7 +403,8 @@ test_outbound_failure_states_quiet_filter_and_redaction() {
 }
 
 test_deterministic_rich_plain_presentation() {
-  local home input out snapshot before different long chunks part units fakebin body payloads sequence rc
+  local home input out snapshot before different long chunks part units plain_units fakebin body payloads sequence rc
+  local oversized_grapheme escaped snapshot_file
   home=$(new_home presentation); write_valid_config "$home"
   input="$home/rich-input"
   cat > "$input" <<'EOF'
@@ -399,6 +455,29 @@ EOF
   [ "$(jq -r '.presentation.messages[0].display_width' "$home/state/telegram/rendered/combining-1.json")" = 1 ] \
     || fail "combining-mark display width was not one cell"
 
+  oversized_grapheme="$home/oversized-grapheme"
+  perl -CSD -e 'print "A", "\x{0301}" x 4000' > "$oversized_grapheme"; chmod 600 "$oversized_grapheme"
+  FM_HOME="$home" "$ROOT/bin/fm-telegram-render.sh" grapheme-1 --text-file "$oversized_grapheme" >/dev/null
+  escaped="$home/escaped-expansion"
+  awk 'BEGIN { for (i=0; i<1000; i++) printf "&" }' > "$escaped"; chmod 600 "$escaped"
+  FM_HOME="$home" "$ROOT/bin/fm-telegram-render.sh" escaped-1 --text-file "$escaped" >/dev/null
+  for snapshot_file in \
+    "$home/state/telegram/rendered/grapheme-1.json" \
+    "$home/state/telegram/rendered/escaped-1.json"; do
+    chunks=$(jq -r '.presentation.messages | length' "$snapshot_file")
+    [ "$chunks" -gt 1 ] || fail "oversized visible unit did not use bounded fallback splitting"
+    part=0
+    while [ "$part" -lt "$chunks" ]; do
+      units=$(jq -j --argjson part "$part" '.presentation.messages[$part].rich_text' "$snapshot_file" \
+        | perl -MEncode=decode,encode -0777 -ne '$s=decode("UTF-8", $_); print length(encode("UTF-16BE", $s))/2')
+      plain_units=$(jq -j --argjson part "$part" '.presentation.messages[$part].plain_text' "$snapshot_file" \
+        | perl -MEncode=decode,encode -0777 -ne '$s=decode("UTF-8", $_); print length(encode("UTF-16BE", $s))/2')
+      [ "$units" -le 3500 ] || fail "rich fallback chunk exceeded its UTF-16 postcondition"
+      [ "$plain_units" -le 3500 ] || fail "plain fallback chunk exceeded its UTF-16 postcondition"
+      part=$((part + 1))
+    done
+  done
+
   long="$home/long"
   awk 'BEGIN { for (i=0; i<450; i++) printf "record-%04d 😀 https://example.test/%04d ", i, i }' > "$long"
   chmod 600 "$long"
@@ -407,9 +486,12 @@ EOF
   [ "$chunks" -gt 1 ] && [ "$chunks" -le 12 ] || fail "bounded renderer did not split into 2..12 messages"
   part=0
   while [ "$part" -lt "$chunks" ]; do
-    units=$(jq -r --argjson part "$part" '.presentation.messages[$part].rich_text' "$home/state/telegram/rendered/split-1.json" \
+    units=$(jq -j --argjson part "$part" '.presentation.messages[$part].rich_text' "$home/state/telegram/rendered/split-1.json" \
       | perl -MEncode=decode,encode -0777 -ne '$s=decode("UTF-8", $_); print length(encode("UTF-16BE", $s))/2')
-    [ "$units" -le 3501 ] || fail "rendered chunk exceeded its UTF-16 bound"
+    plain_units=$(jq -j --argjson part "$part" '.presentation.messages[$part].plain_text' "$home/state/telegram/rendered/split-1.json" \
+      | perl -MEncode=decode,encode -0777 -ne '$s=decode("UTF-8", $_); print length(encode("UTF-16BE", $s))/2')
+    [ "$units" -le 3500 ] || fail "rendered rich chunk exceeded its UTF-16 bound"
+    [ "$plain_units" -le 3500 ] || fail "rendered plain chunk exceeded its UTF-16 bound"
     part=$((part + 1))
   done
 
@@ -455,25 +537,59 @@ EOF
 }
 
 test_retention_and_runtime_harness_matrix() {
-  local home fakebin updates old backend out harness
+  local home fakebin updates old backend out harness text rc counts custom sentinel
   home=$(new_home retention); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
   updates="$home/empty.json"; write_empty_updates "$updates"
-  mkdir -p "$home/state/telegram/inbox" "$home/state/telegram/updates" "$home/state/telegram/outbound" "$home/state/telegram/rendered"
-  chmod 700 "$home/state/telegram" "$home/state/telegram/inbox" "$home/state/telegram/updates" "$home/state/telegram/outbound" "$home/state/telegram/rendered"
+  text="$home/retained-text"; send_file "$text" 'Ambiguous delivery must remain deduplicated.'
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_CURL_FAIL_METHOD=sendMessage \
+    "$ROOT/bin/fm-telegram-send.sh" notify deployment old --text-file "$text" >/dev/null 2>&1; rc=$?
+  expect_code 3 "$rc" "retained uncertain receipt fixture"
   printf '{"schema":"firstmate.telegram-request.v1"}\n' > "$home/state/telegram/inbox/tg-old.json"
   printf '{}\n' > "$home/state/telegram/updates/1.json"
-  printf '{}\n' > "$home/state/telegram/outbound/old.json"
-  printf '{}\n' > "$home/state/telegram/rendered/old.json"
-  chmod 600 "$home/state/telegram/inbox/tg-old.json" "$home/state/telegram/updates/1.json" "$home/state/telegram/outbound/old.json" "$home/state/telegram/rendered/old.json"
+  chmod 600 "$home/state/telegram/inbox/tg-old.json" "$home/state/telegram/updates/1.json"
   old=200001010000
   touch -t "$old" "$home/state/telegram/inbox/tg-old.json" "$home/state/telegram/updates/1.json" "$home/state/telegram/outbound/old.json" "$home/state/telegram/rendered/old.json"
   PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMTG_RETENTION_SECS=1 FAKE_GETUPDATES_FILE="$updates" \
     "$ROOT/bin/fm-telegram-poll.sh" >/dev/null
   assert_absent "$home/state/telegram/inbox/tg-old.json" "expired request body was retained"
   assert_absent "$home/state/telegram/updates/1.json" "expired update journal was retained"
-  assert_absent "$home/state/telegram/outbound/old.json" "expired outbound receipt was retained"
+  assert_present "$home/state/telegram/outbound/old.json" "expired uncertain receipt lost its dedupe tombstone"
+  [ "$(jq -r '.state' "$home/state/telegram/outbound/old.json")" = uncertain ] || fail "uncertain tombstone changed delivery state"
+  [ "$(jq -r '.compacted' "$home/state/telegram/outbound/old.json")" = true ] || fail "terminal receipt was not compacted"
   assert_absent "$home/state/telegram/rendered/old.json" "expired rendered snapshot was retained"
   assert_grep 'request-retention-expired' "$home/state/.wake-queue" "expired request did not wake the operator"
+  counts="$home/reuse-counts"; mkdir -p "$counts"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_CURL_COUNT_DIR="$counts" \
+    "$ROOT/bin/fm-telegram-send.sh" notify deployment old --text-file "$text" >/dev/null 2>&1; rc=$?
+  expect_code 3 "$rc" "uncertain tombstone reuse refusal"
+  assert_absent "$counts/sendMessage" "compacted uncertain receipt dispatched again"
+
+  home=$(new_home cadence-isolation); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  assert_grep 'export FM_TELEGRAM_CHECK_INTERVAL=1' "$home/config/telegram-mode.env" \
+    "Telegram config did not own a separate poll interval"
+  assert_no_grep 'export FM_CHECK_INTERVAL=' "$home/config/telegram-mode.env" \
+    "Telegram config still accelerated the shared check sweep"
+  custom="$home/state/expensive.check.sh"
+  sentinel="$home/expensive-check-ran"
+  cat > "$custom" <<EOF
+#!/usr/bin/env bash
+touch "$sentinel"
+EOF
+  chmod 700 "$custom"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" expensive >/dev/null \
+    || fail "could not register cadence-isolation check"
+  touch "$home/state/.last-check"
+  perl -e 'utime(time - 10, time - 10, $ARGV[0]) or exit 1' "$home/state/.last-check"
+  printf 'done: cadence isolation fixture\n' > "$home/state/cadence.status"
+  updates="$home/empty.json"; write_empty_updates "$updates"
+  counts="$home/poll-counts"; mkdir -p "$counts"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_GETUPDATES_FILE="$updates" \
+    FAKE_CURL_COUNT_DIR="$counts" FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+    bash -c '. "$1/config/telegram-mode.env"; exec "$2/bin/fm-watch.sh"' _ "$home" "$ROOT")
+  assert_contains "$out" 'cadence.status' "cadence-isolation watcher did not reach its terminating signal"
+  [ "$(cat "$counts/getUpdates")" = 1 ] || fail "dedicated Telegram cadence did not run its poll"
+  assert_absent "$sentinel" "Telegram cadence accelerated an unrelated registered check"
 
   for harness in claude codex opencode pi grok; do
     out=$(FM_HOME="$home" "$ROOT/bin/fm-supervision-instructions.sh" --harness "$harness" --telegram-mode 1)
@@ -494,7 +610,7 @@ test_retention_and_runtime_harness_matrix() {
     assert_contains "$out" 'telegram-requests 1' "$backend watcher did not surface Telegram request"
     [ "$(count_wake_key "$home/state/.wake-queue" tg-1-1)" = 1 ] || fail "$backend watcher duplicated the Telegram wake"
   done
-  pass "retention is bounded and all five harnesses plus five runtimes preserve remote supervision delivery"
+  pass "receipt tombstones and isolated cadence preserve all harness and runtime delivery paths"
 }
 
 test_disabled_and_protected_config

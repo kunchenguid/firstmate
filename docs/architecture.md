@@ -265,17 +265,17 @@ The watcher validates the shim and invokes the tracked poll implementation direc
 No state file is executed as arbitrary code.
 
 One bounded Bot API long poll persists a minimal update disposition before advancing its offset.
-Accepted text is stored first under an exact correlation, and the wake queue's locked one-time append makes crash recovery idempotent across the inbox and queue boundary.
+Accepted text is stored first under an exact correlation, and a locked offer/acknowledgement lease keeps one pending wake at a time while re-offering any incomplete request after a primary-session crash.
 Rejected updates retain only a disposition and update ID, while unauthorized sender and chat data is not retained or answered.
 
-Outbound sends use caller-supplied idempotency receipts with `prepared`, `dispatching`, `sent`, `definite-failure`, or `uncertain` state.
+Outbound sends use caller-supplied idempotency receipts with `prepared`, `dispatching`, `sent`, `definite-failure`, or `uncertain` state, and terminal states compact into retained identity tombstones after bulky snapshots expire.
 All direct replies and all allowed captain-relevant supervised worker updates share one deterministic Markdown-subset presentation owner.
 That owner produces escaped Telegram HTML plus a readable plain form, applies mobile table fallback and Unicode display width, and publishes one restart-stable protected split snapshot before delivery.
 The sender alone adds the hardcoded `HTML` parse mode and never accepts model-controlled Telegram entities, parse modes, or buttons.
 Split parts are sent sequentially under the same-chat lock and receipted in order.
 The receipt reaches `dispatching` before network I/O.
 An interrupted or ambiguous send wakes Firstmate for reconciliation and cannot be retried with that receipt.
-Exact approval bindings connect one approval ID to the Telegram decision message and permit one matching direct-reply claim before expiry.
+Exact approval bindings connect one approval ID to the Telegram decision message and permit one matching direct-reply claim before expiry, with exact same-request claim and sent-receipt finalization recovery across publication crashes.
 
 Connector-specific code owns Telegram update, presentation, and receipt semantics.
 The shared private-file library owns regular-file, ownership, link-count, mode, no-follow read, and atomic-publication checks.

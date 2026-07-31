@@ -124,16 +124,29 @@ sub is_table_separator {
 }
 
 sub split_visible {
-  my ($text, $limit) = @_;
+  my ($text, $limit, $escaped_limit) = @_;
   my @out;
   my $part = '';
   for my $g ($text =~ /(\X)/g) {
-    if (utf16_units($part . $g) > $limit && length $part) {
-      $part =~ s/\s+$//;
-      push @out, $part if length $part;
-      $part = '';
+    my @units = utf16_units($g) <= $limit
+      && (!defined($escaped_limit) || utf16_units(html_escape($g)) <= $escaped_limit)
+      ? ($g)
+      : split(//, $g);
+    for my $unit (@units) {
+      my $candidate = $part . $unit;
+      my $fits = utf16_units($candidate) <= $limit
+        && (!defined($escaped_limit) || utf16_units(html_escape($candidate)) <= $escaped_limit);
+      if (!$fits && length $part) {
+        $part =~ s/\s+$//;
+        push @out, $part if length $part;
+        $part = '';
+        $candidate = $unit;
+        $fits = utf16_units($candidate) <= $limit
+          && (!defined($escaped_limit) || utf16_units(html_escape($candidate)) <= $escaped_limit);
+      }
+      die "unsplittable visible unit\n" unless $fits;
+      $part .= $unit;
     }
-    $part .= $g;
   }
   $part =~ s/\s+$//;
   push @out, $part if length $part;
@@ -148,7 +161,7 @@ sub add_block {
     push @blocks, { rich => $rich, plain => $plain };
     return;
   }
-  for my $piece (split_visible($plain, 3000)) {
+  for my $piece (split_visible($plain, 3000, $MAX_UNITS)) {
     push @blocks, { rich => html_escape($piece), plain => $piece };
   }
 }
@@ -275,6 +288,10 @@ for my $block (@blocks) {
 push @messages, { rich_text => $rich, plain_text => $plain, display_width => display_width($plain) } if length $rich;
 die "no messages\n" unless @messages;
 die "too many messages\n" if @messages > 12;
+for my $message (@messages) {
+  die "message exceeds rich limit\n" if utf16_units($message->{rich_text}) > $MAX_UNITS;
+  die "message exceeds plain limit\n" if utf16_units($message->{plain_text}) > $MAX_UNITS;
+}
 
 my $json = JSON::PP->new->canonical(1)->utf8(1);
 print $json->encode({ schema => 'firstmate.telegram-presentation.v1', parse_mode => 'HTML', messages => \@messages });

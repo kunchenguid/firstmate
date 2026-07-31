@@ -128,7 +128,7 @@ write_epoch() {  # <outcome>
 write_epoch arming
 
 # Remote-channel cadence: source each generated local config before the watcher
-# starts. Telegram's one-second sweep starts a bounded long poll, while X keeps
+# starts. Telegram's dedicated one-second cadence starts a bounded long poll, while X keeps
 # its existing 30-second short-poll cadence.
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"

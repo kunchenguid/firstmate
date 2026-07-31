@@ -74,7 +74,8 @@ Use BotFather separately if you also need to revoke the bot token.
 
 ## Requests, replies, and notifications
 
-Accepted inbound text is persisted before the long-poll offset advances, assigned an exact `tg-<update_id>-<message_id>` correlation, and queued once.
+Accepted inbound text is persisted before the long-poll offset advances, assigned an exact `tg-<update_id>-<message_id>` correlation, and offered through one durable wake correlation at a time.
+An uncompleted request is re-offered after its current offer or acknowledgement lease expires, so a primary-session crash cannot strand it.
 Firstmate replies through a durable outbound receipt and Telegram's [`sendMessage`](https://core.telegram.org/bots/api#sendmessage) reply parameters so the answer stays threaded to the request.
 Every reply and every allowed captain-relevant supervised worker update from every project crosses one deterministic presentation boundary.
 The supported source semantics are headings, lists, HTTP or HTTPS links, quotes, inline and fenced code, and simple tables.
@@ -85,6 +86,7 @@ Each split is delivered sequentially to the same chat under one receipt.
 The restart-stable protected snapshot contains both safe rich text and a readable plain version whose links include their full URLs.
 A definite Telegram entity-validation rejection may fall back once to that plain version, while an ambiguous send never retries.
 The inbound message body and rendered snapshot are deleted after a matching sent receipt and otherwise expire after seven days with an operator notification.
+Terminal outbound receipts compact after seven days into body-free identity tombstones that continue to block blind reuse, including uncertain delivery.
 Telegram names, usernames, and profile fields are not retained.
 
 Optional standalone updates are quiet by default.

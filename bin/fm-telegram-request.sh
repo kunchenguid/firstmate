@@ -13,6 +13,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-telegram-lib.sh
 . "$SCRIPT_DIR/fm-telegram-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   echo "usage: fm-telegram-request.sh show <request_id> | complete <request_id> <outbound_receipt_id>" >&2
@@ -28,13 +30,17 @@ case "$command" in
     [ "$#" -eq 2 ] || { usage; exit 2; }
     raw=$(fm_private_read_file "$request_file" 600) \
       || { echo "telegram request: unavailable or unsafe request record" >&2; exit 1; }
-    printf '%s' "$raw" | jq -e '
-      .schema == "firstmate.telegram-request.v1"
-      and (.request_id | type == "string")
-      and (.text | type == "string")
-    ' >/dev/null 2>&1 \
-      || { echo "telegram request: malformed request record" >&2; exit 1; }
-    printf '%s\n' "$raw" | jq '{request_id,text,approval_intent,approval_id,approval_decision,telegram_message_id,reply_to_message_id,received_at}'
+    view=$(printf '%s' "$raw" | jq -e '
+      select(
+        .schema == "firstmate.telegram-request.v1"
+        and (.request_id | type == "string")
+        and (.text | type == "string")
+      )
+      | {request_id,text,approval_intent,approval_id,approval_decision,telegram_message_id,reply_to_message_id,received_at}
+    ') || { echo "telegram request: malformed request record" >&2; exit 1; }
+    printf '%s\n' "$view" || exit 1
+    fmtg_ack_request "$request_id" \
+      || { echo "telegram request: could not acknowledge request offer" >&2; exit 1; }
     ;;
   complete)
     receipt_id=${3:-}
@@ -52,9 +58,7 @@ case "$command" in
       echo "telegram request: matching sent receipt is required" >&2
       exit 1
     fi
-    fm_private_file_valid "$request_file" 600 \
-      || { echo "telegram request: unavailable or unsafe request record" >&2; exit 1; }
-    rm -f -- "$request_file" \
+    fmtg_retire_request "$request_id" \
       || { echo "telegram request: could not retire request body" >&2; exit 1; }
     ;;
   *) usage; exit 2 ;;

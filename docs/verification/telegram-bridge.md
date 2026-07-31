@@ -37,11 +37,11 @@ It never reads a live token, contacts Telegram, or writes a live Firstmate home.
 
 ## Covered guarantees
 
-The focused suite covers protected config modes, regular-file and no-symlink/no-hardlink checks, exact local pairing, authorized and unauthorized updates, strict update ordering and deduplication, persist-before-offset crash recovery, one-time wake encoding, exact approval correlation, outbound receipt states, definite rejection versus ambiguous delivery, diagnostic redaction, bounded retention, quiet event filtering, and malformed, oversized, edited, and media inputs.
-It also covers the one cross-project reply/update presentation boundary: semantic headings, lists, links, quotes, code, mobile table fallback, entity neutralization, no-button payloads, emoji and combining-mark width, readable plain URLs, immutable restart snapshots, bounded UTF-16 splitting, ordered same-chat part receipts, and one definite rich-validation fallback.
+The focused suite covers protected config modes, regular-file and no-symlink/no-hardlink checks, post-publication failure preservation, exact local pairing, authorized and unauthorized updates, strict update ordering and deduplication, persist-before-offset crash recovery, wake offer/acknowledgement recovery, exact approval correlation and crash replay, sent-receipt finalization recovery, outbound receipt states and tombstones, definite rejection versus ambiguous delivery, diagnostic redaction, bounded retention, quiet event filtering, and malformed, oversized, edited, and media inputs.
+It also covers the one cross-project reply/update presentation boundary: semantic headings, lists, links, quotes, code, mobile table fallback, entity neutralization, no-button payloads, emoji and combining-mark width, oversized-grapheme code-point fallback, readable plain URLs, immutable restart snapshots, final rich/plain UTF-16 postconditions, ordered same-chat part receipts, and one definite rich-validation fallback.
 
 Its threat-oriented negative controls remove the exact allowlist or exact approval correlation and prove the request or approval is rejected.
-Its crash control stops after durable inbound persistence and before offset advancement, then proves recovery publishes exactly one wake.
+Its crash controls cover persistence before offset advancement, drained-offer requeue, exact claim replay before inbox publication, and sent-receipt replay before approval and request finalization.
 The harness matrix verifies Claude, Codex, OpenCode, Pi, and Grok inherit the generated Telegram cadence through their owned supervision path.
 The runtime matrix verifies the watcher dispatch remains backend-neutral across tmux, Herdr, zellij, Orca, and cmux.
 

@@ -335,15 +335,16 @@ The bridge's complete owner-facing setup, pairing, opt-out, retention, and v1 li
 It is off unless `config/telegram/bridge.json` is complete, enabled, mode `0600`, owned by the current user, regular, single-link, and stored in a non-symlink owner-only directory.
 The file contains the bot token, exact allowed Telegram user ID, and exact allowed direct-chat ID, and must never be committed or copied into another configuration surface.
 
-The locked bootstrap step writes `state/telegram-watch.check.sh` as the byte-static identity shim and `config/telegram-mode.env` with `FM_CHECK_INTERVAL=1`.
-The one-second sweep interval starts the next bounded long poll promptly after the prior long poll returns; it is not one Bot API request per second while a poll is pending.
+The locked bootstrap step writes `state/telegram-watch.check.sh` as the byte-static identity shim and `config/telegram-mode.env` with `FM_TELEGRAM_CHECK_INTERVAL=1`.
+The dedicated one-second Telegram interval starts the next bounded long poll promptly after the prior long poll returns without accelerating PR, X, or custom checks; it is not one Bot API request per second while a poll is pending.
 Every harness-owned watcher launch sources the active generated cadence files, and away mode sources them before its daemon starts.
 Bootstrap does not restart a running watcher.
 
 Private Telegram runtime data lives under `state/telegram/` in mode-`0700` directories and mode-`0600` regular single-link files.
 It includes minimal update dispositions, the next long-poll offset, accepted request bodies, restart-stable rendered rich/plain snapshots, approval bindings and claims, outbound delivery receipts, and redacted error state.
 Message bodies are removed after a matching sent reply and expire after seven days if unresolved.
-Update journals, rendered snapshots, receipts, and approval records have the same bounded local retention.
+Update journals, rendered snapshots, and approval records have the same bounded local retention.
+Terminal outbound receipts compact into body-free identity tombstones after that window so a reused sent, uncertain, or definitely failed receipt never dispatches again.
 
 `bin/fm-private-lib.sh` is the shared owner of local protected-file validation and atomic publication.
 `bin/fm-telegram-lib.sh` owns connector config, Bot API transport, correlation, retention, and approval primitives.

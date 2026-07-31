@@ -109,6 +109,7 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+TELEGRAM_CHECK_INTERVAL=${FM_TELEGRAM_CHECK_INTERVAL:-1}
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
@@ -756,6 +757,27 @@ while :; do
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
 
+  telegram_check="$STATE/telegram-watch.check.sh"
+  if { [ -e "$telegram_check" ] || [ -L "$telegram_check" ]; } \
+    && [ "$(age_of "$STATE/.last-telegram-check")" -ge "$TELEGRAM_CHECK_INTERVAL" ]; then
+    out=
+    if fmtg_poll_shim_valid "$telegram_check" "$FM_HOME" "$FM_ROOT" \
+      && [ -f "$FM_ROOT/bin/fm-telegram-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-telegram-poll.sh" ]; then
+      FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-telegram-poll.sh" || exit 1
+      out=$FM_CHECK_RESULT
+      touch "$STATE/.last-telegram-check"
+      if [ -n "$out" ]; then
+        reason="check: $telegram_check: $out"
+        wake "$reason"
+      fi
+    else
+      reason="check: rejected unauthenticated state checks: $telegram_check"
+      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      touch "$STATE/.last-telegram-check"
+      wake "$reason"
+    fi
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -770,15 +792,7 @@ while :; do
       is_pr_poll=0
       check_wake_persisted=0
       if [ "$(basename "$c")" = telegram-watch.check.sh ]; then
-        if fmtg_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
-          && [ -f "$FM_ROOT/bin/fm-telegram-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-telegram-poll.sh" ]; then
-          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-telegram-poll.sh" || exit 1
-          out=$FM_CHECK_RESULT
-          check_wake_persisted=1
-        else
-          rejected_checks="$rejected_checks $c"
-          continue
-        fi
+        continue
       elif [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then

@@ -144,8 +144,8 @@ fm_private_publish_stdin() { # <dir> <base> <mode>
     rm -f -- "$tmp"
     return 1
   fi
-  fm_private_sync_dir "$dir" || { rm -f -- "$dest"; return 1; }
-  fm_private_file_valid "$dest" "$mode" || { rm -f -- "$dest"; return 1; }
+  fm_private_sync_dir "$dir" || return 1
+  fm_private_file_valid "$dest" "$mode"
 }
 
 fm_private_publish_stdin_once() { # <dir> <base> <mode>
@@ -164,8 +164,8 @@ fm_private_publish_stdin_once() { # <dir> <base> <mode>
   fi
   if ln -- "$tmp" "$dest" 2>/dev/null; then
     rm -f -- "$tmp"
-    fm_private_sync_dir "$dir" || { rm -f -- "$dest"; return 2; }
-    fm_private_file_valid "$dest" "$mode" || { rm -f -- "$dest"; return 2; }
+    fm_private_sync_dir "$dir" || return 2
+    fm_private_file_valid "$dest" "$mode" || return 2
     return 0
   fi
   rm -f -- "$tmp"

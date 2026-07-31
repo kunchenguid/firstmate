@@ -197,7 +197,10 @@ process_update() {
           approval_id:(if $approval_id == "" then null else $approval_id end),
           approval_decision:(if $approval_decision == "" then null else $approval_decision end),
           received_at:$received_at,
-          wake_queued:false
+          wake_queued:false,
+          wake_state:"idle",
+          wake_state_at:0,
+          wake_offer_count:0
         }
       ' "$UPDATE") || return 1
     if [ -e "$FMTG_STATE/inbox/$request_id.json" ] || [ -L "$FMTG_STATE/inbox/$request_id.json" ]; then
