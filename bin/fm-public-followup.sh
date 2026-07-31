@@ -16,10 +16,13 @@
 #
 # ZERO OVERHEAD FOR HOMES THAT DO NOT USE THE RELAY: every subcommand gates
 # first on the authoritative activation contract (a non-empty FMX_PAIRING_TOKEN
-# in $FM_HOME/.env) and then on an O(1) presence check for registrations this
-# home actually created. A relay-disabled home therefore runs one [ -f ] test:
-# no tasks-axi call, no backlog scan, no output, no file created. A relay-enabled
-# home with no live commitments stops at the second gate for the same cost.
+# in $FM_HOME/.env). Read-side and cleanup paths then use an O(1) presence check
+# for registrations this home actually created. A relay-disabled home therefore
+# runs one [ -f ] test before any backlog work: no tasks-axi call, no backlog scan,
+# and no file created. Silent read-side commands return without output; commands
+# that require an active relay report their configuration error after the same
+# gate. A relay-enabled home with no live commitments stops at the second gate
+# for the same cost.
 #
 # Usage:
 #   fm-public-followup.sh active
@@ -64,8 +67,9 @@
 #       payload hash, post, then record the posted receipt or a typed error.
 #       A validated receipt also clears any bound legacy X link before the
 #       registration is removed.
-#       An already-posted obligation is a silent success; an obligation left in
-#       delivery-posting by a crash is REFUSED rather than posted again.
+#       An already-posted obligation is an idempotent success without another
+#       post; an obligation left in delivery-posting by a crash is REFUSED
+#       rather than posted again.
 #
 #   fm-public-followup.sh record-posted <obligation-id> --attempt <n> --chunks <n>
 #       Close an obligation whose post is known to have landed on exactly
@@ -80,10 +84,13 @@
 #       its public promise is still open.
 #
 #   fm-public-followup.sh retire <obligation-id> [--force]
-#       Drop the registration once its obligation is closed. --force drops a
-#       registration whose obligation is gone from the backlog entirely.
+#       Drop the registration once its obligation is closed. --force is the
+#       explicit discard-approved escape hatch for an unresolved or missing
+#       obligation.
 #
-# Requires jq and a compatible tasks-axi for everything except `active`.
+# Requires jq and a compatible tasks-axi for registration, reconciliation,
+# delivery, cleanup guards, and retirement; `active` and `brief` only inspect
+# local state.
 # FM_PF_RETRY_BACKOFF_SECS (default 900) sets the next-attempt time recorded with
 # a retryable delivery error.
 set -u

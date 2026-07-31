@@ -37,9 +37,10 @@
 #   --deliverable k=v      Repeatable safe deliverable (for example
 #                          pr_url=https://...). tasks-axi owns which keys a given
 #                          expected-final type permits.
-#   --outcome-text ...     Bounded public-safe outcome sentence, from an argument,
-#                          a file, or stdin ("-"). Collapsed to one line and
-#                          truncated; control characters cannot survive.
+#   --outcome-text ...     Public-safe outcome sentence, from an argument, a
+#                          file, or stdin ("-"). Collapsed to one line; the
+#                          event builder bounds it by codepoint, so control
+#                          characters cannot survive.
 #
 # Output: the event id on stdout. Exit 0 on a published or already-present event
 # (both are successes: the id is derived, so re-emitting the same terminal result

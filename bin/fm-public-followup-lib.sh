@@ -46,8 +46,8 @@
 #
 # Event identity is DERIVED, never random: fm_pf_event_id hashes the canonical
 # identity tuple, so re-emitting the same terminal result produces the same
-# event id and the same file bytes. Idempotency therefore holds across retries,
-# restarts, and duplicate child reports without any coordination.
+# event id and the same destination path. Idempotency therefore holds across
+# retries, restarts, and duplicate child reports without any coordination.
 #
 # Depends on bin/fm-x-lib.sh for .env reading and the private-artifact
 # publication primitives (atomic, single-link, mode-validated, non-executable);
