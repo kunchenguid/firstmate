@@ -22,6 +22,9 @@
 #   (l) when the evidence check cannot run at all (missing/non-git worktree,
 #       or a valid worktree with no resolvable ref), a loud warning is printed
 #       to stderr and the merge still proceeds rather than failing closed
+#   (m) same as (l): a valid worktree with no recorded pr_head at all (the gh
+#       headRefOid lookup never succeeded) and no fetchable/local ref still
+#       warns and merges, per the same never-fail-closed decision
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -69,6 +72,22 @@ case "\${1:-} \${2:-}" in
     ;;
 esac
 exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# gh-axi mock whose gh companion never answers headRefOid, so fm-pr-check.sh
+# records no pr_head= at all (distinct from a recorded-but-unresolvable head).
+add_gh_mocks_no_head() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
@@ -445,6 +464,35 @@ test_unresolvable_ref_warns_and_still_merges() {
   pass "fm-pr-merge warns and still merges when no ref can be resolved in a valid worktree"
 }
 
+test_no_recorded_head_and_unresolvable_ref_warns_and_still_merges() {
+  # A valid git worktree with no commits, no fetchable remote, and no
+  # recorded pr_head at all (the gh headRefOid lookup never succeeded, so
+  # fm-pr-check.sh wrote no pr_head= line) still has no ref the evidence
+  # check could run against: same never-fail-closed treatment as (l), just
+  # reached via an empty pr_head= rather than a recorded-but-invalid one.
+  local case_dir rc
+  case_dir=$(make_case no-recorded-head)
+  mkdir -p "$case_dir/wt"
+  git -C "$case_dir/wt" init -q
+  add_gh_mocks_no_head "$case_dir"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/61 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-recorded-head: fm-pr-merge should still merge with no recorded pr_head or resolvable ref"
+  grep -qxF 'pr merge 61 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "no-recorded-head: gh-axi pr merge was not invoked"
+  assert_no_grep 'pr_head=' "$case_dir/state/task-x1.meta" \
+    "no-recorded-head: pr_head= should not have been recorded when headRefOid lookup failed"
+  assert_grep 'warning: evidence check SKIPPED' "$case_dir/stderr" \
+    "no-recorded-head: a valid git worktree with no recorded pr_head or resolvable ref should still warn that the evidence check was skipped"
+  pass "fm-pr-merge warns and still merges when no pr_head was recorded and no ref can be resolved"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -459,3 +507,4 @@ test_identical_evidence_pair_refuses_merge
 test_different_evidence_pair_still_merges
 test_evidence_check_uses_fetched_remote_pr_head_not_stale_local_worktree
 test_unresolvable_ref_warns_and_still_merges
+test_no_recorded_head_and_unresolvable_ref_warns_and_still_merges
