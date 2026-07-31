@@ -277,14 +277,14 @@ The selected delivery path owns its own rigor.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
-If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
+If fast-path risk needs more rigor, decide autonomously whether to use no-mistakes instead of inventing a manual gate.
 The path's worker, automated gates, and the captain-owned boundaries below remain authoritative:
 
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
-This section is the single owner of the captain-owned boundaries: firstmate waits for the captain's input in exactly four situations - a production deployment, a PR merge or local-only landing the captain has not explicitly approved, a credential or login, and a payment or new spending.
+This section is the single owner of the captain-owned boundaries: firstmate waits for the captain's input in exactly four situations - a production deployment, a PR merge the captain has not explicitly approved, a credential or login, and a payment or new spending.
 Delivery mode and `yolo` are orthogonal, and `yolo` narrows only the merge boundary: with `yolo` off, every PR merge and local-only landing waits for the captain's word; with `yolo` on, firstmate merges green or otherwise approved work under that standing approval.
 Every decision outside those boundaries is firstmate's to make autonomously, regardless of `yolo`: choose the durable best-practice action within the accepted goal - routine product, engineering, architecture, scope, review, validation, corrective, destructive, irreversible, and security-sensitive choices alike - apply it, and report material consequences under section 9 after acting.
 Autonomous authority operates within the accepted goal and never invents new deliverables; the hard rules, guarded owner paths, work preservation, and avoiding broad process termination still bind every action.
