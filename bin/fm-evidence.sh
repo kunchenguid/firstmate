@@ -29,13 +29,15 @@
 # NO REDACTION, WHILE THE DESTINATION IS PRIVATE. Artifacts are copied verbatim.
 # That is safe only because the destination repository is private, so the push
 # verifies visibility first and REFUSES to publish into a repository that is not
-# private. The check is bound to the URL the push itself would use, and only a
-# github.com host - including the github.com-<alias> form a multi-account setup
-# requires - can be checked at all, so no other forge can ever be authorized by
-# a same-named GitHub repository. If visibility cannot be determined - offline,
-# no gh-axi, a host that is not github.com - the push is skipped rather than
-# risked, and the evidence stays committed locally. The day that repository
-# stops being private, pushes stop and say why.
+# private. The check is bound to EVERY URL the push itself would reach, since a
+# remote configured with several push URLs publishes to all of them at once, and
+# only a github.com host - including the github.com-<alias> form a multi-account
+# setup requires - can be checked at all, so no other forge can ever be
+# authorized by a same-named GitHub repository. One destination that is not
+# verifiably private disqualifies the whole push: offline, no gh-axi, a host
+# that is not github.com, or a mirror that is public, and the push is skipped
+# rather than risked while the evidence stays committed locally. The day that
+# repository stops being private, pushes stop and say why.
 #
 # LAYOUT: <evidence-repo>/<home-tag>/<task-id>/. The home tag identifies the
 # firstmate home, so concurrent tasks in different homes - two secondmates, or
@@ -206,16 +208,16 @@ evidence_remote() {  # <repo>
   printf '%s\n' "$remote"
 }
 
-# The URL the push would actually travel over: the push URL when the clone
-# configures one, otherwise the fetch URL. Both the host check and the
-# owner/name slug read THIS url, so the visibility precondition can only ever
-# describe the repository the evidence would really be sent to.
-remote_push_url() {  # <repo>
-  local repo=$1 remote url
+# EVERY URL the push would travel over, one per line: the configured push URLs
+# when the clone has them, otherwise the fetch URL. A remote may carry several
+# remote.<name>.pushurl entries and a push then publishes to all of them, so the
+# precondition has to describe all of them and not just the first.
+remote_push_urls() {  # <repo>
+  local repo=$1 remote urls
   remote=$(evidence_remote "$repo") || return 1
-  url=$(git -C "$repo" remote get-url --push "$remote" 2>/dev/null) || return 1
-  [ -n "$url" ] || return 1
-  printf '%s\n' "$url"
+  urls=$(git -C "$repo" remote get-url --push --all "$remote" 2>/dev/null) || return 1
+  [ -n "$urls" ] || return 1
+  printf '%s\n' "$urls"
 }
 
 # The host of a remote URL, in the ssh://, scp-like, and https:// forms, with
@@ -268,23 +270,34 @@ remote_owner_name() {  # <url>
   printf '%s/%s\n' "$owner" "$name"
 }
 
-# Prints "private", "public", or returns non-zero when visibility cannot be
-# established. Only a confirmed "private" authorizes a push.
+# Prints "private" only when EVERY destination the push reaches is confirmed
+# private, prints the visibility of the first destination that is not, and
+# returns non-zero as soon as any one of them cannot be established at all. One
+# unverifiable or public destination disqualifies the whole push, since the
+# evidence would reach all of them together.
 remote_visibility() {  # <repo>
-  local repo=$1 url host slug view visibility
+  local repo=$1 urls url host slug view visibility result=private
   command -v gh-axi >/dev/null 2>&1 || return 1
-  url=$(remote_push_url "$repo") || return 1
-  host=$(remote_host "$url") || return 1
-  if ! evidence_host_is_github "$host"; then
-    printf 'fm-evidence: the destination pushes to %s, whose visibility this cannot establish\n' "$host" >&2
-    return 1
-  fi
-  slug=$(remote_owner_name "$url") || return 1
-  view=$(gh-axi repo view --repo "$slug" 2>/dev/null) || return 1
-  visibility=$(printf '%s\n' "$view" \
-    | awk -F: '/^[[:space:]]*visibility:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')
-  [ -n "$visibility" ] || return 1
-  printf '%s\n' "$visibility"
+  urls=$(remote_push_urls "$repo") || return 1
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    host=$(remote_host "$url") || return 1
+    if ! evidence_host_is_github "$host"; then
+      printf 'fm-evidence: the destination pushes to %s, whose visibility this cannot establish\n' "$host" >&2
+      return 1
+    fi
+    slug=$(remote_owner_name "$url") || return 1
+    view=$(gh-axi repo view --repo "$slug" 2>/dev/null) || return 1
+    visibility=$(printf '%s\n' "$view" \
+      | awk -F: '/^[[:space:]]*visibility:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')
+    [ -n "$visibility" ] || return 1
+    if [ "$visibility" != private ] && [ "$result" = private ]; then
+      result=$visibility
+    fi
+  done <<EOF
+$urls
+EOF
+  printf '%s\n' "$result"
 }
 
 # Run a git command against the destination, retrying only while another process
@@ -316,19 +329,17 @@ evidence_git() {  # <repo> <git-args...>
 # entry can still leave a path unstaged, and a custody claim must never exceed
 # what was really committed.
 unstaged_artifacts() {  # <repo> <dest>
-  local repo=$1 dest=$2 nl staged rel file
-  nl=$'\n'
-  staged=$(git -C "$repo" ls-files --cached -z -- "$dest" | tr '\0' '\n') || return 1
-  while IFS= read -r file; do
-    [ -n "$file" ] || continue
-    rel=${file#"$repo"/}
-    case "$nl$staged$nl" in
-      *"$nl$rel$nl"*) : ;;
-      *) printf '%s\n' "$rel" ;;
-    esac
-  done <<EOF
-$(find "$dest" -type f | LC_ALL=C sort)
-EOF
+  local repo=$1 dest=$2 relative staged copied
+  relative=${dest#"$repo"/}
+  # pipefail so an unreadable index is the caller's error rather than an empty
+  # listing that would name every artifact instead of the real cause.
+  staged=$(set -o pipefail; git -C "$repo" ls-files --cached -z -- "$dest" | tr '\0' '\n') \
+    || return 1
+  copied=$(cd "$repo" && find "$relative" -type f) || return 1
+  [ -n "$copied" ] || return 0
+  comm -23 \
+    <(printf '%s\n' "$copied" | LC_ALL=C sort) \
+    <(printf '%s\n' "$staged" | LC_ALL=C sort)
 }
 
 destination_path() {  # <repo> <task-id>
@@ -469,7 +480,7 @@ cmd_preserve() {  # <task-id>
     return 0
   fi
   if [ "$visibility" != private ]; then
-    note "REFUSED to push evidence for $id: $repo is $visibility, and unredacted evidence may only be published to a private repository"
+    note "REFUSED to push evidence for $id: a push destination of $repo is $visibility, and unredacted evidence may only be published to a private repository"
     return 0
   fi
   # Named remote and explicit ref, so this does not depend on the clone having

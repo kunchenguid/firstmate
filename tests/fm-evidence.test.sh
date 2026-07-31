@@ -51,6 +51,21 @@ SH
   chmod +x "$1/gh-axi"
 }
 
+# A gh-axi stub reporting one named slug as public and every other slug as
+# private, for the case where a remote's destinations do not agree.
+fake_gh_axi_public_slug() {  # <fakebin> <public-slug>
+  cat > "$1/gh-axi" <<SH
+#!/usr/bin/env bash
+slug=\${*: -1}
+if [ "\$slug" = '$2' ]; then
+  printf 'repo:\n  name: fleet-evidence\n  visibility: public\n'
+else
+  printf 'repo:\n  name: fleet-evidence\n  visibility: private\n'
+fi
+SH
+  chmod +x "$1/gh-axi"
+}
+
 # An ssh stub that answers any host with one local bare repository, so a push to
 # a real github.com URL can be exercised without a network. Echoes the command
 # to hand to git through GIT_SSH_COMMAND.
@@ -296,6 +311,86 @@ test_non_github_remote_skips_the_push() {
   pass "fm-evidence: a destination on another host skips the push and keeps custody"
 }
 
+# A remote can carry several push URLs, and a push then publishes to all of them
+# at once, so a second destination on an unverifiable host disqualifies the whole
+# push rather than riding along behind the first one's confirmation.
+test_extra_non_github_pushurl_skips_the_push() {
+  local home fakebin bare ssh out rc
+  home=$(make_home mirrored)
+  make_task "$home" mirrored-task
+  bare="$TMP_ROOT/mirrored/owner/name.git"
+  mkdir -p "$(dirname "$bare")"
+  git init -q --bare "$bare"
+  git -C "$home/evidence" remote add origin "ssh://git@github.com/owner/name.git"
+  git -C "$home/evidence" remote set-url --add --push origin "ssh://git@github.com/owner/name.git"
+  git -C "$home/evidence" remote set-url --add --push origin "ssh://git@gitlab.company.example/acme/evidence.git"
+  fakebin=$(fm_fakebin "$home")
+  fake_gh_axi "$fakebin" private
+  ssh=$(fake_ssh_to_bare "$fakebin" "$bare")
+
+  out=$(PATH="$fakebin:$PATH" GIT_SSH_COMMAND="$ssh" run_evidence "$home" preserve mirrored-task)
+  rc=$?
+
+  expect_code 0 "$rc" "a skipped push must not fail custody"
+  assert_contains "$out" "gitlab.company.example" "the second push destination was never checked"
+  assert_not_contains "$out" "pushed evidence" "evidence was pushed while one destination was unverifiable"
+  [ -z "$(git --git-dir="$bare" ls-tree -r --name-only HEAD 2>/dev/null)" ] \
+    || fail "evidence reached the verified destination of a push that also targets an unverified one"
+  assert_contains "$(git -C "$home/evidence" ls-files)" "mirrored-task/report.md" \
+    "skipping the push also lost the local commit"
+  pass "fm-evidence: an unverifiable second push destination skips the whole push"
+}
+
+# The same rule by visibility rather than by host: every destination has to be
+# private, so a public mirror alongside a private one refuses the push.
+test_public_pushurl_among_private_refuses_the_push() {
+  local home fakebin bare ssh out rc
+  home=$(make_home mixed-visibility)
+  make_task "$home" mixed-task
+  bare="$TMP_ROOT/mixed-visibility/owner/name.git"
+  mkdir -p "$(dirname "$bare")"
+  git init -q --bare "$bare"
+  git -C "$home/evidence" remote add origin "ssh://git@github.com/owner/name.git"
+  git -C "$home/evidence" remote set-url --add --push origin "ssh://git@github.com/owner/name.git"
+  git -C "$home/evidence" remote set-url --add --push origin "ssh://git@github.com/owner/mirror.git"
+  fakebin=$(fm_fakebin "$home")
+  fake_gh_axi_public_slug "$fakebin" owner/mirror
+  ssh=$(fake_ssh_to_bare "$fakebin" "$bare")
+
+  out=$(PATH="$fakebin:$PATH" GIT_SSH_COMMAND="$ssh" run_evidence "$home" preserve mixed-task)
+  rc=$?
+
+  expect_code 0 "$rc" "a refused push must not fail custody"
+  assert_contains "$out" "REFUSED to push" "a public mirror among the destinations was not refused"
+  assert_not_contains "$out" "pushed evidence" "evidence was pushed while one destination was public"
+  [ -z "$(git --git-dir="$bare" ls-tree -r --name-only HEAD 2>/dev/null)" ] \
+    || fail "unredacted evidence reached a push that also targets a public repository"
+  assert_contains "$(git -C "$home/evidence" ls-files)" "mixed-task/report.md" \
+    "refusing the push also lost the local commit"
+  pass "fm-evidence: a public destination among private ones refuses the whole push"
+}
+
+# The staged-artifact check compares two path listings, so an ordinary awkward
+# name - a space, a nested directory - must not read as an artifact that never
+# reached the index and cost custody.
+test_awkward_paths_are_recognized_as_staged() {
+  local home out rc tracked
+  home=$(make_home awkward)
+  make_task "$home" spaced-task
+  mkdir -p "$home/data/spaced-task/run 1"
+  printf 'measured\n' > "$home/data/spaced-task/run 1/probe report.md"
+  printf 'measured\n' > "$home/data/spaced-task/z-last.md"
+
+  out=$(run_evidence "$home" preserve spaced-task)
+  rc=$?
+
+  expect_code 0 "$rc" "artifacts with spaces in their paths reported custody failure"
+  assert_not_contains "$out" "not fully staged" "a staged artifact was reported as missing from the index"
+  tracked=$(git -C "$home/evidence" ls-files)
+  assert_contains "$tracked" "spaced-task/run 1/probe report.md" "the awkward path was not committed"
+  pass "fm-evidence: artifacts with spaces in their paths are recognized as staged"
+}
+
 # Custody is a claim about what was committed, so the destination's ignore rules
 # must not be able to drop an artifact out from under it.
 test_ignored_artifact_is_still_committed() {
@@ -441,7 +536,10 @@ test_failed_commit_reports_custody_failure
 test_public_destination_refuses_the_push
 test_private_destination_pushes
 test_non_github_remote_skips_the_push
+test_extra_non_github_pushurl_skips_the_push
+test_public_pushurl_among_private_refuses_the_push
 test_unverifiable_visibility_skips_the_push
+test_awkward_paths_are_recognized_as_staged
 test_ignored_artifact_is_still_committed
 test_read_only_artifact_survives_a_repeat_preserve
 test_failed_copy_reports_custody_failure
