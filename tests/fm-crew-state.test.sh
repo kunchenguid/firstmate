@@ -457,6 +457,21 @@ test_ci_ready_done_log_beats_monitoring_run() {
   pass "ci-ready status log beats monitoring run"
 }
 
+test_ci_ready_done_log_tolerates_followups_clause() {
+  reset_fakes
+  local d; d=$(new_case ci-ready-followups)
+  make_repo_on_branch "$d/wt" fm/feat-cifollowups
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cifollowups.meta" "window=fm:fm-feat-cifollowups" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green; follow-ups: tidy adjacent helper\n' \
+    > "$d/state/feat-cifollowups.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cifollowups)"
+  local out; out=$(run_crew_state "$d" feat-cifollowups)
+  assert_contains "$out" "state: done" "optional follow-ups clause must not break ci-ready done detection"
+  assert_contains "$out" "follow-ups: tidy adjacent helper" "ci-ready detail preserves the deferred follow-ups"
+  pass "ci-ready done detection tolerates the optional follow-ups clause"
+}
+
 # Regression for the PR #252 incident: the crew's own status log never got a
 # "done: ... checks green" line (log_reports_ci_ready above does not apply),
 # but the ci step's log tail shows CI is actually green and only waiting on
@@ -1316,6 +1331,7 @@ test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_done_log_tolerates_followups_clause
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done

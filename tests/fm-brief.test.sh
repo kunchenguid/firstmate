@@ -217,8 +217,10 @@ test_ship_modes_generate_clean_briefs() {
       "$id: ship brief lost its reviewable-size target"
     assert_grep "Only a blocking correctness or security defect" "$brief" \
       "$id: ship brief lost its follow-up boundary"
-    assert_grep "deferred follow-up in one short clause of your terminal \`done:\` line" "$brief" \
+    assert_grep "deferred follow-up in the optional \`; follow-ups: <items>\` clause of your terminal \`done:\` line" "$brief" \
       "$id: ship brief lost the return channel for deferred follow-ups"
+    assert_grep "append one concise \`; follow-ups: <items>\` clause to it (rule 8)." "$brief" \
+      "$id: Definition of done lost the optional follow-ups slot on the terminal done line"
     assert_grep "Append \`needs-decision: {the scope question}\` and stop (rule 6)" "$brief" \
       "$id: ship brief lost the status verb for scope escalation"
     assert_grep "above 1,200 reviewable changed lines" "$brief" \

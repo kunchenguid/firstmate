@@ -302,6 +302,8 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+FOLLOWUP_SLOT='Send that line as prescribed; only when real deferred follow-ups exist, append one concise `; follow-ups: <items>` clause to it (rule 8).'
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -311,6 +313,7 @@ case "$MODE" in
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+$FOLLOWUP_SLOT
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -323,6 +326,7 @@ This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+$FOLLOWUP_SLOT
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -347,6 +351,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+$FOLLOWUP_SLOT
 EOF
     ;;
 esac
@@ -402,8 +407,9 @@ $RULE1
    generated, vendored, lockfile, and generated-snapshot churn, while hand-authored tests and fixtures count.
    Simplify an estimate above 600 reviewable changed lines.
    Only a blocking correctness or security defect, plus the corrections your accepted intent already
-   requires, is fixed inside this ship; anything else you discover becomes a follow-up, so name each
-   real deferred follow-up in one short clause of your terminal \`done:\` line and let firstmate queue it.
+   requires, is fixed inside this ship; anything else you discover becomes a follow-up, so name each real
+   deferred follow-up in the optional \`; follow-ups: <items>\` clause of your terminal \`done:\` line and
+   let firstmate queue it.
    Append \`needs-decision: {the scope question}\` and stop (rule 6) rather than expanding this ship when a
    pre-coding estimate stays above 1,200 reviewable changed lines, when out-of-contract work you discovered
    still looks necessary now, or when three iterative no-mistakes review rounds have not closed this ship
