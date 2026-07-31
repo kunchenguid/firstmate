@@ -27,9 +27,15 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 # as long as the session, unlike the transient subshell pid of any one tool
 # call.
 fm_harness_ancestry_pid() {
-  local pid=$$ comm args best='' bc extending=0 hit=0 is_claude=0
+  local pid=$$ comm args best='' bc extending=0 hit=0 is_claude=0 inspected=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || {
+      # Exit 2 distinguishes a sandbox or host that blocks process inspection
+      # entirely from a readable ancestry that contains no verified harness.
+      [ "$inspected" -eq 1 ] && break
+      return 2
+    }
+    inspected=1
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     bc=$(basename -- "$comm")
     hit=0; is_claude=0

@@ -44,6 +44,11 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Every ship and scout brief includes a short conditional evidence-integrity
+# section because the {TASK} body is filled only after scaffolding, so this
+# script cannot reliably select a visual or content-specific flag.
+# It requires built-static-output screenshots staged and verified under the
+# task temp directory, plus sources for factual user-facing content claims.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -247,6 +252,15 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+IFS= read -r -d '' EVIDENCE_SECTION <<EOF || true
+# Evidence integrity
+When visual verification is part of the task, capture the built static output, never a development server; Astro's development server injects a toolbar overlay that contaminates screenshots.
+\`chrome-devtools-axi screenshot\` can exit zero and print success while writing no file when the destination is anywhere under \`\$HOME\`.
+Write every screenshot first under the task temp directory \`/tmp/fm-$ID/\`, require \`test -s <capture>\` before using it, copy it to the deliverable location, and require \`test -s <deliverable>\` again.
+For every factual claim added to user-facing marketing or product content - including customer counts, ratings, awards, certifications, and performance numbers - cite its source in the task or PR evidence and never invent or extrapolate one.
+EOF
+EVIDENCE_SECTION=${EVIDENCE_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -256,6 +270,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
+$EVIDENCE_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -264,7 +280,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; the only files you may write outside it are the report, the status file below, and screenshots staged under \`/tmp/fm-$ID/\` as required above.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -364,6 +380,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
+$EVIDENCE_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
@@ -375,7 +393,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; modify nothing outside it except screenshots staged under \`/tmp/fm-$ID/\` as required above.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

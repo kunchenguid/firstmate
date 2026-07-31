@@ -312,7 +312,7 @@ EOF
   while IFS=$'\t' read -r key _verb _summary; do
     [ -n "$key" ] || continue
     list_has_key "$keys" "$key" \
-      || fail "open structured decision $origin/$key has no captain-held inventory entry"
+      || fail "open structured decision $origin/$key has no captain-held inventory entry; register a captain hold for key '$key', or if the event has cleared append a matching 'resolved: <how it cleared>' status line (include [key=$key] when the opening event was keyed), then retry"
   done <<EOF
 $open
 EOF

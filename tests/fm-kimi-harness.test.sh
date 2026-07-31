@@ -61,6 +61,15 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    case "${4:-}" in
+      fm_spawn_toolchain_bin=*)
+        pane_command=$4
+        PATH="${FM_FAKE_INITIAL_PANE_PATH:-/usr/bin:/bin}" /bin/zsh -c \
+          "$pane_command; $pane_command; printf '%s\\n' \"\$PATH\"" \
+          > "$FM_FAKE_TOOLCHAIN_PATH_LOG"
+        exit 0
+        ;;
+    esac
     prev=
     literal=
     for arg in "$@"; do
@@ -164,6 +173,8 @@ run_spawn() {
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_TOOLCHAIN_PATH_LOG="$case_dir/toolchain-path.log" \
+    FM_FAKE_INITIAL_PANE_PATH="${FM_FAKE_INITIAL_PANE_PATH:-/usr/bin:/bin}" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
@@ -177,7 +188,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch pointer brief_real meta task_tmp toolchain_path toolchain_bin count
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -209,6 +220,15 @@ test_kimi_launch_then_send_is_verified() {
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
+  toolchain_path=$(cat "$CASE_DIR/toolchain-path.log")
+  toolchain_bin="$HOME_DIR/.npm-global/bin"
+  count=$(printf '%s\n' "$toolchain_path" | tr ':' '\n' | grep -Fxc "$toolchain_bin" || true)
+  [ "$count" -eq 1 ] \
+    || fail "two fleet-toolchain PATH guarantees left $count copies of $toolchain_bin in '$toolchain_path'"
+  case "$toolchain_path" in
+    "$toolchain_bin":/usr/bin:/bin) ;;
+    *) fail "fleet toolchain PATH guarantee clobbered or reordered the pane PATH: $toolchain_path" ;;
+  esac
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
     "kimi spawn did not install its guarded global hook region"
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"

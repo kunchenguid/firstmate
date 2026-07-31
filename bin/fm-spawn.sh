@@ -111,6 +111,12 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+# Before every harness launch, the pane shell receives an idempotent PATH
+# guarantee for ${NPM_CONFIG_PREFIX:-$HOME/.npm-global}/bin so stale inherited
+# home-manager guards cannot hide the fleet npm tools from the worker.
+# After a verified template launch, spawn observes any empirically supported
+# autonomy footer without changing permissions or blocking the worker; currently
+# only Claude's bypass/auto/manual footer distinction is verified.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -493,8 +499,10 @@ launch_template() {
   esac
 }
 
+LAUNCH_IS_TEMPLATE=1
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    LAUNCH_IS_TEMPLATE=0
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -528,6 +536,11 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+REQUESTED_AUTONOMY_MODE=
+if [ "$LAUNCH_IS_TEMPLATE" -eq 1 ] && [ "$HARNESS" = claude ]; then
+  REQUESTED_AUTONOMY_MODE=bypassPermissions
+fi
 
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
@@ -582,6 +595,38 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+fleet_toolchain_bin() {
+  local prefix=${NPM_CONFIG_PREFIX:-}
+  if [ -z "$prefix" ]; then
+    [ -n "${HOME:-}" ] || {
+      echo "error: HOME is unset, so the fleet toolchain directory cannot be resolved" >&2
+      return 1
+    }
+    prefix="$HOME/.npm-global"
+  else
+    case "$prefix" in
+      /*) ;;
+      *)
+        [ -n "${HOME:-}" ] || {
+          echo "error: HOME is unset, so the relative fleet toolchain prefix cannot be resolved" >&2
+          return 1
+        }
+        case "$prefix" in
+          \~) prefix=$HOME ;;
+          \~/*) prefix="$HOME/${prefix#\~/}" ;;
+          *) prefix="$HOME/$prefix" ;;
+        esac
+        ;;
+    esac
+  fi
+  [ -n "$prefix" ] || {
+    echo "error: the fleet toolchain prefix resolved empty" >&2
+    return 1
+  }
+  [ "$prefix" = / ] || prefix=${prefix%/}
+  printf '%s/bin\n' "$prefix"
 }
 
 resolve_kimi_binary() {
@@ -1243,6 +1288,47 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
+spawn_capture() {  # <lines>
+  fm_backend_capture "$BACKEND" "$T" "$1" "$W" 2>/dev/null || true
+}
+
+claude_observed_autonomy_mode() {  # <plain-pane-capture>
+  local mode_line
+  mode_line=$(printf '%s\n' "$1" \
+    | grep -iE 'bypass[[:space:]]+permissions[[:space:]]+on|auto[[:space:]]+mode[[:space:]]+on|manual[[:space:]]+mode[[:space:]]+on' \
+    | tail -1 || true)
+  case "$mode_line" in
+    *[Bb]ypass*[Pp]ermissions*[Oo]n*) printf '%s\n' bypassPermissions ;;
+    *[Aa]uto*[Mm]ode*[Oo]n*) printf '%s\n' auto ;;
+    *[Mm]anual*[Mm]ode*[Oo]n*) printf '%s\n' manual ;;
+  esac
+}
+
+verify_spawn_autonomy_mode() {
+  local pane observed i=0 max=${FM_SPAWN_AUTONOMY_POLLS:-10}
+  local interval=${FM_SPAWN_AUTONOMY_POLL_INTERVAL:-0.4}
+  [ "$REQUESTED_AUTONOMY_MODE" = bypassPermissions ] || return 0
+
+  pane=$(spawn_capture 120)
+  while [ "$i" -lt "$max" ]; do
+    observed=$(claude_observed_autonomy_mode "$pane")
+    case "$observed" in
+      bypassPermissions) return 0 ;;
+      auto|manual)
+        printf 'AUTONOMY WARNING: task %s requested mode=%s but observed mode=%s in the Claude worker; likely cause: permissions.disableBypassPermissionsMode is "disable" in effective Claude settings or organization policy. The worker remains launched; fix the authoritative setting or policy and relaunch it.\n' \
+          "$ID" "$REQUESTED_AUTONOMY_MODE" "$observed" >&2
+        return 0
+        ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+    pane=$(spawn_capture 120)
+  done
+  printf 'AUTONOMY WARNING: task %s requested mode=%s but observed mode=unverified in the Claude worker; likely cause: the worker UI did not render a verified status footer in time or the backend capture was unavailable. The worker remains launched; inspect its status line, correct the capture or startup problem, and relaunch it if bypass permissions is not on.\n' \
+    "$ID" "$REQUESTED_AUTONOMY_MODE" >&2
+  return 0
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -1679,9 +1765,21 @@ if [ "$KIND" = secondmate ]; then
   sq_primary_home=$(shell_quote "$FM_HOME")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home $LAUNCH"
 fi
+# A login shell that predates a home-manager PATH change can export
+# __HM_SESS_VARS_SOURCED without the newer variables, making every descendant
+# skip the current session-vars file. Guarantee the npm fleet-tool directory in
+# the pane instead of trusting that poisoned parent PATH. NPM_CONFIG_PREFIX owns
+# a configured prefix; the fleet's user-owned HOME prefix is the fallback. The
+# shell case makes repeated spawns converge without duplicating the entry, and
+# the directory need not exist for PATH construction.
+FLEET_TOOLCHAIN_BIN=$(fleet_toolchain_bin) || exit 1
+sq_fleet_toolchain_bin=$(shell_quote "$FLEET_TOOLCHAIN_BIN")
+PATH_GUARANTEE="fm_spawn_toolchain_bin=$sq_fleet_toolchain_bin; case \":\${PATH-}:\" in *\":\${fm_spawn_toolchain_bin}:\"*) ;; *) export PATH=\"\${fm_spawn_toolchain_bin}\${PATH:+:\${PATH}}\" ;; esac; unset fm_spawn_toolchain_bin"
+spawn_send_text_line "$T" "$PATH_GUARANTEE"
+
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
+# the env is set when the agent starts; the brief sleep lets both exports land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
@@ -1691,6 +1789,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+verify_spawn_autonomy_mode
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

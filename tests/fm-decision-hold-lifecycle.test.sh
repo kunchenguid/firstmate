@@ -410,6 +410,30 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   pass "terminal single-owner stale status decisions do not block empty inventory"
 }
 
+test_open_blocked_event_message_names_both_remedies() {
+  local home id
+  home=$(make_home open-blocked-remedy)
+  id=sample-cleared-blocker
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review a cleared sample blocker" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create cleared-blocker origin"
+  write_origin_meta "$home" "$id"
+  printf 'blocked: sample dependency was unavailable\n' > "$home/state/$id.status"
+  printf '# Cleared blocker\n\nThe dependency is now available.\n' > "$home/data/$id/report.md"
+
+  if run_decisions "$home" complete "$id" --none \
+    > "$home/complete.out" 2> "$home/complete.err"; then
+    fail "an open blocked event passed completion without a hold or resolved status"
+  fi
+  assert_grep "open structured decision $id/default has no captain-held inventory entry" \
+    "$home/complete.err" "decision-hold refusal lost the open event identity"
+  assert_grep "register a captain hold for key 'default'" "$home/complete.err" \
+    "decision-hold refusal omitted the legitimate hold-registration remedy"
+  assert_grep "append a matching 'resolved: <how it cleared>' status line" "$home/complete.err" \
+    "decision-hold refusal omitted the cleared-event remedy"
+  pass "fm-decision-hold: an open blocked event refusal explains both legitimate remedies"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -558,5 +582,6 @@ test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
+test_open_blocked_event_message_names_both_remedies
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges

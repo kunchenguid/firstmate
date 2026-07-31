@@ -178,6 +178,7 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+| Autonomy | Firstmate requests `bypassPermissions`; `fm-spawn` accepts Claude's verified `bypass permissions on` footer and warns without stopping the worker when the footer instead reports verified `auto mode on` or `manual mode on`, naming `permissions.disableBypassPermissionsMode` or organization policy as the likely cause. |
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.

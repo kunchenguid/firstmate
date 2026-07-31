@@ -33,7 +33,19 @@ if [ "${1:-}" = "status" ]; then
   exit 0
 fi
 
-me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me=$(fm_harness_ancestry_pid)
+ancestry_status=$?
+case "$ancestry_status" in
+  0) ;;
+  2)
+    echo "error: process inspection is unavailable (ps failed for the current process); allow ps in the harness sandbox - for Claude Code, disable its sandbox for this firstmate session - then rerun session start; operate read-only until resolved" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: process inspection ran but no supported harness process matched the ancestry; launch firstmate from a verified harness, then rerun session start; operate read-only until resolved" >&2
+    exit 1
+    ;;
+esac
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1

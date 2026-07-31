@@ -60,6 +60,53 @@ The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and 
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
 The detailed reconciliation and task chronology stay in the private audit report and PR evidence.
 
+## Spawn autonomy mode
+
+Claude's launch-time autonomy postcondition was verified on 2026-07-31 with Claude Code 2.1.220.
+
+```sh
+claude --version
+claude --dangerously-skip-permissions
+claude --dangerously-skip-permissions \
+  --settings '{"permissions":{"disableBypassPermissionsMode":"disable"}}'
+claude --dangerously-skip-permissions \
+  --settings '{"permissions":{"disableBypassPermissionsMode":"disable","defaultMode":"auto"}}'
+```
+
+The three interactive footer outcomes and the downgrade banner were:
+
+```text
+2.1.220 (Claude Code)
+⏵⏵ bypass permissions on (shift+tab to cycle)
+Bypass permissions mode was disabled by settings
+⏸ manual mode on · ← for agents
+Bypass permissions mode was disabled by settings
+⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+```
+
+`bin/fm-spawn.sh` therefore verifies only these empirically observed Claude renderings, accepts the bypass footer, and prints a non-blocking `AUTONOMY WARNING` with requested mode, observed mode, likely setting or policy cause, and relaunch remedy for the two downgraded footers.
+The same plain capture dispatch covers tmux, Herdr, Zellij, Orca, and cmux, while a Claude capture with no verified mode signal warns with `observed mode=unverified` instead of guessing a mode or silently accepting the missing postcondition.
+
+Codex was exercised on the same date with its real interactive launch flag:
+
+```sh
+codex --version
+codex --dangerously-bypass-approvals-and-sandbox
+```
+
+```text
+codex-cli 0.146.0
+```
+
+Its initial TUI exposed no stable approval or sandbox mode signal, so no Codex check was added.
+OpenCode, Pi, pi-signed, Grok, and Kimi were not installed in this environment and were deliberately left unchanged rather than inferred.
+
+Deterministic coverage drives the real spawn executable through a fake pane capture:
+
+```sh
+tests/fm-spawn-autonomy.test.sh
+```
+
 ## Semantic busy state
 
 The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.

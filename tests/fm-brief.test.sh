@@ -281,6 +281,40 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_ship_and_scout_inherit_evidence_integrity_rules() {
+  local home kind id brief
+  home="$TMP_ROOT/evidence-integrity-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-evidence-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Evidence integrity" "$brief" \
+      "$kind brief did not inherit the conditional evidence rules"
+    assert_grep "capture the built static output, never a development server" "$brief" \
+      "$kind brief did not reject development-server overlays"
+    assert_grep "can exit zero and print success while writing no file" "$brief" \
+      "$kind brief still trusts screenshot command success"
+    assert_grep "under the task temp directory \`/tmp/fm-$id/\`" "$brief" \
+      "$kind brief did not stage browser captures in its task temp directory"
+    assert_grep "require \`test -s <capture>\`" "$brief" \
+      "$kind brief did not assert the staged screenshot postcondition"
+    assert_grep "require \`test -s <deliverable>\` again" "$brief" \
+      "$kind brief did not assert the copied screenshot postcondition"
+    assert_grep "customer counts, ratings, awards, certifications, and performance numbers" "$brief" \
+      "$kind brief did not enumerate factual user-facing claim classes"
+    assert_grep "cite its source in the task or PR evidence and never invent or extrapolate one" "$brief" \
+      "$kind brief did not require a source for factual user-facing claims"
+    assert_grep "screenshots staged under \`/tmp/fm-$id/\` as required above" "$brief" \
+      "$kind brief's write boundary conflicts with required screenshot staging"
+  done
+  pass "fm-brief.sh: every ship and scout inherits screenshot postconditions and sourced-claim rules"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -625,6 +659,7 @@ test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_and_scout_inherit_evidence_integrity_rules
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
