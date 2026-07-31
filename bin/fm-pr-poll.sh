@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
-# It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
-# interpolated into this source: these bytes are identical for every task.
+# It emits exactly one merged line for a merged PR or MR, exactly one
+# "dirty <head>" line for an open GitHub pull request the forge reports as
+# conflicting, and stays silent otherwise, including on every error, so a
+# failed lookup can never be read as either result. The provider-tagged
+# identity is data in the sidecar and is never interpolated into this source:
+# these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
 set -u
@@ -62,8 +64,47 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    # One request carries all three fields, so conflict detection adds no call
+    # to the merge poll. The stable GraphQL "mergeable" field is read rather
+    # than mergeStateStatus: the two agree on a conflict, but mergeStateStatus
+    # rides a preview header and is likelier to be absent on GitHub Enterprise
+    # Server, and its non-conflict values also report failing or pending checks,
+    # which are a different signal this poll must stay silent about.
+    # A base push makes GitHub recompute mergeability on its own, so by the time
+    # this poll runs the answer is normally settled; the transient UNKNOWN it can
+    # return meanwhile is silence here and resolves on the next poll rather than
+    # costing this static program a retry and a timing dependency.
+    raw=$(gh pr view "$url" --json state,mergeable,headRefOid \
+      -q '[.state,.mergeable,.headRefOid]|@tsv' 2>/dev/null) || exit 0
+    tab=$(printf '\t')
+    # Exactly three tab-separated fields, revalidated below against exact
+    # allowlists rather than trusted, so unexpected output stays silent.
+    case "$raw" in
+      *"$tab"*"$tab"*) ;;
+      *) exit 0 ;;
+    esac
+    state=${raw%%"$tab"*}
+    rest=${raw#*"$tab"}
+    mergeable=${rest%%"$tab"*}
+    head=${rest#*"$tab"}
+    case "$head" in
+      *"$tab"*) exit 0 ;;
+    esac
+    # Merged is decided first and alone, so a merged or closed pull request
+    # keeps the exact result it had before conflict reporting existed.
+    if [ "$state" = MERGED ]; then
+      printf '%s\n' merged
+      exit 0
+    fi
+    [ "$state" = OPEN ] || exit 0
+    [ "$mergeable" = CONFLICTING ] || exit 0
+    # The head commit identifies the conflict episode for the watcher's dedupe.
+    # An unreadable head is reported as such instead of suppressing the wake.
+    case "$head" in
+      ''|*[!0-9a-f]*) head=unknown ;;
+      *) [ "${#head}" -ge 7 ] && [ "${#head}" -le 64 ] || head=unknown ;;
+    esac
+    printf 'dirty %s\n' "$head"
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0

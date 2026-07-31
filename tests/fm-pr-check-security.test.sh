@@ -61,16 +61,27 @@ make_case() {
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
 SH
   chmod +x "$fake_root/bin/fm-guard.sh"
+  # Plain gh, reproducing the real CLI's contract for the two field selections
+  # firstmate makes: the poll's single state/mergeability/head request answers
+  # as one tab-separated row, arming reads the head alone, and any failure exits
+  # non-zero with no stdout. FM_TEST_GH_RAW overrides the row verbatim so
+  # malformed forge output can be exercised.
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
-  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
-  *" state "*)
+  *" state,mergeable,headRefOid "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
-    printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
+    if [ -n "${FM_TEST_GH_RAW+set}" ]; then
+      printf '%s\n' "$FM_TEST_GH_RAW"
+    else
+      printf '%s\t%s\t%s\n' "${FM_TEST_GH_STATE-OPEN}" \
+        "${FM_TEST_GH_MERGEABLE-MERGEABLE}" \
+        "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    fi
     ;;
+  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
 esac
 SH
   cat > "$fakebin/gh-axi" <<'SH'
@@ -760,7 +771,73 @@ test_static_poll_contract() {
   set -e
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
-  pass "static poll is silent except for one merged line and remains watcher-bounded"
+  pass "static poll is silent except for one merged line on a mergeable pull request and remains watcher-bounded"
+}
+
+# The conflict result rides the same validated poll and the same single forge
+# request as merge detection, so it is asserted against the poll's real output
+# rather than its source.
+test_static_poll_conflict_contract() {
+  local dir out head calls
+  dir=$(make_case poll-conflict)
+  make_poll_fixture "$dir"
+  head=aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee
+
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGEABLE=CONFLICTING FM_TEST_GH_HEAD="$head" run_poll "$dir")
+  [ "$out" = "dirty $head" ] || fail "conflicting open pull request did not emit exactly one dirty line with its head"
+
+  # One request, not two: conflict reporting must add no forge call.
+  : > "$dir/gh.log"
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGEABLE=CONFLICTING run_poll "$dir" > /dev/null
+  calls=$(grep -c '^pr view ' "$dir/gh.log")
+  [ "$calls" -eq 1 ] || fail "conflict detection changed the poll from one forge call to $calls"
+
+  # Silence for every state that is not an open conflicting pull request,
+  # including the transient unknown mergeability GitHub reports while it
+  # recomputes after a base push.
+  for mergeable in MERGEABLE UNKNOWN '' not-a-mergeable-value; do
+    out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGEABLE="$mergeable" run_poll "$dir")
+    [ -z "$out" ] || fail "static poll emitted for open pull request with mergeability '$mergeable'"
+  done
+  for state in CLOSED '' not-a-state; do
+    out=$(FM_TEST_GH_STATE="$state" FM_TEST_GH_MERGEABLE=CONFLICTING run_poll "$dir")
+    [ -z "$out" ] || fail "static poll emitted a conflict for non-open state '$state'"
+  done
+
+  # A merged pull request keeps exactly the result it had before conflicts were
+  # reported at all, even when the forge also calls it conflicting.
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_MERGEABLE=CONFLICTING run_poll "$dir")
+  [ "$out" = merged ] || fail "merged pull request stopped emitting exactly one merged line"
+
+  out=$(FM_TEST_GH_FAIL=1 FM_TEST_GH_MERGEABLE=CONFLICTING run_poll "$dir")
+  [ -z "$out" ] || fail "static poll emitted a conflict after gh failure"
+
+  # Malformed forge output is silence, never a guessed result.
+  for raw in 'OPEN' 'OPEN	CONFLICTING' 'OPEN	CONFLICTING	abc	extra' ''; do
+    out=$(FM_TEST_GH_RAW="$raw" run_poll "$dir")
+    [ -z "$out" ] || fail "static poll emitted for malformed forge row '$raw'"
+  done
+
+  # An unreadable head is reported as such rather than suppressing the wake.
+  for bad in 'not-hex' 'abc' "$(printf 'a%.0s' $(seq 1 65))"; do
+    out=$(FM_TEST_GH_RAW="$(printf 'OPEN\tCONFLICTING\t%s' "$bad")" run_poll "$dir")
+    [ "$out" = 'dirty unknown' ] || fail "unreadable head '$bad' did not report an unknown conflict episode"
+  done
+
+  # GitLab keeps merge-only detection: plain glab field output carries no
+  # conflict field, so no merge request may ever emit a conflict.
+  make_poll_fixture "$dir"
+  printf '%s\n%s\n%s\n%s\n%s\n' gitlab \
+    https://gitlab.example/group/project/-/merge_requests/3 \
+    gitlab.example group/project 3 > "$dir/home/state/task-a.pr-poll"
+  for state in opened merged conflict cannot_be_merged; do
+    out=$(FM_TEST_GLAB_STATE="$state" run_poll "$dir")
+    case "$state" in
+      merged) [ "$out" = merged ] || fail "GitLab merged detection regressed" ;;
+      *) [ -z "$out" ] || fail "GitLab merge request emitted '$out' for state '$state'" ;;
+    esac
+  done
+  pass "conflict reporting emits one dirty line for an open conflicting pull request and nothing else"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -3165,6 +3242,131 @@ test_external_merge_transition_retires_only_terminal_poll() {
   pass "open/red, closed-unmerged, malformed, and forge errors remain armed until an exact merged transition"
 }
 
+# A conflicting pull request must reach firstmate once per conflict episode
+# with enough detail to steer the lane, must not repeat every sweep while it
+# stays unrebased, and must leave clean, merged, and closed outcomes alone.
+# Silence is proven with a control check sorted after the poll: when the poll
+# stays quiet the cycle ends on that check instead, and the surfaced wake names
+# it rather than the task.
+test_conflicted_pr_wakes_once_per_conflict_episode() {
+  local dir state url rc head_a head_b before
+  dir=$(make_case conflicted-pr-wake)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/1284
+  head_a=1111111122222222333333334444444455555555
+  head_b=6666666677777777888888889999999900000000
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  before=$(poll_artifact_snapshot "$state" task-a)
+
+  run_conflict_cycle() {  # <label> <state> <mergeable> <head>
+    local label=$1 gh_state=$2 mergeable=$3 head=$4 rc
+    rm -f "$state/.last-check"
+    set +e
+    FM_TEST_GH_STATE="$gh_state" FM_TEST_GH_MERGEABLE="$mergeable" FM_TEST_GH_HEAD="$head" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "$label watcher cycle failed: $(cat "$dir/$label.err")"
+  }
+
+  # A mergeable pull request is silent: the cycle ends on the control check.
+  run_conflict_cycle clean OPEN MERGEABLE "$head_a"
+  case "$(cat "$dir/clean.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "a mergeable pull request produced a wake: $(cat "$dir/clean.out")" ;;
+  esac
+  [ ! -e "$state/.pr-dirty-task-a" ] || fail "a mergeable pull request recorded a conflict episode"
+
+  # The conflict wakes once, naming the task and carrying the pull request URL.
+  run_conflict_cycle dirty-first OPEN CONFLICTING "$head_a"
+  [ "$(grep -c "^check: .*task-a\.check\.sh: dirty $head_a $url\$" "$dir/dirty-first.out")" -eq 1 ] \
+    || fail "conflict did not surface exactly one wake naming the task and pull request URL: $(cat "$dir/dirty-first.out")"
+  [ "$(cat "$state/.pr-dirty-task-a")" = "$head_a" ] || fail "conflict episode was not recorded"
+
+  # The same unrebased conflict does not wake again; the cycle falls through to
+  # the control check instead.
+  run_conflict_cycle dirty-repeat OPEN CONFLICTING "$head_a"
+  case "$(cat "$dir/dirty-repeat.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "an unchanged conflict woke twice: $(cat "$dir/dirty-repeat.out")" ;;
+  esac
+
+  # A conflict at a new head is a new episode - the branch moved and went
+  # conflicting again - so it wakes.
+  run_conflict_cycle dirty-rebased OPEN CONFLICTING "$head_b"
+  [ "$(grep -c "^check: .*task-a\.check\.sh: dirty $head_b $url\$" "$dir/dirty-rebased.out")" -eq 1 ] \
+    || fail "a conflict at a new head did not wake: $(cat "$dir/dirty-rebased.out")"
+  [ "$(cat "$state/.pr-dirty-task-a")" = "$head_b" ] || fail "new conflict episode was not recorded"
+
+  # An expired resurface window re-surfaces the same unrebased conflict, so a
+  # forgotten conflict cannot rot invisibly.
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGEABLE=CONFLICTING FM_TEST_GH_HEAD="$head_b" \
+    FM_PR_DIRTY_RESURFACE_SECS=0 run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/dirty-resurface.out" 2> "$dir/dirty-resurface.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "resurface cycle failed: $(cat "$dir/dirty-resurface.err")"
+  [ "$(grep -c "^check: .*task-a\.check\.sh: dirty $head_b $url\$" "$dir/dirty-resurface.out")" -eq 1 ] \
+    || fail "an expired resurface window did not re-surface the conflict"
+
+  # A closed pull request stays silent and the armed poll is untouched, exactly
+  # as before conflicts were reported.
+  run_conflict_cycle closed CLOSED CONFLICTING "$head_b"
+  case "$(cat "$dir/closed.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "a closed pull request produced a wake: $(cat "$dir/closed.out")" ;;
+  esac
+  [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "conflict reporting changed the armed poll"
+
+  # Merging still wakes once with its unchanged reason, retires the poll, and
+  # clears the conflict episode with it.
+  rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust"
+  run_conflict_cycle merged MERGED CONFLICTING "$head_b"
+  case "$(cat "$dir/merged.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "merged outcome changed after conflict reporting: $(cat "$dir/merged.out")" ;;
+  esac
+  assert_poll_absent "$state" task-a
+  [ ! -e "$state/.pr-dirty-task-a" ] || fail "merged retirement left the conflict episode behind"
+  pass "a conflicted pull request wakes once per episode and leaves clean, closed, and merged outcomes unchanged"
+}
+
+# The conflict marker is a poll artifact, so teardown must not leave it behind
+# for a later task reusing the same id.
+test_teardown_removes_conflict_episode_marker() {
+  local dir state url
+  dir=$(make_case conflict-marker-teardown)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/77
+  fm_write_meta "$state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/missing-worktree" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only' \
+    "pr=$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  printf '%s\n' 1111111122222222333333334444444455555555 > "$state/.pr-dirty-task-a"
+  chmod 0600 "$state/.pr-dirty-task-a"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  touch "$state/.last-watcher-beat"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+    || fail "teardown failed: $(cat "$dir/teardown.err")"
+  assert_poll_absent "$state" task-a
+  [ ! -e "$state/.pr-dirty-task-a" ] || fail "teardown left the conflict episode marker behind"
+  pass "teardown retires the conflict episode marker with the rest of the poll"
+}
+
 test_retirement_refuses_replacement_and_nonterminal_results() {
   local dir state before rc replacement_check replacement_data replacement_registration replacement_meta
   local historical_poll current_poll
@@ -3338,6 +3540,9 @@ test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_static_poll_conflict_contract
+test_conflicted_pr_wakes_once_per_conflict_episode
+test_teardown_removes_conflict_episode_marker
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries
