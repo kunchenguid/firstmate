@@ -790,7 +790,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty allow_re unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -810,8 +810,19 @@ validate_worktree_teardown_safety() {
   # OpenCode's artifact ended up covered by the removal paths but not by this
   # filter, so a worktree whose info/exclude write did not take refused teardown
   # as if it held real uncommitted work.
+  # The regex is captured BEFORE the grep and an empty derivation refuses: an
+  # empty alternation would make the pattern match every '?? ' line, filtering
+  # away ALL untracked files and letting a destructive teardown discard a
+  # crewmate's unlanded work. Without the artifact inventory, firstmate's own
+  # wiring cannot be told apart from real work, so refusing is the only safe
+  # answer - no hardcoded fallback, no unfiltered proceed.
+  if ! allow_re=$(fm_harness_dirty_allow_re) || [ -z "$allow_re" ]; then
+    echo "REFUSED: cannot derive the harness artifact allowlist from bin/fm-harness-adapter.sh; the artifact inventory is missing or empty." >&2
+    echo "Firstmate wiring cannot be told apart from real uncommitted work without it. Fix bin/harnesses/, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
   dirty=$(printf '%s\n' "$dirty_raw" \
-    | grep -vE "^\?\? ($(fm_harness_dirty_allow_re))" | head -1 || true)
+    | grep -vE "^\?\? ($allow_re)" | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then

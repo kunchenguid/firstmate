@@ -109,6 +109,24 @@ _fm_harness_adapter_name_into() {  # <varname> <name>
 # it resolves to pi, and listing both would double every union.
 FM_HARNESS_ADAPTERS="claude codex opencode pi grok kimi"
 
+# fm_harness_launch_adapter_name: the adapter whose wiring a LAUNCHED harness
+# name installs. fm-spawn's install arms match by GLOB (claude*, opencode*,
+# ...), and its raw-launch escape hatch can hand them a variant name like
+# claude-nightly that still writes claude's artifacts, so exact
+# FM_HARNESS_KNOWN membership is the wrong test for anything mirroring
+# installation. These patterns must stay in step with fm-spawn's install arms.
+fm_harness_launch_adapter_name() {  # <name> -> adapter base name on stdout, or 1
+  case "$1" in
+    claude*) printf '%s' claude ;;
+    opencode*) printf '%s' opencode ;;
+    pi|pi-signed) printf '%s' pi ;;
+    codex*) printf '%s' codex ;;
+    grok*) printf '%s' grok ;;
+    kimi*) printf '%s' kimi ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_harness_source() {  # <name>
   local adapter
   _fm_harness_adapter_name_into adapter "$1" || return 1

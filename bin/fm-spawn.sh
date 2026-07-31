@@ -1375,14 +1375,26 @@ exclude_path() {
 # in bin/harnesses/<name>.sh. A harness that writes nothing inside the worktree
 # (codex, which rides the launch command; pi, whose extension lives in the state
 # dir to dodge the project-trust gate) declares an empty list and is a no-op.
+# Resolution uses the same GLOB semantics as the install arms above, because the
+# raw-launch escape hatch can set HARNESS to a variant like claude-nightly that
+# those arms still match and install for. A name no arm matches excludes the
+# full union instead of nothing: an info/exclude entry for a file that never
+# appears is inert, while excluding nothing leaks a firstmate-owned file into a
+# crewmate's commit.
 exclude_harness_artifacts() {  # <harness>
-  local harness=$1 rel
+  local harness=$1 adapter rel artifacts
   [ -n "$harness" ] || return 0
+  if adapter=$(fm_harness_launch_adapter_name "$harness"); then
+    artifacts=$(fm_harness_worktree_artifacts "$adapter")
+  else
+    echo "notice: harness '$harness' matches no install arm; excluding every known harness artifact" >&2
+    artifacts=$(fm_harness_worktree_artifacts_all)
+  fi
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     exclude_path "$rel"
   done <<EOF
-$(fm_harness_worktree_artifacts "$harness" 2>/dev/null || true)
+$artifacts
 EOF
 }
 if [ "$KIND" != secondmate ]; then

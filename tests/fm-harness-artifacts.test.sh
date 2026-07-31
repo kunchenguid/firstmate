@@ -154,6 +154,97 @@ EOF
   pass "the dirty allowlist covers every declared artifact, stays escaped, and never ignores real work"
 }
 
+test_glob_variant_harness_still_excludes_artifacts() {
+  local repo wt excl union rel out
+  # fm-spawn's install arms match by GLOB and the raw-launch escape hatch can
+  # produce variant names, so exclusion must resolve the same way installation
+  # does - exact FM_HARNESS_KNOWN membership would skip the exclude while the
+  # install arm still writes the file.
+  [ "$(fm_harness_launch_adapter_name claude-nightly)" = claude ] \
+    || fail "claude-nightly must resolve to the claude adapter, matching the claude* install arm"
+  [ "$(fm_harness_launch_adapter_name opencode-beta)" = opencode ] \
+    || fail "opencode-beta must resolve to the opencode adapter"
+  [ "$(fm_harness_launch_adapter_name pi-signed)" = pi ] \
+    || fail "pi-signed must resolve to the pi adapter"
+  fm_harness_launch_adapter_name pinocchio >/dev/null 2>&1 \
+    && fail "pi's install arm is exact (pi|pi-signed); pinocchio must not resolve to it"
+  fm_harness_launch_adapter_name mystery-agent >/dev/null 2>&1 \
+    && fail "an unmatched harness name must not resolve an adapter"
+
+  repo="$TMP_ROOT/excl-repo"; wt="$TMP_ROOT/excl-wt"
+  fm_git_worktree "$repo" "$wt" fm/excl
+  excl=$(git -C "$wt" rev-parse --git-path info/exclude)
+
+  # shellcheck disable=SC1090  # deliberate: extracting the production excluders under test
+  eval "$(sed -n '/^exclude_path()/,/^}/p;/^exclude_harness_artifacts()/,/^}/p' "$ROOT/bin/fm-spawn.sh")"
+
+  WT=$wt
+  out=$(exclude_harness_artifacts claude-nightly 2>&1) \
+    || fail "exclude_harness_artifacts failed for a glob-variant harness name"
+  grep -qxF '.claude/settings.local.json' "$excl" \
+    || fail "a glob-variant harness (claude-nightly) did not exclude claude's artifact, leaking it into the crewmate's git view"
+
+  # A name no install arm matches excludes the full UNION rather than nothing
+  # (an entry for a file that never appears is inert; excluding nothing leaks),
+  # and reports the miss instead of swallowing it.
+  out=$(exclude_harness_artifacts mystery-agent 2>&1) \
+    || fail "exclude_harness_artifacts failed for an unmatched harness name"
+  assert_contains "$out" 'notice' "an unmatched harness name must be reported, not silently skipped"
+  union=$(fm_harness_worktree_artifacts_all)
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    grep -qxF "$rel" "$excl" \
+      || fail "an unmatched harness name must exclude the full union; '$rel' is missing"
+  done <<EOF
+$union
+EOF
+
+  pass "glob-variant and unmatched harness names still exclude their artifacts"
+}
+
+test_missing_dirty_allowlist_derivation_refuses_teardown() {
+  local repo passing out rc
+  repo="$TMP_ROOT/refuse-wt"
+  fm_git_init_commit "$repo"
+  printf 'unfinished\n' > "$repo/real-work.py"
+
+  # shellcheck disable=SC1090  # deliberate: extracting the production safety check under test
+  eval "$(sed -n '/^validate_worktree_teardown_safety()/,/^}/p' "$ROOT/bin/fm-teardown.sh")"
+  worktree_safety_blocked_by_lock() { return 1; }
+  TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=90
+  WT=$repo FORCE= KIND=ship MODE=github PROJ=$repo
+
+  # An empty derivation once collapsed the filter to '^\?\? ()', which matches
+  # EVERY untracked line - real work included - and let teardown sail past the
+  # uncommitted-work check. It must refuse instead.
+  out=$(fm_harness_dirty_allow_re() { :; }; validate_worktree_teardown_safety 2>&1); rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "an empty allowlist derivation must refuse teardown, not filter away every untracked file"
+  assert_contains "$out" 'REFUSED' "the empty-derivation refusal must be an explicit REFUSED"
+  assert_contains "$out" 'allowlist' "the refusal must name the missing artifact allowlist"
+
+  # A failing derivation must refuse the same way.
+  out=$(fm_harness_dirty_allow_re() { return 1; }; validate_worktree_teardown_safety 2>&1); rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "a failing allowlist derivation must refuse teardown"
+  assert_contains "$out" 'REFUSED' "the failed-derivation refusal must be an explicit REFUSED"
+
+  # With the real derivation, a worktree whose only untracked files are
+  # firstmate's own wiring still tears down.
+  passing="$TMP_ROOT/pass-wt"
+  fm_git_init_commit "$passing"
+  fm_git_add_origin "$passing" "$TMP_ROOT/pass-origin"
+  git -C "$passing" fetch -q origin
+  mkdir -p "$passing/.claude"
+  printf '{}\n' > "$passing/.claude/settings.local.json"
+  WT=$passing
+  out=$(validate_worktree_teardown_safety 2>&1); rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "the safety check must still pass when only firstmate wiring is untracked: $out"
+
+  pass "an empty or failed allowlist derivation refuses teardown instead of ignoring real work"
+}
+
 test_teardown_removes_artifacts_from_a_real_worktree() {
   local wt state rel
   wt="$TMP_ROOT/wt"; state="$TMP_ROOT/state"
@@ -211,6 +302,8 @@ test_pi_signed_shares_the_pi_adapter
 test_union_is_deduplicated_and_id_substituted
 test_installed_artifacts_are_all_removed
 test_dirty_allowlist_covers_every_artifact_and_nothing_else
+test_glob_variant_harness_still_excludes_artifacts
+test_missing_dirty_allowlist_derivation_refuses_teardown
 test_teardown_removes_artifacts_from_a_real_worktree
 
 printf 'all fm-harness-artifacts tests passed\n'
