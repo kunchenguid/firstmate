@@ -397,7 +397,16 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
-8. Keep this ship to exactly one independently testable outcome and a complete branch diff of at most 600 reviewable changed lines; simplify an estimate above 600, return one above 1,200 for decomposition before coding, and after three review rounds return scope reassessment or newly discovered out-of-contract work to firstmate unless a blocking correctness or security defect must be resolved.
+8. Keep this ship to exactly one independently testable outcome and a complete branch diff of at most 600
+   reviewable changed lines - added plus deleted hand-authored lines, excluding project-identified
+   generated, vendored, lockfile, and generated-snapshot churn, while hand-authored tests and fixtures count.
+   Simplify an estimate above 600 reviewable changed lines.
+   Only a blocking correctness or security defect, plus the corrections your accepted intent already
+   requires, is fixed inside this ship; anything else you discover becomes a follow-up.
+   Append \`needs-decision: {the scope question}\` and stop (rule 6) rather than expanding this ship when a
+   pre-coding estimate stays above 1,200 reviewable changed lines, when out-of-contract work you discovered
+   still looks necessary now, or when three iterative no-mistakes review rounds have not closed this ship
+   (only no-mistakes pipeline rounds count; never invent review rounds in a mode that has none).
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

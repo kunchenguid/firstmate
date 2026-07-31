@@ -211,12 +211,16 @@ test_ship_modes_generate_clean_briefs() {
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_grep "exactly one independently testable outcome" "$brief" \
       "$id: ship brief lost its one-outcome scope boundary"
-    assert_grep "complete branch diff of at most 600 reviewable changed lines" "$brief" \
+    assert_grep "added plus deleted hand-authored lines" "$brief" \
+      "$id: ship brief lost the reviewable-changed-lines counting rule"
+    assert_grep "Simplify an estimate above 600 reviewable changed lines." "$brief" \
       "$id: ship brief lost its reviewable-size target"
-    assert_grep "after three review rounds return scope reassessment" "$brief" \
-      "$id: ship brief lost its review-round reassessment boundary"
-    assert_grep "newly discovered out-of-contract work to firstmate unless a blocking correctness or security defect" "$brief" \
+    assert_grep "Only a blocking correctness or security defect" "$brief" \
       "$id: ship brief lost its follow-up boundary"
+    assert_grep "Append \`needs-decision: {the scope question}\` and stop (rule 6)" "$brief" \
+      "$id: ship brief lost the status verb for scope escalation"
+    assert_grep "iterative no-mistakes review rounds have not closed this ship" "$brief" \
+      "$id: ship brief lost its review-round reassessment boundary"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"

@@ -252,9 +252,11 @@ Classify the deliverable:
 - **Scout** produces knowledge in `data/<id>/report.md`, never a PR, and is appropriate for investigation, diagnosis, planning, reproduction, or audit work when the captain explicitly requests a separate knowledge or design deliverable or unresolved uncertainty could materially change whether or what to build.
 
 Scope each ship to exactly one independently testable outcome and target at most 600 reviewable changed lines across its complete branch diff.
-If a credible pre-coding estimate exceeds 600 reviewable changed lines, simplify the outcome; if it remains above 1,200, decompose it into separately dispatched ships before coding.
-Newly discovered work outside the captain's accepted intent becomes a follow-up unless it is a blocking correctness or security defect.
-After three review rounds on one ship, firstmate must stop automatic continuation and reassess the task boundary before authorizing another fix round; any expansion still follows captain authority and the ask-user procedure below.
+Reviewable changed lines are the added plus deleted hand-authored lines in that diff, excluding only project-identified generated, vendored, lockfile, and generated-snapshot churn; hand-authored tests and fixtures count.
+If a credible pre-coding estimate exceeds 600 reviewable changed lines, simplify the outcome; if it remains above 1,200, decompose it into separately dispatched ships before coding, and a worker that reaches that estimate returns it as `needs-decision` and stops rather than coding it.
+Newly discovered work outside the captain's accepted intent becomes a follow-up unless it is a blocking correctness or security defect; the corrections the validate rule below already keeps inside the current task are not newly discovered out-of-contract work, so that rule remains the single carve-out set.
+After three iterative no-mistakes review rounds on one ship, firstmate must stop automatic continuation and reassess the task boundary before authorizing another fix round; only pipeline review rounds count, and a worker returning a scope reassessment returns it as `needs-decision`.
+Any expansion still follows captain authority and the ask-user procedure below.
 
 If established evidence already answers an informational question, relay it without a design-only scout; when implementation intent is unclear, answer and ask one concise implementation question when useful rather than dispatching speculative design work.
 Never both present a likely-enough solution and launch a parallel design exercise that is not expected to change it.
