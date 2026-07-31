@@ -33,7 +33,12 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
+# Every ship definition of done accepts one optional "; follow-ups: <items>" clause
+# on its terminal "done:" line, naming deferred work for firstmate to queue.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# They also carry the ship scope contract owned by AGENTS.md section 7: one
+# independently testable outcome, its reviewable-changed-line targets, follow-up
+# routing for out-of-contract discoveries, and needs-decision scope escalation.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
