@@ -8,7 +8,9 @@
 #        fm-lock.sh status              print holder and liveness; always exits 0
 #        fm-lock.sh reclaim <identity>  take over a marker lock left behind by a
 #                                       session that is confirmed gone
-# A marker identity ("<harness>:<session-id>") can only be proven live by the
+# A marker identity ("<harness>:<session-id>", suffixed with the multiplexer pane
+# the session runs in so one inherited marker cannot identify two windows) can
+# only be proven live by the
 # session that owns it, so a marker lock left behind by a dead sandboxed session
 # is otherwise unreclaimable. reclaim is the deliberate remediation: the caller
 # must name the recorded holder exactly, and it never overrides a numeric holder

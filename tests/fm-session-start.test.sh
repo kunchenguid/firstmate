@@ -411,10 +411,9 @@ SH
 # run_session_start <home> <root> <path>
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), CODEX_THREAD_ID (codex),
-# CURSOR_AGENT (cursor), CURSOR_AGENT_SESSION_ID / CURSOR_CONVERSATION_ID /
-# CURSOR_TRACE_ID (session-lock identity only),
-# PI_CODING_AGENT plus FM_PI_HARNESS (Pi family), GROK_AGENT (grok).
+# Markers today: CLAUDECODE (claude), CODEX_THREAD_ID (codex, consulted only
+# after ancestry), CURSOR_AGENT (cursor), CURSOR_CONVERSATION_ID (session-lock
+# identity only), PI_CODING_AGENT plus FM_PI_HARNESS (Pi family), GROK_AGENT (grok).
 # opencode has no env marker (ancestry only). Without this, a local
 # claude/pi/grok session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.

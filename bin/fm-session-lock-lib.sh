@@ -17,7 +17,7 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|cursor-agent|^pi$|^pi-signed$'
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi cursor-agent pi-signed pi)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -76,34 +76,48 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# Per-window scope appended to every marker identity below, empty outside a
+# terminal multiplexer. A multiplexer replays the environment of whatever
+# started its server into every window it opens later, so two concurrent
+# sessions of one server can read the SAME harness marker; the pane each runs
+# in is what separates them. The pane variables and their precedence are the
+# ones bin/fm-supervisor-target-lib.sh already resolves panes with: tmux sets
+# TMUX_PANE in every pane and herdr injects HERDR_PANE_ID into every process it
+# manages a pane for, both inherited by the session's own tool processes and
+# stable for the life of the pane. Outside a multiplexer there is no such
+# replay, so the harness's own per-session marker is already unique.
+fm_marker_window_scope() {
+  if [ -n "${TMUX_PANE:-}" ]; then
+    printf '@%s' "$TMUX_PANE"
+  elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+    printf '@%s:%s' "${HERDR_SESSION:-default}" "$HERDR_PANE_ID"
+  fi
+}
+
 # Print a stable marker identity for harnesses whose tool environment exposes
 # one even when sandboxing hides process ancestry from `ps`.
-# Every marker here must be per-session and set by the harness itself: an
-# identity two concurrent sessions could share would break the one-active-
-# controller invariant this lock exists to enforce, so window- or host-scoped
-# values (e.g. VSCODE_PID) are deliberately not accepted.
+# Every marker here must be per-session, set by the harness itself, and recorded
+# only once a supervised trial has verified its scope: an identity two
+# concurrent sessions could share would break the one-active-controller
+# invariant this lock exists to enforce, so window- or host-scoped values (e.g.
+# VSCODE_PID) are deliberately not accepted, and every accepted marker still
+# carries the window scope above because any of them can be inherited.
 # A harness's own live marker outranks a foreign marker retained in a terminal
 # multiplexer's stored environment, so CURSOR_AGENT=1 - which only a live
 # cursor-agent process sets - wins over an inherited CODEX_THREAD_ID.
 fm_harness_marker_identity() {
-  local cursor_id=''
-  if [ -n "${CURSOR_AGENT_SESSION_ID:-}" ]; then
-    cursor_id="$CURSOR_AGENT_SESSION_ID"
-  elif [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then
-    cursor_id="$CURSOR_CONVERSATION_ID"
-  elif [ -n "${CURSOR_TRACE_ID:-}" ]; then
-    cursor_id="$CURSOR_TRACE_ID"
-  fi
-  if [ "${CURSOR_AGENT:-}" = "1" ] && [ -n "$cursor_id" ]; then
-    printf 'cursor:%s\n' "$cursor_id"
+  local scope
+  scope=$(fm_marker_window_scope)
+  if [ "${CURSOR_AGENT:-}" = "1" ] && [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then
+    printf 'cursor:%s%s\n' "$CURSOR_CONVERSATION_ID" "$scope"
     return 0
   fi
   if [ -n "${CODEX_THREAD_ID:-}" ]; then
-    printf 'codex:%s\n' "$CODEX_THREAD_ID"
+    printf 'codex:%s%s\n' "$CODEX_THREAD_ID" "$scope"
     return 0
   fi
-  if [ -n "$cursor_id" ]; then
-    printf 'cursor:%s\n' "$cursor_id"
+  if [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then
+    printf 'cursor:%s%s\n' "$CURSOR_CONVERSATION_ID" "$scope"
     return 0
   fi
   return 1

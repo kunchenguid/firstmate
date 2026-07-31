@@ -57,10 +57,14 @@ case "$field:$pid" in
 esac
 SH
   chmod +x "$fakebin/ps"
-  out=$(env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT -u CURSOR_AGENT_SESSION_ID \
-    -u CURSOR_CONVERSATION_ID -u CURSOR_TRACE_ID -u PI_CODING_AGENT -u GROK_AGENT \
+  out=$(env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT -u CURSOR_CONVERSATION_ID \
+    -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = cursor ] || fail "markerless cursor-agent ancestry detection returned '$out'"
+  # An inherited CODEX_THREAD_ID must not outrank that live cursor-agent ancestry.
+  out=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_CONVERSATION_ID -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_THREAD_ID=thread-stale PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = cursor ] || fail "an inherited Codex thread id outranked cursor-agent ancestry, got '$out'"
   pass "fm-harness: cursor detected by marker and by cursor-agent ancestry, marker precedence preserved"
 }
 
@@ -73,8 +77,8 @@ test_cursor_session_lock_identity() {
     *cursor-agent*) : ;;
     *) fail "FM_HARNESS_RE does not include cursor-agent" ;;
   esac
-  out=$(env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT -u CURSOR_AGENT_SESSION_ID \
-    -u CURSOR_TRACE_ID -u PI_CODING_AGENT -u GROK_AGENT \
+  out=$(env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT -u PI_CODING_AGENT -u GROK_AGENT \
+    -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID \
     CURSOR_CONVERSATION_ID=c8822d4c bash -c \
     ". \"\$0/bin/fm-session-lock-lib.sh\"; fm_harness_marker_identity" "$ROOT")
   [ "$out" = "cursor:c8822d4c" ] || fail "cursor marker identity wrong, got '$out'"

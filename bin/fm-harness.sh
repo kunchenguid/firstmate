@@ -18,7 +18,8 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers first, then process ancestry.
+# Detection layers: verified environment markers a live harness sets for its own
+# processes first, then process ancestry, then the inheritable CODEX_THREAD_ID.
 # Record each newly verified env marker here.
 set -u
 
@@ -28,13 +29,14 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 detect_own() {
-  # Layer 1: environment markers for verified harnesses.
-  # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, codex, pi, grok, and cursor set verified markers of their own;
-  # opencode and kimi are markerless, so a foreign marker retained in a terminal
-  # multiplexer's stored environment can silently misidentify one of them before
-  # ancestry is consulted. This is a precedence hazard, not evidence that
-  # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
+  # Layer 1: environment markers a live harness sets for its own processes.
+  # Keep this detection before ancestry detection as an explicit precedence rule.
+  # Claude, pi, grok, and cursor set verified markers of their own; opencode and
+  # kimi are markerless, so a foreign marker retained in a terminal multiplexer's
+  # stored environment can in principle misidentify one of them before ancestry
+  # is consulted. This is a precedence hazard, not evidence that CLAUDECODE
+  # inheritance into a kimi child was observed; it was not observed. Codex's
+  # marker IS observed to be inherited that way, so it is demoted below ancestry.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -48,11 +50,6 @@ detect_own() {
   # session and tool processes (verified, cursor-agent 2026.07.23). The executable
   # is cursor-agent, not cursor, so the ancestry match below keys on "cursor".
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
-  # CODEX_THREAD_ID is checked last among the markers: Codex sets it on its own
-  # session, but a tmux server first started from a Codex primary carries it
-  # into every later window, so a harness that set its own live marker above
-  # must win over that inherited value.
-  [ -n "${CODEX_THREAD_ID:-}" ] && { echo codex; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
@@ -83,6 +80,12 @@ detect_own() {
       break
     fi
   done
+  # Layer 3: CODEX_THREAD_ID. Codex sets it on its own session, but a tmux
+  # server first started from a Codex primary carries it into every later
+  # window, so an opencode or kimi primary in one of those windows reads it too.
+  # It is therefore trusted only after the ancestry walk finds nothing at all -
+  # the sandboxed case it exists for, where `ps` is denied.
+  [ -n "${CODEX_THREAD_ID:-}" ] && { echo codex; return; }
   echo unknown
 }
 

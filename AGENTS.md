@@ -138,7 +138,7 @@ An `ABSENT` captain, shared-captain, secondmate, or learnings file means the fir
 
 If the session lock cannot be acquired and verified, report its exact diagnostic and remain read-only; another active session is only one possible cause.
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
-A holder recorded as a `<harness>:<session-id>` marker identity comes from a sandboxed session whose liveness only that session can prove, so it is never reclaimed automatically; when the captain confirms that session is gone, run the exact `bin/fm-lock.sh reclaim <identity>` command the refusal and `bin/fm-lock.sh status` print.
+A holder recorded as a `<harness>:<session-id>` marker identity (suffixed with the multiplexer pane it runs in, so two windows sharing one inherited marker cannot claim each other's lock) comes from a sandboxed session whose liveness only that session can prove, so it is never reclaimed automatically; when the captain confirms that session is gone, run the exact `bin/fm-lock.sh reclaim <identity>` command the refusal and `bin/fm-lock.sh status` print.
 
 1. **Lock** - acquires the per-home session lock first, before anything mutates shared state.
 2. **Bootstrap** - detect-only checks (tool/version problems, configured forge auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.

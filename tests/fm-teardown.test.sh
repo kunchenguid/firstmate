@@ -867,6 +867,47 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+# The untracked-file allowance exists for the turn-end hooks firstmate itself
+# writes, not for the whole .cursor/ tree: a task whose deliverable IS Cursor
+# project configuration would otherwise be discarded with the pooled worktree.
+test_cursor_hook_files_are_allowed_but_cursor_deliverables_refuse() {
+  local case_dir rc
+  case_dir=$(make_case cursor-untracked)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  local wt_head
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  mkdir -p "$case_dir/wt/.cursor"
+  printf '{}\n' > "$case_dir/wt/.cursor/hooks.json"
+  printf '#!/bin/sh\n' > "$case_dir/wt/.cursor/fm-turn-end.sh"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "cursor-untracked: firstmate's own cursor hook files must not block teardown"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "cursor-untracked: teardown refused its own cursor hook files"
+
+  case_dir=$(make_case cursor-deliverable)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  mkdir -p "$case_dir/wt/.cursor/rules"
+  printf 'rule\n' > "$case_dir/wt/.cursor/rules/foo.mdc"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cursor-deliverable: uncommitted cursor project config must refuse teardown"
+  grep -q REFUSED "$case_dir/stderr" || fail "cursor-deliverable: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" || fail "cursor-deliverable: refusal did not cite uncommitted changes"
+  [ -f "$case_dir/wt/.cursor/rules/foo.mdc" ] || fail "cursor-deliverable: uncommitted cursor config was discarded"
+  pass "teardown allows firstmate's cursor hook files but refuses uncommitted cursor project config"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -1852,6 +1893,7 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_cursor_hook_files_are_allowed_but_cursor_deliverables_refuse
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
