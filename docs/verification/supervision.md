@@ -72,6 +72,7 @@ env HOME="$PROBE_ROOT/home" XDG_CONFIG_HOME="$PROBE_ROOT/home/.config" XDG_DATA_
 
 The probe ran on 2026-07-31 with Devin CLI 3000.3.22 (d5152ff5), after accepting the trust prompt in the isolated Devin data directory while leaving `--respect-workspace-trust true` enabled.
 The effective user override was a copy of the local Devin config with no hooks, and the effective project configuration was the tracked `.devin/config.json` with `read_config_from.claude=false` and its `SessionStart` hook.
+The tracked project configuration contains no organization, shell-setup, or theme values; those remain user-level Devin state.
 A unique probe-only `SessionStart` command, `node -e 'process.stdout.write(JSON.stringify({add_context:"DEVIN_PROBE_CONTEXT_7f3a91c2"}))'`, returned that JSON, but the model replied `DEVIN_PROBE_CONTEXT_MISSING`; a separate `UserPromptSubmit` probe likewise replied `DEVIN_USERPROMPT_CONTEXT_MISSING`.
 The installed Devin hook documentation labels Claude-format hooks as not yet available, so this version-scoped live check does not establish native context delivery and Devin session-start support remains unverified.
 

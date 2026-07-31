@@ -24,6 +24,8 @@ test_primary_hook_wiring() {
   [ -f "$config" ] || fail "tracked .devin/config.json is missing"
   jq -e '.read_config_from.claude == false' "$config" >/dev/null \
     || fail "tracked Devin config does not disable Claude compatibility import"
+  jq -e '(.devin // null) == null and (.shell // null) == null and (.theme_mode // null) == null' "$config" >/dev/null \
+    || fail "tracked Devin config contains user-specific organization or setup state"
   session=$(jq -r '.hooks.SessionStart[0].hooks[0].command // empty' "$config")
   assert_contains "$session" 'fm-sessionstart-nudge.sh' "Devin SessionStart hook omitted session-start nudge"
   assert_contains "$session" 'DEVIN_PROJECT_DIR' "Devin SessionStart hook omitted the native project root"
