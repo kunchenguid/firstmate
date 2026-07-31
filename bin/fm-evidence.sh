@@ -29,10 +29,13 @@
 # NO REDACTION, WHILE THE DESTINATION IS PRIVATE. Artifacts are copied verbatim.
 # That is safe only because the destination repository is private, so the push
 # verifies visibility first and REFUSES to publish into a repository that is not
-# private. If visibility cannot be determined at all - offline, no gh-axi, an
-# unrecognized remote - the push is skipped rather than risked, and the evidence
-# stays committed locally. The day that repository stops being private, pushes
-# stop and say why.
+# private. The check is bound to the URL the push itself would use, and only a
+# github.com host - including the github.com-<alias> form a multi-account setup
+# requires - can be checked at all, so no other forge can ever be authorized by
+# a same-named GitHub repository. If visibility cannot be determined - offline,
+# no gh-axi, a host that is not github.com - the push is skipped rather than
+# risked, and the evidence stays committed locally. The day that repository
+# stops being private, pushes stop and say why.
 #
 # LAYOUT: <evidence-repo>/<home-tag>/<task-id>/. The home tag identifies the
 # firstmate home, so concurrent tasks in different homes - two secondmates, or
@@ -40,10 +43,13 @@
 # derivable from the task alone; `path` prints it, and there is deliberately no
 # registry to consult.
 #
-# SIZE POLICY: an artifact at or below FM_EVIDENCE_MAX_DIRECT_BYTES is committed
-# whole. Anything larger is recorded in the manifest by size and SHA-256 only,
-# never by content, so a corpus that reaches tens of GB is described rather than
-# committed. Every artifact is listed in the manifest either way.
+# SIZE POLICY: an artifact at or below the direct-commit limit is committed
+# whole; config/evidence-max-direct-bytes sets that limit for a home and it
+# defaults to 64 MiB. Anything larger is recorded in the manifest by size and
+# SHA-256 only, never by content, so a corpus that reaches tens of GB is
+# described rather than committed. A symlink is recorded by its target and never
+# followed, since following one would copy the very corpus it exists to avoid.
+# Every artifact is listed in the manifest under one of those dispositions.
 #
 # Usage:
 #   fm-evidence.sh preserve <task-id>   copy, commit, then best-effort push
@@ -92,6 +98,11 @@ evidence_home_tag() {
 FM_EVIDENCE_MAX_DIRECT_BYTES_DEFAULT=67108864
 
 FM_EVIDENCE_MANIFEST="EVIDENCE-MANIFEST.txt"
+
+# One destination is shared by design, so another process holding its index is
+# ordinary contention rather than an inability to preserve. Wait that long for
+# the index before treating a git failure as real.
+FM_EVIDENCE_INDEX_WAIT_SECONDS=30
 
 CUSTODY_FAILED=2
 # Reserved internal return meaning "this home has not opted in", kept distinct
@@ -186,14 +197,6 @@ file_sha256() {  # <path>
   fi
 }
 
-# owner/name from the destination clone's remote, for the visibility check.
-# Handles the ssh://, scp-like, and https:// forms, including the host alias
-# form (github.com-personal) that a multi-account setup requires and that must
-# survive verbatim, since rewriting it to a plain host breaks the identity the
-# clone authenticates with.
-# The last two path segments are the owner and name. A host path that is deeper
-# than that (a nested group on another forge) simply yields a slug the GitHub
-# lookup will not resolve, which skips the push rather than guessing.
 # The remote this destination publishes to: origin when present, otherwise the
 # only one configured. Whatever URL it carries is used verbatim, never rewritten.
 evidence_remote() {  # <repo>
@@ -203,12 +206,52 @@ evidence_remote() {  # <repo>
   printf '%s\n' "$remote"
 }
 
-remote_owner_name() {  # <repo>
-  local repo=$1 remote url path owner name
+# The URL the push would actually travel over: the push URL when the clone
+# configures one, otherwise the fetch URL. Both the host check and the
+# owner/name slug read THIS url, so the visibility precondition can only ever
+# describe the repository the evidence would really be sent to.
+remote_push_url() {  # <repo>
+  local repo=$1 remote url
   remote=$(evidence_remote "$repo") || return 1
-  url=$(git -C "$repo" remote get-url "$remote" 2>/dev/null) || return 1
+  url=$(git -C "$repo" remote get-url --push "$remote" 2>/dev/null) || return 1
+  [ -n "$url" ] || return 1
+  printf '%s\n' "$url"
+}
+
+# The host of a remote URL, in the ssh://, scp-like, and https:// forms, with
+# any userinfo and port removed.
+remote_host() {  # <url>
+  local url=$1 host
   case "$url" in
-    *://*) path=${url#*://}; path=${path#*@}; path=${path#*/} ;;
+    *://*) host=${url#*://}; host=${host%%/*} ;;
+    *:*) host=${url%%:*} ;;
+    *) return 1 ;;
+  esac
+  host=${host##*@}
+  host=${host%%:*}
+  [ -n "$host" ] || return 1
+  printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]'
+}
+
+# Only github.com can be looked up, so only github.com may be authorized. The
+# host alias form (github.com-personal) that a multi-account setup requires
+# counts as github.com and must survive verbatim, since rewriting it to a plain
+# host breaks the identity the clone authenticates with. Any other host -
+# another forge, a GitHub Enterprise install, a host that merely ends in a
+# similar name - is not checkable here, and an unrelated github.com repository
+# that happens to share the owner/name slug must never stand in for it.
+evidence_host_is_github() {  # <host>
+  case "$1" in
+    github.com|github.com-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The last two path segments of a remote URL are the owner and name.
+remote_owner_name() {  # <url>
+  local url=$1 path owner name
+  case "$url" in
+    *://*) path=${url#*://}; path=${path#*/} ;;
     *:*) path=${url#*:} ;;
     *) return 1 ;;
   esac
@@ -228,15 +271,64 @@ remote_owner_name() {  # <repo>
 # Prints "private", "public", or returns non-zero when visibility cannot be
 # established. Only a confirmed "private" authorizes a push.
 remote_visibility() {  # <repo>
-  local repo=$1 slug view
+  local repo=$1 url host slug view visibility
   command -v gh-axi >/dev/null 2>&1 || return 1
-  slug=$(remote_owner_name "$repo") || return 1
+  url=$(remote_push_url "$repo") || return 1
+  host=$(remote_host "$url") || return 1
+  if ! evidence_host_is_github "$host"; then
+    printf 'fm-evidence: the destination pushes to %s, whose visibility this cannot establish\n' "$host" >&2
+    return 1
+  fi
+  slug=$(remote_owner_name "$url") || return 1
   view=$(gh-axi repo view --repo "$slug" 2>/dev/null) || return 1
-  printf '%s\n' "$view" \
-    | awk -F: '/^[[:space:]]*visibility:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' \
-    | grep -q . || return 1
-  printf '%s\n' "$view" \
-    | awk -F: '/^[[:space:]]*visibility:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}'
+  visibility=$(printf '%s\n' "$view" \
+    | awk -F: '/^[[:space:]]*visibility:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')
+  [ -n "$visibility" ] || return 1
+  printf '%s\n' "$visibility"
+}
+
+# Run a git command against the destination, retrying only while another process
+# holds the index. Every other failure returns immediately, so a genuine
+# inability to commit still reports custody failure to the caller.
+evidence_git() {  # <repo> <git-args...>
+  local repo=$1 waited=0 err='' rc=0
+  shift
+  while :; do
+    if err=$(git -C "$repo" "$@" 2>&1); then
+      return 0
+    else
+      rc=$?
+    fi
+    case "$err" in
+      *index.lock*) : ;;
+      *) break ;;
+    esac
+    [ "$waited" -lt "$FM_EVIDENCE_INDEX_WAIT_SECONDS" ] || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  [ -z "$err" ] || printf '%s\n' "$err" >&2
+  return "$rc"
+}
+
+# The copied artifacts that did NOT reach the index, one per line. `git add
+# --force` defeats ignore rules, but a nested repository or a skip-worktree
+# entry can still leave a path unstaged, and a custody claim must never exceed
+# what was really committed.
+unstaged_artifacts() {  # <repo> <dest>
+  local repo=$1 dest=$2 nl staged rel file
+  nl=$'\n'
+  staged=$(git -C "$repo" ls-files --cached -z -- "$dest" | tr '\0' '\n') || return 1
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    rel=${file#"$repo"/}
+    case "$nl$staged$nl" in
+      *"$nl$rel$nl"*) : ;;
+      *) printf '%s\n' "$rel" ;;
+    esac
+  done <<EOF
+$(find "$dest" -type f | LC_ALL=C sort)
+EOF
 }
 
 destination_path() {  # <repo> <task-id>
@@ -254,7 +346,7 @@ validate_task_id() {  # <task-id>
 # number of artifacts recorded.
 copy_artifacts() {  # <source> <dest> <task-id> <limit>
   local source=$1 dest=$2 id=$3 limit=$4
-  local rel size hash mode count=0 manifest="$dest/$FM_EVIDENCE_MANIFEST"
+  local rel size hash mode target count=0 manifest="$dest/$FM_EVIDENCE_MANIFEST"
 
   {
     printf '# firstmate evidence manifest\n'
@@ -262,17 +354,39 @@ copy_artifacts() {  # <source> <dest> <task-id> <limit>
     printf '# home: %s\n' "$(evidence_home_tag)"
     printf '# direct-commit limit: %s bytes\n' "$limit"
     printf '# columns: disposition sha256 bytes path\n'
+    printf '# a symlink row carries "-" for sha256 and bytes and records "path -> target"\n'
   } > "$manifest"
 
   while IFS= read -r file; do
     rel=${file#"$source"/}
     [ "$rel" = "$FM_EVIDENCE_MANIFEST" ] && continue
+    if [ -L "$file" ]; then
+      # A symlink is how corpus-scale material is referenced without copying it,
+      # so it is recorded by target and deliberately never followed.
+      target=$(readlink "$file")
+      printf 'symlink - - %s -> %s\n' "$rel" "$target" >> "$manifest"
+      count=$((count + 1))
+      continue
+    fi
     size=$(file_size "$file")
     hash=$(file_sha256 "$file")
     if [ "$size" -le "$limit" ]; then
       mode=committed
-      mkdir -p "$dest/$(dirname "$rel")"
-      cp -p "$file" "$dest/$rel"
+      # Reported explicitly rather than left to set -e, which the caller's `||`
+      # suppresses inside this command substitution: a copy that did not happen
+      # must reach the caller, or custody would be claimed over material that
+      # was never written.
+      if ! mkdir -p "$dest/$(dirname "$rel")"; then
+        printf 'fm-evidence: cannot create the destination directory for %s\n' "$rel" >&2
+        return 1
+      fi
+      # Removed first so a re-copy over a read-only artifact - teardown runs
+      # this repeatedly - cannot fail on a destination it may not reopen.
+      rm -f "$dest/$rel"
+      if ! cp -p "$file" "$dest/$rel"; then
+        printf 'fm-evidence: cannot copy %s into %s\n' "$rel" "$dest" >&2
+        return 1
+      fi
     else
       # Corpus scale: described by size and hash, never carried as content.
       mode='manifest-only'
@@ -280,7 +394,7 @@ copy_artifacts() {  # <source> <dest> <task-id> <limit>
     printf '%s %s %s %s\n' "$mode" "$hash" "$size" "$rel" >> "$manifest"
     count=$((count + 1))
   done <<EOF
-$(find "$source" -type f | LC_ALL=C sort)
+$(find "$source" \( -type f -o -type l \) | LC_ALL=C sort)
 EOF
 
   printf '%s\n' "$count"
@@ -299,7 +413,7 @@ cmd_path() {  # <task-id>
 }
 
 cmd_preserve() {  # <task-id>
-  local id=$1 repo source dest limit count visibility rc=0
+  local id=$1 repo source dest limit count unstaged visibility rc=0
 
   validate_task_id "$id"
 
@@ -315,7 +429,7 @@ cmd_preserve() {  # <task-id>
   esac
 
   source="$DATA/$id"
-  if [ ! -d "$source" ] || [ -z "$(find "$source" -type f 2>/dev/null | head -1)" ]; then
+  if [ ! -d "$source" ] || [ -z "$(find "$source" \( -type f -o -type l \) 2>/dev/null | head -1)" ]; then
     note "task $id has no artifacts to preserve"
     return 0
   fi
@@ -327,12 +441,22 @@ cmd_preserve() {  # <task-id>
   count=$(copy_artifacts "$source" "$dest" "$id" "$limit") \
     || fail "$CUSTODY_FAILED" "copying evidence for $id into $dest failed"
 
-  git -C "$repo" add -- "$dest" >/dev/null 2>&1 \
+  # --force so the destination's ignore rules cannot silently drop evidence,
+  # then a check that every copied artifact really reached the index, because a
+  # custody claim must never exceed what was actually committed.
+  evidence_git "$repo" add --force -- "$dest" \
     || fail "$CUSTODY_FAILED" "cannot stage evidence for $id in $repo"
+
+  unstaged=$(unstaged_artifacts "$repo" "$dest") \
+    || fail "$CUSTODY_FAILED" "cannot verify the staged evidence for $id in $repo"
+  if [ -n "$unstaged" ]; then
+    fail "$CUSTODY_FAILED" \
+      "evidence for $id was not fully staged in $repo: $(printf '%s' "$unstaged" | tr '\n' ' ')"
+  fi
 
   if git -C "$repo" diff --cached --quiet -- "$dest"; then
     note "evidence for $id already current in $repo"
-  elif git -C "$repo" commit -q -m "evidence($(evidence_home_tag)/$id): preserve $count artifact(s)" -- "$dest"; then
+  elif evidence_git "$repo" commit -q -m "evidence($(evidence_home_tag)/$id): preserve $count artifact(s)" -- "$dest"; then
     note "committed $count artifact(s) for $id in $repo"
   else
     fail "$CUSTODY_FAILED" "cannot commit evidence for $id in $repo"

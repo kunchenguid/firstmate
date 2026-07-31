@@ -51,6 +51,18 @@ SH
   chmod +x "$1/gh-axi"
 }
 
+# An ssh stub that answers any host with one local bare repository, so a push to
+# a real github.com URL can be exercised without a network. Echoes the command
+# to hand to git through GIT_SSH_COMMAND.
+fake_ssh_to_bare() {  # <fakebin> <bare>
+  cat > "$1/ssh-to-bare" <<SH
+#!/usr/bin/env bash
+exec git receive-pack '$2'
+SH
+  chmod +x "$1/ssh-to-bare"
+  printf '%s\n' "$1/ssh-to-bare"
+}
+
 # A home that never opted in must behave exactly as one that has never heard of
 # the feature: no output, no destination, and a clean exit that lets teardown
 # proceed.
@@ -169,7 +181,9 @@ test_unreachable_remote_still_succeeds_with_evidence_committed() {
   local home out rc fakebin
   home=$(make_home unreachable)
   make_task "$home" offline-task
-  git -C "$home/evidence" remote add origin "ssh://git@github.invalid/owner/name.git"
+  # A github.com host alias that resolves nowhere: the visibility precondition
+  # is satisfied, so the push is really attempted and really fails.
+  git -C "$home/evidence" remote add origin "ssh://git@github.com-offline/owner/name.git"
   fakebin=$(fm_fakebin "$home")
   fake_gh_axi "$fakebin" private
 
@@ -178,6 +192,7 @@ test_unreachable_remote_still_succeeds_with_evidence_committed() {
 
   expect_code 0 "$rc" "preserve with an unreachable remote must still succeed"
   assert_contains "$out" "committed locally" "no explanation that custody was still achieved"
+  assert_contains "$out" "the push did not succeed" "the attempted push was not reported as failed"
   assert_contains "$(git -C "$home/evidence" ls-files)" "offline-task/report.md" \
     "the evidence was not committed when the push failed"
   pass "fm-evidence: an unreachable remote leaves evidence committed and still succeeds"
@@ -228,23 +243,143 @@ test_public_destination_refuses_the_push() {
 }
 
 # The push happens only when visibility is confirmed private, and then it really
-# does publish.
+# does publish. The remote is a github.com URL because that is the only host
+# whose visibility can be established; ssh is stubbed so the push still lands in
+# a local bare repository.
 test_private_destination_pushes() {
-  local home fakebin bare out
+  local home fakebin bare ssh out
   home=$(make_home private-dest)
   make_task "$home" shipped-task
   bare="$TMP_ROOT/private-dest/owner/name.git"
   mkdir -p "$(dirname "$bare")"
   git init -q --bare "$bare"
-  git -C "$home/evidence" remote add origin "file://$bare"
+  git -C "$home/evidence" remote add origin "ssh://git@github.com/owner/name.git"
   fakebin=$(fm_fakebin "$home")
   fake_gh_axi "$fakebin" private
+  ssh=$(fake_ssh_to_bare "$fakebin" "$bare")
 
-  out=$(PATH="$fakebin:$PATH" run_evidence "$home" preserve shipped-task)
+  out=$(PATH="$fakebin:$PATH" GIT_SSH_COMMAND="$ssh" run_evidence "$home" preserve shipped-task)
   assert_contains "$out" "pushed evidence" "a verified-private destination did not push"
   assert_contains "$(git --git-dir="$bare" ls-tree -r --name-only HEAD)" \
     "shipped-task/report.md" "the evidence never reached the remote"
   pass "fm-evidence: a verified-private destination is pushed"
+}
+
+# The visibility precondition only protects anything while it describes the
+# repository the push would really reach. A non-GitHub destination cannot be
+# checked at all, so it must skip the push rather than be authorized by whatever
+# github.com repository happens to share its owner and name.
+test_non_github_remote_skips_the_push() {
+  local home fakebin bare ssh out rc
+  home=$(make_home elsewhere)
+  make_task "$home" offsite-task
+  bare="$TMP_ROOT/elsewhere/acme/evidence.git"
+  mkdir -p "$(dirname "$bare")"
+  git init -q --bare "$bare"
+  git -C "$home/evidence" remote add origin "ssh://git@gitlab.company.example/acme/evidence.git"
+  fakebin=$(fm_fakebin "$home")
+  # A gh-axi that reports private for any slug it is asked about, exactly as a
+  # captain's own same-named private repository would.
+  fake_gh_axi "$fakebin" private
+  ssh=$(fake_ssh_to_bare "$fakebin" "$bare")
+
+  out=$(PATH="$fakebin:$PATH" GIT_SSH_COMMAND="$ssh" run_evidence "$home" preserve offsite-task)
+  rc=$?
+
+  expect_code 0 "$rc" "a skipped push must not fail custody"
+  assert_contains "$out" "gitlab.company.example" "the skipped push did not name the host it could not check"
+  assert_not_contains "$out" "pushed evidence" "evidence was pushed to a host whose visibility was never established"
+  [ -z "$(git --git-dir="$bare" ls-tree -r --name-only HEAD 2>/dev/null)" ] \
+    || fail "unredacted evidence reached a remote that was never verified private"
+  assert_contains "$(git -C "$home/evidence" ls-files)" "offsite-task/report.md" \
+    "skipping the push also lost the local commit"
+  pass "fm-evidence: a destination on another host skips the push and keeps custody"
+}
+
+# Custody is a claim about what was committed, so the destination's ignore rules
+# must not be able to drop an artifact out from under it.
+test_ignored_artifact_is_still_committed() {
+  local home out tracked
+  home=$(make_home ignoring)
+  make_task "$home" logged-task
+  printf '*.log\ntmp/\n' > "$home/evidence/.gitignore"
+  printf 'probe output\n' > "$home/data/logged-task/probe.log"
+
+  out=$(run_evidence "$home" preserve logged-task)
+
+  tracked=$(git -C "$home/evidence" ls-files)
+  assert_contains "$tracked" "logged-task/probe.log" \
+    "an artifact matched by the destination's ignore rules was never committed"
+  assert_contains "$out" "committed 2 artifact(s)" "the count claimed did not match what was committed"
+  pass "fm-evidence: the destination's ignore rules cannot drop an artifact from custody"
+}
+
+# A read-only artifact is ordinary for a captured fixture, and teardown runs this
+# repeatedly across a fleet, so re-copying one must not fail and cost custody.
+test_read_only_artifact_survives_a_repeat_preserve() {
+  local home out rc
+  home=$(make_home readonly)
+  make_task "$home" fixture-task
+  printf 'captured\n' > "$home/data/fixture-task/fixture.bin"
+  chmod 444 "$home/data/fixture-task/fixture.bin"
+
+  run_evidence "$home" preserve fixture-task >/dev/null
+  out=$(run_evidence "$home" preserve fixture-task)
+  rc=$?
+
+  expect_code 0 "$rc" "a repeat preserve over a read-only artifact must not fail"
+  assert_contains "$out" "already current" "the unchanged repeat was not reported as such"
+  assert_not_contains "$out" "Permission denied" "re-copying a read-only artifact was refused"
+  assert_not_contains "$out" "cannot copy" "re-copying a read-only artifact failed"
+  assert_contains "$(git -C "$home/evidence" ls-files)" "fixture-task/fixture.bin" \
+    "the read-only artifact was never committed"
+  pass "fm-evidence: a read-only artifact can be preserved twice"
+}
+
+# The other half of the same rule: a copy that could not happen must reach the
+# caller as custody failure, because the alternative is a claim of custody over
+# material that was never written.
+test_failed_copy_reports_custody_failure() {
+  local home dest out rc
+  home=$(make_home nocopy)
+  make_task "$home" blocked-task
+
+  run_evidence "$home" preserve blocked-task >/dev/null
+  dest=$(run_evidence "$home" path blocked-task)
+  # A second artifact appears, and the destination can no longer take a new file.
+  printf 'measured\n' > "$home/data/blocked-task/probe.out"
+  chmod 555 "$dest"
+
+  out=$(run_evidence "$home" preserve blocked-task)
+  rc=$?
+  chmod 755 "$dest"
+
+  [ "$rc" -ne 0 ] || fail "a copy that could not happen reported custody achieved"
+  assert_contains "$out" "cannot copy" "the failed copy gave no actionable reason"
+  pass "fm-evidence: a copy that cannot happen reports custody failure"
+}
+
+# A symlink is how corpus-scale material is referenced without duplicating it, so
+# it is recorded rather than followed - but recorded it must be, because a silent
+# omission would leave the evidence record incomplete with nothing to show it.
+test_symlink_artifact_is_recorded_in_the_manifest() {
+  local home dest manifest tracked
+  home=$(make_home symlinks)
+  make_task "$home" linked-task
+  mkdir -p "$TMP_ROOT/corpus"
+  printf 'huge\n' > "$TMP_ROOT/corpus/frames.bin"
+  ln -s "$TMP_ROOT/corpus" "$home/data/linked-task/corpus"
+
+  run_evidence "$home" preserve linked-task >/dev/null
+
+  dest=$(run_evidence "$home" path linked-task)
+  manifest=$(cat "$dest/EVIDENCE-MANIFEST.txt")
+  assert_contains "$manifest" "symlink" "the symlink was left out of the manifest"
+  assert_contains "$manifest" "corpus -> $TMP_ROOT/corpus" "the manifest lost the symlink's target"
+  assert_absent "$dest/corpus" "the symlink was followed instead of recorded"
+  tracked=$(git -C "$home/evidence" ls-files)
+  assert_not_contains "$tracked" "linked-task/corpus/" "the symlink's target was committed as content"
+  pass "fm-evidence: a symlinked artifact is recorded in the manifest, never followed"
 }
 
 # Without any way to establish visibility the push is skipped rather than
@@ -305,6 +440,11 @@ test_unreachable_remote_still_succeeds_with_evidence_committed
 test_failed_commit_reports_custody_failure
 test_public_destination_refuses_the_push
 test_private_destination_pushes
+test_non_github_remote_skips_the_push
 test_unverifiable_visibility_skips_the_push
+test_ignored_artifact_is_still_committed
+test_read_only_artifact_survives_a_repeat_preserve
+test_failed_copy_reports_custody_failure
+test_symlink_artifact_is_recorded_in_the_manifest
 test_repeat_preserve_is_idempotent
 test_task_without_artifacts_is_not_an_error

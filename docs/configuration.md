@@ -161,8 +161,10 @@ The destination is named only by this local file, so no repository is ever named
 
 The local commit is the custody guarantee and the push is best-effort, so teardown gates on the commit alone: an unreachable remote leaves the evidence committed and cleanup proceeds, while evidence that could not be committed refuses cleanup instead of letting it destroy the worktree.
 Artifacts are copied without redaction, which is safe only while the destination is private, so the push confirms the repository's visibility first and refuses to publish into one that is not private; when visibility cannot be determined at all the push is skipped and the evidence stays committed locally.
+That confirmation reads the URL the push itself would use and only accepts a `github.com` host, including the `github.com-<alias>` form a multi-account setup requires, so a destination on any other host skips the push rather than being authorized by an unrelated repository that happens to share its owner and name.
 Layout is `<evidence-repo>/<home-tag>/<task-id>/`, keyed on the firstmate home so concurrent tasks sharing a task id across homes cannot collide, and derivable from the task alone through `bin/fm-evidence.sh path <task-id>` with no registry to consult.
 An artifact at or below the direct-commit limit is committed whole and anything larger is recorded in that task's `EVIDENCE-MANIFEST.txt` by size and SHA-256 only, so corpus-scale material is described rather than committed; the limit defaults to 64 MiB and the local, gitignored `config/evidence-max-direct-bytes` overrides it as a whole number of bytes.
+A symlink is recorded in that same manifest by its target and never followed, since following one would copy the corpus it exists to reference without duplicating.
 `bin/fm-evidence.sh --help` owns the exact verbs, exit codes, and mechanics.
 
 ## Secondmate routes (data/secondmates.md)
