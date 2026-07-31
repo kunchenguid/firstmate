@@ -38,6 +38,15 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   A "provider/model" --model is checked against the local model registry before
+#   anything is created: the spawn REFUSES when an API-key provider's model is not
+#   on the verified-free allowlist, when the provider's cost posture is unclassified,
+#   when the registry records the model as rejected or blocked, or when the model's
+#   recorded concurrency cap is already met. This is the last
+#   gate before a dispatch can spend money, and the only one that sees a --model
+#   passed explicitly rather than resolved from config/crew-dispatch.json. With no
+#   config/models.json present the check is inert and spawns behave as before;
+#   bin/fm-model-registry-lib.sh owns the full enforcement scope.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -233,6 +242,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-model-registry-lib.sh
+. "$SCRIPT_DIR/fm-model-registry-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1124,6 +1135,31 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+
+# ZERO-BUDGET AND QUOTA GATE. This is the first point where HARNESS and MODEL are
+# both final (the harness resolves above; config/secondmate-harness can still
+# overwrite MODEL just above this line) and the last point before any mutation -
+# the worktree, the backend endpoint and the task metadata are all created below.
+# A refusal here therefore leaves nothing behind to clean up.
+#
+# It is also the ONLY gate that sees a dispatch where firstmate passed --model
+# explicitly, bypassing config/crew-dispatch.json entirely; bootstrap validation
+# structurally cannot see that path. See bin/fm-model-registry-lib.sh for the
+# enforcement scope, and note that an absent config/models.json leaves this inert.
+if ! ZB_REFUSAL=$(fm_model_zero_budget_decision "$MODEL"); then
+  echo "error: $ZB_REFUSAL" >&2
+  exit 1
+fi
+# Separate axis from cost: a model can be free of any charge and still be one the
+# account cannot use. Only the registry's recorded status catches that here.
+if ! ROUTE_REFUSAL=$(fm_model_routable_decision "$MODEL"); then
+  echo "error: $ROUTE_REFUSAL" >&2
+  exit 1
+fi
+if ! CONC_REFUSAL=$(fm_model_concurrency_decision "$MODEL"); then
+  echo "error: $CONC_REFUSAL" >&2
+  exit 1
 fi
 
 secondmate_registry_value() {

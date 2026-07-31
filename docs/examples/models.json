@@ -1,0 +1,134 @@
+{
+  "_readme": "Copy to config/models.json and replace every value with your own VERIFIED evidence. The provider ids, model ids and prices below are placeholders chosen to show the shape, not a recommended routing table. Never copy a price or a probe result you did not observe yourself: the whole point of this file is that its contents were checked. docs/configuration.md owns the schema; .agents/skills/model-onboarding/SKILL.md owns the admission policy.",
+
+  "schema": "fm-model-registry.v1",
+
+  "providers": {
+    "example-subscription": {
+      "access_class": "A",
+      "cost_posture": "subscription-flat",
+      "status": "active"
+    },
+    "example-apikey": {
+      "_note": "One key here reaches BOTH free and metered models, which is why the allowlist below is by exact model id and never by provider.",
+      "access_class": "B",
+      "cost_posture": "api-key",
+      "credential_env": "EXAMPLE_API_KEY",
+      "catalogue_sources": [],
+      "status": "active"
+    },
+    "example-metered": {
+      "access_class": "C",
+      "cost_posture": "api-key",
+      "status": "blocked",
+      "status_reason": "no qualifying free tier; rejected by cost policy"
+    }
+  },
+
+  "models": {
+    "example-subscription/big-model": {
+      "provider": "example-subscription",
+      "model_id": "big-model",
+      "harness": "pi",
+      "cost_class": "subscription-flat",
+      "status": "approved-primary",
+      "eligible_routes": ["t2-substantive", "t2-difficult"],
+      "prohibited_routes": ["t1-risk", "t0-coordinator"],
+      "context": { "advertised": 272000, "operational_ceiling": 140000, "max_output": 128000 },
+      "controls": { "effort_bands": ["low", "medium", "high", "xhigh"], "tool_calling": true, "structured_output": true },
+      "limits": { "concurrency": null, "shared_quota_pool": "example-subscription-oauth" },
+      "observation_level": "O4",
+      "evidence": {
+        "probe": { "result": "ok", "rc": 0, "latency_s": 5.8, "at": "2026-01-01T00:00:00Z" },
+        "price": { "at": "2026-01-01T00:00:00Z", "sources": ["provider-doc"] },
+        "dossier": "data/model-onboarding-policy/dossiers/example-subscription-big-model.md"
+      },
+      "last_verified": "2026-01-01T00:00:00Z"
+    },
+
+    "example-apikey/free-model": {
+      "_note": "An API-key model must ALSO appear in zero_budget.allowlist below. Presence here is a description; presence there is the authorization.",
+      "provider": "example-apikey",
+      "model_id": "free-model",
+      "harness": "pi",
+      "cost_class": "verified-free",
+      "status": "approved-fallback",
+      "price_at_verification": { "input": 0, "output": 0 },
+      "shared_credential_reaches_paid_models": true,
+      "eligible_routes": ["long-context-specialist"],
+      "prohibited_routes": ["t1-risk", "t1-runtime", "t0-coordinator"],
+      "context": { "advertised": 1000000, "operational_ceiling": 200000, "max_output": 64000 },
+      "controls": { "effort_bands": [], "tool_calling": true, "structured_output": true },
+      "limits": { "concurrency": 1, "shared_quota_pool": "example-apikey-free-tier" },
+      "observation_level": "O1",
+      "evidence": {
+        "probe": { "result": "ok", "rc": 0, "latency_s": 1.5, "at": "2026-01-01T00:00:00Z" },
+        "price": { "at": "2026-01-01T00:00:00Z", "sources": ["provider-doc", "harness-static-catalogue"] },
+        "dossier": "data/model-onboarding-policy/dossiers/example-apikey-free-model.md"
+      },
+      "last_verified": "2026-01-01T00:00:00Z"
+    },
+
+    "example-subscription/withdrawn-model": {
+      "_note": "Record a refusal and its evidence so it is never rediscovered as a plausible-looking name.",
+      "provider": "example-subscription",
+      "model_id": "withdrawn-model",
+      "harness": "pi",
+      "cost_class": "subscription-flat",
+      "status": "rejected",
+      "status_reason": "live probe returned a server-side entitlement refusal for this account type",
+      "evidence": {
+        "probe": { "result": "entitlement-refused", "rc": 1, "latency_s": 3.2, "at": "2026-01-01T00:00:00Z" }
+      },
+      "last_verified": "2026-01-01T00:00:00Z"
+    }
+  },
+
+  "zero_budget": {
+    "_rule": "API-key providers route ONLY to models listed here, by exact id. Never to a provider generally, never to a provider default, and never to an unlisted sibling during failover. Adding an entry requires evidence the model is free.",
+    "allowlist": {
+      "example-apikey/free-model": {
+        "price_at_verification": { "input": 0, "output": 0 },
+        "verified_at": "2026-01-01T00:00:00Z",
+        "sources": ["provider-doc", "harness-static-catalogue", "probe"],
+        "hard_ceiling": "provider-side quota override refuses requests past the limit rather than billing them"
+      }
+    }
+  },
+
+  "observation": {
+    "_note": "How stale probe evidence may become before it is reported. This is what keeps the session-start sweep interval-gated instead of probing every model every time.",
+    "levels": {
+      "O1": { "probe_max_age_days": 1 },
+      "O2": { "probe_max_age_days": 7 },
+      "O3": { "probe_max_age_days": 30 },
+      "O4": { "probe_max_age_days": 90 }
+    }
+  },
+
+  "promotion": {
+    "_note": "Dormant until BOTH enabled is true and the named instrument produces records. Every threshold is configuration; firstmate must name the value it acted on when it explains a promotion. These numbers are bootstrap defaults to tune from real history, not measurements.",
+    "enabled": false,
+    "requires_instrument": "wake-outcome-ledger:terminal-task-line",
+    "thresholds": {
+      "p1_min_tasks": 12,
+      "p2_min_clean_pct": 90,
+      "p3_min_higher_tier_clean": 2,
+      "p4_no_demotion_days": 30
+    },
+    "authority": {
+      "_note": "Validated as a ceiling: a home may be more conservative, never more permissive. Tier 1 is triggered by RISK rather than capability rank, so no accumulation of evidence may enter it.",
+      "t4_to_t3": "automatic-notify-immediate",
+      "t3_to_t2": "captain-confirm",
+      "t2_to_t1": "never-by-evidence",
+      "t1_to_t0": "never-by-evidence"
+    },
+    "demotion": {
+      "_note": "Deliberately faster than promotion, because reasoning quality must never silently degrade. Evidence resets to zero rather than decaying so a marginal model cannot oscillate across the threshold.",
+      "single_event": "immediate",
+      "rolling_min_clean_pct": 75,
+      "rolling_window_tasks": 8,
+      "cooldown_days": 30
+    }
+  }
+}
