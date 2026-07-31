@@ -120,8 +120,9 @@ The preference persists for the effective Firstmate home, and toggling it off re
 # clones the project under projects/ and spawns two isolated workers in the active backend.
 # Minutes later:
 
-  PR ready for review, captain: https://github.com/you/xyz/pull/42
-  (fix flaky login test - risk: low - CI green)
+  Complete: the flaky login test is fixed, captain - CI green, risk low.
+  Ready for your review: https://github.com/you/xyz/pull/42
+  Reply "merge it" to ship, or name the changes you want - 1 reply.
 
 > alright merge it
 ```
