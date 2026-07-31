@@ -340,6 +340,7 @@ fm_lock_try_acquire() {
   rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     rc=0
+    # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
     FM_LOCK_RECLAIMED_PID=$cur
   fi
   if [ "$rc" -ne 0 ]; then
