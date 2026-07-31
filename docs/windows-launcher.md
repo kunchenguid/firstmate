@@ -7,6 +7,8 @@ Double-click the file in Explorer, or run it from Command Prompt or PowerShell.
 
 - Install WSL with `wsl --install` and finish the distribution's first-run setup.
 - Install Firstmate's Linux-side prerequisites, Herdr, and the harnesses you want to use inside that WSL distribution.
+- Use a Firstmate revision that includes the `bin/fm-launch.sh` launcher dependency.
+  The bridge reports an actionable error instead of starting when that dependency is absent.
 - Keep the Firstmate repository somewhere the distribution can read.
   Windows drive paths, including paths containing spaces, are supported through WSL's `--cd` mapping.
 
@@ -24,13 +26,8 @@ Double-click `firstmate.bat` at the repository root.
 The window opens the existing harness menu, and the selected session follows the same Herdr launch and attach flow as `bin/fm-launch.sh`.
 If startup fails, the window prints the underlying error, reports the exit status, gives the WSL installation repair when relevant, and stays open for acknowledgment.
 
-The batch entry accepts the launcher's existing arguments and returns its exit status:
-
-```bat
-firstmate.bat --print-menu
-firstmate.bat --verbose
-firstmate.bat --help
-```
+Arguments supplied to the batch entry pass through to `bin/fm-launch.sh`, and the batch entry returns the launcher's exit status.
+Use the launcher's own usage text for its supported arguments.
 
 The bridge starts one WSL process, sets its working directory to the batch file's repository, selects `/bin/bash` directly, and enters through `bin/fm-wsl-entry.sh`.
 The WSL helper resolves the repository from its own location and replaces itself with `bin/fm-launch.sh`, so the current Windows directory and shell profiles cannot redirect the launch.
