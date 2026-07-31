@@ -382,10 +382,29 @@ test_reclaims_dead_autoarm_owner_claim() {
   printf '9999999\n' > "$dir/state/.claude-autoarm.lock/pid"
   out=$(run_autoarm "$dir" 2>&1); status=$?
   expect_code 2 "$status" "a dead auto-arm owner claim must be reclaimed and translated"
-  assert_contains "$out" "reclaiming dead owner claim" "reclaim must be logged"
+  assert_contains "$out" "reclaimed dead owner claim" "reclaim must be logged"
   [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming dead owner claim"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "dead-claim reclaim must record outcome=rewake"
   pass "auto-arm: dead owner claim is reclaimed and logged"
+}
+
+test_does_not_log_contended_dead_owner_claim() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/contended-dead-autoarm-claim")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '9999999\n' > "$dir/state/.claude-autoarm.lock/pid"
+  out=$(FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    mkdir -p "$FM_HOME/state/.claude-autoarm.lock.steal"
+    printf "%s\n" "$$" > "$FM_HOME/state/.claude-autoarm.lock.steal/pid"
+    printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+  ' 2>&1); status=$?
+  expect_code 0 "$status" "a contended stale claim must remain a no-op"
+  assert_not_contains "$out" "reclaimed dead owner claim" "a hook that lost acquisition must not log a reclaim"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed without acquiring the contended owner claim"
+  pass "auto-arm: contended stale owner claim is not falsely logged"
 }
 
 test_need_vanished_mid_cycle_closes_quietly() {
@@ -445,6 +464,7 @@ test_clean_close_exits_silently
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_reclaims_dead_autoarm_owner_claim
+test_does_not_log_contended_dead_owner_claim
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
