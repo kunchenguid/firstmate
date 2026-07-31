@@ -1712,7 +1712,16 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "AFK paused changed pane did not hand off a stale wake"
+  # Unseeded .hash-* means this case pays a full cold start before the stale can
+  # fire: one cycle to record the hash, then two more to reach the stably-stale
+  # count, each forking its whole per-window capture/classify chain (and the first
+  # cycle also paying the one-time PR-check migration). That is a measured
+  # 3.7-12.6s of real work, while a 40-tick wait_for_exit is only ~6.7s of wall
+  # clock - every tick pays a ps fork on top of its sleep 0.1. So the wait, not
+  # the handoff, is what ran out: the watcher emitted the correct wake in every
+  # measured run. Use the same 100-tick (~18s) budget the other watcher-startup
+  # cases in this suite already wait on.
+  wait_for_exit "$pid" 100 || fail "AFK paused changed pane did not hand off a stale wake"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "AFK paused stale did not preserve its plain window identity: $(cat "$out")"
   grep -F "awaiting external" "$out" >/dev/null && fail "AFK watcher decorated a stale identity instead of handing it to the daemon"
   [ ! -e "$state/.paused-$key" ] || fail "AFK watcher recorded normal-mode pause tracking instead of handing off"
