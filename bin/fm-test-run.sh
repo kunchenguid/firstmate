@@ -118,7 +118,7 @@ now_ms() {
 family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
-    fm-auth-preflight.test.sh|fm-brief.test.sh|\
+    fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
@@ -657,14 +657,8 @@ families_for_changed_path() {
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\
-    bin/fm-gate-refuse*|bin/fm-lock*)
+    bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
-      ;;
-    bin/fm-quota-axi-lib.sh)
-      # The quota-axi floor is consumed by bootstrap's diagnostic and by the
-      # dispatch auth preflight, so a bump must re-run both owners.
-      printf '%s\n' session-bootstrap
-      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
@@ -688,7 +682,7 @@ families_for_changed_path() {
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
     bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
-    bin/fm-auth-preflight.sh|\
+    bin/fm-vendor-auth-probe.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
@@ -725,8 +719,13 @@ families_for_changed_path() {
       fi
       ;;
     bin/*)
-      families_for_test_reference "$(basename "$path")" \
-        || printf '%s\n' "__unmapped__:$path"
+      # A deleted script has no consuming suite left to select, the same rule
+      # the fixture case above applies. Refusing on its absent mapping would
+      # make every retirement branch unable to select its changed tests.
+      if [ -e "$path" ]; then
+        families_for_test_reference "$(basename "$path")" \
+          || printf '%s\n' "__unmapped__:$path"
+      fi
       ;;
     tests/*)
       printf '%s\n' "__unmapped__:$path"
