@@ -86,7 +86,7 @@ Never use headroom, runway, pace, or reserve to silently replace that reasoning 
 
 1. Concrete contradictory evidence or malformed configuration: stop and report the tuple and that evidence.
    Unmeasurable quota, a missing model-level window, an absent runway field, and a credential surface quota-axi does not model are uncertainty, never this rule.
-2. Apply any explicit captain-configured dispatch-profile floor for that profile before the generic comparison.
+2. Honor any explicit captain instruction that sets a floor for that candidate before the generic comparison.
    Do not invent a generic percentage floor or treat a low percentage as an automatic failure.
 3. Keep the strongest-reasoning class when every candidate is tight or completion evidence is poor.
    Dispatch inside that class when a candidate can proceed, or report that its strongest-class choice cannot proceed rather than downgrading it to conserve quota.
