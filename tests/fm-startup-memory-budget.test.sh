@@ -16,6 +16,13 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi quota-axi
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'quota-axi 0.1.16 (fake)'
+fi
+exit 0
+SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0

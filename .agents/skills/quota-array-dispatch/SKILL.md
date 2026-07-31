@@ -29,7 +29,19 @@ For each candidate, preserve explicit `harness`, `model`, and `provider`; `harne
 - schema note when pace fields are absent
 
 Stale raw windows are diagnostic, never headroom.
+Grok's `credits.remaining` is a prepaid balance unrelated to `percentRemaining`; never read it as exhaustion.
 Read all windows named by `boundedBy`, `limitingWindowIds`, `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, and `unknownWindowIds`.
+
+## Authentication is scoped to the selected surface
+
+A candidate authenticates through its own tuple's surface; another harness's CLI can never gate it.
+`bin/fm-auth-preflight.sh` owns surface resolution, the captain-approved bounded preflight, exactly one post-preflight quota retry for every resolved candidate, and sanitized output; its `--help` owns flags and mechanics.
+Run it per candidate instead of resolving a surface by hand or launching a vendor CLI yourself.
+Read its verdict as facts, not as a route: `eligible=no` means drop that candidate and state the omission with its reason, and only an array with no eligible candidate left reaches the captain.
+`authStatus=usable` with `headroom=unknown` means authentication is fine and headroom is unmeasured, never a credential or login problem.
+`authStatus=unknown` with `reason=no-auth-evidence` means a verified harness/model relationship has no quota-axi authentication surface; keep it eligible with unknown auth and headroom, do not launch another harness's CLI, and prefer known sustainable evidence when comparable.
+`authStatus=expired` is a short-lived session token the owning vendor renews on next use, not a sign-out.
+Reserve login wording for `authStatus=unusable` or a failed preflight.
 
 ## Pace semantics
 
@@ -45,12 +57,14 @@ Conservation pressure is present for effective pace status `ahead`, effective pa
 Apply only among candidates satisfying required fit and strongest reasoning class.
 Never use pace or raw headroom to silently replace that reasoning class.
 
-1. Unresolved relationship or quota: stop and report the tuple and concrete evidence.
+1. Unresolved relationship, unresolved authentication, or malformed configuration: stop and report the tuple and concrete evidence.
+   Unmeasurable quota alone is not unresolved and never triggers this rule.
 2. All-tight: keep strongest reasoning; dispatch inside it or report if blocked.
 3. Comparable fit/reasoning: prefer no ahead pressure over pressure, even with higher raw headroom.
 4. Among pressured candidates, prefer the least-negative worst applicable reserve.
 5. Sustainable candidates: use known pace plus raw headroom.
    Prefer known sustainable evidence over `unknown` when comparable.
+   An authenticated candidate whose headroom is unmeasurable stays eligible at lower preference; disclose that unmeasured headroom in the dispatch record.
    Do not collapse those facts into an opaque composite score.
 6. If unresolved pace changes the choice, report uncertainty.
 7. Absent pace or older schema: do not crash, fabricate pace, or treat absence as healthy/`on_pace`.
@@ -60,6 +74,5 @@ Never use pace or raw headroom to silently replace that reasoning class.
    Report duplicate concrete profiles as a configuration error.
 
 Name the inspectable facts used for every candidate.
-After selecting, check auth only through that tuple's surface; another harness CLI cannot block it.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.

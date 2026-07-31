@@ -168,7 +168,10 @@ If static `config/crew-harness` or `config/secondmate-harness` names an unverifi
 When dispatch profiles exist, consult them at every crewmate or scout intake and pass the resolved concrete profile required by `fm-spawn`.
 Routing precedence is an explicit per-task captain override, then the best-fit configured rule, then the configured default, then the static crewmate harness.
 Firstmate alone resolves a matched profile array: run `quota-axi --json` at that intake, evaluate every configured candidate against that current output, and choose with inspectable real headroom including quota-window pace.
-Account for every candidate; if any harness/model/provider relationship, applicable quota data, or interpretation cannot be established, stop and report that candidate instead of omitting it, guessing, falling back, or calling the result quota-informed.
+Account for every candidate; if any harness/model/provider relationship, authentication, or interpretation cannot be established, stop and report that candidate instead of omitting it, guessing, falling back, or calling the result quota-informed.
+The exception is a verified harness with a well-formed model/provider relationship that quota-axi does not model on its selected authentication surface; keep that candidate eligible with unknown evidence as specified by `quota-array-dispatch`.
+Usable authentication with unmeasurable headroom is not an unresolved candidate: keep it eligible, disclose the unknown headroom, and never turn it into a credential or login escalation.
+Check a candidate's authentication only through its own tuple's surface using `bin/fm-auth-preflight.sh`, never by launching another harness's CLI.
 Preserve malformed profile configuration as an actionable error rather than selecting around it.
 When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota; stop and report the tight choice if that class cannot proceed.
 Break genuine headroom ties without array-order or harness bias.

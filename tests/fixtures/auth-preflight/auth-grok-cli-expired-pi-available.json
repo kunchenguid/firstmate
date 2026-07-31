@@ -1,0 +1,21 @@
+{
+  "generatedAt": "1970-01-01T00:00:00.000Z",
+  "schemaVersion": 1,
+  "auth": [
+    {
+      "provider": "grok",
+      "sources": [
+        {
+          "source": "auth-json",
+          "path": "/fixture/home/.grok/auth.json",
+          "status": "expired",
+          "error": "grok_cli_credential_expired"
+        },
+        {
+          "source": "pi:xai",
+          "status": "available"
+        }
+      ]
+    }
+  ]
+}
