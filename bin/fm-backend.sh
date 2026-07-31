@@ -619,6 +619,10 @@ fm_backend_source() {  # <name>
         . "$FM_BACKEND_LIB_DIR/backends/psmux.sh" || return 1
         _FM_BACKEND_PSMUX_SOURCED=1
       fi
+      # Re-point the session-provider command at psmux on every dispatch: the
+      # tmux case resets FM_TMUX_CMD=tmux, so a process that served a tmux task
+      # between two psmux tasks must not carry that value into the later one.
+      FM_TMUX_CMD=$(fm_backend_psmux_bin) || return 1
       ;;
     herdr)
       if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
