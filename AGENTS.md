@@ -41,7 +41,9 @@ You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
 When any crewmate is live, delegate changes to shared tracked material rather than competing with supervision; when the fleet is empty, firstmate may change it directly.
 This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
-Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
+Ship shared tracked changes on a branch, validated locally through `no-mistakes axi run --skip=push,pr,ci` (review, test, and lint only).
+Never push that branch or open a PR against this repo.
+Report the validated branch to the captain; once approved, fast-forward-merge it into local `main`, the same captain-approval authority hard rule 2 already requires for any merge.
 Never add an agent name as a commit co-author.
 
 ## 2. Layout and state
