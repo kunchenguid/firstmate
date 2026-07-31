@@ -159,6 +159,7 @@ family_for_basename() {
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
     fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
+    fm-herdr-endpoint-bind-e2e.test.sh|\
     fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
     fm-control-herdr-smoke.test.sh)
@@ -855,7 +856,7 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       ;;
-    bin/fm-herdr-session-cleanup.sh)
+    bin/fm-herdr-endpoint-bind.sh|bin/fm-herdr-session-cleanup.sh)
       printf '%s\n' session-bootstrap
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch

@@ -33,6 +33,9 @@ The durable wake queue preserves actionable events during the residual active-tu
 For every supported arm path, a successor that observes an accepted down stretch emits `check: rearm-resurface` through the ordinary durable handling path before settling into its live wait.
 That recovery presentation includes all unacknowledged queue rows and the existing cursor-folded OPEN DECISIONS set, so a still-open decision reappears even when recovery has no queue row of its own.
 The model no longer re-arms after ordinary wakes.
+A model-driven Claude background arm is reserved for confirmed recovery failures because Claude may terminate that tracked task's whole process group at a turn boundary.
+That termination kills both the arm and its watcher, so the killed arm cannot run its successor-attach logic and the harness reports the task failure even when the next Stop hook restores continuity.
+Routine continuity therefore stays with the external Stop owner; `nohup`, `disown`, and shell `&` remain intentionally denied.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.

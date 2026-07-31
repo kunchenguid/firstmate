@@ -4,9 +4,10 @@
 # Proves, against the real installed Claude Code and the real tracked hook
 # registration: a fresh session with in-flight work, no watcher, and a stale
 # session lock can run fm-session-start.sh first; session start reclaims the
-# dead owner; at least two tokenless auto-arm and rewake cycles then complete
-# with zero model-issued arm commands; and the cooperative guard consumes no
-# forced continuation while the hook's launch is healthy.
+# dead owner; the pull guard's watcher-down warning defers to the Stop owner;
+# at least two tokenless auto-arm and rewake cycles then complete with zero
+# model-issued arm commands; and the cooperative guard consumes no forced
+# continuation while the hook's launch is healthy.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication. No live fleet home, worktree, or session is touched.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -84,6 +85,7 @@ cat > "$PROJECT/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 N=$(cat "$FM_HOME/state/arm-count" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$FM_HOME/state/arm-count"
 echo "arm-run=$N pid=$$" >> "$FM_HOME/state/arm-ran"
+touch "$FM_HOME/state/.last-watcher-beat"
 if [ "$N" -ge 3 ]; then
   rm -f "$FM_HOME/state/task.meta"
   printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
@@ -100,6 +102,10 @@ cat > "$PROJECT/bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
 N=$(cat "$FM_HOME/state/drain-count" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$FM_HOME/state/drain-count"
 echo "drain-run=$N" >> "$FM_HOME/state/drain-ran"
+if [ "$N" -eq 1 ]; then
+  SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+  "$SCRIPT_DIR/fm-guard.sh" || true
+fi
 if [ "$N" -ge 3 ]; then
   rm -f "$FM_HOME/state/task.meta"
 fi
@@ -107,7 +113,7 @@ printf 'stale: fixture-rapid drained\n'
 SH
 chmod +x "$PROJECT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-wake-drain.sh"
 
-PROMPT='Run exactly `bin/fm-session-start.sh` with Bash as your first tool call. After reading its complete digest, reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
+PROMPT='Run exactly `bin/fm-session-start.sh` with Bash as your first tool call. Follow the emitted supervision operating block and watcher-liveness guidance exactly. After reading the complete digest, reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never use any other tool.'
 
 (
   cd "$PROJECT" || exit 1
@@ -123,6 +129,8 @@ REWAKES=$(grep -c 'Stop hook feedback' "$TRANSCRIPT" 2>/dev/null || true)
 [ "$REWAKES" -ge 2 ] || fail "expected at least 2 exit-2 rewake deliveries, got $REWAKES"
 grep -q 'stale: fixture-rapid-1' "$TRANSCRIPT" || fail "first rapid rewake reason missing from the transcript"
 grep -q 'stale: fixture-rapid-2' "$TRANSCRIPT" || fail "second rapid rewake reason missing from the transcript"
+grep -q 'let the Stop-owned auto-arm establish watcher supervision when this turn ends' "$TRANSCRIPT" \
+  || fail "session-start pull guard did not emit Stop-owned liveness guidance"
 [ "$(sed -n '1p' "$HOME_DIR/state/tool-calls.log" 2>/dev/null)" = 'bin/fm-session-start.sh' ] \
   || fail "fresh Claude session did not run session start first: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
 [ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \

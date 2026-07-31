@@ -81,6 +81,9 @@ These five sentences are the single owner of the task-selector vocabulary; backe
 `fm-teardown.sh <id>` takes a task id directly and validates the complete metadata-only endpoint identity before any runtime dispatch or cleanup mutation.
 Missing, empty, duplicate, malformed, backend-inconsistent, or task-mismatched endpoint records are preserved and refused.
 Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>`; opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
+For a pre-update Herdr task that lacks that binding, `bin/fm-herdr-endpoint-bind.sh <id>` is the only supported migration path.
+It changes no runtime state and publishes the binding only after two exact live correlations of the recorded pane, tab, workspace, unique task label, and physical foreground worktree under the task's spawn lock.
+Missing, stopped, exited, renamed, duplicated, moved, or unreadable endpoints remain refused without changing metadata.
 `FM_HOME` determines Herdr's home label: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
 [`herdr-backend.md`](herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, collision handling, and recovery behavior.
 The local `config/herdr-presentation-spaces` file instead opts a home out of, or explicitly in to, Herdr's default-on disposable single-task visual projection; [Presentation spaces](herdr-backend.md#presentation-spaces) owns its accepted values, default, Herdr version floor, migration, behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.

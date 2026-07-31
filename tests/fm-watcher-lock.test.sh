@@ -149,9 +149,13 @@ test_guard_warnings() {
   grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
   grep -F 'guarded operation WILL still run' "$err" >/dev/null || fail "guard banner missing generic continuation wording"
   ! grep -F 'requested message WILL still be sent' "$err" >/dev/null || fail "shared guard used send-specific continuation wording"
-  grep -F 'watcher supervision needs Stop-owned automatic recovery' "$err" >/dev/null || fail "guard banner missing neutral automatic-recovery guidance"
+  grep -F 'let the Stop-owned auto-arm establish watcher supervision when this turn ends' "$err" >/dev/null \
+    || fail "Claude pull guard did not leave routine recovery to the Stop hook"
   grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about pending queue"
-  grep -F 'After draining queued wakes, watcher supervision needs Stop-owned automatic recovery' "$err" >/dev/null || fail "guard did not order neutral automatic recovery after drain"
+  grep -F 'After draining queued wakes, let the Stop-owned auto-arm establish watcher supervision' "$err" >/dev/null \
+    || fail "guard did not order wake drain before Stop-owned recovery"
+  ! grep -F 'Claude Code background task' "$err" >/dev/null \
+    || fail "Claude pull guard still instructed the model-driven background task that fails at turn end"
   ! grep -F 'Restart it NOW, before anything else' "$err" >/dev/null || fail "guard still gave conflicting restart-first instruction"
   ! grep -F 'as the harness-tracked background task' "$err" >/dev/null || fail "guard still printed the old universal background-task repair text"
   banner_line=$(grep -n 'WATCHER DOWN' "$err" | head -1 | cut -d: -f1)
@@ -165,7 +169,10 @@ test_guard_warnings() {
   printf 'project=x\n' > "$state/task.meta"
   : > "$dir/config/x-mode.env"
   CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
+  grep -F 'let the Stop-owned auto-arm establish watcher supervision when this turn ends' "$err" >/dev/null \
+    || fail "X-mode pull guard did not leave routine recovery to the Stop hook"
+  ! grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null \
+    || fail "X-mode pull guard instructed model setup that the Stop auto-arm owns"
 
   # (2) live watcher plus fresh beacon, empty queue -> silence.
   dir=$(make_case guard-fresh)

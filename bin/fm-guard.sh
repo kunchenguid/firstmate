@@ -23,7 +23,9 @@
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
 # suppressed by that dedup. Normal wake handling (watcher briefly down between a
 # wake and the next supervision resume) stays inside the grace window and stays
-# silent. Always exits 0: the guard warns, it never blocks.
+# silent. On Claude, the warning leaves routine recovery to the Stop auto-arm;
+# only the turn-end guard's confirmed-failure path emits the manual background
+# repair command. Always exits 0: the guard warns, it never blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -189,7 +191,7 @@ if [ "$watcher_healthy" = false ]; then
       --afk "$afk" \
       --x-mode "$x_mode" \
       --queue-pending "$queue_arg" \
-      --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')
+      --liveness-line 2>/dev/null || printf '%s\n' 'Restore watcher supervision according to the session-start operating block.')
     rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
     {
       printf '●%s\n' "$rule"

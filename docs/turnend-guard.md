@@ -91,7 +91,8 @@ Malformed JSON, a selected field with a non-boolean type, missing `jq`, missing 
 Grok's project hook requires the checkout to be trusted with `/hooks-trust` or launch-time `--trust`; genuine pre-native builds can run the same tracked hook from an isolated global hook directory.
 
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
-That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
+That warning uses `bin/fm-supervision-instructions.sh --liveness-line`, so it always points to the active harness protocol rather than embedding another repair command.
+For Claude, the non-blocking pull warning leaves routine recovery to the upcoming Stop auto-arm; `--repair-line` remains reserved for a turn-end no-claim continuation or another confirmed failure.
 
 ## Compatibility limits
 

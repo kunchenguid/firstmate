@@ -22,6 +22,9 @@ When this session owns supervision and away mode is not active:
    It allows the stop when a watcher is healthy or the role-verified auto-arm owns recovery, while fresh failure epochs advance the bounded one-time attended fail-open progression described in [`turnend-guard.md`](../turnend-guard.md).
 9. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.
 
+A pull-based `WATCHER DOWN` warning during an active turn is not proof that the Stop owner failed, because the Stop hook has not fired yet.
+Finish the active handling turn and let the Stop hook claim the next cycle; only the turn-end guard's confirmed no-claim continuation or a typed hook failure authorizes the manual recovery path.
+
 The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` remains the verified arm wrapper that the Stop hook foregrounds.
 Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
 See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract and the Claude ownership model.

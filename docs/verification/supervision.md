@@ -178,11 +178,11 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
+The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-30.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
-| Claude | 2.1.219 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session ran session start first, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
+| Claude | 2.1.220 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session received the pull guard's watcher-down warning, deferred routine recovery to Stop, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
 | Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
@@ -218,7 +218,7 @@ Harness identity is read from the executable path and `argv[0]` as well as the c
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, stale acknowledgement rejection, and a persistent successor remaining live after recovery is acknowledged.
 
-The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
+The Claude product live path ran with Claude Code 2.1.220 on 2026-07-30:
 
 ```sh
 claude --version
@@ -228,15 +228,19 @@ FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
 Observed output:
 
 ```text
-2.1.219 (Claude Code)
-ok - Claude 2.1.219 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
+2.1.220 (Claude Code)
+ok - Claude 2.1.220 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
 ```
+
+The fixture deliberately emitted the session-start pull guard's `WATCHER DOWN` warning without instructing the model which arm command to avoid.
+The transcript contained the Stop-owned liveness guidance, the tool log contained zero model-issued `fm-watch-arm.sh` calls, and the hook-owned arm ran twice.
 
 Current entry points:
 
 ```sh
 tests/fm-turnend-guard.test.sh
 tests/fm-supervision-instructions.test.sh
+FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_GROK_STOP_LIVE_E2E=1 FM_GROK_NATIVE_BIN="$native_grok" FM_GROK_LEGACY_BIN="$pre_native_grok" tests/fm-grok-stop-live-e2e.test.sh
 ```
@@ -299,11 +303,11 @@ fm-claude-stop-autoarm: ok
 
 ## Watcher continuity
 
-The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
+The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-30, all against isolated project and home state.
 No credential material was copied into a fixture.
 
 ```text
-Claude Code 2.1.219
+Claude Code 2.1.220
 codex-cli 0.144.4
 OpenCode 1.17.18
 Pi 0.80.10
@@ -312,7 +316,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
-| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
+| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | A watcher-down pull warning produced no model arm, session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |

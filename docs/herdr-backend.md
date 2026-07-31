@@ -190,6 +190,7 @@ The current structural gate removes label inference from cleanup authority.
 ```text
 backend=herdr
 window=<session>:<pane-id>
+endpoint_task_id=<task-id>
 herdr_session=<session>
 herdr_workspace_id=<workspace-id>
 herdr_tab_id=<tab-id>
@@ -199,6 +200,8 @@ herdr_pane_id=<pane-id>
 A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
+For a pre-update task whose metadata lacks `endpoint_task_id=`, `bin/fm-herdr-endpoint-bind.sh <id>` can publish that binding only after the recorded live topology, unique task label, and foreground worktree all agree twice.
+It never guesses an endpoint from a label and never changes Herdr runtime state; [`docs/configuration.md`](configuration.md) owns the full migration contract.
 
 ## Current transport behavior
 

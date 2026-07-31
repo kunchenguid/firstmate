@@ -15,14 +15,16 @@ READ_ONLY=0
 AFK=0
 X_MODE=0
 REPAIR_LINE=0
+LIVENESS_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line|--liveness-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
+With --liveness-line, print the pull guard's non-blocking continuity instruction.
 EOF
 }
 
@@ -64,6 +66,10 @@ while [ "$#" -gt 0 ]; do
       REPAIR_LINE=1
       shift
       ;;
+    --liveness-line)
+      LIVENESS_LINE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -75,6 +81,12 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$REPAIR_LINE" -eq 1 ] && [ "$LIVENESS_LINE" -eq 1 ]; then
+  echo "error: --repair-line and --liveness-line are mutually exclusive" >&2
+  usage >&2
+  exit 2
+fi
 
 if [ -z "$HARNESS" ]; then
   HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
@@ -155,6 +167,23 @@ repair_line() {
   esac
 }
 
+liveness_line() {
+  if [ "$HARNESS" != claude ]; then
+    repair_line
+    return 0
+  fi
+  if [ "$READ_ONLY" -eq 1 ] || [ "$AFK" -eq 1 ]; then
+    repair_line
+    return 0
+  fi
+
+  prefix=
+  if [ "$QUEUE_PENDING" -eq 1 ]; then
+    prefix='After draining queued wakes, '
+  fi
+  printf '%s%s\n' "$prefix" 'let the Stop-owned auto-arm establish watcher supervision when this turn ends; do not start a model-driven bin/fm-watch-arm.sh background task. The turn-end guard will block and issue recovery guidance if the Stop hook does not claim this home.'
+}
+
 ordinary_wake_line() {
   case "$HARNESS" in
     claude)
@@ -180,6 +209,10 @@ ordinary_wake_line() {
 
 if [ "$REPAIR_LINE" -eq 1 ]; then
   repair_line
+  exit 0
+fi
+if [ "$LIVENESS_LINE" -eq 1 ]; then
+  liveness_line
   exit 0
 fi
 

@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+HERDR_BIND="$ROOT/bin/fm-herdr-endpoint-bind.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
 REAL_TMUX=$(command -v tmux || true)
 
@@ -30,8 +31,71 @@ printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 exit 0
 SH
-  chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse"
+  cat > "$TMP_ROOT/$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'herdr' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+session=${FM_TEST_HERDR_SESSION:-lab}
+workspace=${FM_TEST_HERDR_WORKSPACE:-w1}
+tab=${FM_TEST_HERDR_TAB:-w1:t2}
+pane=${FM_TEST_HERDR_PANE:-w1:p2}
+reported_tab=${FM_TEST_HERDR_REPORTED_TAB:-$tab}
+label=${FM_TEST_HERDR_LABEL:-fm-legacy-herdr}
+cwd=${FM_TEST_HERDR_CWD:-/unmatched}
+last=
+previous=
+for arg in "$@"; do
+  previous=$last
+  last=$arg
+done
+[ "$previous:$last" = "--session:$session" ] || exit 87
+case "${1:-}:${2:-}" in
+  pane:get)
+    jq -cn --arg pane "$pane" --arg tab "$reported_tab" --arg workspace "$workspace" --arg cwd "$cwd" \
+      '{result:{pane:{pane_id:$pane,tab_id:$tab,workspace_id:$workspace,foreground_cwd:$cwd}}}'
+    ;;
+  tab:get)
+    jq -cn --arg tab "$tab" --arg workspace "$workspace" --arg label "$label" \
+      '{result:{tab:{tab_id:$tab,workspace_id:$workspace,label:$label,pane_count:1}}}'
+    ;;
+  tab:list)
+    if [ "${FM_TEST_HERDR_DUPLICATE_LABEL:-0}" = 1 ]; then
+      jq -cn --arg tab "$tab" --arg workspace "$workspace" --arg label "$label" \
+        '{result:{tabs:[{tab_id:$tab,workspace_id:$workspace,label:$label},{tab_id:"w1:t9",workspace_id:$workspace,label:$label}]}}'
+    else
+      jq -cn --arg tab "$tab" --arg workspace "$workspace" --arg label "$label" \
+        '{result:{tabs:[{tab_id:$tab,workspace_id:$workspace,label:$label}]}}'
+    fi
+    ;;
+  pane:list)
+    jq -cn --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" \
+      '{result:{panes:[{pane_id:$pane,tab_id:$tab,workspace_id:$workspace}]}}'
+    ;;
+  status:--json)
+    printf '{"server":{"running":true}}\n'
+    ;;
+  pane:close)
+    printf '{"result":{"type":"pane_closed"}}\n'
+    ;;
+  *) exit 88 ;;
+esac
+SH
+  chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse" \
+    "$TMP_ROOT/$dir/fakebin/herdr"
   printf '%s\n' "$TMP_ROOT/$dir"
+}
+
+run_herdr_bind_case() {  # <case> <id>
+  local dir=$1 id=$2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+  FM_TEST_HERDR_SESSION=lab FM_TEST_HERDR_WORKSPACE=w1 \
+  FM_TEST_HERDR_TAB=w1:t2 FM_TEST_HERDR_PANE=w1:p2 \
+  FM_TEST_HERDR_LABEL="fm-$id" FM_TEST_HERDR_CWD="${FM_TEST_HERDR_CWD:-$dir/worktree}" \
+  FM_TEST_HERDR_REPORTED_TAB="${FM_TEST_HERDR_REPORTED_TAB:-w1:t2}" \
+  FM_TEST_HERDR_DUPLICATE_LABEL="${FM_TEST_HERDR_DUPLICATE_LABEL:-0}" \
+  PATH="$dir/fakebin:$PATH" "$HERDR_BIND" "$id"
 }
 
 run_case() {  # <case> <id>
@@ -365,6 +429,91 @@ SH
   pass "fm-teardown: exact tmux cleanup preserves invalid and prefix-matched neighbors while removing only the recorded target"
 }
 
+test_legacy_herdr_binding_requires_exact_live_proof() {
+  local before dir id=legacy-herdr rc
+
+  dir=$(make_case legacy-herdr-valid)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p2" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" "kind=scout"
+  run_herdr_bind_case "$dir" "$id" > "$dir/bind.out" \
+    || fail "exact legacy Herdr endpoint binding failed: $(cat "$dir/bind.out")"
+  [ "$(grep -c '^endpoint_task_id=' "$dir/home/state/$id.meta")" -eq 1 ] \
+    || fail "legacy Herdr binding did not publish exactly one task id"
+  grep -qxF "endpoint_task_id=$id" "$dir/home/state/$id.meta" \
+    || fail "legacy Herdr binding published the wrong task id"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id"
+  ) || fail "migrated Herdr metadata did not pass teardown's unchanged validator"
+
+  : > "$dir/runtime.log"
+  run_herdr_bind_case "$dir" "$id" > "$dir/rebind.out" \
+    || fail "idempotent Herdr endpoint binding failed"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "idempotent binding queried Herdr after metadata was already valid"
+
+  : > "$dir/runtime.log"
+  run_case "$dir" "$id" > "$dir/teardown.out" 2> "$dir/teardown.err" \
+    || fail "migrated legacy Herdr task did not tear down: $(cat "$dir/teardown.err")"
+  [ ! -e "$dir/home/state/$id.meta" ] \
+    || fail "migrated legacy Herdr teardown retained task metadata"
+  grep -F "herdr <pane> <close> <w1:p2> <--session> <lab>" "$dir/runtime.log" >/dev/null \
+    || fail "migrated legacy Herdr teardown did not close the exact recorded pane"
+
+  dir=$(make_case legacy-herdr-wrong-cwd)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p2" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" "kind=scout"
+  before="$dir/meta.before"
+  cp "$dir/home/state/$id.meta" "$before"
+  set +e
+  FM_TEST_HERDR_CWD="$dir/project" run_herdr_bind_case "$dir" "$id" \
+    > "$dir/bind.out" 2> "$dir/bind.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "legacy Herdr binding accepted a pane outside the task worktree"
+  cmp -s "$before" "$dir/home/state/$id.meta" \
+    || fail "wrong-cwd refusal changed legacy Herdr metadata"
+
+  dir=$(make_case legacy-herdr-duplicate-label)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p2" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" "kind=scout"
+  before="$dir/meta.before"
+  cp "$dir/home/state/$id.meta" "$before"
+  set +e
+  FM_TEST_HERDR_DUPLICATE_LABEL=1 run_herdr_bind_case "$dir" "$id" \
+    > "$dir/bind.out" 2> "$dir/bind.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "legacy Herdr binding guessed among duplicate task labels"
+  cmp -s "$before" "$dir/home/state/$id.meta" \
+    || fail "duplicate-label refusal changed legacy Herdr metadata"
+
+  dir=$(make_case legacy-herdr-topology-mismatch)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p2" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" "kind=scout"
+  before="$dir/meta.before"
+  cp "$dir/home/state/$id.meta" "$before"
+  set +e
+  FM_TEST_HERDR_REPORTED_TAB=w1:t9 run_herdr_bind_case "$dir" "$id" \
+    > "$dir/bind.out" 2> "$dir/bind.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "legacy Herdr binding accepted contradictory pane topology"
+  cmp -s "$before" "$dir/home/state/$id.meta" \
+    || fail "topology refusal changed legacy Herdr metadata"
+
+  pass "legacy Herdr binding verifies exact live topology and worktree before enabling unchanged teardown safety"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
@@ -372,3 +521,4 @@ test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
+test_legacy_herdr_binding_requires_exact_live_proof

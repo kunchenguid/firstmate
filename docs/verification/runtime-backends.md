@@ -154,12 +154,13 @@ Expected submit matrix: proven pending plus busy is accepted as queued; proven p
 
 ### Cleanup endpoint identity
 
-The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+The cleanup identity boundary was validated on 2026-07-30 with tmux 3.6a, metadata fixtures for every supported backend, and a guarded Herdr 0.7.5 protocol-17 lab.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
 tests/fm-teardown.test.sh
 tests/fm-backend-herdr.test.sh
+tests/fm-herdr-endpoint-bind-e2e.test.sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend-cmux.test.sh
@@ -172,7 +173,9 @@ ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endp
 ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
-ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
+ok - fm-teardown: exact tmux cleanup preserves invalid and prefix-matched neighbors while removing only the recorded target
+ok - legacy Herdr binding verifies exact live topology and worktree before enabling unchanged teardown safety
+ok - real guarded Herdr lab bound one exact legacy endpoint and refused a duplicate task label without metadata mutation
 ```
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
@@ -217,6 +220,19 @@ The CLI matrix was checked directly:
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
+
+### Legacy endpoint binding
+
+The pre-update metadata bridge was verified on 2026-07-30 against Herdr 0.7.5 protocol 17 in a guarded named non-default session:
+
+```sh
+tests/fm-teardown-endpoint-safety.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-herdr-endpoint-bind-e2e.test.sh
+```
+
+The real endpoint's recorded pane, tab, workspace, unique `fm-<task-id>` label, and physical foreground worktree agreed on both read passes before `endpoint_task_id=` was published.
+A second real endpoint with a duplicate task label was refused without changing its metadata, and guarded lab teardown preserved the default-session fleet-state tripwire.
+The deterministic suite also refuses wrong foreground worktrees and cross-wired topology, then proves that a successfully bound record passes the unchanged teardown validator and closes only its exact pane.
 
 ### Prune and respawn
 

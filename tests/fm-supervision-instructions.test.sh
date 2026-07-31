@@ -71,6 +71,30 @@ test_repair_lines() {
   pass "renderer repair-line mode is harness-aware and honors conditional state"
 }
 
+test_claude_liveness_warning_defers_to_stop_owner() {
+  local home out status
+  home="$TMP_ROOT/claude-liveness-home"
+  mkdir -p "$home/state" "$home/config"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --liveness-line)
+  assert_contains "$out" "After draining queued wakes" "claude liveness line lost queue-first ordering"
+  assert_contains "$out" "Stop-owned auto-arm" "claude liveness line did not leave continuity to the Stop hook"
+  assert_contains "$out" "do not start a model-driven bin/fm-watch-arm.sh background task" "claude liveness line did not forbid the cosmetic-failure path"
+  assert_contains "$out" "turn-end guard will block" "claude liveness line lost its no-turn-ends-blind backstop"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness claude --repair-line)
+  assert_contains "$out" "Claude Code background task" "confirmed Claude recovery lost its tracked background mechanism"
+
+  set +e
+  out=$(FM_HOME="$home" "$RENDER" --harness claude --repair-line --liveness-line 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] || fail "renderer accepted conflicting line modes"
+  assert_contains "$out" "mutually exclusive" "conflicting line modes did not explain the refusal"
+
+  pass "renderer keeps Claude pull warnings Stop-owned while preserving confirmed manual recovery"
+}
+
 test_cross_harness_ordinary_continuation_and_repair_matrix() {
   local ordinary out
 
@@ -180,6 +204,7 @@ test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
+test_claude_liveness_warning_defers_to_stop_owner
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify

@@ -245,6 +245,14 @@ test_installer_retries_transient_download_failure() {
   fakebin=$(fm_fakebin "$tmp")
   destination="$tmp/bin"
 
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf 'Linux\n' ;;
+  -m) printf 'x86_64\n' ;;
+  *) exit 2 ;;
+esac
+SH
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
 count=0
@@ -285,7 +293,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
+  chmod +x "$fakebin/uname" "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
 
   out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
     || fail "installer did not recover from a transient download failure"$'\n'"$out"
@@ -293,6 +301,87 @@ SH
   assert_contains "$out" "download attempt 1 failed; retrying" "installer did not disclose its retry"
   [ -x "$destination/shellcheck" ] || fail "installer did not install ShellCheck after retrying"
   pass "ShellCheck installer retries a transient download failure"
+}
+
+test_installer_selects_verified_platform_asset() {
+  local tmp fakebin os arch platform checksum destination out rc
+  tmp=$(fm_test_tmproot fm-shellcheck-platform)
+  fakebin=$(fm_fakebin "$tmp")
+
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf '%s\n' "$FAKE_UNAME_OS" ;;
+  -m) printf '%s\n' "$FAKE_UNAME_ARCH" ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$CURL_ARGS"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    : > "$2"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  cat > "$fakebin/sha256sum" <<'SH'
+#!/usr/bin/env bash
+printf '%s  %s\n' "$EXPECTED_SHA256" "$1"
+SH
+  cat > "$fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -C ]; then
+    mkdir -p "$2/shellcheck-v0.11.0"
+    cat > "$2/shellcheck-v0.11.0/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+EOF
+    chmod +x "$2/shellcheck-v0.11.0/shellcheck"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  chmod +x "$fakebin/uname" "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar"
+
+  while IFS='|' read -r os arch platform checksum; do
+    [ -n "$os" ] || continue
+    destination="$tmp/bin-${os}-${arch}"
+    out=$(FAKE_UNAME_OS="$os" FAKE_UNAME_ARCH="$arch" \
+      EXPECTED_SHA256="$checksum" CURL_ARGS="$tmp/curl-args" \
+      PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
+      || fail "installer refused supported platform $os-$arch"$'\n'"$out"
+    assert_contains "$(cat "$tmp/curl-args")" \
+      "shellcheck-v0.11.0.${platform}.tar.xz" \
+      "installer selected the wrong asset for $os-$arch"
+    [ -x "$destination/shellcheck" ] \
+      || fail "installer did not install an executable for $os-$arch"
+  done <<'CASES'
+Linux|x86_64|linux.x86_64|8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+Linux|aarch64|linux.aarch64|12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
+Linux|armv6l|linux.armv6hf|8afc50b302d5feeac9381ea114d563f0150d061520042b254d6eb715797c8223
+Linux|riscv64|linux.riscv64|693c987777e7b524dd311d9b8c704885a39c889c9804bb1ef1fd29b48567b0b3
+Darwin|arm64|darwin.aarch64|56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
+Darwin|x86_64|darwin.x86_64|3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6
+CASES
+
+  rm -f "$tmp/curl-args"
+  rc=0
+  out=$(FAKE_UNAME_OS=FreeBSD FAKE_UNAME_ARCH=x86_64 CURL_ARGS="$tmp/curl-args" \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$tmp/unsupported" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted an unsupported platform"
+  assert_contains "$out" "unsupported platform FreeBSD-x86_64" \
+    "installer did not identify the unsupported platform"
+  [ ! -e "$tmp/curl-args" ] \
+    || fail "installer downloaded an asset before refusing an unsupported platform"
+
+  pass "ShellCheck installer selects each verified host asset and refuses unsupported platforms before download"
 }
 
 test_rejects_wrong_shellcheck_version() {
@@ -622,6 +711,7 @@ SH
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
+test_installer_selects_verified_platform_asset
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
