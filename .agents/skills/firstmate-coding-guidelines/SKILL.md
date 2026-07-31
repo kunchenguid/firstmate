@@ -63,6 +63,11 @@ If an addition needs more than a few lines of conditional detail (detail that ma
 A skill's cost is paid only by the sessions that actually load it.
 When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
 
+## Writing a skill
+
+A change to any skill under `.agents/skills/` or `skills/` begins by loading `.agents/skills/writing-great-skills/SKILL.md` under firstmate's tracked code root, and is written against it.
+That guide owns how a skill is written, and firstmate wrote two skills in one day without it and reproduced several of the failure modes it names.
+
 ## Trigger hygiene
 
 A new skill is dead weight if nothing loads it.

@@ -283,7 +283,7 @@ Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
 
-Load `paired-review` before dispatching the high-blast-radius ship work its section 13 trigger names, because that protocol launches a second worker in the same dispatch.
+Load `paired-review` before dispatching the high-blast-radius implementation work its section 13 trigger names, because that protocol launches a second worker in the same dispatch.
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
@@ -524,7 +524,7 @@ These skills are not captain-invocable; load them only at their precise triggers
   Cloning or registering a project is add intake and uses the same trigger.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
-- `paired-review` - load before dispatching high-blast-radius ship work (a database migration, a contract or schema change, a subsystem deletion or relocation, or any task the captain names as paired), and when supervising or deciding an escalation from a pair already under way.
+- `paired-review` - load before dispatching high-blast-radius implementation work (a database migration, a contract or schema change, a subsystem deletion or relocation, or any task the captain names as paired), before dispatching a bug or regression diagnosis, which is never paired work and whose root cause is judged before any fix action, and when supervising or deciding an escalation from a pair already under way.
 - `decision-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
 - `process-event-sources` - load before arming a long-polling source, and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.

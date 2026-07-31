@@ -1,8 +1,9 @@
 ---
 name: paired-review
 description: >-
-  Agent-only protocol for running high-blast-radius ship work as a pair - a driver and a navigator launched together - exchanging directly through a shared file instead of through firstmate.
+  Agent-only protocol for running high-blast-radius implementation work as a pair - a driver and a navigator launched together - exchanging directly through a shared file instead of through firstmate.
   Use before dispatching a database migration, a contract or schema change, a subsystem deletion or relocation, or any ship task the captain names as paired, and while supervising or deciding an escalation from a pair already under way.
+  Also use before dispatching a bug or regression diagnosis, which runs as one worker rather than a pair.
 user-invocable: false
 metadata:
   internal: true
@@ -26,7 +27,7 @@ An agent told it is the reviewer will sit idle until there is something to revie
 
 ## When to pair
 
-Pair only high-blast-radius ship work:
+Pair only high-blast-radius implementation work:
 
 - a database migration,
 - a change to a contract or a schema,
@@ -36,6 +37,32 @@ Pair only high-blast-radius ship work:
 Do not pair routine work.
 A pair roughly doubles the token cost of the task and adds a second supervision chain to keep alive.
 The trade is worth it only when re-doing the work would cost more than checking it, which is what the four triggers above have in common: a wrong direction there is not a patch but a rebuild.
+
+## A diagnosis is not paired work
+
+Pairing applies to implementation work.
+A bug, a regression, or a crash-loop is diagnosis work and takes the diagnose-then-fix shape below: one worker, root cause first.
+A navigator's contribution is an independent view of where the work belongs, and until a root cause exists there is no "where" to hold a view about, so a second agent only adds a second guess to the evidence the first is still gathering.
+The risk a bug carries is a wrong root cause rather than a wrong layer, and sequence guards that where parallelism cannot.
+
+Firstmate loads its own `diagnostic-reasoning` skill before scoping a reported bug; skipping it is how firstmate once reached for this protocol on a production crash-loop by reflex.
+That skill governs how firstmate reasons about the bug and this section governs only the dispatch shape, so each keeps its own contract.
+
+1. **One worker, handed the diagnosis skill by absolute path.**
+   Its brief names `.agents/skills/diagnosing-bugs/SKILL.md` under firstmate's tracked code root, written out in absolute form, and requires it to be read and followed.
+2. **The root cause is the whole deliverable.**
+   The worker publishes it and stops, leaving the fix unwritten.
+3. **The root-cause gate: firstmate judges the root cause before any fix action, on every diagnosis task in every project.**
+   Confident, firstmate authorises the fix immediately; otherwise it escalates the root cause and waits.
+   The captain gets the report either way, so the gate costs the captain a wait rather than visibility.
+4. **Investigation itself needs no permission.**
+   Only action on the system waits.
+
+The root-cause document carries the reproduction, the causal chain with `file:line` per link, an explicit disconfirming check, the separation of initiating trigger from masking condition from visible symptom, and the counterfactual.
+That standard is also the confidence test: all five present and holding is confidence, and any one of them missing, hand-waved, or resting on a plausible story rather than the source calls for the escalation instead.
+A destructive, irreversible, or security-sensitive fix goes to the captain however certain the cause is, as does a fix direction that would expand the accepted product or engineering contract under the existing `ask-user-authority` boundary - which a diagnosis often implies, on one such task whether to retire a boot-time service entirely.
+Any hypothesis firstmate hands the worker is labelled as something to confirm or refute against the source, never as a finding.
+Once the captain has answered, the implementation that follows is ordinary ship work and pairs only if it independently meets the triggers above.
 
 ## Launch both sides at the same time
 
@@ -83,6 +110,36 @@ The stated scope and seam assumptions are part of the accepted contract, so wide
 4. **PR gate, the full review of the finished work.**
    A two-axis code-review skill fits here and only here, and it is a reference the navigator consults rather than a procedure it executes literally.
    Two of its assumptions do not hold in this fleet, so state both in the brief and do not try to satisfy its own setup steps: it expects a fixed point supplied by a user, where here the fixed point is the branch's merge-base with the default branch, and it looks up the originating spec in a configured issue tracker, where here the spec source is the task brief and firstmate supplies it.
+
+## The four structural questions every navigator brief carries
+
+A navigator given a checklist checks the checklist, not the change.
+So every navigator brief carries two things: the task-specific high-consequence checks, and these four structural questions, fixed and unchanged for every paired task.
+
+1. **Was the stated reason delivered?**
+   The brief or decision record says why this shape was chosen over the alternatives.
+   Did the implementation achieve that reason, or only its mechanical part?
+2. **Where did the coupling go?**
+   If the task removed a dependency, did it disappear, or move somewhere else?
+3. **Does this add another instance of a shape this repo has already been burned by?**
+4. **What did the brief not specify that the implementation had to decide anyway?**
+   List those decisions.
+
+The four are fixed, and answering all four is the navigator's stopping rule at that gate.
+Being bounded is the point: the captain rejected an open "what else is wrong here?" because it aims at nothing and leaves the navigator no stopping rule, so it wanders into style, unrelated files, and speculation at a round trip each.
+
+Why this exact set, recorded so a later session keeps the questions sharp rather than treating them as boilerplate:
+
+- Questions 1 and 2 each independently catch the failure that produced this rule.
+  One PR's decision record chose registration-time contribution because `HasData` cannot survive a lazily loaded domain, and the implementation then put the trigger in `Program.cs`, which cannot survive one either.
+  The stated reason went undelivered, and the coupling moved rather than disappeared: core stopped naming domains and the host started naming the feature.
+  Firstmate had written three precise checks for that gate, and the navigator checked exactly those three and passed.
+- Question 3 is the cheapest, and on that same PR would have flagged a second boot-time row creator three lines below the one that crash-looped production the same morning.
+- Question 4 is bounded because the decisions a worker made on its own are a finite list.
+
+The four exist because a checklist cannot reach the destination: a navigator is pointed at a diff, and a diff shows what changed, never whether the change moves toward where the work is going.
+Across one day of pairs on this fleet, 2026-07-31, the pairs caught real code defects unaided - a committed NUL byte, a validation rule enforced server-side but not client-side, a whitespace-predicate mismatch - and missed both architectural direction problems, which the captain caught.
+More precise checks narrow the aperture rather than widening it, which is why the destination stays firstmate's own to hold.
 
 ## The shared exchange file
 
@@ -172,6 +229,7 @@ Removing firstmate from the exchange moves no approval authority to the crewmate
 Firstmate still:
 
 - dispatches both sides together and writes the same scope and seam statement into both briefs,
+- writes the task-specific checks and the four structural questions into the navigator's brief, and holds the destination itself,
 - hands out each side's skills by absolute path, and supplies the spec source at the PR gate,
 - reads the shared exchange file at its own pace rather than gating the pair on a firstmate turn,
 - decides every escalation under the configured authority, escalating to the captain where that authority requires it,
