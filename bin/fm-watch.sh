@@ -75,6 +75,8 @@ mkdir -p "$STATE"
 # cheap when no records exist and never scrapes secondmate conversation.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -109,14 +111,9 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
-# Busy signatures are selected by recorded harness unless FM_BUSY_REGEX globally
-# overrides them.
-# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
-# grok: "Ctrl+c:cancel". Claude's current spinner signature is matched only for
-# a recorded Claude task because an ellipsis followed by elapsed time is not a
-# safe shared signature for arbitrary harness output. Kimi's moon-plus-middot
-# spinner signature is likewise matched only for a recorded Kimi task.
-BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
+# Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
+# is the single owner of per-harness sources, source attribution, and the one
+# remaining rendered-text fallback (Grok only).
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
@@ -187,29 +184,24 @@ hash_pane() {
   fi
 }
 
-# window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
-# a backend's native semantic busy state (fm_backend_busy_state - herdr's
-# agent.get; herdr-addendum "busy state" row, "the first backend where
-# fm_session_busy_state gets real semantics"); when the backend reports unknown,
-# falls back to the recorded harness's verified pane-tail signature. <tail40> is
-# the same bounded capture already read for hashing, so this adds no extra
-# backend calls on the regex-fallback path.
+# window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through
+# the semantic busy-state contract (bin/fm-busy-lib.sh). Only an exact busy
+# verdict returns 0: idle, unknown, and dead all return 1, so a converted
+# adapter whose semantic state is missing, malformed, stale, or unverified is
+# treated as not-provably-working and surfaces rather than being absorbed.
+# <tail40> is the same bounded capture already read for hashing and is
+# consumed only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 bs harness lines
-  bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" 2>/dev/null)
-  case "$bs" in
-    busy) return 0 ;;
-    idle) return 1 ;;
-    *)
-      lines=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
-      harness=$(window_harness "$w")
-      if [ -n "${FM_BUSY_REGEX:-}" ]; then
-        printf '%s' "$lines" | grep -qiE "$BUSY_REGEX"
-      else
-        printf '%s' "$lines" | fm_busy_lines_match "$harness"
-      fi
-      ;;
-  esac
+  local w=$1 tail40=$2 task meta verdict
+  task=$(window_to_task "$w" "$STATE")
+  meta="$STATE/$task.meta"
+  if [ -n "$task" ] && [ -f "$meta" ]; then
+    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
+  else
+    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+      "${task:-unknown}" "$STATE" "$tail40")
+  fi
+  [ "${verdict%% *}" = busy ]
 }
 
 window_kind() {
@@ -966,8 +958,8 @@ EOF
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-          #   - none: no running pipeline, idle pane, no busy signature, no declared
-          #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
+          #   - none: no running pipeline, no exact busy verdict, no declared pause.
+          #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
           #     wait out the timer.

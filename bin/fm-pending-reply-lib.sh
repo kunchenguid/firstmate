@@ -573,6 +573,22 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
   [ "$age" -ge "$grace" ]
 }
 
+# fm_pending_reply_backend_observation: one busy/idle observation of a
+# SECONDMATE endpoint, without ever reading its conversation.
+#
+# Deliberately NOT the semantic busy-state contract (bin/fm-busy-lib.sh).
+# That contract covers ordinary task workers, whose turn lifecycle firstmate
+# wires at spawn; a secondmate has no such wiring because an idle secondmate
+# pane is healthy and it runs no supervised turn sequence of its own. This
+# observation exists only to notice a busy-then-idle transition around one
+# delivered request, so it is a delivery-confirmation signal in the same
+# category as the submit acknowledgement in bin/fm-tmux-lib.sh - never task
+# state, and never a source consumers can confuse with semantic state.
+#
+# It stays harness-scoped (fm_busy_lines_match with the recorded harness, no
+# global OR of every vendor signature), so one harness's output cannot make
+# another read busy, and a weak rendered idle degrades to `fallback-idle`,
+# which the caller accepts as idle only after its grace window.
 fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness]
   local backend=$1 target=$2 expected_label=${3-} harness=${4-} native tail40
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')

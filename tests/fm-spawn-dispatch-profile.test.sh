@@ -521,6 +521,18 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
   assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
+  assert_present "$HOME_DIR/state/$id.busy-gen" "pi-signed spawn did not arm the busy-state contract"
+  assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=fm-spawn" \
+    "pi-signed spawn did not seed the busy-state record from the launch brief"
+  local ext gen
+  ext=$(cat "$HOME_DIR/state/$id.pi-ext.ts")
+  gen=$(cat "$HOME_DIR/state/$id.busy-gen")
+  assert_contains "$ext" 'pi.on("agent_start"' "pi extension lost the semantic agent_start busy edge"
+  assert_contains "$ext" 'pi.on("agent_settled"' "pi extension lost the semantic agent_settled idle edge"
+  assert_contains "$ext" 'ctx.isIdle()' "pi extension no longer confirms idle with ctx.isIdle()"
+  assert_contains "$ext" "\"--gen\", \"$gen\"" "pi extension does not carry the armed incarnation gen"
+  assert_contains "$ext" '"--source", "pi-ext"' "pi extension does not attribute its semantic source"
+  assert_contains "$ext" 'pi.on("turn_end"' "pi extension lost the turn-end notification touch"
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }
 

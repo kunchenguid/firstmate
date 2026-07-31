@@ -1243,6 +1243,27 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_teardown_missing_busy_sidecar_completes() {
+  local case_dir gen rc
+  case_dir=$(make_case missing-busy-sidecar)
+  write_meta "$case_dir" local-only ship
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$case_dir/state" task-x1)
+  printf 'busy_gen=%s\n' "$gen" >> "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.busy-gen"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "missing-busy-sidecar: teardown should treat the incarnation as already retired"
+  assert_absent "$case_dir/state/task-x1.busy-state" \
+    "missing-busy-sidecar: teardown left the orphan busy record"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "missing-busy-sidecar: teardown remained incomplete"
+  pass "teardown completes when an exact busy-state sidecar is already absent"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -1448,6 +1469,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
