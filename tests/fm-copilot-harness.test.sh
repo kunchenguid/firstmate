@@ -100,12 +100,24 @@ EOF
 }
 
 test_copilot_spawn_hook_command_handles_single_quote_paths() {
-  local rec case_dir home proj wt fakebin id out status hook cmd_json cmd
-  rec=$(make_spawn_case "quote-'path")
-  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
-$rec
-EOF
-  out=$(run_copilot_spawn "$home" "$proj" "$wt" "$fakebin" "$id" copilot)
+  local case_dir home proj wt fakebin id out status hook cmd_json cmd qt_home qt_state
+  # Build a case where the home path (and thus state dir) contains a single
+  # quote, exercising json_escape on the TURNEND path.
+  qt_home="$TMP_ROOT/home-quote'dir"
+  id="copilot-quotepath-x1"
+  proj="$TMP_ROOT/proj-quote"
+  wt="$TMP_ROOT/wt-quote"
+  mkdir -p "$qt_home/data/$id" "$qt_home/projects" "$qt_home/state" "$qt_home/config"
+  printf 'brief\n' > "$qt_home/data/$id/brief.md"
+  touch "$qt_home/state/.last-watcher-beat"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/fake-quote")
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$qt_home" \
+    FM_STATE_OVERRIDE="$qt_home/state" FM_DATA_OVERRIDE="$qt_home/data" \
+    FM_PROJECTS_OVERRIDE="$qt_home/projects" FM_CONFIG_OVERRIDE="$qt_home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" copilot 2>&1)
   status=$?
   expect_code 0 "$status" "copilot spawn in a quote-containing path should succeed"
   hook="$wt/.github/hooks/fm-turn-end.$id.json"
@@ -113,9 +125,9 @@ EOF
   cmd_json=$(sed -n 's/.*"command":"\([^"]*\)".*/\1/p' "$hook")
   [ -n "$cmd_json" ] || fail "copilot hook command was not extracted"
   cmd=$(printf '%s' "$cmd_json" | sed 's/\\"/"/g; s/\\\\/\\/g')
-  rm -f "$home/state/$id.turn-ended"
+  rm -f "$qt_home/state/$id.turn-ended"
   bash -c "$cmd"
-  assert_present "$home/state/$id.turn-ended" "copilot hook command failed for single-quote path"
+  assert_present "$qt_home/state/$id.turn-ended" "copilot hook command failed for single-quote path"
   pass "copilot hook command remains executable in single-quote paths"
 }
 
