@@ -165,6 +165,7 @@ A build killed this way fails with `SIGKILL` (exit 137), and the task's local re
 
 The setting fails closed.
 When the file is present but the bound cannot actually be established - no `systemd-run`, no reachable user manager, no delegated memory controller, or a limit that did not reach the kernel - `bin/fm-spawn.sh` refuses to spawn rather than launching a crewmate whose builds would be unbounded.
+A setting this host cannot read as a bound refuses the same way: more than one line, a token that is not a positive size, or a `MemoryHigh` above `MemoryMax` never degrades to an unbounded spawn.
 Enforcement is proven at every spawn rather than assumed: a throwaway scope is created and every limit it sets - `memory.max`, `memory.high` when configured, and the swap denial - is read back from the live cgroup before any window exists.
 An absent file leaves spawning exactly as it was, so a host without a systemd user manager is unaffected until it opts in.
 
