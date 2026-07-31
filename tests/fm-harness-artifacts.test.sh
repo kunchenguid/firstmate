@@ -127,6 +127,12 @@ test_installed_artifacts_are_all_removed() {
   # shellcheck disable=SC1090  # deliberate: extracting the production removers under test
   eval "$(sed -n '/^remove_harness_worktree_artifacts()/,/^}/p;/^remove_harness_state_artifacts()/,/^}/p' "$ROOT/bin/fm-teardown.sh")"
 
+  # Sourced here rather than inside the install subshell: the subshell inherits
+  # the functions, and following the lib from a subshell makes shellcheck read
+  # its function-local harness/state/id as clobbering the loop variables.
+  # shellcheck source=bin/fm-busy-lib.sh
+  . "$ROOT/bin/fm-busy-lib.sh"
+
   for harness in $ADAPTER_HARNESSES; do
     case_dir="$TMP_ROOT/drift-$harness"
     proj="$case_dir/proj"; wt="$case_dir/wt"; state="$case_dir/state"
@@ -160,8 +166,6 @@ test_installed_artifacts_are_all_removed() {
       STATE_REAL=$(cd "$state" && pwd -P)
       # shellcheck disable=SC2034  # read by the eval'd production block below
       TURNEND="$STATE_REAL/$id.turn-ended"
-      # shellcheck source=bin/fm-busy-lib.sh
-      . "$ROOT/bin/fm-busy-lib.sh"
       eval "$spawn_helpers"
       eval "$install_block"
     ); rc=$?
