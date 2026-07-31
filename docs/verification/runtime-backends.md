@@ -89,6 +89,10 @@ tests/fm-tmux-submit-busy.test.sh
 Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
 Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
 
+Claude's empty composer was re-measured live on 2026-07-31 with Claude Code 2.1.220 and tmux 3.7b: it renders between two full-width horizontal rules with no vertical side glyphs, so `fm_tmux_find_composer_box` finds no box and the non-bordered cursor-row path classifies that pane.
+Its captured row is the `❯` glyph followed by U+00A0, which read `pending` before `bin/fm-composer-lib.sh` counted U+00A0 as whitespace and reads `empty` with that rule, while a pane holding typed text read `pending` either way.
+`test_claude_empty_composer_nbsp_row_is_empty` and `test_bordered_claude_composer_nbsp_row_is_empty` in `tests/fm-composer-ghost.test.sh` replay those exact bytes borderless and inside a box.
+
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
