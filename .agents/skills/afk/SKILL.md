@@ -123,11 +123,11 @@ Enter is retried (Enter only, never a retype) until the backend confirms the
 submit landed.
 For tmux that confirmation is a cleared composer, using the same corrected,
 border-aware detector as the composer guard.
+The daemon's injection is a context-free call carrying no task, so it deliberately keeps that rendered core rather than the task-scoped semantic confirmation.
 For herdr, normal idle-baseline submits are confirmed by native agent-state showing a real turn started; the ANSI-aware composer classifier remains the affirmative-empty pre-injection guard and conservative fallback for non-idle or unreadable baselines.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
-`fm-send.sh` uses the same primitive and exits non-zero
-when a steer's Enter is positively swallowed, so firstmate learns an instruction
-did not land instead of leaving it unsubmitted.
+`fm-send.sh` exits non-zero on every unconfirmed verdict, so firstmate learns an instruction did not land instead of leaving it unsubmitted.
+Its steers to a recorded task confirm from the harness's own lifecycle record where one is trusted, keeping this rendered core as the labelled fallback (`docs/tmux-backend.md` owns that routing).
 
 **Busy-queued Enter exception (tmux backend, opencode 1.18.4).** While opencode
 is mid-turn, Enter is accepted and queued for after the current turn but the

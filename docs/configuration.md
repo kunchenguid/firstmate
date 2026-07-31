@@ -559,6 +559,9 @@ GROK_HOME=              # optional Grok config home for firstmate's global grok 
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
+FM_SUBMIT_SEMANTIC_COMPARE=1   # tmux-only: bake-in cross-check on fm-send's semantic submit confirmation; 1 reads the rendered composer once after the verdict, warns and appends state/<id>.submit-disagreement on a mismatch, and downgrades a contradicted confirmation to unconfirmed; 0 ends the bake-in and removes every pane read from that path (docs/tmux-backend.md)
+FM_SUBMIT_SEMANTIC_POLLS=6     # tmux-only: busy-record samples spread across each Enter attempt's budget when confirming a submit from the harness's lifecycle record
+FM_SUBMIT_SEMANTIC_MIN_BUDGET=0.9  # tmux-only: minimum per-Enter confirmation budget before those samples, because a real turn opens up to about 500ms after Enter
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before a completed turn without a correlated parent report is eligible for its one recovery repost
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
