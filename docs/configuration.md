@@ -20,7 +20,7 @@ Wake, watcher, away-mode, and X-specific state mechanics' exact child fields and
 The full per-file layout catalog:
 
 ```
-AGENTS.md            this file (CLAUDE.md is a symlink to it)
+AGENTS.md            shared orchestrator behavior contract (CLAUDE.md is a symlink to it)
 CONTRIBUTING.md      contributor workflow and repo conventions
 README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
