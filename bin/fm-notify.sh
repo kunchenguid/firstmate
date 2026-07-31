@@ -189,7 +189,7 @@ fm_notify_status_ready() {  # <task-id>
   [ -f "$status" ] && [ ! -L "$status" ] || return 1
   line=$(last_status_line "$status")
   verb=$(status_line_verb "$line")
-  [ "$verb" = done ] || return 1
+  [ "$verb" = "done" ] || return 1
   if [ "$FM_NOTIFY_KIND" = scout ]; then
     return 0
   fi

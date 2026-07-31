@@ -26,7 +26,8 @@ SH
 }
 
 write_task() {  # <case> <mode> <kind> [task-id] [project]
-  local dir=$1 mode=$2 kind=$3 id=${4:-task-x1} project=${5:-$dir/projects/example-project}
+  local dir=$1 mode=$2 kind=$3 id=${4:-task-x1} project
+  project=${5:-$dir/projects/example-project}
   fm_write_meta "$dir/state/$id.meta" \
     "window=fm-$id" \
     "endpoint_task_id=$id" \
