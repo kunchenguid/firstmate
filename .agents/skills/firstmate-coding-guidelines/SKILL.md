@@ -73,6 +73,11 @@ Briefs for tasks that touch firstmate's own tracked material should tell the cre
 Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
+## Generated worker discipline
+
+For firstmate-repo work, the generated `# Branch conflict resolution` and `# Verification discipline` sections in [`bin/fm-brief.sh`](../../../bin/fm-brief.sh) own the full worker rules.
+Follow both for branch shipping and verification even if the current task was scaffolded before those sections existed.
+
 ## Compatibility and enforcement
 
 Before changing shared tracked behavior, review every affected supported primary harness and runtime backend rather than checking only the adapters active in the current fleet.

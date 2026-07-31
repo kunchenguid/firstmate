@@ -159,6 +159,21 @@ CONTEXT_SECTION=${CONTEXT_SECTION%$'\n'}
 # path, a crewmate or scout identifies itself before acting on anything unmarked.
 FROMFIRST_MARKER_FACT="a leading \`$FM_FROMFIRST_LABEL\` label followed by an invisible system separator; that separator is untypable, so a human never produces it"
 
+IFS= read -r -d '' VERIFICATION_DISCIPLINE <<'EOF' || true
+# Verification discipline
+- Before trusting success reported only by absence - an empty violations log, no output, or no failures - run a negative control and watch it fail, then run the real check.
+- Wait on completion artifacts, never process names.
+  At collection time, report a missing expected artifact as failure, not as a job still running.
+EOF
+VERIFICATION_DISCIPLINE=${VERIFICATION_DISCIPLINE%$'\n'}
+
+IFS= read -r -d '' BRANCH_CONFLICT_RESOLUTION <<'EOF' || true
+# Branch conflict resolution
+Rebase and resolve branch/base conflicts yourself whenever intent is clear, at any file count: keep the base wherever this branch made no deliberate change, reapply this branch's contributions on top, and preserve every prior pipeline fix commit through the rebase.
+Escalate only genuinely ambiguous intent to firstmate, never the captain.
+EOF
+BRANCH_CONFLICT_RESOLUTION=${BRANCH_CONFLICT_RESOLUTION%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -201,6 +216,8 @@ You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
 In Claude Code, the bottom \`CTX\` row is host-computed context pressure; when it shows \`COMPACT NOW: /compact\` at 70 percent used or higher, run \`/compact\` before continuing instead of relying on a self-estimate.
+
+$VERIFICATION_DISCIPLINE
 
 # Requests from the main firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.
@@ -336,6 +353,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 $WHO_IS_SPEAKING
 
+$VERIFICATION_DISCIPLINE
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -453,6 +472,10 @@ $RULE1
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 $WHO_IS_SPEAKING
+
+$BRANCH_CONFLICT_RESOLUTION
+
+$VERIFICATION_DISCIPLINE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
