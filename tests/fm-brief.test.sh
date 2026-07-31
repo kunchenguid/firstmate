@@ -654,6 +654,11 @@ test_commit_discipline_destination_follows_surviving_artifact() {
   local home ship scout
   home="$TMP_ROOT/commit-destination-home"
   write_registry "$home"
+  # These assertions grep for the rendered path as a fixed string, and the
+  # script renders it physically resolved, so resolve it here too. On macOS the
+  # test root lives under /var/folders, a symlink into /private/var, and an
+  # unresolved pattern would never match.
+  home=$(cd "$home" && pwd -P)
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dest-ship no-registry-proj >/dev/null 2>&1
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dest-scout no-registry-proj --scout >/dev/null 2>&1
