@@ -1,0 +1,8 @@
+# Fixture: watcher cycle exits, captured 2026-07-31 from state/.watch-cycle-exits.log
+# Records: 499   Captured because this log accumulates over days and cannot be regenerated.
+#
+# successor=none : 499 / 499
+# exit_code=0    : 499 / 499
+# signal=none    : 499 / 499
+# reasons        :       8 reason=actionable-check     198 reason=actionable-signal     293 reason=actionable-stale 
+# sub-5s exits   : 112 actionable-stale, 5 actionable-check (22% of all cycles)
