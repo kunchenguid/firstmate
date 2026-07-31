@@ -396,7 +396,7 @@ spawn_abort_cleanup() {
         fi
       fi
       if { [ "$SPAWN_META_OWNED" = 1 ] \
-           || { [ "${BACKEND:-}" != orca ] && [ "$SPAWN_ABORT_META_READY" = 0 ] \
+           || { [ "$SPAWN_ABORT_META_READY" = 0 ] \
                 && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; }; } \
          && ! grep -q '^failed:' "$STATE/$ID.status" 2>/dev/null; then
         printf 'failed: spawn failed before launch completed (exit %s); inspect endpoint %s\n' \
