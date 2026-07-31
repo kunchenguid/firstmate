@@ -710,6 +710,7 @@ test_secondmate_charter_keeps_its_own_marker_consequence() {
     fail "charter must not take the crewmate section; its consequence differs"
   fi
   pass "fm-brief: the charter shares the marker fact but keeps its own consequence"
+}
 
 # The standing worker rules are captain-approved contract text, and the brief is
 # the only place the worker reads them. Pin the variant split directly: every
