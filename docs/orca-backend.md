@@ -51,6 +51,7 @@ Exact command flags and response parsing are owned by `bin/backends/orca.sh` and
 `fm-peek.sh` reads with `orca terminal read`.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Orca's submit machinery.
 On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
+The composer verifier first recognizes Agy's separator-pair composer through the shared, harness-scoped `fm_composer_separated_state` proof (only when `FM_COMPOSER_HARNESS` records `agy`) before the fleet-wide classifier runs.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
