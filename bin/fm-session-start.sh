@@ -103,6 +103,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-public-followup-lib.sh
+. "$SCRIPT_DIR/fm-public-followup-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -392,6 +394,23 @@ if [ -e "$STATE/.afk" ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
 else
   printf 'absent\n'
+fi
+
+# Public commitments made through the myfirstmate relay. A promise to reply in a
+# public thread must survive compaction and restart, so it is surfaced from disk
+# here rather than from conversation memory. fm-public-followup-lib.sh owns both
+# gates: a home that never opted into the relay runs one [ -f ] test, prints no
+# subsection, and never reaches fm-public-followup.sh.
+if fm_pf_relay_active "$FM_HOME" \
+  && { fm_pf_has_registrations "$STATE" || fm_pf_has_events "$STATE"; }; then
+  PUBLIC_FOLLOWUP=$("$SCRIPT_DIR/fm-public-followup.sh" pending 2>/dev/null) || PUBLIC_FOLLOWUP=
+  if [ -n "$PUBLIC_FOLLOWUP" ]; then
+    subsection "Public commitments awaiting delivery"
+    printf '%s\n' "$PUBLIC_FOLLOWUP"
+    printf '\nEach line is a public reply this home still owes. Reconcile terminal results with\n'
+    printf '%s/bin/fm-public-followup.sh consume, then deliver a ready one with\n' "$FM_ROOT"
+    printf '%s/bin/fm-public-followup.sh deliver <id>. Load fmx-respond for the procedure.\n' "$FM_ROOT"
+  fi
 fi
 
 # --- 6. closing reminder -----------------------------------------------
