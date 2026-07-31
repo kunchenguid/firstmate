@@ -49,11 +49,10 @@
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
-# --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
-# state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
-# wins the singleton while the duplicate child stands down. It
-# resolves and signals exactly that pid, so it can never touch another home's
-# watcher. NEVER `pkill -f
+# --restart: attach when THIS home's recorded watcher is identity-verified and
+# healthy. Only when replacement is required does it stop the recorded watcher
+# and own a fresh cycle. It resolves and signals exactly that pid, so it can
+# never touch another home's watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
 set -u
@@ -331,8 +330,20 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
 esac
 
+# If a genuinely live+fresh watcher already holds the lock, both arm modes
+# attach to that cycle and wait until it ends so the harness notify fires then,
+# not as an immediate empty wake. A healthy singleton already satisfies restart;
+# replacement is reserved for a holder that fails this shared health gate.
+if healthy_watcher; then
+  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+  cycle_begin "$HEALTHY_PID" attached
+  report_attached
+  attach_and_wait "$HEALTHY_PID"
+  exit $?
+fi
+
 if [ "$mode" = restart ]; then
-  # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
+  # Home-scoped stop: only an unhealthy watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
     if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
@@ -349,18 +360,6 @@ if [ "$mode" = restart ]; then
       clear_stale_recorded_watcher_lock
     fi
   fi
-fi
-
-# If a genuinely live+fresh watcher already holds the lock, do not start a second
-# one - attach to that cycle and wait until it ends so the harness notify fires
-# then, not as an immediate empty wake. (--restart skips this: it just stopped
-# this home's watcher and wants a fresh one.)
-if [ "$mode" = arm ] && healthy_watcher; then
-  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  cycle_begin "$HEALTHY_PID" attached
-  report_attached
-  attach_and_wait "$HEALTHY_PID"
-  exit $?
 fi
 
 # Start a watcher as a tracked child and confirm it before settling in. The child
