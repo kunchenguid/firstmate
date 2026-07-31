@@ -24,6 +24,16 @@ jobs:
       # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
       - run: bin/fm-lint.sh
 
+  windows-launcher:
+    name: Windows launcher bridge
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Exercise the batch command and WSL entry contracts
+        shell: bash
+        run: bash tests/fm-wsl-entry.test.sh
+
   # Deterministic proof that portable parallel shards + portable serial + Herdr
   # equal the complete tests/*.test.sh inventory with no missing or duplicates.
   test-coverage:
