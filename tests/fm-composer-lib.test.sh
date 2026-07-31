@@ -13,6 +13,10 @@
 #      agent composer either way, bordered or bare.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
+#   5. U+00A0 counts as whitespace: a prompt glyph plus the NON-BREAKING space
+#      claude renders in an empty composer reads `empty`, while real text beside
+#      one still reads `pending` and rule 1 still holds for shell glyphs; the
+#      owner's header in bin/fm-composer-lib.sh has the measurement and rationale.
 set -u
 
 # shellcheck source=tests/lib.sh

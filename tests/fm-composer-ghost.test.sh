@@ -18,8 +18,9 @@
 #      ever reach firstmate's context.
 #   5. The sibling defect with the SAME symptom and a different cause: claude's empty
 #      composer renders as the prompt glyph plus U+00A0 (measured 2026-07-25), which
-#      reads empty through fm_composer_trim_ws - NOT through the ghost stripper, whose
-#      256-colour exclusion deliberately keeps that row's styling.
+#      reads empty on a bare row through fm_composer_trim_ws and inside a box through
+#      fm_tmux_composer_geometry_spaces' U+00A0 mapping - NOT through the ghost
+#      stripper, whose 256-colour exclusion deliberately keeps that row's styling.
 set -u
 
 # shellcheck source=tests/lib.sh
