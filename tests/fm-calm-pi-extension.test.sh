@@ -1928,6 +1928,7 @@ for (const width of [40, 16, 8, 6, 5, 4, 3, 2]) {
   const tui = { requestRender() {} };
   animation.render(40);
   for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE * 7; step += 1) animation.tick();
+  animation.render(40);
   const frozenColumn = animation.position();
   const frozenDirection = animation.direction();
   const frozenPhase = animation.waterPhase();
@@ -1960,6 +1961,7 @@ for (const width of [40, 16, 8, 6, 5, 4, 3, 2]) {
   // Hidden resize clamps without needing a live widget, and preserves a valid heading.
   animation.render(80);
   while (animation.position() < 76) animation.tick();
+  animation.render(80);
   check(animation.position() === 76 && animation.direction() === -1, "endpoint setup failed before hidden resize");
   const beforeHiddenResize = { column: animation.position(), direction: animation.direction(), phase: animation.waterPhase() };
   animation.clampToWidth(20);
@@ -2009,6 +2011,7 @@ for (const width of [40, 16, 8, 6, 5, 4, 3, 2]) {
   ]) {
     const edge = createCalmWorkingShipAnimation();
     scenario.setup(edge);
+    edge.render(12);
     const frozen = { column: edge.position(), direction: edge.direction(), phase: edge.waterPhase() };
     const paused = createCalmWorkingShipWidget(tui, edge);
     paused.dispose();
@@ -2046,6 +2049,112 @@ for (const width of [40, 16, 8, 6, 5, 4, 3, 2]) {
   right.render(40);
   for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE * 3; step += 1) left.tick();
   check(left.position() === 3 && right.position() === 0, "separate animations leaked motion state");
+}
+
+{
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  const callbacks = [];
+  const handles = new Set();
+  globalThis.setInterval = (callback) => {
+    callbacks.push(callback);
+    const handle = { unref() {} };
+    handles.add(handle);
+    return handle;
+  };
+  globalThis.clearInterval = (handle) => {
+    handles.delete(handle);
+  };
+
+  try {
+    const tui = { renderRequests: 0, requestRender() { this.renderRequests += 1; } };
+    const animation = createCalmWorkingShipAnimation();
+    const first = createCalmWorkingShipWidget(tui, animation);
+    first.render(40);
+    callbacks[callbacks.length - 1]();
+    callbacks[callbacks.length - 1]();
+    check(tui.renderRequests === 2, "unpainted timer ticks did not request renders");
+    first.dispose();
+    check(handles.size === 0, "disposing the unpainted widget left its timer scheduled");
+    check(
+      animation.position() === 0 && animation.direction() === 1 && animation.waterPhase() === 0,
+      "dispose retained state from unpainted timer ticks",
+    );
+
+    const resumed = createCalmWorkingShipWidget(tui, animation);
+    resumed.render(40);
+    for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) {
+      callbacks[callbacks.length - 1]();
+    }
+    resumed.render(40);
+    check(animation.position() === 1, "unpainted ticks leaked into the resumed cadence");
+    check(animation.waterPhase() === 0, "resumed cadence did not restore the rendered water phase");
+    resumed.dispose();
+
+    const committed = createCalmWorkingShipAnimation();
+    const progressing = createCalmWorkingShipWidget(tui, committed);
+    progressing.render(40);
+    callbacks[callbacks.length - 1]();
+    progressing.render(40);
+    const renderedPhase = committed.waterPhase();
+    callbacks[callbacks.length - 1]();
+    progressing.dispose();
+    check(committed.position() === 0, "dispose changed the committed column after an unpainted tick");
+    check(committed.waterPhase() === renderedPhase, "dispose changed the committed phase after an unpainted tick");
+
+    const committedResume = createCalmWorkingShipWidget(tui, committed);
+    committedResume.render(40);
+    for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE - 2; step += 1) {
+      callbacks[callbacks.length - 1]();
+    }
+    check(committed.position() === 0, "serviced render did not preserve the committed cadence");
+    callbacks[callbacks.length - 1]();
+    committedResume.render(40);
+    check(committed.position() === 1, "serviced render did not commit progress for the next cadence");
+    committedResume.dispose();
+
+    const boundaryCases = [
+      [7, 1], [8, -1], [7, -1], [1, -1], [0, 1], [1, 1],
+    ];
+    for (const [targetPosition, targetDirection] of boundaryCases) {
+      const edge = createCalmWorkingShipAnimation();
+      edge.render(12);
+      let reached = false;
+      for (let step = 0; step < 160; step += 1) {
+        if (edge.position() === targetPosition && edge.direction() === targetDirection) {
+          edge.render(12);
+          reached = true;
+          break;
+        }
+        edge.tick();
+        edge.render(12);
+      }
+      check(reached, `could not prepare bounce state ${targetPosition}/${targetDirection}`);
+      const before = { position: edge.position(), direction: edge.direction(), phase: edge.waterPhase() };
+      const paused = createCalmWorkingShipWidget(tui, edge);
+      paused.render(12);
+      for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) {
+        callbacks[callbacks.length - 1]();
+      }
+      paused.dispose();
+      check(
+        edge.position() === before.position &&
+          edge.direction() === before.direction &&
+          edge.waterPhase() === before.phase,
+        `unpainted bounce tick escaped ${targetPosition}/${targetDirection}`,
+      );
+      const resumedEdge = createCalmWorkingShipWidget(tui, edge);
+      resumedEdge.render(12);
+      check(
+        edge.position() === before.position && edge.direction() === before.direction,
+        `bounce state ${targetPosition}/${targetDirection} changed on resume`,
+      );
+      resumedEdge.dispose();
+    }
+  } finally {
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+  }
 }
 
 // --- Lifecycle through the Calm extension's registered handlers --------------------

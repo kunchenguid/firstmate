@@ -59,6 +59,7 @@ export type CalmWorkingShipAnimation = {
   render(width: number): string[];
   /** Advance one scheduler tick: water every tick, boat on its slower cadence. */
   tick(): void;
+  restoreLastRendered(): void;
   /** Restore the normal initial column, direction, water phase, and cadence. */
   reset(): void;
   /**
@@ -87,6 +88,11 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
   let span = 0;
   let phase = 0;
   let ticks = 0;
+  let renderedPosition = position;
+  let renderedDirection = direction;
+  let renderedSpan = span;
+  let renderedPhase = phase;
+  let renderedTicks = ticks;
 
   // Reversing the moment the boat lands on an endpoint means the endpoint frame itself
   // already shows the new heading, so no frame at or after a bounce shows the old sail.
@@ -107,6 +113,22 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
     settleDirectionAtEdges();
   };
 
+  const commitRenderedState = (): void => {
+    renderedPosition = position;
+    renderedDirection = direction;
+    renderedSpan = span;
+    renderedPhase = phase;
+    renderedTicks = ticks;
+  };
+
+  const restoreLastRenderedState = (): void => {
+    position = renderedPosition;
+    direction = renderedDirection;
+    span = renderedSpan;
+    phase = renderedPhase;
+    ticks = renderedTicks;
+  };
+
   /** One colored run of water covering absolute columns [from, from + count). */
   const water = (from: number, count: number): string => {
     if (count <= 0) return "";
@@ -124,12 +146,15 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
     direction: () => direction,
     waterPhase: () => phase,
 
+    restoreLastRendered: restoreLastRenderedState,
+
     reset(): void {
       position = 0;
       direction = 1;
       span = 0;
       phase = 0;
       ticks = 0;
+      commitRenderedState();
     },
 
     clampToWidth(width: number): void {
@@ -157,26 +182,28 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
 
       const sail = direction >= 0 ? SAIL_RIGHT : SAIL_LEFT;
 
+      let frame: string[];
       if (width < SAIL_WIDTH) {
         // Too narrow for even the sail: a deterministic single row of water.
-        return [water(0, width)];
-      }
-
-      if (width < HULL_WIDTH) {
+        frame = [water(0, width)];
+      } else if (width < HULL_WIDTH) {
         // Too narrow for the hull: the sail alone rides the water row.
-        return [
+        frame = [
           water(0, position) +
             boat(sail) +
             water(position + SAIL_WIDTH, width - position - SAIL_WIDTH),
         ];
+      } else {
+        frame = [
+          " ".repeat(position + SAIL_OFFSET) + boat(sail),
+          water(0, position) +
+            boat(HULL) +
+            water(position + HULL_WIDTH, width - position - HULL_WIDTH),
+        ];
       }
 
-      return [
-        " ".repeat(position + SAIL_OFFSET) + boat(sail),
-        water(0, position) +
-          boat(HULL) +
-          water(position + HULL_WIDTH, width - position - HULL_WIDTH),
-      ];
+      commitRenderedState();
+      return frame;
     },
   };
 }
@@ -203,13 +230,14 @@ export function createCalmWorkingShipWidget(
   timer.unref?.();
 
   return {
-    render: (width) => animation.render(width),
+    render: (width) => (disposed ? [] : animation.render(width)),
     // Every frame is rebuilt from fixed standard ANSI codes, so there is no cache.
     invalidate: () => {},
     dispose: () => {
       if (disposed) return;
       disposed = true;
       clearInterval(timer);
+      animation.restoreLastRendered();
     },
   };
 }
