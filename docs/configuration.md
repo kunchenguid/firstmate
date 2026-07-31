@@ -316,7 +316,6 @@ A user API key sees only that user's own agents, so this view is per-operator ra
 The key is read from that `.env` file only.
 Unlike X mode, an ambient `CURSOR_API_KEY` in the environment does not activate this helper and does not override the file, because an inherited variable would silently change which Cursor account firstmate speaks for.
 `FM_CURSOR_ENV_FILE` can point the helper at another `.env`-style file, and that file takes precedence over `$FM_HOME/.env`.
-Its behavior tests stay hermetic by a different mechanism: a fake `curl` on `PATH` serves canned fixtures against a fixture `FM_HOME`, so no test reaches api.cursor.com and none needs a real key.
 The helper never reads the macOS keychain or `cursor-agent`'s stored credentials: those are undocumented, are not supported Cursor API credentials, and grant no access beyond the documented user key.
 
 Every subcommand is a GET, so this surface cannot create, steer, cancel, archive, or delete an agent.
@@ -335,7 +334,7 @@ An agent therefore belongs to its environment rather than to any repository insi
 ### Default Cursor environment (config/cursor-environment)
 
 `config/cursor-environment` optionally records this home's default environment name.
-It is local and gitignored, like every other `config/` item.
+It is local and gitignored, like every other `config/` item, and it is not part of secondmate inherited configuration, so each home names its own default.
 The first non-empty, non-comment line is used, with surrounding whitespace trimmed and a trailing newline tolerated, matching how `bin/fm-harness.sh` reads `config/secondmate-harness`.
 The name is used verbatim otherwise, because Cursor environment names contain spaces and are case-sensitive.
 An absent file, or one holding only blank and comment lines, means this home has no default.
