@@ -41,6 +41,10 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
+# The single owner of the away-mode delivery-artifact set (bin/fm-afk-launch.sh
+# sources this script, so it inherits the same owner).
+# shellcheck source=bin/fm-afk-artifacts-lib.sh
+. "$FM_AFK_START_DIR/fm-afk-artifacts-lib.sh"
 
 fm_afk_start_usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -59,11 +63,11 @@ fm_afk_start_usage() {
 # lifecycle" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
 # NOT called on a refresh (daemon already alive), so the current session's own
 # buffered escalations are preserved.
+# bin/fm-afk-artifacts-lib.sh owns the artifact set. The clear status propagates
+# unchanged: bin/fm-afk-launch.sh treats a failed clear as a reason to abort
+# entry rather than start a session on another session's delivery state.
 fm_afk_clear_stale_artifacts() {  # <state-dir>
-  local state=$1
-  rm -f "$state/.subsuper-escalations" \
-        "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" 2>/dev/null
+  fm_afk_artifacts_clear "$1"
 }
 
 daemon_lock_owner() {

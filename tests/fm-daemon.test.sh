@@ -1538,8 +1538,12 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
     inject_wedge_alarm "$state" 30600
   [ -s "$state/.subsuper-inject-wedged" ] || fail "inject_wedge_alarm did not write the durable marker"
   grep -F 'osascript' "$log" >/dev/null || fail "inject_wedge_alarm did not emit the active alert on a non-tmux backend: $(cat "$log")"
-  grep -F 'WEDGED 30600s' "$log" >/dev/null || fail "active alert missing the age and summary"
-  pass "inject_wedge_alarm writes the marker AND emits the active alert even with no tmux status-line (herdr backend)"
+  grep -F '8h30m' "$log" >/dev/null || fail "active alert missing the stall duration: $(cat "$log")"
+  # The alert must carry the ESCALATION ITSELF, not just a pointer to a marker
+  # file. This channel is the only one that reaches a captain whose pane is
+  # unusable, and a captain reading a phone notification cannot open a path.
+  grep -F 'needs-decision: pick A' "$log" >/dev/null || fail "active alert did not carry the buffered escalation: $(cat "$log")"
+  pass "inject_wedge_alarm writes the marker AND emits an escalation-carrying active alert with no tmux status-line (herdr backend)"
 }
 
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
@@ -1924,5 +1928,127 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
+# --- overnight away-mode stall (task fm-afk-inject-wedge) -------------------
+# The 2026-07-21 and 2026-07-30 incidents were the SAME failure nine days apart:
+# the primary pane sat in one blocking composer state all night, every escalation
+# logged "composer not confirmed-empty (state=pending)", and four finished PRs
+# went unmerged. The guard was right to refuse - there is no safe way to type
+# into a composer holding unsubmitted text - but the refusal was silent, endless,
+# and told nobody WHICH guard had refused or for how long.
+#
+# These lock the guarantees the fix owes: the guard still refuses, the buffer
+# still survives, and the one channel that needs no pane carries the escalations
+# themselves plus the recorded cause and duration.
+
+# make_stalled_case: a state dir already in away mode with <n> escalations
+# buffered and their arrival backdated <age> seconds, so max-defer is due.
+make_stalled_case() {  # <name> <age-secs> <item>...
+  local name=$1 age=$2 dir state
+  shift 2
+  dir=$(make_supercase "$name"); state="$dir/state"
+  afk_enter "$state"
+  for item in "$@"; do escalate_add "$state" "$item"; done
+  printf '%s\n' "$(( $(_now) - age ))" > "$state/.subsuper-escalations.since"
+  printf '%s\n' "$dir"
+}
+
+test_overnight_stall_alarm_carries_escalations_and_recorded_cause() {
+  local dir state log alert
+  dir=$(make_stalled_case stall-overnight 20318 \
+    "done: PR 1361 checks green" "blocked: needs a credential")
+  state="$dir/state"; log="$dir/alert.log"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    # The exact 2026-07-30 observation: the primary composer holds unsent text
+    # and never changes.
+    fm_backend_composer_state() { printf 'pending'; }
+    fm_backend_send_text_submit() { fail "the composer guard must still refuse: typing into unsent text would corrupt it"; }
+    WEDGE_ALARM_LAST_EPOCH=0
+    export FM_MAX_DEFER_SECS=1 FM_ESCALATE_BATCH_SECS=0
+    export FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2"
+    export FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=osascript
+    # First tick records the block; the marker is backdated so the second tick's
+    # throttle window is open and the alarm actually fires.
+    housekeeping "$state"
+    touch -t 200001010000 "$state/.subsuper-inject-wedged" 2>/dev/null || true
+    housekeeping "$state"
+  ) || fail "stalled-away-mode housekeeping subshell failed"
+
+  # Nothing is lost: the guard refused, so the buffer is still intact.
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 2 ] \
+    || fail "a refused injection must preserve the escalation buffer"
+  alert=$(cat "$log" 2>/dev/null)
+  # The alert must carry the WORK, not a path to a file an away captain cannot open.
+  case "$alert" in
+    *"done: PR 1361 checks green"*) ;;
+    *) fail "the pane-independent alert did not carry the buffered escalations: $alert" ;;
+  esac
+  # ...and the recorded cause, so the same stall is diagnosable the FIRST time.
+  case "$alert" in
+    *"composer has held unsent text"*) ;;
+    *) fail "the alert did not name the recorded cause of the block: $alert" ;;
+  esac
+  case "$alert" in
+    *5h38m*) ;;
+    *) fail "the alert did not report how long delivery had been blocked: $alert" ;;
+  esac
+  pass "overnight stall: the guard still refuses, the buffer survives, and the pane-independent alert carries the escalations plus the recorded cause and duration"
+}
+
+test_stall_duration_accrues_across_repeated_identical_defers() {
+  local dir state first second
+  dir=$(make_supercase stall-duration); state="$dir/state"
+  delivery_block_record "$state" pending
+  first=$(cut -d' ' -f2 < "$state/.subsuper-delivery-blocked")
+  sleep 1
+  delivery_block_record "$state" pending
+  second=$(cut -d' ' -f2 < "$state/.subsuper-delivery-blocked")
+  [ "$first" = "$second" ] \
+    || fail "an unchanged blocking state must keep its first-seen epoch, or the reported duration resets every poll ($first -> $second)"
+  pass "delivery block: an unchanged blocking state accrues real duration instead of resetting each poll"
+}
+
+test_stall_clock_restarts_when_the_pane_state_changes() {
+  local dir state first second
+  dir=$(make_supercase stall-changing); state="$dir/state"
+  delivery_block_record "$state" pending
+  first=$(cut -d' ' -f2 < "$state/.subsuper-delivery-blocked")
+  sleep 1
+  # A pane that MOVES between states is a pane someone is using; it must not
+  # inherit the previous state's accrued age and be reported as a long stall.
+  delivery_block_record "$state" busy
+  second=$(cut -d' ' -f2 < "$state/.subsuper-delivery-blocked")
+  [ "$first" != "$second" ] \
+    || fail "a changed blocking reason must restart the clock, not inherit the previous reason's age"
+  case "$(delivery_block_describe "$state")" in
+    *mid-turn*) ;;
+    *) fail "delivery_block_describe did not report the CURRENT reason: $(delivery_block_describe "$state")" ;;
+  esac
+  pass "delivery block: a changing pane restarts the clock, so an in-use pane is never reported as a long stall"
+}
+
+test_successful_delivery_clears_the_block_record() {
+  local dir state
+  dir=$(make_supercase stall-cleared); state="$dir/state"
+  afk_enter "$state"
+  delivery_block_record "$state" pending
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'empty'; }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      inject_msg "hello" "$state" || fail "inject_msg should deliver into a confirmed-empty composer"
+  ) || fail "cleared-block inject_msg subshell failed"
+  [ ! -e "$state/.subsuper-delivery-blocked" ] \
+    || fail "a delivered escalation must clear the block record, or a later unrelated block inherits this stall's age"
+  pass "delivery block: a successful delivery clears the record so no stale duration leaks into a later block"
+}
+
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+test_overnight_stall_alarm_carries_escalations_and_recorded_cause
+test_stall_duration_accrues_across_repeated_identical_defers
+test_stall_clock_restarts_when_the_pane_state_changes
+test_successful_delivery_clears_the_block_record

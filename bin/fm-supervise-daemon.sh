@@ -50,7 +50,11 @@
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
-#     alert if submit still cannot be confirmed.
+#     alert if submit still cannot be confirmed. Because no backend offers a
+#     write path that bypasses the composer, that alert is the ONLY channel that
+#     can reach an away captain when the pane itself is unusable, so it carries
+#     the escalations themselves plus the recorded cause and duration of the
+#     block (see the delivery-block tracking section below).
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -198,6 +202,11 @@ HOUSEKEEPING_TICK_DEFAULT=15
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
+# Cap on the escalation text the wedge alarm carries into a notifier. The alarm
+# is the only captain-reachable channel that needs no pane, so it carries the
+# items themselves; notifiers truncate long bodies, and the durable marker keeps
+# the full buffer regardless.
+WEDGE_SUMMARY_MAX_CHARS=280
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
@@ -244,6 +253,16 @@ _file_age() {  # seconds since mtime; very large if missing
 _hash_text() {
   if command -v md5 >/dev/null 2>&1; then printf '%s' "$1" | md5 -q
   else printf '%s' "$1" | md5sum | cut -d ' ' -f1; fi
+}
+
+# _human_secs: compact captain-readable duration for alarm text (5h39m, 12m, 45s).
+_human_secs() {  # <seconds>
+  local s=$1 h m
+  case "$s" in ''|*[!0-9]*) printf 'an unknown time'; return 0 ;; esac
+  h=$(( s / 3600 )); m=$(( (s % 3600) / 60 ))
+  if [ "$h" -gt 0 ]; then printf '%dh%02dm' "$h" "$m"
+  elif [ "$m" -gt 0 ]; then printf '%dm' "$m"
+  else printf '%ds' "$s"; fi
 }
 
 # --- presence-gating helpers (PURE-ish: side-effect-free reads of state) -----
@@ -884,32 +903,130 @@ wedge_alarm_notify() {  # <summary> <marker>
   return 0
 }
 
+# --- delivery-block tracking -------------------------------------------------
+# WHY (task fm-afk-inject-wedge; overnight stalls 2026-07-21 and 2026-07-30, the
+# second logging the SAME line as the first): inject_msg's guards are each
+# individually correct - typing into a human's half-written line corrupts it, and
+# typing into a bare dead-shell prompt could EXECUTE the digest - but a refusal
+# carries no DURATION. A primary that parks in one blocking state therefore
+# blocks every injection for as long as it stays there. On 2026-07-30 that was
+# 5.6h of "composer not confirmed-empty (state=pending)" while four finished PRs
+# waited, with away mode still reporting itself armed.
+#
+# Nothing here relaxes a guard: there is no safe way to type into a composer
+# holding unsubmitted text, and no backend offers a write path that bypasses the
+# composer, so the guard must stay. What this adds is the missing evidence -
+# WHEN the current blocking state was first seen - so the wedge alarm can assert
+# "the primary composer has held unsent text for 5h39m" (proof this is not a
+# human mid-sentence) instead of guessing "busy or wedged". That evidence plus
+# the content-bearing summary in _wedge_summary turns the one channel that needs
+# no pane into an actual delivery path, which is what the guard's refusal owes
+# the captain.
+_delivery_block_file() { printf '%s/.subsuper-delivery-blocked' "$1"; }
+
+# delivery_block_record: note that delivery is blocked by <reason>, PRESERVING
+# the epoch the current reason was first seen. A CHANGED reason restarts the
+# clock: a pane moving pending -> unknown -> pending is a changing pane, not one
+# stuck state, and only an unchanging state proves nobody is at the keyboard.
+delivery_block_record() {  # <state> <reason>
+  local state=$1 reason=$2 f prev
+  f=$(_delivery_block_file "$state")
+  if [ -r "$f" ]; then
+    prev=$(cut -d' ' -f1 < "$f" 2>/dev/null || true)
+    [ "$prev" = "$reason" ] && return 0
+  fi
+  printf '%s %s\n' "$reason" "$(_now)" > "$f" 2>/dev/null || true
+}
+
+# delivery_block_clear: the blocking condition ended. Called the moment a guard
+# stops refusing, so a transient busy pane never accrues a misleading duration.
+delivery_block_clear() {  # <state>
+  rm -f "$(_delivery_block_file "$1")" 2>/dev/null || true
+}
+
+_describe_block_reason() {  # <reason> -> captain-readable cause
+  case "$1" in
+    busy) printf 'the primary has been mid-turn' ;;
+    pending) printf 'the primary composer has held unsent text' ;;
+    pending-unproven) printf 'the primary composer has held unsent text in an unrecognized layout' ;;
+    unknown) printf 'the primary pane has been unreadable or exited to a shell' ;;
+    submit-unconfirmed) printf 'the primary swallowed the send' ;;
+    *) printf 'the primary pane has been unavailable' ;;
+  esac
+}
+
+# delivery_block_describe: one evidence phrase for the alarm and marker, or
+# non-zero when delivery has not been observed blocked.
+delivery_block_describe() {  # <state>
+  local state=$1 f reason since age
+  f=$(_delivery_block_file "$state")
+  [ -r "$f" ] || return 1
+  reason=$(cut -d' ' -f1 < "$f" 2>/dev/null || true)
+  since=$(cut -d' ' -f2 < "$f" 2>/dev/null || true)
+  [ -n "$reason" ] || return 1
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  age=$(( $(_now) - since ))
+  [ "$age" -ge 0 ] || age=0
+  printf '%s for %s' "$(_describe_block_reason "$reason")" "$(_human_secs "$age")"
+}
+
+# _wedge_summary: the alarm's payload. The previous summary carried only how long
+# delivery had stalled, so the ONE channel that reaches a captain with no usable
+# pane delivered no news - the captain had to open the marker to learn that a PR
+# was waiting, which is exactly what an away captain cannot do. Carrying the
+# distilled escalations themselves makes the alert the pane-independent delivery
+# path. Bounded, because notifiers truncate: the durable marker keeps the full
+# buffer.
+_wedge_summary() {  # <state> <age-seconds>
+  local state=$1 age=$2 buf n items cause summary
+  buf="$state/.subsuper-escalations"
+  n=$(wc -l < "$buf" 2>/dev/null | tr -d ' ') || n=0
+  [ -n "$n" ] || n=0
+  items=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
+  items=$(_collapse_newlines "$items")
+  if [ "${#items}" -gt "$WEDGE_SUMMARY_MAX_CHARS" ]; then
+    items="${items:0:$WEDGE_SUMMARY_MAX_CHARS}..."
+  fi
+  summary=$(printf 'fm away mode NOT DELIVERING for %s: %s undelivered - %s' \
+    "$(_human_secs "$age")" "$n" "$items")
+  if cause=$(delivery_block_describe "$state"); then
+    summary="$summary [$cause]"
+  fi
+  printf '%s' "$summary"
+}
+
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
 # max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
 # is swallowed). The daemon must NEVER silently wedge: this logs
 # an ERROR, drops a durable marker firstmate/recovery can surface, flashes
 # the tmux supervisor client's status line when applicable, and attempts a
-# configurable backend-independent active alert (wedge_alarm_notify). Nothing
-# is lost - the buffer and the
+# configurable backend-independent active alert (wedge_alarm_notify) that now
+# carries the escalations themselves. Nothing is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer now notify=1 cause summary
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
   if [ "$(_file_age "$marker")" -lt "$max_defer" ]; then
     return 0
   fi
+  # Recorded cause and duration, not a guess. The old text asserted "supervisor
+  # pane busy or wedged" for every failure, which is why the identical stall
+  # recurred nine days later without anyone learning which guard had refused.
+  cause=$(delivery_block_describe "$state") || cause="the cause was not recorded"
+  summary=$(_wedge_summary "$state" "$age")
   now=$(_now)
   if [ "$WEDGE_ALARM_LAST_EPOCH" -gt 0 ] && [ $((now - WEDGE_ALARM_LAST_EPOCH)) -lt "$max_defer" ]; then
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode escalation undelivered ${age}s; delivery is blocked because ${cause}. Buffer + wake-queue preserved; alarm marker written."
   fi
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
+    printf 'Cause: %s.\n' "$cause"
+    printf 'Away mode is NOT delivering; these items are still waiting:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
@@ -919,7 +1036,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # the primary, backend-independent signal, so a non-tmux backend just skips
   # this cosmetic extra rather than attempting an unsupported call.
   if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+    tmux display-message -t "$target" "fm: away mode NOT delivering (${cause}) - see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
   # every non-tmux backend), this can reach the captain even when every pane and
@@ -927,7 +1044,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    wedge_alarm_notify "$summary" "$marker"
   fi
 }
 
@@ -1136,6 +1253,7 @@ inject_msg() {  # <message> [state]
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
+    delivery_block_record "$state" busy
     return 1
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
@@ -1150,8 +1268,12 @@ inject_msg() {  # <message> [state]
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    delivery_block_record "$state" "${composer:-unknown}"
     return 1
   fi
+  # Past every guard: whatever was blocking delivery has ended, so the recorded
+  # duration must not carry over into a later, unrelated block.
+  delivery_block_clear "$state"
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
   # retype) via the shared submit primitive. Success = the backend confirms
   # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
@@ -1166,6 +1288,7 @@ inject_msg() {  # <message> [state]
     return 0  # Backend confirmed the submit.
   fi
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  delivery_block_record "$state" submit-unconfirmed
   return 1
 }
 

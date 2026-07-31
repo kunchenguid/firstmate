@@ -109,6 +109,8 @@ Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, r
 
 When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
 Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-line flash, it attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
+Because every backend writes to an agent only through its composer, that alert is the sole channel available while the pane is unusable, so it carries the buffered escalations plus the recorded cause and duration of the block rather than only a marker path.
+The daemon records which guard is refusing delivery in `state/.subsuper-delivery-blocked`, restarting that clock whenever the blocking state changes, so an in-use pane is never reported as a long stall.
 `config/wedge-alarm` (local, gitignored) lists channel directives, one per non-empty, non-comment line; every listed non-`off` channel fires, best-effort.
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with a single directive.
 Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).

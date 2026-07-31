@@ -29,6 +29,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 GATE="$STATE/.afk-return-catchup"
 LOCK="$STATE/.afk-return-catchup.lock"
 
+# The single owner of the away-mode delivery-artifact set. Sourcing failure is
+# fatal, not best-effort: silently continuing would leave this return path
+# believing it had cleared delivery state it never touched, so a stale wedge
+# marker or block record would describe the NEXT away-mode session.
+# shellcheck source=bin/fm-afk-artifacts-lib.sh
+if ! . "$SCRIPT_DIR/fm-afk-artifacts-lib.sh"; then
+  printf 'fm-afk-return: cannot load %s/fm-afk-artifacts-lib.sh\n' "$SCRIPT_DIR" >&2
+  exit 1
+fi
+
 usage() {
   sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -121,10 +131,8 @@ print_blockers() {  # <file>
 }
 
 clear_delivery_artifacts() {
-  rm -f \
-    "$STATE/.subsuper-escalations" \
-    "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+  # bin/fm-afk-artifacts-lib.sh owns the artifact set.
+  fm_afk_artifacts_clear "$STATE"
 }
 
 return_guard() {

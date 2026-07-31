@@ -5,6 +5,12 @@ When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_a
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
 The durable marker and tmux flash remain as additional signals.
 
+No backend offers a way to send text to an agent except through its composer, and a composer holding unsubmitted text can never be typed into safely.
+The active alert is therefore the only channel that can reach an away captain while the pane itself is unusable, so it carries the buffered escalations themselves rather than a pointer to the marker file.
+It also names the recorded cause of the block and how long delivery has been blocked, for example `the primary composer has held unsent text for 5h39m`.
+A captain reading a phone notification can act on that; they cannot open a file path.
+The daemon caps the escalation text it passes to a notifier, and the durable marker keeps the full buffer regardless.
+
 ## Channels
 
 `config/wedge-alarm` is local and gitignored.
