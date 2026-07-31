@@ -2418,6 +2418,10 @@ JSON
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-o
   wait_for_text "$expanded_snapshot" "escape to interrupt" \
     || fail "Ctrl+O did not retain Pi's ordinary startup and tool expansion behavior"
+  # The expansion redraw lands a frame or two after the footer hint, so wait for the
+  # tool output this block actually asserts instead of assuming one implies the other.
+  wait_for_text "$expanded_snapshot" "CALM_E2E_OUTPUT" \
+    || fail "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
   assert_contains "$(cat "$expanded_snapshot")" "CALM_E2E_OUTPUT" "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
