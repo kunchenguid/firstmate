@@ -733,6 +733,15 @@ printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
+telegram_check="$STATE/telegram-watch.check.sh"
+if fmtg_poll_shim_valid "$telegram_check" "$FM_HOME" "$FM_ROOT" \
+  && [ -f "$FM_ROOT/bin/fm-telegram-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-telegram-poll.sh" ]; then
+  fmtg_wake_cycle_advance || {
+    echo "watcher: Telegram wake cycle could not be published" >&2
+    exit 1
+  }
+fi
+
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
 # A merged poll may have queued its terminal wake and then lost the process

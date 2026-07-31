@@ -203,6 +203,7 @@ fmtg_offset_write() { # <next-update-id>
 
 FMTG_SESSION_OWNER_PID=
 FMTG_SESSION_OWNER_IDENTITY=
+FMTG_WAKE_CYCLE_INITIAL=0000000000000000000000000000000000000000000000000000000000000000
 fmtg_session_owner_read() {
   local lock="$STATE/.lock" pid identity
   FMTG_SESSION_OWNER_PID=
@@ -228,6 +229,47 @@ fmtg_session_owner_matches() { # <pid> <identity>
     && [ "$FMTG_SESSION_OWNER_IDENTITY" = "$identity" ]
 }
 
+fmtg_wake_cycle_read() {
+  local file="$FMTG_STATE/wake-cycle" value
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    printf '%s\n' "$FMTG_WAKE_CYCLE_INITIAL"
+    return 0
+  fi
+  value=$(fm_private_read_file "$file" 600) || return 1
+  case "$value" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#value}" -eq 64 ] || return 1
+  printf '%s\n' "$value"
+}
+
+fmtg_wake_cycle_advance() {
+  local token
+  token=$(perl -MFcntl=:DEFAULT -e '
+    sysopen(my $fh, "/dev/urandom", O_RDONLY) or exit 1;
+    read($fh, my $bytes, 32) == 32 or exit 1;
+    print unpack("H*", $bytes);
+  ') || return 1
+  case "$token" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#token}" -eq 64 ] || return 1
+  printf '%s\n' "$token" | fm_private_publish_stdin "$FMTG_STATE" wake-cycle 600
+}
+
+fmtg_sent_receipt_time() { # <request-id> <receipt-id>
+  local request_id=$1 receipt_id=$2 receipt sent_at
+  receipt=$(fm_private_read_file "$FMTG_STATE/outbound/$receipt_id.json" 600) || return 1
+  sent_at=$(printf '%s' "$receipt" | jq -r --arg request_id "$request_id" --arg receipt_id "$receipt_id" '
+    select(
+      .schema == "firstmate.telegram-outbound.v1"
+      and .receipt_id == $receipt_id
+      and .request_id == $request_id
+      and .state == "sent"
+      and ((.sent_at // .updated_at) | type == "number" and floor == . and . >= 0)
+    )
+    | (.sent_at // .updated_at)
+  ') || return 1
+  case "$sent_at" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$sent_at"
+}
+
 fmtg_retirement_matches() { # <request-id> [receipt-id] [status]
   local request_id=$1 receipt_id=${2:-} status=${3:-} file raw
   file="$FMTG_STATE/retired/$request_id.json"
@@ -251,7 +293,7 @@ fmtg_retirement_matches() { # <request-id> [receipt-id] [status]
 }
 
 fmtg_publish_retirement_locked() { # <request-id> <status> <receipt-id> <retired-at>
-  local request_id=$1 status=$2 receipt_id=$3 retired_at=$4 retirement rc
+  local request_id=$1 status=$2 receipt_id=$3 retired_at=$4 retirement rc sent_at
   retirement=$(jq -n --arg request_id "$request_id" --arg status "$status" \
     --arg receipt_id "$receipt_id" --argjson retired_at "$retired_at" '
       {
@@ -266,7 +308,19 @@ fmtg_publish_retirement_locked() { # <request-id> <status> <receipt-id> <retired
   rc=$?
   case "$rc" in
     0) ;;
-    1|2) fmtg_retirement_matches "$request_id" "$receipt_id" "$status" || return 1 ;;
+    1|2)
+      if fmtg_retirement_matches "$request_id" "$receipt_id" "$status"; then
+        :
+      elif [ "$status" = completed ] && fmtg_retirement_matches "$request_id" "" expired; then
+        sent_at=$(fmtg_sent_receipt_time "$request_id" "$receipt_id") || return 1
+        [ "$sent_at" = "$retired_at" ] || return 1
+        printf '%s\n' "$retirement" | fmtg_json_publish "$FMTG_STATE/retired" "$request_id.json" || return 1
+      elif [ "$status" = expired ] && fmtg_retirement_matches "$request_id" "" completed; then
+        :
+      else
+        return 1
+      fi
+      ;;
     *) return 1 ;;
   esac
   fm_private_sync_dir "$FMTG_STATE/retired"
@@ -300,6 +354,7 @@ fmtg_retire_terminal() { # <request-id> <completed|expired> <receipt-id> <retire
 
 fmtg_queue_request() { # <request-id>; 0=new, 1=already offered, 2=error
   local request_id=$1 file raw wake_state wake_state_at wake_ttl handler_pid handler_identity
+  local handler_cycle current_cycle
   local now updated status=0 wake_status=0 increment=0 retirement_status
   fmtg_safe_slug "$request_id" 96 || return 2
   file="$FMTG_STATE/inbox/$request_id.json"
@@ -322,6 +377,7 @@ fmtg_queue_request() { # <request-id>; 0=new, 1=already offered, 2=error
     wake_state_at=$(printf '%s' "$raw" | jq -r '.wake_state_at // .wake_queued_at // 0' 2>/dev/null) || status=2
     handler_pid=$(printf '%s' "$raw" | jq -r '.wake_handler_pid // empty' 2>/dev/null) || status=2
     handler_identity=$(printf '%s' "$raw" | jq -r '.wake_handler_identity // empty' 2>/dev/null) || status=2
+    handler_cycle=$(printf '%s' "$raw" | jq -r '.wake_handler_cycle // empty' 2>/dev/null) || status=2
   fi
   now=$(date +%s)
   wake_ttl=0
@@ -329,7 +385,11 @@ fmtg_queue_request() { # <request-id>; 0=new, 1=already offered, 2=error
     offered) wake_ttl=$FMTG_WAKE_OFFER_TTL_SECS ;;
   esac
   case "${wake_state_at:-}" in ''|*[!0-9]*) wake_state_at=0 ;; esac
+  if [ "$status" -eq 0 ] && [ "${wake_state:-}" = acknowledged ]; then
+    current_cycle=$(fmtg_wake_cycle_read) || status=2
+  fi
   if [ "$status" -eq 0 ] && [ "${wake_state:-}" = acknowledged ] \
+    && [ "${handler_cycle:-}" = "$current_cycle" ] \
     && fmtg_session_owner_matches "${handler_pid:-}" "${handler_identity:-}"; then
     status=1
   elif [ "$status" -eq 0 ] && [ "$wake_ttl" -gt 0 ] \
@@ -347,7 +407,7 @@ fmtg_queue_request() { # <request-id>; 0=new, 1=already offered, 2=error
         .wake_state="offered" |
         .wake_state_at=$at |
         .wake_offer_count=((.wake_offer_count // 0) + $increment) |
-        del(.wake_handler_pid,.wake_handler_identity,.wake_acknowledged_at)
+        del(.wake_handler_pid,.wake_handler_identity,.wake_handler_cycle,.wake_acknowledged_at)
       ') || status=2
       if [ "$status" -eq 0 ]; then
         printf '%s\n' "$updated" | fmtg_json_publish "$FMTG_STATE/inbox" "$request_id.json" || status=2
@@ -362,22 +422,25 @@ fmtg_queue_request() { # <request-id>; 0=new, 1=already offered, 2=error
 }
 
 fmtg_ack_request() { # <request-id>
-  local request_id=$1 file raw updated now status=0
+  local request_id=$1 file raw updated now handler_cycle status=0
   fmtg_safe_slug "$request_id" 96 || return 1
   file="$FMTG_STATE/inbox/$request_id.json"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fmtg_session_owner_read || status=1
+  handler_cycle=$(fmtg_wake_cycle_read) || status=1
   raw=$(fm_private_read_file "$file" 600) || status=1
   now=$(date +%s)
   if [ "$status" -eq 0 ]; then
     updated=$(printf '%s' "$raw" | jq --argjson at "$now" \
-      --argjson handler_pid "$FMTG_SESSION_OWNER_PID" --arg handler_identity "$FMTG_SESSION_OWNER_IDENTITY" '
+      --argjson handler_pid "$FMTG_SESSION_OWNER_PID" --arg handler_identity "$FMTG_SESSION_OWNER_IDENTITY" \
+      --arg handler_cycle "$handler_cycle" '
       .wake_queued=false |
       .wake_state="acknowledged" |
       .wake_state_at=$at |
       .wake_acknowledged_at=$at |
       .wake_handler_pid=$handler_pid |
-      .wake_handler_identity=$handler_identity
+      .wake_handler_identity=$handler_identity |
+      .wake_handler_cycle=$handler_cycle
     ') || status=1
   fi
   if [ "$status" -eq 0 ]; then
@@ -388,19 +451,8 @@ fmtg_ack_request() { # <request-id>
 }
 
 fmtg_retire_request() { # <request-id> <receipt-id>
-  local request_id=$1 receipt_id=$2 receipt retired_at
-  receipt=$(fm_private_read_file "$FMTG_STATE/outbound/$receipt_id.json" 600) || return 1
-  retired_at=$(printf '%s' "$receipt" | jq -r --arg request_id "$request_id" --arg receipt_id "$receipt_id" '
-    select(
-      .schema == "firstmate.telegram-outbound.v1"
-      and .receipt_id == $receipt_id
-      and .request_id == $request_id
-      and .state == "sent"
-      and ((.sent_at // .updated_at) | type == "number" and floor == . and . >= 0)
-    )
-    | (.sent_at // .updated_at)
-  ') || return 1
-  case "$retired_at" in ''|*[!0-9]*) return 1 ;; esac
+  local request_id=$1 receipt_id=$2 retired_at
+  retired_at=$(fmtg_sent_receipt_time "$request_id" "$receipt_id") || return 1
   fmtg_retire_terminal "$request_id" completed "$receipt_id" "$retired_at"
 }
 

@@ -285,6 +285,15 @@ test_persist_before_offset_and_one_wake() {
   [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 0 ] || fail "acknowledged request was re-offered while its session owner remained live"
   FMTG_WAKE_OFFER_TTL_SECS=0 run_poll "$home" "$fakebin" "$updates" >/dev/null
   [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 0 ] || fail "live acknowledged request was re-offered by a fixed lease"
+  (
+    FM_HOME="$home"
+    . "$ROOT/bin/fm-telegram-lib.sh"
+    fmtg_wake_cycle_advance
+  ) || fail "could not advance the supervised wake cycle"
+  run_poll "$home" "$fakebin" "$updates" >/dev/null
+  [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "ended handling turn did not re-offer its acknowledged request"
+  FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-telegram-request.sh" show tg-200-77 >/dev/null
   rm -f "$home/state/.lock"
   run_poll "$home" "$fakebin" "$updates" >/dev/null
   [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "abandoned acknowledged request was not re-offered"
@@ -302,7 +311,7 @@ send_file() {
 }
 
 test_exact_approval_and_sent_receipts() {
-  local home fakebin counts updates send_body text out rc request saved approval_tmp receipt_tmp expires
+  local home fakebin counts updates send_body text out rc request saved approval_tmp receipt_tmp retirement_tmp expires
   home=$(new_home approval); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
   bind_live_session "$home"
   counts="$home/counts"; mkdir -p "$counts"
@@ -330,6 +339,10 @@ test_exact_approval_and_sent_receipts() {
   [ "$(count_wake_key "$home/state/.wake-queue" tg-1-10)" = 0 ] || fail "retired request was re-offered"
 
   cp "$saved" "$home/state/telegram/inbox/tg-1-10.json"; chmod 600 "$home/state/telegram/inbox/tg-1-10.json"
+  retirement_tmp="$home/state/telegram/retired/tg-1-10.recovery"
+  jq '.status="expired" | .receipt_id=null' "$home/state/telegram/retired/tg-1-10.json" > "$retirement_tmp"
+  chmod 600 "$retirement_tmp"
+  mv "$retirement_tmp" "$home/state/telegram/retired/tg-1-10.json"
   approval_tmp="$home/state/telegram/approvals/release-42.recovery"
   jq '.status="preparing" | del(.telegram_message_id,.expires_at)' \
     "$home/state/telegram/approvals/release-42.json" > "$approval_tmp"
@@ -346,6 +359,8 @@ test_exact_approval_and_sent_receipts() {
   assert_absent "$home/state/telegram/inbox/tg-1-10.json" "sent receipt replay did not retire the restored request"
   [ "$(jq -r .status "$home/state/telegram/approvals/release-42.json")" = pending ] \
     || fail "sent receipt replay did not finish the approval binding"
+  [ "$(jq -r '.status + ":" + .receipt_id' "$home/state/telegram/retired/tg-1-10.json")" = completed:reply-1 ] \
+    || fail "sent receipt did not supersede an expiry that raced delivery"
   [ "$(cat "$counts/sendMessage")" = 1 ] || fail "sent receipt finalization replay dispatched again"
 
   jq -n '{schema:"firstmate.telegram-approval-claim.v1",approval_id:"release-42",request_id:"tg-2-11",decision:"approve",claimed_at:1}' \
@@ -608,7 +623,7 @@ EOF
 }
 
 test_retention_and_runtime_harness_matrix() {
-  local home fakebin updates old backend out harness text rc counts custom sentinel wait_budget
+  local home fakebin updates old backend out harness text rc counts custom sentinel wait_budget wake_cycle
   home=$(new_home retention); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
   updates="$home/empty.json"; write_empty_updates "$updates"
   text="$home/retained-text"; send_file "$text" 'Ambiguous delivery must remain deduplicated.'
@@ -670,6 +685,11 @@ EOF
     bash -c '. "$1/config/telegram-mode.env"; exec "$2/bin/fm-watch.sh"' _ "$home" "$ROOT")
   assert_contains "$out" 'cadence.status' "cadence-isolation watcher did not reach its terminating signal"
   [ "$(cat "$counts/getUpdates")" = 1 ] || fail "dedicated Telegram cadence did not run its poll"
+  wake_cycle=$(cat "$home/state/telegram/wake-cycle")
+  case "$wake_cycle" in
+    *[!0-9a-f]*) fail "watcher published a malformed wake-cycle claim" ;;
+  esac
+  [ "${#wake_cycle}" -eq 64 ] || fail "watcher did not publish a bounded wake-cycle claim"
   assert_absent "$sentinel" "Telegram cadence accelerated an unrelated registered check"
 
   for harness in claude codex opencode pi grok; do
