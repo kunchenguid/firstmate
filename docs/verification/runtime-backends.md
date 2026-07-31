@@ -141,7 +141,7 @@ Semantic submit confirmation was validated on 2026-07-31 (revalidated the same d
 bash tests/fm-tmux-submit-semantic.test.sh
 ```
 
-All fourteen cases passed.
+All fourteen cases passed, and the same fourteen were re-run on 2026-08-01 after the per-Enter confirmation floor `FM_SUBMIT_SEMANTIC_MIN_BUDGET` was raised to 2 seconds, so this record covers the shipped defaults.
 Expected semantic submit matrix: only an idle baseline enters the semantic path, and a trusted busy record with an advanced sequence observed after a delivered Enter confirms `empty turn-opened`; no turn on an idle baseline stays `pending no-turn`; a send whose every Enter keystroke was rejected is `send-failed`; every busy, unknown, or unreadable baseline routes to the labelled `composer-fallback`, so an unchanged record (including the spawn-time seed and a stuck record from a crashed turn) can never confirm; the shipped default performs exactly one post-verdict comparison read, warns loudly in both disagreement directions, records each disagreement in `state/<id>.submit-disagreement`, and downgrades a contradicted confirmation to `unknown semantic-contradicted`; with the comparison off the semantic path performs zero pane reads; codex, kimi, and unarmed tasks fall back with the `composer-fallback` label; and a context-free call keeps the bare single-token verdict.
 Send-to-turn correlation and concurrent-send serialisation are deliberately out of scope and unverified here; the fm-submit-correlation follow-up owns both.
 The turn-open signals themselves reuse the #1327 hook, plugin, and extension wiring whose live-harness evidence is recorded in [supervision.md](supervision.md).
