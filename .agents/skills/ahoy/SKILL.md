@@ -32,7 +32,7 @@ Give the captain a concise session-only recap without gathering fresh state.
    A later unrelated captain message establishes a recap boundary but does not close an earlier decision.
    Treat a decision as closed only when a later visible response substantively resolves it, chooses an option, declines it, grants or denies the requested approval, or otherwise directly addresses that decision.
    Include every visibly supported open decision once, and deduplicate by the decision's substance when the ordinary interval recap already represents it or its wording differs.
-   Apply `AGENTS.md` section 9's operator-effort and reply cues only to Captain's Call-class items that need the captain's own action now, not to recap-only events.
+   Apply `AGENTS.md` section 9's decision grammar - the unmistakable question, labeled recommendation, consequences, stable ID, operator effort, and reply cue - only to Captain's Call-class items that need the captain's own action now, never to recap-only events.
 6. The normal recap branch is session-history-only.
    Do not call Bearings, shell commands, fleet snapshots, status readers, GitHub or browser APIs, tools, or file reads or writes.
    Create no report, persist nothing, and do not guess current live state beyond the last visible event.
