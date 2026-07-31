@@ -92,7 +92,7 @@ else
   STATE="$FM_HOME/state"
 fi
 BROWSER_RULE="3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-   For browser or visual work against an internal app gated by SSO, export \`CHROME_DEVTOOLS_AXI_USER_DATA_DIR=\"$FM_ROOT/data/chrome-profile\"\` before invoking chrome-devtools-axi so it reuses the captain's persisted login session.
+   For browser or visual work against an internal app gated by SSO, export \`CHROME_DEVTOOLS_AXI_USER_DATA_DIR=\"$FM_HOME/data/chrome-profile\"\` before invoking chrome-devtools-axi so it reuses the captain's persisted login session.
    If you still land on a login page (the persisted session expired or was never established), do NOT attempt to authenticate yourself: append \`blocked: {app} needs a fresh manual login via bin/fm-chrome-login.sh\` to the status file and stop."
 
 KIND=ship

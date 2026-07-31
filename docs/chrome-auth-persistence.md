@@ -7,7 +7,7 @@ This convention gives crewmates a persistent profile directory that already carr
 
 ## Profile path
 
-The fixed profile directory is `$FM_ROOT/data/chrome-profile`.
+The fixed profile directory is `$FM_HOME/data/chrome-profile`.
 `data/` is already gitignored as a whole, so this needs no separate ignore entry and no `config/` override.
 
 ## One-time captain setup
@@ -19,7 +19,7 @@ This is captain-run only: a crewmate never performs this login itself.
 
 ## How crewmates consume it
 
-A crewmate doing browser or visual work exports `CHROME_DEVTOOLS_AXI_USER_DATA_DIR="$FM_ROOT/data/chrome-profile"` before invoking `chrome-devtools-axi`, so its launch reuses the persisted session (see `bin/fm-brief.sh`'s browser-work rule, the single owner of that instruction text).
+A crewmate doing browser or visual work exports `CHROME_DEVTOOLS_AXI_USER_DATA_DIR="$FM_HOME/data/chrome-profile"` before invoking `chrome-devtools-axi`, so its launch reuses the persisted session (see `bin/fm-brief.sh`'s browser-work rule, the single owner of that instruction text).
 If a crewmate still lands on a login page, the persisted session has expired or was never established.
 It must not attempt to authenticate itself: it appends `blocked: {app} needs a fresh manual login via bin/fm-chrome-login.sh` to its status file and stops, per the standard `blocked:` protocol, so firstmate can relay the need for a fresh captain login.
 

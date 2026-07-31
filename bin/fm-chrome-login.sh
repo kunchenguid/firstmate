@@ -6,7 +6,7 @@
 #   Captain-run only; crewmates never authenticate themselves (see
 #   docs/chrome-auth-persistence.md and bin/fm-brief.sh's browser-work rule).
 #   Launches chrome-devtools-axi headed with
-#   CHROME_DEVTOOLS_AXI_USER_DATA_DIR=$FM_ROOT/data/chrome-profile, the fixed
+#   CHROME_DEVTOOLS_AXI_USER_DATA_DIR=$FM_HOME/data/chrome-profile, the fixed
 #   profile directory every crewmate's browser work reuses afterward, and
 #   opens <start-url> when given.
 set -eu
