@@ -329,13 +329,14 @@ Observed guarantees: a contended presentation lock refused the teardown before t
 
 The same fixtures verified three further boundaries on 2026-07-29: missing or malformed endpoint identity and an unparseable pane presence refused record removal with everything retained; the SIGKILL escalation re-read the exact pane's process information and refused to signal when a different shell pid owned the pane, falling back to the plain close with the original process untouched; and a reposition whose removal then failed on every path restored the exact original workspace order through a second verified move and reported the close as failed.
 
-The teardown fixture was re-run on 2026-07-31 after extending the same fail-closed boundary through forced secondmate cleanup.
+The teardown fixture was re-run on 2026-07-31 after extending the same fail-closed boundary through forced secondmate cleanup, including recursive cleanup of a nested secondmate whose Herdr grandchild close remains unconfirmed.
 
 Observed output:
 
 ```text
 ok - forced secondmate teardown preflights every Herdr child before cleanup mutation
 ok - forced secondmate teardown retains Herdr child identity until exact pane disappearance
+ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
 ```
 
 ### Composer and operational input
