@@ -210,12 +210,14 @@ successor=none                499 / 499
 reason=actionable-stale       293
 reason=actionable-signal      198
 reason=actionable-check         8
-sub-5s exits, actionable-stale 112 (22% of all cycles)
+exits within 5s               117 (23% of all cycles)
+  of those, actionable-stale  112 (22% of all cycles)
+  of those, actionable-check    5
 ```
 
 Every cycle completed normally and delivered a wake; none armed a successor.
 Supervision therefore ended on each delivered wake and resumed only when an adapter above the arm layer happened to re-arm.
-The sub-5s exits are parked lanes at independent phases, each ending a cycle of its own.
+The 112 actionable-stale sub-5s exits are parked lanes at independent phases, each ending a cycle of its own.
 
 Guard-class mutation results, one mutation per protection.
 A failing case aborts its suite, so each mutation was run twice: once to see which case it kills, and once with that case's invocation removed to prove nothing else in the suite breaks.

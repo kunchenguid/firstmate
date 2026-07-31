@@ -1009,6 +1009,36 @@ test_successor_is_not_armed_without_supervision_need() {
   pass "no successor is armed for a home with nothing left to supervise"
 }
 
+# The other half of the same gate. In away mode the supervise-daemon owns the
+# cycle, so an arm that armed a successor here would leave a second watcher
+# competing with the daemon for the home it is already driving. This home still
+# has in-flight work and still delivers its wake, so .afk is the only thing
+# standing between this cycle and a successor.
+test_successor_is_not_armed_in_away_mode() {
+  local dir state fakebin armout armpid status leftover
+  dir=$(stage_one_signal_home successor-away-gate)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  date +%s > "$state/.afk"   # away mode: the supervise-daemon owns this cycle
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -eq 0 ] || fail "arm in away mode did not deliver its wake cleanly (status $status)"
+  grep -q '^signal:' "$armout" || fail "arm in away mode swallowed the staged wake"
+  grep -q "arm_pid=$armpid.*successor=none" "$state/.watch-cycle-exits.log" \
+    || fail "an away home recorded a successor the daemon-owned cycle should not have armed"
+  leftover=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if is_live_non_zombie "$leftover"; then
+    kill -TERM "$leftover" 2>/dev/null || true
+    fail "an away home was left with a detached watcher competing with the daemon"
+  fi
+  pass "no successor is armed in away mode, where the supervise-daemon owns the cycle"
+}
+
 # The preserved capture is the reason this contract exists, so it is checked as
 # evidence rather than trusted as prose: if the fixture ever stops showing the
 # defect it recorded, these tests are guarding nothing and must say so.
@@ -1233,5 +1263,6 @@ test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_delivered_wake_arms_its_successor_before_it_is_handled
 test_attached_arm_delivers_its_successor_cycle_wake
 test_successor_is_not_armed_without_supervision_need
+test_successor_is_not_armed_in_away_mode
 test_preserved_capture_still_shows_the_defect_a_fresh_cycle_no_longer_has
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

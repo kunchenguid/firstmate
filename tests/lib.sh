@@ -53,7 +53,8 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
+# on EXIT. Sourcing this file installs the cleanup trap, so a root registered
+# from inside a command substitution is still removed. A test file that needs
 # extra teardown (e.g. killing a daemon) should define its own EXIT trap and
 # call fm_test_cleanup from inside it so registered dirs are still removed.
 

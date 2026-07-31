@@ -1,8 +1,7 @@
-# Fixture: watcher cycle exits, captured 2026-07-31 from state/.watch-cycle-exits.log
-# Records: 499   Captured because this log accumulates over days and cannot be regenerated.
+# cycle-exits.log: 499 watcher lifecycle records captured 2026-07-31 verbatim from
+# a live home's state/.watch-cycle-exits.log. Preserved because that log accumulates
+# over days and cannot be regenerated, so it is raw evidence, not a generated input.
 #
-# successor=none : 499 / 499
-# exit_code=0    : 499 / 499
-# signal=none    : 499 / 499
-# reasons        :       8 reason=actionable-check     198 reason=actionable-signal     293 reason=actionable-stale 
-# sub-5s exits   : 112 actionable-stale, 5 actionable-check (22% of all cycles)
+# The record breakdown it shows, and the contract that breakdown drove, are owned by
+# docs/verification/supervision.md, section "Arm-layer successor and parked check-in
+# cadence". Do not restate them here; a second copy would drift.
