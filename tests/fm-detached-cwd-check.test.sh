@@ -4,7 +4,8 @@
 # directory (the detached-paseo-agent skill is the only caller).
 #
 # All hermetic over temp dirs; the check is driven only through its executable
-# interface with FM_ROOT_OVERRIDE / FM_HOME / FM_STATE_OVERRIDE.
+# interface with FM_ROOT_OVERRIDE / FM_HOME / FM_STATE_OVERRIDE /
+# FM_PROJECTS_OVERRIDE / FM_DATA_OVERRIDE.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -22,17 +23,24 @@ CODE="$TMP_ROOT/fmcode"
 HOME_DIR="$TMP_ROOT/home"
 WT="$TMP_ROOT/wt/task1"
 SAFE="$TMP_ROOT/user/code"
+PROJECTS="$TMP_ROOT/relocated-projects"
+SECOND_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p \
   "$CODE/bin" \
+  "$HOME_DIR/data" \
   "$HOME_DIR/state" \
   "$HOME_DIR/projects/alpha/src" \
+  "$PROJECTS/beta/src" \
+  "$SECOND_HOME/data/private" \
   "$WT/pkg" \
   "$SAFE/sub" \
   "$HOME_DIR/sub"
 printf 'worktree=%s\n' "$WT" > "$HOME_DIR/state/task1.meta"
+printf -- '- sm - registered idle secondmate (home: %s; scope: fixture; projects: beta; added 2026-07-30)\n' "$SECOND_HOME" > "$HOME_DIR/data/secondmates.md"
 
 run_check() {
   FM_ROOT_OVERRIDE="$CODE" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_PROJECTS_OVERRIDE="$PROJECTS" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     bash "$CHECK" "$1" 2>&1
 }
 
@@ -83,11 +91,15 @@ test_refuse_inside_fm_home() {
 }
 
 test_refuse_projects_root() {
-  expect_unsafe "$HOME_DIR/projects" "the projects root is refused"
+  expect_unsafe "$PROJECTS" "the configured projects root is refused"
 }
 
-test_refuse_inside_registered_clone() {
-  expect_unsafe "$HOME_DIR/projects/alpha/src" "a directory inside a registered project clone is refused"
+test_refuse_inside_configured_projects_root() {
+  expect_unsafe "$PROJECTS/beta/src" "a directory inside the configured projects root is refused"
+}
+
+test_refuse_inside_registered_secondmate_home() {
+  expect_unsafe "$SECOND_HOME/data/private" "a directory inside a registered idle secondmate home is refused"
 }
 
 test_refuse_inside_active_worktree() {
@@ -143,7 +155,8 @@ test_refuse_inside_fm_root
 test_refuse_fm_home_itself
 test_refuse_inside_fm_home
 test_refuse_projects_root
-test_refuse_inside_registered_clone
+test_refuse_inside_configured_projects_root
+test_refuse_inside_registered_secondmate_home
 test_refuse_inside_active_worktree
 test_refuse_relative_path
 test_refuse_nonexistent_path

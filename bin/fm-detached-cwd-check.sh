@@ -17,7 +17,9 @@
 # Forbidden roots (the candidate may not equal or sit inside any of them):
 #   - FM_ROOT             the tracked firstmate code root
 #   - FM_HOME             the effective operational home
-#   - FM_HOME/projects    all registered project clones live here
+#   - FM_PROJECTS_OVERRIDE or FM_HOME/projects
+#                         all registered project clones live here
+#   - every home: entry    recorded in FM_DATA_OVERRIDE or FM_HOME/data/secondmates.md
 #   - every worktree=      recorded in FM_HOME/state/*.meta (active task worktrees)
 #
 # Containment is decided by device+inode identity walked up the candidate's real
@@ -32,6 +34,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 unsafe() {
   printf 'UNSAFE: %s\n' "$1" >&2
@@ -77,7 +81,15 @@ add_forbidden() {
 
 add_forbidden "$FM_ROOT"
 add_forbidden "$FM_HOME"
-add_forbidden "$FM_HOME/projects"
+add_forbidden "$PROJECTS"
+
+if [ -f "$DATA/secondmates.md" ]; then
+  while IFS= read -r line; do
+    home=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
+    [ -n "$home" ] || continue
+    add_forbidden "$home"
+  done < "$DATA/secondmates.md"
+fi
 
 if [ -d "$STATE" ]; then
   for meta in "$STATE"/*.meta; do
