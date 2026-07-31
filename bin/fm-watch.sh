@@ -153,6 +153,18 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# A parked lane - a declared external wait, or a captain hold whose agent has
+# confidently exited - cannot clear until something outside this fleet acts, so
+# it gets a CHECK-IN CADENCE rather than a standing per-cycle trigger. Each lane
+# keeps its own PAUSE_RESURFACE_SECS recheck age, but every lane due in one poll
+# is BATCHED into a single wake, and that batch is rate-limited home-wide by the
+# .last-parked-checkin mtime - the same restart-surviving, time-based shape the
+# slow per-task checks use. Without the batch, parked lanes at independent
+# phases each ended a supervision cycle of their own, and a fresh watcher died
+# within seconds of every start on whichever lane happened to be next overdue.
+# This is cadence, never silence: a parked lane is still re-checked, because a
+# declared wait can stop holding.
+PARKED_CHECKIN_SECS=${FM_PARKED_CHECKIN_SECS:-$PAUSE_RESURFACE_SECS}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -333,11 +345,43 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
-    fm_wake_append stale "$win" "$reason" || exit 1
-    date +%s > "$rf"
-    wake "$reason"
+    # Due, but not surfaced here: collect it and let flush_parked_checkin decide
+    # once, for the whole fleet, whether this poll is a check-in.
+    parked_due=$(printf '%s%s\t%s\n' "$parked_due" "$win" "$reason")
+    triage_log "parked check-in due (paused ${age}s): $win"
+    return 0
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+}
+
+# Emit at most ONE parked check-in per PARKED_CHECKIN_SECS, carrying every lane
+# that came due in this poll. Only the lanes actually included in an emitted
+# check-in have their per-lane cadence stamped, so a deferred lane stays due and
+# is picked up by the check-in that does fire.
+flush_parked_checkin() {
+  local win reason combined='' first=1 key
+  [ -n "$parked_due" ] || return 0
+  if [ "$(age_of "$STATE/.last-parked-checkin")" -lt "$PARKED_CHECKIN_SECS" ]; then
+    triage_log "deferred parked check-in to its cadence"
+    return 0
+  fi
+  while IFS=$(printf '\t') read -r win reason; do
+    [ -n "$win" ] || continue
+    fm_wake_append stale "$win" "$reason" || exit 1
+    key=$(printf '%s' "$win" | tr ':/.' '___')
+    date +%s > "$STATE/.paused-resurfaced-$key"
+    if [ "$first" -eq 1 ]; then
+      combined="$reason"
+      first=0
+    else
+      combined="$combined; $reason"
+    fi
+  done <<EOF
+$parked_due
+EOF
+  [ -n "$combined" ] || return 0
+  touch "$STATE/.last-parked-checkin"
+  wake "$combined"
 }
 
 clear_pause_state() {  # <window>
@@ -856,6 +900,9 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
+  # Parked lanes found in this pass accumulate here instead of each ending the
+  # cycle on its own; flush_parked_checkin below decides the batch once.
+  parked_due=''
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -1019,6 +1066,11 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+
+  # One check-in for every parked lane that came due in this pass, at most once
+  # per PARKED_CHECKIN_SECS. Runs after the whole window loop so a check-in
+  # never truncates the pass that produced it.
+  flush_parked_checkin
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

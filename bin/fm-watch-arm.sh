@@ -42,6 +42,23 @@
 # loud. A live cycle already present means re-arm attaches - do not start a second
 # watcher.
 #
+# ARMING THE SUCCESSOR IS THE FIRST ACT OF CONSUMING A WAKE, before the wake is
+# handled. The watcher is one-shot by design: it exits to deliver one actionable
+# reason. Nothing here used to start the next cycle, so supervision ENDED on
+# every delivered wake and resumed only when some adapter above this layer
+# happened to re-arm - a blind window as wide as the whole handling turn, and
+# unbounded whenever that adapter path was inert (a forked Claude session whose
+# Stop hook can never claim the home is the observed case). Handling first and
+# arming afterwards cannot close that window; only this ordering can.
+# The successor is deliberately NOT this arm's child: it must outlive this
+# process, which exits as soon as it delivers the wake. Its stdout goes to a
+# pid-keyed state/.watch-successor-output.<pid> file, so whichever arm later
+# attaches to it can still deliver that cycle's real reason instead of reporting
+# a genuine wake as an unexplained empty close.
+# A successor is armed only where supervision would otherwise end: a delivered
+# actionable wake, in a home that still needs supervision and is not away. Typed
+# failures stay loud and unarmed so the adapter and the model still repair them.
+#
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
@@ -61,6 +78,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
@@ -79,6 +98,11 @@ CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
+# Where a detached successor's one printed reason lands until an arm claims it.
+SUCCESSOR_OUT_PREFIX="$STATE/.watch-successor-output"
+# How long an unclaimed successor output survives before it is treated as debris.
+SUCCESSOR_OUT_TTL=${FM_WATCH_SUCCESSOR_OUT_TTL:-3600}
+case "$SUCCESSOR_OUT_TTL" in ''|*[!0-9]*) SUCCESSOR_OUT_TTL=3600 ;; esac
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 ARM_PID=${BASHPID:-$$}
@@ -241,6 +265,78 @@ report_attached() {
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
+successor_output_path() {  # <watcher-pid>
+  printf '%s.%s' "$SUCCESSOR_OUT_PREFIX" "$1"
+}
+
+# Drop only successor outputs no live watcher can still be writing to AND that
+# no arm plausibly still owes a delivery for. Age is the second condition on
+# purpose: pruning purely on a dead pid would race an attached arm that has just
+# observed the close and is about to claim that exact file.
+prune_successor_outputs() {
+  local f pid
+  for f in "$SUCCESSOR_OUT_PREFIX".*; do
+    [ -e "$f" ] || continue
+    pid=${f##*.}
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      *) fm_pid_alive "$pid" && continue ;;
+    esac
+    [ "$(fm_path_age "$f")" -ge "$SUCCESSOR_OUT_TTL" ] || continue
+    rm -f "$f" 2>/dev/null || true
+  done
+}
+
+# A successor is armed only where supervision would otherwise end. An away home
+# is skipped because the daemon owns the cycle there, and a home with no
+# in-flight work and no relay poll is skipped so a detached watcher can never
+# outlive the work it was supervising. FM_WATCH_ARM_SUCCESSOR=0 is the explicit
+# opt-out for a caller that owns continuity itself.
+successor_wanted() {
+  [ "${FM_WATCH_ARM_SUCCESSOR:-1}" != 0 ] || return 1
+  [ -e "$STATE/.afk" ] && return 1
+  fm_supervision_needed "$STATE" "$GRACE"
+}
+
+# Start one detached watcher and confirm it through the same honesty gate an
+# owned child passes. Prints "started:<pid>" once confirmed and "none"
+# otherwise. It NEVER fails the wake delivery it precedes: a home left without a
+# successor is recorded as such in the ledger and still gets its reason.
+arm_successor() {  # <just-closed-watcher-pid>
+  local closed_pid=${1:-none} tmp deadline pid target
+  successor_wanted || { printf 'none'; return 0; }
+  prune_successor_outputs
+  tmp=$(mktemp "$SUCCESSOR_OUT_PREFIX.pending.XXXXXX" 2>/dev/null) || { printf 'none'; return 0; }
+  # Double-fork so the watcher is reparented away from this arm: it must survive
+  # the exit that delivers the wake. setsid additionally detaches the controlling
+  # terminal where it exists; the bare subshell fallback covers hosts without it.
+  if command -v setsid >/dev/null 2>&1; then
+    ( setsid "$WATCH" >"$tmp" 2>/dev/null </dev/null & ) 2>/dev/null
+  else
+    ( "$WATCH" >"$tmp" 2>/dev/null </dev/null & ) 2>/dev/null
+  fi
+  deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+  while :; do
+    if healthy_watcher && [ "$HEALTHY_PID" != "$closed_pid" ]; then
+      pid=$HEALTHY_PID
+      target=$(successor_output_path "$pid")
+      # Another arm may already own this watcher and its output file. Never
+      # clobber a reason someone else is still owed.
+      if [ -e "$target" ]; then
+        rm -f "$tmp" 2>/dev/null || true
+      else
+        mv -f "$tmp" "$target" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+      fi
+      printf 'started:%s' "$pid"
+      return 0
+    fi
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 0.2
+  done
+  rm -f "$tmp" 2>/dev/null || true
+  printf 'none'
+}
+
 # Give a successor the same bounded confirmation window used for a fresh child.
 # Adapter-owned continuations normally win immediately, but the bound avoids a
 # false failure when process-close delivery and lock publication cross briefly.
@@ -265,7 +361,7 @@ fail_unexplained_cycle() {
 # to a verified successor. With no successor, fail loudly instead of returning a
 # clean empty completion that an adapter could mistake for a no-op.
 attach_and_wait() {
-  local attached_pid=$1
+  local attached_pid=$1 out claimed reason_type successor
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
@@ -276,6 +372,22 @@ attach_and_wait() {
       fi
       sleep "$ATTACH_POLL"
       continue
+    fi
+    # The cycle this arm was following has closed. A watcher writes its one
+    # reason and only then releases the lock, so if that cycle woke for
+    # something real its reason is already complete on disk. Deliver it - an
+    # attached close carrying a genuine wake is a wake, not the unexplained
+    # empty completion this used to report.
+    out=$(successor_output_path "$attached_pid")
+    if watch_output_has_wake "$out"; then
+      reason_type=$(watch_output_reason_type "$out")
+      claimed="$out.claimed.$ARM_PID"
+      mv -f "$out" "$claimed" 2>/dev/null || claimed=$out
+      successor=$(arm_successor "$attached_pid")
+      cycle_log_append 0 none "$reason_type" "$successor"
+      print_watch_output "$claimed"
+      rm -f "$claimed" 2>/dev/null || true
+      return 0
     fi
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
@@ -405,11 +517,14 @@ cycle_begin "$child" started
 child_done=0
 
 owned_child_finished() {
-  local rc=$1 signal reason_type status
+  local rc=$1 signal reason_type status successor
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
-    cycle_log_append "$rc" "$signal" "$reason_type" none
+    # Arm first, deliver second. Nothing below this line may run before the
+    # next cycle exists, or the home is blind for the whole handling turn.
+    successor=$(arm_successor "$cycle_watcher_pid")
+    cycle_log_append "$rc" "$signal" "$reason_type" "$successor"
     print_watch_output "$child_out"
     rm -f "$child_out" 2>/dev/null || true
     child=
