@@ -1,9 +1,11 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
 // Verified against Pi 0.81.1 and 0.82.0, which expose built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons,
-// ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), and
-// setHiddenThinkingLabel(). The focused tests pin those assumptions but never reject a
+// renderers, renderShell: "self", session_start replacement reasons, agent_start and
+// agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
+// with a disposable component factory, and setHiddenThinkingLabel().
+// ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
+// installs. The focused tests pin those assumptions but never reject a
 // newer Pi solely for its version. The collapsed-thinking and operational-user
 // presentation adapters probe the exact API they patch and degrade independently with a
 // diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it; Pi
@@ -21,6 +23,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   ExtensionAPI,
+  ExtensionUIContext,
   ToolDefinition,
   ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
@@ -37,6 +40,11 @@ import { Box, Container, getKeybindings, type Component } from "@earendil-works/
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
+import {
+  CALM_WORKING_SHIP_WIDGET_KEY,
+  createCalmWorkingShipAnimation,
+  createCalmWorkingShipWidget,
+} from "./lib/fm-calm-working-ship.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
@@ -93,6 +101,36 @@ export default function (pi: ExtensionAPI) {
 
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
+  // One logical agent run, tracked from agent_start through agent_settled rather than
+  // from turns or tool calls, so the boat never flickers between tool calls, automatic
+  // continuations, retries, or compaction that stay inside the same run.
+  let agentRunActive = false;
+  let workingShipShown = false;
+  // One animation instance per extension lifetime. Hiding the working widget freezes
+  // this state; the next working period resumes it. session_start resets it so a fresh
+  // Pi session starts at the normal initial position. Never module-global.
+  const workingShipAnimation = createCalmWorkingShipAnimation();
+
+  // Single owner of Calm's working-row presentation choice. The widget is only created
+  // or removed on a real transition, so repeated starts cannot duplicate its timer.
+  const applyWorkingPresentation = (
+    ui: ExtensionUIContext,
+    forceStockVisibility = false,
+  ): void => {
+    const showShip = agentRunActive && calmPresentationIsActive();
+    if (showShip !== workingShipShown) {
+      workingShipShown = showShip;
+      ui.setWidget(
+        CALM_WORKING_SHIP_WIDGET_KEY,
+        showShip
+          ? (tui) => createCalmWorkingShipWidget(tui, workingShipAnimation)
+          : undefined,
+      );
+      ui.setWorkingVisible(!showShip);
+    } else if (forceStockVisibility && !showShip) {
+      ui.setWorkingVisible(true);
+    }
+  };
 
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
@@ -241,7 +279,11 @@ export default function (pi: ExtensionAPI) {
     setCalmPresentation(loadCalmPreference());
     setCalmStockExportRendering(false);
     publishPresentationState();
-    ctx.ui.setWorkingVisible(true);
+    agentRunActive = false;
+    workingShipShown = false;
+    // A genuine new session lifetime starts the boat at the normal initial position.
+    workingShipAnimation.reset();
+    applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
     ctx.ui.setStatus("firstmate-calm", undefined);
     removeTerminalInputHandler?.();
@@ -271,6 +313,22 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
+  pi.on("agent_start", (_event, ctx) => {
+    agentRunActive = true;
+    applyWorkingPresentation(ctx.ui);
+  });
+
+  // agent_settled is emitted from a finally block, so it also covers abort and failure.
+  pi.on("agent_settled", (_event, ctx) => {
+    agentRunActive = false;
+    applyWorkingPresentation(ctx.ui);
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    agentRunActive = false;
+    applyWorkingPresentation(ctx.ui);
+  });
+
   pi.registerCommand("calm", {
     description: "Toggle Firstmate's supported conversation-only transcript presentation.",
     handler: async (_args, ctx) => {
@@ -278,7 +336,7 @@ export default function (pi: ExtensionAPI) {
       persistCalmPreference(active);
       setCalmPresentation(active);
       publishPresentationState();
-      ctx.ui.setWorkingVisible(true);
+      applyWorkingPresentation(ctx.ui, true);
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
       ctx.ui.setStatus("firstmate-calm", undefined);
 

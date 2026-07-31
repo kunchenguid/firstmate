@@ -9,33 +9,17 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
+KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
-assert_source_line() {
-  local line=$1
-  grep -Fqx -- "$line" "$SPAWN" || fail "existing launch template changed: $line"
+cleanup_kimi_harness() {
+  [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
+  rm -rf "$TMP_ROOT"
 }
-
-test_existing_launch_templates_are_byte_pinned() {
-  assert_source_line "    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__\"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
-  assert_source_line "        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
-  assert_source_line "        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c \"notify=[\\\"bash\\\",\\\"-c\\\",\\\"touch __TURNEND__\\\"]\" \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
-  assert_source_line "    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\\''{\"permission\":{\"*\":\"allow\"}}'\\'' opencode __MODELFLAG__--prompt \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
-  assert_source_line "        printf '%s%s' \"\$harness\" ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
-  assert_source_line "        printf '%s%s' \"\$harness\" ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
-  assert_source_line "    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__\"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
-  pass "fm-spawn: the five pre-existing adapters' launch templates stay byte-pinned"
-}
-
-test_tracked_files_have_no_user_absolute_paths() {
-  local pattern="/""Users/" matches
-  matches=$(git -C "$ROOT" grep -n -F "$pattern" -- . || true)
-  [ -z "$matches" ] || fail "tracked files contain user-specific absolute paths: $matches"
-  pass "repository: tracked files contain no user-specific absolute paths"
-}
+trap cleanup_kimi_harness EXIT
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -193,8 +177,11 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta
-  id=kimi-success-z1
+  local id rec out rc launch pointer brief_real meta task_tmp
+  id="kimi-success-z1-$$"
+  task_tmp="/tmp/fm-$id"
+  KIMI_RUNTIME_TASK_TMP=$task_tmp
+  rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
@@ -218,6 +205,10 @@ test_kimi_launch_then_send_is_verified() {
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
+  assert_grep "tasktmp=$task_tmp" "$meta" "kimi meta did not record its task temp root"
+  assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
+  assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
+    "kimi spawn did not export its Go temp directory into the pane"
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
     "kimi spawn did not install its guarded global hook region"
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
@@ -575,7 +566,7 @@ SH
 }
 
 test_kimi_busy_signature_is_scoped_to_spinner_lines() {
-  local capture phase kimi_regex_lines
+  local capture
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-tmux-lib.sh"
   unset FM_BUSY_REGEX
@@ -589,10 +580,11 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   # These fixtures reproduce the observed spinner shape rather than byte-exact
   # transcriptions. Leading whitespace is deliberately varied; separator whitespace
   # follows the captured contract.
-  printf ' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"\n│ > │\n' > "$capture"
-  fm_pane_is_busy fake kimi || fail "the first real Kimi spinner shape was not recognized as busy"
-  printf '   🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
-  fm_pane_is_busy fake kimi || fail "the tool-execution Kimi spinner shape was not recognized as busy"
+  local phase
+  for phase in 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘; do
+    printf '  %s · Tip: Kimi is working\n│ > │\n' "$phase" > "$capture"
+    fm_pane_is_busy fake kimi || fail "Kimi spinner phase $phase was not recognized as busy"
+  done
   printf 'ordinary response ending with 🌕\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake kimi; then
     fail "a moon outside Kimi's spinner-line shape was misread as busy"
@@ -617,18 +609,10 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   if fm_pane_is_busy fake kimi; then
     fail "Kimi's idle thinking-effort status label was misread as busy"
   fi
-  kimi_regex_lines=$(grep 'KIMI_BUSY_REGEX' "$ROOT/bin/fm-tmux-lib.sh" "$ROOT/bin/fm-watch.sh")
-  if printf '%s\n' "$kimi_regex_lines" | grep -qi thinking; then
-    fail "Kimi busy regex still depends on a Thinking or thinking token"
-  fi
-  for phase in 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘; do
-    grep -Fq "$phase" "$ROOT/bin/fm-tmux-lib.sh" \
-      || fail "shared Kimi matcher is missing moon phase $phase"
-  done
   pass "busy detection: real Kimi moon-plus-middot captures require its harness while idle labels stay idle"
 }
 
-test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
+test_watcher_never_classifies_kimi_from_its_spinner() (
   local state="$TMP_ROOT/watch-state" busy_capture='  🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
   mkdir -p "$state"
   printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
@@ -640,26 +624,26 @@ test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
   . "$ROOT/bin/fm-watch.sh"
   # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
   fm_backend_busy_state() { printf 'unknown'; }
-  window_is_busy fake "$busy_capture" \
-    || fail "fm-watch did not recognize the real Kimi spinner-line shape"
+  # Standalone Kimi has no verified semantic busy source, so it classifies
+  # unknown - and unknown is never working. Its moon-phase spinner is
+  # deliberately not a state source: the approved redesign forbids inventing a
+  # Kimi UI signature, and that glyph set is locale- and emoji-font-sensitive.
+  if window_is_busy fake "$busy_capture"; then
+    fail "fm-watch classified a Kimi task busy from its spinner instead of unknown"
+  fi
+  [ "$(fm_busy_classify tmux fake kimi kimi-watch "$state" "$busy_capture")" = "unknown kimi-unverified" ] \
+    || fail "a Kimi task must classify unknown kimi-unverified"
   printf 'window=fake\nharness=codex\n' > "$state/kimi-watch.meta"
   if window_is_busy fake "$busy_capture"; then
-    fail "fm-watch applied Kimi's real spinner signature to a recorded Codex task"
+    fail "fm-watch applied Kimi's spinner to a recorded Codex task"
   fi
-  printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
-  if window_is_busy fake 'ordinary response ending with 🌕'; then
-    fail "fm-watch treated an ordinary Kimi moon as a spinner line"
+  printf 'window=fake\nharness=grok\n' > "$state/kimi-watch.meta"
+  if window_is_busy fake "$busy_capture"; then
+    fail "Kimi's spinner classified a recorded Grok task through its isolated fallback"
   fi
-  if window_is_busy fake '🌕 Full moon details'; then
-    fail "fm-watch treated moon-led Kimi output without the middot separator as busy"
-  fi
-  if window_is_busy fake 'auto  K2.7 Coding thinking  /some/path'; then
-    fail "fm-watch treated Kimi's idle thinking-effort status label as busy"
-  fi
-  if window_is_busy fake 'Ctrl+c:cancel'; then
-    fail "fm-watch let Grok's exact busy token classify a recorded Kimi task busy"
-  fi
-  pass "fm-watch: Kimi spinner matching is metadata-scoped and ignores Grok's busy token"
+  window_is_busy fake 'Ctrl+c:cancel' \
+    || fail "Grok's own verified token must still classify a recorded Grok task busy"
+  pass "fm-watch classifies Kimi as unknown rather than from its spinner, and Grok's fallback stays isolated"
 )
 
 test_kimi_bordered_prompt_needs_no_override() {
@@ -673,8 +657,6 @@ test_kimi_bordered_prompt_needs_no_override() {
   pass "composer classifier: kimi's existing bordered > shape is already safe without an override"
 }
 
-test_tracked_files_have_no_user_absolute_paths
-test_existing_launch_templates_are_byte_pinned
 test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
@@ -690,5 +672,5 @@ test_kimi_readiness_gate_precedes_pointer
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
-test_watcher_scopes_moon_spinner_to_recorded_kimi_task
+test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override

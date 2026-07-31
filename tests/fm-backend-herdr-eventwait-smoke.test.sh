@@ -25,6 +25,11 @@ command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity (tests/herdr-test-safety.sh).
+herdr_forget_inherited_pane
+
 SESSION="fm-lab-eventwait-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=

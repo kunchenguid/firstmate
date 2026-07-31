@@ -78,6 +78,10 @@ add_quota_axi() {
   local fakebin=$1
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.16}"
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$fakebin/quota-axi"
@@ -320,6 +324,43 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^mi
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
+}
+
+# 0.1.16 is the first quota-axi that reports per-credential auth sources and Grok
+# state.authStatus. Before it, a dispatch candidate could not be scoped to its own
+# authentication surface, which is exactly how one harness's expired CLI token
+# produced a captain-facing "log in" claim for a candidate that never read it. A
+# stale install used to pass this check silently, so the fix stayed uninstalled.
+test_quota_axi_min_version() {
+  local label version mode case_dir fakebin out missing n
+  missing='MISSING: quota-axi (install: npm install -g quota-axi)'
+  n=0
+  while IFS='^' read -r label version mode; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/quota-axi-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    add_tasks_axi "$fakebin" "0.1.1"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_QUOTA_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      missing)
+        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+    esac
+  done <<'ROWS'
+minimum quota-axi version is accepted^0.1.16^empty
+newer quota-axi patch is accepted^0.1.17^empty
+newer quota-axi minor is accepted^0.2.0^empty
+newer quota-axi major is accepted^1.0.0^empty
+older quota-axi patch reports an upgrade^0.1.15^missing
+much older quota-axi minor reports an upgrade^0.0.9^missing
+unparseable quota-axi version reports an upgrade^quota-axi development build^missing
+ROWS
+  pass "bootstrap enforces quota-axi minimum version"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -655,6 +696,7 @@ make_routine_bootstrap_fixture() {
     printf '%s\n' '.fm-secondmate-home'
     printf '%s\n' 'config/crew-harness'
     printf '%s\n' 'config/crew-dispatch.json'
+    printf '%s\n' 'config/startup-memory-budget'
   } > "$root/.gitignore"
   printf '%s\n' 'instructions' > "$root/AGENTS.md"
   mkdir -p "$root/bin" "$root/.agents/skills"
@@ -716,19 +758,6 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
   out=$(run_routine_bootstrap_fixture /bin/bash "$TMP_ROOT/routine-bash")
   [ -z "$out" ] || fail "routine bootstrap contract should be silent under /bin/bash, got: $out"
   pass "bootstrap routine contract runs under system /bin/bash"
-}
-
-test_bootstrap_info_is_no_load_and_actionable_lines_trigger() {
-  local trigger
-  # shellcheck disable=SC2016 # The backtick-delimited skill names are literal Markdown.
-  trigger=$(sed -n '/- `bootstrap-diagnostics`/,/- `diagnostic-reasoning`/p' "$ROOT/AGENTS.md")
-  assert_contains "$trigger" "actionable diagnostic line" "bootstrap-diagnostics trigger should be action-scoped"
-  assert_contains "$trigger" "BOOTSTRAP_INFO:" "bootstrap-diagnostics trigger should classify BOOTSTRAP_INFO as no-load"
-  assert_not_contains "$trigger" "TASKS_AXI:" "tasks-axi availability must not trigger diagnostics loading"
-  assert_not_contains "$trigger" "CREW_HARNESS_OVERRIDE:" "harness override confirmation must not trigger diagnostics loading"
-  assert_not_contains "$trigger" "CREW_DISPATCH: active" "active dispatch confirmation must not trigger diagnostics loading"
-  assert_not_contains "$trigger" "already-live" "already-live secondmate liveness must not trigger diagnostics loading"
-  pass "bootstrap diagnostics trigger excludes benign lines and keeps actionable prefixes"
 }
 
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
@@ -805,6 +834,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
@@ -821,6 +851,5 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
-test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation

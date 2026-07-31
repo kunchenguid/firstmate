@@ -38,7 +38,7 @@
 #                   silently pass as a gate skip.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
 #                   Default is 1 (serial). N>1 is allowed only when every
-#                   selected script is in the Phase 2 proven-isolated set
+#                   selected script is in the proven-isolated set
 #                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
 #                   families never schedule under --jobs.
 #   -h, --help      print this header
@@ -117,15 +117,15 @@ now_ms() {
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
-    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|fm-brief.test.sh|\
-    fm-calm-pi-extension.test.sh|fm-captain-translation-contract.test.sh|fm-cd-pretool-check.test.sh|\
+    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
+    fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
+    fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
-    fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
-    fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
+    fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
-    fm-send-popup-settle.test.sh|fm-send-settle.test.sh|fm-stow-contract.test.sh|\
+    fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
@@ -139,6 +139,7 @@ family_for_basename() {
       ;;
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
+    fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
     fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh)
@@ -146,6 +147,7 @@ family_for_basename() {
       ;;
     fm-backlog-handoff.test.sh|fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
+    fm-startup-memory-budget.test.sh|\
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
       printf '%s\n' secondmate
       ;;
@@ -229,7 +231,7 @@ real-herdr-gated
 EOF
 }
 
-# Exact Phase 2 proven-isolated candidate set (same paths as
+# Exact proven-isolated candidate set (same paths as
 # bin/fm-test-isolation-proof.sh --list). Do not expand without a new concurrent
 # isolation proof archive.
 list_proven_isolated() {
@@ -237,7 +239,6 @@ list_proven_isolated() {
 tests/fm-arm-pretool-check.test.sh
 tests/fm-backend-herdr.test.sh
 tests/fm-brief.test.sh
-tests/fm-captain-translation-contract.test.sh
 tests/fm-cd-pretool-check.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-composer-lib.test.sh
@@ -246,10 +247,7 @@ tests/fm-decision-hold-lifecycle.test.sh
 tests/fm-ensure-agents-md.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
-tests/fm-instruction-owners.test.sh
 tests/fm-lint.test.sh
-tests/fm-nm-test-contract.test.sh
-tests/fm-no-mistakes-ownership.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-review-diff.test.sh
@@ -257,7 +255,6 @@ tests/fm-send-popup-settle.test.sh
 tests/fm-send-settle.test.sh
 tests/fm-send-strict.test.sh
 tests/fm-spawn-batch.test.sh
-tests/fm-stow-contract.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-test-run.test.sh
 tests/fm-tmux-submit-busy.test.sh
@@ -266,47 +263,41 @@ tests/fm-x-mode.test.sh
 EOF
 }
 
-# Portable parallel shard 1: LPT balance of the proven-isolated set using
-# Phase 1 serial duration averages from CI timing artifacts on main after
-# #825/#832/#834 (docs/fm-test-portable-shards.md). Execution order is longest
-# first so wall-clock stays near the balanced sum.
+# Portable parallel shard 1: LPT balance of the proven-isolated set using the
+# current concurrent-proof durations in docs/fm-test-isolation-proof.json.
+# Execution order is longest first so wall-clock stays near the balanced sum.
 list_portable_parallel_1() {
   cat <<'EOF'
-tests/fm-arm-pretool-check.test.sh
+tests/fm-x-mode.test.sh
 tests/fm-cd-pretool-check.test.sh
-tests/fm-backend-herdr.test.sh
-tests/fm-pr-merge.test.sh
+tests/fm-decision-hold-lifecycle.test.sh
 tests/fm-test-run.test.sh
-tests/fm-send-popup-settle.test.sh
+tests/fm-composer-ghost.test.sh
+tests/fm-grok-harness.test.sh
+tests/fm-lint.test.sh
+tests/fm-pi-primary-types.test.sh
 tests/fm-review-diff.test.sh
 tests/fm-brief.test.sh
-tests/fm-ensure-agents-md.test.sh
-tests/fm-instruction-owners.test.sh
-tests/fm-pi-primary-types.test.sh
 tests/fm-transition-lib.test.sh
-tests/fm-composer-lib.test.sh
-tests/fm-stow-contract.test.sh
 EOF
 }
 
 # Portable parallel shard 2: the complementary LPT half of the proven set.
 list_portable_parallel_2() {
   cat <<'EOF'
-tests/fm-decision-hold-lifecycle.test.sh
-tests/fm-x-mode.test.sh
-tests/fm-herdr-lab.test.sh
+tests/fm-backend-herdr.test.sh
+tests/fm-arm-pretool-check.test.sh
 tests/fm-crew-state.test.sh
-tests/fm-grok-harness.test.sh
-tests/fm-spawn-batch.test.sh
-tests/fm-send-strict.test.sh
+tests/fm-herdr-lab.test.sh
+tests/fm-pr-merge.test.sh
+tests/fm-send-popup-settle.test.sh
 tests/fm-tmux-submit-busy.test.sh
-tests/fm-composer-ghost.test.sh
 tests/fm-send-settle.test.sh
+tests/fm-send-strict.test.sh
+tests/fm-spawn-batch.test.sh
 tests/fm-supervision-instructions.test.sh
-tests/fm-lint.test.sh
-tests/fm-nm-test-contract.test.sh
-tests/fm-captain-translation-contract.test.sh
-tests/fm-no-mistakes-ownership.test.sh
+tests/fm-ensure-agents-md.test.sh
+tests/fm-composer-lib.test.sh
 EOF
 }
 
@@ -599,7 +590,7 @@ families_for_test_reference() {
 # Conservative path → family map. Over-selects rather than under-selects.
 # Never expands to the complete suite.
 families_for_changed_path() {
-  local path=$1
+  local path=$1 fixture_ref
   case "$path" in
     tests/fm-test-run.test.sh)
       printf '%s\n' pure-contract-unit
@@ -656,13 +647,17 @@ families_for_changed_path() {
       printf '%s\n' live-harness-optin
       printf '%s\n' afk
       ;;
+    bin/fm-startup-memory-budget.sh|bin/fm-startup-memory-budget-lib.sh)
+      printf '%s\n' secondmate
+      printf '%s\n' session-bootstrap
+      ;;
     bin/fm-secondmate*|bin/fm-home-seed.sh|bin/fm-backlog-handoff.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\
-    bin/fm-gate-refuse*|bin/fm-lock*)
+    bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
@@ -687,6 +682,7 @@ families_for_changed_path() {
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
     bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
+    bin/fm-vendor-auth-probe.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
@@ -710,9 +706,26 @@ families_for_changed_path() {
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
       ;;
+    tests/fixtures/*/*)
+      # A fixture belongs to whichever suite reads its directory, found by the
+      # same reference scan used for shared helpers. Keyed on the directory
+      # rather than the file so adding a fixture selects the same suite.
+      # A removed fixture directory has no consuming suite left to select.
+      fixture_ref=${path#tests/fixtures/}
+      fixture_ref=${fixture_ref%%/*}
+      if [ -d "tests/fixtures/$fixture_ref" ]; then
+        families_for_test_reference "fixtures/$fixture_ref" \
+          || printf '%s\n' "__unmapped__:$path"
+      fi
+      ;;
     bin/*)
-      families_for_test_reference "$(basename "$path")" \
-        || printf '%s\n' "__unmapped__:$path"
+      # A deleted script has no consuming suite left to select, the same rule
+      # the fixture case above applies. Refusing on its absent mapping would
+      # make every retirement branch unable to select its changed tests.
+      if [ -e "$path" ]; then
+        families_for_test_reference "$(basename "$path")" \
+          || printf '%s\n' "__unmapped__:$path"
+      fi
       ;;
     tests/*)
       printf '%s\n' "__unmapped__:$path"

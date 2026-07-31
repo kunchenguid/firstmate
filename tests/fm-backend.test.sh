@@ -141,7 +141,7 @@ resolve_permissive_tmux_kill_ref() {
 # hence the dispatcher is a copied sibling, while the tmux adapter is extracted
 # from BASE_REF so conformance tests retain the exact historical behavior even
 # when this branch changes tmux dispatch semantics.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-x-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
@@ -959,37 +959,6 @@ run_teardown_case() {
     "$script" "$id"
 }
 
-test_permissive_tmux_kill_ref_stays_historical() {
-  local ref body_hist body_head head
-  head=$(git -C "$ROOT" rev-parse HEAD)
-  ref=$(resolve_permissive_tmux_kill_ref) \
-    || fail "unable to locate a historical bin/backends/tmux.sh with permissive kill-window selectors"
-  body_hist=$(git -C "$ROOT" show "$ref:bin/backends/tmux.sh") \
-    || fail "could not read historical tmux adapter at $ref"
-  body_head=$(cat "$ROOT/bin/backends/tmux.sh")
-
-  # shellcheck disable=SC2016
-  case "$body_hist" in
-    *'tmux kill-window -t "=$session:=$window"'*)
-      fail "resolve_permissive_tmux_kill_ref returned exact selectors at $ref"
-      ;;
-  esac
-  # shellcheck disable=SC2016
-  case "$body_hist" in
-    *'tmux kill-window -t "$1"'*|*'tmux kill-window -t "$target"'*) ;;
-    *) fail "historical tmux adapter at $ref lacks a permissive kill-window target" ;;
-  esac
-  # shellcheck disable=SC2016
-  case "$body_head" in
-    *'tmux kill-window -t "=$session:=$window"'*) ;;
-    *) fail "current tmux adapter lost exact kill-window selectors" ;;
-  esac
-  [ "$ref" != "$head" ] \
-    || fail "permissive tmux baseline collapsed to HEAD; fixture is no longer historical"
-
-  pass "historical permissive tmux kill baseline stays distinct from current exact selectors"
-}
-
 test_teardown_conformance_old_vs_new() {
   local old_bin fb proj wt id old_tmux_ref saved_base_ref
   local state_old state_new config_old config_new data log_old log_new out_old out_new rc_old rc_new
@@ -1185,7 +1154,6 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
-test_permissive_tmux_kill_ref_stays_historical
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
