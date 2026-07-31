@@ -4,7 +4,7 @@
 #
 # Usage:
 #   fm-no-mistakes-ready.sh init <task-id>
-#   fm-no-mistakes-ready.sh approve <task-id> <exact-head>
+#   fm-no-mistakes-ready.sh approve <task-id> <exact-head> <reviewed-evidence-sha256>
 #   fm-no-mistakes-ready.sh check <task-id>
 #   fm-no-mistakes-ready.sh monitor-reconcile <task-id>
 #   fm-no-mistakes-ready.sh monitor-clear-attempt <task-id> <attempt-token>
@@ -21,15 +21,17 @@
 # and maestro.
 # Replace every `pending` verdict and placeholder evidence, then run `check`.
 # After reviewing every evidence axis, the lock-owning Firstmate session alone
-# runs `approve` with the exact implementation HEAD. The durable approval binds
-# both that HEAD and the reviewed record bytes. Worker evidence without this
-# approval cannot be ready.
+# runs `approve` with the exact implementation HEAD and SHA-256 captured from
+# the record bytes it reviewed. The durable approval binds both that HEAD and
+# the reviewed record bytes. Worker evidence without this approval cannot be
+# ready.
 # `check` also verifies the exact fm/<task-id> branch, clean committed worktree,
 # record-to-HEAD and approval binding, no-mistakes ship metadata, and Spec Kit applicability.
 # It prints `READY`, `NOT_READY`, or `ERROR` and exits 0, 1, or 2 respectively.
 #
-# `monitor-reconcile` reads the task's exact endpoint metadata and the
-# current-branch AXI status.
+# The lock-owning Firstmate session alone runs `monitor-reconcile` and
+# `monitor-clear-attempt`. Reconciliation reads the task's exact endpoint
+# metadata and the current-branch AXI status.
 # On Herdr it binds one state/<task-id>.no-mistakes-monitor journal to the exact
 # run, session, workspace, tab, pane, canonical executable, and submitted head, then runs only
 # `no-mistakes attach --run <id>` in a new `--no-focus` tab beside the worker.
@@ -213,11 +215,11 @@ fm_nm_evidence_is_concrete() { # <verdict> <evidence>
   return 0
 }
 
-fm_nm_validate_readiness() { # <task-id> <require-approval>
-  local id=$1 require_approval=$2 record approval branch head record_head axis verdict evidence
+fm_nm_validate_readiness() { # <task-id> <require-approval> [record-snapshot]
+  local id=$1 require_approval=$2 record=${3:-} approval branch head record_head axis verdict evidence
   local worktree_status evidence_sha256 approval_status failures=0
   fm_nm_task_load "$id" || return $?
-  record=$(fm_nm_record_path)
+  [ -n "$record" ] || record=$(fm_nm_record_path)
   if [ ! -f "$record" ] || [ -L "$record" ]; then
     printf "NOT_READY: task %s has no regular readiness record; run \`%s init %s\`\n" "$id" "$0" "$id"
     return 1
@@ -339,45 +341,88 @@ fm_nm_check() { # <task-id>
   printf 'READY: task %s at %s; evidence %s\n' "$id" "$FM_NM_VALIDATED_HEAD" "$FM_NM_VALIDATED_RECORD"
 }
 
-fm_nm_approve() { # <task-id> <exact-head>
-  local id=$1 exact_head=$2 approval dir tmp evidence_sha256
+fm_nm_approve() { # <task-id> <exact-head> <reviewed-evidence-sha256>
+  local id=$1 exact_head=$2 reviewed_evidence_sha256=$3 record approval dir snapshot tmp
+  local snapshot_sha256 live_sha256 validated_head rc
   fm_session_lock_owned_by_self "$STATE" || {
     fm_nm_error "semantic approval can be published only by the lock-owning Firstmate session"
     return 2
   }
-  fm_nm_validate_readiness "$id" 0 || return $?
-  [ "$exact_head" = "$FM_NM_VALIDATED_HEAD" ] || {
-    fm_nm_error "approval head $exact_head does not match worktree HEAD $FM_NM_VALIDATED_HEAD"
+  [ "${#reviewed_evidence_sha256}" -eq 64 ] || {
+    fm_nm_error "reviewed evidence SHA-256 must be 64 lowercase hexadecimal characters"
+    return 2
+  }
+  case "$reviewed_evidence_sha256" in
+    *[!0-9a-f]*)
+      fm_nm_error "reviewed evidence SHA-256 must be 64 lowercase hexadecimal characters"
+      return 2
+      ;;
+  esac
+  fm_nm_task_load "$id" || return $?
+  record=$(fm_nm_record_path)
+  [ -f "$record" ] && [ ! -L "$record" ] || {
+    fm_nm_error "readiness record is not a regular file at $record"
+    return 2
+  }
+  dir=${record%/*}
+  snapshot=$(mktemp "$dir/.no-mistakes-reviewed-evidence.XXXXXX") || return 2
+  chmod 600 "$snapshot" || { rm -f "$snapshot"; return 2; }
+  cp "$record" "$snapshot" || { rm -f "$snapshot"; return 2; }
+  snapshot_sha256=$(fm_pr_sha256 "$snapshot") || {
+    rm -f "$snapshot"
+    fm_nm_error "cannot hash reviewed readiness evidence snapshot"
+    return 2
+  }
+  if [ "$snapshot_sha256" != "$reviewed_evidence_sha256" ]; then
+    rm -f "$snapshot"
+    fm_nm_error "current readiness record does not match the reviewed evidence SHA-256"
+    return 2
+  fi
+  if fm_nm_validate_readiness "$id" 0 "$snapshot"; then
+    validated_head=$FM_NM_VALIDATED_HEAD
+  else
+    rc=$?
+    rm -f "$snapshot"
+    return "$rc"
+  fi
+  rm -f "$snapshot"
+  [ "$exact_head" = "$validated_head" ] || {
+    fm_nm_error "approval head $exact_head does not match worktree HEAD $validated_head"
     return 2
   }
   approval=$(fm_nm_approval_path)
-  dir=${approval%/*}
   if [ -e "$approval" ] || [ -L "$approval" ]; then
     [ -f "$approval" ] && [ ! -L "$approval" ] || {
       fm_nm_error "approval path is not a regular file at $approval"
       return 2
     }
   fi
-  evidence_sha256=$(fm_pr_sha256 "$FM_NM_VALIDATED_RECORD") || {
-    fm_nm_error "cannot hash readiness evidence for semantic approval"
-    return 2
-  }
   tmp=$(mktemp "$dir/.no-mistakes-readiness-approval.XXXXXX") || return 2
   chmod 600 "$tmp" || { rm -f "$tmp"; return 2; }
   {
     printf 'version=1\n'
     printf 'authority=firstmate\n'
     printf 'task=%s\n' "$id"
-    printf 'head=%s\n' "$FM_NM_VALIDATED_HEAD"
-    printf 'evidence_sha256=%s\n' "$evidence_sha256"
+    printf 'head=%s\n' "$validated_head"
+    printf 'evidence_sha256=%s\n' "$reviewed_evidence_sha256"
   } > "$tmp"
+  live_sha256=$(fm_pr_sha256 "$record") || {
+    rm -f "$tmp"
+    fm_nm_error "cannot re-hash readiness evidence before semantic approval publication"
+    return 2
+  }
+  if [ "$live_sha256" != "$reviewed_evidence_sha256" ]; then
+    rm -f "$tmp"
+    fm_nm_error "readiness evidence changed after review and before semantic approval publication"
+    return 2
+  fi
   fm_session_lock_owned_by_self "$STATE" || {
     rm -f "$tmp"
     fm_nm_error "Firstmate session-lock ownership changed before semantic approval publication"
     return 2
   }
   mv "$tmp" "$approval" || { rm -f "$tmp"; return 2; }
-  printf 'approved: Firstmate semantic readiness for task %s at %s\n' "$id" "$FM_NM_VALIDATED_HEAD"
+  printf 'approved: Firstmate semantic readiness for task %s at %s\n' "$id" "$validated_head"
 }
 
 fm_nm_timeout_run() { # <worktree> <no-mistakes args...>
@@ -771,12 +816,21 @@ fm_nm_with_monitor_task_lock() { # <task-id> <function> [args...]
     fm_nm_error "invalid task id '$id'"
     return 2
   }
+  fm_session_lock_owned_by_self "$STATE" || {
+    fm_nm_error "monitor lifecycle can be changed only by the lock-owning Firstmate session"
+    return 2
+  }
   mkdir -p "$STATE" || return 2
   lock="$STATE/.${id}.no-mistakes-monitor.lock"
   if ! fm_lock_try_acquire "$lock"; then
     fm_nm_error "monitor reconciliation is already active for task $id"
     return 2
   fi
+  fm_session_lock_owned_by_self "$STATE" || {
+    fm_lock_release "$lock"
+    fm_nm_error "Firstmate session-lock ownership changed before monitor lifecycle mutation"
+    return 2
+  }
   "$operation" "$@" && rc=0 || rc=$?
   fm_lock_release "$lock"
   return "$rc"
@@ -913,8 +967,9 @@ case "${1:-}" in
   approve)
     id=${2:-}
     head=${3:-}
-    [ -n "$id" ] && [ -n "$head" ] && [ "$#" -eq 3 ] || { usage >&2; exit 2; }
-    fm_nm_approve "$id" "$head"
+    evidence_sha256=${4:-}
+    [ -n "$id" ] && [ -n "$head" ] && [ -n "$evidence_sha256" ] && [ "$#" -eq 4 ] || { usage >&2; exit 2; }
+    fm_nm_approve "$id" "$head" "$evidence_sha256"
     ;;
   monitor-clear-attempt)
     id=${2:-}

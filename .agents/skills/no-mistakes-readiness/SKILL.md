@@ -54,8 +54,9 @@ Apply each axis to the project and accepted intent instead of imposing a fixed t
 Bind the record to the exact implementation commit after every corrective implementation commit.
 The helper independently checks the branch name, clean worktree, committed HEAD, record binding, task kind and delivery mode, required verdicts, evidence presence, and detectable Spec Kit applicability.
 Worker evidence alone never authorizes `READY`.
-After inspecting every axis against the accepted intent and project, Firstmate runs the helper's semantic approval command with the exact reviewed HEAD.
+After inspecting every axis against the accepted intent and project, Firstmate captures the reviewed record's SHA-256 and runs the helper's semantic approval command with that digest and the exact reviewed HEAD.
 The helper accepts approval publication and validation only from the Firstmate session that owns the home's session lock.
+The helper validates an exact snapshot matching that digest and rechecks the live bytes before publication.
 The approval binds both that commit and the reviewed evidence bytes, so a later commit or evidence edit requires renewed Firstmate review and approval.
 
 ## Outcome model
@@ -76,7 +77,7 @@ A failed preflight is not a review finding and must never be handed to no-mistak
 ## Starting and supervising validation
 
 Immediately before invoking the worker's no-mistakes skill, Firstmate checks the durable record and approval itself and proceeds only on `READY` for the current HEAD.
-After the worker starts AXI, Firstmate uses the helper's monitor reconciliation entry point.
+After the worker starts AXI, Firstmate uses the helper's monitor reconciliation entry point from the lock-owning Firstmate session.
 If the run is not visible yet, keep supervising the worker and reconcile again after AXI reports its run.
 Reconcile again during recovery, at material validation transitions, and before teardown.
 
@@ -99,7 +100,7 @@ Reconciliation retires the presentation pane only after the exact run is termina
 A missing exact pane can be recreated only after positive absence.
 An ambiguous, active, repurposed, or unconfirmed pane is preserved and blocks duplicate creation or teardown until inspected.
 If tab creation loses its response, the attempt journal identifies the exact session, workspace, random token, and requested label for Firstmate to inspect.
-After Firstmate preserves or retires any resulting presentation pane in Herdr's UI, `monitor-clear-attempt` clears only that token-matched attempt journal so reconciliation can safely resume.
+After Firstmate preserves or retires any resulting presentation pane in Herdr's UI, the lock-owning Firstmate session uses `monitor-clear-attempt` to clear only that token-matched attempt journal so reconciliation can safely resume.
 The recovery command never discovers, closes, sends input to, or otherwise mutates a pane because a lost response cannot provide exact native pane authority.
 This is deliberately reconciliation-driven rather than a second background lifecycle controller: after a Firstmate restart or while a run changes state, visibility and retirement advance on the next required reconcile call.
 

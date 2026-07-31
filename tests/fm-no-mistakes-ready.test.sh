@@ -26,6 +26,14 @@ assert_contains_text() {
   esac
 }
 
+file_sha256() { # <file>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  else
+    sha256sum "$1" | awk '{ print $1 }'
+  fi
+}
+
 make_fake_session_owner_ps() { # <fakebin>
   cat > "$1/ps" <<'SH'
 #!/usr/bin/env bash
@@ -168,14 +176,14 @@ test_help() {
   output=$("$HELPER" --help)
   assert_contains_text "$output" 'monitor-reconcile <task-id>' "help omitted monitor reconciliation"
   assert_contains_text "$output" 'monitor-clear-attempt <task-id> <attempt-token>' "help omitted attempt recovery"
-  assert_contains_text "$output" 'approve <task-id> <exact-head>' "help omitted Firstmate semantic approval"
+  assert_contains_text "$output" 'approve <task-id> <exact-head> <reviewed-evidence-sha256>' "help omitted Firstmate semantic approval"
   # shellcheck disable=SC2016 # Literal Markdown code spans are the expected help text.
   assert_contains_text "$output" 'prints `READY`, `NOT_READY`, or `ERROR`' "help omitted readiness outcomes"
   pass "fm-no-mistakes-ready: help renders the full mechanics header"
 }
 
 test_readiness_outcomes() {
-  local home state data worktree id output status record head approval authbin
+  local home state data worktree id output status record head approval authbin reviewed_digest
   local PATH=$PATH FM_FAKE_SESSION_OWNER=$$
   home="$TMP_ROOT/readiness-home"
   state="$home/state"
@@ -209,17 +217,30 @@ test_readiness_outcomes() {
   [ "$status" -eq 1 ] || fail_with_output "worker evidence produced READY without Firstmate approval" "$output"
   assert_contains_text "$output" 'Firstmate semantic approval is missing' "worker-only readiness lacked an approval diagnostic"
   approval="$data/$id/no-mistakes-readiness.approval"
+  reviewed_digest=$(file_sha256 "$record") || fail "could not hash reviewed readiness evidence"
   set +e
   output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
-    "$HELPER" approve "$id" "$head" 2>&1)
+    "$HELPER" approve "$id" "$head" "$reviewed_digest" 2>&1)
   status=$?
   set -e
   [ "$status" -eq 2 ] || fail_with_output "worker session published semantic approval" "$output"
   assert_contains_text "$output" 'lock-owning Firstmate session' "unowned approval refusal lacked caller-authority evidence"
   [ ! -e "$approval" ] || fail "unowned approval attempt published an approval artifact"
   printf '%s\n' "$FM_FAKE_SESSION_OWNER" > "$state/.lock"
+  sed -i $'s#focused_tests\tpass\t.*#focused_tests\tpass\tchanged but otherwise concrete focused test evidence#' "$record"
+  set +e
   output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
-    "$HELPER" approve "$id" "$head") || fail_with_output "semantic approval failed" "$output"
+    "$HELPER" approve "$id" "$head" "$reviewed_digest" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] || fail_with_output "stale reviewed evidence digest published semantic approval" "$output"
+  assert_contains_text "$output" 'does not match the reviewed evidence SHA-256' \
+    "stale reviewed digest refusal lacked exact-byte evidence"
+  [ ! -e "$approval" ] || fail "stale reviewed digest published an approval artifact"
+  write_ready_record "$record" "$head" not-applicable
+  reviewed_digest=$(file_sha256 "$record") || fail "could not hash restored reviewed readiness evidence"
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" approve "$id" "$head" "$reviewed_digest") || fail_with_output "semantic approval failed" "$output"
   assert_contains_text "$output" "approved: Firstmate semantic readiness for task $id at $head" \
     "semantic approval did not bind the exact commit"
   rm -f "$state/.lock"
@@ -255,8 +276,9 @@ test_readiness_outcomes() {
   set -e
   [ "$status" -eq 1 ] || fail_with_output "later implementation commit retained old Firstmate approval" "$output"
   assert_contains_text "$output" 'Firstmate approval head' "later commit did not invalidate exact-HEAD approval"
+  reviewed_digest=$(file_sha256 "$record") || fail "could not hash renewed readiness evidence"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
-    "$HELPER" approve "$id" "$head" >/dev/null || fail "renewed semantic approval failed"
+    "$HELPER" approve "$id" "$head" "$reviewed_digest" >/dev/null || fail "renewed semantic approval failed"
 
   sed -i $'s#intent_trace\tpass\t.*#intent_trace\tpass\tdone#' "$record"
   set +e
@@ -292,8 +314,9 @@ test_readiness_outcomes() {
   [ "$status" -eq 1 ] || fail_with_output "Spec Kit not-applicable did not fail" "$output"
   assert_contains_text "$output" 'Spec Kit markers are present' "Spec Kit applicability was not enforced"
   write_ready_record "$record" "$head" pass
+  reviewed_digest=$(file_sha256 "$record") || fail "could not hash Spec Kit readiness evidence"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
-    "$HELPER" approve "$id" "$head" >/dev/null || fail "Spec Kit evidence reapproval failed"
+    "$HELPER" approve "$id" "$head" "$reviewed_digest" >/dev/null || fail "Spec Kit evidence reapproval failed"
   output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" "$HELPER" check "$id") || \
     fail_with_output "applicable Spec Kit pass did not clear readiness" "$output"
 
@@ -305,7 +328,7 @@ test_readiness_outcomes() {
   [ "$status" -eq 1 ] || fail_with_output "dirty worktree did not fail readiness" "$output"
   assert_contains_text "$output" 'worktree is not clean and committed' "dirty worktree reason was not explicit"
   git -C "$worktree" checkout -- file.txt
-  pass "fm-no-mistakes-ready: readiness is Firstmate-authorized and commit-bound"
+  pass "fm-no-mistakes-ready: readiness binds Firstmate-reviewed evidence bytes"
 }
 
 make_fake_no_mistakes() { # <fakebin> <status-file>
@@ -434,7 +457,8 @@ EOF
 }
 
 test_monitor_backends_and_lifecycle() {
-  local home state data worktree id fakebin fixture status_file head run output count journal rc backend token presentation_lock
+  local home state data worktree id authbin fakebin fixture status_file head run output count journal rc backend token presentation_lock
+  local PATH=$PATH FM_FAKE_SESSION_OWNER=$$
   home="$TMP_ROOT/monitor-home"
   state="$home/state"
   data="$home/data"
@@ -442,6 +466,32 @@ test_monitor_backends_and_lifecycle() {
   id=monitor-task
   new_repo "$worktree" "$id"
   head=$(git -C "$worktree" rev-parse HEAD)
+  authbin=$(fm_fakebin "$TMP_ROOT/monitor-auth")
+  make_fake_session_owner_ps "$authbin"
+  PATH="$authbin:$PATH"
+  export PATH FM_FAKE_SESSION_OWNER
+  write_meta "$state" "$id" "$worktree" tmux
+  set +e
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-reconcile "$id" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail_with_output "worker session reconciled monitor lifecycle" "$output"
+  assert_contains_text "$output" 'lock-owning Firstmate session' \
+    "unowned monitor reconcile lacked caller-authority evidence"
+  [ ! -e "$state/.${id}.no-mistakes-monitor.lock" ] || \
+    fail "unowned monitor reconcile acquired a task lock"
+  set +e
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-clear-attempt "$id" token 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail_with_output "worker session cleared monitor recovery authority" "$output"
+  assert_contains_text "$output" 'lock-owning Firstmate session' \
+    "unowned monitor recovery lacked caller-authority evidence"
+  [ ! -e "$state/.${id}.no-mistakes-monitor.lock" ] || \
+    fail "unowned monitor recovery acquired a task lock"
+  printf '%s\n' "$FM_FAKE_SESSION_OWNER" > "$state/.lock"
   fakebin=$(fm_fakebin "$TMP_ROOT/monitor-fakes")
   fixture="$TMP_ROOT/herdr-fixture"
   status_file="$fixture/status.toon"
@@ -615,6 +665,19 @@ test_monitor_backends_and_lifecycle() {
   [ "$(grep -c '^tab create ' "$fixture/calls.log" || true)" -eq "$count" ] \
     || fail "incomplete attempt allowed a duplicate monitor create"
   token=$(sed -n 's/^token=//p' "$journal")
+  rm -f "$state/.lock"
+  set +e
+  output=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$HELPER" monitor-clear-attempt "$id" "$token" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail_with_output "worker session cleared an ambiguous monitor attempt" "$output"
+  assert_contains_text "$output" 'lock-owning Firstmate session' \
+    "unowned ambiguous-attempt recovery lacked caller-authority evidence"
+  [ -e "$journal" ] || fail "unowned recovery removed the ambiguous attempt journal"
+  [ "$(grep -c '^tab create ' "$fixture/calls.log" || true)" -eq "$count" ] \
+    || fail "unowned recovery allowed a duplicate monitor create"
+  printf '%s\n' "$FM_FAKE_SESSION_OWNER" > "$state/.lock"
   set +e
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
     "$HELPER" monitor-clear-attempt "$id" wrong-token >/dev/null 2>&1
@@ -628,7 +691,7 @@ test_monitor_backends_and_lifecycle() {
   [ ! -e "$journal" ] || fail "inspected attempt recovery retained its journal"
   [ ! -e "$fixture/closed" ] || fail "attempt recovery mutated the ambiguous presentation pane"
   [ ! -e "$fixture/presentation-lock-missing" ] || fail "monitor mutated Herdr outside the shared presentation lock"
-  pass "fm-no-mistakes-ready: Herdr monitor requires one locked exact attach process"
+  pass "fm-no-mistakes-ready: Herdr recovery requires Firstmate and exact attach topology"
 }
 
 test_monitor_ids_are_validated_before_lock_paths() {

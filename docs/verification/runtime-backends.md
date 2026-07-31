@@ -244,7 +244,8 @@ No ambient `herdr server stop` command is a supported test operation.
 
 ### No-mistakes attach projection
 
-The Firstmate-owned monitor contract was verified on 2026-07-31 with Herdr 0.7.5 protocol 17 response shapes and no-mistakes v1.41.2.
+The Firstmate-owned monitor's synthetic contract coverage was verified on 2026-07-31.
+The fixture models Herdr and no-mistakes response shapes but does not launch either runtime, so it does not establish version-specific runtime compatibility.
 `tests/fm-no-mistakes-ready.test.sh` is the complete self-cleaning fixture: it creates the temporary task repository and metadata, exact AXI status fixture, executable attach fixture, and Herdr API fixture without external setup variables.
 The Herdr fixture refuses create, focus restoration, close, and post-close gone confirmation unless the session/socket-wide presentation lock is held.
 It reports an exact attach process plus a second foreground process to prove that ambiguous topology preserves the pane and journal instead of authorizing retirement.
@@ -260,8 +261,8 @@ Exact filtered output:
 
 ```text
 ok - fm-no-mistakes-ready: help renders the full mechanics header
-ok - fm-no-mistakes-ready: readiness is Firstmate-authorized and commit-bound
-ok - fm-no-mistakes-ready: Herdr monitor requires one locked exact attach process
+ok - fm-no-mistakes-ready: readiness binds Firstmate-reviewed evidence bytes
+ok - fm-no-mistakes-ready: Herdr recovery requires Firstmate and exact attach topology
 ok - fm-no-mistakes-ready: monitor IDs are rejected before lock-path authority
 ```
 
