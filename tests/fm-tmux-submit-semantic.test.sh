@@ -2,8 +2,7 @@
 # tests/fm-tmux-submit-semantic.test.sh - semantic submit confirmation on the
 # tmux path (bin/fm-tmux-lib.sh, bin/backends/tmux.sh) under the
 # independent-review redesign: delivery is confirmed ONLY by a positive
-# idle-to-busy transition observed after a delivered Enter, under a per-task
-# submit lock. Covered here:
+# idle-to-busy transition observed after a delivered Enter. Covered here:
 #   - a submit is confirmed from the lifecycle record; at the shipped default
 #     (bake-in comparison ON) exactly one post-verdict pane read happens, and
 #     with the comparison off (the post-bake-in configuration) zero pane
