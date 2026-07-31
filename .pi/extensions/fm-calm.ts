@@ -42,6 +42,7 @@ import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
 import {
   CALM_WORKING_SHIP_WIDGET_KEY,
+  createCalmWorkingShipAnimation,
   createCalmWorkingShipWidget,
 } from "./lib/fm-calm-working-ship.ts";
 import {
@@ -105,6 +106,10 @@ export default function (pi: ExtensionAPI) {
   // continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
   let workingShipShown = false;
+  // One animation instance per extension lifetime. Hiding the working widget freezes
+  // this state; the next working period resumes it. session_start resets it so a fresh
+  // Pi session starts at the normal initial position. Never module-global.
+  const workingShipAnimation = createCalmWorkingShipAnimation();
 
   // Single owner of Calm's working-row presentation choice. The widget is only created
   // or removed on a real transition, so repeated starts cannot duplicate its timer.
@@ -117,7 +122,9 @@ export default function (pi: ExtensionAPI) {
       workingShipShown = showShip;
       ui.setWidget(
         CALM_WORKING_SHIP_WIDGET_KEY,
-        showShip ? createCalmWorkingShipWidget : undefined,
+        showShip
+          ? (tui) => createCalmWorkingShipWidget(tui, workingShipAnimation)
+          : undefined,
       );
       ui.setWorkingVisible(!showShip);
     } else if (forceStockVisibility && !showShip) {
@@ -274,6 +281,8 @@ export default function (pi: ExtensionAPI) {
     publishPresentationState();
     agentRunActive = false;
     workingShipShown = false;
+    // A genuine new session lifetime starts the boat at the normal initial position.
+    workingShipAnimation.reset();
     applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
     ctx.ui.setStatus("firstmate-calm", undefined);
