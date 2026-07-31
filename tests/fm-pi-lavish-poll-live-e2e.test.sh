@@ -144,7 +144,7 @@ chmod +x "$FAKE"
 
 wait_for_text "gpt-5.6-sol" 240 || fail "Pi did not reach its ready composer"
 [ -f "$HOME_DIR/state/.pi-lavish-extension-loaded" ] || fail "Pi Lavish relay extension did not publish its loaded marker"
-send_prompt "Use fm_lavish_poll with action=start for .lavish/pi-relay-smoke.html and do not use bash. Reply exactly LAVISH_RELAY_STARTED after the tool returns. When LAVISH_RELAY_RESULT later contains SYNTHETIC_LIVE_FEEDBACK, start the same relay again with agent_reply set to LIVE_AGENT_REPLY and reply exactly LAVISH_REARMED. When it contains SYNTHETIC_LIVE_FINAL_FEEDBACK, reply exactly LAVISH_REVIEW_TERMINAL."
+send_prompt "Use fm_lavish_poll with action=start for .lavish/pi-relay-smoke.html and do not use bash. After the tool returns, reply with the exact single line LAVISH_RELAY_STARTED. When LAVISH_RELAY_RESULT later contains SYNTHETIC_LIVE_FEEDBACK, start the same relay again with agent_reply set to LIVE_AGENT_REPLY and reply with the exact single line LAVISH_REARMED. When it contains SYNTHETIC_LIVE_FINAL_FEEDBACK, reply with the exact single line LAVISH_REVIEW_TERMINAL."
 wait_for_exact_line "LAVISH_RELAY_STARTED" 240 || fail "Pi did not start the relay through fm_lavish_poll"
 
 for _ in $(seq 1 120); do
@@ -158,7 +158,7 @@ pid_alive "$first_pid" || fail "first poll was not alive after the start turn se
 send_prompt "/bearings"
 wait_for_text "[skill] bearings" 240 || fail "Pi did not accept Bearings while the Lavish poll waited"
 pid_alive "$first_pid" || fail "Bearings cancelled the waiting Lavish poll"
-send_prompt "Reply exactly LAVISH_SECOND_COMMAND_ACCEPTED."
+send_prompt "Reply with the exact single line LAVISH_SECOND_COMMAND_ACCEPTED"
 wait_for_exact_line "LAVISH_SECOND_COMMAND_ACCEPTED" 240 || fail "a second normal prompt did not complete while the Lavish poll waited"
 pid_alive "$first_pid" || fail "the second normal prompt cancelled the waiting Lavish poll"
 
@@ -177,7 +177,7 @@ pid_alive "$second_pid" || fail "second poll was not waiting"
 printf 'release\n' >"$CONTROL/release.2"
 wait_for_exact_line "LAVISH_REVIEW_TERMINAL" 240 || fail "terminal feedback did not wake the same Pi session"
 wait_pid_dead "$second_pid" || fail "terminal review left the second poll alive"
-send_prompt "Call fm_lavish_poll with action=status. If it reports no active polls, reply exactly LAVISH_REVIEW_ENDED."
+send_prompt "Call fm_lavish_poll with action=status. If it reports no active polls, reply with the exact single line LAVISH_REVIEW_ENDED."
 wait_for_exact_line "LAVISH_REVIEW_ENDED" 240 || fail "terminal review did not clear relay ownership"
 
 pane=$(capture)
