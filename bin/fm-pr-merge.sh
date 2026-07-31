@@ -22,12 +22,12 @@
 # when a base is found and every changed path is root-level (no directory
 # component to scope to), the check is skipped rather than widened back to
 # the whole ref. A byte-identical before/after evidence image pair with no
-# opt-out marker refuses the merge. See bin/fm-evidence-check.sh --help for
-# the pairing convention and opt-out mechanism. If the task's recorded
-# worktree is missing or not a git repository, no ref can be resolved at
-# all, or the check itself cannot run (e.g. missing python3), a loud warning
-# goes to stderr and the merge still proceeds unverified rather than failing
-# closed.
+# opt-out marker refuses the merge. bin/fm-evidence-check.sh's own header
+# comment owns the pairing convention and opt-out mechanism. If the task's
+# recorded worktree is missing or not a git repository, no ref can be
+# resolved at all, or the check itself cannot run (e.g. missing python3), a
+# loud warning goes to stderr and the merge still proceeds unverified rather
+# than failing closed.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
