@@ -126,7 +126,7 @@ done
 # `alarm 0` both disable the deadline, so a hung vendor CLI would run unbounded.
 TIMEOUT=${FM_VENDOR_AUTH_PROBE_TIMEOUT:-20}
 case "$TIMEOUT" in
-  ''|*[!0-9]*|0) TIMEOUT=20 ;;
+  ''|*[!0-9]*|0*) TIMEOUT=20 ;;
 esac
 
 # Bounded execution, mirroring bin/fm-fleet-snapshot.sh's run_timed selection so

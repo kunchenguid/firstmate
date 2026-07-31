@@ -297,14 +297,16 @@ test_hanging_probe_is_bounded_and_reported() {
 # fake hangs for 30s, longer than the 20s default it must fall back to, so the
 # two outcomes are distinguishable.
 test_zero_bound_falls_back_to_a_real_bound() {
-  local started finished
-  started=$(date +%s)
-  run_probe bound-zero grok -- "FM_FAKE_GROK_MODE=hang" "FM_VENDOR_AUTH_PROBE_TIMEOUT=0"
-  finished=$(date +%s)
-  assert_field "$RUN_LINE" status timeout "a zero bound must fall back to the default bound, not to no bound"
-  [ $((finished - started)) -lt 28 ] \
-    || fail "a zero bound removed the hard bound: took $((finished - started))s"
-  pass "a zero bound falls back to the default instead of removing the hard bound"
+  local started finished value
+  for value in 0 00; do
+    started=$(date +%s)
+    run_probe "bound-zero-$value" grok -- "FM_FAKE_GROK_MODE=hang" "FM_VENDOR_AUTH_PROBE_TIMEOUT=$value"
+    finished=$(date +%s)
+    assert_field "$RUN_LINE" status timeout "a zero bound must fall back to the default bound, not to no bound"
+    [ $((finished - started)) -lt 28 ] \
+      || fail "a zero bound removed the hard bound: took $((finished - started))s"
+  done
+  pass "zero and all-zero bounds fall back to the default instead of removing the hard bound"
 }
 
 # A bogus bound must be replaced, not forwarded: `timeout abc` and `timeout -1`
