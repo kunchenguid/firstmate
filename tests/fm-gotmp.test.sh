@@ -47,7 +47,7 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
-  mkdir -p "$fake/bin/backends" "$fake/state"
+  mkdir -p "$fake/bin/backends" "$fake/bin/harnesses" "$fake/state"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   # fm-backend.sh + its tmux adapter: symlink the REAL files (teardown sources
@@ -57,6 +57,13 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  # fm-teardown.sh sources the harness adapter for its artifact inventory, and
+  # that adapter eagerly loads every bin/harnesses/<name>.sh, so both must be
+  # reachable inside this synthetic tree or the source aborts under set -eu.
+  ln -s "$ROOT/bin/fm-harness-adapter.sh" "$fake/bin/fm-harness-adapter.sh"
+  for _adapter in "$ROOT"/bin/harnesses/*.sh; do
+    ln -s "$_adapter" "$fake/bin/harnesses/$(basename "$_adapter")"
+  done
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
@@ -125,11 +132,18 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # not error and must not remove anything.
   local id=td-absent-z3
   local fake="$TMP_ROOT/$id-root"
-  mkdir -p "$fake/bin/backends" "$fake/state"
+  mkdir -p "$fake/bin/backends" "$fake/bin/harnesses" "$fake/state"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  # fm-teardown.sh sources the harness adapter for its artifact inventory, and
+  # that adapter eagerly loads every bin/harnesses/<name>.sh, so both must be
+  # reachable inside this synthetic tree or the source aborts under set -eu.
+  ln -s "$ROOT/bin/fm-harness-adapter.sh" "$fake/bin/fm-harness-adapter.sh"
+  for _adapter in "$ROOT"/bin/harnesses/*.sh; do
+    ln -s "$_adapter" "$fake/bin/harnesses/$(basename "$_adapter")"
+  done
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.

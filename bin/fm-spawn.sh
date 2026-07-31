@@ -173,6 +173,10 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# The ONE owner of which files each harness's wiring writes; fm-teardown
+# removes exactly this list, so install and cleanup cannot drift apart.
+# shellcheck source=bin/fm-harness-adapter.sh
+. "$SCRIPT_DIR/fm-harness-adapter.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -1366,6 +1370,21 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+
+# exclude_harness_artifacts: exclude every worktree artifact <harness> declares
+# in bin/harnesses/<name>.sh. A harness that writes nothing inside the worktree
+# (codex, which rides the launch command; pi, whose extension lives in the state
+# dir to dodge the project-trust gate) declares an empty list and is a no-op.
+exclude_harness_artifacts() {  # <harness>
+  local harness=$1 rel
+  [ -n "$harness" ] || return 0
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    exclude_path "$rel"
+  done <<EOF
+$(fm_harness_worktree_artifacts "$harness" 2>/dev/null || true)
+EOF
+}
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
@@ -1422,7 +1441,6 @@ if [ "$KIND" != secondmate ]; then
       cat > "$WT/.claude/settings.local.json" <<EOF
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
-      exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -1475,7 +1493,6 @@ export const FmBusyState = async () => {
   };
 };
 EOF
-      exclude_path '.opencode/plugins/fm-busy-state.js'
       ;;
     pi|pi-signed)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
@@ -1567,7 +1584,6 @@ EOF
       hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
-      exclude_path '.fm-grok-turnend'
       ;;
     kimi*)
       # Kimi's Stop hook is global, but it is inert unless cwd contains this
@@ -1582,9 +1598,13 @@ EOF
       printf '%s\n' "$TURNEND" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
-      exclude_path '.fm-kimi-turnend'
       ;;
   esac
+  # Keep every artifact this harness declares out of git's view, reading the
+  # SAME adapter list fm-teardown removes. Excluding them here and removing
+  # them there from one source is what stops a renamed artifact being handled
+  # in one place and forgotten in the other.
+  exclude_harness_artifacts "$HARNESS"
 fi
 
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
