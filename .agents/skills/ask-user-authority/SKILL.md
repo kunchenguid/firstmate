@@ -35,6 +35,7 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
 
 ## Captain-facing escalation
 
+Present the escalation with the captain-facing grammar owned by `AGENTS.md` section 9; this skill owns only the decision content below.
 State all five of these elements in one concise, evidence-first escalation:
 
 1. The original requirement or accepted task criterion.
