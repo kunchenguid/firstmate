@@ -107,6 +107,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -354,6 +355,94 @@ test_hook_loop_guard_allows_retry() {
   expect_code 0 "$status" "hook must allow the stop when stop_hook_active is already true"
   [ -z "$out" ] || fail "hook produced output on the loop-guarded retry: $out"
   pass "fm-turnend-guard: stop_hook_active=true always allows the stop (never blocks twice in one turn)"
+}
+
+# --- session-lock ownership: a lock-refused read-only session stays silent -----
+#
+# The turn-end guard classifies session-lock ownership (bin/fm-session-lock-lib.sh)
+# before it may nag. Only a DIFFERENT live harness owner (a lock-refused read-only
+# session) is silenced; the real owner still blocks when its supervision is
+# unhealthy, and a free or stale-owner lock still triggers recovery.
+#
+# The guard resolves the current session's harness by walking its process
+# ancestry, so these fixtures run the guard as a child of a fake harness (a bash
+# symlink named "codex") exactly as the auto-arm tests do.
+
+# Run the guard as a child of a fake "codex" harness whose own pid is written to
+# the home's session lock, so the guard classifies the lock as owned by self.
+# shellcheck disable=SC2016 # $$/$rc/$? are deliberately literal: they expand inside the fake harness child, not here; only $dir/$home expand via the '"..."' concatenation.
+run_hook_owned_by_self() {
+  local dir=$1 fakebin home
+  home=$(cd "$dir" && pwd)
+  fakebin=$(fm_fakebin "$dir/fake-self")
+  ln -sf /bin/bash "$fakebin/codex"
+  printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" "$fakebin/codex" -c '
+    printf "%s\n" "$$" > "'"$home"'/state/.lock"
+    bash "'"$dir"'/bin/fm-turnend-guard.sh"
+    rc=$?
+    exit "$rc"
+  ' 2>&1
+}
+
+# Start a detached fake "codex" harness process and echo its pid; the caller
+# writes it into state/.lock to simulate a different live session owning the home.
+start_other_harness() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir/fake-other")
+  ln -sf /bin/bash "$fakebin/codex"
+  "$fakebin/codex" -c 'sleep 60; :' >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
+test_hook_silent_when_other_live_harness_owns_lock() {
+  local dir other out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-other-live")
+  : > "$dir/state/task1.meta"
+  other=$(start_other_harness "$dir")
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "hook must stay silent when a different live harness owns the session lock"
+  [ -z "$out" ] || fail "lock-refused read-only session must not be told to supervise: $out"
+  pass "fm-turnend-guard: silent when another live session owns the home (lock-refused read-only session)"
+}
+
+test_hook_blocks_when_current_harness_owns_lock() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-self-owns")
+  : > "$dir/state/task1.meta"
+  out=$(run_hook_owned_by_self "$dir"); status=$?
+  expect_code 2 "$status" "the lock-owning session must still block when its own supervision is unhealthy"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
+  pass "fm-turnend-guard: the session that owns the lock still blocks a blind turn end"
+}
+
+test_hook_blocks_when_lock_owner_is_stale() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-stale-owner")
+  : > "$dir/state/task1.meta"
+  dead=$(nonexistent_pid)
+  printf '%s\n' "$dead" > "$dir/state/.lock"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "a dead session-lock owner must still trigger recovery, not silence"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: a stale (dead-owner) session lock still blocks for recovery"
+}
+
+test_hook_silent_when_other_live_harness_owns_secondmate_lock() {
+  local dir other out status
+  dir=$(make_secondmate_dir "$TMP_ROOT/hook-other-live-sm")
+  : > "$dir/state/task1.meta"
+  other=$(start_other_harness "$dir")
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "a secondmate home must also silence when a different live session owns its lock"
+  [ -z "$out" ] || fail "lock-refused secondmate session must not be told to supervise: $out"
+  pass "fm-turnend-guard: silent in a secondmate home when another live session owns its lock"
 }
 
 # A secondmate's OWN home runs a primary firstmate session and must be guarded
@@ -1121,6 +1210,10 @@ test_hook_x_mode_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
+test_hook_silent_when_other_live_harness_owns_lock
+test_hook_blocks_when_current_harness_owns_lock
+test_hook_blocks_when_lock_owner_is_stale
+test_hook_silent_when_other_live_harness_owns_secondmate_lock
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry

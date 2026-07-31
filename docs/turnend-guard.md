@@ -32,6 +32,11 @@ Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] 
 A stale beacon blocks even when a watcher pid is live.
 A fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
 
+Once the guard has decided supervision is needed and no watcher is healthy, it classifies session-lock ownership through `fm_session_lock_ownership <state-dir>` in `bin/fm-session-lock-lib.sh`, the same harness-identity contract the Claude Stop auto-arm uses.
+A lock-refused read-only session (`other-live`: a different live harness owns `state/.lock`) exits silently, because supervising the lock owner's in-flight work is not its job and telling it to resume supervision would be the wrong instruction.
+Only a confidently different live harness owner silences the guard; a lock owned by this session (`self`), an absent or malformed lock (`free`), or a dead or non-harness owner (`stale`) all keep the existing block or recovery behavior, so the real owner still blocks when its supervision is unhealthy and an absent or dead-owner lock still triggers recovery.
+This preserves the loop guard and both main-home and secondmate-home behavior.
+
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot safely read loop-guard fields.

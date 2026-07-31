@@ -126,6 +126,8 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 budget_reset() {
@@ -146,6 +148,19 @@ else
   fi
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  budget_reset
+  exit 0
+fi
+
+# A lock-refused read-only session is not responsible for this home's
+# supervision. When a DIFFERENT live harness owns the session lock, the owning
+# session (guarded here as "self") carries the repair; telling this read-only
+# session to resume supervision on another session's in-flight work is exactly
+# the wrong instruction, so exit silently. A "self", "stale", or "free" lock all
+# keep the existing block/recovery behavior below: the owner still blocks when
+# its supervision is unhealthy, and an absent or dead-owner lock still needs
+# recovery here.
+if [ "$(fm_session_lock_ownership "$STATE")" = other-live ]; then
   budget_reset
   exit 0
 fi

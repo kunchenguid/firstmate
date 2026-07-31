@@ -128,6 +128,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/detached-paseo-agent/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
       "audience": "agent-runtime"
     },

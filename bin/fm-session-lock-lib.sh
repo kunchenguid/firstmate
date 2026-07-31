@@ -94,3 +94,33 @@ fm_session_lock_owned_by_self() {
   my_pid=$(fm_harness_ancestry_pid) || return 1
   [ "$my_pid" = "$lock_pid" ]
 }
+
+# Classify session-lock ownership for the home whose state dir is $1, using the
+# same harness-identity contract as fm_session_lock_owned_by_self. Prints exactly
+# one token and always returns 0:
+#   self       - the current process descends from the live lock-owning harness
+#   other-live - the lock names a different live harness process (a lock-refused
+#                read-only session); only this token proves another session owns
+#                the home, and only confidently, so callers may silence on it
+#   stale      - the lock names a dead or non-harness pid (a recoverable owner)
+#   free       - no lock, or an empty / malformed lock pid
+# Ancestry that cannot be resolved never yields "self"; it degrades toward
+# "other-live" only when a different pid is a confirmed live harness, so a caller
+# that acts on "self"/"stale"/"free" keeps its existing behavior under
+# uncertainty and never silences the real owner by mistake.
+fm_session_lock_ownership() {
+  local state=$1 lock_pid
+  if fm_session_lock_owned_by_self "$state"; then
+    printf 'self\n'
+    return 0
+  fi
+  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) printf 'free\n'; return 0 ;;
+  esac
+  if fm_harness_pid_alive "$lock_pid"; then
+    printf 'other-live\n'
+    return 0
+  fi
+  printf 'stale\n'
+}
