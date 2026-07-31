@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'root=${DEVIN_PROJECT_DIR:-}; if [ -z \"$root\" ]; then root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; fi; [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-sessionstart-nudge.sh\" ] || exit 0; exec \"$root/bin/fm-sessionstart-nudge.sh\"'"
+            "command": "bash -lc 'root=${DEVIN_PROJECT_DIR:-}; if [ -z \"$root\" ]; then root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; fi; [ -f \"$root/.devin/config.json\" ] && [ -x \"$root/bin/fm-sessionstart-nudge.sh\" ] || exit 0; nudge=$(\"$root/bin/fm-sessionstart-nudge.sh\") || exit 0; [ -n \"$nudge\" ] || exit 0; node -e \"process.stdout.write(JSON.stringify({add_context: process.argv[1]}))\" \"$nudge\"'"
           }
         ]
       }
@@ -39,5 +39,12 @@
         ]
       }
     ]
-  }
+  },
+  "devin": {
+    "org_id": "org-7bc2e89a34724a819e8aa1e89799d8bf"
+  },
+  "shell": {
+    "setup_complete": true
+  },
+  "theme_mode": "dark"
 }

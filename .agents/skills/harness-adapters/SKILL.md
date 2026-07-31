@@ -93,6 +93,7 @@ Full mechanics, scoping, and fail-open behavior live in `docs/sessionstart-nudge
 - `opencode`: verified on 1.17.18; `session.created` plus `client.session.promptAsync` starts the nudge turn in the TUI, while `opencode run` remains fail-open headless.
 - `pi` and `pi-signed`: verified native `session_start`; the existing primary extension handles `startup`, `new`, and `resume` and uses `pi.sendMessage` to inject context without racing a positional launch prompt.
 - `grok`: the 0.2.103 project `SessionStart` event fires with `source=new`, but stdout does not reach model context; the tracked project hook remains fail-open, and a global token-guarded fallback requires a captain decision.
+- `devin`: Devin CLI 3000.3.22 did not deliver a unique tracked `SessionStart` `add_context` probe to model context; keep the tracked hook configured, but treat native session-start delivery as unverified until a CLI version implements it.
 
 ## Primary watcher supervision
 

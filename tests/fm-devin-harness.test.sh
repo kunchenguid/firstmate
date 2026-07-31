@@ -28,6 +28,7 @@ test_primary_hook_wiring() {
   assert_contains "$session" 'fm-sessionstart-nudge.sh' "Devin SessionStart hook omitted session-start nudge"
   assert_contains "$session" 'DEVIN_PROJECT_DIR' "Devin SessionStart hook omitted the native project root"
   assert_contains "$session" 'git rev-parse --show-toplevel' "Devin SessionStart hook omitted the Git-root fallback"
+  assert_contains "$session" 'add_context' "Devin SessionStart hook does not return Devin context JSON"
   [ "$(jq '[.hooks.SessionStart[].hooks[] | select(.command | contains("fm-sessionstart-nudge.sh"))] | length' "$config")" -eq 1 ] \
     || fail "tracked Devin config does not have exactly one SessionStart owner"
   matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$config")
@@ -81,17 +82,22 @@ test_primary_hooks_anchor_from_nested_cwd() {
   git -C "$fixture" init -q
   for script in fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-turnend-guard.sh fm-sessionstart-nudge.sh; do
     # shellcheck disable=SC2016  # fixture script expands these values when its hook runs
-    printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$(basename "$0")" >> "$FM_DEVIN_HOOK_MARKER"' > "$fixture/bin/$script"
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$(basename "$0")" >> "$FM_DEVIN_HOOK_MARKER"' '[ "$(basename "$0")" = fm-sessionstart-nudge.sh ] && printf "%s\n" "FIRSTMATE_OP: v1 session-start: probe"' > "$fixture/bin/$script"
     chmod +x "$fixture/bin/$script"
   done
   for mode in env fallback; do
     : > "$marker"
     while IFS= read -r command; do
       if [ "$mode" = env ]; then
-        (trap - EXIT; cd "$nested" && DEVIN_PROJECT_DIR="$fixture" FM_DEVIN_HOOK_MARKER="$marker" bash -c "$command")
+        out=$(trap - EXIT; cd "$nested" && DEVIN_PROJECT_DIR="$fixture" FM_DEVIN_HOOK_MARKER="$marker" bash -c "$command")
       else
-        (trap - EXIT; cd "$nested" && DEVIN_PROJECT_DIR='' FM_DEVIN_HOOK_MARKER="$marker" bash -c "$command")
+        out=$(trap - EXIT; cd "$nested" && DEVIN_PROJECT_DIR='' FM_DEVIN_HOOK_MARKER="$marker" bash -c "$command")
       fi
+      case "$command" in
+        *fm-sessionstart-nudge.sh*)
+          jq -e '.add_context == "FIRSTMATE_OP: v1 session-start: probe"' <<<"$out" >/dev/null \
+            || fail "Devin $mode SessionStart hook did not return add_context JSON: $out" ;;
+      esac
     done < <(jq -r '.hooks.SessionStart[].hooks[].command, .hooks.PreToolUse[].hooks[].command, .hooks.Stop[].hooks[].command' "$fixture/.devin/config.json")
     [ "$(wc -l < "$marker" | tr -d ' ')" -eq 4 ] \
       || fail "Devin $mode root resolution did not invoke all four hooks from a nested cwd: $(cat "$marker")"

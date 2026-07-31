@@ -60,6 +60,21 @@ The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and 
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
 The detailed reconciliation and task chronology stay in the private audit report and PR evidence.
 
+Devin command shape, using an isolated temporary Devin data directory, a plain temporary checkout containing the tracked `.devin`, `bin`, and `AGENTS.md` files, and the tracked project configuration:
+
+```sh
+env HOME="$PROBE_ROOT/home" XDG_CONFIG_HOME="$PROBE_ROOT/home/.config" XDG_DATA_HOME="$PROBE_ROOT/data" \
+  DEVIN_PROJECT_DIR="$PLAIN_ROOT" FM_GATE_REFUSE_BYPASS=1 FM_STATE_OVERRIDE="$PLAIN_ROOT/state" DEVIN_CLI=1 \
+  devin --config "$PROBE_ROOT/config.json" --permission-mode dangerous \
+  --respect-workspace-trust true --export "$PLAIN_ROOT/interactive-export.json" -- \
+  'Do not use tools. Reply exactly DEVIN_FIRSTMATE_HOOK_PAYLOAD_SEEN if the exact Firstmate SessionStart context is present; otherwise reply exactly DEVIN_FIRSTMATE_HOOK_PAYLOAD_MISSING.'
+```
+
+The probe ran on 2026-07-31 with Devin CLI 3000.3.22 (d5152ff5), after accepting the trust prompt in the isolated Devin data directory while leaving `--respect-workspace-trust true` enabled.
+The effective user override was a copy of the local Devin config with no hooks, and the effective project configuration was the tracked `.devin/config.json` with `read_config_from.claude=false` and its `SessionStart` hook.
+A unique probe-only `SessionStart` command, `node -e 'process.stdout.write(JSON.stringify({add_context:"DEVIN_PROBE_CONTEXT_7f3a91c2"}))'`, returned that JSON, but the model replied `DEVIN_PROBE_CONTEXT_MISSING`; a separate `UserPromptSubmit` probe likewise replied `DEVIN_USERPROMPT_CONTEXT_MISSING`.
+The installed Devin hook documentation labels Claude-format hooks as not yet available, so this version-scoped live check does not establish native context delivery and Devin session-start support remains unverified.
+
 ## Semantic busy state
 
 The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
