@@ -605,7 +605,7 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   # A leased Treehouse worktree is handed over at detached HEAD on a clean
   # default branch, and fm-spawn refuses one that is still attached to a branch
-  # (the crew creates its own). Reproduce that shape, not a generic worktree.
+  # (the crewmate creates its own). Reproduce that shape, not a generic worktree.
   fm_git_worktree "$project" "$worktree" "wt-$name"
   git -C "$worktree" checkout --quiet --detach HEAD
   git -C "$project" branch --quiet -D "wt-$name"

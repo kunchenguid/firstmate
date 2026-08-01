@@ -95,7 +95,7 @@ make_gate_worktree() {
 }
 
 # make_normal_repo <dir> -> echoes a plain (non-gate) git repo to stand in for a
-# normal primary/crew checkout: its git-common-dir is <dir>/.git, never a gate.
+# normal primary/crewmate checkout: its git-common-dir is <dir>/.git, never a gate.
 make_normal_repo() {
   local dir=$1
   git init -q -b main "$dir"

@@ -55,7 +55,7 @@
 #          bootstrap prints TASKS_AXI: available. quota-axi is required because
 #          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
 #          degrades at runtime when quota data is unavailable.
-#          Routed direct crew selection also requires Agent Fleet's read-only
+#          Routed direct crewmate selection also requires Agent Fleet's read-only
 #          profile registry so pool-reserved accounts can fail closed.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes

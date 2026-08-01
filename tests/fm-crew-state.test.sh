@@ -38,7 +38,7 @@ TMP_ROOT=$(fm_test_tmproot fm-crew-state)
 fm_git_identity fmtest fmtest@example.invalid
 
 # A real git repo checked out on <branch>, so the helper's branch attribution
-# (git symbolic-ref) resolves like it would for a live crew worktree.
+# (git symbolic-ref) resolves like it would for a live crewmate worktree.
 make_repo_on_branch() {  # <dir> <branch>
   local dir=$1 branch=$2
   mkdir -p "$dir"

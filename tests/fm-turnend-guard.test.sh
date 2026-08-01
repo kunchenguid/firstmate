@@ -136,7 +136,7 @@ make_crewmate_worktree_dir() {
   printf '%s\n' "$dir"
 }
 
-# A secondmate home's OWN child crew/scout worktree: a genuine linked git
+# A secondmate home's OWN child crewmate/scout worktree: a genuine linked git
 # worktree of the secondmate home, so git-dir != git-common-dir exactly as for a
 # main-home child worktree. A child worktree never carries the gitignored
 # .fm-secondmate-home marker, so the marker force-include never fires for it and
@@ -424,7 +424,7 @@ test_hook_secondmate_reinvoke_recovery_loop() {
 }
 
 # The marker force-include must guard only the secondmate's OWN home, never its
-# children: a secondmate's linked crew/scout worktree carries no marker, so it
+# children: a secondmate's linked crewmate/scout worktree carries no marker, so it
 # stays exempt by the same git-dir/git-common-dir test that exempts the main
 # home's children.
 test_hook_silent_in_secondmate_child_worktree() {

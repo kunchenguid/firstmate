@@ -154,7 +154,7 @@ Claude and Grok use background-notify cycles, Codex uses bounded foreground chec
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 Claude crewmate and scout launches additionally require the exact installed Opus 5 model before endpoint creation.
 `fm-harness.sh claude-crew-model` resolves the one-value local `config/claude-crew-model` anchor, whose absent-file default and only accepted value is `claude-opus-5`; an explicit `--model` must equal that resolved anchor.
-The anchor is inherited into secondmate homes so the same rule governs their Claude crews.
+The anchor is inherited into secondmate homes so the same rule governs their Claude crewmates.
 An empty, invalid, mismatched, or `default` anchor, a mismatched explicit model, and a raw Claude launch fail closed rather than inheriting or selecting another Claude model.
 The resolved model is both passed through Claude's `--model` flag and recorded as `model=` in task metadata.
 Fresh launches and recovery share this final resolution guard: recovery preserves an explicit recorded model, while legacy `model=default` metadata resolves through the anchor before relaunch and is rewritten to the value actually used.
@@ -178,7 +178,7 @@ The exact discovery, fresh-usage, health, fallback, and Herdr-hook mechanics are
 The selected provider command receives `CLAUDE_CONFIG_DIR=<home>` or `CODEX_HOME=<home>`, and task metadata records the non-secret `account_home=<home>` for observability.
 New ship/scout launches never ask Agent Fleet to enable a profile, establish identity, install a bundle, or acquire a lease.
 They use Agent Fleet's read-only profile listing as the authoritative pool-membership registry.
-Only enabled worker profiles with real account homes registered in the provider's crew pool are eligible, so disabled, non-worker, and manual-only profiles cannot be selected for crew work.
+Only enabled worker profiles with real account homes registered in the provider's worker pool are eligible, so disabled, non-worker, and manual-only profiles cannot be selected for crewmate work.
 Claude candidates must additionally carry quota-axi's exact non-secret per-directory `claude-keychain-access-granted` marker with the exact `granted` newline payload, mode 0600, current-user ownership, one link, non-symlink path components, and stable metadata.
 Pool filtering and the marker check happen before fallback selection; if no Claude candidate survives, launch fails closed with the reserved and captain-approval-required reasons instead of borrowing a manual profile.
 The optional declared `claude-crew-last-resort` pool is checked only after no usable `claude-crew` profile remains and is announced loudly when used.
@@ -215,7 +215,7 @@ It never creates `account_pool=`, `account_profile=`, `account_task=`, `account_
 Existing ship/scout tasks that already carry `account_profile=` metadata remain legacy Agent Fleet managed generations.
 That compatibility path is recovery-only for ordinary crewmates and is not used for any new ship/scout task.
 Secondmate launches continue to create and recover legacy Agent Fleet managed generations until their dedicated direct-account integration is designed.
-Bootstrap requires Agent Fleet for direct crew-pool eligibility, for enforced secondmate routing, and when legacy `account_profile=` or pending rollback metadata exists.
+Bootstrap requires Agent Fleet for direct worker-pool eligibility, for enforced secondmate routing, and when legacy `account_profile=` or pending rollback metadata exists.
 New direct ship/scout routing also requires `jq`, `quota-axi`, and Herdr's integration installer.
 Same-profile recovery is sticky and fail-closed: `bin/fm-spawn.sh <id> --resume-account` validates existing task metadata and Agent Fleet's session mapping, uses `lease recover` rather than new-task quota selection, resumes the recorded provider session without replaying the brief as a new prompt, and requires a higher monotonic `session_event_seq` from a SessionStart accepted after its local launch gate before committing the recovered lease.
 Wall-clock `updated_at` remains diagnostic only and never decides launch freshness.

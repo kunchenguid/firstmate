@@ -16,7 +16,7 @@ Repeated unchanged wedge or permission-stall escalations add an escalation count
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crewmate is still working: an actively running no-mistakes step for that crewmate's branch or a backend busy signature.
 A crewmate that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
-For stale-pane triage only, that durable declaration also explains the expected idle pane after a matching no-mistakes run has reached terminal `done` (including passed or checks-passed outcomes); active and failed runs retain normal run-step precedence, and stopped crew without a declared pause surface immediately.
+For stale-pane triage only, that durable declaration also explains the expected idle pane after a matching no-mistakes run has reached terminal `done` (including passed or checks-passed outcomes); active and failed runs retain normal run-step precedence, and stopped crewmates without a declared pause surface immediately.
 Pause cadence markers remain in force while the latest durable status still declares the pause and are cleared only after that status resumes, so every continuously declared pause still re-surfaces on the bounded long cadence.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
@@ -139,8 +139,8 @@ That keeps spawn launch compatible across claude, codex, grok, pi, and opencode 
 New ship/scout observe and enforce account routing is backend-neutral and uses the direct profile-directory contract owned by [configuration.md](configuration.md#agent-fleet-account-routing).
 Routing remains default-off and adds no account field or provider environment override until an explicit account flag or observe/enforce policy enables it.
 The direct selector reads Agent Fleet only for pool membership and enabled worker eligibility, excludes disabled, non-worker, and manual-only profiles, requires Claude's fully validated non-secret per-directory Keychain approval marker, then uses fresh Codex quota opportunistically.
-If no usable Claude crew account survives eligibility, the launch fails closed before fallback selection.
-Claude can declare a separate last-resort crew pool, consulted only after its primary crew pool is empty; no identity inference participates in either tier.
+If no usable Claude account for crewmates survives eligibility, the launch fails closed before fallback selection.
+Claude can declare a separate last-resort worker pool, consulted only after its primary worker pool is empty; no identity inference participates in either tier.
 It serializes round-robin fallback and exact-score tie-breaking so unavailable usage and concurrent launches cannot collapse onto the stable first account.
 For quota-balanced account-pool candidates, new dispatch deterministically uses the ordered first profile and passes its compatibility alias to spawn only as the activation signal for direct per-account selection.
 The legacy Agent Fleet pool-summary selector is inactive deferred code tracked by `remove-fleet-routing-deadcode`; it is not available to new dispatches.
@@ -177,7 +177,7 @@ When the harness token is unset or `default`, launch falls back to `config/crew-
 Those optional tokens are re-read on every secondmate spawn or respawn and are overridden by explicit per-spawn `--model` or `--effort` flags.
 An explicit per-spawn harness or raw launch command does not inherit model or effort tokens from `config/secondmate-harness`.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
-`config/claude-crew-model` is inherited too, so Claude crews in every home validate the same exact `claude-opus-5` model anchor.
+`config/claude-crew-model` is inherited too, so Claude crewmates in every home validate the same exact `claude-opus-5` model anchor.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 `config/backlog-backend` is inherited too; absent or `tasks-axi` selects the default tasks-axi backlog backend, while `manual` forces routine backlog updates to hand-editing across the fleet without disabling validated handoff delegation.
 

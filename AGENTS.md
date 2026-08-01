@@ -220,8 +220,8 @@ Secondmate launches are exempt because they resolve through `fm-harness.sh secon
 
 `quota-balanced` selection is deterministic and owned by `bin/fm-dispatch-select.sh`; every real new ship/scout launch uses direct account-directory selection.
 When candidates carry account pools, the selector chooses the ordered first profile and passes its pool to spawn only as a compatibility activation input, never as an account choice or lease request.
-Direct selection reads Agent Fleet's profile registry only for pool membership, excludes profiles outside the provider's crew pool, and requires Claude's non-secret per-directory quota-axi Keychain approval marker before any fallback or rotation.
-When no usable Claude crew account survives those checks, selection fails closed and names the reserved or approval-required reasons.
+Direct selection reads Agent Fleet's profile registry only for pool membership, excludes profiles outside the provider's worker pool, and requires Claude's non-secret per-directory quota-axi Keychain approval marker before any fallback or rotation.
+When no usable Claude account for crewmates survives those checks, selection fails closed and names the reserved or approval-required reasons.
 An explicitly declared `claude-crew-last-resort` pool is consulted only after `claude-crew` has no usable account; manual-only profiles remain excluded, and selector code never guesses account ownership from unreadable identity data.
 Fresh Codex quota is an opportunistic ranking signal.
 Exact best-score Codex ties and an all-unavailable quota result rotate across eligible accounts under a serialized persistent cursor; Claude always uses that rotation because its per-directory quota signal is unreadable.

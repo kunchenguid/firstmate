@@ -570,7 +570,7 @@ test_off_is_byte_compatible_and_never_calls_agent_fleet() {
   assert_grep '# Completion report' "$HOME_DIR/data/$id/brief.md" "post-cutover spawn did not upgrade a legacy unspawned brief"
   # Assert each required section by the exact heading publication demands, not by
   # the sentence that happens to list them. The prose was reworded once already
-  # (to spell out the level-two requirement crews kept getting wrong) and this
+  # (to spell out the level-two requirement crewmates kept getting wrong) and this
   # assertion broke even though the contract still named all six - it was pinned
   # to phrasing rather than to the guarantee.
   for section in '## Summary' '## What changed' '## Verification' \

@@ -10,9 +10,9 @@
 # Account homes are discovered under the current passwd user's
 # .local/share/agent-fleet/accounts/<vendor>/ tree without fixed counts.
 # Agent Fleet's read-only profile list is the source of pool eligibility:
-# direct crew selection considers only enabled worker profiles with real homes
+# direct crewmate selection considers only enabled worker profiles with real homes
 # registered in the fixed <vendor>-crew pool, so a disabled, manual-only, or
-# non-worker profile is never a crew candidate and no caller-supplied
+# non-worker profile is never a crewmate candidate and no caller-supplied
 # compatibility alias can weaken that boundary.
 # Claude may also declare a separate claude-crew-last-resort pool.
 # It is consulted only when no usable claude-crew profile remains; Firstmate
@@ -20,7 +20,7 @@
 # Claude eligibility also requires quota-axi's exact, non-secret per-directory
 # Keychain access marker.
 # That check happens after pool filtering and before rotation, so a reserved
-# profile cannot become a fallback and an unapproved crew profile fails honestly.
+# profile cannot become a fallback and an unapproved crewmate profile fails honestly.
 # Codex selection removes that account's quota-axi window cache immediately
 # before every read, sets CODEX_HOME plus the account-isolated XDG_CACHE_HOME,
 # accepts only a fresh result with at least one numeric five_hour or weekly
