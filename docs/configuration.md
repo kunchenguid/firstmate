@@ -87,6 +87,55 @@ The caller-facing label remains `fm-<id>`, but the actual cmux workspace title i
 Test cleanup must use the guarded path described in [`docs/cmux-backend.md`](cmux-backend.md)'s "Test safety" section, never enumerate-and-close every workspace.
 The `config/backend` file is not inherited by secondmate homes.
 
+## Relay task hosts (config/relay-hosts.json)
+
+Optional, LOCAL, gitignored.
+Absent means the relay layer is wholly inert: nothing runs, nothing is polled, and `bin/fm-bootstrap.sh` prints nothing about it.
+
+A remote task host is a machine that runs its own firstmate and hosts crewmates for tasks this home dispatches.
+It is not a runtime backend and not a secondmate: `config/backend` still selects the LOCAL session provider, and a task host has no charter, no backlog of its own, and no routing scope.
+[`docs/relay-host.md`](relay-host.md) owns the mechanism, the pairing contract, the ordered dispatch procedure, and the measured behaviour.
+
+The file maps a host name to one record.
+The name is the value passed to `fm-spawn.sh --host <name>` and must match `[A-Za-z0-9._@=+-]{1,96}`.
+
+```json
+{
+  "box151": {
+    "client_id": "22713be4-d23",
+    "control_root": "/data00/home/user/.fm-relay/control-root",
+    "fleet_root": "/data00/home/user/.fm-relay/fleet-root",
+    "home": "/data00/home/user/.fm-relay/host-home",
+    "root": "/data00/home/user/Documents/firstmate",
+    "home_dir": "/data00/home/user",
+    "path": "/data00/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin",
+    "lang": "en_US.UTF-8",
+    "key": "/Users/me/.fm-relay/keys/151-target.key",
+    "ssh": "user@10.37.37.151"
+  }
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `client_id` | yes | the target's Bifrost client instance id or label prefix, passed as `--client-id` so a home paired with several hosts addresses the right one |
+| `control_root` | yes | absolute path on the host holding the verb entry point, its config, and the task claim directory; must be OUTSIDE every file-access root, which is what stops a paired caller from reading or rewriting its own verb table |
+| `fleet_root` | yes | absolute path on the host that is the ONLY file-access root: briefs and steers in, reports and artifacts out |
+| `home` | yes | absolute path to the host's firstmate home, whose `state/` and `data/` the host's own scripts own |
+| `root` | yes | absolute path to the firstmate checkout on the host that provides its `bin/` |
+| `home_dir` | no | `HOME` for the scripts the verb drives; defaults to the parent of `home` |
+| `path` | no | `PATH` for those scripts; defaults to `/usr/local/bin:/usr/bin:/bin`, and usually has to be set because a non-interactive shell on the host does not carry `~/.local/bin` |
+| `lang` | no | locale for those scripts; defaults to `en_US.UTF-8`, and is load-bearing rather than cosmetic because without a UTF-8 locale the tmux endpoint lookup silently reports every live pane as gone |
+| `key` | pairing only | local path to the host's exported device key, used by `bin/fm-relay-conn.sh up` |
+| `ssh` | pairing/audit only | ordinary out-of-band SSH destination, used to deploy the verb and to tighten and audit authorizations, never to run fleet work |
+
+Every path must be absolute and must be the REAL path.
+A symlinked home directory (`/home/user` -> `/data00/home/user`) makes the file policy reject its own root.
+
+Absent optional fields are safe; the record is read one field per line precisely so an empty `lang` cannot shift `key` and `ssh` left.
+
+A host with no `ssh` route cannot be paired from here at all, and `bin/fm-relay-conn.sh` says so rather than pairing without being able to secure the result.
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.

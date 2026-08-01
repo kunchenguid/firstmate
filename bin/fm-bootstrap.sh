@@ -21,7 +21,8 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "RELAY: <host>: <what is wrong and how to repair it>".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
@@ -1017,6 +1018,49 @@ fi
 if fleet_uses_codebase && ! command -v bytedcli >/dev/null 2>&1; then
   missing_tool_diagnostic bytedcli
 fi
+# Relay task hosts. Wholly inert until config/relay-hosts.json exists, which is
+# also why this is the last diagnostic added: a home with no remote host pays
+# nothing. It asks two questions per host and only the two that stop dispatch
+# working - is the verb channel answering, and does any grant on that host still
+# bind the built-in full-access policy. The second one has to be universal and
+# has to be asked on the host itself: a second `bifrost remote conn up` ADDS a
+# fresh full-access grant and leaves the tightened one looking correct, so a
+# per-grant audit passes on a wide-open machine (bin/fm-relay-conn.sh).
+relay_hosts_check() {
+  local hosts host grants
+  [ -f "$CONFIG/relay-hosts.json" ] || return 0
+  # shellcheck source=bin/fm-relay-lib.sh
+  . "$SCRIPT_DIR/fm-relay-lib.sh"
+  hosts=$(fm_relay_hosts_list "$FM_HOME")
+  [ -n "$hosts" ] || return 0
+  if ! bifrost sync status 2>/dev/null | grep -q '^Authorized: true'; then
+    echo "RELAY: this machine is not authorized to the relay; no remote task host is reachable until it is"
+    return 0
+  fi
+  for host in $hosts; do
+    if ! fm_relay_host_load "$FM_HOME" "$host" >/dev/null 2>&1; then
+      echo "RELAY: $host: its registry entry is incomplete; dispatch to it will refuse"
+      continue
+    fi
+    if ! fm_relay_exec ping >/dev/null 2>&1; then
+      echo "RELAY: $host: not answering on the verb channel; re-pair with bin/fm-relay-conn.sh up $host"
+      continue
+    fi
+    [ -n "$FM_RELAY_SSH" ] || continue
+    # The host record's PATH is prepended for the same reason the deployed verb
+    # sets it: a non-interactive SSH shell there does not carry ~/.local/bin, so
+    # a bare `bifrost` is "command not found" and the audit would report itself
+    # unavailable on a perfectly healthy host.
+    grants=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$FM_RELAY_SSH" \
+      "PATH=$FM_RELAY_HOST_PATH:\$PATH; ${FM_RELAY_HOST_BIFROST:-bifrost} setting grant list" 2>/dev/null) || {
+      echo "RELAY: $host: its authorization could not be audited from here; check it on that machine"
+      continue
+    }
+    fm_relay_audit_grants_text "$grants" \
+      || echo "RELAY: $host: a full-access authorization is live on it; re-run bin/fm-relay-conn.sh up $host"
+  done
+}
+
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
@@ -1053,6 +1097,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
 fi
 nm_orphan_scan
 nm_unwatched_prs
+relay_hosts_check
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync

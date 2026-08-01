@@ -6,8 +6,15 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--host-home <path> --host-root <path>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --host-home/--host-root write a REMOTE TASK HOST variant: the brief file is
+#   still created in this home, but every path inside it - the status file, the
+#   report, the firstmate scripts and skills it points at - is spelled for the
+#   host machine the crewmate will actually run on. Both are required together.
+#   The variant also states that its status appends are the ONLY signal reaching
+#   the supervisor, because a turn-end marker written on the host cannot be seen
+#   across the relay (bin/fm-relay-check-make.sh, docs/relay-host.md).
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -73,17 +80,60 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+HOST_HOME=
+HOST_ROOT=
 POS=()
+want_value=
 for a in "$@"; do
+  if [ -n "$want_value" ]; then
+    case "$want_value" in
+      host-home) HOST_HOME=$a ;;
+      host-root) HOST_ROOT=$a ;;
+    esac
+    want_value=
+    continue
+  fi
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --host-home) want_value=host-home ;;
+    --host-home=*) HOST_HOME=${a#--host-home=} ;;
+    --host-root) want_value=host-root ;;
+    --host-root=*) HOST_ROOT=${a#--host-root=} ;;
     *) POS+=("$a") ;;
   esac
 done
+[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 ID=${POS[0]}
+
+# Paths written INTO the brief. They are this home's by default and the host's for
+# a remote-host variant, while BRIEF itself is always created here.
+BRIEF_STATE=$STATE
+BRIEF_DATA=$DATA
+BRIEF_ROOT=$FM_ROOT
+BRIEF_REMOTE_NOTE=
+if [ -n "$HOST_HOME" ] || [ -n "$HOST_ROOT" ]; then
+  [ -n "$HOST_HOME" ] && [ -n "$HOST_ROOT" ] \
+    || { echo "error: --host-home and --host-root must be given together" >&2; exit 1; }
+  [ "$KIND" != secondmate ] || { echo "error: a secondmate charter has no remote-host variant" >&2; exit 1; }
+  case "$HOST_HOME$HOST_ROOT" in /*) ;; *) echo "error: --host-home and --host-root must be absolute paths" >&2; exit 1 ;; esac
+  BRIEF_STATE="$HOST_HOME/state"
+  BRIEF_DATA="$HOST_HOME/data"
+  BRIEF_ROOT=$HOST_ROOT
+  # printf, not a heredoc: bash 3.2 (the macOS system bash this repo still
+  # supports) mis-parses an apostrophe inside a quoted heredoc nested in $(...),
+  # and this text needs both. Same construction HERDR_SECTION above uses.
+  BRIEF_REMOTE_NOTE=$(printf '%s\n' \
+'' \
+'' \
+'# Where you are running' \
+'You are on a TASK HOST machine. Firstmate supervises you from another machine over a relay link, so:' \
+'- Your status appends are the only signal that reaches it. Nothing else about this pane crosses the link, and there is no turn-end notification, so a phase change you do not append is a phase change firstmate never learns about.' \
+'- Expect a supervisor reply to take minutes rather than seconds; that is the polling cadence of the link, not a stall.' \
+'- Write every deliverable and every piece of evidence into the paths named below on THIS machine. Firstmate fetches them by hash; a file left anywhere else does not exist as far as it is concerned.')
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -105,7 +155,7 @@ shell_quote() {
   printf "'"
 }
 
-STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+STATUS_FILE=$(shell_quote "$BRIEF_STATE/$ID.status")
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -192,7 +242,7 @@ fi
 REPO=${POS[1]}
 
 if [ "$HERDR_LAB" -eq 1 ]; then
-HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
+HERDR_LAB_HELPER=$(shell_quote "$BRIEF_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
 HERDR_SECTION=$(printf '%s\n' \
 '# Herdr isolation - HARD SAFETY CONTRACT' \
@@ -230,7 +280,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
-$HERDR_SECTION
+$HERDR_SECTION$BRIEF_REMOTE_NOTE
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -261,9 +311,9 @@ The report is the only thing that survives, so anything worth keeping must be in
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Definition of done
-Write your findings to \`$DATA/$ID/report.md\`.
+Write your findings to \`$BRIEF_DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
-Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
+Before reporting done, read and follow \`$BRIEF_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
@@ -334,7 +384,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
-$HERDR_SECTION
+$HERDR_SECTION$BRIEF_REMOTE_NOTE
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -371,10 +421,10 @@ $RULE1
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$BRIEF_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
+If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$BRIEF_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD

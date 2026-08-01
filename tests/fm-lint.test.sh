@@ -22,7 +22,7 @@ CI="$ROOT/.github/workflows/ci.yml"
 NM="$ROOT/.no-mistakes.yaml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The authoritative file set the one owner must run.
-CANON='shellcheck --norc bin/*.sh bin/backends/*.sh tests/*.sh'
+CANON='shellcheck --norc bin/*.sh bin/backends/*.sh control-root/*.sh control-root/verbs/*.sh tests/*.sh'
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
 

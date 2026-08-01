@@ -16,6 +16,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$SCRIPT_DIR/fm-guard.sh" || true
 
 RAW_TARGET=$1
+# A task whose meta records host= runs on a remote machine, so its pane is not on
+# any backend this home can address. Ask the host to capture it instead; the
+# relay client is a no-op for every ordinary local task.
+if [ -f "$STATE/$RAW_TARGET.meta" ] && grep -q '^host=' "$STATE/$RAW_TARGET.meta" 2>/dev/null; then
+  exec "$SCRIPT_DIR/fm-relay-host.sh" peek "$RAW_TARGET" "${2:-40}"
+fi
 T=$(fm_backend_resolve_selector "$RAW_TARGET" "$STATE")
 N=${2:-40}
 

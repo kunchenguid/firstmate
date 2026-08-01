@@ -186,6 +186,18 @@ fm_send_resolve_target() {  # <raw-target>
 }
 
 RAW_TARGET=$1
+# A relay task has no endpoint on any backend this home can address, so resolve
+# it before the backend resolver refuses. The host runs its OWN fm-send, which
+# means the composer read, the typed line, the Enter, and the submit verification
+# all stay local-to-local over there; only the ONE call crosses the link. The
+# steer text itself never becomes a shell argument (bin/fm-relay-host.sh).
+if [ -f "$STATE/$RAW_TARGET.meta" ] && grep -q '^host=' "$STATE/$RAW_TARGET.meta" 2>/dev/null; then
+  shift
+  if [ "${1:-}" = "--key" ]; then
+    exec "$SCRIPT_DIR/fm-relay-host.sh" key "$RAW_TARGET" "${2:-Enter}"
+  fi
+  exec "$SCRIPT_DIR/fm-relay-host.sh" send "$RAW_TARGET" "$@"
+fi
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
