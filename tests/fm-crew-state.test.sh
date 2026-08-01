@@ -25,6 +25,8 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) branch chronology outranks mutable head identity for the current
+#       nonterminal run, while terminal history remains strictly head-bound.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -62,6 +64,9 @@ make_fakebin() {  # <dir> -> echoes fakebin path
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_FAKE_NM_CALLS:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_NM_CALLS"
+fi
 case "${1:-}" in
   axi)
     shift
@@ -170,8 +175,9 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_NM_CALLS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_NM_CALLS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -291,10 +297,11 @@ outcome: failed
 EOF
 }
 
-run_ci_monitoring() {  # <branch>
+run_ci_monitoring() {  # <branch> [run-id]
+  local run_id=${2:-01RUN}
   cat <<EOF
 run:
-  id: "01RUN"
+  id: "$run_id"
   branch: $1
   status: running
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
@@ -1217,7 +1224,7 @@ test_usage_error() {
 }
 
 # Head-binding: same branch name with a rewritten/diverged worktree tip must not
-# attribute a historical no-mistakes run (multi-stage branch reuse incident).
+# attribute a historical terminal no-mistakes run (multi-stage branch reuse incident).
 test_historical_same_branch_rewritten_head_not_current() {
   reset_fakes
   local d old_head new_head out
@@ -1235,12 +1242,12 @@ test_historical_same_branch_rewritten_head_not_current() {
   printf 'working: stage 2 setup complete rebased onto merged #76\n' > "$d/state/wishlist.status"
   # Historical run still reports the pre-rewrite head on the reused branch.
   FM_FAKE_RUN_HEAD="$old_head"
-  FM_FAKE_AXI_STATUS="$(run_parked fm/todo-flag)"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/todo-flag)"
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" wishlist
   out=$(run_crew_state "$d" wishlist)
   assert_not_contains "$out" "source: run-step" "historical rewritten head must not use run-step"
-  assert_not_contains "$out" "parked at" "historical parked run must not mask current state"
+  assert_not_contains "$out" "run failed" "historical terminal run must not mask current state"
   assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
   assert_contains "$out" "state: working" "status-log working: remains current"
   pass "historical same-branch rewritten head is not attributed as current"
@@ -1309,6 +1316,130 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# (l) The branch's current nonterminal run is selected by bare axi status.
+# Its mutable head may have advanced onto history unavailable to the submitting
+# worktree, and an older exact-head failure must never replace it.
+test_newer_nonterminal_run_owns_branch_despite_unavailable_head() {
+  reset_fakes
+  local d local_short out
+  d=$(new_case current-run-unavailable-head)
+  make_repo_on_branch "$d/wt" fm/feat-current
+  local_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/current.meta" "window=fm:fm-current" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=deadbee
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-current)"
+  FM_FAKE_RUNS_LIST="failed fm/feat-current $local_short 2026-07-01 10:00"
+  out=$(run_crew_state "$d" current)
+  assert_contains "$out" "state: working" "newer active run remains current despite unavailable mutable head"
+  assert_contains "$out" "source: run-step" "newer active run keeps full run-step detail"
+  assert_not_contains "$out" "state: failed" "older exact-head failure is not resurrected"
+  pass "newer nonterminal run owns its branch despite an unavailable mutable head"
+}
+
+test_newer_divergent_ci_run_uses_its_latest_green_marker() {
+  reset_fakes
+  local d local_short calls out
+  d=$(new_case current-ci-divergent-green)
+  make_repo_on_branch "$d/wt" fm/feat-current-ci
+  local_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  git -C "$d/wt" checkout -q --orphan divergent-ci
+  git -C "$d/wt" commit -q --allow-empty -m 'divergent pipeline head'
+  FM_FAKE_RUN_HEAD=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q fm/feat-current-ci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/current-ci.meta" "window=fm:fm-current-ci" "worktree=$d/wt" "kind=ship"
+  calls="$d/no-mistakes.calls"
+  : > "$calls"
+  FM_FAKE_NM_CALLS=$calls
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-current-ci 01NEW)"
+  FM_FAKE_RUNS_LIST="failed fm/feat-current-ci $local_short 2026-07-01 10:00"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+CI checks running, waiting for results...
+all CI checks passed - still monitoring until merged or closed
+EOF
+)
+  out=$(run_crew_state "$d" current-ci)
+  assert_contains "$out" "state: done" "newer divergent ci run reports review-ready from its green marker"
+  assert_contains "$out" "checks green" "newer divergent ci run surfaces checks green"
+  assert_contains "$(cat "$calls")" "axi logs --step ci --run 01NEW" "ci logs are read for the newer selected run"
+  pass "newer divergent ci run uses its own latest green marker"
+}
+
+test_newer_divergent_ci_run_later_non_ready_marker_stays_working() {
+  reset_fakes
+  local d local_short out
+  d=$(new_case current-ci-divergent-relapse)
+  make_repo_on_branch "$d/wt" fm/feat-current-relapse
+  local_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/current-relapse.meta" "window=fm:fm-current-relapse" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=deadbee
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-current-relapse 01NEW)"
+  FM_FAKE_RUNS_LIST="failed fm/feat-current-relapse $local_short 2026-07-01 10:00"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+CI checks running, waiting for results...
+EOF
+)
+  out=$(run_crew_state "$d" current-relapse)
+  assert_contains "$out" "state: working" "later non-ready marker keeps the newer ci run working"
+  assert_not_contains "$out" "state: done" "earlier green marker does not mask later non-ready state"
+  assert_not_contains "$out" "state: failed" "older exact-head failure is not resurrected"
+  pass "newer divergent ci run follows its latest non-ready marker"
+}
+
+test_same_branch_terminal_mismatch_does_not_resurrect_older_run() {
+  reset_fakes
+  local d local_short out
+  d=$(new_case terminal-chronology-stop)
+  make_repo_on_branch "$d/wt" fm/feat-terminal-stop
+  local_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/terminal-stop.meta" "window=fm:fm-terminal-stop" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current implementation continues\n' > "$d/state/terminal-stop.status"
+  FM_FAKE_RUN_HEAD=deadbee
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-terminal-stop)"
+  FM_FAKE_RUNS_LIST=$(cat <<EOF
+completed fm/feat-terminal-stop deadbee 2026-07-02 10:00
+failed fm/feat-terminal-stop $local_short 2026-07-01 10:00
+EOF
+)
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" terminal-stop
+  out=$(run_crew_state "$d" terminal-stop)
+  assert_not_contains "$out" "source: run-step" "head-mismatched newest terminal row is not attributed"
+  assert_contains "$out" "state: working" "older compatible terminal row does not replace current state"
+  assert_contains "$out" "source: status-log" "terminal chronology stop falls back to live state sources"
+  pass "same-branch terminal mismatch does not resurrect an older run"
+}
+
+test_cross_branch_fallback_stops_at_newest_target_branch_row() {
+  reset_fakes
+  local d local_short out
+  d=$(new_case cross-branch-chronology-stop)
+  make_repo_on_branch "$d/wt" fm/feat-cross-stop
+  local_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cross-stop.meta" "window=fm:fm-cross-stop" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current implementation continues\n' > "$d/state/cross-stop.status"
+  FM_FAKE_RUN_HEAD=deadbee
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST=$(cat <<EOF
+running fm/other-crew deadbee 2026-07-03 10:00
+completed fm/feat-cross-stop deadbee 2026-07-02 10:00
+failed fm/feat-cross-stop $local_short 2026-07-01 10:00
+EOF
+)
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" cross-stop
+  out=$(run_crew_state "$d" cross-stop)
+  assert_not_contains "$out" "source: run-step" "newest target-branch mismatch stops coarse attribution"
+  assert_contains "$out" "state: working" "older compatible terminal row is not resurrected cross-branch"
+  assert_contains "$out" "source: status-log" "cross-branch chronology stop falls back to live state sources"
+  pass "cross-branch fallback stops at the newest target-branch row"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1358,5 +1489,10 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_newer_nonterminal_run_owns_branch_despite_unavailable_head
+test_newer_divergent_ci_run_uses_its_latest_green_marker
+test_newer_divergent_ci_run_later_non_ready_marker_stays_working
+test_same_branch_terminal_mismatch_does_not_resurrect_older_run
+test_cross_branch_fallback_stops_at_newest_target_branch_row
 
 echo "all fm-crew-state tests passed"
