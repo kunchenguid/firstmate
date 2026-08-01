@@ -17,7 +17,9 @@ Calm hides collapsed thinking labels, the shells for Pi's seven built-in tools, 
 The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 A notification that arrives while a turn is still running is queued rather than delivered, and Pi lists queued input above the working row before it becomes a transcript row.
 Calm keeps canonically classified operational notifications out of that queued listing too, including its leading spacer and its dequeue hint when every queued message is operational.
-A genuinely queued captain message stays listed exactly as Pi lists it, and the queue itself is untouched, so delivery order, the dequeue shortcut, and the model's view of every notification are unchanged.
+A genuinely queued captain message stays listed exactly as Pi lists it, and the queue itself is untouched, so delivery order and the model's view of every notification are unchanged.
+Because a hidden row is a row the captain never saw, aborting a running turn with `Escape` and the `Option+Up` dequeue shortcut both restore only genuinely captain-authored messages to the editor.
+Every hidden notification stays queued in its original order and is delivered on the next turn instead of arriving as raw editor text.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Calm changes presentation only.

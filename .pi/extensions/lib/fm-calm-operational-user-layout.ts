@@ -67,18 +67,16 @@ export function installCalmOperationalUserLayout(): void {
     [key: symbol]: CalmOperationalUserLayoutPatch | undefined;
   };
   const hidesOperationalInput = (): boolean => calmPresentationHides("synthetic-user");
-  const isOperationalInput = (text: string): boolean =>
-    isFirstmateOperationalPresentationText(text);
   const installed = registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH];
   if (installed) {
     installed.hidesOperationalInput = hidesOperationalInput;
-    installed.isOperationalInput = isOperationalInput;
+    installed.isOperationalInput = isFirstmateOperationalPresentationText;
     return;
   }
 
   const patch: CalmOperationalUserLayoutPatch = {
     hidesOperationalInput,
-    isOperationalInput,
+    isOperationalInput: isFirstmateOperationalPresentationText,
   };
   const InteractiveMode = PiCodingAgent.InteractiveMode;
   if (typeof InteractiveMode !== "function") {

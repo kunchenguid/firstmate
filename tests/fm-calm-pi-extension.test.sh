@@ -1053,6 +1053,17 @@ if (typeof InteractiveMode.prototype.getAllQueuedMessages !== "function") {
     "fixture precondition failed: installed Pi lacks InteractiveMode.getAllQueuedMessages",
   );
 }
+// The Pi Escape/dequeue restore, captured the same way: the Calm-off baseline and the
+// pre-fix behavior that emptied the whole queue into the editor.
+const stockRestoreQueuedMessagesToEditor = InteractiveMode.prototype.restoreQueuedMessagesToEditor;
+if (typeof stockRestoreQueuedMessagesToEditor !== "function") {
+  throw new Error(
+    "fixture precondition failed: installed Pi lacks InteractiveMode.restoreQueuedMessagesToEditor",
+  );
+}
+if (typeof InteractiveMode.prototype.clearAllQueues !== "function") {
+  throw new Error("fixture precondition failed: installed Pi lacks InteractiveMode.clearAllQueues");
+}
 
 const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?queued=${Date.now()}`);
 
@@ -1120,6 +1131,81 @@ function renderStockQueued(steering, followUp) {
   const mode = pendingMode(steering, followUp);
   stockUpdatePendingMessagesDisplay.call(mode);
   return mode.pendingMessagesContainer.render(150);
+}
+
+// One Pi interactive mode whose queue behaves the way the Pi queue does across a restore: the
+// session mirror arrays Pi lists from, the ordered delivery queue the agent drains on the
+// next turn, the compaction queue, the editor, and the abort Escape performs.
+function restorableMode(steering, followUp, compaction) {
+  const mode = Object.create(InteractiveMode.prototype);
+  const steeringQueue = [...steering];
+  const followUpQueue = [...followUp];
+  const delivery = [
+    ...steering.map((text) => ({ mode: "steer", text })),
+    ...followUp.map((text) => ({ mode: "followUp", text })),
+  ];
+  let editorValue = "";
+  let aborts = 0;
+  mode.pendingMessagesContainer = new Container();
+  mode.compactionQueuedMessages = (compaction ?? []).map((message) => ({ ...message }));
+  mode.editor = {
+    getText: () => editorValue,
+    setText(text) {
+      editorValue = text;
+    },
+  };
+  const session = {
+    agent: {
+      abort() {
+        aborts += 1;
+      },
+    },
+    getSteeringMessages: () => steeringQueue,
+    getFollowUpMessages: () => followUpQueue,
+    clearQueue() {
+      const cleared = { steering: [...steeringQueue], followUp: [...followUpQueue] };
+      steeringQueue.length = 0;
+      followUpQueue.length = 0;
+      delivery.length = 0;
+      return cleared;
+    },
+    async _queueSteer(text) {
+      steeringQueue.push(text);
+      delivery.push({ mode: "steer", text });
+    },
+    async _queueFollowUp(text) {
+      followUpQueue.push(text);
+      delivery.push({ mode: "followUp", text });
+    },
+  };
+  Object.defineProperty(mode, "session", { configurable: true, value: session });
+  return {
+    mode,
+    session,
+    delivery,
+    editorText: () => editorValue,
+    setEditorText(text) {
+      editorValue = text;
+    },
+    aborts: () => aborts,
+    // Read through the Pi accessor outside any render, so this is the queue Pi delivers from.
+    queue: () => InteractiveMode.prototype.getAllQueuedMessages.call(mode),
+    compaction: () => mode.compactionQueuedMessages,
+    rows: () => {
+      mode.updatePendingMessagesDisplay();
+      return mode.pendingMessagesContainer.render(150);
+    },
+  };
+}
+
+function restoreOutcome(restorable) {
+  return {
+    editor: restorable.editorText(),
+    queue: restorable.queue(),
+    delivery: restorable.delivery,
+    compaction: restorable.compaction(),
+    aborts: restorable.aborts(),
+  };
 }
 
 // One delivered chat row, so a batch can be checked where the captain finally sees it.
@@ -1215,6 +1301,116 @@ if (JSON.stringify(mixed.rows) !== JSON.stringify(mixedStock)) {
   );
 }
 
+// 8. Escape-to-abort and the Option+Up dequeue both reach the Pi restore, which empties the
+// queue into the editor. A hidden row must not come back as raw editor text the captain
+// never saw and would naturally clear, so only genuine captain input is restored and every
+// marked notification stays queued, in order, for the next turn.
+const escape = restorableMode(
+  [captainSteer, watcherStale],
+  [watcherSignal, captainFollowUp, legacyAway],
+);
+escape.setEditorText("half-typed captain draft");
+const escapeRestored = escape.mode.restoreQueuedMessagesToEditor({ abort: true });
+if (escapeRestored !== 2) {
+  throw new Error(`Escape restored ${escapeRestored} messages instead of the two captain ones`);
+}
+const escapeExpectedEditor = [captainSteer, captainFollowUp, "half-typed captain draft"].join("\n\n");
+if (escape.editorText() !== escapeExpectedEditor) {
+  throw new Error(`Escape built the wrong editor text: ${JSON.stringify(escape.editorText())}`);
+}
+if (escape.editorText().includes("⁣")) {
+  throw new Error("Escape put hidden operational text the captain never saw into the editor");
+}
+if (escape.aborts() !== 1) {
+  throw new Error(`Escape performed ${escape.aborts()} aborts instead of the single Pi abort`);
+}
+const escapeQueue = escape.queue();
+if (JSON.stringify(escapeQueue) !== JSON.stringify({
+  steering: [watcherStale],
+  followUp: [watcherSignal, legacyAway],
+})) {
+  throw new Error(`Escape lost, duplicated, or reordered queued notifications: ${JSON.stringify(escapeQueue)}`);
+}
+if (JSON.stringify(escape.delivery) !== JSON.stringify([
+  { mode: "steer", text: watcherStale },
+  { mode: "followUp", text: watcherSignal },
+  { mode: "followUp", text: legacyAway },
+])) {
+  throw new Error(`Escape changed what the agent delivers next turn: ${JSON.stringify(escape.delivery)}`);
+}
+if (escape.rows().length !== 0) {
+  throw new Error("the retained notifications became visible queued rows after Escape");
+}
+
+// A queue holding nothing but notifications restores nothing, still aborts, and keeps every
+// notification queued rather than reporting a restore the captain cannot see.
+const escapeAllMarked = restorableMode([marked[0]], marked.slice(1));
+const allMarkedRestored = escapeAllMarked.mode.restoreQueuedMessagesToEditor({ abort: true });
+if (allMarkedRestored !== 0 || escapeAllMarked.editorText() !== "") {
+  throw new Error(
+    `an all-notification queue restored ${allMarkedRestored} messages into ${JSON.stringify(escapeAllMarked.editorText())}`,
+  );
+}
+if (escapeAllMarked.aborts() !== 1) {
+  throw new Error("an all-notification queue swallowed the Pi Escape abort");
+}
+if (JSON.stringify(escapeAllMarked.queue()) !== JSON.stringify({
+  steering: [marked[0]],
+  followUp: marked.slice(1),
+})) {
+  throw new Error(`an all-notification queue was not retained intact: ${JSON.stringify(escapeAllMarked.queue())}`);
+}
+
+// Compaction-queued notifications are retained in their own queue with their own mode, so a
+// pending compaction flush still delivers them while the captain message is restored.
+const escapeCompaction = restorableMode([], [], [
+  { text: watcherStale, mode: "followUp" },
+  { text: captainFollowUp, mode: "followUp" },
+  { text: turnEndGuard, mode: "steer" },
+]);
+const compactionRestored = escapeCompaction.mode.restoreQueuedMessagesToEditor();
+if (compactionRestored !== 1 || escapeCompaction.editorText() !== captainFollowUp) {
+  throw new Error(
+    `the compaction queue restored ${compactionRestored} messages into ${JSON.stringify(escapeCompaction.editorText())}`,
+  );
+}
+if (JSON.stringify(escapeCompaction.compaction()) !== JSON.stringify([
+  { text: watcherStale, mode: "followUp" },
+  { text: turnEndGuard, mode: "steer" },
+])) {
+  throw new Error(
+    `compaction-queued notifications were lost or rerouted: ${JSON.stringify(escapeCompaction.compaction())}`,
+  );
+}
+
+// A queue with no notification in it stays the stock Pi restore, down to the abort and the count.
+const escapeCaptainOnly = restorableMode([captainSteer], [captainFollowUp]);
+const escapeCaptainOnlyStock = restorableMode([captainSteer], [captainFollowUp]);
+escapeCaptainOnly.setEditorText("tail");
+escapeCaptainOnlyStock.setEditorText("tail");
+const captainOnlyCount = escapeCaptainOnly.mode.restoreQueuedMessagesToEditor({ abort: true });
+const captainOnlyStockCount = stockRestoreQueuedMessagesToEditor.call(
+  escapeCaptainOnlyStock.mode,
+  { abort: true },
+);
+if (
+  captainOnlyCount !== captainOnlyStockCount ||
+  JSON.stringify(restoreOutcome(escapeCaptainOnly)) !== JSON.stringify(restoreOutcome(escapeCaptainOnlyStock))
+) {
+  throw new Error("Calm changed how Pi restores a queue holding only captain messages");
+}
+
+// If a future Pi drops the already-expanded queueing entry point, retention is impossible,
+// so the restore falls back to the stock Pi behavior rather than dropping a notification.
+const escapeWithoutRetention = restorableMode([], [watcherStale, captainFollowUp]);
+delete escapeWithoutRetention.session._queueFollowUp;
+const withoutRetentionCount = escapeWithoutRetention.mode.restoreQueuedMessagesToEditor();
+if (withoutRetentionCount !== 2 || !escapeWithoutRetention.editorText().includes("FIRSTMATE_OP:")) {
+  throw new Error(
+    "a Pi without the queueing entry point did not fall back to the stock restore, so a notification could be dropped",
+  );
+}
+
 // 6. Near misses a captain can actually type stay visible: suppression is marker
 // authenticated through the classifier owner, never the visible words or a path fragment.
 const nearMisses = [
@@ -1281,6 +1477,18 @@ for (const queue of [[[], [watcherStale]], [marked.slice(0, 2), marked.slice(2)]
   if (JSON.stringify(renderQueued(steering, followUp).rows) !== JSON.stringify(renderStockQueued(steering, followUp))) {
     throw new Error(`Calm off changed stock Pi queued rendering for ${JSON.stringify(queue)}`);
   }
+  const offCalm = restorableMode(steering, followUp);
+  const offStock = restorableMode(steering, followUp);
+  offCalm.setEditorText("tail");
+  offStock.setEditorText("tail");
+  const offCalmCount = offCalm.mode.restoreQueuedMessagesToEditor({ abort: true });
+  const offStockCount = stockRestoreQueuedMessagesToEditor.call(offStock.mode, { abort: true });
+  if (
+    offCalmCount !== offStockCount ||
+    JSON.stringify(restoreOutcome(offCalm)) !== JSON.stringify(restoreOutcome(offStock))
+  ) {
+    throw new Error(`Calm off changed the stock Pi queue restore for ${JSON.stringify(queue)}`);
+  }
 }
 await calmCommand.handler("", ctx);
 if (renderQueued([], [watcherStale]).rows.length !== 0) {
@@ -1301,12 +1509,132 @@ if (!bypassed.includes("Follow-up:") || !bypassed.includes("FIRSTMATE_OP:")) {
 if (renderQueued([], [watcherStale, watcherSignal]).rows.length !== 0) {
   throw new Error("the mutation witness left the queued-operational adapter uninstalled");
 }
+
+// The same witness for the restore seam: the unpatched Pi restore - the behavior before this
+// adapter owned it - must dump the hidden notification text into the editor and clear it out
+// of the queue, so the regression above can fail rather than pass silently.
+const restoreWitness = restorableMode([], [watcherStale, watcherSignal]);
+const bypassedRestore = stockRestoreQueuedMessagesToEditor.call(restoreWitness.mode, { abort: true });
+if (bypassedRestore !== 2 || !restoreWitness.editorText().includes("FIRSTMATE_OP:")) {
+  throw new Error(
+    "the restore mutation witness did not reproduce the raw operational editor text, so the regression cannot fail",
+  );
+}
+if (restoreWitness.queue().followUp.length !== 0 || restoreWitness.delivery.length !== 0) {
+  throw new Error("the restore mutation witness did not reproduce the emptied queue");
+}
+const adaptedRestore = restorableMode([], [watcherStale, watcherSignal]);
+if (
+  adaptedRestore.mode.restoreQueuedMessagesToEditor({ abort: true }) !== 0 ||
+  adaptedRestore.editorText() !== "" ||
+  adaptedRestore.delivery.length !== 2
+) {
+  throw new Error("the restore mutation witness left the adapted restore path uninstalled");
+}
 JS
 )
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm queued-operational presentation failed: $out"
   [ -z "$out" ] || fail "Pi calm queued-operational test printed output: $out"
-  pass "Calm hides marker-authenticated notifications queued during an active turn - alone, as a batch, and once delivered - while keeping queued captain messages, near misses, Calm-off rendering, and export/share stock, and a bypassing mutation reproduces the visible Follow-up rows"
+  pass "Calm hides marker-authenticated notifications queued during an active turn - alone, as a batch, and once delivered - restores only genuine captain input on Escape or dequeue while keeping every notification queued in order, and keeps queued captain messages, near misses, Calm-off rendering, and export/share stock, with bypassing mutations reproducing both the visible Follow-up rows and the raw restored editor text"
+}
+
+test_operational_presentation_classifier_failure() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Firstmate operational presentation classifier-failure test"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/classifier-failure"
+  mkdir -p "$fixture/lib"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$fixture/lib/"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+  # Stands in for a classifier that never ran: a spawn failure leaves no status at all, and
+  # invalid use exits 2. Neither is the owner answering "this is not operational".
+  cat >"$fixture/unrunnable-classifier.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1-}" >>"$FM_OPERATIONAL_INPUT_CALLS"
+if [ -e "$FM_CLASSIFIER_UNRUNNABLE" ]; then
+  exit 2
+fi
+exec "$FM_OPERATIONAL_INPUT_OWNER" "$@"
+SH
+  chmod +x "$fixture/unrunnable-classifier.sh"
+  : >"$fixture/classifier-calls"
+
+  out=$(cd "$fixture" && \
+    FM_OPERATIONAL_INPUT_SCRIPT="$fixture/unrunnable-classifier.sh" \
+    FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" \
+    FM_OPERATIONAL_INPUT_CALLS="$fixture/classifier-calls" \
+    FM_CLASSIFIER_UNRUNNABLE="$fixture/unrunnable" \
+    node --input-type=module 2>&1 <<'JS'
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const unrunnable = process.env.FM_CLASSIFIER_UNRUNNABLE;
+rmSync(unrunnable, { force: true });
+const owner = await import(
+  `${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?failure=${Date.now()}`
+);
+const calls = () =>
+  readFileSync(process.env.FM_OPERATIONAL_INPUT_CALLS, "utf8").split("\n").filter(Boolean).length;
+
+const watcher = owner.encodeFirstmateOperationalInput(
+  "watcher",
+  "FIRSTMATE WATCHER WAKE: stale: default:w2:pC (idle 241s)",
+);
+
+// A classifier that could not run has not answered, so presentation keeps the row visible
+// for now - and must ask again next time instead of pinning it visible for the session.
+writeFileSync(unrunnable, "");
+if (owner.isFirstmateOperationalPresentationText(watcher) !== false) {
+  throw new Error("an unrunnable classifier was treated as an authoritative match");
+}
+rmSync(unrunnable, { force: true });
+if (owner.isFirstmateOperationalPresentationText(watcher) !== true) {
+  throw new Error(
+    "a transient classifier failure was memoized as an authoritative negative, so the notification stays visible for the rest of the session",
+  );
+}
+
+// The answers the owner did give are still memoized, which is the whole reason the memo
+// exists: a queued backlog re-asks on every queue change.
+const afterMatch = calls();
+if (owner.isFirstmateOperationalPresentationText(watcher) !== true || calls() !== afterMatch) {
+  throw new Error("an authoritative match was not memoized");
+}
+const nearMiss = "⁣FIRSTMATE_OP: legacy untyped captain message";
+if (owner.isFirstmateOperationalPresentationText(nearMiss) !== false) {
+  throw new Error("the classifier owner hid a bare-marker message a captain can author");
+}
+const afterNonMatch = calls();
+if (owner.isFirstmateOperationalPresentationText(nearMiss) !== false || calls() !== afterNonMatch) {
+  throw new Error("an authoritative non-match was not memoized");
+}
+
+// The one supported legacy prefix is answered by the local owner grammar, so an unrunnable
+// classifier cannot unhide it either.
+writeFileSync(unrunnable, "");
+const beforeLegacy = calls();
+if (owner.isFirstmateOperationalPresentationText("⁣Supervisor escalate (STILL_HIDDEN)") !== true) {
+  throw new Error("the supported legacy prefix stopped authenticating without the classifier");
+}
+if (calls() !== beforeLegacy) {
+  throw new Error("the supported legacy prefix paid for a classifier subprocess");
+}
+if (owner.isFirstmateOperationalPresentationText("ordinary captain text") !== false) {
+  throw new Error("unmarked captain text was classified operational");
+}
+if (calls() !== beforeLegacy) {
+  throw new Error("unmarked captain text paid for a classifier subprocess");
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Firstmate operational presentation classifier-failure handling failed: $out"
+  [ -z "$out" ] || fail "Firstmate operational presentation classifier-failure test printed output: $out"
+  pass "a classifier subprocess that could not run leaves the presentation question open and self-heals, while authoritative matches and non-matches stay memoized"
 }
 
 test_operational_followup_turn_e2e() {
@@ -1853,6 +2181,35 @@ TS
         "Pi queued-turn $label case lost the Calm-off queued supported-legacy row"
     fi
 
+    # Escape is the ordinary way to stop a running turn, and it hands the whole queue back to
+    # the editor. A row the captain never saw must not come back as raw editor text that the
+    # natural reaction - clearing the editor - would silently drop.
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+    i=0
+    while [ "$i" -lt 300 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      printf '%s\n' "$pane" | grep -Fq "Follow-up: QUEUED_CAPTAIN_$label" || break
+      sleep 0.05
+      i=$((i + 1))
+    done
+    if printf '%s\n' "$pane" | grep -Fq "Follow-up: QUEUED_CAPTAIN_$label"; then
+      fail "Pi queued-turn $label case never restored the queued messages to the editor on Escape"
+    fi
+    assert_contains "$pane" "QUEUED_CAPTAIN_$label" \
+      "Pi queued-turn $label case lost the genuine queued captain message on Escape"
+    if [ "$calm_state" = on ]; then
+      assert_not_contains "$pane" "FIRSTMATE_OP:" \
+        "Pi queued-turn $label case restored hidden operational text into the editor on Escape"
+      assert_not_contains "$pane" "QUEUED_MARKED_${label}_LEGACY" \
+        "Pi queued-turn $label case restored the hidden supported-legacy notification into the editor on Escape"
+    else
+      assert_contains "$pane" "QUEUED_MARKED_${label}_WATCHER" \
+        "Pi queued-turn $label case changed the Calm-off stock Escape restore"
+    fi
+    # Submitting the restored editor is what an aborting captain does next, and it is when
+    # the retained notifications must still be delivered.
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+
     # Nothing was dropped: every queued notification still reaches the session and the model.
     i=0
     while [ "$i" -lt 400 ]; do
@@ -1866,10 +2223,10 @@ TS
     if [ -z "$session_file" ] || ! grep -Fq "QUEUED_HANDLED_$label" "$session_file"; then
       fail "Pi queued-turn $label case never processed the queued notification batch"
     fi
-    node - "$session_file" "$label" <<'JS' \
+    node - "$session_file" "$label" "$calm_state" <<'JS' \
       || fail "Pi queued-turn $label case lost or rerouted a queued notification"
 const fs = require("node:fs");
-const [file, label] = process.argv.slice(2);
+const [file, label, calmState] = process.argv.slice(2);
 const entries = fs.readFileSync(file, "utf8").trim().split("\n").map(JSON.parse);
 const text = (content) => typeof content === "string"
   ? content
@@ -1877,16 +2234,37 @@ const text = (content) => typeof content === "string"
 const users = entries
   .filter((entry) => entry.type === "message" && entry.message.role === "user")
   .map((entry) => text(entry.message.content));
-const expected = [
-  `CAPTAIN_PROMPT_${label}`,
+const marked = [
   `\u2063FIRSTMATE_OP: v1 watcher: QUEUED_MARKED_${label}_WATCHER`,
   `\u2063FIRSTMATE_OP: v1 turn-end-guard: QUEUED_MARKED_${label}_GUARD`,
   `\u2063Supervisor escalate (QUEUED_MARKED_${label}_LEGACY)`,
-  `QUEUED_CAPTAIN_${label}`,
 ];
-for (const message of expected) {
-  if (users.filter((value) => value === message).length !== 1) {
-    throw new Error(`expected exactly one persisted user input ${JSON.stringify(message)}`);
+const captain = `QUEUED_CAPTAIN_${label}`;
+// Regardless of which side of the Escape restore a message came back on, every notification
+// and the captain message must survive exactly once, in the order they were produced.
+const allUserText = users.join("\n");
+for (const message of [`CAPTAIN_PROMPT_${label}`, ...marked, captain]) {
+  if (allUserText.split(message).length - 1 !== 1) {
+    throw new Error(`expected exactly one persisted occurrence of ${JSON.stringify(message)}`);
+  }
+}
+const positions = marked.map((message) => allUserText.indexOf(message));
+if (positions.some((position, index) => index > 0 && position < positions[index - 1])) {
+  throw new Error("Escape reordered the queued notifications");
+}
+if (calmState === "on") {
+  // Calm restored only the captain message, so every notification stayed queued and was
+  // delivered on the next turn as its own ordinary user input.
+  for (const message of [...marked, captain]) {
+    if (users.filter((value) => value === message).length !== 1) {
+      throw new Error(`expected exactly one standalone persisted user input ${JSON.stringify(message)}`);
+    }
+  }
+} else {
+  // Calm off keeps the stock restore, which joins the whole queue into one editor submission.
+  const stockRestore = [...marked, captain].join("\n\n");
+  if (users.filter((value) => value === stockRestore).length !== 1) {
+    throw new Error("Calm off did not keep Pi's stock Escape restore of the whole queue");
   }
 }
 if (entries.some((entry) => entry.type === "custom_message")) {
@@ -1902,7 +2280,7 @@ JS
 
   run_queued_turn_case on calm_on
   run_queued_turn_case off calm_off
-  pass "Pi queued-operational turn E2E keeps marked notifications queued behind a busy turn off the transcript while Calm is on, still shows a genuine queued captain follow-up and the stock dequeue hint, renders every queued row Calm off, and loses no notification from the session"
+  pass "Pi queued-operational turn E2E keeps marked notifications queued behind a busy turn off the transcript while Calm is on, still shows a genuine queued captain follow-up and the stock dequeue hint, renders every queued row Calm off, restores only the genuine captain message to the editor when the captain aborts with Escape, keeps Pi's stock whole-queue restore Calm off, and loses, duplicates, reorders, or reroutes no notification in the session"
 }
 
 test_hidden_block_geometry_e2e() {
@@ -3813,6 +4191,7 @@ test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
 test_rendering_and_session_lifecycle
 test_queued_operational_presentation
+test_operational_presentation_classifier_failure
 test_operational_followup_turn_e2e
 test_queued_operational_turn_e2e
 test_hidden_block_geometry_e2e

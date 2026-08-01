@@ -18,19 +18,42 @@ export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
 export type FirstmateCurrentOperationalKind =
   (typeof FIRSTMATE_CURRENT_OPERATIONAL_KINDS)[number];
 
-function runOperationalInputCommand(
+// bin/fm-operational-input.sh answers a data command with exit 0, reports an authoritative
+// non-match with exit 1, and reserves exit 2 for invalid use. Anything else - including a
+// spawn that never ran the script, which leaves status null - is no answer at all, so the
+// two are kept apart rather than collapsed into one "not operational".
+type OperationalInputAnswer =
+  | { outcome: "matched"; value: string }
+  | { outcome: "no-match" }
+  | { outcome: "unavailable" };
+
+function askOperationalInputCommand(
   command: "encode" | "classify" | "kind",
   content: string,
   kind?: FirstmateCurrentOperationalKind,
-): string | undefined {
+): OperationalInputAnswer {
   const args = command === "encode" ? [command, kind ?? ""] : [command];
   const result = spawnSync(operationalInputScript, args, {
     encoding: "utf8",
     input: content,
     maxBuffer: 1024 * 1024,
   });
-  if (result.status !== 0) return undefined;
-  return command === "classify" ? result.stdout.replace(/\n$/, "") : result.stdout;
+  if (result.status === 0) {
+    return {
+      outcome: "matched",
+      value: command === "classify" ? result.stdout.replace(/\n$/, "") : result.stdout,
+    };
+  }
+  return result.status === 1 ? { outcome: "no-match" } : { outcome: "unavailable" };
+}
+
+function runOperationalInputCommand(
+  command: "encode" | "classify" | "kind",
+  content: string,
+  kind?: FirstmateCurrentOperationalKind,
+): string | undefined {
+  const answer = askOperationalInputCommand(command, content, kind);
+  return answer.outcome === "matched" ? answer.value : undefined;
 }
 
 export function encodeFirstmateOperationalInput(
@@ -61,9 +84,17 @@ export function classifyFirstmateCurrentOperationalText(
 const LEGACY_OPERATIONAL_PRESENTATION_PREFIX = "\u2063Supervisor escalate (";
 // Presentation re-asks the same question for every queued row on every queue change, so
 // answers are memoized. Classification is a pure function of the text, and the bound keeps
-// a long session from retaining every distinct message.
+// a long session from retaining every distinct message. Only an answer the owner actually
+// gave is memoized: a classifier that could not run at all leaves the question open, so a
+// transient failure cannot pin one message to "visible" for the rest of the session.
 const PRESENTATION_MEMO_LIMIT = 512;
 const presentationMemo = new Map<string, boolean>();
+
+function rememberPresentationAnswer(content: string, operational: boolean): boolean {
+  if (presentationMemo.size >= PRESENTATION_MEMO_LIMIT) presentationMemo.clear();
+  presentationMemo.set(content, operational);
+  return operational;
+}
 
 // Single owner of the marker-authenticated question "may Calm presentation hide this exact
 // input?", shared by every Calm operational adapter so the marker grammar is stated once.
@@ -73,10 +104,12 @@ export function isFirstmateOperationalPresentationText(content: string): boolean
   if (!content.includes("\u2063")) return false;
   const memoized = presentationMemo.get(content);
   if (memoized !== undefined) return memoized;
-  const operational =
-    classifyFirstmateCurrentOperationalText(content) !== undefined ||
-    content.startsWith(LEGACY_OPERATIONAL_PRESENTATION_PREFIX);
-  if (presentationMemo.size >= PRESENTATION_MEMO_LIMIT) presentationMemo.clear();
-  presentationMemo.set(content, operational);
-  return operational;
+  if (content.startsWith(LEGACY_OPERATIONAL_PRESENTATION_PREFIX)) {
+    return rememberPresentationAnswer(content, true);
+  }
+  const classified = askOperationalInputCommand("kind", content);
+  // No answer means presentation keeps the row visible for now and asks again next time,
+  // because hiding real captain input is the one outcome that must never be guessed.
+  if (classified.outcome === "unavailable") return false;
+  return rememberPresentationAnswer(content, classified.outcome === "matched");
 }

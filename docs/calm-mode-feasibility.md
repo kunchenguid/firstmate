@@ -208,7 +208,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
 | `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height adapter (verified on Pi 0.81.1 through 0.82.0) under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
-| `synthetic-user` queued before delivery | `InteractiveMode.updatePendingMessagesDisplay` listing `Steering:`/`Follow-up:` rows, their leading spacer, and the dequeue hint from `InteractiveMode.getAllQueuedMessages` | A notification delivered while a turn is running reaches this listing before it is ever a transcript row. Calm filters only what that one listing reads (verified on Pi 0.82.1), so an all-operational queue collapses to no rows, spacer, or hint, while genuinely queued captain messages and the queue Pi delivers from, restores to the editor, and persists are untouched. |
+| `synthetic-user` queued before delivery | `InteractiveMode.updatePendingMessagesDisplay` listing `Steering:`/`Follow-up:` rows, their leading spacer, and the dequeue hint from `InteractiveMode.getAllQueuedMessages` | A notification delivered while a turn is running reaches this listing before it is ever a transcript row. Calm filters only what that one listing reads (verified on Pi 0.82.1), so an all-operational queue collapses to no rows, spacer, or hint, while genuinely queued captain messages and the queue Pi delivers from and persists are untouched. |
+| `synthetic-user` restored from the queue | `InteractiveMode.restoreQueuedMessagesToEditor` reading `InteractiveMode.clearAllQueues`, reached by `Escape` during a run and by the `Option+Up` dequeue shortcut | Restoring a hidden row would hand the captain raw text nothing on screen ever showed, and clearing the editor would then drop it. Calm restores only genuinely captain-authored messages and re-queues every marker-authenticated notification in order through the same already-expanded queueing entry point Pi uses, so the next turn still delivers them; Calm off keeps the stock whole-queue restore byte for byte. |
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
@@ -488,13 +489,41 @@ custom_message entries: 0
 
 With Calm off, the same fixture listed all four queued rows and the hint, confirming the regression exercises the real path rather than a fixture that never populates it.
 
+### Aborting the busy turn
+
+Pressing `Escape` while the turn was still busy exercised `InteractiveMode.restoreQueuedMessagesToEditor`, which empties the whole queue into the editor.
+With Calm on, only the genuine captain message reached the editor, and the three hidden notifications stayed queued and were delivered on the next turn, each persisted exactly once, in order, as ordinary user input:
+
+```text
+user inputs persisted: [
+ "CAPTAIN_PROMPT_ESCAPE_ON",
+ "QUEUED_CAPTAIN_ESCAPE_ON",
+ "⁣FIRSTMATE_OP: v1 watcher: QUEUED_MARKED_ESCAPE_ON_WATCHER",
+ "⁣FIRSTMATE_OP: v1 turn-end-guard: QUEUED_MARKED_ESCAPE_ON_GUARD",
+ "⁣Supervisor escalate (QUEUED_MARKED_ESCAPE_ON_LEGACY)"
+]
+```
+
+No `FIRSTMATE_OP:` text ever appeared on screen or in the editor during that run.
+With Calm off, the same keystroke produced Pi's stock restore, joining the whole queue into one editor submission, which is also what the pre-fix Calm-on run produced:
+
+```text
+user inputs persisted: [
+ "CAPTAIN_PROMPT_ESCAPE_OFF",
+ "⁣FIRSTMATE_OP: v1 watcher: QUEUED_MARKED_ESCAPE_OFF_WATCHER\n\n⁣FIRSTMATE_OP: v1 turn-end-guard: QUEUED_MARKED_ESCAPE_OFF_GUARD\n\n⁣Supervisor escalate (QUEUED_MARKED_ESCAPE_OFF_LEGACY)\n\nQUEUED_CAPTAIN_ESCAPE_OFF"
+]
+```
+
 ### Regression entry points
 
 `test_queued_operational_presentation` drives the installed `InteractiveMode.updatePendingMessagesDisplay` against a real pi-tui `Container` and theme.
 It covers one marked notification, every supported marked kind alone and as a batch, the same messages once delivered, genuinely queued captain steering and follow-up messages, a mixed queue reduced to exactly the stock captain-only rows, queued near misses a captain can type, `/export` and `/share` stock rendering, byte-identical Calm-off rendering, and a mutation witness that restores the unpatched Pi renderer and requires the reported rows to reappear.
 It also asserts that ordinary queued text never reaches the classifier subprocess and that the marked kinds are classified only through `bin/fm-operational-input.sh`.
+The same regression drives the installed `InteractiveMode.restoreQueuedMessagesToEditor` over a queue that behaves like Pi's own, covering the mixed, all-notification, compaction-queued, and captain-only cases, byte-identical Calm-off restores, a fallback to the stock restore when the queueing entry point is absent, and a second mutation witness that requires the raw restored editor text to reappear.
 
-`test_queued_operational_turn_e2e` runs the same busy-turn scenario through a real Pi TUI for Calm on and Calm off, and checks the persisted session in both.
+`test_operational_presentation_classifier_failure` proves that a classifier subprocess that could not run leaves the presentation question open and self-heals on the next ask, while the answers the owner did give stay memoized.
+
+`test_queued_operational_turn_e2e` runs the same busy-turn scenario through a real Pi TUI for Calm on and Calm off, aborts it with `Escape`, submits the restored editor, and checks the persisted session in both.
 
 ```sh
 tests/fm-calm-pi-extension.test.sh
