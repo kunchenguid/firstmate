@@ -265,6 +265,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/model-verification.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
@@ -326,6 +330,10 @@
     },
     {
       "path": "docs/verification/gbrain-reranker.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/model-verification.md",
       "audience": "maintainer-verification"
     },
     {

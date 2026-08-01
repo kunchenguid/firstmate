@@ -33,6 +33,7 @@ The scope line is therefore: wrong tool reached for, deny; wrong amount of think
 
 The guard is also not a dispatch-quality check.
 It says nothing about whether the resulting brief, project, or delivery mode is correct.
+Whether a worker that WAS dispatched correctly then ran on the model it was dispatched with is a separate contract, owned by [`model-verification.md`](model-verification.md).
 
 ## Shipped mechanism
 

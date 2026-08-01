@@ -23,6 +23,11 @@
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
+#     model is bin/fm-model-verify.sh's verdict on whether the worker actually
+#     ran on the model recorded for it at dispatch: {verdict,recorded,actual[],
+#     source,detail}. `match` means a model was read and compared; `mismatch`
+#     and `unverifiable` both need attention, and `pending`/`unpinned` are
+#     explicitly no-verdict rather than a pass.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
@@ -208,6 +213,28 @@ meta_value() {  # <meta-file> <key>
 last_nonempty_line() {  # <file>
   [ -f "$1" ] || return 1
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
+}
+
+# model_verify_json: bin/fm-model-verify.sh's verdict for one task - whether the
+# model the worker ACTUALLY ran on matches the model recorded for it at dispatch.
+# The helper owns the whole contract; this only carries its structured answer.
+# An unreadable or absent answer becomes an explicit `unverifiable` verdict, so a
+# broken verifier can never render as a clean one.
+model_verify_json() {  # <id>
+  local id=$1 raw
+  raw=$(
+    FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_HOME="$FM_HOME" \
+      FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-model-verify.sh" "$id" --json 2>/dev/null || true
+  )
+  if [ -n "$raw" ] && printf '%s' "$raw" | jq -e '.verdict' >/dev/null 2>&1; then
+    printf '%s' "$raw"
+    return 0
+  fi
+  jq -n --arg id "$id" \
+    '{id:$id,verdict:"unverifiable",recorded:null,actual:[],source:"none",
+      detail:"model verification produced no readable answer"}'
 }
 
 crew_state_json() {  # <id>
@@ -416,7 +443,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_source event_json current_json model_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -457,6 +484,7 @@ task_json_lines() {
     fi
 
     current_json=$(crew_state_json "$id")
+    model_json=$(model_verify_json "$id")
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
@@ -564,6 +592,7 @@ task_json_lines() {
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
+      --argjson model "$model_json" \
       --argjson meta_path "$meta_json" \
       --argjson status_log "$status_json" \
       --argjson report "$report_json" \
@@ -592,6 +621,7 @@ task_json_lines() {
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+        model:($model | del(.id) | . + {observed_at:$observed_at}),
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
