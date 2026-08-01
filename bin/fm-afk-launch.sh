@@ -48,6 +48,28 @@ set -u
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_AFK_LAUNCH_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+case "$FM_HOME" in
+  /*) ;;
+  *)
+    FM_AFK_LAUNCH_HOME_INPUT=$FM_HOME
+    FM_HOME=$(CDPATH='' cd -- "$FM_AFK_LAUNCH_HOME_INPUT" 2>/dev/null && pwd -P) || {
+      echo "error: FM_HOME directory cannot be resolved: $FM_AFK_LAUNCH_HOME_INPUT" >&2
+      exit 1
+    }
+    ;;
+esac
+if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+  case "$FM_STATE_OVERRIDE" in
+    /*) ;;
+    *)
+      FM_AFK_LAUNCH_STATE_INPUT=$FM_STATE_OVERRIDE
+      FM_STATE_OVERRIDE=$(CDPATH='' cd -- "$FM_AFK_LAUNCH_STATE_INPUT" 2>/dev/null && pwd -P) || {
+        echo "error: FM_STATE_OVERRIDE directory cannot be resolved: $FM_AFK_LAUNCH_STATE_INPUT" >&2
+        exit 1
+      }
+      ;;
+  esac
+fi
 FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
@@ -606,10 +628,15 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
-  fm_afk_launch_lock_acquire || return 1
+  # Traps first, lock second. Acquiring before the handlers exist leaves a
+  # window where a signal terminates this process by default action and leaks
+  # the lock directory, which then blocks the next away-mode launch until the
+  # stale-owner reclaim path clears it. fm_afk_launch_lock_release only removes
+  # a lock this process owns, so arming it before acquisition is safe.
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  fm_afk_launch_lock_acquire || return 1
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;

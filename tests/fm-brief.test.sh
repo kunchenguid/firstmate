@@ -234,6 +234,12 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
     "local-only brief hard-coded captain-only authority"
   assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
     "local-only brief retained a personal review stacked on the selected delivery path"
+  assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
+    "local-only brief must not include the no-mistakes --intent contract"
+  id="brief-direct-intent-a4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
+    "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
@@ -255,6 +261,14 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
+  assert_grep "make \`--intent\` preserve all relevant content from this brief" "$brief" \
+    "no-mistakes DOD must require --intent to retain the accepted task contract"
+  assert_grep "carrying only each requirement's current accepted form" "$brief" \
+    "no-mistakes DOD must replace superseded requirements with their current accepted form"
+  assert_grep "retain direct requirements instead of substituting a diff summary" "$brief" \
+    "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
+  assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
+    "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
@@ -436,6 +450,97 @@ test_secondmate_marked_request_reporting_contract() {
   pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
 }
 
+test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
+  local root home data_override state_override brief baseline err status
+  root="$TMP_ROOT/relative-directory-inputs"
+  mkdir -p "$root"
+  root=$(cd "$root" && pwd -P)
+  home="$root/home"
+  data_override="$root/data-override"
+  state_override="$root/state-override"
+  mkdir -p "$home/data" "$home/state" "$data_override" "$state_override" \
+    "$root/cdpath/home/data" "$root/cdpath/home/state" \
+    "$root/cdpath/data-override" "$root/cdpath/state-override"
+
+  brief="$home/data/relative-home/brief.md"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=x \
+    "$ROOT/bin/fm-brief.sh" relative-home --secondmate --no-projects >/dev/null 2>&1
+  baseline="$root/absolute-home-charter"
+  cp "$brief" "$baseline"
+  rm -f "$brief"
+  (
+    cd "$root" || exit 1
+    CDPATH="$root/cdpath" FM_HOME=home FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" relative-home --secondmate --no-projects >/dev/null 2>&1
+  )
+  cmp -s "$baseline" "$brief" \
+    || fail "relative FM_HOME changed charter bytes compared with the same absolute home"
+  assert_grep ">> '$home/state/relative-home.status'" "$brief" \
+    "relative FM_HOME did not render an absolute secondmate status path"
+
+  brief="$home/data/relative-state/brief.md"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state_override" FM_SECONDMATE_CHARTER=x \
+    "$ROOT/bin/fm-brief.sh" relative-state --secondmate --no-projects >/dev/null 2>&1
+  baseline="$root/absolute-state-charter"
+  cp "$brief" "$baseline"
+  rm -f "$brief"
+  (
+    cd "$root" || exit 1
+    CDPATH="$root/cdpath" FM_HOME="$home" FM_STATE_OVERRIDE=state-override FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" relative-state --secondmate --no-projects >/dev/null 2>&1
+  )
+  cmp -s "$baseline" "$brief" \
+    || fail "relative FM_STATE_OVERRIDE changed charter bytes compared with the same absolute state directory"
+  assert_grep ">> '$state_override/relative-state.status'" "$brief" \
+    "relative FM_STATE_OVERRIDE did not render an absolute secondmate status path"
+
+  brief="$data_override/relative-data/brief.md"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data_override" FM_SECONDMATE_CHARTER=x \
+    "$ROOT/bin/fm-brief.sh" relative-data --secondmate --no-projects >/dev/null 2>&1
+  baseline="$root/absolute-data-charter"
+  cp "$brief" "$baseline"
+  rm -f "$brief"
+  (
+    cd "$root" || exit 1
+    CDPATH="$root/cdpath" FM_HOME="$home" FM_DATA_OVERRIDE=data-override FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" relative-data --secondmate --no-projects >/dev/null 2>&1
+  )
+  cmp -s "$baseline" "$brief" \
+    || fail "relative FM_DATA_OVERRIDE changed charter bytes compared with the same absolute data directory"
+  assert_grep ">> '$home/state/relative-data.status'" "$brief" \
+    "relative FM_DATA_OVERRIDE changed the absolute default status path"
+
+  err="$root/unresolved.err"
+  (
+    cd "$root" || exit 1
+    FM_HOME=missing-home FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" unresolved-home --secondmate --no-projects >/dev/null 2>"$err"
+  ); status=$?
+  expect_code 1 "$status" "an unresolved relative FM_HOME must fail"
+  assert_grep "FM_HOME directory cannot be resolved: missing-home" "$err" \
+    "unresolved relative FM_HOME did not fail loudly"
+
+  (
+    cd "$root" || exit 1
+    FM_HOME="$home" FM_STATE_OVERRIDE=missing-state FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" unresolved-state --secondmate --no-projects >/dev/null 2>"$err"
+  ); status=$?
+  expect_code 1 "$status" "an unresolved relative FM_STATE_OVERRIDE must fail"
+  assert_grep "FM_STATE_OVERRIDE directory cannot be resolved: missing-state" "$err" \
+    "unresolved relative FM_STATE_OVERRIDE did not fail loudly"
+
+  (
+    cd "$root" || exit 1
+    FM_HOME="$home" FM_DATA_OVERRIDE=missing-data FM_SECONDMATE_CHARTER=x \
+      "$ROOT/bin/fm-brief.sh" unresolved-data --secondmate --no-projects >/dev/null 2>"$err"
+  ); status=$?
+  expect_code 1 "$status" "an unresolved relative FM_DATA_OVERRIDE must fail"
+  assert_grep "FM_DATA_OVERRIDE directory cannot be resolved: missing-data" "$err" \
+    "unresolved relative FM_DATA_OVERRIDE did not fail loudly"
+
+  pass "fm-brief.sh: relative directory inputs ignore CDPATH, render stable absolute charter paths, or fail loudly"
+}
+
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   local home brief status=0
   home="$TMP_ROOT/herdr-kind-home"
@@ -540,6 +645,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
+test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

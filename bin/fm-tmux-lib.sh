@@ -46,8 +46,14 @@
 # tmux adapter does not paper over a herdr-specific shape.
 #
 # Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
-# structural border stripping. FM_BUSY_REGEX globally overrides harness-scoped
-# busy-footer matching (mirrors fm-watch.sh / the daemon).
+# structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
+# matching used here.
+#
+# NOT a task-state source: task busy state is owned by bin/fm-busy-lib.sh's
+# semantic contract. The matching below serves only delivery guards: the submit
+# acknowledgement and the away-mode supervisor-pane busy guard. Both ask about
+# the pane receiving input, not the state of a recorded worker task. Matching
+# stays harness-scoped so one harness's output cannot make another read busy.
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
@@ -60,7 +66,7 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
-# Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
+# Delivery-only rendered busy footers per harness. claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this

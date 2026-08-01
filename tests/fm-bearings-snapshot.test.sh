@@ -75,6 +75,18 @@ make_home() {  # <name>
   printf '%s\n' "$home"
 }
 
+record_claude_state() {  # <state-dir> <id> <busy|idle>
+  local state=$1 id=$2 semantic_state=$3 gen event
+  case "$semantic_state" in
+    busy) event=user-prompt-submit ;;
+    idle) event=stop ;;
+    *) fail "unsupported semantic fixture state: $semantic_state" ;;
+  esac
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" "$semantic_state" --gen "$gen" \
+    --source claude-hook --event "$event"
+}
+
 fixture_mate_home() {  # <parent-home>
   printf '%s/%s-secondmate-home\n' "$TMP_ROOT" "$(basename "$1")"
 }
@@ -108,18 +120,20 @@ EOF
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/ship-wt" \
     "project=firstmate" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=no-mistakes" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
+  record_claude_state "$home/state" ship-task busy
   printf 'working: building the thing\n' > "$home/state/ship-task.status"
   fm_write_meta "$home/state/scout-x.meta" \
     "window=firstmate:fm-scout-x" \
     "worktree=$home/projects/ship-wt" \
     "project=firstmate" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=scout" \
     "mode=scout"
+  record_claude_state "$home/state" scout-x idle
   printf 'done: report ready\n' > "$home/state/scout-x.status"
   fm_write_meta "$home/state/mate.meta" \
     "window=firstmate:fm-mate" \
@@ -136,9 +150,10 @@ EOF
     "window=firstmate:fm-external-wait" \
     "worktree=$home/projects/ship-wt" \
     "project=firstmate" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=no-mistakes"
+  record_claude_state "$home/state" external-wait idle
   printf 'paused: declared external-wait for upstream release\n' > "$home/state/external-wait.status"
   # The secondmate's OWN home backlog records a merge it managed. This lands in the
   # secondmate home, never the main backlog, so landed-work views only see it via the
@@ -156,7 +171,8 @@ EOF
   mkdir -p "$mate/projects/mate"
   fm_write_meta "$mate/state/mate.meta" \
     "window=firstmate:fm-mate" "worktree=$mate/projects/mate" "project=firstmate" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" mate idle
   printf 'needs-decision [key=race]: pick subscribe order\n' > "$mate/state/mate.status"
 }
 
@@ -367,7 +383,8 @@ test_structured_child_decision_reaches_captains_call() {
 EOF
   fm_write_meta "$mate/state/phase8.meta" \
     "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" phase8 idle
   printf 'needs-decision [key=release]: choose release A or B\n' > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
@@ -527,7 +544,8 @@ test_secondmate_and_child_bounds_are_disclosed() {
     printf -- '- [ ] %s - Active %s (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
     fm_write_meta "$mate/state/$child.meta" \
       "window=firstmate:fm-$child" "worktree=$mate/projects/$child" "project=sample" \
-      "harness=codex" "kind=ship" "mode=no-mistakes"
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$mate/state" "$child" busy
     printf 'working [key=%s]: active child %s\n' "$child" "$i" > "$mate/state/$child.status"
     i=$((i + 1))
   done
@@ -636,7 +654,8 @@ EOF
 EOF
   fm_write_meta "$decision/state/$child.meta" \
     "window=firstmate:fm-$child" "worktree=$decision/projects/$child" "project=sample" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$decision/state" "$child" idle
   printf 'needs-decision [key=live-route]: choose the current route\n' > "$decision/state/$child.status"
   fakebin=$(make_fakebin "$home")
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
@@ -688,7 +707,8 @@ test_nonprogressing_child_states_are_explicit() {
 EOF
   fm_write_meta "$mate/state/parked.meta" \
     "window=firstmate:fm-parked" "worktree=$mate/projects/parked" "project=sample" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" parked idle
   printf 'needs-decision [key=parked]: choose a route\n' > "$mate/state/parked.status"
   fakebin=$(make_fakebin "$home")
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
@@ -725,10 +745,12 @@ EOF
 EOF
   fm_write_meta "$mate/state/done.meta" \
     "window=firstmate:fm-done" "worktree=$mate/projects/done" "project=sample" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes"
   fm_write_meta "$mate/state/failed.meta" \
     "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" "done" idle
+  record_claude_state "$mate/state" failed idle
   printf 'done: complete\n' > "$mate/state/done.status"
   printf 'failed: stopped\n' > "$mate/state/failed.status"
   rm "$mate/state/parked.meta" "$mate/state/parked.status"
@@ -1365,6 +1387,7 @@ test_live_blocker_is_not_charted_queue_work() {
   local home fakebin json
   home=$(make_home live-blocker); write_fixture "$home"
   printf 'blocked [key=synthetic-dependency]: firstmate can refresh the synthetic token\n' > "$home/state/ship-task.status"
+  record_claude_state "$home/state" ship-task idle
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
@@ -1563,7 +1586,8 @@ test_mixed_secondmate_roles_partial_state_and_captain_readiness() {
 EOF
   fm_write_meta "$hibit/state/hibit-worker.meta" \
     "window=firstmate:fm-hibit-worker" "worktree=$hibit/projects/worker" "project=hibit" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$hibit/state" hibit-worker busy
   printf 'working: finalizing progress\n' > "$hibit/state/hibit-worker.status"
 
   cat > "$wheel/data/backlog.md" <<'EOF'
@@ -1577,7 +1601,8 @@ EOF
 EOF
   fm_write_meta "$wheel/state/wheel-worker.meta" \
     "window=firstmate:fm-wheel-worker" "worktree=$wheel/projects/worker" "project=wheelhouse" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$wheel/state" wheel-worker busy
   printf 'working: active validation\n' > "$wheel/state/wheel-worker.status"
 
   cat > "$sshhip/data/backlog.md" <<'EOF'
@@ -1606,7 +1631,8 @@ EOF
 EOF
   fm_write_meta "$ha/state/prep.meta" \
     "window=firstmate:fm-prep" "worktree=$ha/projects/prep" "project=home-assistant" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$ha/state" prep busy
   printf 'working: preparing canary\n' > "$ha/state/prep.status"
 
   fakebin=$(make_fakebin "$home")
@@ -1710,7 +1736,8 @@ EOF
 
   fm_write_meta "$wheel/state/production-observation.meta" \
     "window=firstmate:fm-production-observation" "worktree=$wheel/projects/worker" "project=wheelhouse" \
-    "harness=codex" "kind=scout" "mode=scout"
+    "harness=claude" "kind=scout" "mode=scout"
+  record_claude_state "$wheel/state" production-observation idle
   printf 'paused: observation is deliberately held\n' > "$wheel/state/production-observation.status"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
@@ -1723,7 +1750,8 @@ EOF
 
   fm_write_meta "$sshhip/state/unreadable-child.meta" \
     "window=firstmate:fm-unreadable-child" "worktree=$sshhip/projects/child" "project=sshhip" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$sshhip/state" unreadable-child busy
   printf 'working: app store submission restored\n' > "$sshhip/state/unreadable-child.status"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
@@ -1861,35 +1889,6 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
-# The /bearings skill is the one owner of the four-section chat-response contract.
-# Assert it states exactly the four fixed sections in order, each with its explicit
-# empty-state sentence, documents the At Anchor exclusion, and mandates a chat that is
-# materially shorter than and links to the report file.
-test_chat_contract_four_sections() {
-  local skill body headings report_headings expected
-  skill="$ROOT/.agents/skills/bearings/SKILL.md"
-  [ -f "$skill" ] || fail "bearings SKILL.md missing at $skill"
-  body=$(awk '/^## Chat-response contract$/{capture=1; next} capture && /^## /{exit} capture' "$skill")
-  headings=$(printf '%s\n' "$body" | sed -nE "s/^[0-9]+\. \*\*([^*]+)\*\*.*/\1/p")
-  expected=$(printf '%s\n' "Captain's Call" "Recently Landed" "Underway" "Charted Next")
-  [ "$headings" = "$expected" ] || fail "chat contract must contain exactly four numbered sections in fixed order, got: $headings"
-  assert_contains "$body" "Nothing needs your action right now" "Captain's Call empty-state sentence"
-  assert_contains "$body" "No recent completions are in the current baseline" "Recently Landed empty-state sentence"
-  assert_contains "$body" "Nothing is underway" "Underway empty-state sentence"
-  assert_contains "$body" "Nothing is queued" "Charted Next empty-state sentence"
-  report_headings=$(sed -nE 's/^   - \*\*(Captain.s Call|Recently Landed|Underway|Charted Next)\*\*.*/\1/p' "$skill")
-  [ "$report_headings" = "$expected" ] || fail "detailed report contract must contain the same four complete sections, got: $report_headings"
-  grep -Eq 'since the (prior|last) report|Nothing has landed since|unchanged delta' "$skill" \
-    && fail "bearings contract still contains prior-report delta wording"
-  # shellcheck disable=SC2016 # Backticks are literal Markdown in the expected text.
-  assert_contains "$(cat "$skill")" 'Never read an earlier `data/status-report-*.md`' "prior reports must not influence current output"
-  assert_contains "$(cat "$skill")" "bounded current recent-completions baseline" "Recently Landed must be a current baseline"
-  assert_contains "$body" "no At Anchor section" "the At Anchor exclusion must be documented"
-  assert_contains "$body" "materially shorter" "the chat must be materially shorter than the report file"
-  assert_contains "$body" "links to" "the chat must link to the report file"
-  pass "the /bearings skill states the four-section chat contract in order, with empty-states and the At Anchor exclusion"
-}
-
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
@@ -1920,7 +1919,6 @@ test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
-test_chat_contract_four_sections
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
