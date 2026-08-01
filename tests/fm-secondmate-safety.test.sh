@@ -48,7 +48,7 @@ SH
 }
 
 test_fm_home_parameterization() {
-  local brief home_one home_two out
+  local brief home_one home_two out fake_root
   home_one="$TMP_ROOT/home one"
   home_two="$TMP_ROOT/home-two"
   mkdir -p "$home_one/data" "$home_one/state" "$home_two/data" "$home_two/state"
@@ -74,7 +74,24 @@ test_fm_home_parameterization() {
   grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
   printf 'project=x\n' > "$home_one/state/task-a.meta"
-  FM_HOME="$home_one" FM_GUARD_GRACE=999999 "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
+  fake_root="$home_one/fake-root"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fake_root/bin/fm-independent-review.sh" <<'SH'
+#!/usr/bin/env bash
+head_file=
+while [ "$#" -gt 0 ]; do
+  case "$1" in --head-file) head_file=$2; shift 2 ;; *) shift ;; esac
+done
+printf '%s\n' 0123456789abcdef0123456789abcdef01234567 > "$head_file"
+printf 'Independent review: fixture (different family) - no blocking findings\n'
+SH
+  chmod +x "$fake_root/bin/fm-guard.sh" "$fake_root/bin/fm-independent-review.sh"
+  FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home_one" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
     || fail "fm-pr-check failed under FM_HOME"
   [ -f "$home_one/state/task-a.check.sh" ] || fail "pr check was not written under FM_HOME/state"
   [ ! -e "$home_two/state/task-a.check.sh" ] || fail "pr check leaked into another home"

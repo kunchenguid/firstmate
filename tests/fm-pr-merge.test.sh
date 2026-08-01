@@ -26,10 +26,29 @@ TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
 # fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin
+  local name=$1 case_dir fakebin fake_root
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
+  fake_root="$case_dir/root"
+  mkdir -p "$case_dir/state" "$fakebin" "$fake_root/bin"
+  cat > "$fake_root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fake_root/bin/fm-independent-review.sh" <<'SH'
+#!/usr/bin/env bash
+head=${FM_TEST_REVIEW_HEAD:-0123456789abcdef0123456789abcdef01234567}
+head_file=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --head-file) head_file=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -z "$head_file" ] || printf '%s\n' "$head" > "$head_file"
+printf 'Independent review: fixture (different family) - no blocking findings\n'
+SH
+  chmod +x "$fake_root/bin/fm-guard.sh" "$fake_root/bin/fm-independent-review.sh"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
@@ -46,6 +65,7 @@ make_case() {
 # headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
+  printf '%s\n' "$head" > "$case_dir/review-head"
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -85,9 +105,12 @@ SH
 }
 
 run_pr_merge() {
-  local case_dir=$1 rc; shift
-  FM_ROOT_OVERRIDE="$ROOT" \
+  local case_dir=$1 rc review_head; shift
+  review_head=$(sed -n '1p' "$case_dir/review-head" 2>/dev/null || true)
+  [ -n "$review_head" ] || review_head=0123456789abcdef0123456789abcdef01234567
+  FM_ROOT_OVERRIDE="$case_dir/root" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_REVIEW_HEAD="$review_head" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"

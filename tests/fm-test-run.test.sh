@@ -37,7 +37,7 @@ test_list_all_exact_suite_coverage() {
 }
 
 test_family_selection() {
-  local listed line
+  local listed line pr_forge
   listed=$("$RUNNER" --list --family pure-contract-unit)
   [ -n "$listed" ] || fail "--family pure-contract-unit selected nothing"
   printf '%s\n' "$listed" | grep -Fq 'tests/fm-test-run.test.sh' \
@@ -55,6 +55,9 @@ test_family_selection() {
   fam_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
   [ "$fam_count" -lt "$all_count" ] \
     || fail "pure-contract-unit must be a proper subset of --all"
+  pr_forge=$("$RUNNER" --list --family pr-forge)
+  printf '%s\n' "$pr_forge" | grep -Fxq 'tests/fm-independent-review.test.sh' \
+    || fail "pr-forge must include fm-independent-review.test.sh"
   pass "family selection returns a proper subset of the suite"
 }
 
@@ -103,6 +106,7 @@ init_changed_fixture_repo() {
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
+    fm-independent-review.test.sh \
     fm-pr-merge.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
@@ -115,6 +119,7 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/fm-independent-review.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
@@ -151,6 +156,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-backend.test.sh" "eventwait test selects backend coverage"
   git -C "$repo" add tests/fm-backend-herdr-eventwait.test.py
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm eventwait-change
+
+  printf '\n' >>"$repo/bin/fm-independent-review.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-independent-review.test.sh" \
+    "independent review source selects its pr-forge coverage"
+  git -C "$repo" add bin/fm-independent-review.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm independent-review-change
 
   printf '\n' >>"$repo/bin/fm-supervisor-target-lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)

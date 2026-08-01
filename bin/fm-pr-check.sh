@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# Record a PR-ready task only after the standing independent-review gate clears:
+# store one validated canonical pr=<url> and its exact reviewed pr_head=<sha>,
+# then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -56,27 +57,51 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   exit 1
 fi
 
-# Neutralize any pre-fix poll before recording or arming this task. The
-# migration never executes legacy artifacts and holds watcher exclusion while
-# it quarantines or rebuilds them.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
-"$FM_ROOT/bin/fm-guard.sh" || true
-
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
-WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
-    PR_HEAD=$REMOTE_HEAD
-  fi
+# Neutralize every pre-fix poll before a review can wait.
+# Hold normal migration notices until after the review line so a successful
+# readiness report still leads with who independently read the exact head.
+set +e
+MIGRATION_OUTPUT=$("$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe)
+MIGRATION_STATUS=$?
+set -e
+if [ "$MIGRATION_STATUS" -ne 0 ]; then
+  [ -z "$MIGRATION_OUTPUT" ] || printf '%s\n' "$MIGRATION_OUTPUT"
+  exit "$MIGRATION_STATUS"
 fi
+
+# This is the structural captain-readiness boundary.
+# The reviewer gate inspects the current forge head, dispatches a cold
+# different-family reviewer when needed, and succeeds only for a clear verdict
+# bound to that exact head. Its single-line verdict is deliberately printed
+# before any readiness mechanics so it can travel as the first captain-facing
+# line. A pending, rejected, stale, or unresolvable review stops here without
+# recording PR-ready metadata or publishing a merge poll.
+REVIEW_HEAD_TMP=$(mktemp "$STATE/.fm-independent-review-head.XXXXXX") || exit 1
+set +e
+REVIEW_OUTPUT=$("$FM_ROOT/bin/fm-independent-review.sh" ready "$ID" "$URL" --head-file "$REVIEW_HEAD_TMP")
+REVIEW_STATUS=$?
+set -e
+if [ -n "$REVIEW_OUTPUT" ]; then
+  printf '%s\n' "$REVIEW_OUTPUT"
+fi
+[ -z "$MIGRATION_OUTPUT" ] || printf '%s\n' "$MIGRATION_OUTPUT"
+if [ "$REVIEW_STATUS" -ne 0 ]; then
+  rm -f -- "$REVIEW_HEAD_TMP"
+  exit "$REVIEW_STATUS"
+fi
+PR_HEAD=
+if ! { IFS= read -r PR_HEAD && ! IFS= read -r _EXTRA_REVIEW_HEAD; } < "$REVIEW_HEAD_TMP"; then
+  rm -f -- "$REVIEW_HEAD_TMP"
+  echo "error: independent review returned a malformed reviewed-head binding" >&2
+  exit 1
+fi
+rm -f -- "$REVIEW_HEAD_TMP"
+fm_pr_head_valid "$PR_HEAD" || {
+  echo "error: independent review did not return an exact reviewed head" >&2
+  exit 1
+}
+
+"$FM_ROOT/bin/fm-guard.sh" || true
 
 META_TMP=
 pr_check_cleanup() {

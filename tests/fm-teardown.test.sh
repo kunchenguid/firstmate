@@ -69,10 +69,32 @@ export REAL_GIT_FOR_TEST
 #   $CASE/wt/           - a worktree of the project (the task worktree)
 # Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin
+  local name=$1 case_dir fakebin fake_root
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  fake_root="$case_dir/root"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin" "$fake_root/bin"
+
+  cat > "$fake_root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fake_root/bin/fm-independent-review.sh" <<'SH'
+#!/usr/bin/env bash
+head_file=
+while [ "$#" -gt 0 ]; do
+  case "$1" in --head-file) head_file=$2; shift 2 ;; *) shift ;; esac
+done
+head=$(gh pr view https://github.com/example/repo/pull/7 --json headRefOid -q .headRefOid) || exit 1
+printf '%s\n' "$head" > "$head_file"
+printf 'Independent review: fixture (different family) - no blocking findings\n'
+SH
+  cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake_root/bin/fm-guard.sh" "$fake_root/bin/fm-independent-review.sh" \
+    "$fake_root/bin/fm-fleet-sync.sh"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -491,7 +513,7 @@ SH
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_ROOT_OVERRIDE="$case_dir/root" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
@@ -608,6 +630,35 @@ test_no_mistakes_origin_remote_allows() {
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+}
+
+test_teardown_retires_independent_review_artifacts() {
+  local case_dir artifact
+  case_dir=$(make_case independent-review-retirement)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "independently reviewed work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf '%s\n' 'round one' > "$case_dir/state/task-x1.independent-review.round-1"
+  printf '%s\n' 'round two' > "$case_dir/state/task-x1.independent-review.round-2"
+  printf '%s\n' 'clear' > "$case_dir/state/task-x1.independent-review.verdict"
+  mkdir "$case_dir/state/task-x1.independent-review.bundle-1" \
+    "$case_dir/state/task-x1.independent-review.bundle-2"
+  printf '%s\n' 'criteria' > "$case_dir/state/task-x1.independent-review.bundle-1/criteria.md"
+  printf '%s\n' 'diff' > "$case_dir/state/task-x1.independent-review.bundle-2/diff.patch"
+
+  run_teardown "$case_dir" >/dev/null \
+    || fail 'teardown failed while retiring completed independent-review state'
+  for artifact in \
+    "$case_dir/state/task-x1.independent-review.round-1" \
+    "$case_dir/state/task-x1.independent-review.round-2" \
+    "$case_dir/state/task-x1.independent-review.verdict" \
+    "$case_dir/state/task-x1.independent-review.bundle-1" \
+    "$case_dir/state/task-x1.independent-review.bundle-2"; do
+    [ ! -e "$artifact" ] && [ ! -L "$artifact" ] \
+      || fail "teardown retained independent-review artifact: $artifact"
+  done
+  pass 'teardown retires bounded independent-review state with the completed parent task'
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -754,7 +805,7 @@ test_pr_check_does_not_refresh_stale_pr_head() {
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_ROOT_OVERRIDE="$case_dir/root" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
@@ -762,7 +813,7 @@ test_pr_check_does_not_refresh_stale_pr_head() {
   wt_commit_file "$case_dir" later.txt local-only "local follow-up"
   new_head=$(git -C "$case_dir/wt" rev-parse HEAD)
 
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_ROOT_OVERRIDE="$case_dir/root" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
@@ -791,7 +842,7 @@ test_pr_check_records_remote_head_when_local_lags() {
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_ROOT_OVERRIDE="$case_dir/root" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
@@ -1830,6 +1881,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_teardown_retires_independent_review_artifacts
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes

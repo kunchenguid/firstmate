@@ -2,6 +2,7 @@
 
 Empirical record for the merge watch on GitLab, alongside the existing GitHub watch.
 Every command below was run on 2026-07-21 and its output is reproduced exactly.
+The transcript predates the independent-review readiness gate; it remains evidence for the merge-poll layer, while current `fm-pr-check.sh` calls require an open non-draft merge request and an exact-head clear verdict before reaching that layer.
 
 ## Versions
 
@@ -195,6 +196,6 @@ No armed watch is lost by upgrading.
 `bin/fm-pr-merge.sh` still addresses GitHub only, by owner and repository.
 It refuses a GitLab merge request URL rather than sending it to the wrong forge, so merging a merge request stays a deliberate manual step until merge parity lands separately.
 
-A GitLab task records no `pr_head=`.
-`gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.
-Both consumers already treat it as optional: `bin/fm-teardown.sh` reads the head from the forge at teardown rather than from metadata and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
+A GitLab task now records the exact independently reviewed `pr_head=` before its merge poll is armed.
+The standing readiness gate reads the merge request through `glab api`, requires `jq` to validate its open, non-draft state and exact SHA, and fetches `refs/merge-requests/<n>/head` to bind the cold diff to that same commit.
+Missing tools, an unreadable state or SHA, and any mismatch between the forge response and fetched ref all refuse readiness rather than recording an optional head.

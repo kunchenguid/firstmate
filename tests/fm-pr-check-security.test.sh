@@ -60,7 +60,20 @@ make_case() {
 #!/usr/bin/env bash
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
 SH
-  chmod +x "$fake_root/bin/fm-guard.sh"
+  cat > "$fake_root/bin/fm-independent-review.sh" <<'SH'
+#!/usr/bin/env bash
+head=${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}
+head_file=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --head-file) head_file=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -z "$head_file" ] || printf '%s\n' "$head" > "$head_file"
+printf 'Independent review: fixture (different family) - no blocking findings\n'
+SH
+  chmod +x "$fake_root/bin/fm-guard.sh" "$fake_root/bin/fm-independent-review.sh"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
@@ -564,11 +577,16 @@ test_valid_recording_and_merge_derivation() {
 
   dir=$(make_case newline-head)
   write_task_meta "$dir"
+  set +e
   FM_TEST_GH_HEAD=$'0123456789abcdef0123456789abcdef01234567\nwindow=unexpected' \
-    run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null 2>/dev/null \
-    || fail "valid check with malformed remote head failed"
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "readiness accepted a malformed exact-head binding"
+  assert_no_grep 'pr=' "$dir/home/state/task-a.meta" "malformed head recorded PR readiness metadata"
   assert_no_grep 'pr_head=' "$dir/home/state/task-a.meta" "multiline PR head reached metadata"
   assert_no_grep 'window=unexpected' "$dir/home/state/task-a.meta" "newline metadata key was injected"
+  assert_poll_absent "$dir/home/state" task-a
 
   dir=$(make_case lifecycle-compatible-id)
   write_task_meta "$dir" Task_A.1
@@ -1452,8 +1470,7 @@ test_ambiguous_failure_accepts_validated_replacement() {
     || fail "ambiguous partial migration did not persist recovery obligations"
 
   rmdir "$state/task-a.pr-poll"
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
-    "$PR_CHECK" task-a https://github.com/o/r/pull/10 >/dev/null \
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/10 >/dev/null \
     || fail "validated replacement poll could not be published"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
     || fail "replacement registration did not publish a valid poll pair"

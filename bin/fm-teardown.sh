@@ -33,7 +33,9 @@
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
-# quarantine entries with the rest of the volatile state.
+# quarantine entries with the rest of the volatile state. Completed parent-task
+# teardown also retires both bounded independent-review bundles, their round
+# bindings, and the latest exact-head verdict.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -1898,6 +1900,14 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# The cold criteria/diff bundles and their exact-head bindings are volatile
+# parent-task state. Retire both bounded rounds only after the ordinary landed
+# work and endpoint gates above have authorized the rest of task teardown.
+rm -f "$STATE/$ID.independent-review.round-1" \
+  "$STATE/$ID.independent-review.round-2" \
+  "$STATE/$ID.independent-review.verdict"
+rm -rf -- "$STATE/$ID.independent-review.bundle-1" \
+  "$STATE/$ID.independent-review.bundle-2"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token"
