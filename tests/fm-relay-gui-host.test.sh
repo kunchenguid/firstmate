@@ -556,22 +556,31 @@ EOF
   pass "fm-relay-conn deploy-local: GUI files ship only where they mean something"
 }
 
+# Both host-session tests drive the real script against a stubbed ancestry, and
+# they have to: `ps -o comm=` prints the full executable path on macOS but only
+# the basename on Linux, so a test that read the REAL chain would assert one
+# thing on a developer's Mac and the opposite on a Linux CI runner. Stubbing the
+# probe keeps the decision under test and the platform out of it.
+write_ps_stub() {  # <dir> <exe-of-the-only-ancestor>
+  mkdir -p "$1"
+  cat > "$1/ps" <<STUB
+#!/bin/bash
+for a in "\$@"; do case "\$a" in -p) next=1 ;; *) [ "\${next:-}" = 1 ] && { pid=\$a; next=0; } ;; esac; done
+case "\$pid" in
+  1) echo "        1 /sbin/launchd" ;;
+  *) echo "        1 $2" ;;
+esac
+STUB
+  chmod 755 "$1/ps"
+}
+
 test_host_session_refuses_launchd_ancestry() {
   local croot out fake
   croot=$(setup_gui_verb_host session)
   fake="$TMP_ROOT/session/fakeps"
-  mkdir -p "$fake"
   # A chain that reaches launchd with no desktop app: the one shape known to
   # wedge every agent it would ever start.
-  cat > "$fake/ps" <<'STUB'
-#!/bin/bash
-for a in "$@"; do case "$a" in -p) next=1 ;; *) [ "${next:-}" = 1 ] && { pid=$a; next=0; } ;; esac; done
-case "$pid" in
-  1) echo "        1 /sbin/launchd" ;;
-  *) echo "        1 /bin/bash" ;;
-esac
-STUB
-  chmod 755 "$fake/ps"
+  write_ps_stub "$fake" /bin/bash
   out=$(PATH="$fake:$PATH" "$croot/fmr-host-session.sh" start --control-root "$croot" 2>&1); rc=$?
   expect_code 1 "$rc" "starting a host session from launchd ancestry must refuse"
   assert_contains "$out" "REFUSED" "the refusal must be unmistakable"
@@ -583,28 +592,48 @@ STUB
 }
 
 test_host_session_start_status_stop_roundtrip() {
-  local croot out sock
+  local croot out sock fake rc
   croot=$(setup_gui_verb_host roundtrip)
   sock="$TMP_ROOT/roundtrip/host.sock"
   command -v tmux >/dev/null 2>&1 || { pass "fmr-host-session: skipped, no tmux"; return 0; }
-  # Real tmux, real socket: PATH here is this test's, not the verb's stub PATH.
-  out=$("$croot/fmr-host-session.sh" start --control-root "$croot" 2>&1) \
-    || fail "starting a host session must succeed: $out"
+  fake="$TMP_ROOT/roundtrip/fakeprobe"
+  write_ps_stub "$fake" "/Applications/Term.app/Contents/MacOS/Term"
+  # The console probe is macOS-only too, so the audit session id is stubbed for
+  # the same reason as the ancestry. tmux and its socket stay real.
+  cat > "$fake/ioreg" <<STUB
+#!/bin/bash
+cat <<'PLIST'
+$IOREG_UNLOCKED
+PLIST
+STUB
+  chmod 755 "$fake/ioreg"
+  run_hs() { PATH="$fake:$PATH" "$croot/fmr-host-session.sh" "$@" --control-root "$croot" 2>&1; }
+
+  out=$(run_hs start) || fail "starting a host session must succeed: $out"
   assert_present "$croot/host-session" "start must record a marker"
   assert_contains "$(cat "$croot/host-session")" "socket=$sock" "the marker must record its socket"
-  out=$("$croot/fmr-host-session.sh" status --control-root "$croot" 2>&1) \
-    || fail "status on a live host session must succeed: $out"
+  assert_contains "$(cat "$croot/host-session")" "provenance=desktop" \
+    "a start from desktop ancestry must record that provenance"
+  out=$(run_hs status) || fail "status on a live host session must succeed: $out"
   assert_contains "$out" "ok desktop host session" "status must report a live session as ok"
   # Idempotent: starting twice must not stack servers or rewrite a good marker.
-  out=$("$croot/fmr-host-session.sh" start --control-root "$croot" 2>&1) \
-    || fail "starting twice must be a no-op, not an error: $out"
+  out=$(run_hs start) || fail "starting twice must be a no-op, not an error: $out"
   assert_contains "$out" "already running" "a second start must say it is already running"
-  "$croot/fmr-host-session.sh" stop --control-root "$croot" >/dev/null 2>&1
+  # The distinction the design turns on: kill the server behind its back and the
+  # answer must be "died", not "never started".
+  tmux -S "$sock" kill-server 2>/dev/null
+  out=$(run_hs status); rc=$?
+  expect_code 1 "$rc" "status on a dead host session must report failure"
+  assert_contains "$out" "dead the desktop host session" \
+    "a killed server must read as died, not as never started"
+  run_hs start >/dev/null
+  run_hs stop >/dev/null
   assert_absent "$croot/host-session" "stop must remove the marker"
-  out=$("$croot/fmr-host-session.sh" status --control-root "$croot" 2>&1); rc=$?
+  out=$(run_hs status); rc=$?
   expect_code 1 "$rc" "status after stop must report failure"
   assert_contains "$out" "absent" "status after stop must report the session as never-started"
-  pass "fmr-host-session: start, status, idempotent restart, stop"
+  unset -f run_hs
+  pass "fmr-host-session: start, status, died-vs-never-started, idempotent restart, stop"
 }
 
 # An adopted server was not created here, and on the machine this was built for
