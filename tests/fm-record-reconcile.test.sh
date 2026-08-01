@@ -6,10 +6,17 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-record-reconcile)
-RECONCILE="$ROOT/bin/fm-record-reconcile.sh"
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
+
+append_status_wake() {  # <state-dir> <task-id>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"
+    fm_wake_append signal "$2.status" "signal: $3/$2.status"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$2" "$1"
+}
 
 test_terminal_row_reconciles_while_unlanded_work_remains() {
-  local home wt dirty_wt receipt head crew_state
+  local home wt dirty_wt receipt head guard_root drain_out
   home="$TMP_ROOT/home"
   wt="$home/projects/sample-terminal"
   mkdir -p "$home/data" "$home/state" "$home/projects" "$wt"
@@ -61,7 +68,15 @@ esac
 SH
   chmod +x "$crew_state"
 
-  FM_HOME="$home" FM_CREW_STATE_BIN="$crew_state" "$RECONCILE" >/dev/null || fail "record reconciliation failed"
+  guard_root="$home/guard-root"
+  drain_out="$home/drain.out"
+  mkdir -p "$guard_root"
+  touch "$home/state/.last-watcher-beat"
+  append_status_wake "$home/state" sample-terminal || fail "could not queue terminal status wake"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$guard_root" "$DRAIN" > "$drain_out" \
+    || fail "terminal wake drain and record reconciliation failed"
+  grep "$(printf '\tsignal\tsample-terminal.status\t')" "$drain_out" >/dev/null \
+    || fail "terminal wake did not traverse the ordinary drain path"
   ! sed -n '/^## In flight/,/^## /p' "$home/data/backlog.md" | grep -F -- '- [ ] sample-terminal -' >/dev/null \
     || fail "terminal report still reads in flight"
   sed -n '/^## Done/,$p' "$home/data/backlog.md" | grep -F -- '- [x] sample-terminal -' >/dev/null \

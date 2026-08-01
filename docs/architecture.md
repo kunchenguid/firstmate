@@ -27,7 +27,7 @@ Its initial normal-mode status signal still surfaces through the no-verb path, w
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
-After each drain, `fm-wake-drain.sh` first custody-versions the exact consumed queue bytes and writes a digest, byte count, source reference, custody class, and timestamp receipt, then runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
+After each drain, `fm-wake-drain.sh` first custody-versions the exact consumed queue bytes and writes a digest, byte count, source reference, custody class, and timestamp receipt, then reconciles any safely read terminal status signal through `fm-record-reconcile.sh` in that same turn before running the liveness guard, so neither a terminal row nor a lapsed watcher chain waits for session restart.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
