@@ -96,11 +96,11 @@ Approved setup nodes are:
 
 - `cd <one path word>`.
 - `export NAME=<one shell word>` with no command substitution, process substitution, or redirection.
-- `source <x-mode path>` or `. <x-mode path>`.
-- `[ -f <x-mode path> ] && source <x-mode path>` and the equivalent dot form.
+- `source <remote-mode path>` or `. <remote-mode path>`.
+- `[ -f <remote-mode path> ] && source <remote-mode path>` and the equivalent dot form.
 
 The allowed remote-mode paths are `config/x-mode.env`, `config/telegram-mode.env`, their `./config/` forms, and absolute paths that normalize to those exact files under the active Firstmate home.
-An absolute x-mode path outside the active home is not an approved setup node.
+An absolute remote-mode path outside the active home is not an approved setup node.
 
 Approved nodes may be separated by `;`, a real newline, or `&&`.
 `&&` is accepted after setup so a failed `cd`, `export`, or source prevents the protected call from running under the wrong setup.

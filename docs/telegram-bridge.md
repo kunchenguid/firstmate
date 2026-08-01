@@ -17,6 +17,9 @@ Telegram delivery does not relax Firstmate's authority rules.
 Merges, deployments, destructive or irreversible operations, security-sensitive changes, and ambiguous writes still require whatever fresh approval they require in the primary session.
 An approval reply is accepted only when it names the exact approval ID and directly replies to the Telegram decision message that created that binding.
 
+Local pairing and bridge operation require `curl`, `jq`, and Perl.
+The lock-owning session start keeps polling disabled and reports the missing dependency when any of them is unavailable.
+
 ## Create a dedicated bot
 
 Use Telegram's official [BotFather procedure](https://core.telegram.org/bots/features#botfather) from your own Telegram account to create a bot used only for this Firstmate home.
@@ -107,5 +110,22 @@ Firstmate wakes for reconciliation and never retries uncertain content blindly.
 Unsafe permissions, a symlink or hard link, an incomplete config, a mismatched user/chat pair, a webhook or competing poller, malformed Bot API data, duplicate or out-of-order update IDs, an edited update, unsupported media, or oversized text disables or rejects the affected path.
 Unauthorized senders and chats receive no reply.
 Diagnostics contain stable redacted codes only and never include the token, Telegram response body, message body, or profile data.
+
+### Redacted error actions
+
+A repeated identical `telegram-error <code>` stays deduplicated until one complete poll succeeds and clears it.
+Apply these actions without copying private bridge state into chat or reports:
+
+- For `missing-curl` or `missing-jq`, make the reported dependency available and rerun the lock-owning session start.
+- For `config-invalid`, keep the bridge off and restore its configuration only through the local pairing procedure after correcting the protected file path or permissions; never hand-edit the bridge config.
+- For `poll-authorization-rejected`, revoke or rotate the bot token with BotFather and pair locally again.
+- For `webhook-or-competing-poller`, retire the webhook or other poller in the application that owns it before allowing this dedicated bot to poll again.
+- For `poll-transport-uncertain`, `poll-rate-limited`, or `poll-http-<status>`, no inbound request was committed by that attempt; let the bounded poll retry naturally, and investigate local connectivity or Telegram if the code persists.
+- For `response-order-or-shape-invalid` or `response-read-failed`, do not edit the offset or replay data; disable the bridge and escalate the persistent Bot API response anomaly through the trusted primary conversation.
+- For `unsafe-state`, `unsafe-inbox`, `retention-failed`, `offset-invalid`, `replay-without-receipt`, `wake-publication-failed`, `state-commit-failed`, or `turn-epoch-failed`, disable the bridge, preserve the protected local state, and escalate the integrity failure through the trusted primary conversation rather than deleting or rewriting records.
+- For `request-record-invalid` or `request-retention-expired`, the request body has been retired and the captain must resend the request.
+- For `sent-receipt-finalization-failed`, delivery may already be visible; reconcile the chat, correct the local-state failure, and retry only the exact same receipt so finalization can complete without another blind send.
+
+A separate `telegram-delivery-uncertain <receipt_id>` wake always requires chat reconciliation and never authorizes retry or a replacement receipt.
 
 Maintainer evidence and exact current test commands live in [the Telegram bridge verification record](verification/telegram-bridge.md).
