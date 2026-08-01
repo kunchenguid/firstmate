@@ -81,16 +81,22 @@ fm_harness_pid_alive() {
   esac
 }
 
-# True when state dir $1 holds a session lock whose pid is the harness ancestor
-# of the current process: this script runs inside the session that owns the
-# home's fleet lock. A missing lock, a lock held by another live harness, or an
-# ancestry that cannot be resolved all fail closed.
+# True when state dir $1 holds a session lock whose live verified harness pid
+# appears in the current process ancestry. A missing lock, a lock held by an
+# independent live harness, or an ancestry that cannot be resolved all fail
+# closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid my_pid
+  local state=$1 lock_pid pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  my_pid=$(fm_harness_ancestry_pid) || return 1
-  [ "$my_pid" = "$lock_pid" ]
+  fm_harness_pid_alive "$lock_pid" || return 1
+  pid=$$
+  for _ in 1 2 3 4 5 6 7 8; do
+    [ "$pid" = "$lock_pid" ] && return 0
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+  done
+  return 1
 }

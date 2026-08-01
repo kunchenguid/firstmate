@@ -20,7 +20,9 @@ TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 HARNESS_FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-fakebin")
 ln -s /bin/bash "$HARNESS_FAKEBIN/codex"
+ln -s /bin/bash "$HARNESS_FAKEBIN/grok"
 FAKE_CODEX="$HARNESS_FAKEBIN/codex"
+FAKE_GROK="$HARNESS_FAKEBIN/grok"
 
 REQUIRED_REASON='repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
 
@@ -241,6 +243,21 @@ run_lock_refused_hook() {
     status=$?
     exit "$status"
   ' 2>&1
+}
+
+run_nested_lock_owned_hook() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" "$FAKE_GROK" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    "$1" -c "
+      bash \"\$FM_HOME/bin/fm-turnend-guard.sh\"
+      status=\$?
+      exit \"\$status\"
+    "
+    status=$?
+    exit "$status"
+  ' _ "$FAKE_GROK" 2>&1
 }
 
 nonexistent_pid() {
@@ -639,7 +656,7 @@ test_hook_runs_fast() {
   pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
 }
 
-test_hook_advances_telegram_turn_epoch_only_for_lock_owner() {
+test_hook_advances_telegram_turn_epoch_only_with_lock_owner_in_ancestry() {
   local dir first refused second lock_owner out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-telegram-turn-epoch")
   activate_telegram_turn_epoch "$dir"
@@ -657,14 +674,14 @@ test_hook_advances_telegram_turn_epoch_only_for_lock_owner() {
   expect_code 0 "$status" "lock-refused loop-guarded turn end must remain inert"
   [ -z "$out" ] || fail "lock-refused Telegram turn-end marker printed output: $out"
   [ "$first" = "$refused" ] || fail "lock-refused session advanced the Telegram handling epoch"
-  out=$(run_lock_owned_hook "$dir" true); status=$?
-  expect_code 0 "$status" "loop-guarded turn end must still publish the Telegram handling epoch"
-  [ -z "$out" ] || fail "loop-guarded Telegram turn-end marker printed output: $out"
+  out=$(run_nested_lock_owned_hook "$dir" true); status=$?
+  expect_code 0 "$status" "nested same-session Grok turn end must publish the Telegram handling epoch"
+  [ -z "$out" ] || fail "nested same-session Telegram turn-end marker printed output: $out"
   second=$(cat "$dir/state/telegram/turn-epoch")
-  [ "$first" != "$second" ] || fail "loop-guarded turn end did not release acknowledged Telegram work"
+  [ "$first" != "$second" ] || fail "nested same-session turn end did not release acknowledged Telegram work"
   case "$second" in *[!0-9a-f]*) fail "turn-end hook published a malformed Telegram epoch" ;; esac
   [ "${#second}" -eq 64 ] || fail "turn-end hook published an unbounded Telegram epoch"
-  pass "fm-turnend-guard: only the session-lock owner releases acknowledged Telegram work"
+  pass "fm-turnend-guard: lock-owner ancestry includes nested Grok and rejects independent sessions"
 }
 
 test_grok_adapter_forces_one_resume_when_unhealthy() {
@@ -1329,7 +1346,7 @@ test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
-test_hook_advances_telegram_turn_epoch_only_for_lock_owner
+test_hook_advances_telegram_turn_epoch_only_with_lock_owner_in_ancestry
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_grok_adapter_native_false_blocks_without_resume
