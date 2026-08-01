@@ -230,6 +230,39 @@ test_verb_sanitizes_crew_authored_event_text() {
   pass "fmr-verb events: crew-authored text is stripped of control characters"
 }
 
+# The first token IS the protocol. An unconditional OK made a failed read look
+# like a successful one whose text the control side would have to guess at.
+test_verb_crew_state_reports_failure_as_err() {
+  local croot home out rc
+  croot=$(setup_verb_host)
+  home="$TMP_ROOT/verbhost/home"
+  cat > "$TMP_ROOT/verbhost/fmroot/bin/fm-crew-state.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "no such task" >&2
+exit 3
+STUB
+  chmod +x "$TMP_ROOT/verbhost/fmroot/bin/fm-crew-state.sh"
+  rc=0
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" crew-state t7 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed remote state read must exit non-zero"
+  case "$out" in
+    ERR\ statefailed*) ;;
+    *) fail "a failed remote state read must answer ERR on the first line, got [$out]" ;;
+  esac
+
+  cat > "$TMP_ROOT/verbhost/fmroot/bin/fm-crew-state.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "state: working · source: pane · harness busy"
+STUB
+  chmod +x "$TMP_ROOT/verbhost/fmroot/bin/fm-crew-state.sh"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" crew-state t7 2>&1) \
+    || fail "a successful remote state read must exit 0"
+  assert_contains "$out" "OK" "a successful remote state read must still answer OK"
+  assert_contains "$out" "state: working" "a successful remote state read must return the state line"
+  rm -f "$TMP_ROOT/verbhost/fmroot/bin/fm-crew-state.sh"
+  pass "fmr-verb crew-state: a failed read answers ERR, not OK"
+}
+
 test_verb_teardown_gate_needs_a_matching_report_hash() {
   local croot home out
   croot=$(setup_verb_host)
@@ -266,6 +299,26 @@ test_spawn_host_flag_refusals() {
   pass "fm-spawn --host: refuses every combination that only means something locally"
 }
 
+# The remote path still writes state/<id>.meta on THIS side, so it needs the
+# local path's task-id gate verbatim. A dot-leading name would otherwise write a
+# hidden record that every "$STATE"/*.meta glob skips, leaving a live remote task
+# nothing here can find or steer.
+test_spawn_host_applies_the_local_task_id_gate() {
+  local out rc id
+  for id in .hidden 'bad id' 'bad/id' 'bad;id' ''; do
+    rc=0
+    out=$("$ROOT/bin/fm-spawn.sh" --host box "$id" proj --scout 2>&1) || rc=$?
+    expect_code 2 "$rc" "--host must refuse task id [$id] with the local path's exit code"
+    assert_contains "$out" "error: invalid task id" \
+      "--host must refuse task id [$id] with the local path's message"
+  done
+  # 65 characters: one past the length the local gate allows.
+  rc=0
+  out=$("$ROOT/bin/fm-spawn.sh" --host box "$(printf 'a%.0s' $(seq 1 65))" proj --scout 2>&1) || rc=$?
+  expect_code 2 "$rc" "--host must apply the local path's task-id length limit"
+  pass "fm-spawn --host: applies the same task-id gate as the local path"
+}
+
 test_spawn_help_documents_host() {
   local help
   help=$("$ROOT/bin/fm-spawn.sh" --help)
@@ -296,6 +349,12 @@ test_brief_host_variant() {
   expect_code 1 "$rc" "--host-home without --host-root must refuse"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" b1 proj --scout --host-home rel --host-root /srv/r 2>&1); rc=$?
   expect_code 1 "$rc" "a relative --host-home must refuse"
+  # Each path is checked on its own: an absolute --host-home must not carry a
+  # relative --host-root past the gate and into the brief's own paths.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" b1 proj --scout --host-home /srv/h --host-root rel 2>&1); rc=$?
+  expect_code 1 "$rc" "a relative --host-root behind an absolute --host-home must refuse"
+  assert_contains "$out" "must be absolute paths" "the refusal must name the absolute-path requirement"
+  assert_absent "$home/data/b1/brief.md" "a refused remote-host brief must not be written"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" plain proj --scout >/dev/null
   brief=$(cat "$home/data/plain/brief.md")
@@ -361,8 +420,10 @@ test_verb_refuses_without_config
 test_verb_validates_its_own_arguments
 test_verb_events_are_byte_offset_incremental
 test_verb_sanitizes_crew_authored_event_text
+test_verb_crew_state_reports_failure_as_err
 test_verb_teardown_gate_needs_a_matching_report_hash
 test_spawn_host_flag_refusals
+test_spawn_host_applies_the_local_task_id_gate
 test_spawn_help_documents_host
 test_teardown_refuses_force_on_a_relay_task
 test_brief_host_variant

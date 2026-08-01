@@ -300,9 +300,17 @@ case "$verb" in
   crew-state)
     require_id "${1-}"
     tid=$1
-    out=$("$BIN/fm-crew-state.sh" "$tid" 2>&1)
-    printf 'OK\n'
-    printf '%s\n' "$out" | sanitize_events
+    # The first token is the protocol, so a failed read has to say ERR. Printing
+    # OK unconditionally made the control side treat "no such task" and a broken
+    # backend as a successful state read whose text it would then have to guess at.
+    if out=$("$BIN/fm-crew-state.sh" "$tid" 2>&1); then
+      printf 'OK\n'
+      printf '%s\n' "$out" | sanitize_events
+    else
+      printf 'ERR statefailed fm-crew-state.sh could not read the state of %s\n' "$tid"
+      printf '%s\n' "$out" | sanitize_events
+      exit 1
+    fi
     ;;
 
   peek)

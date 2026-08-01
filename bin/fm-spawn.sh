@@ -257,6 +257,11 @@ if [ "$HOST_SET" -eq 1 ]; then
   [ "$LAUNCH_SET" -eq 0 ] || { echo "error: --launch names a local launch variant and cannot combine with --host" >&2; exit 1; }
   [ "${#POS[@]}" -ge 2 ] || { echo "error: --host needs <task-id> <project-name-on-host>" >&2; exit 1; }
   HOST_ID=${POS[0]}
+  # Same task-id gate as the local path below, deliberately identical in check,
+  # message, and exit code. A remote task still gets a state/<id>.meta here, so a
+  # dot-leading name would write a HIDDEN record that every "$STATE"/*.meta glob
+  # skips, leaving a live remote task nothing on this side can find or steer.
+  fm_task_id_creation_valid "$HOST_ID" || { echo "error: invalid task id" >&2; exit 2; }
   HOST_PROJECT=${POS[1]}
   host_spawn_args=("$HOST_ARG" "$HOST_ID" "$HOST_PROJECT")
   [ "$KIND" = scout ] && host_spawn_args+=(--scout)

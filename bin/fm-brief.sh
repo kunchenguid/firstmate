@@ -118,7 +118,15 @@ if [ -n "$HOST_HOME" ] || [ -n "$HOST_ROOT" ]; then
   [ -n "$HOST_HOME" ] && [ -n "$HOST_ROOT" ] \
     || { echo "error: --host-home and --host-root must be given together" >&2; exit 1; }
   [ "$KIND" != secondmate ] || { echo "error: a secondmate charter has no remote-host variant" >&2; exit 1; }
-  case "$HOST_HOME$HOST_ROOT" in /*) ;; *) echo "error: --host-home and --host-root must be absolute paths" >&2; exit 1 ;; esac
+  # Each path on its own. Concatenating them only ever checks the first
+  # character, so an absolute --host-home would smuggle a relative --host-root
+  # into the brief's own BRIEF_ROOT and point the remote crewmate at nothing.
+  for host_path in "$HOST_HOME" "$HOST_ROOT"; do
+    case "$host_path" in
+      /*) ;;
+      *) echo "error: --host-home and --host-root must be absolute paths" >&2; exit 1 ;;
+    esac
+  done
   BRIEF_STATE="$HOST_HOME/state"
   BRIEF_DATA="$HOST_HOME/data"
   BRIEF_ROOT=$HOST_ROOT
