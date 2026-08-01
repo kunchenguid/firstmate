@@ -601,7 +601,7 @@ heartbeat_scan_finds_actionable() {
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 telegram_wait_budget() {
-  local budget=$POLL telegram_check age remaining
+  local budget=$POLL telegram_check age remaining budget_whole
   telegram_check="$STATE/telegram-watch.check.sh"
   if [ -e "$telegram_check" ] || [ -L "$telegram_check" ]; then
     age=$(age_of "$STATE/.last-telegram-check")
@@ -609,7 +609,17 @@ telegram_wait_budget() {
       budget=0
     else
       remaining=$((TELEGRAM_CHECK_INTERVAL - age))
-      [ "$remaining" -ge "$budget" ] || budget=$remaining
+      case "$budget" in
+        *.*)
+          budget_whole=${budget%%.*}
+          [ -n "$budget_whole" ] || budget_whole=0
+          case "$budget_whole" in
+            *[!0-9]*) ;;
+            *) [ "$budget_whole" -lt "$remaining" ] || budget=$remaining ;;
+          esac
+          ;;
+        *) [ "$remaining" -ge "$budget" ] || budget=$remaining ;;
+      esac
     fi
   fi
   printf '%s\n' "$budget"
@@ -619,7 +629,7 @@ event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc wait_budget
   local windows=()
   wait_budget=$(telegram_wait_budget) || wait_budget=$POLL
-  [ "$wait_budget" -gt 0 ] || return
+  [ "$wait_budget" != 0 ] || return
   while IFS= read -r w; do
     b=$(window_backend "$w")
     fm_backend_has_push "$b" || continue

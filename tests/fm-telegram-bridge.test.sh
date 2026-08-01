@@ -720,6 +720,14 @@ test_retention_and_runtime_harness_matrix() {
     bash -c '. "$1/bin/fm-watch.sh"; telegram_wait_budget' _ "$ROOT")
   case "$wait_budget" in ''|*[!0-9]*) fail "Telegram terminal wait budget was not numeric" ;; esac
   [ "$wait_budget" -le 1 ] || fail "watcher terminal wait ignored the Telegram deadline"
+  set +e
+  FM_HOME="$home" FM_POLL=0.02 FM_TELEGRAM_CHECK_INTERVAL=1 \
+    bash -c '. "$1/bin/fm-watch.sh"; event_wait_or_sleep' _ "$ROOT" \
+    > "$home/fractional-wait.out" 2> "$home/fractional-wait.err"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "fractional watcher terminal wait"
+  [ ! -s "$home/fractional-wait.err" ] || fail "fractional watcher cadence emitted an arithmetic diagnostic"
   rm -f "$home/state/.last-telegram-check"
   custom="$home/state/expensive.check.sh"
   sentinel="$home/expensive-check-ran"
