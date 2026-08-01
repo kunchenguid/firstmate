@@ -144,6 +144,18 @@ release_answer_claim() {
   return 1
 }
 
+# write_reply_receipt <chunks> <dry-run-0|1>: record what this reply actually
+# sent, for a caller that has to build a typed delivery receipt. Only ever called
+# on success. A write failure is reported but never changes the exit status: the
+# reply already landed, and claiming otherwise would invite a duplicate post.
+write_reply_receipt() {
+  [ -n "$RECEIPT_FILE" ] || return 0
+  if ! (umask 077; jq -n --arg r "$REQ" --arg e "$ENDPOINT" --argjson c "$1" --argjson d "$2" \
+      '{request_id:$r, endpoint:$e, chunks:$c, dry_run:($d == 1)}' > "$RECEIPT_FILE"); then
+    echo "fm-x-reply: warning: posted but could not write the receipt to $RECEIPT_FILE" >&2
+  fi
+}
+
 usage() {
   echo "usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] <text> | ... --text-file <path> | ... -" >&2
 }
