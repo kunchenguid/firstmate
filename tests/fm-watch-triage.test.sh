@@ -10,6 +10,7 @@
 # task-bound stale disconfirmers, exact trust dialogs, possible-wedge transition
 # deduplication, unknown-state silence, the completed-turn outer bound that keeps
 # a busy footer and an unreadable harness from silencing a task forever, the
+# bounded awaiting-external recheck that does the same for a declared pause, the
 # heartbeat backstop fail-safe, and afk coherence (no double-triage while the
 # away-mode daemon owns supervision).
 #
@@ -590,6 +591,77 @@ test_possible_wedge_transition_fires_once_across_pane_churn() {
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a genuine wedge transition fires, while the identical candidate is deduplicated across pane churn"
+}
+
+# A declared external pause is only as trustworthy as the thing it waits on. It
+# suppresses the immediate alarm, but never permanently: `paused` sits outside
+# FM_CAPTAIN_RE, so the heartbeat backstop cannot cover it and a wait that has
+# already resolved would otherwise stay silent forever. Past
+# FM_PAUSE_RESURFACE_SECS the ordinary worker gets exactly one awaiting-external
+# recheck through the same candidate dedup, then the window resets.
+test_declared_pause_gets_one_bounded_recheck() {
+  local dir state fakebin out capture_file window key pane_hash pid
+  dir=$(make_case pause-recheck); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-pause-recheck"
+  printf 'idle worker pane\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/pause-recheck.meta"
+  printf 'paused: waiting on the upstream review\n' > "$state/pause-recheck.status"
+  printf '%s' "$(seen_sig "$state/pause-recheck.status")" > "$state/.seen-pause-recheck_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle worker pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream review'
+
+  # Inside the window: the pause is absorbed and stays quiet.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a fresh declared pause emitted an alarm: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a fresh declared pause queued an alarm"; }
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "pause-recheck:external-pause" ] \
+    || { reap "$pid"; fail "declared pause did not record its task-bound candidate"; }
+  reap "$pid"
+
+  # The upstream wait has long since ended, but the worker never wrote another
+  # status line and its pane has sat idle throughout. Past the window the pause
+  # must be rechecked exactly once.
+  touch -t 200001010000 "$state/pause-recheck.status"
+  printf '%s' "$(seen_sig "$state/pause-recheck.status")" > "$state/.seen-pause-recheck_status"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a declared pause past its window was never rechecked"
+  grep -F "awaiting external - declared pause" "$out" >/dev/null \
+    || fail "pause recheck did not use the awaiting-external reason: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "the bounded pause recheck was mislabeled a possible wedge"
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "pause-recheck:pause-recheck" ] \
+    || fail "the pause recheck did not record its deduplicating candidate"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the pause recheck did not reset the pause window"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null || fail "drain after the pause recheck failed"
+
+  # The window has been reset, so the same unchanged pause goes quiet again.
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "the pause recheck re-fired inside its reset window: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the pause recheck fired more than once per window"; }
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "pause-recheck:external-pause" ] \
+    || { reap "$pid"; fail "the pause did not return to its quiet absorbed candidate"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared external pause stays quiet, then gets exactly one bounded awaiting-external recheck per window"
 }
 
 test_unknown_stale_is_visible_but_never_alarms() {
@@ -1311,6 +1383,7 @@ test_classifier_primitives
 test_crew_supervision_class_classifier
 test_state_specific_disconfirmers_suppress_stale_replays
 test_possible_wedge_transition_fires_once_across_pane_churn
+test_declared_pause_gets_one_bounded_recheck
 test_unknown_stale_is_visible_but_never_alarms
 test_unknown_stale_escalates_past_the_turn_bound
 test_busy_pane_without_a_completed_turn_escalates

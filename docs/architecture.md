@@ -25,7 +25,8 @@ A concurrent replacement remains armed, every non-merged or invalid observation 
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
 A crew that declares `paused:` for a known external wait is a distinct stale disconfirmer while its task substrate is live, rather than being treated as a possible wedge.
 The pause status transition can still surface through the normal signal path, while repeated stale observations do not re-fire it.
-Secondmates retain their separate idle-endpoint exemption and bounded pause cadence.
+A declared external wait trades that silence for exactly one bounded `awaiting external` recheck per `FM_PAUSE_RESURFACE_SECS` window, sent through the same candidate dedup and anchored on the task's status-log mtime rather than a pane hash, so a forgotten or already-resolved pause cannot remain invisible indefinitely.
+Secondmates retain their separate idle-endpoint exemption and share that same bounded pause cadence.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run, parked gate, or proven busy worker outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.

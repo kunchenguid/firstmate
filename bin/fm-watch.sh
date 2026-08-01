@@ -18,16 +18,19 @@
 #                          disconfirms a wedge. Unknown stays non-alarming. What
 #                          remains wakes once as a possible-wedge transition;
 #                          identical candidates are recorded and deduplicated
-#                          across pane churn. The signals that prove only
-#                          rendering or readability - a busy pane footer, a
-#                          harness-turn verdict, an unreadable unknown verdict -
-#                          are bounded by BUSY_TURN_MAX_SECS against this task's
-#                          own completed-turn marker, so past that bound the
-#                          window surfaces once more for human inspection only,
-#                          never an automatic interrupt, signal, or restart.
-#                          Unless afk is active, when the daemon owns triage.
-#                          Secondmate pause handling retains its separate
-#                          long-cadence policy.
+#                          across pane churn. No disconfirmer is unbounded: the
+#                          signals that prove only rendering or readability - a
+#                          busy pane footer, a harness-turn verdict, an
+#                          unreadable unknown verdict - are bounded by
+#                          BUSY_TURN_MAX_SECS against this task's own
+#                          completed-turn marker, so past that bound the window
+#                          surfaces once more for human inspection only, never an
+#                          automatic interrupt, signal, or restart; and a declared
+#                          external pause sends exactly one awaiting-external
+#                          recheck per PAUSE_RESURFACE_SECS window, so a forgotten
+#                          or already-resolved wait cannot rot invisibly. Unless
+#                          afk is active, when the daemon owns triage. Secondmate
+#                          pause handling shares that cadence on its own path.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -123,7 +126,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # unbounded: BUSY_TURN_MAX_SECS caps how long any pane-derived liveness signal (a
 # busy footer, a harness-turn verdict) or an unreadable `unknown` verdict may
 # suppress an alarm with no completed turn, after which the window surfaces once
-# for human inspection only. An ACTIONABLE wake (a captain-relevant signal, a
+# for human inspection only, and a declared external pause sends exactly one
+# awaiting-external recheck per PAUSE_RESURFACE_SECS window so a wait that has
+# already resolved cannot stay silent. An ACTIONABLE wake (a captain-relevant signal, a
 # no-verb signal whose crew is not provably working, any check, or a
 # state-specific stale transition) is written to the durable queue and exits, which
 # is what wakes the LLM through the background-task completion. The same classifier
@@ -249,35 +254,57 @@ recorded_windows() {
   done
 }
 
+# Seconds since <task> last wrote a status line. This is the ONE anchor for the
+# declared-pause re-surface cadence, shared by the secondmate path and the
+# ordinary-worker path so the two cannot drift. Anchoring on the log rather than
+# a per-hash marker is what stops a churny idle pane (a ticking clock, a token
+# counter) from resetting the window forever the way a hash-tied timer would.
+pause_window_age() {  # <task>
+  local task=$1 mtime
+  mtime=$(stat_mtime "$STATE/$task.status")
+  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+  echo $(( $(date +%s) - mtime ))
+}
+
+# 0 when <window>'s declared pause has gone a full PAUSE_RESURFACE_SECS with no
+# recheck. A declared pause is only as trustworthy as the thing it waits on, so
+# no pause may be permanently silent: the wait can resolve, or turn out to have
+# been mistaken, with nothing else left to tell firstmate (paused is deliberately
+# outside FM_CAPTAIN_RE, so the heartbeat backstop cannot cover it). The
+# .paused-resurfaced-<key> marker throttles this to one recheck per window.
+pause_recheck_due() {  # <window> <task>
+  local win=$1 task=$2 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  [ "$(pause_window_age "$task")" -ge "$PAUSE_RESURFACE_SECS" ] || return 1
+  [ "$(age_of "$STATE/.paused-resurfaced-$key")" -ge "$PAUSE_RESURFACE_SECS" ]
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
-# status file mtime, not a per-hash marker, so a churny idle pane (a ticking
-# clock, a token counter) cannot keep resetting the cadence the way a hash-tied
-# timer would. A .paused-resurfaced-<key> throttle marker records the last
-# re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
+# cheap: it NEVER re-reads crew state. Advances the stale suppressor to <hash>
+# and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+  local win=$1 task=$2 h=$3 key age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-  statusf="$STATE/$task.status"
-  mtime=$(stat_mtime "$statusf")
-  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
-  age=$(( $(date +%s) - mtime ))
-  rf="$STATE/.paused-resurfaced-$key"
-  rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
-  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+  age=$(pause_window_age "$task")
+  if pause_recheck_due "$win" "$task"; then
+    reason=$(pause_recheck_reason "$win" "$age")
     fm_wake_append stale "$win" "$reason" || exit 1
-    date +%s > "$rf"
+    date +%s > "$STATE/.paused-resurfaced-$key"
     wake "$reason"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+}
+
+# The one wording for a bounded declared-pause recheck, shared by the secondmate
+# cadence and the ordinary-worker candidate path.
+pause_recheck_reason() {  # <window> <age>
+  printf 'stale: %s (paused %ss, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)' "$1" "$2"
 }
 
 clear_pause_state() {  # <window>
@@ -417,12 +444,15 @@ clear_turn_bound_candidate() {  # <window>
 # whose replacement reuses the same backend target counts as a transition instead
 # of inheriting the retired worker's verdict. Every disconfirmer comes from that
 # task's fm-crew-state read (or the exact dialog in that same pane). Pane hash
-# churn is deliberately not a state transition. The two signals that prove only
-# rendering or readability - a harness-turn verdict and an unreadable `unknown` -
-# are absorbed only inside BUSY_TURN_MAX_SECS of a completed turn; past it they
-# become the turn-bound candidate, so neither can silence a task forever. Queue
-# publication precedes committing an actionable candidate so a failed enqueue can
-# never suppress its retry.
+# churn is deliberately not a state transition. NO disconfirmer here is
+# unbounded: the two signals that prove only rendering or readability - a
+# harness-turn verdict and an unreadable `unknown` - are absorbed only inside
+# BUSY_TURN_MAX_SECS of a completed turn, past which they become the turn-bound
+# candidate; and a declared external pause is absorbed quietly but sends exactly
+# one awaiting-external recheck per PAUSE_RESURFACE_SECS window, the same bounded
+# cadence handle_paused_stale applies to a secondmate. Queue publication precedes
+# committing an actionable candidate so a failed enqueue can never suppress its
+# retry.
 handle_state_specific_stale() {  # <window> <task> <hash> <tail40>
   local win=$1 task=$2 h=$3 tail40=$4 key state_file previous class candidate dialog reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
@@ -439,11 +469,18 @@ handle_state_specific_stale() {  # <window> <task> <hash> <tail40>
     harness-turn|unknown)
       busy_turn_over_age "$task" && class=turn-bound
       ;;
+    external-pause)
+      pause_recheck_due "$win" "$task" && class=pause-recheck
+      ;;
   esac
   candidate="$task:$class"
 
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  case "$class" in
+    external-pause|pause-recheck) ;;
+    *) rm -f "$STATE/.paused-resurfaced-$key" ;;
+  esac
   [ "$candidate" = "$previous" ] && return 0
 
   case "$class" in
@@ -464,6 +501,13 @@ handle_state_specific_stale() {  # <window> <task> <hash> <tail40>
     turn-bound)
       surface_turn_bound_candidate "$win" "$task" \
         "its harness reported a live turn or no readable state at all"
+      ;;
+    pause-recheck)
+      reason=$(pause_recheck_reason "$win" "$(pause_window_age "$task")")
+      fm_wake_append stale "$win" "$reason" || exit 1
+      printf '%s' "$candidate" > "$state_file"
+      date +%s > "$STATE/.paused-resurfaced-$key"
+      wake "$reason"
       ;;
     active-run|gate|harness-turn|external-pause|unknown)
       printf '%s' "$candidate" > "$state_file"
