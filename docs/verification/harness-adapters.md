@@ -8,33 +8,64 @@ Task chronology, temporary paths, branch names, and delivery transcripts stay in
 
 ## OpenCode worker agent selection
 
-OpenCode worker-agent selection was verified on 2026-07-29 with OpenCode 1.18.9 on the same interactive `--prompt` path that Firstmate launches.
-The probe used a scratch git repository, a throwaway tmux session, and the same injected `OPENCODE_CONFIG_CONTENT` prefix used by `bin/fm-spawn.sh`.
+OpenCode worker-agent selection was verified on 2026-07-31 with OpenCode 1.18.9 on the interactive startup path.
 The TUI footer rendered the active agent at startup, so the probe spent zero model tokens.
-The footer was rechecked after 25 seconds and 40 seconds.
 
-Command shapes:
+Exact command and output:
 
 ```sh
-OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --prompt '<throwaway prompt>'
-OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --agent build --prompt '<throwaway prompt>'
-OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --agent zzz-not-an-agent --prompt '<throwaway prompt>'
-opencode agent list
+opencode --version
 ```
-
-Observed output:
 
 ```text
-no --agent footer: Gentle-Orchestrator · GPT-5.6 Sol
---agent build footer: Build · GPT-5.6 Sol
---agent zzz-not-an-agent footer: Gentle-Orchestrator
-opencode agent list includes: build (primary)
+1.18.9
 ```
 
-The first row proves that an OpenCode launch without `--agent` inherits the configured `default_agent`.
-The second row proves that `--agent build` selects the built-in worker agent on the interactive launch path.
-The third row proves that an unknown `--agent` value silently falls back to `default_agent` instead of failing or warning.
-The fallback behavior is the critical residual risk: if a later OpenCode version removes or renames `build`, OpenCode crewmates would again launch as the configured default agent with no CLI signal.
+Exact command and relevant footer output:
+
+```sh
+OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode
+```
+
+```text
+Gentle-Orchestrator · GPT-5.6 Sol OpenAI
+```
+
+Exact command and relevant footer output:
+
+```sh
+OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --agent build
+```
+
+```text
+Build · GPT-5.6 Sol OpenAI
+```
+
+Exact command and popup plus relevant footer output:
+
+```sh
+OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --agent zzz-not-an-agent
+```
+
+```text
+Agent not found: zzz-not-an-agent
+Gentle-Orchestrator · GPT-5.6 Sol OpenAI
+```
+
+Exact command and output:
+
+```sh
+opencode agent list | python3 -c 'import sys; [print(line, end="") for line in sys.stdin if line.startswith("build ")]'
+```
+
+```text
+build (primary)
+```
+
+The default startup proves that an OpenCode launch without `--agent` inherits the configured `default_agent`.
+The explicit build startup proves that `--agent build` selects the built-in worker agent on the interactive launch path.
+The unknown-agent startup proves that OpenCode reports the unknown agent in the TUI and then uses the configured default agent without failing the process.
+The fallback behavior is the critical residual risk: if a later OpenCode version removes or renames `build`, OpenCode crewmates would again launch as the configured default agent after a TUI error.
 Firstmate therefore pins `--agent build` for OpenCode ship and scout launches, while secondmate launches omit it so persistent firstmate homes retain primary-agent semantics.
 
 Applicability was reviewed across all seven supported harnesses.
