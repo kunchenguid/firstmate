@@ -374,7 +374,7 @@ A declared `paused:` event means a bounded external wait expected to clear on it
 Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
-2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
+2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a trust-dialog reason wants the keystroke, an `awaiting external` recheck wants confirmation that the wait still holds, and an `inspect only` turn-bound reason wants current-state and validation-log inspection without interrupting the worker.
 3. For `check:`, act on the named poll result, including merges, X-mode events, and process-to-event source results.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 

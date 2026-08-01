@@ -321,9 +321,9 @@ nm_ci_checks_state() {
 # status` answer was not this crew's own branch, attribution always failed and
 # the caller fell straight through to the pane/log fallback below. (The
 # PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
-# a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
-# file's history - but this cross-branch path was independently confirmed
-# dead code and is worth having actually work.)
+# a separate bug in bin/fm-watch.sh's since-retired status-log terminality
+# precedence - see that file's history - but this cross-branch path was
+# independently confirmed dead code and is worth having actually work.)
 #
 # The real run-listing command is the top-level `no-mistakes runs` (verified:
 # `no-mistakes --help` lists it separately from `axi`). It is plain, human-
