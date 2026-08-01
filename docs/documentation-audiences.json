@@ -153,6 +153,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/friction-retro/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
