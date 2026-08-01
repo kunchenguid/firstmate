@@ -46,6 +46,7 @@ Launching a supported harness inside it instantiates your first mate - and makes
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver authorized changes; scout tasks leave standalone investigation reports when the intake contract warrants separate research.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
+- **Independent verification before you see a PR** - no finished pull request is presented as ready until a cold reviewer on a different model family than the builder has read that exact head against the original acceptance criteria and only the diff; the reviewer's identity and finding lead the report, a moved head invalidates the verdict, and a second rejection stops the work for re-scoping instead of a third round.
 - **Optional secondmates** - opt in to persistent second mates that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, either locally or as a whole home on an SSH-reachable host, with guarded updates and recovery that never turns an unavailable remote route into a local replacement.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; a final reply promised in a thread becomes durable state that is reconciled from disk, so a restart or a compacted conversation cannot lose it; dry-run preview records would-be replies and dismissals locally before go-live.
@@ -118,8 +119,9 @@ The preference persists for the effective Firstmate home, and toggling it off re
 
 # firstmate checks its toolchain (asking your consent before installing anything),
 # clones the project under projects/ and spawns two isolated workers in the active backend.
-# Minutes later:
+# Minutes later, after a cold reviewer on a different model family has cleared the exact head:
 
+  Independent review: ir-flaky-login-r1-4d9f1c02ab77 via codex (openai family) - no blocking findings
   PR ready for review, captain: https://github.com/you/xyz/pull/42
   (fix flaky login test - risk: low - CI green)
 
