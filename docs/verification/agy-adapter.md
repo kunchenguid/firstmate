@@ -88,6 +88,13 @@ reporting a false spawn failure while a trusted agent works unsupervised.
 Because the anchors above provably do not match the dialog body, past-trust-first
 is correct under either scrollback behavior.
 
+`agy_wait_for_trust_clear()` sends the default-focus `Enter` at most once (the
+`answered` flag, so a repeat Enter after trust clears cannot land as stray
+composer text) and polls up to `FM_AGY_TRUST_POLLS` (default 60) at
+`FM_AGY_POLL_INTERVAL` (default 0.5s). On exhaustion `agy_spawn_fail()` appends
+`failed: ...` to `$STATE/$ID.status`, prints `error: ...; inspect window $T` to
+stderr, and `bin/fm-spawn.sh` exits 1 — the same shape as `copilot_spawn_fail`.
+
 ## Launch and brief delivery
 
 ```
