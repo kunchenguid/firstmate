@@ -228,8 +228,8 @@ No Herdr-specific copy of that protocol exists.
 
 ## Primary Pi persistence and exact recovery
 
-Herdr 0.7.5 preserves workspace, tab, and pane ids when a named server restarts, but it does not preserve the Pi process or native agent registration.
-A disconnected Herdr client and a lost server can therefore look identical to an operator while requiring opposite actions.
+[Restart and liveness behavior](#restart-and-liveness-behavior) owns what a named Herdr server restart preserves and what it does not.
+Because of that gap, a disconnected Herdr client and a lost server can look identical to an operator while requiring opposite actions.
 Use `bin/fm-primary-pi.sh` when a Pi or pi-signed primary must be recoverable without guessing which condition occurred.
 
 Start a new guarded primary from its intended native Herdr pane:
@@ -282,9 +282,8 @@ It does not recover other harnesses, other runtime backends, workers, secondmate
 It does not configure remote access, reconnect a phone automatically, change login settings in the current session, or promise automatic restart when private state or process evidence is incomplete.
 Those axes are intentionally manual or owned by their existing runtime lifecycle.
 
-`tests/fm-primary-pi.test.sh` covers executable launch, attach-first, strict resumption, lease, retry, contradiction, corruption, duplicate, path, and post-launch-attestation behavior.
-`tests/fm-primary-custody-extension.test.sh` covers Pi-side input blocking, successful startup attestation, one-time new-session persistence finalization, no routine settled-message rechecks, and shutdown after failed startup or first-persistence attestation.
-`tests/fm-primary-pi-install.test.sh` covers idempotent install, status, uninstall, permissions, and foreign-file refusal.
+`tests/fm-primary-pi.test.sh`, `tests/fm-primary-custody-extension.test.sh`, and `tests/fm-primary-pi-install.test.sh` are this path's executable regression entry points.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#primary-pi-custody-and-exact-recovery) owns the lab evidence and what each suite proves.
 Real lifecycle verification remains restricted to generated non-default sessions through `bin/fm-herdr-lab.sh`.
 
 ## Restart and liveness behavior
