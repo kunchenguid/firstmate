@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Use before harness-specific spawn, recovery, trust, skill invocation, interrupt, exit, resume, or adapter verification.
 user-invocable: false
 metadata:
   internal: true
@@ -204,6 +204,7 @@ Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on
 
 | Fact | Value |
 |---|---|
+| Env marker | `CODEX_CI=1` plus UUID-shaped `CODEX_THREAD_ID` is set for Codex tool commands, including the Codex 0.146.0 seatbelt path where `ps` is denied. Firstmate uses it only as a post-ancestry fallback so markerless child harness process names still win when process inspection works. |
 | Busy state | Unknown until a semantic source is live-verified: the app-server turn lifecycle is unreachable for a pane worker, and project lifecycle hooks did not fire for a firstmate-launched worker. |
 | Exit command | `/quit` (slash popup needs about 1 second between text and Enter; `fm-send` handles it) |
 | Interrupt | single Escape |

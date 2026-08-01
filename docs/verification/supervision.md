@@ -10,6 +10,20 @@ Task-specific chronology, temporary paths, run identifiers, and delivery transcr
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.
 
+Codex 0.146.0 was rechecked on 2026-08-01 with a throwaway `FM_HOME`, throwaway `HOME`, and throwaway `CODEX_HOME`.
+`codex -C "$PWD" sandbox bin/fm-session-start.sh` faithfully reproduced the supported Codex seatbelt shape: process inspection failed with `bash: line 1: /bin/ps: Operation not permitted`, while tool commands exposed `CODEX_CI=1`, `CODEX_SANDBOX=seatbelt`, and a UUID-shaped `CODEX_THREAD_ID`.
+Before the fix, that path printed `error: cannot locate harness process in ancestry`, reported primary harness `unknown`, and stayed read-only.
+The standalone `codex sandbox` command was read-only for throwaway roots in this environment, so writable lock acquisition was verified with the same denied-`ps` behavior and Codex markers in the executable session-start counterfactual plus the deterministic tests below.
+The session-lock owner now falls back to `codex-thread:<CODEX_THREAD_ID>` only after process ancestry fails, so markerless child process harnesses still win whenever `ps` is available.
+
+The same probe separated the GitHub diagnostic from the lock bug.
+Outside the Codex sandbox, an authenticated account succeeded through `gh auth status`.
+Inside the Codex seatbelt, existing GitHub CLI credential material could be present but not validated, so bootstrap now reports `GH_AUTH_UNVERIFIED` instead of requesting a fresh login; a throwaway home with no token and no `hosts.yml` still reports `NEEDS_GH_AUTH`.
+
+Skill-budget reproduction was bounded to repository-controlled inputs.
+`codex -C "$PWD" debug prompt-input` with a throwaway `CODEX_HOME` and no user plugins showed no 2% warning for Firstmate project skills alone, so the observed Ponytail-enabled user path is an independent budget contributor rather than a proven sole cause.
+Firstmate's controllable mitigation is to keep every internal skill discoverable while shortening only frontmatter descriptions to exact triggers.
+
 Codex command shape:
 
 ```sh
@@ -52,6 +66,8 @@ Current deterministic and live entry points:
 
 ```sh
 tests/fm-sessionstart-nudge.test.sh
+tests/fm-secondmate-harness.test.sh
+tests/fm-bootstrap.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 ```

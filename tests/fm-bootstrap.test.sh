@@ -295,6 +295,70 @@ ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
 
+test_gh_auth_diagnostics_distinguish_codex_sandbox() {
+  local case_dir fakebin out status userhome
+
+  case_dir="$TMP_ROOT/gh-token-bridge"
+  mkdir -p "$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
+  [ "${GH_TOKEN:-}" = pat-ok ] && exit 0
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(env -u GH_TOKEN -u GITHUB_TOKEN PATH="$fakebin:$BASE_PATH" \
+    HOME="$case_dir/home" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    GITHUB_PERSONAL_ACCESS_TOKEN=pat-ok FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "GITHUB_PERSONAL_ACCESS_TOKEN bridge should satisfy gh auth, got: $out"
+
+  case_dir="$TMP_ROOT/gh-codex-sandbox-configured"
+  userhome="$case_dir/userhome"
+  mkdir -p "$case_dir/home" "$userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$userhome/.config/gh/hosts.yml"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN \
+    PATH="$fakebin:$BASE_PATH" HOME="$userhome" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" CODEX_SANDBOX=seatbelt \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"); status=$?
+  expect_code 0 "$status" "Codex sandbox auth diagnostic"
+  assert_contains "$out" "GH_AUTH_UNVERIFIED: Codex sandbox could not validate existing GitHub credential material" \
+    "Codex sandbox auth failure should not ask for login"
+  assert_not_contains "$out" "NEEDS_GH_AUTH" "Codex sandbox auth failure was mislabeled as missing login"
+
+  case_dir="$TMP_ROOT/gh-missing"
+  userhome="$case_dir/userhome"
+  mkdir -p "$case_dir/home" "$userhome"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN \
+    PATH="$fakebin:$BASE_PATH" HOME="$userhome" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" CODEX_SANDBOX=seatbelt \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "NEEDS_GH_AUTH" ] || fail "missing credentials should request login, got: $out"
+
+  pass "bootstrap distinguishes missing GitHub auth from Codex sandbox validation limits"
+}
+
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
   missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
@@ -833,6 +897,7 @@ ROWS
 }
 
 test_bootstrap_reporting
+test_gh_auth_diagnostics_distinguish_codex_sandbox
 test_no_mistakes_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction

@@ -52,7 +52,7 @@ set -u
 # ambient CLAUDECODE=1, the pi-signed ancestry case resolves "claude". Drop the
 # ambient markers so what this suite asserts does not depend on which harness it
 # was launched from; every case states the marker it means to test.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
+unset CLAUDECODE CODEX_CI CODEX_THREAD_ID CODEX_SANDBOX PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -228,7 +228,8 @@ SH
   chmod +x "$fakebin/ps"
 
   err="$dir/fm-harness.err"
-  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  got=$(env -u CLAUDECODE -u CODEX_CI -u CODEX_THREAD_ID -u CODEX_SANDBOX \
+    -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh" 2>"$err")
   [ "$got" = codex ] || fail "dash-leading shell ancestry resolved '$got', expected codex"
   [ ! -s "$err" ] || fail "fm-harness wrote basename option noise for literal -zsh: $(cat "$err")"
@@ -247,6 +248,94 @@ SH
   [ ! -s "$err" ] || fail "session-lock liveness wrote basename option noise for literal -codex: $(cat "$err")"
 
   pass "harness identity: dash-leading ps command names are basename operands, not options"
+}
+
+test_codex_thread_identity_fallback_after_ps_denial() {
+  local dir fakebin uuid out status err home
+  dir="$TMP_ROOT/codex-thread-identity"
+  fakebin=$(fm_fakebin "$dir")
+  uuid=019fbddb-b27d-7b23-86d2-7dc3bbaba31f
+  home="$dir/home"
+  mkdir -p "$home/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '/bin/ps: Operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$uuid" PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+  [ "$out" = "codex-thread:$uuid" ] \
+    || fail "Codex ps-denied identity returned '$out'"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    CODEX_CI=1 CODEX_THREAD_ID="$uuid" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = codex ] || fail "fm-harness did not use Codex thread fallback, got '$out'"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$uuid" PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "fm-lock should acquire through Codex thread identity: $out"
+  assert_contains "$out" "lock acquired: harness identity codex-thread:$uuid" \
+    "fm-lock did not report the Codex thread lock"
+  [ "$(cat "$home/state/.lock")" = "codex-thread:$uuid" ] \
+    || fail "fm-lock wrote the wrong Codex thread identity"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$uuid" PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness identity codex-thread:$uuid" \
+    "fm-lock status did not accept the Codex thread identity"
+
+  err="$dir/missing-marker.err"
+  if CODEX_THREAD_ID="$uuid" PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT" 2>"$err"; then
+    fail "Codex thread fallback accepted CODEX_THREAD_ID without CODEX_CI"
+  fi
+  err="$dir/invalid-marker.err"
+  if CODEX_CI=1 CODEX_THREAD_ID=not-a-thread PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT" 2>"$err"; then
+    fail "Codex thread fallback accepted an invalid thread id"
+  fi
+
+  pass "Codex identity: thread marker covers ps-denied seatbelt without accepting invalid markers"
+}
+
+test_codex_thread_fallback_does_not_outrank_process_ancestry() {
+  local dir fakebin uuid out harness
+  dir="$TMP_ROOT/codex-thread-precedence"
+  fakebin=$(fm_fakebin "$dir")
+  uuid=019fbddb-b27d-7b23-86d2-7dc3bbaba31f
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '/opt/test/bin/%s\n' "${FM_FAKE_PARENT_HARNESS:?}" ;;
+  4242:args=) printf '%s\n' "${FM_FAKE_PARENT_HARNESS:?}" ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' '/bin/zsh' ;;
+  *:args=) printf '%s\n' 'zsh' ;;
+  *:ppid=) printf '%s\n' 4242 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  for harness in opencode kimi; do
+    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      CODEX_CI=1 CODEX_THREAD_ID="$uuid" FM_FAKE_PARENT_HARNESS="$harness" \
+      PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+    [ "$out" = "$harness" ] \
+      || fail "Codex marker outranked $harness process ancestry: got '$out'"
+  done
+
+  pass "Codex identity: process ancestry outranks inherited Codex thread markers"
 }
 
 # ===========================================================================
@@ -2326,6 +2415,8 @@ test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
+test_codex_thread_identity_fallback_after_ps_denial
+test_codex_thread_fallback_does_not_outrank_process_ancestry
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback

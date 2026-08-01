@@ -1,8 +1,6 @@
 ---
 name: decision-hold-lifecycle
-description: >-
-  Agent-only policy for completing investigations and visual reviews without losing unresolved captain decisions.
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
+description: Load before completing an investigation or review that may contain unresolved captain decisions, and when routing the captain's answer.
 user-invocable: false
 metadata:
   internal: true

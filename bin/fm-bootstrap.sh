@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "GH_AUTH_UNVERIFIED: <reason>",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -120,6 +121,28 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+
+gh_auth_config_present() {
+  [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ] \
+    || [ -s "${HOME:-}/.config/gh/hosts.yml" ]
+}
+
+gh_auth_status_ok() {
+  gh auth status >/dev/null 2>&1 && return 0
+  if [ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]; then
+    GH_TOKEN=$GITHUB_PERSONAL_ACCESS_TOKEN gh auth status >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+gh_auth_diagnostic() {
+  gh_auth_status_ok && return 0
+  if gh_auth_config_present && [ "${CODEX_SANDBOX:-}" = seatbelt ]; then
+    echo "GH_AUTH_UNVERIFIED: Codex sandbox could not validate existing GitHub credential material; rerun the auth check outside the Codex sandbox or expose a valid GH_TOKEN/GITHUB_TOKEN to this session"
+  else
+    echo "NEEDS_GH_AUTH"
+  fi
+}
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -1000,7 +1023,7 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+gh_auth_diagnostic
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.

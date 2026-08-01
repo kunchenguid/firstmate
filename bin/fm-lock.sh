@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Writes the harness-session identity found from the shell's ancestry, which
+# lives as long as the firstmate session - unlike the transient subshell PID of
+# any one tool call, which is dead moments after it is written.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -29,7 +29,14 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if fm_harness_pid_alive "$old"; then
+    case "$old" in
+      "$FM_CODEX_THREAD_LOCK_PREFIX"*) echo "lock: held by live harness identity $old" ;;
+      *) echo "lock: held by live harness pid $old" ;;
+    esac
+  else
+    echo "lock: stale (owner $old dead or not a harness)"
+  fi
   exit 0
 fi
 
@@ -67,7 +74,7 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     exit 1
   }
   if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+    echo "error: another live firstmate session holds the lock (owner $old); operate read-only until resolved" >&2
     exit 1
   fi
 fi
@@ -84,4 +91,7 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   exit 1
 fi
 release_claim_lock
-echo "lock acquired: harness pid $me"
+case "$me" in
+  "$FM_CODEX_THREAD_LOCK_PREFIX"*) echo "lock acquired: harness identity $me" ;;
+  *) echo "lock acquired: harness pid $me" ;;
+esac

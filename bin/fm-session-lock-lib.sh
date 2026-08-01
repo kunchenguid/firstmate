@@ -2,7 +2,8 @@
 # Shared session-lock harness identity.
 #
 # ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
+# lock, and does the current process belong to that same harness session?"
+# decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
@@ -10,6 +11,7 @@
 
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+FM_CODEX_THREAD_LOCK_PREFIX='codex-thread:'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
@@ -74,6 +76,26 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+fm_codex_thread_id_valid() {
+  printf '%s' "${1:-}" \
+    | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+}
+
+fm_codex_thread_identity() {
+  [ "${CODEX_CI:-}" = 1 ] || return 1
+  fm_codex_thread_id_valid "${CODEX_THREAD_ID:-}" || return 1
+  printf '%s%s\n' "$FM_CODEX_THREAD_LOCK_PREFIX" "$CODEX_THREAD_ID"
+}
+
+fm_codex_thread_lock_valid() {
+  local id=${1:-}
+  case "$id" in
+    "$FM_CODEX_THREAD_LOCK_PREFIX"*) ;;
+    *) return 1 ;;
+  esac
+  fm_codex_thread_id_valid "${id#"$FM_CODEX_THREAD_LOCK_PREFIX"}"
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -93,10 +115,17 @@ fm_harness_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
+  local pid=$$ comm args ppid extending=0 printed=0
+  FM_HARNESS_ANCESTRY_BLOCKED=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    if ! comm=$(ps -o comm= -p "$pid" 2>/dev/null); then
+      FM_HARNESS_ANCESTRY_BLOCKED=1
+      break
+    fi
+    if ! args=$(ps -o args= -p "$pid" 2>/dev/null); then
+      FM_HARNESS_ANCESTRY_BLOCKED=1
+      args=
+    fi
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
@@ -105,56 +134,77 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    if ! ppid=$(ps -o ppid= -p "$pid" 2>/dev/null); then
+      FM_HARNESS_ANCESTRY_BLOCKED=1
+      break
+    fi
+    pid=$(printf '%s' "$ppid" | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
   [ "$printed" -eq 1 ]
 }
 
-# Print the one pid that identifies this session when the session lock is being
-# WRITTEN: the outermost pid of the contiguous run. That is the pid that lives as
-# long as the session - a Claude worker several levels in is reaped when its hook
-# returns, and a lock naming it would look stale moments later while the session
-# is still running. Every non-Claude harness reports a single pid, so this is its
-# innermost match unchanged.
+# Print the identity that identifies this session when the session lock is being
+# WRITTEN: normally the outermost pid of the contiguous run. That is the pid that
+# lives as long as the session - a Claude worker several levels in is reaped when
+# its hook returns, and a lock naming it would look stale moments later while the
+# session is still running. Every non-Claude harness reports a single pid, so
+# this is its innermost match unchanged. Codex 0.146.0 can deny `ps` inside its
+# seatbelt; when ancestry cannot be inspected, fall back to Codex's verified
+# per-thread marker and publish a codex-thread identity instead of a numeric pid.
 fm_harness_ancestry_pid() {
-  local pids pid outermost=''
-  pids=$(fm_harness_ancestry_pids) || return 1
-  while IFS= read -r pid; do
-    [ -n "$pid" ] && outermost=$pid
-  done <<EOF
+  local pids pid outermost='' identity
+  if pids=$(fm_harness_ancestry_pids); then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] && outermost=$pid
+    done <<EOF
 $pids
 EOF
-  [ -n "$outermost" ] || return 1
-  printf '%s\n' "$outermost"
+    [ -n "$outermost" ] && { printf '%s\n' "$outermost"; return 0; }
+  fi
+  if [ "${FM_HARNESS_ANCESTRY_BLOCKED:-0}" -eq 1 ]; then
+    identity=$(fm_codex_thread_identity 2>/dev/null) && { printf '%s\n' "$identity"; return 0; }
+  fi
+  return 1
 }
 
-# True if $1 is a live process that looks like a verified harness.
+# True if $1 is a live process, or a fail-closed non-process session identity,
+# that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
+  case "$pid" in
+    "$FM_CODEX_THREAD_LOCK_PREFIX"*)
+      fm_codex_thread_lock_valid "$pid"
+      return
+      ;;
+  esac
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   fm_harness_process_matches "$comm" "$args"
 }
 
-# True when state dir $1 holds a session lock whose pid is ANY harness ancestor
-# of the current process: this script runs inside the session that owns the
-# home's fleet lock. Membership is the honest test of that question, because the
-# lock owner sits at an unknown depth in a contiguous Claude run - it is the
-# outermost pid when the hook fires inside the session's own nested worker chain,
-# and an inner pid when a harness-named daemon parents the session. A missing
-# lock, a malformed lock, a lock held by a harness outside this ancestry, or an
-# ancestry that cannot be resolved all fail closed.
+# True when state dir $1 holds the current process's harness-session identity:
+# numeric locks may be ANY harness ancestor of the current process, while a
+# codex-thread lock must match Codex's verified thread marker. A missing lock, a
+# malformed lock, a lock held by a harness outside this ancestry, or an identity
+# that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
-  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
+  local state=$1 lock_identity my_identity
+  lock_identity=$(cat "$state/.lock" 2>/dev/null || true)
+  case "$lock_identity" in
+    ''|1) return 1 ;;
+    "$FM_CODEX_THREAD_LOCK_PREFIX"*)
+      my_identity=$(fm_codex_thread_identity 2>/dev/null) || return 1
+      [ "$my_identity" = "$lock_identity" ]
+      return
+      ;;
+    *[!0-9]*) return 1 ;;
   esac
+  local pids pid
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] && return 0
+    [ "$pid" = "$lock_identity" ] && return 0
   done <<EOF
 $pids
 EOF
