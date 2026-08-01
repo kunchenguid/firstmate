@@ -54,6 +54,9 @@ CFG_PATH=
 CFG_PROJECTS=
 CFG_FLEET_ROOT=
 CFG_LANG=
+CFG_GUI=
+CFG_TMUX_SOCKET=
+CFG_HOST_SESSION=
 config_file="$control_root/config"
 [ -f "$config_file" ] || emit_err config "no host config at $config_file"
 while IFS= read -r line; do
@@ -70,6 +73,9 @@ while IFS= read -r line; do
     PROJECTS) CFG_PROJECTS=$value ;;
     FLEET_ROOT) CFG_FLEET_ROOT=$value ;;
     LANG) CFG_LANG=$value ;;
+    GUI) CFG_GUI=$value ;;
+    TMUX_SOCKET) CFG_TMUX_SOCKET=$value ;;
+    HOST_SESSION) CFG_HOST_SESSION=$value ;;
   esac
 done < "$config_file"
 [ -n "$CFG_FM_ROOT" ] || emit_err config "FM_ROOT missing from host config"
@@ -90,6 +96,68 @@ TASKS="$control_root/tasks"
 BIN="$CFG_FM_ROOT/bin"
 STATE="$CFG_FM_HOME/state"
 DATA="$CFG_FM_HOME/data"
+
+# A GUI task host pins the session provider to the DESKTOP host session's socket
+# rather than letting bin/fm-tmux-lib.sh resolve one from an environment this
+# verb does not have. Without that pin, fm-spawn would find no server and create
+# its own - as a descendant of the launchd-managed bifrost daemon, which is the
+# one ancestry that wedges an agent forever (control-root/fmr-gui-lib.sh).
+[ -z "$CFG_TMUX_SOCKET" ] || export FM_TMUX_SOCKET=$CFG_TMUX_SOCKET
+
+# ---- GUI host preflight ------------------------------------------------------
+# Sourced only when the host declares GUI=1, so a non-GUI task host neither needs
+# control-root/fmr-gui-lib.sh nor changes behaviour when it is absent.
+gui_required() { [ "$CFG_GUI" = 1 ]; }
+
+gui_lib_load() {
+  local lib="$control_root/fmr-gui-lib.sh"
+  [ -f "$lib" ] || emit_err guilib "GUI=1 but $lib is not deployed on this host"
+  # shellcheck source=control-root/fmr-gui-lib.sh
+  . "$lib"
+}
+
+# The three answers a GUI host owes BEFORE it claims anything: awake, unlocked,
+# and a live desktop host session.
+#
+# Sets GUI_REFUSAL to "<code> <sentence>" when this machine must not take work,
+# and to the empty string when it may. It assigns a global rather than printing
+# into a command substitution on purpose: gui_lib_load fails through emit_err,
+# and inside a subshell that exit would be swallowed and its ERR line would be
+# captured as if it were the refusal text.
+#
+# Awake needs no probe and gets none: a machine that is asleep does not run this
+# verb, so reaching this line IS the awake answer. What the design asks for is
+# that a sleeping host produce a readable refusal, and that belongs on the
+# control side, which is the only side still running (bin/fm-relay-lib.sh).
+GUI_REFUSAL=
+GUI_STATE=
+gui_preflight() {
+  local marker='' verdict socket
+  GUI_REFUSAL=; GUI_STATE=
+  gui_lib_load
+  case "$(fmr_gui_lock_verdict "$(fmr_gui_ioreg_text)")" in
+    locked)
+      GUI_REFUSAL='guilocked the screen is locked, so a dispatched agent would start work nobody can see or unblock'
+      return 0 ;;
+    unknown)
+      GUI_REFUSAL='guilockunknown the screen lock state could not be read, so this host will not claim work'
+      return 0 ;;
+  esac
+  [ -n "$CFG_HOST_SESSION" ] || CFG_HOST_SESSION="$control_root/host-session"
+  if [ -f "$CFG_HOST_SESSION" ]; then
+    marker=$(cat "$CFG_HOST_SESSION" 2>/dev/null || true)
+  fi
+  socket=${CFG_TMUX_SOCKET:-${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/default}
+  verdict=$(fmr_gui_session_verdict "$marker" \
+    "$(fmr_gui_socket_server_pid "$socket")" "$(fmr_gui_console_asid)")
+  case "$verdict" in
+    ok\ *) GUI_STATE=${verdict#ok } ;;
+    *)
+      # The operator has to know WHAT to start, not only that something is wrong.
+      GUI_REFUSAL="guisession ${verdict#* }; start it on this machine with $control_root/fmr-host-session.sh start"
+      ;;
+  esac
+}
 
 # ---- argument validation -----------------------------------------------------
 id_ok() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; case "$1" in .*) return 1 ;; esac; }
@@ -195,7 +263,25 @@ shift || true
 case "$verb" in
 
   ping)
-    printf 'OK pong host=%s proto=fmr-v1 home=%s\n' "$(hostname)" "$CFG_FM_HOME"
+    printf 'OK pong host=%s proto=fmr-v1 home=%s gui=%s\n' \
+      "$(hostname)" "$CFG_FM_HOME" "${CFG_GUI:-0}"
+    ;;
+
+  preflight)
+    # "Can you take work right now" asked on its own, so the control side can
+    # give a readable reason without staging a brief or attempting a claim. This
+    # is a courtesy, never the gate: the authoritative check is the one spawn
+    # runs in the same process as its claim, below.
+    if ! gui_required; then
+      printf 'OK preflight=ok gui=0\n'
+      exit 0
+    fi
+    gui_preflight
+    if [ -n "$GUI_REFUSAL" ]; then
+      emit_err "${GUI_REFUSAL%% *}" "${GUI_REFUSAL#* }"
+    fi
+    printf 'OK preflight=ok gui=1 awake=yes locked=no session=ok\n'
+    printf '%s\n' "$GUI_STATE"
     ;;
 
   task-list)
@@ -238,6 +324,15 @@ case "$verb" in
     [ -d "$proj_dir" ] || emit_err noproject "no project directory at $proj_dir"
     brief_src="$FLEET_ROOT/tasks/$tid/in/$briefref"
     [ -f "$brief_src" ] || emit_err nobrief "no staged brief at tasks/$tid/in/$briefref"
+    # BEFORE the claim, and in the same process as it. A claim tells the control
+    # machine this work has an owner; claiming and then failing is worse than
+    # refusing, because it stops the control side looking for anywhere else to
+    # run it. Asking here rather than only through the `preflight` verb is also
+    # what leaves no window between the answer and the claim.
+    if gui_required; then
+      gui_preflight
+      [ -z "$GUI_REFUSAL" ] || emit_err "${GUI_REFUSAL%% *}" "${GUI_REFUSAL#* }"
+    fi
     mkdir -p "$TASKS" || emit_err io "cannot create claim root"
     if ! mkdir "$TASKS/$tid" 2>/dev/null; then
       printf 'ALREADY_CLAIMED task %s is already claimed on this host\n' "$tid"

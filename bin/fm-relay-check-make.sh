@@ -15,6 +15,12 @@
 # here would be frozen at the moment of arming; keeping it in the library means a
 # later fix reaches checks armed before the fix existed.
 #
+# A task may be armed before it is live. A GUI-capable host that was locked,
+# asleep, or missing its desktop host session leaves a QUEUED dispatch rather
+# than a running task, and this same check is what retries it until it takes and
+# then reports its events - so it arms from either the task's metadata or its
+# queued-dispatch record (bin/fm-spawn.sh arms it in that case itself).
+#
 # The cost of this wake path, stated plainly: a remote task does not get the
 # turn-end hook's immediate wake, because that hook writes a file on the host.
 # Wake latency is therefore 0..FM_CHECK_INTERVAL (300 s by default), which is the
@@ -40,8 +46,19 @@ esac
 ID=$1
 fm_relay_id_valid "$ID" || { echo "error: invalid task id '$ID'" >&2; exit 2; }
 META="$STATE/$ID.meta"
-[ -f "$META" ] || { echo "error: no metadata for task $ID at $META" >&2; exit 1; }
-HOST=$(fm_relay_meta_host "$META")
+PENDING=$(fm_relay_pending_file "$STATE" "$ID")
+# A task can be armed before it is live. A GUI host that was locked, asleep, or
+# missing its desktop host session leaves a queued dispatch instead of a task,
+# and this same check is what retries it - so refusing to arm without metadata
+# would leave the queued work with nothing to pick it up.
+if [ -f "$META" ]; then
+  HOST=$(fm_relay_meta_host "$META")
+elif [ -f "$PENDING" ]; then
+  HOST=$(fm_relay_pending_field "$PENDING" host)
+else
+  echo "error: task $ID has neither metadata at $META nor a queued dispatch at $PENDING" >&2
+  exit 1
+fi
 [ -n "$HOST" ] || { echo "error: task $ID has no host= line; it is not a relay task" >&2; exit 1; }
 fm_relay_host_load "$FM_HOME" "$HOST" || exit 1
 

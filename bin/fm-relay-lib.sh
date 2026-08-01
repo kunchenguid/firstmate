@@ -37,6 +37,11 @@ FM_RELAY_ARG_RE='^[A-Za-z0-9._@=+-]{1,96}$'
 FM_RELAY_REF_RE='^[A-Za-z0-9._-]{1,64}$'
 FM_RELAY_ID_RE='^[A-Za-z0-9._-]{1,64}$'
 
+# This file's own directory, so the generated wake check - which carries per-task
+# parameters and one library call, nothing else - can reach its sibling scripts
+# without the caller putting bin/ on PATH.
+FM_RELAY_LIB_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
 # Set by fm_relay_exec / fm_relay_file_* for the caller to read.
 FM_RELAY_OUT=
 FM_RELAY_ERR=
@@ -56,6 +61,9 @@ FM_RELAY_HOST_LANG=
 FM_RELAY_KEY=
 FM_RELAY_SSH=
 FM_RELAY_VERB=
+FM_RELAY_GUI=
+FM_RELAY_TMUX_SOCKET=
+FM_RELAY_HOST_SESSION=
 
 fm_relay_bifrost() {
   printf '%s' "${FM_RELAY_BIFROST:-bifrost}"
@@ -84,6 +92,7 @@ fm_relay_host_load() {  # <home> <host-name>
   FM_RELAY_HOST=; FM_RELAY_CLIENT_ID=; FM_RELAY_CONTROL_ROOT=; FM_RELAY_FLEET_ROOT=
   FM_RELAY_HOST_HOME=; FM_RELAY_HOST_ROOT=; FM_RELAY_HOST_DIR=; FM_RELAY_HOST_PATH=
   FM_RELAY_HOST_LANG=; FM_RELAY_KEY=; FM_RELAY_SSH=; FM_RELAY_VERB=
+  FM_RELAY_GUI=; FM_RELAY_TMUX_SOCKET=; FM_RELAY_HOST_SESSION=
   fm_relay_arg_valid "$name" || { echo "error: invalid relay host name '$name'" >&2; return 1; }
   file=$(fm_relay_hosts_file "$home")
   [ -f "$file" ] || { echo "error: no relay host registry at $file" >&2; return 1; }
@@ -92,12 +101,22 @@ fm_relay_host_load() {  # <home> <host-name>
   # run of tabs collapses into a single separator and one absent optional field
   # (lang, home_dir, path) would silently shift every later field left - which is
   # how the ssh route once became the key path. Line-per-field preserves empties.
+  #
+  # The trailing "." is a sentinel and is never read. Command substitution strips
+  # TRAILING newlines, so a record whose last optional fields are all absent -
+  # a laptop host with no ssh route and no key, which is the normal shape - loses
+  # those lines entirely and the reads below run off the end of the input. Each
+  # failed read returns non-zero, and in a `set -e` caller like
+  # bin/fm-relay-conn.sh that killed the whole script with no message at all.
+  # A sentinel guarantees the last real field is never the last line.
   raw=$(jq -r --arg n "$name" '
     if (.[$n] // empty) == null then empty
     else .[$n] as $h
       | [ ($h.client_id // ""), ($h.control_root // ""), ($h.fleet_root // ""),
           ($h.home // ""), ($h.root // ""), ($h.home_dir // ""), ($h.path // ""),
-          ($h.lang // ""), ($h.key // ""), ($h.ssh // "") ]
+          ($h.lang // ""), ($h.key // ""), ($h.ssh // ""),
+          (if ($h.gui // false) then "1" else "" end),
+          ($h.tmux_socket // ""), ($h.host_session // ""), "." ]
       | .[]
     end' "$file" 2>/dev/null) || {
     echo "error: $file is not valid JSON" >&2; return 1; }
@@ -106,7 +125,8 @@ fm_relay_host_load() {  # <home> <host-name>
   { read -r FM_RELAY_CLIENT_ID; read -r FM_RELAY_CONTROL_ROOT; read -r FM_RELAY_FLEET_ROOT
     read -r FM_RELAY_HOST_HOME; read -r FM_RELAY_HOST_ROOT; read -r FM_RELAY_HOST_DIR
     read -r FM_RELAY_HOST_PATH; read -r FM_RELAY_HOST_LANG; read -r FM_RELAY_KEY
-    read -r FM_RELAY_SSH || true
+    read -r FM_RELAY_SSH; read -r FM_RELAY_GUI; read -r FM_RELAY_TMUX_SOCKET
+    read -r FM_RELAY_HOST_SESSION
   } <<< "$raw"
   FM_RELAY_HOST=$name
   [ -n "$FM_RELAY_HOST_PATH" ] || FM_RELAY_HOST_PATH=/usr/local/bin:/usr/bin:/bin
@@ -125,8 +145,11 @@ fm_relay_host_load() {  # <home> <host-name>
       *) echo "error: relay host '$name' ${f#FM_RELAY_} must be an absolute path" >&2; return 1 ;;
     esac
   done
+  [ -n "$FM_RELAY_HOST_SESSION" ] || FM_RELAY_HOST_SESSION="$FM_RELAY_CONTROL_ROOT/host-session"
   FM_RELAY_VERB="$FM_RELAY_CONTROL_ROOT/verbs/fmr-verb.sh"
 }
+
+fm_relay_host_is_gui() { [ "$FM_RELAY_GUI" = 1 ]; }
 
 fm_relay_hosts_list() {  # <home>
   local file
@@ -255,6 +278,141 @@ fm_relay_meta_host() {  # <meta-file>
   grep '^host=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+# --- queued dispatch ----------------------------------------------------------
+#
+# A GUI task host refuses work while its screen is locked, while its desktop host
+# session is down, and - by simply not answering - while the machine is asleep.
+# Those are all TRANSIENT: the right answer is to hold the dispatch and try
+# again, not to lose it and not to pretend it started.
+#
+# So a refused dispatch leaves a record here and the ordinary wake check retries
+# it. Everything needed to dispatch is in the record, which is why the first
+# attempt and every retry run the identical code path
+# (bin/fm-relay-host.sh dispatch) instead of a second, thinner one that would
+# drift.
+#
+# The queue lives on the CONTROL side deliberately. The host cannot hold it: a
+# sleeping machine has no queue, and the whole point is to survive the host being
+# unavailable.
+
+fm_relay_pending_file() {  # <state-dir> <id>
+  printf '%s/%s.relay-pending' "$1" "$2"
+}
+
+fm_relay_pending_field() {  # <pending-file> <key>
+  [ -f "$1" ] || return 1
+  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# Record WHY the host would not take this work, in the host's own words.
+#
+# It lives in the record rather than being re-derived from a dispatch attempt's
+# printed output, because only bin/fm-relay-host.sh sees the raw verb protocol;
+# anything downstream would be parsing a human sentence and would classify a
+# refused-but-reachable host as an unreachable one. It also makes
+# `fm-relay-host.sh queued` able to say what a stuck dispatch is stuck on.
+fm_relay_pending_set_reason() {  # <pending-file> <reason>
+  local file=$1 reason=$2 tmp
+  [ -f "$file" ] || return 0
+  tmp="$file.tmp$$"
+  { grep -v '^reason=' "$file" 2>/dev/null || true; printf 'reason=%s\n' "$reason"; } > "$tmp" \
+    && mv -f "$tmp" "$file"
+  rm -f "$tmp"
+}
+
+# Classify what came back from a dispatch attempt so the caller knows whether to
+# hold the work or give it up. Prints "ok", "retry <reason>", or "fail <reason>".
+#
+# The FIRST TOKEN decides, not the exit status, because the verb protocol makes
+# the first token authoritative and one refusal deliberately exits 0:
+# ALREADY_CLAIMED reports a live task on the host, which succeeded as a question
+# and failed as a dispatch. Reading the exit status alone would file that as a
+# successful spawn and then write metadata from a claim report.
+#
+# The host's own transient refusals are self-identifying: every GUI preflight
+# code starts with `gui`, so a new one is retryable the day it is added without
+# this side being taught about it. A transport failure carries no ERR line at
+# all, and that is exactly the shape a sleeping or powered-off host produces, so
+# it is retryable too - "could not ask" is never "was told no".
+# Anything else - a rejected argument, a missing project, an existing claim - is
+# a decision that will not change by waiting.
+fm_relay_dispatch_class() {  # <output-text> <exit-code>
+  local out=$1 rc=$2 first
+  first=${out%%$'\n'*}
+  case "$first" in
+    OK|OK\ *)
+      [ "$rc" -eq 0 ] && { printf 'ok'; return 0; }
+      printf 'fail the host answered OK but the call itself failed (exit %s)' "$rc"
+      return 0 ;;
+    ERR\ gui*)
+      printf 'retry %s' "${first#ERR }"
+      return 0 ;;
+    ERR\ *|ALREADY_CLAIMED*)
+      printf 'fail %s' "$first"
+      return 0 ;;
+  esac
+  [ "$rc" -eq 0 ] && { printf 'fail the host answered with no protocol line: %s' "$first"; return 0; }
+  printf 'retry host unreachable - asleep, powered off, or the link is down'
+}
+
+# One retry attempt for a queued dispatch, run from inside the wake check.
+#
+# Prints a line ONLY when the supervisor needs to act: the work finally started,
+# or it has been held long enough with a stable reason that silence would be
+# misreporting, or it failed for a reason waiting cannot fix. A refusal that is
+# simply still true prints nothing, because a locked screen every five minutes is
+# not news.
+#
+# The alert marker records the REASON it fired on, not just that it fired, so a
+# refusal that changes - screen unlocked but the host session is now down - wakes
+# once more instead of hiding behind the first alert.
+# The dispatcher's EXIT CODE is the contract here, not its printed text: 0 it
+# started, 3 the host declined for a reason that passes, anything else it failed
+# for good. bin/fm-relay-host.sh's header owns those codes, and it is the only
+# side that sees the raw verb protocol, so nothing downstream re-derives a
+# verdict from a human sentence.
+fm_relay_pending_emit() {  # <home> <id>
+  local home=$1 id=$2 state pending host out rc reason fails limit prev
+  state="${FM_STATE_OVERRIDE:-$home/state}"
+  pending=$(fm_relay_pending_file "$state" "$id")
+  host=$(fm_relay_pending_field "$pending" host) || return 0
+  limit=${FM_RELAY_QUEUE_WAKE_AFTER:-3}
+  rc=0
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-$home/data}" \
+    "$FM_RELAY_LIB_DIR/fm-relay-host.sh" dispatch "$id" 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    rm -f "$state/$id.relay-queue-fails" "$state/$id.relay-queue-alert"
+    printf '%s dispatched to %s after waiting: %s\n' "$id" "$host" \
+      "$(printf '%s' "$out" | tr '\n' '|' | cut -c1-200)"
+    return 0
+  fi
+  if [ "$rc" -ne 3 ]; then
+    # Never silently drop queued work: the record stays, so a supervisor can see
+    # it and decide, and the alert marker stops this repeating every check.
+    reason=$(printf '%s' "$out" | tr '\n' '|' | cut -c1-200)
+    prev=$(cat "$state/$id.relay-queue-alert" 2>/dev/null || true)
+    [ "$prev" = "$reason" ] && return 0
+    printf '%s\n' "$reason" > "$state/$id.relay-queue-alert"
+    printf '%s is still queued for %s and cannot start: %s\n' "$id" "$host" "$reason"
+    return 0
+  fi
+  reason=$(fm_relay_pending_field "$pending" reason)
+  [ -n "$reason" ] || reason="the host declined without saying why"
+  fails=$(cat "$state/$id.relay-queue-fails" 2>/dev/null || true)
+  case "$fails" in ''|*[!0-9]*) fails=0 ;; esac
+  fails=$((fails + 1))
+  printf '%s\n' "$fails" > "$state/$id.relay-queue-fails"
+  prev=$(cat "$state/$id.relay-queue-alert" 2>/dev/null || true)
+  # Hold quietly, but not forever and not through a CHANGED reason: a screen that
+  # was unlocked while the host session went down is new information, and hiding
+  # it behind the first alert would misreport what the machine is waiting on.
+  if [ "$fails" -ge "$limit" ] && [ "$prev" != "$reason" ]; then
+    printf '%s\n' "$reason" > "$state/$id.relay-queue-alert"
+    printf '%s is waiting for %s: %s\n' "$id" "$host" "$reason"
+  fi
+}
+
 # The body of a task's generated wake check. It lives here, not inlined into the
 # generated file, because bin/fm-relay-check-make.sh WRITES that file once and
 # nothing ever rewrites it: anything inlined would keep asking the question of the
@@ -275,6 +433,15 @@ fm_relay_check_emit() {  # <home> <id>
   local home=$1 id=$2 state host seen first new offset fails limit
   state="${FM_STATE_OVERRIDE:-$home/state}"
   limit=${FM_RELAY_FAIL_WAKE_AFTER:-3}
+  # A task can be armed before it is live: a dispatch the host refused while it
+  # was locked, asleep, or without its desktop host session is held here and
+  # retried on this same check, so the work starts on its own once the host can
+  # take it. While that record exists there is no remote task to read events
+  # from, and the retry owns the whole check.
+  if [ -f "$(fm_relay_pending_file "$state" "$id")" ]; then
+    fm_relay_pending_emit "$home" "$id"
+    return 0
+  fi
   host=$(fm_relay_meta_host "$state/$id.meta") || return 0
   [ -n "$host" ] || return 0
   fm_relay_host_load "$home" "$host" >/dev/null 2>&1 || return 0
