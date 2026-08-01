@@ -33,6 +33,37 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
+# Hard wall-clock cap on ONE current-state read. The stale path consults the
+# reader on every poll of a stale window, so an unresponsive backend, a hung
+# `axi status`, or a no-mistakes call that outlives its own internal bound
+# (FM_CREW_STATE_NM_TIMEOUT, default 10s) must never stretch a supervision cycle
+# without limit. Set above that internal bound so this stays a backstop rather
+# than a preemption of legitimate work. A read that hits this cap yields no
+# parseable line, so it classifies as `unknown` - never as a healthy
+# disconfirmer, and never as a silent absorb (the unknown outer bound in
+# bin/fm-watch.sh still surfaces a task that stays unreadable).
+FM_CREW_STATE_READ_TIMEOUT=${FM_CREW_STATE_READ_TIMEOUT:-15}
+case "$FM_CREW_STATE_READ_TIMEOUT" in ''|*[!0-9]*) FM_CREW_STATE_READ_TIMEOUT=15 ;; esac
+
+# Run the reader under FM_CREW_STATE_READ_TIMEOUT. GNU/BSD `timeout` first, then
+# Homebrew `gtimeout`, then a perl process-group alarm; with none of those the
+# reader still runs (its own bounded no-mistakes call remains) rather than
+# reporting a fabricated verdict. stdin is detached so the reader can never block
+# on an inherited terminal.
+_crew_state_read() {  # <id>
+  local id=$1 secs=$FM_CREW_STATE_READ_TIMEOUT
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null </dev/null
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null </dev/null
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+      "$secs" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null </dev/null
+  else
+    "$FM_CREW_STATE_BIN" "$id" 2>/dev/null </dev/null
+  fi
+}
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -554,12 +585,15 @@ signal_reason_is_actionable() {  # <file> ...
 # precedence: a crew that appended paused: but then STARTED a run reports an
 # active run, never a pause.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# keep it on supervision candidate paths, never on unrelated wakes.
+# keep it on supervision candidate paths, never on unrelated wakes. The stale path
+# does consult it every poll of a stale window, which is safe only because
+# _crew_state_read caps the whole read at FM_CREW_STATE_READ_TIMEOUT and a capped
+# read reports `unknown`, never a healthy disconfirmer.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_supervision_class() {  # <id>
   local id=$1 line state src
   [ -n "$id" ] || { printf 'unknown'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  line=$(_crew_state_read "$id") || true
   case "$line" in state:*"source: "*) ;; *) printf 'unknown'; return ;; esac
   state=${line#state: }; state=${state%% *}
   src=${line#*source: }; src=${src%% *}
@@ -633,16 +667,6 @@ signal_crew_provably_working() {  # <file> ...
   done
   [ -n "$seen" ] || return 1
   return 0
-}
-
-# 0 (terminal/actionable) if a stale window's last status line is
-# captain-relevant; 1 otherwise, including the no-status case. A 1 only means
-# "non-terminal"; the always-on watcher then applies crew_is_provably_working,
-# while the away-mode daemon applies its persistence recheck.
-stale_is_terminal() {  # <window> <state>
-  local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
-  [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 
 # Print "<file>\t<task>\t<last-line>" for every state/*.status whose last line is

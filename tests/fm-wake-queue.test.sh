@@ -105,7 +105,7 @@ test_stale_enqueue_before_suppressor() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after stale wake failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "stale wake was not queued"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not written"
-  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = possible-wedge ] || fail "stale candidate was not committed after enqueue"
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "stale:possible-wedge" ] || fail "task-bound stale candidate was not committed after enqueue"
   unset FM_FAKE_CREW_STATE
   pass "stale wake is queued before suppressor state is advanced"
 }
@@ -143,7 +143,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the immediate stale wake failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced after the enqueue"
-  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = possible-wedge ] || fail "possible-wedge candidate was not committed after enqueue"
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "stopped:possible-wedge" ] || fail "task-bound possible-wedge candidate was not committed after enqueue"
   unset FM_FAKE_CREW_STATE
   pass "a possible-wedge wake is queued before its candidate marker is committed"
 }

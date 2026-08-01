@@ -4,7 +4,9 @@
 # and keeps blocking; it queues and exits only for actionable wakes.
 # A no-verb signal is absorb-only-when-provably-working. The stale path instead
 # classifies the task's current state and wakes only on an actionable transition,
-# so pane-idle time cannot overrule a live run, gate, harness turn, or pause.
+# so pane-idle time cannot overrule a live run, gate, harness turn, or pause -
+# while BUSY_TURN_MAX_SECS keeps every pane-derived or unreadable disconfirmer
+# bounded, so none of them can silence a task forever.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -16,9 +18,16 @@
 #                          disconfirms a wedge. Unknown stays non-alarming. What
 #                          remains wakes once as a possible-wedge transition;
 #                          identical candidates are recorded and deduplicated
-#                          across pane churn. Unless afk is active, when the
-#                          daemon owns triage. Secondmate pause handling retains
-#                          its separate long-cadence policy.
+#                          across pane churn. The signals that prove only
+#                          rendering or readability - a busy pane footer, a
+#                          harness-turn verdict, an unreadable unknown verdict -
+#                          are bounded by BUSY_TURN_MAX_SECS against this task's
+#                          own completed-turn marker, so past that bound the
+#                          window surfaces once more for human inspection only,
+#                          never an automatic interrupt, signal, or restart.
+#                          Unless afk is active, when the daemon owns triage.
+#                          Secondmate pause handling retains its separate
+#                          long-cadence policy.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -102,20 +111,40 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
 # and ABSORBS the benign majority - it advances the suppression marker, logs to a
-# debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
-# / stale path is absorb-only-when-provably-working: such a wake is absorbed ONLY
-# while the crew shows positive evidence it is still working (an actively-running
-# no-mistakes step, or a busy pane, via crew_is_provably_working over
-# fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
-# busy pane is SURFACED, so a finish reported only through interactive pane menus
-# (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
-# signal, a no-verb signal whose crew is not provably working, any check, or a
+# debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb SIGNAL
+# path is absorb-only-when-provably-working: such a wake is absorbed ONLY while the
+# crew shows positive evidence it is still working (an actively-running no-mistakes
+# step, or a busy pane, via crew_is_provably_working over fm-crew-state.sh); a crew
+# that stopped its turn with no running pipeline and no busy pane is SURFACED, so a
+# finish reported only through interactive pane menus (no done: status) is never
+# swallowed. The STALE path instead reads the task's current state
+# (crew_supervision_class) and absorbs an active run, a parked gate, a live harness
+# turn, or a declared external pause - each bound to the task, none of them
+# unbounded: BUSY_TURN_MAX_SECS caps how long any pane-derived liveness signal (a
+# busy footer, a harness-turn verdict) or an unreadable `unknown` verdict may
+# suppress an alarm with no completed turn, after which the window surfaces once
+# for human inspection only. An ACTIONABLE wake (a captain-relevant signal, a
+# no-verb signal whose crew is not provably working, any check, or a
 # state-specific stale transition) is written to the durable queue and exits, which
 # is what wakes the LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # secondmate pause-state recheck interval
+# The outer bound on every liveness signal that is NOT a task-bound run or gate.
+# A busy pane is proof of rendering, not of progress: a hung foreground tool call
+# keeps repainting a changing busy footer while no turn ever completes, and an
+# unreadable harness (fm-crew-state's `unknown`) reports nothing at all.
+# BUSY_TURN_MAX_SECS bounds how long any of those may go with no completed turn:
+# once this task's state/<id>.turn-ended marker (or, before any turn has
+# completed, the task's spawn record) is this old, the window surfaces once as an
+# outer-bound candidate through the same state-transition dedup, for human
+# inspection only - never an automatic interrupt, signal, or restart of the worker
+# or its tool process. A completed turn touches turn-ended and resets the age. Set
+# generously above any legitimate interval between completed turns, including long
+# tool calls, builds, or test runs.
+BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+case "$BUSY_TURN_MAX_SECS" in ''|*[!0-9]*) BUSY_TURN_MAX_SECS=3600 ;; esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -265,7 +294,8 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.stale-candidate-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -328,13 +358,73 @@ exact_human_input_dialog() {  # <tail40>
   esac
 }
 
+# Age in seconds of <task>'s latest completed turn: the harness-neutral
+# state/<id>.turn-ended marker every verified harness's turn-end hook touches,
+# or, before any turn has completed, the task's own spawn record so a fresh task
+# still gets a bound. Task-bound by construction - no unrelated heartbeat can
+# advance it.
+turn_marker_age() {  # <task>
+  local task=$1 f
+  [ -n "$task" ] || { echo 0; return; }
+  f="$STATE/$task.turn-ended"
+  [ -e "$f" ] || f="$STATE/$task.meta"
+  age_of "$f"
+}
+
+# 0 iff <task> has completed no turn within BUSY_TURN_MAX_SECS. This is the outer
+# bound on every liveness signal that only proves rendering or readability - a
+# busy pane footer, a harness-turn verdict, an unreadable `unknown` verdict -
+# none of which is proof that the task advanced.
+busy_turn_over_age() {  # <task>
+  local task=$1
+  [ -n "$task" ] || return 1
+  [ "$(turn_marker_age "$task")" -ge "$BUSY_TURN_MAX_SECS" ]
+}
+
+# Surface the outer bound: <task> completed no turn within BUSY_TURN_MAX_SECS
+# while <signal> kept suppressing an alarm. Routed through the same
+# .stale-candidate-<key> transition dedup every other class uses, so one bound
+# crossing wakes once rather than every poll. For human inspection only: nothing
+# on this path interrupts, signals, or restarts the worker or its tool process.
+surface_turn_bound_candidate() {  # <window> <task> <signal>
+  local win=$1 task=$2 signal=$3 key state_file candidate age reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  state_file="$STATE/.stale-candidate-$key"
+  candidate="$task:turn-bound"
+  [ "$(cat "$state_file" 2>/dev/null || true)" = "$candidate" ] && return 0
+  age=$(turn_marker_age "$task")
+  reason="stale: $win (no completed turn in ${age}s, past the ${BUSY_TURN_MAX_SECS}s bound, while $signal - inspect only, never interrupt the worker)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$candidate" > "$state_file"
+  wake "$reason"
+}
+
+# A completed turn is a genuine transition back to progress, so drop a recorded
+# outer-bound candidate. Without this a task that crossed the bound once could
+# never wake on a second crossing, since the marker would still read turn-bound.
+clear_turn_bound_candidate() {  # <window>
+  local win=$1 key state_file
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  state_file="$STATE/.stale-candidate-$key"
+  case "$(cat "$state_file" 2>/dev/null || true)" in
+    *:turn-bound) rm -f "$state_file" ;;
+  esac
+  return 0
+}
+
 # State-specific stale triage for an ordinary worker. The candidate marker is
-# keyed to the worker target, while every disconfirmer comes from that task's
-# fm-crew-state read (or the exact dialog in that same pane). Pane hash churn is
-# deliberately not a state transition. Queue publication precedes committing an
-# actionable candidate so a failed enqueue can never suppress its retry.
+# keyed to the worker target but RECORDS "<task>:<class>", so a torn-down task
+# whose replacement reuses the same backend target counts as a transition instead
+# of inheriting the retired worker's verdict. Every disconfirmer comes from that
+# task's fm-crew-state read (or the exact dialog in that same pane). Pane hash
+# churn is deliberately not a state transition. The two signals that prove only
+# rendering or readability - a harness-turn verdict and an unreadable `unknown` -
+# are absorbed only inside BUSY_TURN_MAX_SECS of a completed turn; past it they
+# become the turn-bound candidate, so neither can silence a task forever. Queue
+# publication precedes committing an actionable candidate so a failed enqueue can
+# never suppress its retry.
 handle_state_specific_stale() {  # <window> <task> <hash> <tail40>
-  local win=$1 task=$2 h=$3 tail40=$4 key state_file previous class dialog reason
+  local win=$1 task=$2 h=$3 tail40=$4 key state_file previous class candidate dialog reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   state_file="$STATE/.stale-candidate-$key"
   previous=$(cat "$state_file" 2>/dev/null || true)
@@ -345,32 +435,42 @@ handle_state_specific_stale() {  # <window> <task> <hash> <tail40>
       [ -n "$dialog" ] && class=human-input
       ;;
   esac
+  case "$class" in
+    harness-turn|unknown)
+      busy_turn_over_age "$task" && class=turn-bound
+      ;;
+  esac
+  candidate="$task:$class"
 
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-  [ "$class" = "$previous" ] && return 0
+  [ "$candidate" = "$previous" ] && return 0
 
   case "$class" in
     human-input)
       reason="stale: $win (trust dialog awaiting a keystroke)"
       fm_wake_append stale "$win" "$reason" || exit 1
-      printf '%s' "$class" > "$state_file"
+      printf '%s' "$candidate" > "$state_file"
       mark_surfaced "$STATE/$task.status"
       wake "$reason"
       ;;
     possible-wedge)
       reason="stale: $win (possible wedge: no active run, gate, live harness turn, or declared external pause)"
       fm_wake_append stale "$win" "$reason" || exit 1
-      printf '%s' "$class" > "$state_file"
+      printf '%s' "$candidate" > "$state_file"
       mark_surfaced "$STATE/$task.status"
       wake "$reason"
       ;;
+    turn-bound)
+      surface_turn_bound_candidate "$win" "$task" \
+        "its harness reported a live turn or no readable state at all"
+      ;;
     active-run|gate|harness-turn|external-pause|unknown)
-      printf '%s' "$class" > "$state_file"
+      printf '%s' "$candidate" > "$state_file"
       triage_log "absorbed stale ($class): $win"
       ;;
     *)
-      printf 'unknown' > "$state_file"
+      printf '%s' "$task:unknown" > "$state_file"
       triage_log "absorbed stale (unknown classifier verdict): $win"
       ;;
   esac
@@ -920,10 +1020,17 @@ EOF
           handle_state_specific_stale "$w" "$task" "$h" "$tail40"
         fi
       else
-        # A task-bound live harness turn is a stale disconfirmer regardless of
-        # pane-idle duration. A not-yet-stale pane has no candidate to fire.
+        # A busy pane disconfirms a stale wedge, but only inside the
+        # BUSY_TURN_MAX_SECS bound: a hung foreground tool call repaints a
+        # changing busy footer forever while this task's turn-ended marker never
+        # advances, so past the bound the window surfaces once for inspection.
         rm -f "$ssf" "$STATE/.wedge-escalations-$key"
-        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
+          surface_turn_bound_candidate "$w" "$task" "its pane kept rendering a busy footer"
+        elif [ "$busy_now" -eq 0 ]; then
+          clear_turn_bound_candidate "$w"
+        fi
+        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; }; then
           clear_pause_tracking "$w"
         fi
       fi
@@ -931,7 +1038,11 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       rm -f "$ssf" "$STATE/.wedge-escalations-$key"
-      task=$(window_to_task "$w" "$STATE")
+      if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
+        surface_turn_bound_candidate "$w" "$task" "its pane kept rendering a busy footer"
+      elif [ "$busy_now" -eq 0 ]; then
+        clear_turn_bound_candidate "$w"
+      fi
       [ -e "$pf" ] && clear_pause_tracking "$w"
     fi
   done < <(recorded_windows)

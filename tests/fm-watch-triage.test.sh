@@ -8,8 +8,10 @@
 # provably-working no-verb wakes absorbed (no exit, no queue entry, suppressor
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
 # task-bound stale disconfirmers, exact trust dialogs, possible-wedge transition
-# deduplication, unknown-state silence, the heartbeat backstop fail-safe, and afk
-# coherence (no double-triage while the away-mode daemon owns supervision).
+# deduplication, unknown-state silence, the completed-turn outer bound that keeps
+# a busy footer and an unreadable harness from silencing a task forever, the
+# heartbeat backstop fail-safe, and afk coherence (no double-triage while the
+# away-mode daemon owns supervision).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
@@ -90,20 +92,6 @@ test_signal_reason_is_actionable_classifier() {
   # Coalesced batch: one benign + one captain-relevant -> actionable.
   signal_reason_is_actionable "$state/a.status" "$state/b.status" || fail "coalesced benign+actionable not actionable"
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
-}
-
-test_stale_is_terminal_classifier() {
-  local dir state
-  dir=$(make_case classify-stale); state="$dir/state"
-  printf 'done: ready in branch fm/x\n' > "$state/term.status"
-  stale_is_terminal "sess:fm-term" "$state" || fail "terminal stale status not classified terminal"
-  fm_write_meta "$state/herdr-term.meta" "window=default:w1:p2" "backend=herdr"
-  printf 'done: ready in branch fm/herdr\n' > "$state/herdr-term.status"
-  stale_is_terminal "default:w1:p2" "$state" || fail "terminal herdr stale status not resolved through metadata"
-  printf 'working: compiling\n' > "$state/nonterm.status"
-  stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
-  stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
-  pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
 }
 
 test_scan_captain_relevant_statuses_classifier() {
@@ -552,8 +540,8 @@ test_state_specific_disconfirmers_suppress_stale_replays() {
       reap "$pid"; fail "$name replay emitted a stale alarm despite task-bound '$verdict': $(cat "$out")"
     fi
     [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$name replay queued a stale alarm despite its disconfirmer"; }
-    [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "$expected" ] \
-      || { reap "$pid"; fail "$name replay did not record its $expected candidate"; }
+    [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "$name:$expected" ] \
+      || { reap "$pid"; fail "$name replay did not record its task-bound $expected candidate"; }
     reap "$pid"
   done <<'EOF'
 active-validation|active-run|state: working · source: run-step · validating (running)
@@ -629,11 +617,148 @@ test_unknown_stale_is_visible_but_never_alarms() {
   sleep 2
   kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; fail "unknown state re-fired after pane churn: $(cat "$out")"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "unknown state queued an alarm"; }
-  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = unknown ] \
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "unknown-stale:unknown" ] \
     || { reap "$pid"; fail "unknown candidate was not recorded for deduplication"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "unknown remains non-alarming across repeated stale observations"
+}
+
+# Unknown suppresses the IMMEDIATE alarm, but it is never permanently silent.
+# `unknown · pane` is the standing verdict for a whole harness class (kimi and
+# codex have no verified semantic busy source), so absorbing it forever would
+# delete wedge detection for those crews outright. The same task-bound
+# completed-turn bound that caps a busy footer caps an unreadable harness too:
+# the knob stays fixed here, and only the task's own turn marker decides.
+test_unknown_stale_escalates_past_the_turn_bound() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case unknown-stale-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-unknown-bound"
+  printf 'unreadable worker pane\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=kimi\n' "$window" > "$state/unknown-bound.meta"
+  printf 'working: old progress note\n' > "$state/unknown-bound.status"
+  sig=$(seen_sig "$state/unknown-bound.status"); printf '%s' "$sig" > "$state/.seen-unknown-bound_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "unreadable worker pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown kimi-unverified)'
+
+  # Inside the bound: a turn completed moments ago, so unknown stays quiet.
+  : > "$state/unknown-bound.turn-ended"
+  printf '%s' "$(seen_sig "$state/unknown-bound.turn-ended")" > "$state/.seen-unknown-bound_turn-ended"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_TURN_MAX_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an unreadable harness inside the turn bound emitted an alarm: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "an unreadable harness inside the turn bound queued an alarm"; }
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "unknown-bound:unknown" ] \
+    || { reap "$pid"; fail "unknown candidate inside the bound was not recorded"; }
+  reap "$pid"
+
+  # Past the bound: same unreadable verdict, same knob, but no turn has completed
+  # since. It must surface exactly once.
+  touch -t 200001010000 "$state/unknown-bound.turn-ended"
+  printf '%s' "$(seen_sig "$state/unknown-bound.turn-ended")" > "$state/.seen-unknown-bound_turn-ended"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_TURN_MAX_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an unreadable harness past the turn bound never surfaced"
+  grep -F "no completed turn in" "$out" >/dev/null \
+    || fail "unknown escalation past the bound did not use the turn-bound reason: $(cat "$out")"
+  grep -F "inspect only, never interrupt the worker" "$out" >/dev/null \
+    || fail "unknown escalation past the bound was not marked inspection-only: $(cat "$out")"
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "unknown-bound:turn-bound" ] \
+    || fail "turn-bound escalation did not record its deduplicating candidate"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null || fail "drain after unknown escalation failed"
+
+  # Still unreadable, still no completed turn: the identical candidate must not re-fire.
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_TURN_MAX_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an identical turn-bound candidate re-fired: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "an identical turn-bound candidate was enqueued twice"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "an unreadable harness is suppressed inside the turn bound and surfaces once past it"
+}
+
+# A hung foreground tool call keeps repainting a changing busy footer forever
+# while the task's own turn-end marker never advances. A busy pane is a stale
+# disconfirmer, but not an unbounded one: past FM_BUSY_TURN_MAX_SECS the window
+# surfaces once for inspection only, and a completed turn re-arms the bound.
+test_busy_pane_without_a_completed_turn_escalates() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case busy-turn-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-forever"
+  printf 'building the thing\n\n* Working... (esc to interrupt)\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/busy-forever.meta"
+  printf 'working: running the build\n' > "$state/busy-forever.status"
+  printf '%s' "$(seen_sig "$state/busy-forever.status")" > "$state/.seen-busy-forever_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # A real armed busy record, so window_is_busy reports an exact busy verdict.
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" busy-forever >/dev/null || fail "arming the busy record failed"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+
+  # A turn completed within the bound, so the busy footer is trusted outright.
+  : > "$state/busy-forever.turn-ended"
+  printf '%s' "$(seen_sig "$state/busy-forever.turn-ended")" > "$state/.seen-busy-forever_turn-ended"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_TURN_MAX_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a busy pane within the turn bound emitted an alarm: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a busy pane within the turn bound queued an alarm"; }
+  reap "$pid"
+
+  # The footer keeps repainting (a changing pane hash) but no turn ever ends.
+  printf 'building the thing\n\n* Working... (94s, esc to interrupt)\n' > "$capture_file"
+  touch -t 200001010000 "$state/busy-forever.turn-ended"
+  printf '%s' "$(seen_sig "$state/busy-forever.turn-ended")" > "$state/.seen-busy-forever_turn-ended"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_TURN_MAX_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a permanently busy pane with no completed turn never surfaced"
+  grep -F "no completed turn in" "$out" >/dev/null \
+    || fail "busy-pane escalation did not use the turn-bound reason: $(cat "$out")"
+  grep -F "inspect only, never interrupt the worker" "$out" >/dev/null \
+    || fail "busy-pane escalation was not marked inspection-only: $(cat "$out")"
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = "busy-forever:turn-bound" ] \
+    || fail "busy-pane escalation did not record its deduplicating candidate"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null || fail "drain after busy escalation failed"
+
+  # A completed turn is real progress: the recorded candidate clears, so a later
+  # crossing of the same bound can wake again instead of being deduplicated away.
+  touch "$state/busy-forever.turn-ended"
+  printf '%s' "$(seen_sig "$state/busy-forever.turn-ended")" > "$state/.seen-busy-forever_turn-ended"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_TURN_MAX_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a busy pane back inside the turn bound emitted an alarm: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-candidate-$key" ] \
+    || { reap "$pid"; fail "a completed turn did not clear the recorded turn-bound candidate"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a busy pane with no completed turn surfaces once past the bound, and a completed turn re-arms it"
 }
 
 test_exact_trust_dialog_fires_as_human_input_not_wedge() {
@@ -1181,13 +1306,14 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 }
 
 test_signal_reason_is_actionable_classifier
-test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_supervision_class_classifier
 test_state_specific_disconfirmers_suppress_stale_replays
 test_possible_wedge_transition_fires_once_across_pane_churn
 test_unknown_stale_is_visible_but_never_alarms
+test_unknown_stale_escalates_past_the_turn_bound
+test_busy_pane_without_a_completed_turn_escalates
 test_exact_trust_dialog_fires_as_human_input_not_wedge
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
