@@ -12,38 +12,6 @@ PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-independent-review)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
-write_spawn_mock() {
-  local fake_root=$1
-  cat > "$fake_root/bin/fm-spawn.sh" <<'SH'
-#!/usr/bin/env bash
-id=$1
-project=$2
-shift 2
-harness=
-model=default
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --harness) harness=$2; shift 2 ;;
-    --model) model=$2; shift 2 ;;
-    --effort) shift 2 ;;
-    --scout) shift ;;
-    *) exit 2 ;;
-  esac
-done
-printf '%s\t%s\t%s\n' "$id" "$harness" "$model" >> "$FM_TEST_SPAWN_LOG"
-{
-  printf 'window=fm-%s\n' "$id"
-  printf 'endpoint_task_id=%s\n' "$id"
-  printf 'worktree=%s\n' "$project"
-  printf 'project=%s\n' "$project"
-  printf 'harness=%s\n' "$harness"
-  printf 'model=%s\n' "$model"
-  printf 'kind=scout\nmode=scout\nyolo=off\n'
-} > "$FM_STATE_OVERRIDE/$id.meta"
-SH
-  chmod +x "$fake_root/bin/fm-spawn.sh"
-}
-
 make_case() {
   local name=$1 builder_harness=$2 builder_model=$3 implementation=$4
   local dir="$TMP_ROOT/$name" source remote project wt home fake_root fakebin
@@ -124,7 +92,33 @@ done
 head=$(git --git-dir="$FM_TEST_REMOTE" rev-parse refs/pull/1/head)
 printf '%s\t%s\t%s\n' "${FM_TEST_PR_STATE:-OPEN}" "${FM_TEST_PR_DRAFT:-false}" "$head"
 SH
-  write_spawn_mock "$fake_root"
+  cat > "$fake_root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+id=$1
+project=$2
+shift 2
+harness=
+model=default
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --harness) harness=$2; shift 2 ;;
+    --model) model=$2; shift 2 ;;
+    --effort) shift 2 ;;
+    --scout) shift ;;
+    *) exit 2 ;;
+  esac
+done
+printf '%s\t%s\t%s\n' "$id" "$harness" "$model" >> "$FM_TEST_SPAWN_LOG"
+{
+  printf 'window=fm-%s\n' "$id"
+  printf 'endpoint_task_id=%s\n' "$id"
+  printf 'worktree=%s\n' "$project"
+  printf 'project=%s\n' "$project"
+  printf 'harness=%s\n' "$harness"
+  printf 'model=%s\n' "$model"
+  printf 'kind=scout\nmode=scout\nyolo=off\n'
+} > "$FM_STATE_OVERRIDE/$id.meta"
+SH
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -565,35 +559,6 @@ EOF
   pass 'a fenced shell comment inside the task section never truncates the cold acceptance criteria'
 }
 
-test_reviewer_that_never_launched_is_retired_and_redispatched() {
-  local dir rc out
-  dir=$(make_case launch-failure codex gpt-5.6-sol 'authorize() { [ "${1:-}" = allowed ]; }')
-  cat > "$dir/root/bin/fm-spawn.sh" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$dir/root/bin/fm-spawn.sh"
-  set +e
-  out=$(run_review "$dir" ready task-a https://github.com/example/repo/pull/1 2>&1)
-  rc=$?
-  set -e
-  expect_code 1 "$rc" 'a failed reviewer launch should refuse readiness'
-  assert_contains "$out" 'launch failed' 'failed launch refusal did not name the launch failure'
-  assert_absent "$dir/home/state/task-a.independent-review.round-1" \
-    'a reviewer that never launched left a review round that can never produce a verdict'
-  write_spawn_mock "$dir/root"
-  set +e
-  run_review "$dir" ready task-a https://github.com/example/repo/pull/1 >/dev/null 2>&1
-  rc=$?
-  set -e
-  expect_code 3 "$rc" 'readiness stayed wedged after a reviewer launch failure'
-  [ -n "$(round_value "$dir" 1 reviewer_task)" ] \
-    || fail 're-dispatch did not record a fresh first-round reviewer'
-  assert_absent "$dir/home/state/task-a.independent-review.round-2" \
-    'a failed launch consumed one of the two permitted review rounds'
-  pass 'a reviewer that never launched is retired so the next readiness call re-dispatches its round'
-}
-
 test_pr_check_is_structurally_blocked_without_clear_verdict() {
   local dir rc out
   dir=$(make_case pr-check-blocked codex gpt-5.6-sol 'authorize() { [ "${1:-}" = allowed ]; }')
@@ -667,7 +632,6 @@ test_draft_and_merged_prs_never_start_review
 test_work_in_progress_task_never_starts_review
 test_gitlab_finished_merge_request_binds_exact_head
 test_fenced_hash_comment_never_truncates_criteria
-test_reviewer_that_never_launched_is_retired_and_redispatched
 test_pr_check_is_structurally_blocked_without_clear_verdict
 test_pr_check_quarantines_legacy_poll_before_pending_review
 test_pr_check_leads_with_traveling_clear_verdict

@@ -9,6 +9,11 @@
 # A second rejection, or another head after two rounds, opens the circuit and
 # requires re-scoping rather than a third review.
 #
+# A round file is never rewritten or deleted here. A round whose reviewer failed
+# to launch or died before submitting stays on disk and its refusal names the
+# exact file, so stale rounds accumulate and are cleaned up separately rather
+# than by this script.
+#
 # Reviewer candidates are verified fm-spawn adapters.
 # The default candidate order is intentionally compared with the recorded
 # builder family at runtime; it is not a standing vendor assignment.
@@ -508,54 +513,13 @@ start_review() {
   set -e
   if [ "$spawn_status" -ne 0 ]; then
     printf '%s\n' 'status=launch-failed' >> "$round_file"
-    if round_never_launched "$round_file" && retire_round "$id" "$round" "$round_file"; then
-      fail "different-family reviewer launch failed for round $round; the round was retired so the next readiness call dispatches a fresh reviewer"
-    else
-      fail "different-family reviewer launch failed for round $round; retire $round_file before retrying"
-    fi
+    fail "different-family reviewer launch failed for round $round; retire $round_file before retrying"
     return 1
   fi
   printf '%s\n' 'status=pending' >> "$round_file"
   printf 'independent review started: round %s reviewer=%s family=%s head=%s\n' \
     "$round" "$review_id" "$SELECTED_FAMILY" "$PR_HEAD"
   return 3
-}
-
-validate_round() {
-  local id=$1 url=$2 round=$3 round_file=$4
-  [ "$(meta_value "$round_file" format)" = firstmate-independent-review-round-v1 ] || {
-    fail "could not validate independent review round $round state"
-    return 1
-  }
-  [ "$(meta_value "$round_file" task)" = "$id" ] \
-    && [ "$(meta_value "$round_file" pr)" = "$url" ] || {
-      fail "independent review round $round is bound to another task or pull request"
-      return 1
-    }
-}
-
-# A round is replaceable only while its reviewer task provably never came into
-# existence: no reviewer metadata and no reviewer status file. A launch that got
-# far enough to create either is left in place for an operator to retire.
-round_never_launched() {
-  local round_file=$1 reviewer
-  reviewer=$(meta_value "$round_file" reviewer_task)
-  [ -n "$reviewer" ] && fm_pr_task_id_valid "$reviewer" || return 1
-  [ ! -e "$STATE/$reviewer.meta" ] && [ ! -L "$STATE/$reviewer.meta" ] || return 1
-  [ ! -e "$STATE/$reviewer.status" ] && [ ! -L "$STATE/$reviewer.status" ]
-}
-
-retire_round() {
-  local id=$1 round=$2 round_file=$3 reviewer bundle review_dir
-  reviewer=$(meta_value "$round_file" reviewer_task)
-  fm_pr_task_id_valid "$reviewer" || return 1
-  bundle="$STATE/$id.independent-review.bundle-$round"
-  review_dir="$DATA/$reviewer"
-  [ ! -L "$bundle" ] && [ ! -L "$review_dir" ] || return 1
-  [ ! -e "$bundle" ] || [ -d "$bundle" ] || return 1
-  [ ! -e "$review_dir" ] || [ -d "$review_dir" ] || return 1
-  rm -rf -- "$bundle" "$review_dir" || return 1
-  rm -f -- "$round_file"
 }
 
 verdict_matches_round() {
@@ -653,27 +617,17 @@ ready_command() {
     verdict_value=$(meta_value "$verdict" verdict)
   fi
 
-  # A round whose reviewer never came into existence can never produce a
-  # verdict, so it is retired rather than left wedging readiness. Retiring frees
-  # the round number: a failed launch does not consume one of the two permitted
-  # review rounds.
   if [ "$round" -gt 0 ]; then
     round_file="$STATE/$id.independent-review.round-$round"
-    validate_round "$id" "$url" "$round" "$round_file" || return 1
-    if [ "$verdict_round" != "$round" ] && round_never_launched "$round_file"; then
-      retire_round "$id" "$round" "$round_file" || {
-        fail "independent review round $round never launched a reviewer and could not be retired; retire $round_file by hand and retry"
+    [ "$(meta_value "$round_file" format)" = firstmate-independent-review-round-v1 ] || {
+      fail "could not validate independent review round $round state"
+      return 1
+    }
+    [ "$(meta_value "$round_file" task)" = "$id" ] \
+      && [ "$(meta_value "$round_file" pr)" = "$url" ] || {
+        fail "independent review round $round is bound to another task or pull request"
         return 1
       }
-      printf 'retired independent review round %s: no different-family reviewer was ever launched\n' "$round" >&2
-      round=$((round - 1))
-      round_file=''
-    fi
-  fi
-
-  if [ "$round" -gt 0 ]; then
-    round_file="$STATE/$id.independent-review.round-$round"
-    validate_round "$id" "$url" "$round" "$round_file" || return 1
     if [ "$(meta_value "$round_file" head)" = "$PR_HEAD" ]; then
       if [ "$verdict_round" = "$round" ]; then
         verdict_matches_round "$verdict" "$round_file" || {
