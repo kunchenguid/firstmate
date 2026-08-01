@@ -105,8 +105,7 @@ case "$out" in
 esac
 pass "real tmux: fm_backend_tmux_send_text_line sends literal text and submits with Enter"
 
-# --- send_literal + send_key(Enter), the two-step form fm-spawn.sh uses for the
-# harness launch command (literal send, settle, then a separate Enter) --------
+# --- send_literal + send_key(Enter), the two-step primitive composition ------
 
 fm_backend_tmux_send_literal "$TARGET" "printf 'literal-then-key-%s\\n' captain" \
   || fail "fm_backend_tmux_send_literal failed"
