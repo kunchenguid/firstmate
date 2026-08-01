@@ -66,7 +66,7 @@ case "$1 ${2:-}" in
     ;;
   'pane run')
     sleep "${TEST_PANE_RUN_DELAY:-0}"
-    bash -c "$4" >> "$TEST_RESUME_LOG" 2>&1 &
+    (cd / && bash -c "$4") >> "$TEST_RESUME_LOG" 2>&1 &
     ;;
   *) printf '{"error":{"code":"unexpected"}}\n'; exit 1 ;;
 esac
@@ -78,6 +78,7 @@ cat > "$FAKEBIN/pi" <<'SH'
 set -u
 printf '%s\n' "$*" >> "$TEST_PI_LOG"
 umask > "$TEST_UMASK_FILE"
+pwd -P > "$TEST_PI_CWD_FILE"
 trap 'printf "shell\n" > "$TEST_MODE_FILE"; exit 0' TERM INT HUP
 actual_id=${TEST_ATTEST_ID:-$TEST_FULL_ID}
 pi_start=$(ps -o lstart= -p $$ | awk '{$1=$1; print}')
@@ -109,7 +110,7 @@ export HERDR_WORKSPACE_ID="$WORKSPACE" HERDR_TAB_ID="$TAB" HERDR_PANE_ID="$PANE"
 export TEST_HERDR_LOG="$LOG" TEST_MODE_FILE="$MODE" TEST_SESSION='lab-exact' TEST_SOCKET="$SOCKET"
 export TEST_PANE="$PANE" TEST_WORKSPACE="$WORKSPACE" TEST_TAB="$TAB"
 export TEST_FULL_ID="$FULL_ID" TEST_SESSION_FILE="$SESSION_FILE" TEST_SESSION_DIR="$SESSION_DIR" TEST_CWD="$T"
-export TEST_RESUME_LOG="$T/resume.log" TEST_PI_LOG="$T/pi.log" TEST_UMASK_FILE="$T/pi.umask"
+export TEST_RESUME_LOG="$T/resume.log" TEST_PI_LOG="$T/pi.log" TEST_UMASK_FILE="$T/pi.umask" TEST_PI_CWD_FILE="$T/pi.cwd"
 SCRIPT="$ROOT/bin/fm-primary-pi.sh"
 RECOVERY_LOCK="$HOME_FIXTURE/state/primary-pi/recovery.lock"
 LAUNCH_PID=''
@@ -298,6 +299,7 @@ RECOVERY_PID=''
 out=$(cat "$T/exact.out")
 assert_contains "$out" "pi_session=$FULL_ID" 'successful restart must report exact Pi session'
 assert_grep "--session $FULL_ID" "$TEST_PI_LOG" 'Pi restart command must carry the full exact session id'
+[ "$(cat "$TEST_PI_CWD_FILE")" = "$T" ] || fail 'Pi restart did not enter the exact recorded session cwd'
 assert_no_grep ' --session-id ' "$TEST_PI_LOG" 'Pi restart command must never use --session-id'
 assert_no_grep ' -c ' "$TEST_PI_LOG" 'Pi restart command must never use -c'
 assert_grep 'result=ok' "$HOME_FIXTURE/state/primary-pi/attestation.v1" 'recovery must publish successful post-launch attestation'
@@ -368,5 +370,34 @@ out=$("$SCRIPT" status 2>&1) || fail "status must report a malformed lease token
 assert_contains "$out" 'lease=malformed' 'a non-hex lease token must read as a malformed lease'
 rm -rf "$HOME_FIXTURE/state/primary-pi/lease"
 pass 'malformed custody and lease records are reported by status rather than exiting'
+
+# A crash before first attestation leaves no custody; only a stale lease plus a
+# twice-proven exact bare shell can be reclaimed by the supported launch path.
+mv "$HOME_FIXTURE/state/primary-pi" "$T/previous-primary-state"
+mkdir -p "$HOME_FIXTURE/state/primary-pi/lease"
+printf 'version=1\n' > "$HOME_FIXTURE/state/primary-pi/lease/version"
+printf 'token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' > "$HOME_FIXTURE/state/primary-pi/lease/token"
+printf 'pid=999999\nstart=Mon Jan  1 00:00:00 2001\n' > "$HOME_FIXTURE/state/primary-pi/lease/owner"
+chmod 700 "$HOME_FIXTURE/state/primary-pi" "$HOME_FIXTURE/state/primary-pi/lease"
+chmod 600 "$HOME_FIXTURE/state/primary-pi/lease/"*
+printf 'unknown\n' > "$MODE"
+set +e
+out=$("$SCRIPT" launch --pi pi 2>&1); rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail 'unknown stale pre-attestation pane unexpectedly relaunched'
+assert_contains "$out" 'unknown agent state' 'unknown stale pre-attestation pane must refuse'
+assert_grep 'token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$HOME_FIXTURE/state/primary-pi/lease/token" 'refused stale launch must preserve its lease evidence'
+printf 'shell\n' > "$MODE"
+"$SCRIPT" launch --pi pi > "$T/stale-launch.out" 2>&1 &
+LAUNCH_PID=$!
+wait_for 'safe stale pre-attestation lease reclamation' lease_live
+new_token=$(grep '^token=' "$HOME_FIXTURE/state/primary-pi/lease/token" | cut -d= -f2-)
+[ "$new_token" != bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ] || fail 'stale pre-attestation lease token was not replaced'
+assert_present "$HOME_FIXTURE/state/primary-pi/custody.v1" 'reclaimed launch must publish fresh attested custody'
+kill -TERM "$LAUNCH_PID"
+wait "$LAUNCH_PID" 2>/dev/null || true
+LAUNCH_PID=''
+wait_for 'reclaimed launch cleanup' lease_absent
+pass 'stale pre-attestation launch state safely refuses ambiguity and recovers a proven bare shell'
 
 printf 'all fm-primary-pi executable-interface tests passed\n'

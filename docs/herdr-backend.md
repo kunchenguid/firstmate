@@ -242,6 +242,7 @@ The wrapper requires Herdr's complete injected session, socket, workspace, tab, 
 It holds a PID/start-bound lease for Pi's whole lifetime and loads the custody, turn-end, and watcher extensions explicitly.
 The tracked custody extension only reports Pi's live exact session identity; the wrapper validates that report and is the sole writer of the canonical Firstmate home, exact Herdr endpoint, Pi harness, full Pi session id, canonical session file and directory, session cwd, and lease identity under private `state/primary-pi/` records.
 A normal `/new`, `/resume`, or `/fork` inside the same Pi process updates that record through the same attestation path.
+If a crash leaves a PID/start-stale lease before the first custody record exists, a later `launch` reclaims it only after two stable reads prove the same injected pane is an agent-free bare shell; a live Pi, foreground process, unknown state, malformed lease, or existing custody still refuses.
 
 Reconnect with:
 
@@ -253,7 +254,7 @@ Recovery reads only recorded immutable ids and always passes the named session e
 When that exact pane still has a registered Pi and corroborating foreground process, recovery attaches to it and never starts another Pi.
 When the server is absent, recovery retries for a bounded interval and may start only the recorded named server before retrying again.
 A restored pane may restart Pi only when two stable reads prove one agent-free bare shell, the old lifetime lease is absent or PID/start-stale, and the recorded session passes strict file, path, header, cwd, and duplicate-id validation.
-The restart strictly validates the canonical session file and passes Pi its full exact header id through `--session`; it never uses `-c`, `--resume`, `--session-id`, labels, focus, interactive selection, a partial id, or an ambient Herdr target.
+The restart strictly validates the canonical session file, enters its exact recorded cwd, and passes Pi its full exact header id through `--session`; it never uses `-c`, `--resume`, `--session-id`, labels, focus, interactive selection, a partial id, or an ambient Herdr target.
 A fresh token atomically binds the replacement wrapper, and recovery refuses to attach or report success until Pi attests the exact expected session from inside the new process.
 Unknown state, a live or malformed lease, path aliases, symlinks, non-regular files, malformed JSONL, duplicate full ids, missing sessions, changed pane identity, and attestation mismatch all stop automatic restart.
 The fallback is attach-only or manual recovery, never a guessed launch.
@@ -272,7 +273,7 @@ It does not configure remote access, reconnect a phone automatically, change log
 Those axes are intentionally manual or owned by their existing runtime lifecycle.
 
 `tests/fm-primary-pi.test.sh` covers executable launch, attach-first, strict resumption, lease, retry, contradiction, corruption, duplicate, path, and post-launch-attestation behavior.
-`tests/fm-primary-custody-extension.test.sh` covers Pi-side input blocking, successful startup attestation, and shutdown after startup or later integrity failure.
+`tests/fm-primary-custody-extension.test.sh` covers Pi-side input blocking, successful startup attestation, one-time new-session persistence finalization, no routine settled-message rechecks, and shutdown after failed startup or first-persistence attestation.
 `tests/fm-primary-pi-install.test.sh` covers idempotent install, status, uninstall, permissions, and foreign-file refusal.
 Real lifecycle verification remains restricted to generated non-default sessions through `bin/fm-herdr-lab.sh`.
 

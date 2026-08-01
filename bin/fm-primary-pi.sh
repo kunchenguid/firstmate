@@ -53,8 +53,10 @@
 #
 # lease/ contains version, token, owner_pid, and owner_start. The wrapper keeps
 # that directory for Pi's whole lifetime. Clean exit removes only a token-matched
-# lease. A stale lease can be replaced only by the internal resume action after
-# recover has proved the exact pane is a stable restored shell.
+# lease. A stale recorded lease can be replaced only by the internal resume
+# action after recover proves the exact pane is a stable restored shell. A stale
+# pre-attestation lease with no custody can be replaced by `launch` only after
+# two reads prove its exact injected pane is an agent-free bare shell.
 #
 # recovery.lock is the mkdir-created single-flight directory that keeps two
 # wrappers from deciding custody at once. Its owner record holds pid and start,
@@ -576,6 +578,10 @@ run_pi_owner() {
   export FM_PRIMARY_PI_HARNESS="$harness"
   export FM_PI_HARNESS="$harness"
   export FM_HOME FM_ROOT_OVERRIDE="$FM_ROOT"
+  if [ "$recovery" = 1 ]; then
+    cd "$expected_cwd" || die "cannot enter the exact recorded Pi cwd before recovery launch"
+    [ "$(pwd -P)" = "$expected_cwd" ] || die "recovery launch cwd is not the exact recorded Pi cwd"
+  fi
   trap 'if [ "$child" -gt 1 ] 2>/dev/null; then kill -TERM "$child" 2>/dev/null || true; fi' TERM INT HUP
   "$pi_bin" \
     -e "$FM_ROOT/.pi/extensions/fm-primary-custody.ts" \
@@ -591,7 +597,7 @@ run_pi_owner() {
 }
 
 command_launch() {
-  local harness=${FM_PI_HARNESS:-pi} token start
+  local harness=${FM_PI_HARNESS:-pi} token start stale_token='' shape proc shape2 proc2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --pi) shift; harness=${1:-}; shift ;;
@@ -609,14 +615,34 @@ command_launch() {
     if pid_matches "$LEASE_PID" "$LEASE_START"; then
       die "a primary custody lease is already live (pid $LEASE_PID)"
     fi
-    die "a stale custody lease requires recover; launch will not reclaim it"
-  fi
-  if [ -e "$CUSTODY" ] || [ -L "$CUSTODY" ]; then
+    if [ -e "$CUSTODY" ] || [ -L "$CUSTODY" ]; then
+      die "a stale custody lease with recorded identity requires recover; launch will not reclaim it"
+    fi
+    stale_token=$LEASE_TOKEN
+  elif [ -e "$CUSTODY" ] || [ -L "$CUSTODY" ]; then
     die "existing primary custody requires recover; launch will not create a second authority"
   fi
   token=$(new_token)
   start=$(process_start "$$")
-  write_lease "$token" "$$" "$start" || die "could not acquire the primary custody lease"
+  if [ -n "$stale_token" ]; then
+    shape=$(agent_shape "$HERDR_SESSION" "$HERDR_PANE_ID")
+    proc=$(process_json "$HERDR_SESSION" "$HERDR_PANE_ID") || die "stale pre-attestation launch pane process state is unreadable"
+    if [ "$shape" = pi ]; then
+      process_is_pi "$proc" || die "stale pre-attestation lease has contradictory registered-Pi process state"
+      die "stale pre-attestation lease still has a live Pi; manual attach is required"
+    fi
+    [ "$shape" = none ] || die "stale pre-attestation lease has unknown agent state; refusing duplicate launch"
+    process_is_bare_shell "$proc" || die "stale pre-attestation lease does not resolve to a proven bare shell"
+    sleep "$SERVER_DELAY"
+    shape2=$(agent_shape "$HERDR_SESSION" "$HERDR_PANE_ID")
+    proc2=$(process_json "$HERDR_SESSION" "$HERDR_PANE_ID") || die "stale pre-attestation pane changed unreadably during revalidation"
+    if [ "$shape2" != none ] || ! process_is_bare_shell "$proc2"; then
+      die "stale pre-attestation pane stopped being a stable agent-free bare shell"
+    fi
+    replace_stale_lease "$stale_token" "$token" || die "could not atomically replace the stale pre-attestation lease"
+  else
+    write_lease "$token" "$$" "$start" || die "could not acquire the primary custody lease"
+  fi
   release_recovery_lock
   trap - EXIT
   run_pi_owner "$token" "$harness" 0 '' '' '' '' "$@"

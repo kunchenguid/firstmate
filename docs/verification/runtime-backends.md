@@ -170,9 +170,9 @@ tests/fm-primary-custody-extension.test.sh
 tests/fm-primary-pi-install.test.sh
 ```
 
-The first suite proves attach-first behavior, lifetime lease exclusion, stable restored-shell restart, canonical-file validation with full-exact-id Pi invocation, bounded named-server absence, strict malformed/duplicate/missing/symlink refusal, unknown and contradictory state refusal, post-launch attestation, token-bound cleanup, and repeated-recovery idempotence.
+The first suite proves attach-first behavior, lifetime lease exclusion, stable restored-shell restart from the exact recorded cwd, canonical-file validation with full-exact-id Pi invocation, bounded named-server absence, strict malformed/duplicate/missing/symlink refusal, unknown and contradictory state refusal, safe stale pre-attestation lease reclaim, post-launch attestation, token-bound cleanup, and repeated-recovery idempotence.
 It also proves that private records stay mode 0700/0600 without widening the umask Pi inherits, that every completed recovery releases its recovery lock instead of leaving dead ownership, and that malformed custody or lease records surface through `status` rather than an error exit.
-The extension suite proves input remains blocked before or after failed attestation and that a startup or later integrity failure requests Pi shutdown.
+The extension suite proves input remains blocked after failed startup or first-persistence attestation, a new pending session finalizes once, and established sessions perform no synchronous per-message or per-settlement rechecks.
 The install suite proves the optional next-login server ensure and attach helper are idempotent, private, reversible, inert until a future login or explicit invocation, and refuse foreign files and symlinks.
 Any repeated live lifecycle verification must use `bin/fm-herdr-lab.sh` with a generated non-default session and the default-session tripwire.
 

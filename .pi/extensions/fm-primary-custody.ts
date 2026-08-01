@@ -16,6 +16,8 @@ const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 const owner = `${root}/bin/fm-primary-pi.sh`;
 
+type Verdict = "ok" | "pending" | "failed";
+
 function processStart(): string {
   const result = spawnSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8" });
   if (result.status !== 0) return "";
@@ -27,10 +29,11 @@ export default function (pi: ExtensionAPI) {
   if (!token) return;
 
   let inputAllowed = false;
+  let persistencePending = false;
   let attesting = false;
 
-  function attest(reason: string, ctx: ExtensionContext): boolean {
-    if (attesting) return inputAllowed;
+  function attest(reason: string, ctx: ExtensionContext): Verdict {
+    if (attesting) return "failed";
     attesting = true;
     try {
       const sessionFile = ctx.sessionManager.getSessionFile() ?? "";
@@ -55,36 +58,41 @@ export default function (pi: ExtensionAPI) {
         env: process.env,
         encoding: "utf8",
       });
-      const verdict = result.status === 0 ? result.stdout.trim() : "failed";
-      inputAllowed = verdict === "ok" || (!recovery && verdict === "pending");
-      if (inputAllowed && recovery) {
+      const output = result.status === 0 ? result.stdout.trim() : "failed";
+      const verdict: Verdict = output === "ok" || output === "pending" ? output : "failed";
+      if (verdict === "ok" && recovery) {
         // Pi reloads extension factories on /new, /resume, and /fork. Clear the
         // one-time recovery expectation process-wide after the exact startup
         // attests so later deliberate same-process session changes can publish
         // their own new custody identity.
         process.env.FM_PRIMARY_PI_RECOVERY = "0";
       }
-      return inputAllowed;
+      return verdict;
     } finally {
       attesting = false;
     }
   }
 
   pi.on("session_start", async (event, ctx) => {
-    if (attest(String(event.reason ?? "startup"), ctx)) return;
+    const recovery = process.env.FM_PRIMARY_PI_RECOVERY === "1";
+    const verdict = attest(String(event.reason ?? "startup"), ctx);
+    inputAllowed = verdict === "ok" || (!recovery && verdict === "pending");
+    persistencePending = !recovery && verdict === "pending";
+    if (inputAllowed) return;
     ctx.ui.notify("Firstmate exact-session custody attestation failed; Pi is shutting down without accepting input.", "error");
     ctx.shutdown();
   });
 
-  pi.on("message_end", async (event, ctx) => {
-    if (event.message.role !== "assistant" || attest("message", ctx)) return;
-    ctx.ui.notify("Firstmate session custody lost integrity; Pi is shutting down.", "error");
-    ctx.shutdown();
-  });
-
+  // A brand-new Pi session can have an intended canonical file path before the
+  // JSONL exists. Finalize that one pending record after Pi's first settled run.
+  // Established sessions do no per-message or per-settlement subprocess work.
   pi.on("agent_settled", async (_event, ctx) => {
-    if (attest("settled", ctx)) return;
-    ctx.ui.notify("Firstmate session custody lost integrity; Pi is shutting down.", "error");
+    if (!persistencePending) return;
+    const verdict = attest("persisted", ctx);
+    persistencePending = verdict === "pending";
+    if (verdict === "ok" || verdict === "pending") return;
+    inputAllowed = false;
+    ctx.ui.notify("Firstmate session custody failed final persistence attestation; Pi is shutting down.", "error");
     ctx.shutdown();
   });
 
