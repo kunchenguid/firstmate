@@ -36,13 +36,39 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Extract the value following a flag (e.g. -t, -n) from the argument list.
+fake_arg_after() {
+  local flag=$1 prev= a
+  shift
+  for a in "$@"; do
+    [ "$prev" = "$flag" ] && { printf '%s\n' "$a"; return 0; }
+    prev=$a
+  done
+  return 1
+}
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    # A batch spawns several distinct tasks into one home; a real worktree pool
+    # hands each its own slot. When FM_FAKE_WT_MAP is set, map the queried
+    # window (its name is fm-<id>) to its own worktree so each pair settles into
+    # a distinct path; otherwise fall back to the single shared pane path.
+    if [ -n "${FM_FAKE_WT_MAP:-}" ]; then
+      target=$(fake_arg_after -t "$@" || true)
+      if [ -n "$target" ] && [ -d "$FM_FAKE_WT_MAP/$target" ]; then
+        printf '%s\n' "$FM_FAKE_WT_MAP/$target"; exit 0
+      fi
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    # Under FM_FAKE_WT_MAP, echo the window name as its window id so the
+    # pane-path query above can resolve a per-window worktree.
+    [ -n "${FM_FAKE_WT_MAP:-}" ] && fake_arg_after -n "$@"
+    exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -212,12 +238,19 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
+  # The absolute-spelling spawn is a SECOND task in the same home; a real
+  # worktree pool would hand it a distinct slot, so give it its own worktree.
+  # Reusing the relative spawn's slot would (correctly) be refused now that
+  # fm-spawn guards against launching onto a worktree another task's metadata
+  # still claims.
+  local wt2="$CASE_DIR/wt2"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt2-home-defaults "$wt2"
   : > "$LAUNCH_LOG"
   out=$(
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
       FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
-      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt2" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -639,15 +672,25 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status wtmap
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  # Each batch pair is a distinct task; give each its own worktree (keyed by the
+  # fm-<id> window name) so the fm-spawn ownership guard sees two separate slots,
+  # as a real worktree pool would hand out.
+  wtmap="$CASE_DIR/wtmap"
+  mkdir -p "$wtmap"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-batch-a "$wtmap/fm-$id1"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-batch-b "$wtmap/fm-$id2"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  out=$(
+    export FM_FAKE_WT_MAP="$wtmap"
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high
+  )
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"

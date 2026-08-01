@@ -1659,6 +1659,34 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# Report the id of any OTHER task whose durable metadata still claims worktree
+# <resolved-worktree>. Compares physical paths so a symlinked or relative prefix
+# never hides a real collision, and prints the first conflicting task id (or
+# nothing). The current task ($ID) is skipped: a recovery re-spawn legitimately
+# reclaims the slot its own state/<id>.meta already records.
+worktree_meta_claimant() {  # <resolved-worktree>
+  local wt=$1 wt_real meta task_id claim line
+  wt_real=$(real_path_or_raw "$wt")
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    task_id=${meta##*/}
+    task_id=${task_id%.meta}
+    [ "$task_id" = "$ID" ] && continue
+    claim=
+    while IFS= read -r line; do
+      case $line in
+        worktree=*) claim=${line#worktree=}; break ;;
+      esac
+    done < "$meta"
+    [ -n "$claim" ] || continue
+    if [ "$(real_path_or_raw "$claim")" = "$wt_real" ]; then
+      printf '%s\n' "$task_id"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1668,7 +1696,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real owner
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -1681,6 +1709,19 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  # Refuse a slot that another task's durable metadata still claims. The worktree
+  # pool (treehouse, or any provider) keys reuse off live-agent presence, not
+  # recorded task ownership: a crash- or reboot-orphaned but still-owned slot
+  # reads as "empty" and gets handed to a new spawn, which resets its branch and
+  # destroys that task's unlanded work (observed 2026-07-21). state/<id>.meta
+  # ownership outlives the agent process, so this guard fires regardless of
+  # whether an agent is currently live in the slot - it turns a silent
+  # destructive reuse into a loud refusal the captain can reconcile.
+  owner=$(worktree_meta_claimant "$WT" || true)
+  if [ -n "$owner" ]; then
+    echo "error: $source handed out worktree '$WT', but task $owner still claims it in $STATE/$owner.meta; refusing to launch on a slot with a recorded owner (its unlanded work would be destroyed). Reconcile or tear down task $owner first. Inspect target $inspect_target" >&2
     exit 1
   fi
 }
