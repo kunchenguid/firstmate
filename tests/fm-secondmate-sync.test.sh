@@ -840,6 +840,52 @@ test_seed_marker_does_not_mask_real_dirt() {
   pass "T14 marker tolerance does not mask a genuinely dirty home"
 }
 
+# --- T15: a local Treehouse config does not block shared fast-forward logic -----
+test_treehouse_local_config_does_not_block_ff() {
+  local w c1 base
+  w=$(new_world treehouse-local-config)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  printf 'root = "/tmp/treehouse-pool"\n' > "$w/sm/treehouse.toml"
+  bump_primary "$w" readme
+  base=$(primary_head_commit "$w/main")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] \
+    || fail "treehouse-config-only home did not fast-forward, got '$FF_STATUS': $FF_OUT"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "treehouse-config-only home did not reach the base"
+  grep -qxF 'root = "/tmp/treehouse-pool"' "$w/sm/treehouse.toml" \
+    || fail "treehouse local config was changed or removed"
+  pass "T15 an exact untracked treehouse.toml does not block shared fast-forward logic"
+}
+
+# --- T16: the existing seed-marker exception remains unchanged -----------------
+test_seed_marker_tolerance_remains_intact() {
+  local w c0 base
+  w=$(new_world marker-tolerance-intact)
+  c0=$(head_of "$w/main")
+  seed_marked_home "$w" sm "$c0"
+  bump_primary "$w" readme
+  base=$(primary_head_commit "$w/main")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] \
+    || fail "seed-marker-only home did not fast-forward, got '$FF_STATUS': $FF_OUT"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "seed-marker-only home did not reach the base"
+  pass "T16 existing secondmate-marker tolerance remains intact"
+}
+
+# --- T17: the shipped firstmate repo gitignores the seed marker -----------------
+# Pins the actual fix so it cannot silently regress: without this .gitignore entry
+# every seeded home would read dirty again the moment it lands on this repo's HEAD.
+test_repo_gitignores_seed_marker() {
+  grep -qxF '.fm-secondmate-home' "$ROOT/.gitignore" \
+    || fail "the firstmate repo .gitignore must ignore the seed marker (.fm-secondmate-home)"
+  pass "T17 the firstmate repo gitignores the secondmate seed marker"
+}
+
 test_ff_updated
 test_ff_current
 test_ff_dirty
@@ -860,5 +906,8 @@ test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
+test_treehouse_local_config_does_not_block_ff
+test_seed_marker_tolerance_remains_intact
+test_repo_gitignores_seed_marker
 
 echo "# all fm-secondmate-sync tests passed"

@@ -276,6 +276,90 @@ test_dirty_is_stuck_untouched() {
   pass "dirty working tree is reported STUCK and left untouched"
 }
 
+test_treehouse_local_config_does_not_block_sync() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" local-config)
+  advance_origin "$home" local-config C1
+  before=$(head_sha "$clone")
+  printf 'root = "/tmp/treehouse-pool"\n' > "$clone/treehouse.toml"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "local-config: synced" "treehouse local config permits sync"
+  assert_not_contains "$out" "STUCK" "treehouse local config is not reported as dirt"
+  [ "$(head_sha "$clone")" != "$before" ] || fail "treehouse local config blocked the fast-forward"
+  grep -qxF 'root = "/tmp/treehouse-pool"' "$clone/treehouse.toml" \
+    || fail "treehouse local config was changed or removed"
+  pass "an exact untracked treehouse.toml is tolerated and preserved"
+}
+
+test_modified_tracked_file_still_blocks_sync() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" modified-tracked)
+  advance_origin "$home" modified-tracked C1
+  before=$(head_sha "$clone")
+  printf 'local edit\n' >> "$clone/file.txt"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "modified-tracked: STUCK:" "modified tracked file reports STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "modified tracked clone HEAD moved"
+  grep -q 'local edit' "$clone/file.txt" || fail "modified tracked content was discarded"
+  pass "a modified tracked file still blocks fleet sync"
+}
+
+test_staged_change_still_blocks_sync() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" staged-change)
+  advance_origin "$home" staged-change C1
+  before=$(head_sha "$clone")
+  printf 'staged work\n' > "$clone/staged.txt"
+  git -C "$clone" add staged.txt
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "staged-change: STUCK:" "staged change reports STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "staged-change clone HEAD moved"
+  [ "$(git -C "$clone" status --porcelain -- staged.txt)" = "A  staged.txt" ] \
+    || fail "staged change was altered"
+  pass "a staged change still blocks fleet sync"
+}
+
+test_other_untracked_file_still_blocks_sync() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" other-untracked)
+  advance_origin "$home" other-untracked C1
+  before=$(head_sha "$clone")
+  printf 'local notes\n' > "$clone/notes.txt"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "other-untracked: STUCK:" "other untracked file reports STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "other-untracked clone HEAD moved"
+  [ -f "$clone/notes.txt" ] || fail "other untracked file was removed"
+  pass "an unrelated untracked file still blocks fleet sync"
+}
+
+test_treehouse_name_lookalike_still_blocks_sync() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" local-config-lookalike)
+  advance_origin "$home" local-config-lookalike C1
+  before=$(head_sha "$clone")
+  printf 'local notes\n' > "$clone/treehouse.toml.backup"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "local-config-lookalike: STUCK:" "treehouse name lookalike reports STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "treehouse-name-lookalike clone HEAD moved"
+  [ -f "$clone/treehouse.toml.backup" ] || fail "treehouse name lookalike was removed"
+  pass "an untracked name containing treehouse.toml still blocks fleet sync"
+}
+
 test_non_default_branch_is_stuck_untouched() {
   local home clone out
   home=$(new_home)
@@ -607,6 +691,11 @@ test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
+test_treehouse_local_config_does_not_block_sync
+test_modified_tracked_file_still_blocks_sync
+test_staged_change_still_blocks_sync
+test_other_untracked_file_still_blocks_sync
+test_treehouse_name_lookalike_still_blocks_sync
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
