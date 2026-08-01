@@ -42,9 +42,17 @@ SECURITY_REVIEW_STATUS='not run in this invocation'
 SECURITY_REVIEW_REPORT=''
 VALIDATION_STATUS='not run in this invocation'
 
-# Number of the promotion record once it is opened, so a fast-forward that then
-# fails can annotate the record it already published.
+# The promotion record once it is opened, so a fast-forward that then fails can
+# annotate the record it already published. Whether a record was opened is
+# tracked apart from its number: a record whose number could not be read still
+# needs saying so, while no record at all is correctly silent.
+PROMOTION_PR_OPENED=0
 PROMOTION_PR_NUMBER=''
+PROMOTION_PR_URL=''
+
+# Set the moment origin/main accepts the push, so a failure in the post-push
+# work can never be mistaken for a promotion that did not land.
+MAIN_LANDED=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -181,19 +189,33 @@ open_promotion_pr() {
   echo "== promotion record PR (prakrit → main) =="
   fm_proplane_promote_pr_sync "$GIT_ROOT" main prakrit "$title" "$body_file" "$DRY_RUN"
   rc=$?
+  PROMOTION_PR_OPENED=$FM_PROPLANE_PROMOTE_PR_OPENED
   PROMOTION_PR_NUMBER=$FM_PROPLANE_PROMOTE_PR_NUMBER
+  PROMOTION_PR_URL=$FM_PROPLANE_PROMOTE_PR_URL
   rm -f "$body_file"
   return "$rc"
 }
 
 # The record announces that the ladder fast-forwards main right after opening it.
 # When that fast-forward does not complete, the record must say so rather than
-# stand as an unqualified claim that this range went live. Best-effort by
-# design: a failed annotation is warned about and never changes the exit code of
-# the push that actually failed.
+# stand as an unqualified claim that this range went live.
+#
+# It fires only when main did NOT land. Everything after the push is realignment
+# work: it can fail on its own, and annotating then would tell a later reader
+# that a promotion which did go live never happened, which is the exact
+# falsehood this annotation exists to prevent.
+#
+# Best-effort by design: a failed annotation is warned about and never changes
+# the exit code of the push that actually failed.
 annotate_failed_fast_forward() {
   local message
-  [ -n "$PROMOTION_PR_NUMBER" ] || return 0
+  if [ "$MAIN_LANDED" -eq 1 ] || [ "$PROMOTION_PR_OPENED" -ne 1 ]; then
+    return 0
+  fi
+  if [ -z "$PROMOTION_PR_NUMBER" ]; then
+    echo "proplane-promote-main: WARNING a promotion record PR was opened but its number could not be read, so it was not annotated; it still claims a promotion that did not land - annotate the open prakrit -> main PR by hand (${PROMOTION_PR_URL:-no URL reported})" >&2
+    return 0
+  fi
   message="proplane-promote-main: the fast-forward of \`main\` did NOT complete after this record was opened, so this record does not reflect a landed promotion. Re-run the promote once the cause is resolved."
   fm_proplane_promote_pr_comment "$GIT_ROOT" "$PROMOTION_PR_NUMBER" "$message" "$DRY_RUN" || {
     echo "proplane-promote-main: WARNING could not annotate promotion record PR #$PROMOTION_PR_NUMBER; it still claims a promotion that did not land" >&2
@@ -207,6 +229,7 @@ merge_and_push_main() {
   run_git "$GIT_ROOT" checkout main || return 1
   run_git "$GIT_ROOT" merge --ff-only "$INTEGRATE_BRANCH" || return 1
   run_git "$GIT_ROOT" push origin main || return 1
+  MAIN_LANDED=1
   run_git "$GIT_ROOT" branch -D "$INTEGRATE_BRANCH" 2>/dev/null || true
   echo "proplane-promote-main: pushed origin/main (Vercel Preview will build)"
   sync_prakrit_from_main || return 1

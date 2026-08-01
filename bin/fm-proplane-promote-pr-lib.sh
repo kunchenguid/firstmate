@@ -27,7 +27,8 @@
 #   fm_proplane_promote_pr_sync <git_root> <base> <head> <title> <body_file> <dry_run>
 #     Idempotent publish: updates the open <head> -> <base> PR when one exists
 #     AND its title marks it as a promotion record, otherwise creates one. Sets
-#     FM_PROPLANE_PROMOTE_PR_NUMBER to the record it published, when known.
+#     FM_PROPLANE_PROMOTE_PR_OPENED to 1 once a record exists, and
+#     FM_PROPLANE_PROMOTE_PR_NUMBER and _URL to that record when they are known.
 #     <dry_run>=1 prints the PR it would open and makes no GitHub call.
 #   fm_proplane_promote_pr_comment <git_root> <number> <message> <dry_run>
 #     Annotate an already-opened record, for when the promotion it describes did
@@ -51,9 +52,17 @@ FM_PROPLANE_PR_GH_TIMEOUT=${FM_PROPLANE_PR_GH_TIMEOUT:-60}
 # title builder and the reuse guard so the two can never drift apart.
 FM_PROPLANE_PR_TITLE_PREFIX='promote(ladder): prakrit -> main'
 
-# Number of the record fm_proplane_promote_pr_sync last published, when it could
-# be determined. Empty when nothing was published or the number was unreadable.
+# Open PRs the reuse scan reads. The scan stops at the first promotion record it
+# sees, so the only cost of a wider listing is the rows gh-axi prints, while too
+# narrow a listing hides the record behind any unrelated PR for the same pair.
+FM_PROPLANE_PR_LIST_LIMIT=${FM_PROPLANE_PR_LIST_LIMIT:-20}
+
+# What fm_proplane_promote_pr_sync last published. OPENED is the fact that a
+# record exists, tracked apart from NUMBER and URL because gh-axi output that
+# omits the URL leaves the number unreadable without meaning nothing was opened.
+FM_PROPLANE_PROMOTE_PR_OPENED=0
 FM_PROPLANE_PROMOTE_PR_NUMBER=''
+FM_PROPLANE_PROMOTE_PR_URL=''
 
 # Bounded gh-axi call. Prefers timeout, falls back to gtimeout, and runs the
 # call bare when neither is installed rather than refusing to record anything.
@@ -158,7 +167,9 @@ fm_proplane_promote_pr_sync() {
   local git_root=$1 base=$2 head=$3 title=$4 body_file=$5 dry_run=${6:-0}
   local listing number out url
 
+  FM_PROPLANE_PROMOTE_PR_OPENED=0
   FM_PROPLANE_PROMOTE_PR_NUMBER=''
+  FM_PROPLANE_PROMOTE_PR_URL=''
 
   if [ "$dry_run" = 1 ]; then
     echo "DRY gh-axi pr create --base $base --head $head --title \"$title\" --body-file <generated>"
@@ -177,7 +188,7 @@ fm_proplane_promote_pr_sync() {
   # so a re-run updates it instead of stacking a duplicate. Once the ladder
   # fast-forwards main the PR closes as merged, so the next promotion of a new
   # range correctly finds nothing open and creates its own record.
-  listing=$(cd "$git_root" && fm_proplane_promote_pr_gh pr list --state open --base "$base" --head "$head" --limit 1 2>&1) || {
+  listing=$(cd "$git_root" && fm_proplane_promote_pr_gh pr list --state open --base "$base" --head "$head" --limit "$FM_PROPLANE_PR_LIST_LIMIT" 2>&1) || {
     echo "proplane-promote-pr: could not list open PRs for $head -> $base" >&2
     printf '%s\n' "$listing" >&2
     return 1
@@ -198,7 +209,7 @@ fm_proplane_promote_pr_sync() {
       if (index(title, want) == 1) { print num; exit }
     }')
   if [ -z "$number" ] && printf '%s\n' "$listing" | grep -qE '^[[:space:]]+[0-9]+,'; then
-    echo "proplane-promote-pr: the open $head -> $base PR is not a promotion record, opening a new one rather than rewriting it" >&2
+    echo "proplane-promote-pr: no open $head -> $base PR is a promotion record, opening a new one rather than rewriting an unrelated PR" >&2
   fi
 
   if [ -n "$number" ]; then
@@ -207,6 +218,8 @@ fm_proplane_promote_pr_sync() {
       printf '%s\n' "$out" >&2
       return 1
     }
+    # shellcheck disable=SC2034 # Read by callers after fm_proplane_promote_pr_sync returns.
+    FM_PROPLANE_PROMOTE_PR_OPENED=1
     FM_PROPLANE_PROMOTE_PR_NUMBER=$number
     echo "proplane-promote-pr: updated promotion record PR #$number"
   else
@@ -216,11 +229,15 @@ fm_proplane_promote_pr_sync() {
       printf '%s\n' "$out" >&2
       return 1
     }
+    # shellcheck disable=SC2034 # Read by callers after fm_proplane_promote_pr_sync returns.
+    FM_PROPLANE_PROMOTE_PR_OPENED=1
     echo "proplane-promote-pr: opened promotion record PR"
   fi
 
   url=$(fm_proplane_promote_pr_first_url "$out")
   if [ -n "$url" ]; then
+    # shellcheck disable=SC2034 # Read by callers after fm_proplane_promote_pr_sync returns.
+    FM_PROPLANE_PROMOTE_PR_URL=$url
     echo "proplane-promote-pr: $url"
     [ -n "$FM_PROPLANE_PROMOTE_PR_NUMBER" ] ||
       FM_PROPLANE_PROMOTE_PR_NUMBER=$(fm_proplane_promote_pr_number_from_url "$url")

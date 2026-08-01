@@ -18,6 +18,7 @@
 #   (k) every gh-axi call is bounded, and a timed-out one only warns
 #   (l) an open PR that is not a promotion record is never rewritten
 #   (m) end to end: a failed fast-forward annotates the record it already opened
+#   (p) end to end: a failure AFTER main lands leaves that record alone
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -50,8 +51,13 @@ make_repo() {
 
 # make_gh_axi <fakebin> <mode>: gh-axi stub logging every call to
 # $FM_TEST_GH_AXI_LOG. Modes: none (no open PR), existing (one open PR #77),
-# foreign (one open PR #66 that is NOT a promotion record), create-fails
-# (listing works, create does not), list-fails, comment-fails.
+# foreign (one open PR #66 that is NOT a promotion record), buried (a foreign PR
+# listed ahead of the record, so only a listing wider than one row finds it),
+# create-fails (listing works, create does not), create-silent (create succeeds
+# but prints no URL), list-fails, comment-fails.
+#
+# `pr list` honors --limit the way the real one does, so a test that needs a row
+# gh-axi would have truncated away cannot pass on a stub that ignores the cap.
 make_gh_axi() {
   local fakebin=$1 mode=$2
   mkdir -p "$fakebin"
@@ -66,6 +72,12 @@ fi
 case "\${1:-} \${2:-}" in
   "pr list")
     [ "\$mode" = list-fails ] && { echo "error: HTTP 401" >&2; exit 1; }
+    limit=1
+    prev=
+    for a in "\$@"; do
+      [ "\$prev" = --limit ] && limit=\$a
+      prev=\$a
+    done
     if [ "\$mode" = existing ]; then
       echo 'count: 1 of 1 total'
       echo 'pull_requests[1]{number,title,state,author,draft,review}:'
@@ -76,6 +88,12 @@ case "\${1:-} \${2:-}" in
       echo 'count: 1 of 1 total'
       echo 'pull_requests[1]{number,title,state,author,draft,review}:'
       echo '  66,"feat(billing): someone elses open work",open,someone,no,none'
+    elif [ "\$mode" = buried ]; then
+      echo 'count: 2 of 2 total'
+      echo 'pull_requests[2]{number,title,state,author,draft,review}:'
+      echo '  66,"feat(billing): someone elses open work",open,someone,no,none'
+      [ "\$limit" -ge 2 ] &&
+        echo '  77,"promote(ladder): prakrit -> main (aaa..bbb)",open,prakrit,no,none'
     else
       echo 'count: 0'
       echo 'pull_requests: []'
@@ -94,6 +112,9 @@ case "\${1:-} \${2:-}" in
     [ -n "\${FM_TEST_ORIGIN:-}" ] &&
       printf 'origin-main-at-create:%s\n' "\$(git --git-dir="\$FM_TEST_ORIGIN" rev-parse main)" >> "\$FM_TEST_GH_AXI_LOG"
     [ "\$mode" = create-fails ] && { echo "error: rate limit exceeded" >&2; exit 1; }
+    # create-silent: the PR really is opened, but the output carries no URL, so
+    # its number cannot be scraped back out.
+    [ "\$mode" = create-silent ] && { echo 'created'; exit 0; }
     echo 'created: https://github.com/PrakritR/PropLane/pull/91'
     exit 0
     ;;
@@ -353,8 +374,28 @@ out=$(PATH="$case_l/fakebin:$PATH" bash -c '
 log=$(cat "$FM_TEST_GH_AXI_LOG")
 assert_not_contains "$log" 'pr edit' 'a PR that is not a promotion record is never rewritten'
 assert_contains "$log" 'pr create --base main --head prakrit' 'a fresh record is opened instead'
-assert_contains "$out" 'not a promotion record' 'the skipped reuse is explained'
+assert_contains "$out" 'rather than rewriting an unrelated PR' 'the skipped reuse is explained'
 pass 'reuse is refused for an open PR that is not a promotion record'
+
+# The scan only works if the listing is wide enough to hold more than the first
+# row. With a one-row listing the record hides behind any unrelated open PR for
+# the same pair, and the create that follows is rejected as a duplicate.
+case_l2="$TMP_ROOT/l-buried"
+mkdir -p "$case_l2"
+make_repo "$case_l2/repo"
+make_gh_axi "$case_l2/fakebin" buried
+printf 'body\n' > "$case_l2/body.md"
+export FM_TEST_GH_AXI_LOG="$case_l2/gh.log"
+: > "$FM_TEST_GH_AXI_LOG"
+out=$(PATH="$case_l2/fakebin:$PATH" bash -c '
+  . "$1"
+  fm_proplane_promote_pr_sync "$2" main prakrit "promote(ladder): prakrit -> main (nnn..ooo)" "$3" 0
+' _ "$PR_LIB" "$case_l2/repo" "$case_l2/body.md" 2>&1) || fail "sync should succeed: $out"
+log=$(cat "$FM_TEST_GH_AXI_LOG")
+assert_contains "$log" 'pr edit 77 --title' 'the record is found behind an unrelated open PR'
+assert_not_contains "$log" 'pr create' 'a found record is never duplicated'
+assert_not_contains "$out" 'rather than rewriting an unrelated PR' 'a found record is not reported as missing'
+pass 'the reuse scan reads past the first row to find the promotion record'
 
 # --- end-to-end promotion fixtures -------------------------------------------
 
@@ -363,13 +404,18 @@ pass 'reuse is refused for an open PR that is not a promotion record'
 # skipped. The config carries no prakrit row on purpose: that leaves the
 # post-push sandbox realignment out of scope for these tests, which are about
 # the PR and the fast-forward.
+#
+# A third argument adds a prakrit integration row, which is what makes the
+# post-push sync run at all; without one it returns before doing anything.
 make_promotion_case() {
-  local name=$1 mode=$2 case_dir
+  local name=$1 mode=$2 prakrit_worktree=${3:-} case_dir
   case_dir="$TMP_ROOT/$name"
   mkdir -p "$case_dir/home/config" "$case_dir/fakebin"
   make_repo "$case_dir/repo"
   printf 'GIT_ROOT\t%s\n' "$case_dir/repo" > "$case_dir/home/config/proplane-agent-branches"
   printf 'cursor-2\t%s\t3011\n' "$case_dir/sandbox" >> "$case_dir/home/config/proplane-agent-branches"
+  [ -n "$prakrit_worktree" ] &&
+    printf 'prakrit\t%s\t3000\n' "$prakrit_worktree" >> "$case_dir/home/config/proplane-agent-branches"
   # The integrate branch is what a real promotion run leaves behind: main with
   # prakrit merged in, so main can fast-forward onto it.
   git -C "$case_dir/repo" checkout -q -B integrate/prakrit-to-main origin/main
@@ -505,6 +551,44 @@ set -e
 expect_code 1 "$rc" 'a failed annotation must not mask the failed push exit'
 assert_contains "$out" 'WARNING could not annotate' 'the unannotated record is warned about'
 pass 'an annotation that cannot be posted warns without changing the promotion outcome'
+
+# A record whose number could not be read is not the same as no record at all.
+# Falling silent there leaves a record permanently claiming a promotion that
+# never landed, with nothing on stderr for an operator to act on.
+case_o=$(make_promotion_case o create-silent)
+: > "$case_o/gh.log"
+advance_origin_main "$case_o"
+set +e
+out=$(run_promotion "$case_o" --validate-only --push-main --skip-gates)
+rc=$?
+set -e
+expect_code 1 "$rc" 'a failed fast-forward should still fail the promotion'
+assert_contains "$out" 'number could not be read' 'an unannotatable record is called out'
+assert_contains "$out" 'by hand' 'the operator is told to correct it themselves'
+assert_no_grep 'pr comment' "$case_o/gh.log" 'no annotation can be posted without a number'
+pass 'a record opened without a readable number is warned about, never left silent'
+
+# --- (p) a failure after main lands must not annotate the record --------------
+#
+# Everything after the push is realignment. It can fail on its own, and the
+# promotion record is accurate either way: annotating it there would tell a later
+# reader that a promotion which did go live never happened.
+
+case_p=$(make_promotion_case p none "$TMP_ROOT/p/no-such-prakrit-worktree")
+: > "$case_p/gh.log"
+prakrit_sha=$(origin_sha "$case_p" prakrit)
+set +e
+out=$(run_promotion "$case_p" --validate-only --push-main --skip-gates)
+rc=$?
+set -e
+expect_code 1 "$rc" 'a failed post-push sync should still fail the promotion'
+log=$(cat "$case_p/gh.log")
+assert_contains "$log" 'pr create --base main --head prakrit' 'the record was opened'
+assert_contains "$out" 'pushed origin/main' 'the promotion did land main'
+[ "$(origin_sha "$case_p" main)" = "$prakrit_sha" ] || fail 'origin/main must have been fast-forwarded'
+assert_not_contains "$log" 'pr comment' 'a record for a landed promotion is never annotated as failed'
+assert_not_contains "$out" 'could not be read' 'no unannotatable-record warning when nothing needed annotating'
+pass 'a failure after main lands leaves the accurate promotion record alone'
 
 # --- (h) dry run opens nothing and pushes nothing -----------------------------
 
