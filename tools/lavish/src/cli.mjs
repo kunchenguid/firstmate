@@ -98,6 +98,10 @@ function resolveHome(options) {
   return resolve(home);
 }
 
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 function printRequest(decision) {
   process.stdout.write(`${decision.requestText.trimEnd()}\n\n`);
   process.stdout.write(`Decision: ${decision.manifest.title} (${decision.id})\n`);
@@ -342,7 +346,7 @@ async function createCommand(options) {
   });
   process.stdout.write(
     `${result.created ? 'Created' : 'Already exists'}: ${result.decision.id}\n`
-    + `Run: lavish answer ${result.decision.id}\n`,
+    + `Run: lavish answer ${result.decision.id} --home ${shellQuote(home)}\n`,
   );
 }
 

@@ -149,11 +149,14 @@ function runCli(args, {
 function runExecutable(executable, args, {
   env = {},
   input = '',
+  unsetEnv = [],
 } = {}) {
   return new Promise((resolveRun, rejectRun) => {
+    const childEnv = { ...process.env, ...env };
+    for (const key of unsetEnv) delete childEnv[key];
     const child = spawn(executable, args, {
       detached: true,
-      env: { ...process.env, ...env },
+      env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -182,6 +185,7 @@ async function createRequest(fx, {
   id = 'release-choice',
   destination = 'data/replies/release-choice.toon',
   createdAt = undefined,
+  returnResult = false,
 } = {}) {
   const args = [
     'create',
@@ -199,7 +203,7 @@ async function createRequest(fx, {
   if (createdAt !== undefined) args.push('--created-at', createdAt);
   const result = await runCli(args, { home: fx.home });
   assert.equal(result.code, 0, result.stderr);
-  return id;
+  return returnResult ? { id, result } : id;
 }
 
 async function answer(fx, id, {
@@ -233,6 +237,36 @@ test('a seven-day-old request remains answerable with no firstmate process', asy
   const inbox = await runCli(['inbox'], { home: fx.home });
   assert.equal(inbox.code, 0, inbox.stderr);
   assert.equal(inbox.stdout, 'No pending Lavish decisions.\n');
+});
+
+test('the surfaced captain command works with FM_HOME unset', async () => {
+  const fx = await fixture('captain shell');
+  const { id, result: created } = await createRequest(fx, { returnResult: true });
+  const runLine = created.stdout
+    .split('\n')
+    .find((line) => line.startsWith('Run: '));
+  assert.ok(runLine, `create did not surface a Run line: ${created.stdout}`);
+  const surfacedCommand = runLine.slice('Run: '.length);
+  assert.equal(
+    surfacedCommand,
+    `lavish answer ${id} --home '${fx.home}'`,
+  );
+
+  const fakeBin = join(fx.root, 'captain-bin');
+  await mkdir(fakeBin);
+  await symlink(CLI, join(fakeBin, 'lavish'));
+  const answered = await runExecutable('/bin/sh', ['-c', surfacedCommand], {
+    env: { PATH: `${fakeBin}:${process.env.PATH}` },
+    unsetEnv: ['FM_HOME'],
+    input: '1\nRun from the captain shell\ny\n',
+  });
+  assert.equal(answered.code, 0, answered.stderr);
+  assert.doesNotMatch(answered.stderr, /FM_HOME is required/);
+  assert.match(answered.stdout, /Answer saved.*wake queued/);
+  assert.equal(
+    await exists(join(fx.home, 'data/decisions', id, 'answer.toon')),
+    true,
+  );
 });
 
 test('interruption before rename cannot expose a partial answer', async () => {

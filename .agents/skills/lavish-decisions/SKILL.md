@@ -23,14 +23,19 @@ Use the firstmate-owned `lavish-axi` file protocol documented in `tools/lavish/R
    Use nonempty unique lowercase-slug keys.
 4. Choose a durable `$FM_HOME`-relative destination below `data/`.
    This is where intake commits the validated answer before writing its receipt.
-5. Run `lavish-axi create` with a stable decision id, title, Markdown request, question JSON, and destination.
-6. Run `lavish show <id>` and `lavish inbox` to verify the exact durable request.
-7. Surface only the title and command:
+5. Run `lavish-axi create` with a stable decision id, title, Markdown request, question JSON, and destination, and retain its emitted `Run:` line.
+6. From firstmate's environment, run `lavish show <id>` and `lavish inbox` to verify the exact durable request.
+7. Surface only the title and the exact `Run:` line emitted by `lavish-axi create`:
 
    ```text
    Decision waiting: <short title>
-   Run: lavish answer <decision-id>
+   <exact Run: line emitted by lavish-axi create>
    ```
+
+The surfaced command is for the captain's shell, not firstmate's environment.
+It must retain the emitted `--home` argument and resolved absolute home path even when firstmate has `FM_HOME` exported.
+Never shorten the command or reconstruct it from a placeholder.
+Always carrying the explicit home is slightly noisier than asking the captain to export `FM_HOME`, but it makes every decision independently runnable and avoids a hidden setup dependency.
 
 Do not edit `request.md` or `manifest.toon` after surfacing the decision.
 Their digest and ordered question set are the immutable contract.

@@ -8,10 +8,14 @@ An unanswered request remains answerable until the files are deliberately remove
 
 ## Human commands
 
+The captain-facing command contract is owned by the [`lavish-decisions` skill](../../.agents/skills/lavish-decisions/SKILL.md).
+`lavish-axi create` follows that contract by printing an answer command with the resolved absolute home path.
+For direct human use, pass the same explicit home to every command, replacing this example path with the fleet home's resolved absolute path:
+
 ```sh
-lavish inbox
-lavish show <decision-id>
-lavish answer <decision-id>
+lavish inbox --home '/Users/example/firstmate-home'
+lavish show <decision-id> --home '/Users/example/firstmate-home'
+lavish answer <decision-id> --home '/Users/example/firstmate-home'
 ```
 
 `lavish answer` renders the complete request, collects one numbered choice for every ordered question, accepts an optional note, shows the whole batch, and requires one explicit confirmation.
@@ -62,8 +66,9 @@ Intake validates every unreceipted answer, writes the declared destination first
 An existing matching destination or receipt is an idempotent success.
 A conflicting destination fails closed.
 
-All commands use `FM_HOME`.
-Tests and recovery tools may pass `--home <path>` explicitly.
+All commands require either `FM_HOME` or an explicit `--home <path>` and never guess a fleet home.
+Firstmate's internal commands use `FM_HOME`; captain-facing commands carry the resolved absolute `--home` path.
+Tests and recovery tools may also pass `--home <path>` explicitly.
 The firstmate bootstrap install command also records the checkout's narrow wake adapter with `lavish-axi configure-wake`; this local pointer is not inherited into other homes.
 
 ## Protocol
