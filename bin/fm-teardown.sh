@@ -986,14 +986,16 @@ validate_firstmate_home_for_removal() {
       echo "REFUSED: unsafe $label removal target $home is marked for secondmate ${marker_id:-unknown}, expected $expected_id" >&2
       return 1
     fi
-    if ! secondmate_registry_validate_bindings "$SECONDMATE_REG" secondmate_registry_path_key "$expected_id" "$abs_home_path"; then
-      case "$SECONDMATE_REGISTRY_ERROR" in
-        overlapping\ secondmate\ home\ assignment:*)
-          echo "REFUSED: unsafe $label removal target $home contains registered secondmate home; $SECONDMATE_REGISTRY_ERROR" >&2
-          ;;
-        *) echo "REFUSED: $SECONDMATE_REGISTRY_ERROR" >&2 ;;
-      esac
-      return 1
+    if [ -e "$SECONDMATE_REG" ] || [ -L "$SECONDMATE_REG" ]; then
+      if ! secondmate_registry_validate_bindings "$SECONDMATE_REG" secondmate_registry_path_key "$expected_id" "$abs_home_path"; then
+        case "$SECONDMATE_REGISTRY_ERROR" in
+          overlapping\ secondmate\ home\ assignment:*)
+            echo "REFUSED: unsafe $label removal target $home contains registered secondmate home; $SECONDMATE_REGISTRY_ERROR" >&2
+            ;;
+          *) echo "REFUSED: $SECONDMATE_REGISTRY_ERROR" >&2 ;;
+        esac
+        return 1
+      fi
     fi
   fi
   validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
