@@ -82,7 +82,7 @@ secondmate_registry_path_key() {
 
 secondmate_registry_validate_bindings() {
   local reg=$1 resolver=$2 expected_id=${3:-} expected_home=${4:-}
-  local tmp line id home home_key duplicate_homes duplicate_ids overlaps expected_home_key
+  local tmp snapshot bindings line id home home_key duplicate_homes duplicate_ids overlaps expected_home_key
   SECONDMATE_REGISTRY_MATCH_HOME=
   SECONDMATE_REGISTRY_MATCH_HOME_KEY=
   SECONDMATE_REGISTRY_MATCH_PROJECTS=
@@ -92,15 +92,22 @@ secondmate_registry_validate_bindings() {
     SECONDMATE_REGISTRY_ERROR="secondmate registry is unavailable or unsafe: $reg"
     return 1
   fi
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-secondmate-registry.XXXXXX") || {
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-secondmate-registry.XXXXXX") || {
     SECONDMATE_REGISTRY_ERROR="could not create secondmate registry validation state"
     return 1
   }
+  snapshot="$tmp/registry"
+  bindings="$tmp/bindings"
+  if ! cat "$reg" > "$snapshot" 2>/dev/null || ! : > "$bindings"; then
+    rm -rf -- "$tmp"
+    SECONDMATE_REGISTRY_ERROR="secondmate registry is unavailable or unsafe: $reg"
+    return 1
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "- "*)
         if ! secondmate_registry_parse_line "$line"; then
-          rm -f "$tmp"
+          rm -rf -- "$tmp"
           SECONDMATE_REGISTRY_ERROR="malformed secondmate registry entry: $line"
           return 1
         fi
@@ -109,25 +116,25 @@ secondmate_registry_validate_bindings() {
         case "$home" in
           /*) ;;
           *)
-            rm -f "$tmp"
+            rm -rf -- "$tmp"
             SECONDMATE_REGISTRY_ERROR="unsafe non-absolute secondmate home for $id: $home"
             return 1
             ;;
         esac
         case "$home" in
           *$'\t'*)
-            rm -f "$tmp"
+            rm -rf -- "$tmp"
             SECONDMATE_REGISTRY_ERROR="unsafe secondmate home for $id"
             return 1
             ;;
         esac
         home_key=$("$resolver" "$home" 2>/dev/null || true)
         if [ -z "$home_key" ]; then
-          rm -f "$tmp"
+          rm -rf -- "$tmp"
           SECONDMATE_REGISTRY_ERROR="unresolvable secondmate home for $id: $home"
           return 1
         fi
-        printf '%s\t%s\n' "$home_key" "$id" >> "$tmp"
+        printf '%s\t%s\n' "$home_key" "$id" >> "$bindings"
         if [ -n "$expected_id" ] && [ "$id" = "$expected_id" ]; then
           SECONDMATE_REGISTRY_MATCH_HOME=$home
           SECONDMATE_REGISTRY_MATCH_HOME_KEY=$home_key
@@ -135,7 +142,7 @@ secondmate_registry_validate_bindings() {
         fi
         ;;
     esac
-  done < "$reg"
+  done < "$snapshot"
   duplicate_homes=$(awk -F '\t' '
     {
       if ($1 in owner) {
@@ -146,8 +153,8 @@ secondmate_registry_validate_bindings() {
       }
     }
     END { exit bad ? 1 : 0 }
-  ' "$tmp" 2>/dev/null) || {
-    rm -f "$tmp"
+  ' "$bindings" 2>/dev/null) || {
+    rm -rf -- "$tmp"
     SECONDMATE_REGISTRY_ERROR="duplicate secondmate home assignment: $duplicate_homes"
     return 1
   }
@@ -161,8 +168,8 @@ secondmate_registry_validate_bindings() {
       }
     }
     END { exit bad ? 1 : 0 }
-  ' "$tmp" 2>/dev/null) || {
-    rm -f "$tmp"
+  ' "$bindings" 2>/dev/null) || {
+    rm -rf -- "$tmp"
     SECONDMATE_REGISTRY_ERROR="duplicate secondmate id assignment: $duplicate_ids"
     return 1
   }
@@ -183,12 +190,12 @@ secondmate_registry_validate_bindings() {
       id[count]=$2
     }
     END { exit bad ? 1 : 0 }
-  ' "$tmp" 2>/dev/null) || {
-    rm -f "$tmp"
+  ' "$bindings" 2>/dev/null) || {
+    rm -rf -- "$tmp"
     SECONDMATE_REGISTRY_ERROR="overlapping secondmate home assignment: $overlaps"
     return 1
   }
-  rm -f "$tmp"
+  rm -rf -- "$tmp"
   if [ -n "$expected_id" ] && [ -z "$SECONDMATE_REGISTRY_MATCH_HOME" ]; then
     SECONDMATE_REGISTRY_ERROR="no registry binding for secondmate $expected_id"
     return 1

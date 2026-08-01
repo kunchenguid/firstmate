@@ -147,6 +147,34 @@ test_home_seed_refuses_broken_registry_symlink() {
   pass "home seeding refuses broken registry symlinks before provisioning"
 }
 
+test_home_seed_refuses_unreadable_registry() {
+  local home sub err registry
+  home="$TMP_ROOT/unreadable-registry-home"
+  sub="$TMP_ROOT/unreadable-registry-subhome"
+  err="$TMP_ROOT/unreadable-registry.err"
+  registry="$home/data/secondmates.md"
+  mkdir -p "$home/data" "$home/state" "$home/projects"
+  printf '%s\n' '- design - design domain (home: /tmp/design; scope: design; projects: alpha; added 2026-07-30)' > "$registry"
+  chmod 000 "$registry"
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    chmod 600 "$registry"
+    fail "home-seed validation accepted an unreadable registry"
+  fi
+  grep -F 'secondmate registry is unavailable or unsafe' "$err" >/dev/null || {
+    chmod 600 "$registry"
+    fail "home-seed validation did not explain the unreadable registry"
+  }
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='design domain' \
+    "$ROOT/bin/fm-home-seed.sh" design "$sub" alpha >/dev/null 2>"$err"; then
+    chmod 600 "$registry"
+    fail "home seeding accepted an unreadable registry"
+  fi
+  chmod 600 "$registry"
+  [ ! -e "$sub" ] || fail "home seeding provisioned a home before unreadable registry refusal"
+  [ ! -e "$home/data/design" ] || fail "home seeding created a brief before unreadable registry refusal"
+  pass "home seeding refuses unreadable registries before provisioning"
+}
+
 test_home_seed_validate_rejects_duplicate_homes() {
   local home subhome subhome_abs err
   home="$TMP_ROOT/duplicate-home"
@@ -2342,6 +2370,7 @@ test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
 test_home_seed_validate_rejects_unparseable_registry_entry
 test_home_seed_refuses_broken_registry_symlink
+test_home_seed_refuses_unreadable_registry
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
