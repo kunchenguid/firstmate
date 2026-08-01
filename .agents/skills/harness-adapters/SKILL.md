@@ -245,7 +245,7 @@ If a pane shows the exit banner, relaunch with `--continue` to resume the sessio
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
 Firstmate names `--agent build` only for opencode ship and scout launches so workers do worker work even when the local `default_agent` is an officer.
 Secondmate launches omit `--agent build` so persistent firstmate homes keep primary-agent semantics.
-OpenCode 1.18.9 silently falls back to `default_agent` when an unknown `--agent` is supplied, so future removal or renaming of `build` would reintroduce the worker-as-officer defect without a CLI error.
+OpenCode 1.18.9 shows the TUI error `Agent not found: zzz-not-an-agent` and then falls back to `default_agent` when an unknown `--agent` is supplied, so future removal or renaming of `build` would reintroduce the worker-as-officer defect.
 The empirical A/B record lives in `docs/verification/harness-adapters.md`.
 
 **Busy-queued Enter (opencode 1.18.4, tmux backend fix, herdr known gap).**
