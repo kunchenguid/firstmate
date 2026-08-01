@@ -98,7 +98,11 @@ SH
 set -u
 [ "${FM_FAKE_GH_UNAVAILABLE:-0}" = 0 ] || exit 1
 case "${1:-} ${2:-}" in
-  "pr view") printf '%s\n' "${FM_FAKE_GH_PR_VIEW:-}" ;;
+  # The payload is keyed on the PR argument, so a read of any PR other than the
+  # task's own recorded one fails instead of quietly answering for it.
+  "pr view")
+    [ "${3:-}" = "${FM_FAKE_GH_PR_URL:-}" ] || exit 1
+    printf '%s\n' "${FM_FAKE_GH_PR_VIEW:-}" ;;
   *) exit 2 ;;
 esac
 SH
@@ -180,10 +184,11 @@ reset_fakes() {
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   FM_FAKE_GH_PR_VIEW=""
+  FM_FAKE_GH_PR_URL="https://github.com/o/r/pull/2"
   FM_FAKE_GH_UNAVAILABLE=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_GH_PR_VIEW FM_FAKE_GH_UNAVAILABLE
+  export FM_FAKE_GH_PR_VIEW FM_FAKE_GH_PR_URL FM_FAKE_GH_UNAVAILABLE
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -287,6 +292,19 @@ run:
   pr: "https://github.com/o/r/pull/1"
   findings: none
 outcome: passed
+EOF
+}
+
+run_checks_passed() {  # <branch> [pr-url]
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "${2:-https://github.com/o/r/pull/2}"
+  findings: none
+outcome: checks-passed
 EOF
 }
 
@@ -614,6 +632,92 @@ test_ci_green_head_mismatch_stays_not_ready() {
   pass "PR head identity must match the task record"
 }
 
+# bin/fm-pr-check.sh records pr_head= once and never re-records it, so a later
+# pipeline fix commit or captain-requested change leaves that value behind. The
+# attributed run's own head is an equally exact record of this task's code, so
+# the forge head matching EITHER is proof of identity; requiring the recorded
+# one alone would pin a genuinely green PR to not-ready forever.
+test_ci_green_matches_attributed_run_head_after_stale_pr_head() {
+  reset_fakes
+  local d out old new
+  d=$(new_case ci-stale-pr-head)
+  make_repo_on_branch "$d/wt" fm/feat-cistalehead
+  old=$FM_FAKE_RUN_HEAD
+  git -C "$d/wt" commit -q --allow-empty -m "pipeline fix"
+  new=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$old"
+  FM_FAKE_RUN_HEAD=$new
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cistalehead.meta" "window=fm:fm-feat-cistalehead" \
+    "worktree=$d/wt" "kind=ship" "pr=https://github.com/o/r/pull/2" "pr_head=$old"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cistalehead)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_GH_PR_VIEW=$(printf '{"headRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}' "$new")
+  out=$(run_crew_state "$d" feat-cistalehead)
+  assert_contains "$out" "state: done" "forge head matching the attributed run head -> done"
+  assert_contains "$out" "PR ready" "a stale recorded head does not withhold captain-ready detail"
+  assert_contains "$out" "verified from forge" "readiness still names its forge evidence"
+  pass "a stale recorded pr_head cannot pin a green PR to not-ready"
+}
+
+test_checks_passed_outcome_needs_forge_evidence() {
+  reset_fakes
+  local d out
+  d=$(new_case checks-passed-unverified)
+  make_repo_on_branch "$d/wt" fm/feat-cpunverified
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cpunverified.meta" "window=fm:fm-feat-cpunverified" \
+    "worktree=$d/wt" "kind=ship" "pr=https://github.com/o/r/pull/2" \
+    "pr_head=$FM_FAKE_RUN_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-cpunverified)"
+  FM_FAKE_GH_PR_VIEW=$(printf '{"headRefOid":"%s","statusCheckRollup":[]}' "$FM_FAKE_RUN_HEAD")
+  out=$(run_crew_state "$d" feat-cpunverified)
+  assert_contains "$out" "state: unknown" "a checks-passed outcome with zero forge checks is not done"
+  assert_contains "$out" "no-checks" "the rejected checks-passed outcome names its verdict"
+  assert_not_contains "$out" "state: done" "a terminal checks-passed outcome is not evidence by itself"
+  assert_not_contains "$out" "PR ready" "an unverified checks-passed outcome is never captain-ready"
+  pass "checks-passed outcome alone is not readiness"
+}
+
+test_checks_passed_outcome_verified_green_is_done() {
+  reset_fakes
+  local d out
+  d=$(new_case checks-passed-verified)
+  make_repo_on_branch "$d/wt" fm/feat-cpverified
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cpverified.meta" "window=fm:fm-feat-cpverified" \
+    "worktree=$d/wt" "kind=ship" "pr=https://github.com/o/r/pull/2" \
+    "pr_head=$FM_FAKE_RUN_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-cpverified)"
+  FM_FAKE_GH_PR_VIEW=$(printf '{"headRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"StatusContext","state":"SUCCESS"}]}' "$FM_FAKE_RUN_HEAD")
+  out=$(run_crew_state "$d" feat-cpverified)
+  assert_contains "$out" "state: done" "a forge-verified checks-passed outcome -> done"
+  assert_contains "$out" "source: run-step" "verified checks-passed keeps the run-step source"
+  assert_contains "$out" "PR ready" "verified checks-passed is captain-ready"
+  assert_contains "$out" "verified from forge" "verified checks-passed names its evidence"
+  pass "checks-passed outcome is done once the forge confirms it"
+}
+
+# A GitLab merge request is a supported firstmate watch target, but the check
+# semantics read here are GitHub's, so the resolver refuses to guess.
+test_non_github_pr_is_forge_unsupported() {
+  reset_fakes
+  local d out
+  d=$(new_case checks-passed-gitlab)
+  make_repo_on_branch "$d/wt" fm/feat-cpgitlab
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cpgitlab.meta" "window=fm:fm-feat-cpgitlab" \
+    "worktree=$d/wt" "kind=ship" "pr=https://gitlab.com/g/p/-/merge_requests/3" \
+    "pr_head=$FM_FAKE_RUN_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-cpgitlab https://gitlab.com/g/p/-/merge_requests/3)"
+  FM_FAKE_GH_PR_VIEW=$(printf '{"headRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}' "$FM_FAKE_RUN_HEAD")
+  out=$(run_crew_state "$d" feat-cpgitlab)
+  assert_contains "$out" "state: unknown" "a merge request on another forge is not verifiable here"
+  assert_contains "$out" "forge-unsupported" "the unverifiable forge is named rather than read as an outage"
+  assert_not_contains "$out" "PR ready" "an unverifiable forge is never captain-ready"
+  pass "a non-GitHub merge request resolves to forge-unsupported"
+}
+
 test_ci_monitoring_green_then_rearm_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-green-then-rearm)
@@ -855,12 +959,44 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
 EOF
 )"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  # The fake gh answers ONLY for the task's own PR, so a resolver that asked
+  # about the foreign run's pr: (pull/2) would fail instead of passing here.
+  FM_FAKE_GH_PR_URL="https://github.com/o/r/pull/4"
   FM_FAKE_GH_PR_VIEW=$(printf '{"headRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}' "$FM_FAKE_RUN_HEAD")
   local out; out=$(run_crew_state "$d" feat-coarseready)
   assert_contains "$out" "state: done" "coarse ready status -> done"
   assert_contains "$out" "source: run-step" "coarse ready status requires task-bound forge evidence"
   assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
   pass "coarse run does not probe another branch's ci log"
+}
+
+# Coarse attribution means $RUN_OUT belongs to a DIFFERENT branch, so its step
+# rows say nothing about this task. A foreign run in a fix round must not veto
+# this task's own forge evidence.
+test_coarse_run_ignores_other_branch_ci_fix_round() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-ready-other-fixing)
+  make_repo_on_branch "$d/wt" fm/feat-coarsefixing
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-coarsefixing.meta" "window=fm:fm-feat-coarsefixing" \
+    "worktree=$d/wt" "kind=ship" "pr=https://github.com/o/r/pull/7" \
+    "pr_head=$FM_FAKE_RUN_HEAD"
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$d/state/feat-coarsefixing.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_fixing fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  fixing     fm/other-crew aaaaaaa  2026-07-02 22:10
+  running    fm/feat-coarsefixing ${short}  2026-07-02 22:05
+EOF
+)"
+  FM_FAKE_GH_PR_URL="https://github.com/o/r/pull/7"
+  FM_FAKE_GH_PR_VIEW=$(printf '{"headRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}' "$FM_FAKE_RUN_HEAD")
+  out=$(run_crew_state "$d" feat-coarsefixing)
+  assert_contains "$out" "state: done" "another branch's fix round cannot withhold this task's verified green"
+  assert_contains "$out" "verified from forge" "coarse readiness still comes from task-bound forge evidence"
+  assert_not_contains "$out" "unverified" "a foreign fix round is not evidence about this task"
+  pass "a foreign branch's ci fix round does not veto coarse readiness"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -1426,6 +1562,10 @@ test_ci_monitoring_no_checks_terminal_stays_working
 test_ci_green_forge_unavailable_renders_unknown_without_ready
 test_ci_green_with_zero_forge_checks_is_no_checks
 test_ci_green_head_mismatch_stays_not_ready
+test_ci_green_matches_attributed_run_head_after_stale_pr_head
+test_checks_passed_outcome_needs_forge_evidence
+test_checks_passed_outcome_verified_green_is_done
+test_non_github_pr_is_forge_unsupported
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
@@ -1439,6 +1579,7 @@ test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_coarse_run_ignores_other_branch_ci_fix_round
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
