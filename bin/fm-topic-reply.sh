@@ -2,8 +2,8 @@
 # Send an idempotently keyed reply into an item's originating Telegram topic and archive the item after its initial answer.
 #
 # Usage:
-#   fm-topic-reply.sh <update-id> [--text-file <path>]
-#   fm-topic-reply.sh <update-id> --follow-up <key> [--text-file <path>]
+#   fm-topic-reply.sh <update-id> [--text-file <path>] [--buttons <key=label,...>]
+#   fm-topic-reply.sh <update-id> --follow-up <key> [--text-file <path>] [--buttons <key=label,...>]
 #   fm-topic-reply.sh <update-id> [--follow-up <key>] --confirm-sent
 #   fm-topic-reply.sh <update-id> [--follow-up <key>] --retry-unknown [--text-file <path>]
 #
@@ -29,6 +29,7 @@ reply_key=initial
 text_file=
 confirm_sent=0
 retry_unknown=0
+buttons_spec=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --text-file)
@@ -43,6 +44,11 @@ while [ "$#" -gt 0 ]; do
       ;;
     --confirm-sent) confirm_sent=1; shift ;;
     --retry-unknown) retry_unknown=1; shift ;;
+    --buttons)
+      [ "$#" -gt 1 ] || { echo 'error: --buttons requires key=label entries' >&2; exit 2; }
+      buttons_spec=$2
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -50,6 +56,8 @@ done
 
 case "$reply_key" in ''|*[!A-Za-z0-9._-]*) echo 'error: reply key must use letters, digits, dot, underscore, or dash' >&2; exit 2 ;; esac
 [ "$confirm_sent" -eq 0 ] || [ "$retry_unknown" -eq 0 ] || { echo 'error: choose only one of --confirm-sent or --retry-unknown' >&2; exit 2; }
+[ "$confirm_sent" -eq 0 ] || [ -z "$buttons_spec" ] || { echo 'error: --buttons cannot be used with --confirm-sent' >&2; exit 2; }
+[ "$retry_unknown" -eq 0 ] || [ -z "$buttons_spec" ] || { echo 'error: --buttons cannot be used with --retry-unknown' >&2; exit 2; }
 
 fm_topic_check_config
 fm_topic_prepare_storage
@@ -150,6 +158,16 @@ else
 fi
 [ -n "$text" ] || { echo 'error: reply text is empty' >&2; exit 1; }
 text_hash=$(printf '%s' "$text" | fm_topic_hash)
+decision_token=
+buttons_json=null
+reply_markup=
+if [ -n "$buttons_spec" ]; then
+  buttons_json=$(fm_topic_parse_buttons "$buttons_spec") || exit 2
+  decision_token=$(fm_topic_decision_token "topic:${update_id}:${reply_key}")
+  reply_markup=$(jq -cn --arg token "$decision_token" --argjson buttons "$buttons_json" '
+    {inline_keyboard: [$buttons | map({text: .label, callback_data: ($token + ":" + .key)})]}
+  ') || exit 1
+fi
 
 if [ -f "$intent" ]; then
   recorded_hash=$(jq -r '.text_sha256' "$intent")
@@ -157,6 +175,17 @@ if [ -f "$intent" ]; then
     printf 'error: reply key %s already belongs to different text for update %s\n' "$reply_key" "$update_id" >&2
     exit 1
   }
+  if [ -n "$buttons_spec" ]; then
+    jq -e --arg token "$decision_token" --argjson buttons "$buttons_json" '
+      .decision.token == $token and .decision.buttons == $buttons
+    ' "$intent" >/dev/null 2>&1 || {
+      printf 'error: reply key %s already belongs to different button choices for update %s\n' "$reply_key" "$update_id" >&2
+      exit 1
+    }
+  elif jq -e 'has("decision")' "$intent" >/dev/null 2>&1; then
+    printf 'error: reply key %s already belongs to a decision prompt for update %s\n' "$reply_key" "$update_id" >&2
+    exit 1
+  fi
   intent_status=$(jq -r '.status' "$intent")
   case "$intent_status" in
     sent)
@@ -185,6 +214,8 @@ else
     --arg thread_id "$thread_id" \
     --arg group "$group" \
     --arg from_id "$from_id" \
+    --arg decision_token "$decision_token" \
+    --argjson buttons "$buttons_json" \
     --arg prepared_at "$(fm_topic_now)" \
     '{
       version: $version,
@@ -201,7 +232,16 @@ else
       prepared_at: $prepared_at,
       changed_at: $prepared_at,
       status: "prepared"
-    }' | fm_topic_atomic_from_stdin "$intent"
+    }
+    | if $decision_token == "" then . else . + {decision: {
+        token: $decision_token,
+        buttons: $buttons,
+        source_chat_id: $chat_id,
+        source_thread_id: (if $thread_id == "null" then null else ($thread_id | tonumber) end),
+        source_topic: (if $group == "" then "Direct message" else $group end),
+        route: "main",
+        status: "open"
+      }} end' | fm_topic_atomic_from_stdin "$intent"
 fi
 
 mark_intent sending
@@ -217,6 +257,7 @@ curl_args=(
   --data-urlencode "text=${text}"
 )
 [ "$thread_id" = null ] || curl_args+=(--data-urlencode "message_thread_id=${thread_id}")
+[ -z "$reply_markup" ] || curl_args+=(--data-urlencode "reply_markup=${reply_markup}")
 
 set +e
 response=$("$CURL_BIN" "${curl_args[@]}")
@@ -249,6 +290,7 @@ jq --arg sent_at "$(fm_topic_now)" \
   | .changed_at = $sent_at
   | .telegram_message_id = ($message_id | tonumber)
   | .telegram_thread_id = (if $thread_id == "null" then null else ($thread_id | tonumber) end)
+  | if has("decision") then .decision.source_message_id = ($message_id | tonumber) else . end
   | del(.note)
 ' "$intent" | fm_topic_atomic_from_stdin "$intent"
 finalize_initial_answer

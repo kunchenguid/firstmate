@@ -41,6 +41,7 @@ case " $* " in
     [ "$rc" -eq 0 ] || exit "$rc"
     cat "${FM_FAKE_SEND_RESPONSE:?}"
     ;;
+  *answerCallbackQuery*|*editMessageText*) printf '%s\n' '{"ok":true,"result":true}' ;;
   *) echo 'unexpected fake curl request' >&2; exit 2 ;;
 esac
 SH
@@ -168,6 +169,7 @@ test_reply_archives_and_standalone_send_records() {
   assert_present "$data/answered/update-20.json" "answered item was not archived"
   assert_absent "$data/inbox/update-20.json" "answered item stayed in the inbox"
   grep -q 'message_thread_id' "$log" && fail "direct-chat reply sent a forum thread id"
+  grep -q 'reply_markup' "$log" && fail "a button-free direct-message reply changed its Telegram request shape"
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_FAKE_CURL_LOG="$log" FM_FAKE_SEND_RESPONSE="$send_response" \
@@ -175,6 +177,43 @@ test_reply_archives_and_standalone_send_records() {
   assert_contains "$out" 'ok: message 900 sent to captain chat' "standalone send did not confirm"
   [ "$(find "$data/outbox" -name 'send-*.json' | wc -l | tr -d '[:space:]')" = 1 ] || fail "standalone send left no outbox record"
   pass "replies archive the item and standalone sends leave durable records"
+}
+
+test_direct_message_decision_buttons_reuse_the_durable_tap_contract() {
+  local home fakebin response send_response log data token callback_data
+  home=$(make_home decision-buttons)
+  fakebin=$(make_fake_curl "$home")
+  data="$home/data/fm-telegram-dm"
+  response="$home/updates.json"
+  send_response="$home/send-response.json"
+  log="$home/curl.log"
+  : > "$log"
+  printf '%s\n' '{"ok":true,"result":{"message_id":901}}' > "$send_response"
+  write_updates "$response" \
+    "{\"update_id\":70,\"message\":{\"message_id\":700,\"chat\":{\"id\":$CAPTAIN_ID,\"type\":\"private\"},\"from\":{\"id\":$CAPTAIN_ID},\"text\":\"decision please\"}}"
+  listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "could not seed direct-message decision item"
+
+  printf 'Choose a release action.' | PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_CURL_LOG="$log" FM_FAKE_SEND_RESPONSE="$send_response" "$REPLY" 70 --buttons 'merge=MERGE,hold=HOLD' >/dev/null \
+    || fail "direct-message decision reply did not send"
+  token=$(jq -r '.decision.token' "$data/outbox/update-70-initial.json")
+  callback_data="${token}:hold"
+  assert_grep 'reply_markup=' "$log" "direct-message reply did not attach an inline keyboard"
+
+  write_updates "$response" \
+    "{\"update_id\":71,\"callback_query\":{\"id\":\"callback-71\",\"from\":{\"id\":$CAPTAIN_ID},\"data\":\"$callback_data\",\"message\":{\"message_id\":901,\"chat\":{\"id\":$CAPTAIN_ID,\"type\":\"private\"},\"text\":\"Choose a release action.\"}}}"
+  listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "direct-message listener did not accept a captain decision tap"
+  assert_present "$data/inbox/update-71.json" "direct-message decision tap did not reach the durable inbox"
+  [ "$(jq -r '.content_type' "$data/inbox/update-71.json")" = decision_tap ] || fail "direct-message tap did not use the shared content type"
+  [ "$(jq -r '.text' "$data/inbox/update-71.json")" = HOLD ] || fail "direct-message choice label was not retained"
+  assert_grep 'answerCallbackQuery' "$log" "direct-message listener did not stop the callback spinner"
+
+  printf 'Standalone choice.' | PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_CURL_LOG="$log" FM_FAKE_SEND_RESPONSE="$send_response" "$REPLY" send --buttons 'yes=YES,no=NO' >/dev/null \
+    || fail "standalone direct-message decision did not send"
+  jq -e '.decision.buttons | length == 2' "$data/outbox/send-"*.json >/dev/null 2>&1 \
+    || fail "standalone direct-message decision did not leave a reusable decision record"
+  pass "direct-message replies and standalone sends support the durable decision-button contract"
 }
 
 epoch_to_iso8601() {
@@ -267,6 +306,7 @@ test_listener_accepts_only_captain_private_messages
 test_listener_waits_while_plugin_poller_lives
 test_check_config_refuses_board_token_reuse
 test_reply_archives_and_standalone_send_records
+test_direct_message_decision_buttons_reuse_the_durable_tap_contract
 test_claimed_item_reminds_on_the_longer_cadence
 test_count_subcommand_uses_configured_dm_claimed_cadence
 test_service_unit_and_supervision_demand

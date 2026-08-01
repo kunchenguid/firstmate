@@ -317,6 +317,90 @@ fm_topic_atomic_text() {
   printf '%s\n' "$value" | fm_topic_atomic_from_stdin "$destination"
 }
 
+# Parse the public --buttons key=label,key=label syntax into a Telegram-ready
+# JSON array, keeping callback data short enough for Telegram's 64-byte limit.
+fm_topic_parse_buttons() {
+  local spec=$1 part key label buttons='[]'
+  local -a parts=()
+  [ -n "$spec" ] || {
+    echo 'error: --buttons must contain at least one key=label pair' >&2
+    return 1
+  }
+  IFS=',' read -r -a parts <<< "$spec"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      *=*) ;;
+      *) echo 'error: each --buttons entry must use key=label syntax' >&2; return 1 ;;
+    esac
+    key=${part%%=*}
+    label=${part#*=}
+    [[ "$key" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || {
+      echo 'error: button keys must use 1-32 letters, digits, dot, underscore, or dash' >&2
+      return 1
+    }
+    [ -n "$label" ] && [ "${#label}" -le 64 ] || {
+      echo 'error: button labels must contain 1-64 characters' >&2
+      return 1
+    }
+    case "$label" in *$'\r'*|*$'\n'*) echo 'error: button labels must not contain newlines' >&2; return 1 ;; esac
+    printf '%s' "$buttons" | jq -e --arg key "$key" 'all(.[]; .key != $key)' >/dev/null 2>&1 || {
+      printf 'error: duplicate button key: %s\n' "$key" >&2
+      return 1
+    }
+    buttons=$(printf '%s' "$buttons" | jq -c --arg key "$key" --arg label "$label" '. + [{key: $key, label: $label}]') || return 1
+  done
+  printf '%s\n' "$buttons"
+}
+
+fm_topic_decision_token() {
+  local stable_key=$1
+  printf 'd1-%s\n' "$(printf '%s' "$stable_key" | fm_topic_hash | cut -c1-24)"
+}
+
+fm_topic_callback_data() {
+  local token=$1 key=$2 data
+  [[ "$token" =~ ^d1-[a-f0-9]{24}$ ]] || return 1
+  [[ "$key" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || return 1
+  data="${token}:${key}"
+  [ "${#data}" -le 64 ] || return 1
+  printf '%s\n' "$data"
+}
+
+fm_topic_find_decision_intent() {
+  local token=$1 intent
+  [[ "$token" =~ ^d1-[a-f0-9]{24}$ ]] || return 1
+  for intent in "$FM_TOPIC_OUTBOX"/update-*.json "$FM_TOPIC_OUTBOX"/send-*.json; do
+    [ -f "$intent" ] && [ ! -L "$intent" ] || continue
+    jq -e --arg token "$token" '.decision.token == $token' "$intent" >/dev/null 2>&1 || continue
+    printf '%s\n' "$intent"
+    return 0
+  done
+  return 1
+}
+
+fm_topic_decision_choice() {
+  local intent=$1 key=$2
+  [[ "$key" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || return 1
+  jq -c --arg key "$key" '.decision.buttons[]? | select(.key == $key)' "$intent"
+}
+
+fm_topic_decision_already_recorded() {
+  local chat_id=$1 message_id=$2 token=$3 item
+  for item in "$FM_TOPIC_INBOX"/update-*.json "$FM_TOPIC_ANSWERED"/update-*.json; do
+    [ -f "$item" ] && [ ! -L "$item" ] || continue
+    jq -e \
+      --arg chat_id "$chat_id" \
+      --argjson message_id "$message_id" \
+      --arg token "$token" '
+        .content_type == "decision_tap"
+        and .decision.source_chat_id == $chat_id
+        and .decision.source_message_id == $message_id
+        and .decision.token == $token
+      ' "$item" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 fm_topic_item_filename() {
   local update_id=$1
   case "$update_id" in

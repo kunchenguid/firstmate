@@ -23,6 +23,10 @@ Claimed items repeat on a separate default four-hour cadence, which keeps active
 `bin/fm-topic-inbox.sh` lists, shows, claims, and releases individual items.
 Claiming records ownership but leaves the item in the inbox until a successful initial answer.
 `bin/fm-topic-reply.sh` sends through Telegram `sendMessage` with the item's recorded `chat_id` and `message_thread_id`, so the response lands in the originating group and topic.
+Pass `--buttons 'merge=MERGE,hold=HOLD'` to attach one inline keyboard row to a reply.
+Each tap becomes one `decision_tap` inbox record with the compact callback token, source message id, chosen key, and chosen label, then queues the same durable wake as an ordinary topic message.
+The listener acknowledges the callback to stop Telegram's spinner and replaces the prompt with a visible selected label while clearing its keyboard.
+A second tap for the same decision prompt is acknowledged but never creates a second actionable record.
 A new reply intent repeats that origin and refuses reuse if its origin no longer matches the durable item.
 A successful initial answer moves only that item into `answered/` and never bulk-deletes the inbox.
 
@@ -152,3 +156,8 @@ Worker instructions and returns carry `topic-item <update-id>` so the final outc
 
 An enabled topic board requires one live harness supervision cycle even when no project task is running.
 Session-start instructions, the turn-end guard, the normal liveness guard, and the OpenCode idle-arm plugin all treat the local topic credential file as supervision demand.
+
+## Manual live verification after landing
+
+Do not send a test prompt to a production group from a disposable worktree.
+After the guarded local merge, firstmate can run one supervised probe in an approved non-production chat: send a `fm-topic-reply.sh` decision prompt, tap one choice as the configured captain, verify one `decision_tap` record and wake, then confirm the original prompt visibly shows the selected choice with no remaining keyboard.

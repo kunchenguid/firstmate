@@ -83,6 +83,7 @@ case " $* " in
     [ "$rc" -eq 0 ] || exit "$rc"
     cat "${FM_FAKE_SEND_RESPONSE:?}"
     ;;
+  *answerCallbackQuery*|*editMessageText*) printf '%s\n' '{"ok":true,"result":true}' ;;
   *) echo 'unexpected fake curl request' >&2; exit 2 ;;
 esac
 SH
@@ -378,6 +379,7 @@ test_claim_reply_idempotency_and_ambiguous_delivery() {
   assert_absent "$data/inbox/update-50.json" "answered item remained in the active inbox"
   assert_present "$data/answered/update-50.json" "answered item was deleted instead of archived"
   [ "$(jq -r '.status' "$data/outbox/update-50-initial.json")" = sent ] || fail "reply intent was not recorded as sent"
+  grep -q 'reply_markup' "$log" && fail "a button-free reply changed its Telegram request shape"
 
   printf 'Started and routed.' | PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_CURL_LOG="$log" FM_FAKE_SEND_RESPONSE="$send_response" "$REPLY" 50 >/dev/null || fail "idempotent reply replay failed"
   send_count=$(grep -c 'sendMessage' "$log")
@@ -406,6 +408,49 @@ test_claim_reply_idempotency_and_ambiguous_delivery() {
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_CURL_LOG="$log" FM_FAKE_SEND_RESPONSE="$send_response" "$REPLY" 51 --confirm-sent >/dev/null || fail "manual sent confirmation failed"
   assert_present "$data/answered/update-51.json" "confirmed ambiguous item was not archived"
   pass "claims persist, keyed replies do not duplicate, and ambiguous delivery requires an explicit decision"
+}
+
+test_decision_buttons_persist_one_tap_and_clear_the_keyboard() {
+  local home fakebin response send_response log data token merge_data hold_data
+  home=$(make_home decision-buttons)
+  fakebin=$(make_fake_curl "$home")
+  response="$home/updates.json"
+  send_response="$home/send.json"
+  log="$home/curl.log"
+  data="$home/data/fm-telegram-topics"
+  : > "$log"
+  printf '%s\n' '{"ok":true,"result":{"message_id":901,"message_thread_id":3}}' > "$send_response"
+  write_updates "$response" \
+    '{"update_id":60,"message":{"message_id":601,"message_thread_id":3,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"choose"}}'
+  listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "could not seed decision reply item"
+
+  printf 'Ship this branch?' | PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_CURL_LOG="$log" FM_FAKE_SEND_RESPONSE="$send_response" "$REPLY" 60 --buttons 'merge=MERGE,hold=HOLD' >/dev/null \
+    || fail "decision reply did not send"
+  token=$(jq -r '.decision.token' "$data/outbox/update-60-initial.json")
+  merge_data="${token}:merge"
+  hold_data="${token}:hold"
+  assert_grep 'reply_markup=' "$log" "decision reply did not attach an inline keyboard"
+  assert_grep "$merge_data" "$log" "inline keyboard did not include the compact merge callback token"
+
+  write_updates "$response" \
+    "{\"update_id\":61,\"callback_query\":{\"id\":\"callback-61\",\"from\":{\"id\":700000001},\"data\":\"$merge_data\",\"message\":{\"message_id\":901,\"message_thread_id\":3,\"chat\":{\"id\":-1001234567890},\"text\":\"Ship this branch?\"}}}"
+  listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "listener did not accept the captain decision tap"
+  assert_present "$data/inbox/update-61.json" "decision tap did not reach the durable inbox"
+  [ "$(jq -r '.content_type' "$data/inbox/update-61.json")" = decision_tap ] || fail "decision tap did not receive its distinct content type"
+  [ "$(jq -r '.decision.choice_key' "$data/inbox/update-61.json")" = merge ] || fail "decision choice key was not retained"
+  [ "$(jq -r '.decision.label' "$data/inbox/update-61.json")" = MERGE ] || fail "decision label was not retained"
+  [ "$(jq -r '.decision.status' "$data/outbox/update-60-initial.json")" = selected ] || fail "decision intent was not closed after the tap"
+  assert_grep 'answerCallbackQuery' "$log" "listener did not stop the Telegram callback spinner"
+  assert_grep 'editMessageText' "$log" "listener did not replace the choice keyboard with the selected state"
+  assert_grep 'Selected: MERGE' "$log" "selected choice was not made visible in the original message"
+
+  write_updates "$response" \
+    "{\"update_id\":62,\"callback_query\":{\"id\":\"callback-62\",\"from\":{\"id\":700000001},\"data\":\"$hold_data\",\"message\":{\"message_id\":901,\"message_thread_id\":3,\"chat\":{\"id\":-1001234567890},\"text\":\"Ship this branch?\"}}}"
+  listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "listener rejected a duplicate decision tap"
+  assert_absent "$data/inbox/update-62.json" "a second tap created another actionable decision"
+  assert_grep 'Decision already recorded' "$log" "duplicate tap was not acknowledged as already recorded"
+  pass "decision buttons produce one durable tap, acknowledge Telegram, and visibly close the prompt"
 }
 
 epoch_to_iso8601() {
@@ -569,6 +614,7 @@ test_boundary_offset_and_failed_persistence
 test_fast_wake_signals_only_verified_home_watcher
 test_queued_topic_wake_survives_unhandled_usr1
 test_claim_reply_idempotency_and_ambiguous_delivery
+test_decision_buttons_persist_one_tap_and_clear_the_keyboard
 test_claimed_item_reminds_on_the_longer_cadence
 test_claimed_item_cadence_survives_concurrent_wake_clock_resets
 test_claimed_item_with_missing_claimed_at_surfaces_immediately

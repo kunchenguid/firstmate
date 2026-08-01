@@ -19,6 +19,7 @@ Claimed items repeat on a separate default four-hour cadence (`FM_DM_CLAIMED_REM
 `bin/fm-dm-inbox.sh` lists, shows, claims, and releases items (same commands and claimed-versus-pending semantics as `fm-topic-inbox.sh`).
 `bin/fm-dm-reply.sh <update-id>` answers an item with the full topic-board reply semantics, including keyed idempotent intents, the ambiguous-delivery stop, and the `answered/` archive.
 `bin/fm-dm-reply.sh send` sends a standalone message to the captain chat with no inbox item, for announcements; it records `outbox/send-<epoch>-<id>.json`.
+Both forms accept `--buttons 'key=Label,...'` and turn an approved captain tap into the same durable `decision_tap` inbox contract as the topic board.
 
 ## Single-consumer safety
 
