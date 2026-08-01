@@ -170,7 +170,7 @@ When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without 
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 After Firstmate filters a matched array for task fit and reasoning class, `fm-dispatch-select.mjs` uses fresh metered evidence, excludes provider cooldowns, and rotates eligible subscriptions through private home-local state.
-Static and explicit dispatch keep spawn launch compatible across claude, codex, grok, pi, opencode, kimi, cline, cursor-agent, and copilot, while automatic subscription arrays exclude Kimi and preserve the selected profile for later audit.
+Static and explicit dispatch keep spawn launch compatible across claude, codex, grok, pi, opencode, kimi, cline, cursor-agent, copilot, and agy, while automatic subscription arrays exclude Kimi and preserve the selected profile for later audit.
 
 ## Optional secondmates
 

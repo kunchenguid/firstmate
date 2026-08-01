@@ -79,6 +79,15 @@ Past-trust anchors (must not match the dialog itself):
 
 Deliberately **not** the substring `Antigravity CLI` — it appears inside the dialog body.
 
+The readiness gate tests the past-trust anchors **before** the dialog literal.
+Whether the accepted frame is scrubbed from the 120-line capture window was not
+pinned down empirically, and cursor-agent's Ink TUI demonstrably leaves its own
+trust frame in the scrollback forever. Dialog-first ordering would therefore
+risk never reaching the success branch, exhausting the poll budget, and
+reporting a false spawn failure while a trusted agent works unsupervised.
+Because the anchors above provably do not match the dialog body, past-trust-first
+is correct under either scrollback behavior.
+
 ## Launch and brief delivery
 
 ```

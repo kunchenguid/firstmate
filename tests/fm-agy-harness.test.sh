@@ -43,16 +43,36 @@ test_existing_launch_templates_untouched() {
 }
 
 test_agy_is_a_known_bare_adapter_name() {
-  grep -Fq "|copilot|agy)" "$SPAWN" \
-    || fail "fm-spawn: agy not added to a known-harness allowlist"
+  # Assert an executable case-pattern line, not the usage comment that spells
+  # the same allowlist - a comment-only match would keep this fence green after
+  # agy was dropped from the real arg-parsing arm.
+  grep -Eq "^[[:space:]]*[^#]*\|agy\)" "$SPAWN" \
+    || fail "fm-spawn: agy not added to a known-harness allowlist case arm"
   pass "fm-spawn: agy is recognized as a known bare adapter name"
 }
 
 test_agy_model_and_effort_flags() {
-  grep -Fq "|copilot|agy)" "$SPAWN" \
-    || fail "fm-spawn: agy not in the --model allowlist"
-  grep -Fq "low|medium|high) printf -- '--effort %s '" "$SPAWN" \
-    || fail "fm-spawn: agy effort->--effort mapping missing"
+  # Scope both needles to the function bodies that actually build the flags.
+  # A bare file-wide grep for "|copilot|agy)" also matches a usage comment and
+  # the secondmate bare-name case, so deleting agy from model_flag_for_harness
+  # alone would leave this fence green while agy silently loses --model.
+  local model_fn effort_agy_arm
+  model_fn=$(sed -n '/^model_flag_for_harness()/,/^}/p' "$SPAWN")
+  printf '%s\n' "$model_fn" | grep -Eq '^ *[^)]*\|agy\)' \
+    || fail "fm-spawn: agy not in model_flag_for_harness's --model allowlist"
+  printf '%s\n' "$model_fn" | grep -Fq "printf -- '--model %s '" \
+    || fail "fm-spawn: model_flag_for_harness no longer emits --model"
+  # The agy arm runs from its `agy)` case label to that arm's `;;` terminator.
+  effort_agy_arm=$(sed -n '/^effort_flag_for_harness()/,/^}/p' "$SPAWN" \
+    | sed -n '/^ *agy)/,/^ *;;/p')
+  [ -n "$effort_agy_arm" ] \
+    || fail "fm-spawn: effort_flag_for_harness has no agy case arm"
+  printf '%s\n' "$effort_agy_arm" | grep -Fq "low|medium|high) printf -- '--effort %s '" \
+    || fail "fm-spawn: agy effort->--effort (low|medium|high) mapping missing"
+  # agy rejects xhigh/max, so the arm's own case pattern must not widen to them.
+  if printf '%s\n' "$effort_agy_arm" | grep -Eq "^ *[a-z|]*(xhigh|max)[a-z|]*\) printf -- '--effort"; then
+    fail "fm-spawn: agy effort arm must omit xhigh/max"
+  fi
   pass "fm-spawn: agy gets --model and effort->--effort (low|medium|high)"
 }
 
@@ -237,6 +257,44 @@ if agy_wait_for_trust_clear; then echo OK; else echo FAIL; fi
   pass "agy trust gate clears untrusted path with one Enter then past-trust idle"
 }
 
+test_agy_trust_gate_clears_when_dialog_stays_in_scrollback() {
+  # An Ink TUI need not scrub the accepted trust frame from the scrollback
+  # (cursor-agent does not), which keeps the dialog literal inside every
+  # capture forever. The gate must still succeed the moment a past-trust
+  # anchor appears below it, or it burns the whole poll budget and reports a
+  # false spawn failure while a trusted, working agent runs unsupervised.
+  local tmpd send_log out sends
+  tmpd=$(fm_test_tmproot fm-agy-trust-scrollback)
+  send_log=$tmpd/sends
+  : > "$send_log"
+  out=$(bash -c '
+set -u
+'"$AGY_GATE_SOURCE"'
+T=fake:0
+W=
+BACKEND=tmux
+FM_AGY_TRUST_POLLS=4
+FM_AGY_POLL_INTERVAL=0
+spawn_send_key() { printf "KEY:%s\n" "$2" >> "'"$send_log"'"; }
+agy_capture() {
+  cat <<EOF
+Do you trust the contents of this project?
+Antigravity CLI requires permission to read, edit, and execute files here.
+> Yes, I trust this folder
+  No, exit
+esc to cancel                                                          Gemini 3.6 Flash · low
+EOF
+}
+if agy_wait_for_trust_clear; then echo OK; else echo FAIL; fi
+')
+  [ "$out" = OK ] \
+    || fail "agy trust gate must clear when the dialog literal persists in scrollback below a past-trust anchor, got '$out'"
+  sends=$(wc -l < "$send_log" | tr -d ' ')
+  [ "$sends" = 0 ] \
+    || fail "expected no keystroke once the pane is already past trust, got $sends"
+  pass "agy trust gate succeeds when the accepted dialog stays in scrollback"
+}
+
 test_agy_trust_gate_fails_loudly_on_budget() {
   local out
   out=$(bash -c '
@@ -276,4 +334,5 @@ test_agy_real_input_reads_pending
 test_agy_trust_gate_wired
 test_agy_past_trust_does_not_match_the_dialog
 test_agy_trust_gate_clears_untrusted_path
+test_agy_trust_gate_clears_when_dialog_stays_in_scrollback
 test_agy_trust_gate_fails_loudly_on_budget

@@ -1633,17 +1633,27 @@ agy_pane_is_past_trust() {  # <plain-pane-capture>
 # to persist the path and proceed); answered at most once so a repeat Enter
 # after trust clears does not land as stray composer text. See
 # docs/verification/agy-adapter.md "Trust / permission gate".
+#
+# The POSITIVE past-trust anchor is tested FIRST, matching cursor's ordering
+# above: an Ink TUI need not scrub the accepted trust frame from the terminal
+# scrollback, and if agy leaves it there the dialog literal stays in every
+# 120-line capture forever. Dialog-first would then never reach the success
+# branch, exhaust the poll budget, and report a false spawn failure while a
+# trusted, working agent runs unsupervised. Past-trust-first is correct under
+# BOTH scrollback behaviors because the anchors ('esc to cancel',
+# '? for shortcuts') provably do not appear in the dialog body - there is a
+# dedicated regression fence for that in tests/fm-agy-harness.test.sh.
 agy_wait_for_trust_clear() {
   local pane i=0 max=${FM_AGY_TRUST_POLLS:-60} interval=${FM_AGY_POLL_INTERVAL:-0.5} answered=0
   while [ "$i" -lt "$max" ]; do
     pane=$(agy_capture)
-    if agy_trust_dialog_present "$pane"; then
+    if agy_pane_is_past_trust "$pane"; then
+      return 0
+    elif agy_trust_dialog_present "$pane"; then
       if [ "$answered" -eq 0 ]; then
         spawn_send_key "$T" Enter
         answered=1
       fi
-    elif agy_pane_is_past_trust "$pane"; then
-      return 0
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
