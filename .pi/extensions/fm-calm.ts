@@ -159,6 +159,14 @@ export default function (pi: ExtensionAPI) {
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
   const calmPreferencePath = resolve(configDirectory, "calm");
+  // Visible footer indicator so the captain can always see whether Calm is on or
+  // off (2026-08-01: the previous code cleared the status with setStatus(key,
+  // undefined), so an active Calm looked identical to no Calm at all).
+  const applyCalmStatus = (ui: ExtensionUIContext, active: boolean): void => {
+    const theme = ui.theme;
+    const label = active ? "● calm on" : "○ calm off";
+    ui.setStatus("firstmate-calm", theme?.fg ? theme.fg(active ? "accent" : "dim", label) : label);
+  };
   const loadCalmPreference = (): boolean => {
     try {
       return readFileSync(calmPreferencePath, "utf8").trim() === "on";
@@ -397,7 +405,7 @@ export default function (pi: ExtensionAPI) {
     workingShipAnimation.reset();
     applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
-    ctx.ui.setStatus("firstmate-calm", undefined);
+    applyCalmStatus(ctx.ui, calmPresentationIsActive());
     removeTerminalInputHandler?.();
     removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
       if (!getKeybindings().matches(data, "tui.input.submit")) return;
@@ -451,7 +459,7 @@ export default function (pi: ExtensionAPI) {
       publishPresentationState();
       applyWorkingPresentation(ctx.ui, true);
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
-      ctx.ui.setStatus("firstmate-calm", undefined);
+      applyCalmStatus(ctx.ui, active);
 
       const expanded = ctx.ui.getToolsExpanded();
       ctx.ui.setToolsExpanded(!expanded);
