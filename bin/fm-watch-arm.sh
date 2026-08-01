@@ -89,6 +89,14 @@ esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
+# attach_and_wait() and own_watcher_cycle() hand off to each other (mutual
+# recursion, not a loop) on every successor-gap-then-clean-exit-with-successor
+# round trip; bash has no TCO, so each hop adds two permanent stack frames for
+# the rest of this process's life. Bound the hop count explicitly rather than
+# relying on any other script's timeout to keep the depth rare in practice.
+MAX_TAKEOVER_HOPS=${FM_ARM_MAX_TAKEOVER_HOPS:-50}
+case "$MAX_TAKEOVER_HOPS" in ''|*[!0-9]*) MAX_TAKEOVER_HOPS=50 ;; esac
+TAKEOVER_HOPS=0
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
@@ -273,6 +281,19 @@ fail_unexplained_cycle() {
   return 1
 }
 
+# Returns success (bounds not exceeded, caller should recurse) or failure
+# (bounds exceeded, caller must report a typed FAILED instead of recursing
+# again). Kept as one shared gate so both handoff directions apply the same
+# bound the same way.
+takeover_hop_or_fail() {
+  TAKEOVER_HOPS=$((TAKEOVER_HOPS + 1))
+  if [ "$TAKEOVER_HOPS" -gt "$MAX_TAKEOVER_HOPS" ]; then
+    echo "watcher: FAILED - exceeded max takeover hops ($MAX_TAKEOVER_HOPS)"
+    return 1
+  fi
+  return 0
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, this arm never learns why its
 # attached target exited - it was never the one that forked it, so it has no
@@ -306,6 +327,7 @@ attach_and_wait() {
       continue
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
+    takeover_hop_or_fail || return $?
     own_watcher_cycle
     return $?
   done
@@ -396,6 +418,7 @@ owned_child_finished() {
       cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
       report_attached
       cycle_begin "$HEALTHY_PID" attached
+      takeover_hop_or_fail || return $?
       attach_and_wait "$HEALTHY_PID"
       return $?
     fi
