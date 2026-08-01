@@ -818,6 +818,33 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|pending-unp
   esac
 }
 
+# fm_backend_process_root_pid: return the shell/process root whose descendant
+# closure belongs to one pane. Only tmux and herdr expose a verified PID binding;
+# other backends fail without guessing so progress sampling stays supplemental.
+fm_backend_process_root_pid() {  # <backend> <target>
+  local backend=$1 target=$2 session pane info
+  case "$backend" in
+    tmux)
+      tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+      printf '%s' "$info" | jq -er --arg pane "$pane" '
+        .result.process_info
+        | select(.pane_id == $pane)
+        | .shell_pid
+        | select(type == "number" and . > 1)
+        | floor
+      ' 2>/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of

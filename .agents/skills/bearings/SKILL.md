@@ -14,13 +14,14 @@ metadata:
 Generate a complete current snapshot from the fleet's current state, so the captain can resume in one read after a break, a night, or a context reset.
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
-This skill is operationally read-only in both modes.
-It never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, mutates backlog or task state, or writes any file except the single dated report in explicit file mode.
+This skill is operationally read-only in plain mode and custody-preserving in file mode.
+It never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
+Explicit file mode may write only the dated report plus the version and receipt for a prior same-day report through `bin/fm-bearings-report.sh`.
 
 ## Invocation modes
 
 - Plain `/bearings` gathers a fresh bounded snapshot and renders the four-section chat digest without creating, deleting, reading, or replacing `data/status-report-<YYYY-MM-DD>.md`.
-- `/bearings file` gathers a fresh bounded snapshot, replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch, and renders the four-section chat digest with a link or path to that report.
+- `/bearings file` gathers a fresh bounded snapshot, versions any prior same-day report before replacement, and renders the four-section chat digest with a link or path to that report.
 - Treat `file` only as an explicit invocation option in the slash command.
 - Do not treat natural-language requests such as "write a report", "save this", "persist it", or "make a file" as file mode unless the invocation explicitly includes the standalone `file` option.
 - When the captain asks to include PRs, pass the snapshot command's live-PR opt-in.
@@ -49,12 +50,14 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.
    Plain mode stops here and writes no report artifact.
 
-3. **In explicit file mode only, compose and replace the detailed report file.**
+3. **In explicit file mode only, compose and custody-preserve the detailed report file.**
    The report uses the same four complete sections as the chat, in the same order, and adds the detail the chat omits.
    Never read an earlier `data/status-report-*.md` to decide what to omit, include, describe as changed, or call current.
-   Write the full report to `data/status-report-<YYYY-MM-DD>.md` using today's date.
-   If today's file already exists, delete it first, then create a new file from scratch.
-   This is the only write allowed by the skill.
+   Compose the full report in a temporary draft outside `data/status-report-*.md`, then install it with `bin/fm-bearings-report.sh <complete-draft.md>`.
+   The installer writes `data/status-report-<YYYY-MM-DD>.md` using today's date.
+   If today's file already exists, the installer first copies its exact bytes to a create-exclusive unique path under `data/status-report-versions/` and writes a pre-transition receipt containing its digest, byte count, source ref, custody class, and timestamp.
+   Never delete, truncate, or directly overwrite the dated report, and never hand-write the custody receipt.
+   The version and receipt preserve evidence only; never read them to decide what belongs in the new current report.
    The detailed report includes:
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
    - **Captain's Call** - every open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
@@ -103,5 +106,6 @@ Rules that keep the contract unambiguous:
 ## Supervision discipline
 
 This skill changes no fleet state.
-Do not tear down a task, merge a PR, dispatch queued work, steer a worker, answer a queued decision, clean up work, or mutate any `state/` or `data/` file other than the single report file in explicit file mode.
+Do not tear down a task, merge a PR, dispatch queued work, steer a worker, answer a queued decision, clean up work, or mutate task state.
+In file mode, the dated report and its prior-version custody artifacts are the only permitted `data/` writes.
 If the state you read suggests an action - a PR ready to merge, a queued item whose gate has arrived, or a needs-decision finding - name it in its section and leave the action to the normal lifecycle and configured authority rather than taking it from inside this skill.

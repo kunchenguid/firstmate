@@ -771,6 +771,8 @@ SH
   i=1
   while [ "$i" -le 40 ]; do
     (
+      # Bash 3.2 keeps $$ fixed across subshells and has no BASHPID. A child
+      # shell's PPID is the portable actual PID of this concurrent subshell.
       harness_pid=$(sh -c 'printf "%s\n" "$PPID"')
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"

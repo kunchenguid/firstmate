@@ -23,7 +23,10 @@ Load `secondmate-provisioning` instead for `kind=secondmate` recovery.
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
 Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding to relaunch.
-A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
+A pane and a detached pipeline worker are independent supervision subjects: interrupting or exiting the pane affects only the interactive agent, not a headless native agent or its process tree.
+A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active headless worker instead of recording the task stopped or creating a duplicate worker.
+When the recorded pipeline step is `running` but its bound native-agent PID is dead or suspended, report that contradiction instead of recording the run as live; use the pipeline's supported abort and custody flow only after its process ownership is reconciled.
+If the run record cannot be bound to a native-agent identity, report that limit as indeterminate rather than inferring live or dead from the pane.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
 Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
@@ -42,6 +45,7 @@ Escalate in order:
 2. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home.
 3. If the crewmate is confused or looping, interrupt with the adapter's interrupt key, then redirect with one corrective line.
    For example, for a single-Escape adapter: `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Escape`.
+   Re-read `bin/fm-crew-state.sh <id>` immediately afterward: the interrupt does not stop a detached validation worker, and a still-live headless worker keeps the task working.
 4. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.

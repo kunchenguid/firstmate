@@ -1827,6 +1827,29 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+test_inject_msg_defers_on_registered_model_capacity_hold() {
+  local dir state touched
+  dir=$(make_supercase inject-model-capacity-hold)
+  state="$dir/state"
+  touched="$dir/backend-called"
+  afk_enter "$state"
+  cat > "$state/.model-capacity-hold" <<'EOF'
+schema=fm-model-capacity-hold.v1
+hold_id=reserve-daemon
+reason=capacity reserved for another dispatch
+dispatch_ref=dispatch reserve-daemon
+registered_at=2026-07-31T00:00:00Z
+EOF
+  (
+    fm_backend_target_exists() { : > "$touched"; return 0; }
+    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
+      fail "inject_msg should defer while a registered model-capacity hold is active"
+    fi
+  ) || fail "model-capacity-held inject_msg subshell failed"
+  assert_absent "$touched" "held injection reached the backend before refusing"
+  pass "inject_msg: registered model-capacity hold preserves the buffer before backend work"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -1926,3 +1949,4 @@ test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+test_inject_msg_defers_on_registered_model_capacity_hold

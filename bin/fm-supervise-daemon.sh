@@ -180,6 +180,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
+# Durable capacity holds block away-mode model injections while leaving watcher
+# bookkeeping and cleanup available.
+# shellcheck source=bin/fm-model-capacity-hold-lib.sh
+. "$FM_DAEMON_DIR/fm-model-capacity-hold-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -1112,12 +1117,16 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict composer encoded hold_error
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
   afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  if ! hold_error=$(STATE="$state" fm_model_capacity_hold_refuse "away-supervisor model injection" 2>&1); then
+    log "inject deferred: $hold_error"
+    return 1
+  fi
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain

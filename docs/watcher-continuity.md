@@ -33,6 +33,8 @@ The durable wake queue preserves actionable events during the residual active-tu
 The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
+If a manual repair races a live Claude Stop-hook owner, `fm-watch-arm.sh` verifies the owner's fresh watcher and returns a typed delegated outcome instead of attaching a second arm lifecycle to the same cycle.
+The Stop-hook descendant itself is recognized through process ancestry and remains the only lifecycle owner.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
@@ -43,6 +45,7 @@ The turn-end guard remains the final backstop rather than the normal continuity 
 ## Arm-layer cycle contract
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
+The explicit delegated-to-Claude-owner result is a clean non-empty no-op because another verified owner already carries continuity; it is not an attached arm and never waits on or signals that owner's watcher.
 An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
 An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one, because it holds no handle on the watcher's stdout and cannot read the reason line itself.
