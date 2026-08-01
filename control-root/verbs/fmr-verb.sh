@@ -349,9 +349,14 @@ case "$verb" in
     [ "$effort" = default ] || spawn_args+=(--effort "$effort")
     spawn_log="$TASKS/$tid/spawn.log"
     if ! "$BIN/fm-spawn.sh" "${spawn_args[@]}" > "$spawn_log" 2>&1; then
+      # Read the log BEFORE releasing the claim. The log lives INSIDE the claim
+      # directory, so removing the claim first destroyed the only diagnostic and
+      # every spawn failure reported an empty reason - the control side was told
+      # "it failed" and never told why.
+      spawn_detail=$(tail -n 20 "$spawn_log" 2>/dev/null)
       rm -rf "${TASKS:?}/$tid"
       printf 'ERR spawnfailed fm-spawn.sh refused or failed on the host\n'
-      tail -n 20 "$spawn_log" 2>/dev/null
+      printf '%s\n' "$spawn_detail" | sanitize_events
       exit 1
     fi
     trust_note=$(settle_trust_dialog "$tid")

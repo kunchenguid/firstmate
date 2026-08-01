@@ -293,7 +293,16 @@ if [ "$HOST_SET" -eq 1 ]; then
     fi
     exit 3
   fi
-  [ "$host_rc" -eq 0 ] || exit 1
+  if [ "$host_rc" -ne 0 ]; then
+    # A failure waiting will not fix, reported synchronously to whoever ran this
+    # and with no retry armed. Clearing the queued record here is what stops it
+    # becoming a leak: nothing would ever pick it up, and `queued` would list a
+    # dispatch that is going nowhere. A refusal that DOES pass is exit 3 above,
+    # and that one is kept and retried.
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-relay-host.sh" cancel "$HOST_ID" >/dev/null 2>&1 || true
+    exit 1
+  fi
   printf '%s\n' "$host_out"
   # Same durable backlog transition the local path makes below; a failure here is
   # reported, never fatal, because the task is already live on the host.

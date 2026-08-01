@@ -499,6 +499,77 @@ test_queue_cli_lists_and_cancels() {
   pass "fm-relay-host queued/cancel: the queue is inspectable and reversible"
 }
 
+# The REAL dispatch against a fake relay, not the stub dispatcher the retry tests
+# use. That stub cannot see what dispatch does to the queue record, and it hid a
+# real disagreement: dispatch deleted the record on a permanent failure while the
+# retry path and the documentation both said it was kept.
+#
+# Both behaviours are correct, for different callers, which is why this pins
+# them: the retry runs where nobody is watching, so it must keep the work; a
+# first attempt from fm-spawn reported the failure to a human and armed no retry,
+# so keeping it would leave a record nothing will ever act on.
+# Enough of bifrost to reach the verb call: the file channel has to succeed and
+# hash-match first, because dispatch stages the brief before it spawns.
+fake_bifrost() {  # <dir> <exec-output> <exec-exit> <brief-sha256>
+  mkdir -p "$1"
+  cat > "$1/bifrost" <<STUB
+#!/bin/bash
+for a in "\$@"; do
+  case "\$a" in
+    write|delete) exit 0 ;;
+    hash) printf 'sha256: %s\n' "$4"; exit 0 ;;
+    exec) printf '%s\n' "$2"; exit $3 ;;
+  esac
+done
+exit 0
+STUB
+  chmod 755 "$1/bifrost"
+}
+
+test_dispatch_keeps_the_queue_record_when_the_host_refuses_for_good() {
+  local home out rc fake
+  home="$TMP_ROOT/perm"
+  mkdir -p "$home/state" "$home/data/p1"
+  write_gui_registry "$home"
+  printf 'a brief\n' > "$home/data/p1/brief.md"
+  queue_record "$home" p1 box151
+  fake="$home/fakebin"
+  fake_bifrost "$fake" "ERR noproject no project directory at /srv/projects/nope" 1 \
+    "$(fm_relay_sha256 "$home/data/p1/brief.md")"
+  rc=0
+  out=$(FM_HOME="$home" FM_RELAY_BIFROST="$fake/bifrost" \
+    "$ROOT/bin/fm-relay-host.sh" dispatch p1 2>&1) || rc=$?
+  expect_code 1 "$rc" "a permanent refusal must exit 1, not the retryable 3"
+  assert_present "$home/state/p1.relay-pending" \
+    "dispatch must KEEP the queued record; the retry runs where nobody is watching"
+  assert_contains "$(cat "$home/state/p1.relay-pending")" "reason=ERR noproject" \
+    "the record must carry why it cannot start, so the queue listing can show it"
+  assert_absent "$home/state/p1.meta" "a failed dispatch must not write task metadata"
+  pass "fm-relay-host dispatch: a permanent refusal keeps the queued record and records why"
+}
+
+test_dispatch_holds_the_record_when_the_relay_cannot_answer() {
+  local home out rc fake
+  home="$TMP_ROOT/unreach"
+  mkdir -p "$home/state" "$home/data/u1"
+  write_gui_registry "$home"
+  printf 'a brief\n' > "$home/data/u1/brief.md"
+  queue_record "$home" u1 box151
+  fake="$home/fakebin"
+  # No protocol line at all: the shape a sleeping or powered-off host produces.
+  fake_bifrost "$fake" "Network error: connection refused" 1 \
+    "$(fm_relay_sha256 "$home/data/u1/brief.md")"
+  rc=0
+  out=$(FM_HOME="$home" FM_RELAY_BIFROST="$fake/bifrost" \
+    "$ROOT/bin/fm-relay-host.sh" dispatch u1 2>&1) || rc=$?
+  expect_code 3 "$rc" "an unreachable host must exit 3 so the dispatch is retried"
+  assert_contains "$out" "held:" "the caller must be told the work is held, not lost"
+  assert_present "$home/state/u1.relay-pending" "an unreachable host must leave the work queued"
+  assert_contains "$(cat "$home/state/u1.relay-pending")" "asleep" \
+    "the recorded reason must describe the unreachable host"
+  pass "fm-relay-host dispatch: an unreachable host holds the dispatch at exit 3"
+}
+
 test_queue_refuses_to_shadow_a_live_task() {
   local home out rc
   home="$TMP_ROOT/shadow"
@@ -693,6 +764,8 @@ test_check_emit_returns_to_events_once_the_task_is_live
 test_registry_gui_fields
 test_check_make_arms_from_a_queued_dispatch
 test_queue_cli_lists_and_cancels
+test_dispatch_keeps_the_queue_record_when_the_host_refuses_for_good
+test_dispatch_holds_the_record_when_the_relay_cannot_answer
 test_queue_refuses_to_shadow_a_live_task
 test_deploy_local_ships_gui_files_only_for_a_gui_host
 test_host_session_refuses_launchd_ancestry

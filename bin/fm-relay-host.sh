@@ -195,8 +195,8 @@ case "$CMD" in
             printf 'held: %s is queued for %s - %s\n' "$ID" "$HOST" "${CLASS#retry }"
             exit 3 ;;
         esac
+        fm_relay_pending_set_reason "$PENDING" "${CLASS#fail }"
         printf '%s\n' "${CLASS#fail }" >&2
-        rm -f "$PENDING"
         exit 1
       fi
     fi
@@ -212,8 +212,13 @@ case "$CMD" in
         printf 'held: %s is queued for %s - %s\n' "$ID" "$HOST" "${CLASS#retry }"
         exit 3 ;;
       *)
+        # The queued record STAYS. A retry runs from the wake check, where no
+        # supervisor is watching in real time, so dropping it here would lose
+        # work silently. The caller decides: bin/fm-spawn.sh clears it because it
+        # reported the failure synchronously and armed nothing, while the check
+        # keeps it and alerts once.
+        fm_relay_pending_set_reason "$PENDING" "${CLASS#fail }"
         printf '%s\n' "$FM_RELAY_OUT" >&2
-        rm -f "$PENDING"
         exit 1 ;;
     esac
     # The host answers with its own state/<id>.meta after the OK line. Recording

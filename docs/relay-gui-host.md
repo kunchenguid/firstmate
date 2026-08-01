@@ -212,9 +212,57 @@ dead the desktop host session started at 2026-08-01T10:56:21Z (server pid 34040)
 Pointed at an unreachable client id - the protocol shape a sleeping machine produces - the dispatch queued with `reason=host unreachable - asleep, powered off, or the link is down`, and the armed check printed nothing on the first two runs, reported once on the third, and went quiet again on the fourth.
 When the host answered again, the check noticed the answer had CHANGED and reported the new reason rather than staying silent behind the first alert.
 
-**WindowServer reachability while locked.**
-`CGWindowListCopyWindowInfo` listed layer-0 windows, and a headed Chrome launched with a private `--user-data-dir` appeared in that list with its own title, while the screen was locked.
-This is a capability probe run directly on the host, not through a dispatch.
+**No desktop host session, screen unlocked.**
+With the session stopped, `spawn` answered, and again the claim directory and the host's `state/` were both empty afterwards:
+
+```
+ERR guisession no desktop host session has been started on this machine; start it on this machine
+with /Users/bytedance/.fm-relay/control-root/fmr-host-session.sh start
+```
+
+**A GUI task, dispatched from 151, run on the Mac's real screen.**
+After the machine's owner unlocked it, `fm-spawn.sh --host macgui acc-gui3 gui-probe --scout --harness claude` returned `OK spawned=acc-gui3 trust=working`, having first passed `preflight=ok gui=1 awake=yes locked=no session=ok`.
+
+The agent wrote a page carrying the token 151 had issued, opened it in a headed Chrome with its own `--user-data-dir`, and this crewmate - not the agent - independently listed the on-screen windows at 12:14:27Z:
+
+```
+windowid=57780 pid=40037 layer=0 owner="Google Chrome" title="FMP2-20260801T121210Z-5ba4…@ 2026-08-01T12:13:32.168Z" bounds=22,54,1200x1041
+```
+
+The agent's own `windows.txt` records the identical window id, pid, layer, and title.
+A headless browser never appears in that list at all, which is what makes it proof.
+The screenshot is 1306536 bytes at 3456x2234 - the physical Retina panel, not the ~144 KB all-black a dark display produces - and shows the page rendered on the unlocked desktop.
+
+The agent's recorded process chain ends in the desktop host session, which is the whole architecture in one place:
+
+```
+43534 35691 /bin/zsh
+35691 34688 /Users/bytedance/.local/bin/claude
+34688 34627 /bin/zsh
+34627 34460 treehouse
+34460 97811 -zsh
+97811     1 tmux          <- the desktop host session, marker server_pid=97811, provenance=desktop
+    1     0 /sbin/launchd
+```
+
+The machine owner's own browsers were untouched throughout, verified before and after by the agent and independently here.
+
+**Artifact round trip.**
+`bin/fm-relay-host.sh report-pull acc-gui3` fetched the 10244-byte report, and both machines independently computed `0917c80331bba188ba8de5abfd06f4c3eb868d88833c3eb232b99c22d11ae959`.
+Teardown then succeeded, killed the window, returned the worktree to its pool, cleaned the control-side records, and retained the report.
+
+**A GUI host must not share a treehouse pool with the machine's own firstmate.**
+The first attempt used a clone of firstmate as the host's project, and `treehouse get` handed out a worktree from the pool keyed to the CONTROL machine's own firstmate checkout, because the two clones share an origin.
+`bin/fm-spawn.sh`'s isolation assertion caught it and refused to adopt that path, which is exactly its job.
+A GUI host running on a machine that also runs its own firstmate therefore needs projects that do not collide with that machine's own repositories.
+
+**Phase 1 is unaffected, verified live rather than assumed.**
+With the Phase 2 client and a Phase 1 host record carrying no `gui` field, `ping box151` answered normally against the OLD deployed verb, and `spawn` never calls `preflight` for a non-GUI host.
+After redeploying over SSH, that host answers `gui=0` and its control root contains the verb and config only - neither GUI file.
+
+**A Phase 1 bug this surfaced.**
+`verbs/fmr-verb.sh` removed the claim directory before reading the spawn log, and the log lives inside that directory, so every spawn failure reported an empty reason: the control side was told "it failed" and never told why.
+It reads the log first now.
 
 ## Not verified
 
@@ -223,12 +271,11 @@ This is a capability probe run directly on the host, not through a dispatch.
   That is NOT the same event: a real sleep turns every established TCP connection into a dead one on wake.
   The design opens a fresh connection per attempt and retries silently on failure, so it should absorb that, but it has not been run.
   Scheduling a wake needs `sudo` and `pmset sleepnow` would cut the session doing the measuring.
-- **A dispatched agent actually running on the Mac**, and therefore the artifact round trip and its hash comparison.
-  Dispatch refuses while the screen is locked, and the screen was locked for the whole window this was built in; unlocking it needs the machine's owner.
-  The capability itself - headed browser, layer-0 on-screen window - was probed directly on the host and is recorded above; what is untested is that path reached through a dispatch.
-- **The automatic pickup completing a real dispatch.**
-  The queue, the silence, the threshold, the changed-reason wake, and the retry were all exercised; the final transition from queued to live was not, for the same reason.
+- **The queued-to-live transition driven by a real watcher.**
+  The queue, the silence, the threshold, the changed-reason wake, and the retry were each exercised, and the armed check was run exactly as the watcher runs it - but by hand, because the control machine had no watcher armed.
 - **A real engineering task with a graphical session.**
-  Nothing here has run a browser task with an SSO login state, which touches more surface than a probe page.
+  What ran was a probe page. A browser task carrying an SSO login state touches more surface.
 - **Whether an `indirect` or `adopted` host session actually avoids the wedge.**
   Only `desktop` was exercised. The other two are reported rather than blocked precisely because nothing here can prove them either way.
+- **Whether the wedge still reproduces at all.**
+  The workaround was built from the earlier measurement and never re-tested against a launchd-parented agent, because doing so means deliberately hanging one for ten minutes.
