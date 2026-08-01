@@ -327,7 +327,7 @@ Resume fleet supervision immediately after the decision lands.
 
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed is done; failed or cancelled is failed.
-A checks-passed outcome, and a worker's own `checks green` line, are only claims: they read done solely when `bin/fm-crew-state.sh` has independently confirmed from the task's own recorded GitHub PR that its head still matches and every one of a non-zero set of checks succeeded, and they otherwise read `unknown` with the unverified verdict named, which is the intended not-ready answer rather than a fault.
+A checks-passed outcome, and a worker's own `checks green` line, are only claims: they read done solely when `bin/fm-crew-state.sh` has independently confirmed from the task's own recorded GitHub PR that its head still matches and every one of a non-zero set of checks succeeded, and they otherwise stay not ready (`unknown`, or the still-working run state when a run is attributed) with the unverified verdict named, which is the intended answer rather than a fault.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
