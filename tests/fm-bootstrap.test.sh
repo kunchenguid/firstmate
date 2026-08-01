@@ -760,6 +760,45 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
   pass "bootstrap routine contract runs under system /bin/bash"
 }
 
+# Vault drift is detection only, so bootstrap must surface it in BOTH the normal
+# and the detect-only (lock-refused) session, and never rewrite the clone.
+# bin/fm-vault-drift.sh's own suite owns the vault shapes and thresholds.
+test_bootstrap_relays_vault_drift_in_both_modes() {
+  local case_dir fakebin proj out i mode
+  case_dir="$TMP_ROOT/vault-drift"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  proj="$case_dir/home/projects/hermes"
+  mkdir -p "$proj/vault"
+  git -C "$proj" init -q
+  git -C "$proj" config user.name fmtest
+  git -C "$proj" config user.email fmtest@example.invalid
+  printf '%s\n' '# Vault home' > "$proj/vault/00-Home.md"
+  git -C "$proj" add -A
+  GIT_AUTHOR_DATE='@1700000000 +0000' GIT_COMMITTER_DATE='@1700000000 +0000' \
+    git -C "$proj" commit -qm 'vault: seed'
+  for ((i = 1; i <= 20; i++)); do
+    printf '%s\n' "change $i" > "$proj/file-$i.txt"
+    git -C "$proj" add -A
+    GIT_AUTHOR_DATE='@1700086400 +0000' GIT_COMMITTER_DATE='@1700086400 +0000' \
+      git -C "$proj" commit -qm "work $i"
+  done
+
+  for mode in 0 1; do
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY="$mode" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    printf '%s\n' "$out" \
+      | grep -F 'VAULT_DRIFT: hermes: in-repo vault stale at vault/ - vault last updated 2023-11-14, 20 project commits landed since, drift window 1d' \
+        >/dev/null \
+      || fail "detect-only=$mode: bootstrap must relay the vault drift line (got: $out)"
+  done
+  [ -z "$(git -C "$proj" status --porcelain)" ] \
+    || fail "bootstrap's vault check must leave the clone untouched"
+  pass "bootstrap relays vault-drift detection in normal and detect-only sessions"
+}
+
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
@@ -851,5 +890,6 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
+test_bootstrap_relays_vault_drift_in_both_modes
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation

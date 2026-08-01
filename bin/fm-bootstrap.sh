@@ -13,6 +13,7 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
+#                 "VAULT_DRIFT: <project>: <vault problem and remedy>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -48,6 +49,11 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A VAULT_DRIFT line means a project's documentation vault is stale, or
+#          its external vault link is absent or broken so drift cannot be
+#          measured at all; the check is read-only and runs in detect-only
+#          sessions too. bin/fm-vault-drift.sh owns the vault shapes, thresholds,
+#          and exact wording.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -1014,6 +1020,11 @@ if [ -n "$tangle_branch" ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
 fi
+# Documentation-vault drift: read-only inspection of the project clones, so it
+# runs in detect-only sessions too. bin/fm-vault-drift.sh owns the shapes,
+# thresholds, and line wording.
+FM_HOME="$FM_HOME" FM_PROJECTS_OVERRIDE="$PROJECTS" FM_DATA_OVERRIDE="$DATA" \
+  "$SCRIPT_DIR/fm-vault-drift.sh" || true
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then
