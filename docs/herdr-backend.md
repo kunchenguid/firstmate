@@ -240,7 +240,7 @@ FM_HOME=/canonical/firstmate/home bin/fm-primary-pi.sh launch --pi pi
 
 The wrapper requires Herdr's complete injected session, socket, workspace, tab, and pane identity.
 It holds a PID/start-bound lease for Pi's whole lifetime and loads the custody, turn-end, and watcher extensions explicitly.
-The custody extension records the canonical Firstmate home, exact Herdr endpoint, Pi harness, full Pi session id, canonical session file and directory, session cwd, and lease identity under private `state/primary-pi/` records.
+The tracked custody extension only reports Pi's live exact session identity; the wrapper validates that report and is the sole writer of the canonical Firstmate home, exact Herdr endpoint, Pi harness, full Pi session id, canonical session file and directory, session cwd, and lease identity under private `state/primary-pi/` records.
 A normal `/new`, `/resume`, or `/fork` inside the same Pi process updates that record through the same attestation path.
 
 Reconnect with:
@@ -258,10 +258,13 @@ A fresh token atomically binds the replacement wrapper, and recovery refuses to 
 Unknown state, a live or malformed lease, path aliases, symlinks, non-regular files, malformed JSONL, duplicate full ids, missing sessions, changed pane identity, and attestation mismatch all stop automatic restart.
 The fallback is attach-only or manual recovery, never a guessed launch.
 
+`bin/fm-primary-pi.sh status` is the read-only way to tell a merely disconnected client, a lost server, and a lost Pi apart before acting.
+It reports the recorded custody, lease, server, pane, and agent state without touching a process, and a missing, unknown, contradictory, or malformed private record reads as one of those reported states rather than an error exit.
+
 `bin/fm-primary-pi-install.sh install` optionally creates one reversible user-local next-login server-ensure plist and a `~/.local/bin/firstmate-attach` helper.
 It does not call `launchctl`, enable a login item, configure remote access, start Pi, or keep a process alive.
 The plist makes one bounded `server-ensure` call after a future login, while the helper runs the same exact `recover` path from any already-established local or remote shell.
-Run `bin/fm-primary-pi-install.sh uninstall` to remove only installer-owned files.
+`bin/fm-primary-pi-install.sh status` reports whether each file is absent, installer-owned, or foreign, and `uninstall` removes only installer-owned files.
 
 This path supports only a Pi or pi-signed primary in a native Herdr 0.7.5 pane with the complete injected identity.
 It does not recover other harnesses, other runtime backends, workers, secondmates, in-memory Pi sessions, or Pi processes launched outside this wrapper.

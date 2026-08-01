@@ -56,6 +56,16 @@
 # lease. A stale lease can be replaced only by the internal resume action after
 # recover has proved the exact pane is a stable restored shell.
 #
+# recovery.lock is the mkdir-created single-flight directory that keeps two
+# wrappers from deciding custody at once. Its owner record holds pid and start,
+# so ownership is PID/start-bound rather than mtime-guessed. `launch` takes it
+# before reading custody and drops it once the lifetime lease is written, before
+# Pi starts. `recover` holds it across the whole decision, including a restart's
+# post-launch attestation, and drops it at the exact attach, before that attach
+# can exec away. Every other exit releases through the EXIT trap. Only a
+# self-owned lock is removed, and a PID/start-dead owner is reclaimed only
+# through the .recovery-steal guard, never a live or unreadable owner.
+#
 # attestation.v1 contains version, token, result=ok|pending|failed, exact Pi
 # session identity, Pi PID/start identity, and a one-word reason. The tracked Pi
 # custody extension calls `attest` synchronously on session_start and after
