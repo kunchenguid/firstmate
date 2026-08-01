@@ -157,9 +157,25 @@ publish_pending() {
   printf '%s\n' "$published"
 }
 
+ensure_runner_group() {  # <source-id>
+  local id=$1 pgid
+  pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') \
+    || die "cannot inspect runner process group"
+  [ -n "$pgid" ] || die "cannot inspect runner process group"
+  [ "$pgid" != "$$" ] || return 0
+  if command -v setsid >/dev/null 2>&1; then
+    exec setsid "$SCRIPT_DIR/fm-procevent.sh" start "$id"
+  fi
+  # shellcheck disable=SC2016  # single quotes are deliberate: perl expands its own vars.
+  exec perl -e 'setpgrp(0, 0); exec @ARGV' \
+    "$SCRIPT_DIR/fm-procevent.sh" start "$id"
+  die "cannot establish runner process group"
+}
+
 cmd_start() {
   local id=${1-} adapter out rc claimed bound_rc
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  ensure_runner_group "$id"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
     fm_procevent_source_lock_release "$id"
@@ -257,18 +273,10 @@ cmd_start() {
   printf 'captured: %s\n' "$durable"
 }
 
-# Start a runner in its own process group so it outlives the watcher cycle that
-# noticed it was missing. macOS has no setsid, so perl's setpgrp is the portable
-# equivalent - the same fallback shape bin/fm-watch.sh already uses for bounded
-# check execution.
+# Start a runner outside the watcher cycle that noticed it was missing. The
+# public start boundary establishes its own process group before claiming.
 detach_runner() {  # <source-id>
-  if command -v setsid >/dev/null 2>&1; then
-    FM_HOME="$FM_HOME" setsid "$SCRIPT_DIR/fm-procevent.sh" start "$1" >/dev/null 2>&1 &
-  else
-    # shellcheck disable=SC2016  # single quotes are deliberate: perl expands its own vars.
-    FM_HOME="$FM_HOME" perl -e 'setpgrp(0, 0); exec @ARGV' \
-      "$SCRIPT_DIR/fm-procevent.sh" start "$1" >/dev/null 2>&1 &
-  fi
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" start "$1" >/dev/null 2>&1 &
 }
 
 cmd_reconcile() {

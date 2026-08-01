@@ -170,6 +170,22 @@ assert_grep 'payload one' "$RESULT" "the captured result holds the source output
 assert_grep 'lavish' "${RESULT%.result}.adapter" "the captured result retains its immutable adapter"
 assert_absent "${RESULT%.result}.handled" "publication alone never marks a result handled"
 
+# --- the public start boundary establishes generation group ownership -------
+HPG="$TMP_ROOT/hpg"; new_home "$HPG"
+DIRECT_TRIGGER="$TMP_ROOT/direct-trigger"
+pe_register "$HPG" lavish direct-src -- "$BLOCKER" "$DIRECT_TRIGGER" "direct result" >/dev/null
+pe "$HPG" start direct-src > "$TMP_ROOT/direct-start.out" &
+direct_runner=$!
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/direct-src.claim" || fail "direct start never claimed its source"
+direct_leader=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/direct-src.claim")
+direct_group=$(ps -o pgid= -p "$direct_leader" 2>/dev/null | tr -d '[:space:]')
+[ "$direct_group" = "$direct_leader" ] \
+  || fail "direct start claimed before leading its process group: pid=$direct_leader pgid=$direct_group"
+: > "$DIRECT_TRIGGER"
+wait "$direct_runner" || fail "direct start failed after its source completed"
+assert_contains "$(cat "$TMP_ROOT/direct-start.out")" "captured:" "direct start captures its result"
+pass "public start owns the process group recorded by its claim"
+
 # --- an unhandled result remains eligible for re-announcement on restart ----
 # A result is durable but nothing has ever acknowledged handling it. Every
 # reconcile call - not just the first restart after a crash - must keep
@@ -448,12 +464,30 @@ pass "concurrent stale-claim replacement starts exactly one runner"
 HG="$TMP_ROOT/hg"; new_home "$HG"
 ORPHAN_TRIGGER="$TMP_ROOT/orphan-trigger"
 ORPHAN_LOG="$TMP_ROOT/orphan-executions"
-pe_register "$HG" lavish orphan-src -- "$RACE_BLOCKER" "$ORPHAN_LOG" "$ORPHAN_TRIGGER" >/dev/null
+ORPHAN_GROUP="$TMP_ROOT/orphan-group"
+ORPHAN_OVERLAP="$TMP_ROOT/orphan-overlap"
+ORPHAN_BLOCKER="$TMP_ROOT/orphan-blocker.sh"
+cat > "$ORPHAN_BLOCKER" <<'SH'
+#!/usr/bin/env bash
+printf 'started\n' >> "$1"
+if [ -s "$3" ]; then
+  IFS= read -r old_group < "$3"
+  if kill -0 "-$old_group" 2>/dev/null; then
+    printf 'overlap\n' > "$4"
+  fi
+fi
+while [ ! -e "$2" ]; do sleep 0.05; done
+printf 'orphan result\n'
+SH
+chmod +x "$ORPHAN_BLOCKER"
+pe_register "$HG" lavish orphan-src -- \
+  "$ORPHAN_BLOCKER" "$ORPHAN_LOG" "$ORPHAN_TRIGGER" "$ORPHAN_GROUP" "$ORPHAN_OVERLAP" >/dev/null
 pe "$HG" reconcile >/dev/null
 wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" || fail "leader-crash fixture never claimed its source"
 wait_for "$ORPHAN_LOG" || fail "leader-crash fixture source never started"
 orphan_leader=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim")
 case "$orphan_leader" in ''|*[!0-9]*) fail "could not read the runner leader pid: $orphan_leader" ;; esac
+printf '%s\n' "$orphan_leader" > "$ORPHAN_GROUP"
 
 kill -KILL "$orphan_leader" 2>/dev/null || fail "could not kill the runner leader"
 for _ in $(seq 1 50); do kill -0 "$orphan_leader" 2>/dev/null || break; sleep 0.1; done
@@ -464,16 +498,19 @@ orphan_out=$(pe "$HG" reconcile)
 kill -0 -"$orphan_leader" 2>/dev/null \
   && fail "reconcile left the crashed generation's process group alive: $orphan_out"
 sleep 0.5
-[ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" -le 2 ] \
-  || fail "reconcile started more than one replacement source: $(cat "$ORPHAN_LOG")"
+assert_absent "$ORPHAN_OVERLAP" "no replacement source starts while the crashed generation remains alive"
 case "$orphan_out" in
   *"started=1"*)
     [ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
       || fail "a replacement runner started without recording its own claim"
+    [ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 2 ] \
+      || fail "reconcile did not start exactly one replacement source: $(cat "$ORPHAN_LOG")"
     ;;
   *"started=0"*)
     [ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
       || fail "refusing to replace must preserve the claim for retry: $orphan_out"
+    [ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 1 ] \
+      || fail "reconcile started a source while refusing replacement: $(cat "$ORPHAN_LOG")"
     ;;
   *) fail "unexpected reconcile result for a crashed leader: $orphan_out" ;;
 esac
