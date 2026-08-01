@@ -112,7 +112,8 @@ telegram_check="$STATE/telegram-watch.check.sh"
 if [ -f "$SCRIPT_DIR/fm-telegram-lib.sh" ] && [ ! -L "$SCRIPT_DIR/fm-telegram-lib.sh" ]; then
   # shellcheck source=bin/fm-telegram-lib.sh
   . "$SCRIPT_DIR/fm-telegram-lib.sh"
-  if fmtg_poll_shim_valid "$telegram_check" "$FM_HOME" "$FM_ROOT"; then
+  if fm_session_lock_owned_by_self "$STATE" \
+    && fmtg_poll_shim_valid "$telegram_check" "$FM_HOME" "$FM_ROOT"; then
     if ! fmtg_prepare_state || ! fmtg_turn_epoch_advance; then
       fmtg_error_once turn-epoch-failed >/dev/null || true
     fi

@@ -18,6 +18,9 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
+HARNESS_FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-fakebin")
+ln -s /bin/bash "$HARNESS_FAKEBIN/codex"
+FAKE_CODEX="$HARNESS_FAKEBIN/codex"
 
 REQUIRED_REASON='repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
 
@@ -127,6 +130,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-private-lib.sh" "$dir/bin/fm-private-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-telegram-lib.sh" "$dir/bin/fm-telegram-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
@@ -216,6 +220,27 @@ run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
   printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+run_lock_owned_hook() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" "$FAKE_CODEX" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    bash "$FM_HOME/bin/fm-turnend-guard.sh"
+    status=$?
+    exit "$status"
+  ' 2>&1
+}
+
+run_lock_refused_hook() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" "$FAKE_CODEX" -c '
+    bash "$FM_HOME/bin/fm-turnend-guard.sh"
+    status=$?
+    exit "$status"
+  ' 2>&1
 }
 
 nonexistent_pid() {
@@ -614,22 +639,32 @@ test_hook_runs_fast() {
   pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
 }
 
-test_hook_advances_telegram_turn_epoch_before_loop_allow() {
-  local dir first second out status
+test_hook_advances_telegram_turn_epoch_only_for_lock_owner() {
+  local dir first refused second lock_owner out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-telegram-turn-epoch")
   activate_telegram_turn_epoch "$dir"
-  out=$(run_hook "$dir" false); status=$?
+  out=$(run_lock_owned_hook "$dir" false); status=$?
   expect_code 2 "$status" "unwatched Telegram turn must block after publishing its handling epoch"
   assert_contains "$out" 'TURN WOULD END BLIND' "unwatched Telegram turn did not retain the supervision guard"
   first=$(cat "$dir/state/telegram/turn-epoch")
-  out=$(run_hook "$dir" true); status=$?
+  "$FAKE_CODEX" -c 'while :; do sleep 1; done' &
+  lock_owner=$!
+  printf '%s\n' "$lock_owner" > "$dir/state/.lock"
+  out=$(run_lock_refused_hook "$dir" true); status=$?
+  refused=$(cat "$dir/state/telegram/turn-epoch")
+  kill "$lock_owner" 2>/dev/null || true
+  wait "$lock_owner" 2>/dev/null || true
+  expect_code 0 "$status" "lock-refused loop-guarded turn end must remain inert"
+  [ -z "$out" ] || fail "lock-refused Telegram turn-end marker printed output: $out"
+  [ "$first" = "$refused" ] || fail "lock-refused session advanced the Telegram handling epoch"
+  out=$(run_lock_owned_hook "$dir" true); status=$?
   expect_code 0 "$status" "loop-guarded turn end must still publish the Telegram handling epoch"
   [ -z "$out" ] || fail "loop-guarded Telegram turn-end marker printed output: $out"
   second=$(cat "$dir/state/telegram/turn-epoch")
   [ "$first" != "$second" ] || fail "loop-guarded turn end did not release acknowledged Telegram work"
   case "$second" in *[!0-9a-f]*) fail "turn-end hook published a malformed Telegram epoch" ;; esac
   [ "${#second}" -eq 64 ] || fail "turn-end hook published an unbounded Telegram epoch"
-  pass "fm-turnend-guard: every primary turn end releases acknowledged Telegram work"
+  pass "fm-turnend-guard: only the session-lock owner releases acknowledged Telegram work"
 }
 
 test_grok_adapter_forces_one_resume_when_unhealthy() {
@@ -1294,7 +1329,7 @@ test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
-test_hook_advances_telegram_turn_epoch_before_loop_allow
+test_hook_advances_telegram_turn_epoch_only_for_lock_owner
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_grok_adapter_native_false_blocks_without_resume

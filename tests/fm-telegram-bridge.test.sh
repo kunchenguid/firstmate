@@ -297,7 +297,8 @@ test_persist_before_offset_and_one_wake() {
   (
     FM_HOME="$home"
     . "$ROOT/bin/fm-telegram-lib.sh"
-    fmtg_turn_epoch_advance
+    printf '%s\n' 1111111111111111111111111111111111111111111111111111111111111111 \
+      | fm_private_publish_stdin "$FMTG_STATE" turn-epoch 600
   ) || fail "could not advance the handling turn epoch"
   run_poll "$home" "$fakebin" "$updates" >/dev/null
   [ "$(count_wake_key "$home/state/.wake-queue" tg-200-77)" = 1 ] || fail "ended handling turn did not re-offer its acknowledged request"

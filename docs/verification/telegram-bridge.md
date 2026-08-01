@@ -42,7 +42,7 @@ It also covers the one cross-project reply/update presentation boundary: semanti
 
 Its threat-oriented negative controls remove the exact allowlist or exact approval correlation and prove the request or approval is rejected.
 Its crash controls cover persistence before offset advancement, drained-offer requeue, exact claim publication before inbox publication, request resurrection after retirement, sent-receipt replay before approval and request finalization, and expiry waiting for an in-flight reply before alert arbitration.
-The harness matrix verifies Claude, Codex, OpenCode, Pi, and Grok inherit the generated Telegram cadence and advance acknowledgement at their owned turn-end boundary.
+The harness matrix verifies Claude, Codex, OpenCode, Pi, and Grok inherit the generated Telegram cadence and advance acknowledgement only when their exact harness process owns the home session lock; a lock-refused primary-shaped session cannot rotate the epoch.
 The runtime matrix verifies the watcher dispatch remains backend-neutral across tmux, Herdr, zellij, Orca, and cmux.
 
 ## Current evidence - 2026-07-31

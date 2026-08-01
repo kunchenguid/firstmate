@@ -26,6 +26,8 @@ case "$FMTG_WAKE_OFFER_TTL_SECS" in ''|*[!0-9]*) FMTG_WAKE_OFFER_TTL_SECS=60 ;; 
 
 # shellcheck source=bin/fm-private-lib.sh
 . "$FMTG_LIB_DIR/fm-private-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FMTG_LIB_DIR/fm-session-lock-lib.sh"
 
 fmtg_safe_slug() {
   case "$1" in
@@ -243,6 +245,7 @@ fmtg_turn_epoch_read() {
 
 fmtg_turn_epoch_advance() {
   local token
+  fm_session_lock_owned_by_self "$STATE" || return 1
   token=$(perl -MFcntl=:DEFAULT -e '
     sysopen(my $fh, "/dev/urandom", O_RDONLY) or exit 1;
     read($fh, my $bytes, 32) == 32 or exit 1;
