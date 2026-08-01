@@ -45,6 +45,10 @@ reported_tab=${FM_TEST_HERDR_REPORTED_TAB:-$tab}
 label=${FM_TEST_HERDR_LABEL:-fm-legacy-herdr}
 cwd=${FM_TEST_HERDR_CWD:-/unmatched}
 protocol=${FM_TEST_HERDR_PROTOCOL:-14}
+# Case-local so the derived presentation lock never collides with another
+# case or a real fleet session, and so a closed pane stays closed.
+case_dir=${FM_RUNTIME_LOG%/*}
+closed="$case_dir/herdr-closed"
 if [ "$#" -eq 2 ] && [ "$1" = status ] && [ "$2" = --json ]; then
   jq -cn --argjson protocol "$protocol" \
     '{client:{protocol:$protocol,version:"0.7.1"},server:{running:true}}'
@@ -59,6 +63,10 @@ done
 [ "$previous:$last" = "--session:$session" ] || exit 87
 case "${1:-}:${2:-}" in
   pane:get)
+    if [ -e "$closed" ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+      exit 1
+    fi
     jq -cn --arg pane "$pane" --arg tab "$reported_tab" --arg workspace "$workspace" --arg cwd "$cwd" \
       '{result:{pane:{pane_id:$pane,tab_id:$tab,workspace_id:$workspace,foreground_cwd:$cwd}}}'
     ;;
@@ -82,7 +90,12 @@ case "${1:-}:${2:-}" in
   status:--json)
     printf '{"server":{"running":true}}\n'
     ;;
+  session:list)
+    jq -cn --arg name "$session" --arg socket "$case_dir/herdr.sock" \
+      '{sessions:[{name:$name,running:true,socket_path:$socket}]}'
+    ;;
   pane:close)
+    : > "$closed"
     printf '{"result":{"type":"pane_closed"}}\n'
     ;;
   *) exit 88 ;;
