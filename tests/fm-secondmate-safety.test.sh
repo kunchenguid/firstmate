@@ -485,6 +485,63 @@ test_secondmate_spawn_resolves_punctuated_registry_projects() {
   pass "secondmate spawn resolves home validation and projects from punctuated registry fields"
 }
 
+test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings() {
+  local row case_name home sub other fakebin log err meta_before
+  for row in duplicate-id duplicate-home supplied-mismatch metadata-mismatch; do
+    case_name=${row%%|*}
+    home="$TMP_ROOT/spawn-binding-$case_name-home"
+    sub="$TMP_ROOT/spawn-binding-$case_name-sub"
+    other="$TMP_ROOT/spawn-binding-$case_name-other"
+    mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+    mark_firstmate_home "$sub"
+    mark_firstmate_home "$other"
+    printf 'domain\n' > "$sub/.fm-secondmate-home"
+    printf 'domain\n' > "$other/.fm-secondmate-home"
+    case "$case_name" in
+      duplicate-id)
+        cat > "$home/data/secondmates.md" <<EOF
+- domain - primary route (home: $sub; scope: valid (scope); punctuation; projects: alpha; added 2026-07-30)
+- domain - duplicate route (home: $other; scope: duplicate; projects: beta; added 2026-07-30)
+EOF
+        ;;
+      duplicate-home)
+        cat > "$home/data/secondmates.md" <<EOF
+- domain - primary route (home: $sub; scope: valid (scope); punctuation; projects: alpha; added 2026-07-30)
+- other - duplicate home route (home: $sub; scope: duplicate; projects: beta; added 2026-07-30)
+EOF
+        ;;
+      supplied-mismatch|metadata-mismatch)
+        printf -- '- domain - mismatched route (home: %s; scope: valid (scope); punctuation; projects: alpha; added 2026-07-30)\n' \
+          "$other" > "$home/data/secondmates.md"
+        ;;
+    esac
+    fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-binding-$case_name-fake")
+    log="$TMP_ROOT/spawn-binding-$case_name-fake/tmux.log"
+    err="$TMP_ROOT/spawn-binding-$case_name.err"
+    if [ "$case_name" = metadata-mismatch ]; then
+      fm_write_secondmate_meta "$home/state/domain.meta" "$sub"
+      meta_before="$TMP_ROOT/spawn-binding-$case_name.meta.before"
+      cp "$home/state/domain.meta" "$meta_before"
+      if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+        FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-binding-$case_name-fake/pane.txt" \
+        "$ROOT/bin/fm-spawn.sh" domain codex --secondmate >/dev/null 2>"$err"; then
+        fail "secondmate spawn accepted $case_name registry binding"
+      fi
+      cmp -s "$meta_before" "$home/state/domain.meta" || fail "secondmate spawn changed metadata after $case_name refusal"
+    else
+      if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+        FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-binding-$case_name-fake/pane.txt" \
+        "$ROOT/bin/fm-spawn.sh" domain "$sub" codex --secondmate >/dev/null 2>"$err"; then
+        fail "secondmate spawn accepted $case_name registry binding"
+      fi
+      [ ! -e "$home/state/domain.meta" ] || fail "secondmate spawn wrote metadata after $case_name refusal"
+    fi
+    [ ! -e "$home/state/.spawn-domain.lock" ] || fail "secondmate spawn left a lock after $case_name refusal"
+    grep -F 'new-window' "$log" >/dev/null && fail "secondmate spawn created an endpoint before $case_name refusal"
+  done
+  pass "secondmate spawn refuses ambiguous, supplied-home, and metadata-home registry bindings"
+}
+
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home() {
   local home reusable_sub stale_sub stale_brief stale_brief_before err
   home="$TMP_ROOT/no-projects-reused-charter-home"
@@ -1357,6 +1414,53 @@ EOF
   pass "secondmate teardown retires empty homes and releases routing"
 }
 
+test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings() {
+  local case_name home sub other fakebin log err meta_before registry_before
+  for case_name in duplicate-id duplicate-home home-mismatch; do
+    home="$TMP_ROOT/teardown-binding-$case_name-home"
+    sub="$TMP_ROOT/teardown-binding-$case_name-sub"
+    other="$TMP_ROOT/teardown-binding-$case_name-other"
+    mkdir -p "$home/state" "$home/data" "$sub/state" "$sub/data" "$sub/config" "$sub/projects" "$other"
+    printf 'domain\n' > "$sub/.fm-secondmate-home"
+    fm_write_secondmate_meta "$home/state/domain.meta" "$sub"
+    case "$case_name" in
+      duplicate-id)
+        cat > "$home/data/secondmates.md" <<EOF
+- domain - primary route (home: $sub; scope: valid (scope); punctuation; projects: alpha; added 2026-07-30)
+- domain - duplicate route (home: $other; scope: duplicate; projects: beta; added 2026-07-30)
+EOF
+        ;;
+      duplicate-home)
+        cat > "$home/data/secondmates.md" <<EOF
+- domain - primary route (home: $sub; scope: valid (scope); punctuation; projects: alpha; added 2026-07-30)
+- other - duplicate home route (home: $sub; scope: duplicate; projects: beta; added 2026-07-30)
+EOF
+        ;;
+      home-mismatch)
+        printf -- '- domain - mismatched route (home: %s; scope: valid (scope); punctuation; projects: alpha; added 2026-07-30)\n' \
+          "$other" > "$home/data/secondmates.md"
+        ;;
+    esac
+    meta_before="$TMP_ROOT/teardown-binding-$case_name.meta.before"
+    registry_before="$TMP_ROOT/teardown-binding-$case_name.registry.before"
+    cp "$home/state/domain.meta" "$meta_before"
+    cp "$home/data/secondmates.md" "$registry_before"
+    fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-binding-$case_name-fake")
+    log="$TMP_ROOT/teardown-binding-$case_name-fake/tmux.log"
+    err="$TMP_ROOT/teardown-binding-$case_name.err"
+    if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+      FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-binding-$case_name-fake/pane.txt" \
+      "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+      fail "secondmate teardown accepted $case_name registry binding"
+    fi
+    [ -d "$sub" ] || fail "secondmate teardown removed the home after $case_name refusal"
+    cmp -s "$meta_before" "$home/state/domain.meta" || fail "secondmate teardown changed metadata after $case_name refusal"
+    cmp -s "$registry_before" "$home/data/secondmates.md" || fail "secondmate teardown changed registry after $case_name refusal"
+    grep -F 'kill-window' "$log" >/dev/null && fail "secondmate teardown killed an endpoint before $case_name refusal"
+  done
+  pass "secondmate teardown refuses ambiguous and identity-mismatched registry bindings"
+}
+
 test_secondmate_teardown_refuses_failed_leased_home_return() {
   local home subhome subhome_abs fakebin log fmroot err rc
   home="$TMP_ROOT/teardown-return-fail-home"
@@ -2222,6 +2326,7 @@ test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
 test_secondmate_spawn_resolves_punctuated_registry_projects
+test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home
 test_home_seed_refuses_projectless_conversion_of_populated_home
 test_home_seed_refuses_projectless_home_with_uninspectable_projects
@@ -2248,6 +2353,7 @@ test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
+test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work

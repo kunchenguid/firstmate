@@ -157,7 +157,7 @@ PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
 PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=0
 PUBLIC_FOLLOWUP_RELAY_ACTIVE=0
 public_followup_resolve_primary_home() {
-  local parent=$1 child=$2 id=$3 parent_meta registry lines line_count meta_home registry_home
+  local parent=$1 child=$2 id=$3 parent_meta registry meta_home
   fm_pf_home_id_valid "secondmate:$id" || return 1
   case "$parent" in /*) ;; *) return 1 ;; esac
   parent=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
@@ -170,15 +170,7 @@ public_followup_resolve_primary_home() {
   meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || return 1
   [ "$meta_home" = "$child" ] || return 1
   registry="$parent/data/secondmates.md"
-  [ -f "$registry" ] && [ ! -L "$registry" ] || return 1
-  lines=$(awk -v wanted="$id" '$1 == "-" && $2 == wanted { print }' "$registry" 2>/dev/null || true)
-  line_count=$(printf '%s\n' "$lines" | grep -c . || true)
-  [ "$line_count" -eq 1 ] || return 1
-  line=$(printf '%s\n' "$lines")
-  secondmate_registry_parse_line "$line" || return 1
-  registry_home=$SECONDMATE_REGISTRY_HOME
-  registry_home=$(CDPATH='' cd -- "$registry_home" 2>/dev/null && pwd -P) || return 1
-  [ "$registry_home" = "$child" ] || return 1
+  secondmate_registry_validate_bindings "$registry" secondmate_registry_path_key "$id" "$child" || return 1
   printf '%s\n' "$parent"
 }
 if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
@@ -893,6 +885,10 @@ validate_removal_target() {
 registered_descendant_home_for_removal() {
   local reg=$1 target=$2 line id registered_home registered_abs
   [ -f "$reg" ] || return 1
+  if ! secondmate_registry_validate_bindings "$reg" secondmate_registry_path_key; then
+    echo "REFUSED: $SECONDMATE_REGISTRY_ERROR" >&2
+    return 2
+  fi
   while IFS= read -r line; do
     case "$line" in
       "- "*)
@@ -988,6 +984,15 @@ validate_firstmate_home_for_removal() {
     marker_id=$(cat "$abs_home_path/$SUB_HOME_MARKER" 2>/dev/null || true)
     if [ "$marker_id" != "$expected_id" ]; then
       echo "REFUSED: unsafe $label removal target $home is marked for secondmate ${marker_id:-unknown}, expected $expected_id" >&2
+      return 1
+    fi
+    if ! secondmate_registry_validate_bindings "$SECONDMATE_REG" secondmate_registry_path_key "$expected_id" "$abs_home_path"; then
+      case "$SECONDMATE_REGISTRY_ERROR" in
+        overlapping\ secondmate\ home\ assignment:*)
+          echo "REFUSED: unsafe $label removal target $home contains registered secondmate home; $SECONDMATE_REGISTRY_ERROR" >&2
+          ;;
+        *) echo "REFUSED: $SECONDMATE_REGISTRY_ERROR" >&2 ;;
+      esac
       return 1
     fi
   fi
