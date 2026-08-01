@@ -23,7 +23,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn, Sequence
+from typing import Any, NoReturn, Optional, Sequence
 
 
 SCHEMA_VERSION = 1
@@ -795,12 +795,22 @@ def parser() -> argparse.ArgumentParser:
     inventory_parser.add_argument(
         "--lock-timeout-ms",
         type=positive_timeout,
-        default=positive_timeout(
-            os.environ.get("FM_PR_STACK_LOCK_TIMEOUT_MS", str(DEFAULT_LOCK_TIMEOUT_MS))
-        ),
+        default=None,
         help=argparse.SUPPRESS,
     )
     return command
+
+
+def resolve_lock_timeout_ms(explicit: Optional[int]) -> int:
+    if explicit is not None:
+        return explicit
+    raw = os.environ.get("FM_PR_STACK_LOCK_TIMEOUT_MS", str(DEFAULT_LOCK_TIMEOUT_MS))
+    try:
+        return positive_timeout(raw)
+    except argparse.ArgumentTypeError as exc:
+        raise InventoryError(
+            f"invalid FM_PR_STACK_LOCK_TIMEOUT_MS environment value: {exc}"
+        ) from exc
 
 
 def fail(message: str, code: int = 1) -> NoReturn:
@@ -813,7 +823,8 @@ def main() -> int:
     try:
         repo = repository_root()
         if arguments.command == "inventory":
-            snapshot = inventory(repo, arguments.base, arguments.lock_timeout_ms)
+            lock_timeout_ms = resolve_lock_timeout_ms(arguments.lock_timeout_ms)
+            snapshot = inventory(repo, arguments.base, lock_timeout_ms)
             if arguments.json:
                 print(json.dumps(snapshot, indent=2, sort_keys=True, ensure_ascii=True))
             else:

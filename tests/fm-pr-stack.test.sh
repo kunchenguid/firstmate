@@ -292,6 +292,26 @@ PY
   pass "concurrent writer contention fails within a bound and leaves no partial refresh"
 }
 
+test_invalid_lock_timeout_env_diagnoses_cleanly() {
+  local repo=$TMP_ROOT/inventory/repo out err rc
+  out=$TMP_ROOT/badtimeout.out
+  err=$TMP_ROOT/badtimeout.err
+  rc=0
+  (cd "$repo" && FM_PR_STACK_LOCK_TIMEOUT_MS=abc "$CLI" inventory --json > "$out" 2> "$err") || rc=$?
+  expect_code 2 "$rc" "non-integer FM_PR_STACK_LOCK_TIMEOUT_MS"
+  [ ! -s "$out" ] || fail "non-integer timeout diagnostic corrupted JSON stdout"
+  assert_grep "fm-pr-stack: invalid FM_PR_STACK_LOCK_TIMEOUT_MS" "$err" \
+    "non-integer timeout diagnostic is not clean/actionable"
+
+  rc=0
+  (cd "$repo" && FM_PR_STACK_LOCK_TIMEOUT_MS=999999 "$CLI" inventory --json > "$out" 2> "$err") || rc=$?
+  expect_code 2 "$rc" "out-of-range FM_PR_STACK_LOCK_TIMEOUT_MS"
+  [ ! -s "$out" ] || fail "out-of-range timeout diagnostic corrupted JSON stdout"
+  assert_grep "fm-pr-stack: invalid FM_PR_STACK_LOCK_TIMEOUT_MS" "$err" \
+    "out-of-range timeout diagnostic is not clean/actionable"
+  pass "invalid FM_PR_STACK_LOCK_TIMEOUT_MS values fail cleanly with a bounded diagnostic"
+}
+
 test_human_output_is_concise() {
   local repo=$TMP_ROOT/inventory/repo out
   out=$(cd "$repo" && "$CLI" inventory --base main) || fail "human inventory failed"
@@ -308,4 +328,5 @@ test_inventory_json_and_read_only_git
 test_refresh_reobserves_and_catalog_is_shared
 test_missing_and_ambiguous_default_base
 test_bounded_concurrent_writer_failure_is_atomic
+test_invalid_lock_timeout_env_diagnoses_cleanly
 test_human_output_is_concise
