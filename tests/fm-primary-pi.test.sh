@@ -77,6 +77,7 @@ cat > "$FAKEBIN/pi" <<'SH'
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >> "$TEST_PI_LOG"
+umask > "$TEST_UMASK_FILE"
 trap 'printf "shell\n" > "$TEST_MODE_FILE"; exit 0' TERM INT HUP
 actual_id=${TEST_ATTEST_ID:-$TEST_FULL_ID}
 pi_start=$(ps -o lstart= -p $$ | awk '{$1=$1; print}')
@@ -108,8 +109,9 @@ export HERDR_WORKSPACE_ID="$WORKSPACE" HERDR_TAB_ID="$TAB" HERDR_PANE_ID="$PANE"
 export TEST_HERDR_LOG="$LOG" TEST_MODE_FILE="$MODE" TEST_SESSION='lab-exact' TEST_SOCKET="$SOCKET"
 export TEST_PANE="$PANE" TEST_WORKSPACE="$WORKSPACE" TEST_TAB="$TAB"
 export TEST_FULL_ID="$FULL_ID" TEST_SESSION_FILE="$SESSION_FILE" TEST_SESSION_DIR="$SESSION_DIR" TEST_CWD="$T"
-export TEST_RESUME_LOG="$T/resume.log" TEST_PI_LOG="$T/pi.log"
+export TEST_RESUME_LOG="$T/resume.log" TEST_PI_LOG="$T/pi.log" TEST_UMASK_FILE="$T/pi.umask"
 SCRIPT="$ROOT/bin/fm-primary-pi.sh"
+RECOVERY_LOCK="$HOME_FIXTURE/state/primary-pi/recovery.lock"
 LAUNCH_PID=''
 RECOVERY_PID=''
 
@@ -144,6 +146,7 @@ lease_absent() {
 }
 
 # A wrapped ordinary launch acquires lifetime custody and publishes exact state.
+umask 022
 "$SCRIPT" launch --pi pi > "$T/launch.out" 2>&1 &
 LAUNCH_PID=$!
 wait_for 'initial exact custody' lease_live
@@ -159,11 +162,17 @@ assert_grep "pi_session_id=$FULL_ID" "$CUSTODY" 'full Pi session id must be pers
 assert_grep "pi_session_file=$SESSION_FILE" "$CUSTODY" 'canonical Pi session file must be persisted'
 assert_grep 'session_integrity=ok' "$CUSTODY" 'strict session result must be persisted'
 [ "$(stat -f '%Lp' "$CUSTODY" 2>/dev/null || stat -c '%a' "$CUSTODY")" = 600 ] || fail 'custody must be private mode 0600'
-pass 'wrapped launch publishes complete exact custody'
+LEASE_DIR="$HOME_FIXTURE/state/primary-pi/lease"
+LEASE_TOKEN_FILE="$LEASE_DIR/token"
+[ "$(stat -f '%Lp' "$LEASE_DIR" 2>/dev/null || stat -c '%a' "$LEASE_DIR")" = 700 ] || fail 'lease directory must be private mode 0700'
+[ "$(stat -f '%Lp' "$LEASE_TOKEN_FILE" 2>/dev/null || stat -c '%a' "$LEASE_TOKEN_FILE")" = 600 ] || fail 'lease token must be private mode 0600'
+[ "$(cat "$TEST_UMASK_FILE")" = 0022 ] || fail "private state writes must not change the umask Pi inherits: $(cat "$TEST_UMASK_FILE")"
+pass 'wrapped launch publishes complete exact custody without widening the inherited umask'
 
 # Live Pi always takes the attach-first path and duplicate launch is refused.
 out=$(FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1) || fail "attach-first recover failed: $out"
 assert_contains "$out" 'primary live:' 'live recovery must report the existing Pi'
+assert_absent "$RECOVERY_LOCK" 'a completed no-attach recovery must release its recovery ownership'
 set +e
 duplicate=$("$SCRIPT" launch --pi pi 2>&1)
 rc=$?
@@ -295,6 +304,7 @@ assert_grep 'result=ok' "$HOME_FIXTURE/state/primary-pi/attestation.v1" 'recover
 assert_grep "pi_session_id=$FULL_ID" "$CUSTODY" 'post-launch custody must attest the exact full id'
 new_token=$(grep '^token=' "$HOME_FIXTURE/state/primary-pi/lease/token" | cut -d= -f2-)
 [ "$new_token" != aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ] || fail 'stale lease token was not atomically replaced'
+assert_absent "$RECOVERY_LOCK" 'a completed no-attach restart must release its recovery ownership'
 assert_grep "pane get $PANE --session lab-exact" "$LOG" 'recovery must resolve only the exact recorded pane'
 assert_grep "pane run $PANE" "$LOG" 'restart must target only the exact recorded pane'
 assert_no_grep 'workspace list' "$LOG" 'workspace labels must not participate in recovery'
@@ -306,7 +316,8 @@ pass 'stale lease and race handling converge on one exact attested session'
 out=$(FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1) || fail "second attach-first recover failed: $out"
 assert_contains "$out" 'primary live:' 'second recover must attach to the attested process'
 assert_no_grep 'pane run' "$LOG" 'second recover must not launch another Pi'
-pass 'repeated recovery remains idempotently attach-first'
+assert_absent "$RECOVERY_LOCK" 'repeated no-attach recovery must not accumulate dead recovery ownership'
+pass 'repeated recovery remains idempotently attach-first and leaves no recovery lock'
 
 # Stop the recovered wrapper through exact recorded PID/start custody.
 owner=$(grep '^pid=' "$HOME_FIXTURE/state/primary-pi/lease/owner" | cut -d= -f2-)
@@ -339,5 +350,23 @@ for bad in -c --resume --session-id=foo --session=foo --no-session; do
   assert_contains "$out" 'forbids Pi session-selection' "forbidden launch option should explain refusal: $bad"
 done
 pass 'interactive, partial, and create-on-miss Pi selectors are unavailable'
+
+# Malformed private records are reported by status, never turned into an exit.
+printf 'none\n' > "$MODE"
+cp "$CUSTODY" "$T/custody.attested"
+awk 'BEGIN{FS=OFS="="} $1=="pi_session_id"{$2="full session 1234567890"} {print}' "$T/custody.attested" > "$CUSTODY"
+out=$("$SCRIPT" status 2>&1) || fail "status must report a malformed session id instead of exiting: $out"
+assert_contains "$out" 'custody=unknown' 'a malformed full Pi session id must read as unknown custody'
+cp "$T/custody.attested" "$CUSTODY"
+mkdir "$HOME_FIXTURE/state/primary-pi/lease"
+printf 'version=1\n' > "$HOME_FIXTURE/state/primary-pi/lease/version"
+printf 'token=not-a-hex-token\n' > "$HOME_FIXTURE/state/primary-pi/lease/token"
+printf 'pid=999999\nstart=Mon Jan  1 00:00:00 2001\n' > "$HOME_FIXTURE/state/primary-pi/lease/owner"
+chmod 700 "$HOME_FIXTURE/state/primary-pi/lease"
+chmod 600 "$HOME_FIXTURE/state/primary-pi/lease/"*
+out=$("$SCRIPT" status 2>&1) || fail "status must report a malformed lease token instead of exiting: $out"
+assert_contains "$out" 'lease=malformed' 'a non-hex lease token must read as a malformed lease'
+rm -rf "$HOME_FIXTURE/state/primary-pi/lease"
+pass 'malformed custody and lease records are reported by status rather than exiting'
 
 printf 'all fm-primary-pi executable-interface tests passed\n'

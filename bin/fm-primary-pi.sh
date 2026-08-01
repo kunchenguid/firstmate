@@ -129,17 +129,26 @@ validate_value() {
   case "$value" in *$'\n'*|*$'\r'*) die "$label must be one line" ;; esac
 }
 
-validate_token() {
+token_is_valid() {
   case "$1" in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) return 0 ;;
-    *) die "invalid custody token" ;;
+    *) return 1 ;;
   esac
 }
 
-validate_session_id() {
+session_id_is_valid() {
   case "$1" in
-    ''|*[!A-Za-z0-9._-]*|[-_.]*|*[-_.]) die "invalid full Pi session id" ;;
+    ''|*[!A-Za-z0-9._-]*|[-_.]*|*[-_.]) return 1 ;;
   esac
+  return 0
+}
+
+validate_token() {
+  token_is_valid "$1" || die "invalid custody token"
+}
+
+validate_session_id() {
+  session_id_is_valid "$1" || die "invalid full Pi session id"
 }
 
 canonical_dir() {
@@ -242,8 +251,7 @@ write_record() {
   shift
   ensure_private_dir || return 1
   tmp="$PRIVATE_DIR/.record.$$.$(new_token)"
-  umask 077
-  : > "$tmp" || return 1
+  ( umask 077; : > "$tmp" ) || return 1
   while [ "$#" -gt 0 ]; do
     key=$1; value=$2; shift 2
     validate_value "$key" "$value"
@@ -263,7 +271,7 @@ load_lease() {
   LEASE_PID=$(record_field "$LEASE/owner" pid) || return 1
   LEASE_START=$(record_field "$LEASE/owner" start) || return 1
   [ "$LEASE_VERSION" = 1 ] || return 1
-  validate_token "$LEASE_TOKEN"
+  token_is_valid "$LEASE_TOKEN" || return 1
 }
 
 write_lease() {
@@ -308,8 +316,8 @@ load_custody() {
   case "$C_INTEGRITY" in ok|pending) ;; *) return 1 ;; esac
   case "$C_LEASE_PID" in ''|*[!0-9]*|1) return 1 ;; esac
   case "$C_UPDATED" in ''|*[!0-9]*) return 1 ;; esac
-  validate_token "$C_LEASE_TOKEN"
-  validate_session_id "$C_SESSION_ID"
+  token_is_valid "$C_LEASE_TOKEN" || return 1
+  session_id_is_valid "$C_SESSION_ID" || return 1
   canonical=$(canonical_dir "$C_HOME") || return 1
   [ "$canonical" = "$C_HOME" ] || return 1
   canonical=$(canonical_dir "$C_SESSION_DIR") || return 1
@@ -404,7 +412,7 @@ process_is_bare_shell() {
 
 strict_session() {
   local file=$1 session_dir=$2 session_id=$3 cwd=$4 canonical_file canonical_session_dir canonical_cwd first header_id header_cwd header_version f fid count=0
-  validate_session_id "$session_id"
+  session_id_is_valid "$session_id" || return 1
   canonical_file=$(canonical_file_path "$file") || return 1
   canonical_session_dir=$(canonical_dir "$session_dir") || return 1
   canonical_cwd=$(canonical_dir "$cwd") || return 1
@@ -715,11 +723,11 @@ ensure_recorded_server() {
 
 attach_exact() {
   local no_attach=$1
+  release_recovery_lock
   if [ "$no_attach" = 1 ] || [ "${FM_PRIMARY_NO_ATTACH:-0}" = 1 ]; then
     printf 'primary live: session=%s pane=%s pi_session=%s\n' "$C_HERDR_SESSION" "$C_HERDR_PANE" "$C_SESSION_ID"
     return 0
   fi
-  release_recovery_lock
   exec env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH \
     "$HERDR_BIN" agent attach "$C_HERDR_PANE" --session "$C_HERDR_SESSION"
 }
