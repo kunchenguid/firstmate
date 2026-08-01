@@ -83,6 +83,8 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
 printf 'trivial e2e primary crewmate brief: nothing to do.\n' > "$PRIMARY_HOME/data/cm1/brief.md"
+printf '# Backlog\n\n## In flight\n- [ ] cm1 - primary Herdr e2e spawn (repo: project)\n\n## Queued\n\n## Done\n' \
+  > "$PRIMARY_HOME/data/backlog.md"
 
 SM_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p "$SM_HOME/state" "$SM_HOME/data/cm2" "$SM_HOME/config" "$SM_HOME/projects" "$SM_HOME/bin"
@@ -90,6 +92,8 @@ printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM_HOME/AGENTS.md
 printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
 printf 'trivial e2e secondmate-owned crewmate brief: nothing to do.\n' > "$SM_HOME/data/cm2/brief.md"
+printf '# Backlog\n\n## In flight\n- [ ] cm2 - secondmate Herdr e2e spawn (repo: project)\n\n## Queued\n\n## Done\n' \
+  > "$SM_HOME/data/backlog.md"
 
 write_completion_report() {  # <path> <summary>
   printf '# Completion\n\n## Summary\n\n%s\n\n## What changed\n\nNo project files changed.\n\n## Verification\n\nThe task command ran in its isolated Herdr pane.\n\n## Visual evidence\n\nNone.\n\n## Artifacts\n\nThe captured pane output is the test artifact.\n\n## Follow-ups\n\nNone.\n' "$2" > "$1"

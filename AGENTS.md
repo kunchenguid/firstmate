@@ -469,8 +469,8 @@ A backend spawn refusal - a missing dependency, an unauthenticated socket, or a 
 For ship and scout tasks, the script asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout, aborting the spawn otherwise to prevent the worktree tangle of section 8.
 For `kind=secondmate`, it launches in the registered or explicit firstmate home with the charter brief as the launch prompt, after the guarded home sync and inheritable-config propagation owned by `secondmate-provisioning`.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
+For a genuinely new ship or scout task, `bin/fm-spawn.sh` asserts an In flight or Queued backlog row before endpoint creation.
 After spawning, peek the endpoint to confirm the crewmate is processing the brief and handle any trust dialog with `harness-adapters`.
-For a ship or scout task, add the task to `data/backlog.md` under In flight.
 A secondmate spawn adds no backlog row: its identity and scope live in `data/secondmates.md`, its runtime lives in `state/<id>.meta`, and section 10 owns the backlog contract.
 
 ### Supervise

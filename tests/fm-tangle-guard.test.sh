@@ -181,6 +181,8 @@ run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - isolation guard test (repo: %s)\n\n## Queued\n\n## Done\n' \
+    "$id" "$(basename "$proj")" > "$home/data/backlog.md"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -266,6 +268,8 @@ run_spawn_record() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - tmux construction test (repo: %s)\n\n## Queued\n\n## Done\n' \
+    "$id" "$(basename "$proj")" > "$home/data/backlog.md"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \

@@ -1098,6 +1098,8 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   data="$TMP_ROOT/symlink-data-$label"
   mkdir -p "$data/$id"
   printf 'test brief content\n' > "$data/$id/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - backend symlink spawn test (repo: proj)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$data/backlog.md"
   state="$TMP_ROOT/symlink-state-$label"; config="$TMP_ROOT/symlink-config-$label"
   mkdir -p "$state" "$config"
   log="$TMP_ROOT/symlink-spawn-$label.log"
@@ -1282,6 +1284,8 @@ test_spawn_default_backend_writes_no_meta_field() {
   local fb
   fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - default backend spawn test (repo: project)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$data/backlog.md"
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
 
@@ -1305,6 +1309,8 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   git -C "$wt" checkout --detach >/dev/null 2>&1
   fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - explicit backend spawn test (repo: project)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$data/backlog.md"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
   mkdir -p "$state" "$config"
 
@@ -1330,6 +1336,8 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   git -C "$wt" checkout --detach >/dev/null 2>&1
   fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - autodetect backend spawn test (repo: project)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$data/backlog.md"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
   mkdir -p "$state" "$config"
 

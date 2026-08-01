@@ -4764,6 +4764,8 @@ test_secondmate_retirement_serializes_child_spawn() {
   child_project="$case_dir/wt/projects/test"
   mkdir -p "$case_dir/wt/data/child"
   printf '%s\n' 'Do bounded child work.' > "$case_dir/wt/data/child/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] child - serialized child spawn (repo: test)\n\n## Queued\n\n## Done\n' \
+    > "$case_dir/wt/data/backlog.md"
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 state="$(dirname "$0")/.tmux-live"

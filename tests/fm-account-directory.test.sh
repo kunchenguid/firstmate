@@ -602,6 +602,8 @@ make_spawn_case() {
     "$home/treehouse-pools"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - account directory spawn test (repo: project)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$home/data/backlog.md"
   touch "$home/state/.last-watcher-beat"
   # A leased Treehouse worktree is handed over at detached HEAD on a clean
   # default branch, and fm-spawn refuses one that is still attached to a branch
@@ -852,6 +854,7 @@ test_direct_recovery_preserves_recorded_task_context() {
   set_remaining 1 20,15
   set_remaining 2 90,85
   rm -f "$SPAWN_HOME/state/.fake-endpoint"
+  printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$SPAWN_HOME/data/backlog.md"
 
   out=$(run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
     "$id" --recover-direct-account 2>&1)
@@ -881,6 +884,9 @@ test_direct_recovery_preserves_recorded_task_context() {
   assert_grep "generation_id=$generation" "$meta" "direct recovery replaced the task generation identity"
   assert_grep "dispatch_profile_required=1" "$meta" "direct recovery dropped dispatch-profile metadata"
   assert_grep "account_home=$ACCOUNT_ROOT/codex/2" "$meta" "direct recovery did not update account_home"
+  if grep -q "$id" "$SPAWN_HOME/data/backlog.md"; then
+    fail "direct recovery fixture unexpectedly retained its historical backlog row"
+  fi
   [ ! -s "$TMP_ROOT/agent-fleet.log" ] || fail "direct recovery invoked Agent Fleet"
   pass "direct recovery preserves recorded task context while refreshing account selection"
 }

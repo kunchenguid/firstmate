@@ -437,10 +437,13 @@ make_case() {
       "$wt" "$first_id" > "$case_dir/treehouse-pool/treehouse-state.json"
   fi
   touch "$home/state/.last-watcher-beat"
+  printf '# Backlog\n\n## In flight\n' > "$home/data/backlog.md"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
     printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    printf -- '- [ ] %s - account routing spawn test (repo: project)\n' "$id" >> "$home/data/backlog.md"
   done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
   printf '%s|%s|%s|%s|%s\n' "$case_dir" "$home" "$proj" "$wt" "$fakebin"
 }
 
@@ -463,6 +466,10 @@ EOF
   : > "$LAUNCH_LOG"
   : > "$NATIVE_LAUNCH_LOG"
   FM_TEST_SPAWN_ROOT=
+}
+
+empty_case_backlog() {
+  printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$HOME_DIR/data/backlog.md"
 }
 
 run_spawn() {
@@ -1206,6 +1213,7 @@ test_resume_uses_sticky_recovery_and_preserves_mapping_on_failure() {
   grep -v '^report_required=' "$HOME_DIR/state/$id.meta" > "$HOME_DIR/state/$id.meta.precutover"
   mv "$HOME_DIR/state/$id.meta.precutover" "$HOME_DIR/state/$id.meta"
   rm -f "$CASE_DIR/endpoint-live"
+  empty_case_backlog
   : > "$AF_LOG"
   : > "$TMUX_LOG"
   : > "$LAUNCH_LOG"
@@ -1224,6 +1232,7 @@ test_resume_uses_sticky_recovery_and_preserves_mapping_on_failure() {
   assert_not_contains "$launch" 'cat ' "resume started a fresh prompted conversation"
   [ "$(sed -n 's/^provider_session_id=//p' "$HOME_DIR/state/$id.meta" | tail -1)" = "$before_session" ] || fail "resume changed provider session identity"
   assert_not_grep '^report_required=' "$HOME_DIR/state/$id.meta" "pre-cutover recovery silently activated the report gate"
+  assert_not_grep "$id" "$HOME_DIR/data/backlog.md" "resume recovery fixture retained its backlog row"
 
   : > "$AF_LOG"
   : > "$TMUX_LOG"
@@ -1484,6 +1493,7 @@ test_unmanaged_respawn_preserves_report_cutover_state() {
     "pr=418" \
     "x_request=req-legacy" \
     "custom_extension=preserve-success"
+  empty_case_backlog
   out=$(run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew)
   status=$?
   [ "$status" -eq 0 ] || fail "pre-cutover unmanaged respawn should succeed (exit $status): $out"
@@ -1491,6 +1501,7 @@ test_unmanaged_respawn_preserves_report_cutover_state() {
   assert_grep 'pr=418' "$HOME_DIR/state/$id.meta" "managed respawn dropped the existing PR pointer"
   assert_grep 'x_request=req-legacy' "$HOME_DIR/state/$id.meta" "managed respawn dropped the existing X-mode link"
   assert_grep 'custom_extension=preserve-success' "$HOME_DIR/state/$id.meta" "managed respawn dropped extension metadata"
+  assert_not_grep "$id" "$HOME_DIR/data/backlog.md" "existing-metadata relaunch fixture retained its backlog row"
   pass "unmanaged respawn preserves a legacy task's report cutover state"
 }
 
@@ -3170,6 +3181,7 @@ test_failed_continuation_cleanup_restores_predecessor_for_retry() {
   assert_grep "account_predecessor_task=$old_task" "$HOME_DIR/state/$id.meta" "failed continuation cleanup lost predecessor identity"
 
   clear_case_logs
+  empty_case_backlog
   out=$(FM_FAKE_AF_PROFILE=claude-3 FM_FAKE_AF_POOL=explicit run_spawn "$id" --continue-account --account-profile claude-3)
   status=$?
   [ "$status" -eq 0 ] || fail "continuation retry could not clean and replace its failed generation: $out"
@@ -3179,6 +3191,7 @@ test_failed_continuation_cleanup_restores_predecessor_for_retry() {
   assert_grep "session remove --task $failed_task" "$AF_LOG" "continuation retry did not clean its failed mapping"
   assert_grep "lease release --task $old_task --force" "$AF_LOG" "continuation retry did not clean its restored predecessor"
   assert_not_grep '^account_rollback_' "$HOME_DIR/state/$id.meta" "continuation retry retained rollback metadata"
+  assert_not_grep "$id" "$HOME_DIR/data/backlog.md" "continuation recovery fixture retained its backlog row"
   pass "failed continuation cleanup restores predecessor state before retry"
 }
 
@@ -5943,6 +5956,13 @@ run_isolated_test() {
   status=$?
   [ "$status" -eq 0 ] || exit "$status"
 }
+
+if [ "${FM_TEST_FOCUSED:-}" = backlog-row-exemptions ]; then
+  run_isolated_test test_resume_uses_sticky_recovery_and_preserves_mapping_on_failure
+  run_isolated_test test_unmanaged_respawn_preserves_report_cutover_state
+  run_isolated_test test_failed_continuation_cleanup_restores_predecessor_for_retry
+  exit 0
+fi
 
 if [ "${FM_TEST_FOCUSED:-}" = stale-reclaim-generation ]; then
   run_isolated_test test_stale_reclaim_guard_is_owned_before_lock_removal

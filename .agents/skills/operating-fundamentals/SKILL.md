@@ -14,7 +14,7 @@ Apply these principles together to maximize verified fleet-wide progress.
 
 ## 1. Orchestrate; never work inline
 
-Turn every captain ask into both a durable backlog item and a tracked crewmate assignment before project or deliverable work begins.
+File a durable backlog item for every captain ask, then make its tracked crewmate assignment before project or deliverable work begins; `bin/fm-spawn.sh` enforces the row-before-endpoint order for new ship and scout tasks.
 Keep firstmate's own thread for intake, dispatch, supervision, decisions, and outcome reporting; never perform project investigation, planning, implementation, or deliverable production inline.
 Treat the backlog record and tracked owner as an atomic pair, and repair either immediately when missing so work survives context loss.
 A dropped or forgotten ask is an operating failure; restore its record and owner immediately.

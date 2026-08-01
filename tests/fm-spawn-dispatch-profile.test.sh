@@ -66,6 +66,7 @@ make_spawn_case() {
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" \
     "$home/treehouse-pools"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
+  printf '# Backlog\n\n## In flight\n' > "$home/data/backlog.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   git -C "$wt" checkout --quiet --detach HEAD
   git -C "$proj" branch --quiet -D "wt-$name"
@@ -73,7 +74,9 @@ make_spawn_case() {
   for id in "$@"; do
     mkdir -p "$home/data/$id"
     printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    printf -- '- [ ] %s - spawn profile test (repo: project)\n' "$id" >> "$home/data/backlog.md"
   done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
 
@@ -420,12 +423,14 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   make_seeded_secondmate_home "$sm" "$id" "$source"
   printf -- '- %s - dispatch profile test (home: %s; scope: test; projects: ; added 2026-07-29)\n' \
     "$id" "$(cd "$sm" && pwd -P)" > "$HOME_DIR/data/secondmates.md"
+  rm -f "$HOME_DIR/data/backlog.md"
 
   out=$(FM_TEST_ROOT_OVERRIDE="$source" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
   expect_code 0 "$status" "secondmate spawn should be exempt from the dispatch-profile explicit harness requirement: $out"
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
+  assert_absent "$HOME_DIR/data/backlog.md" "secondmate exemption fixture unexpectedly had a backlog row"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
   pass "active crew-dispatch profile does not block secondmate launches"

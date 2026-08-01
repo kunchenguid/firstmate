@@ -76,6 +76,8 @@ make_spawn_case() {
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" \
     "$home/treehouse-pools" "$grok_home"
   printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - Grok harness spawn test (repo: project)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$home/data/backlog.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   git -C "$wt" checkout --quiet --detach
   printf '{"worktrees":[{"name":"1","path":"%s","leased":false,"lease_holder":null}]}\n' \

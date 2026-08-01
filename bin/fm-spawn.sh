@@ -3,7 +3,7 @@
 # Spawn a direct report: a new crewmate in a treehouse worktree, an eligible
 # pre-cutover Orca direct recovery with empirically verified provider authority,
 # or a secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--account-pool <pool>] [--account-profile <profile>] [--no-account-routing] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--account-pool <pool>] [--account-profile <profile>] [--no-account-routing] [--backlog-row-exemption <test-fixture|tracking-backend-repair>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--account-pool <pool>] [--account-profile <profile>] [--no-account-routing] --secondmate
 #        fm-spawn.sh <task-id> --recover-direct-account
 #        fm-spawn.sh <task-id> (--resume-account|--continue-account) [--harness <claude|codex>] [--account-pool <pool>] [--account-profile <profile>]
@@ -88,6 +88,9 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   A genuinely new ship/scout spawn must already have an In flight or Queued row
+#   in this home's configured backlog. --backlog-row-exemption accepts only
+#   test-fixture or tracking-backend-repair and records the category in metadata.
 #   Before a secondmate launch, the home must fast-forward safely to the primary
 #   default-branch commit and independently match the live default tip.
 #   Any unproven freshness state refuses launch.
@@ -104,7 +107,8 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/account flags apply to every pair.
+#   source of truth; shared --scout/--harness/--model/--effort/--backend/account
+#   flags and --backlog-row-exemption apply to every pair.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
@@ -154,6 +158,8 @@ CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
 . "$SCRIPT_DIR/fm-account-routing-lib.sh"
 # shellcheck source=bin/fm-report-contract-lib.sh
 . "$SCRIPT_DIR/fm-report-contract-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -340,6 +346,8 @@ BACKEND_ARG=
 ACCOUNT_POOL=
 ACCOUNT_PROFILE=
 NO_ACCOUNT_ROUTING=0
+BACKLOG_ROW_EXEMPTION=
+BACKLOG_ROW_EXEMPTION_SET=0
 RESUME_ACCOUNT=0
 CONTINUE_ACCOUNT=0
 DIRECT_ACCOUNT_RECOVERY=0
@@ -368,6 +376,7 @@ for a in "$@"; do
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       account-pool) ACCOUNT_POOL=$a; ACCOUNT_POOL_SET=1 ;;
       account-profile) ACCOUNT_PROFILE=$a; ACCOUNT_PROFILE_SET=1 ;;
+      backlog-row-exemption) BACKLOG_ROW_EXEMPTION=$a; BACKLOG_ROW_EXEMPTION_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -389,6 +398,8 @@ for a in "$@"; do
     --account-profile) want_value=account-profile ;;
     --account-profile=*) ACCOUNT_PROFILE=${a#--account-profile=}; ACCOUNT_PROFILE_SET=1 ;;
     --no-account-routing) NO_ACCOUNT_ROUTING=1 ;;
+    --backlog-row-exemption) want_value='backlog-row-exemption' ;;
+    --backlog-row-exemption=*) BACKLOG_ROW_EXEMPTION=${a#--backlog-row-exemption=}; BACKLOG_ROW_EXEMPTION_SET=1 ;;
     --resume-account) RESUME_ACCOUNT=1 ;;
     --continue-account) CONTINUE_ACCOUNT=1 ;;
     --recover-direct-account) DIRECT_ACCOUNT_RECOVERY=1 ;;
@@ -402,6 +413,15 @@ done
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$ACCOUNT_POOL_SET" -eq 0 ] || [ -n "$ACCOUNT_POOL" ] || { echo "error: --account-pool requires a non-empty value" >&2; exit 1; }
 [ "$ACCOUNT_PROFILE_SET" -eq 0 ] || [ -n "$ACCOUNT_PROFILE" ] || { echo "error: --account-profile requires a non-empty value" >&2; exit 1; }
+[ "$BACKLOG_ROW_EXEMPTION_SET" -eq 0 ] || [ -n "$BACKLOG_ROW_EXEMPTION" ] \
+  || { echo "error: --backlog-row-exemption requires a non-empty value" >&2; exit 1; }
+case "$BACKLOG_ROW_EXEMPTION" in
+  ''|test-fixture|tracking-backend-repair) ;;
+  *)
+    echo "error: --backlog-row-exemption must be one of test-fixture, tracking-backend-repair" >&2
+    exit 1
+    ;;
+esac
 if [ "$NO_ACCOUNT_ROUTING" = 1 ] && { [ "$ACCOUNT_POOL_SET" = 1 ] || [ "$ACCOUNT_PROFILE_SET" = 1 ]; }; then
   echo "error: --no-account-routing cannot be combined with --account-pool or --account-profile" >&2
   exit 1
@@ -417,7 +437,7 @@ if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
   if [ "$KIND_SET" = 1 ] || [ "$HARNESS_SET" = 1 ] || [ "$MODEL_SET" = 1 ] \
     || [ "$EFFORT_SET" = 1 ] || [ "$BACKEND_SET" = 1 ] \
     || [ "$ACCOUNT_POOL_SET" = 1 ] || [ "$ACCOUNT_PROFILE_SET" = 1 ] \
-    || [ "$NO_ACCOUNT_ROUTING" = 1 ]; then
+    || [ "$NO_ACCOUNT_ROUTING" = 1 ] || [ "$BACKLOG_ROW_EXEMPTION_SET" = 1 ]; then
     echo "error: --recover-direct-account accepts only a task id; task context comes from metadata" >&2
     exit 1
   fi
@@ -431,6 +451,10 @@ esac
 
 RECOVERY_ACCOUNT=0
 [ "$RESUME_ACCOUNT" = 0 ] && [ "$CONTINUE_ACCOUNT" = 0 ] && [ "$DIRECT_ACCOUNT_RECOVERY" = 0 ] || RECOVERY_ACCOUNT=1
+[ "$RECOVERY_ACCOUNT" = 0 ] || [ "$BACKLOG_ROW_EXEMPTION_SET" = 0 ] || {
+  echo "error: --backlog-row-exemption applies only to a genuinely new ship or scout task" >&2
+  exit 1
+}
 RESUME_META=
 LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_OWNED=0
@@ -527,6 +551,62 @@ spawn_preflight_kind_value() {
       return 1
       ;;
   esac
+}
+
+spawn_manual_backlog_has_row() {  # <task-id> <backlog-file>
+  local task_id=$1 backlog=$2
+  [ -f "$backlog" ] || return 1
+  awk -v wanted="$task_id" '
+    /^## (In flight|Queued)[[:space:]]*$/ { active = 1; next }
+    /^## / { active = 0 }
+    !active { next }
+    {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      sub(/^\[[ xX]\][[:space:]]*/, "", line)
+      if (substr(line, 1, 2) == "**") {
+        line = substr(line, 3)
+        closing_pos = index(line, "**")
+        if (closing_pos == 0) next
+        key = substr(line, 1, closing_pos - 1)
+      } else {
+        key = line
+        sub(/[[:space:]].*$/, "", key)
+      }
+      if (key == wanted) found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$backlog"
+}
+
+spawn_backlog_has_row() {  # <task-id>
+  local task_id=$1 backlog task
+  backlog="$DATA/backlog.md"
+  if fm_tasks_axi_backend_available "$CONFIG"; then
+    task=$(tasks-axi show "$task_id" --backend markdown --file "$backlog" 2>/dev/null) || return 1
+    printf '%s\n' "$task" | grep -Eq '^[[:space:]]*state: (in_flight|queued)[[:space:]]*$'
+    return $?
+  fi
+  spawn_manual_backlog_has_row "$task_id" "$backlog"
+}
+
+spawn_shell_quote() {  # <value>
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+spawn_refuse_missing_backlog_row() {  # <task-id> <kind> <project-dir>
+  local task_id=$1 kind=$2 project=$3 repo backlog
+  repo=${project%/}
+  repo=${repo##*/}
+  [ -n "$repo" ] || repo=unknown
+  backlog="$DATA/backlog.md"
+  echo "error: new $kind task $task_id has no In flight or Queued row in $backlog; file it before dispatch." >&2
+  printf 'fix: tasks-axi add %s %s --kind %s --repo %s --start --backend markdown --file %s\n' \
+    "$(spawn_shell_quote "$task_id")" "$(spawn_shell_quote '<one line>')" \
+    "$(spawn_shell_quote "$kind")" "$(spawn_shell_quote "$repo")" \
+    "$(spawn_shell_quote "$backlog")" >&2
 }
 
 spawn_refuse_report_required_orca() {
@@ -1827,6 +1907,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$ACCOUNT_POOL" ] || shared_args+=(--account-pool "$ACCOUNT_POOL")
   [ -z "$ACCOUNT_PROFILE" ] || shared_args+=(--account-profile "$ACCOUNT_PROFILE")
   [ "$NO_ACCOUNT_ROUTING" = 0 ] || shared_args+=(--no-account-routing)
+  [ -z "$BACKLOG_ROW_EXEMPTION" ] || shared_args+=(--backlog-row-exemption "$BACKLOG_ROW_EXEMPTION")
   if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     echo "error: batch dispatch does not support account recovery; recover tasks individually" >&2
     exit 1
@@ -1907,6 +1988,21 @@ if [ "$KIND" = secondmate ]; then
 else
   PROJ=${POS[1]:-}
   ARG3=${POS[2]:-}
+fi
+
+if [ "$BACKLOG_ROW_EXEMPTION_SET" = 1 ] \
+  && { [ "$KIND" = secondmate ] || [ "$SPAWN_META_PRESENT" = 1 ]; }; then
+  echo "error: --backlog-row-exemption applies only to a genuinely new ship or scout task" >&2
+  exit 1
+fi
+if [ "$KIND" != secondmate ] && [ "$RECOVERY_ACCOUNT" = 0 ] && [ "$SPAWN_META_PRESENT" = 0 ]; then
+  [ -f "$DATA/$ID/brief.md" ] || { echo "error: no brief at $DATA/$ID/brief.md" >&2; exit 1; }
+  if [ -n "$BACKLOG_ROW_EXEMPTION" ]; then
+    echo "WARNING: backlog row exemption '$BACKLOG_ROW_EXEMPTION' is active for new $KIND task $ID; the category will be recorded in task metadata" >&2
+  elif ! spawn_backlog_has_row "$ID"; then
+    spawn_refuse_missing_backlog_row "$ID" "$KIND" "$PROJ"
+    exit 1
+  fi
 fi
 
 if [ -z "$LIFECYCLE_LOCK" ]; then
@@ -3583,6 +3679,7 @@ META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
   echo "effort=${EFFORT:-default}"
   echo "generation_id=$SPAWN_GENERATION_ID"
   [ "$NO_ACCOUNT_ROUTING" != 1 ] || echo "account_routing_emergency_bypass=1"
+  [ -z "$BACKLOG_ROW_EXEMPTION" ] || echo "backlog_row_exemption=$BACKLOG_ROW_EXEMPTION"
   [ -z "$DIRECT_ACCOUNT_HOME" ] || echo "account_home=$DIRECT_ACCOUNT_HOME"
   if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     if grep -q '^report_required=' "$RESUME_META"; then

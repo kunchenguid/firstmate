@@ -735,6 +735,8 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" \
     "$home/treehouse-pools" "$home/checkout-refresh-state"
   printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - crew harness fallback test (repo: crew-project)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$home/data/backlog.md"
   : > "$launchlog"
   spawn_err="$w/crew-spawn.err"
   node_bin=$(command -v node) || fail "crew-unaffected: node is required"
