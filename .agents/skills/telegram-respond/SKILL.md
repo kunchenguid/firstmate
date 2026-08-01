@@ -3,8 +3,8 @@ name: telegram-respond
 description: >-
   Agent-only playbook for private Telegram requests, exact approval replies,
   captain-relevant notifications, and uncertain-delivery reconciliation.
-  Use on telegram-request and telegram-error check wakes, or when sending an
-  allowed quiet Telegram progress event.
+  Use on Telegram request, error, or delivery-uncertain wakes, or when sending
+  an allowed quiet Telegram progress event.
 user-invocable: false
 metadata:
   internal: true

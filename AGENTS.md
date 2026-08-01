@@ -540,7 +540,7 @@ One exact user and matching private chat are allowed in v1; malformed, unauthori
 The token and allowlist remain in owner-only local config and never belong in chat, task instructions, status events, reports, arguments, logs, or tracked files.
 
 An active Telegram-only home still requires the normal supervision cycle.
-On a Telegram request or error wake, load `telegram-respond`, which owns exact-correlation request reads, approval binding, reply receipts, quiet notifications, privacy cleanup, and ambiguous-delivery handling.
+On a private Telegram wake, load `telegram-respond`, which owns exact-correlation request reads, approval binding, reply receipts, quiet notifications, privacy cleanup, and ambiguous-delivery handling.
 Every Telegram reply and every allowed captain-relevant update from any supervised worker passes through the same deterministic rich/plain presentation owner; never send model-authored Telegram markup or buttons.
 The bridge never runs a model offline and never lets a worker address the captain.
 

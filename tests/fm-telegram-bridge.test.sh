@@ -262,6 +262,7 @@ test_authorization_shape_order_and_media() {
   pass "unauthorized, edited, media, oversized, malformed, duplicate, and out-of-order updates fail closed"
 }
 
+# shellcheck disable=SC2031 # The deliberate subshell isolates sourced-library globals from these fixture locals.
 test_persist_before_offset_and_one_wake() {
   local home fakebin updates out rc request hostile fields drained
   home=$(new_home crash-recovery); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"
@@ -320,6 +321,7 @@ send_file() {
   chmod 600 "$path"
 }
 
+# shellcheck disable=SC2031 # The deliberate subshell isolates sourced-library globals from these fixture locals.
 test_exact_approval_and_sent_receipts() {
   local home fakebin counts updates send_body text out rc request saved approval_tmp receipt_tmp retirement_tmp expires
   home=$(new_home approval); fakebin=$(make_fake_curl "$home"); write_valid_config "$home"

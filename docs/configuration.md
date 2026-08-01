@@ -332,7 +332,8 @@ Its request handling remains in X-specific `bin/` scripts and the `fmx-respond` 
 ## Private Telegram bridge
 
 The bridge's complete owner-facing setup, pairing, opt-out, retention, and v1 limitations live in [the private Telegram bridge guide](telegram-bridge.md).
-It is off unless `config/telegram/bridge.json` is complete, enabled, mode `0600`, owned by the current user, regular, single-link, and stored in a non-symlink owner-only directory.
+Local pairing publishes `config/telegram/` as a non-symlink owner-only directory and `bridge.json` as a mode-`0600` file.
+The bridge stays off unless that file is complete, enabled, owned by the current user, regular, and single-link.
 The file contains the bot token, exact allowed Telegram user ID, and exact allowed direct-chat ID, and must never be committed or copied into another configuration surface.
 
 The locked bootstrap step writes `state/telegram-watch.check.sh` as the byte-static identity shim and `config/telegram-mode.env` with `FM_TELEGRAM_CHECK_INTERVAL=1`.

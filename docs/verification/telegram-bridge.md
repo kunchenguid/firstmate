@@ -47,8 +47,17 @@ The runtime matrix verifies the watcher dispatch remains backend-neutral across 
 
 ## Current evidence - 2026-07-31
 
-With documentation corrections applied to target `2fb7a9e`, `bin/fm-doc-audience-check.sh`, `tests/fm-documentation-audiences.test.sh`, and `tests/fm-instruction-owners.test.sh` exited 0, and `git diff --check 3f71cddd764a49ab71bcd53a46b84e5e7336557a` reported no whitespace errors.
+With documentation corrections and narrow ShellCheck rationale comments applied to target `28e7d48`, these commands exited 0:
 
-`bin/fm-lint.sh` ran with the pinned ShellCheck 0.11.0 and exited 1.
-It reported one SC2329 finding in `bin/fm-telegram-send.sh`, seventeen SC2031 findings in `tests/fm-telegram-bridge.test.sh`, and three SC2016 findings in `tests/fm-turnend-guard.test.sh`.
-No clean target-wide lint or current full-suite evidence is recorded; green pull-request checks remain required.
+```sh
+shellcheck --norc --external-sources bin/fm-telegram-send.sh tests/fm-telegram-bridge.test.sh tests/fm-turnend-guard.test.sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+tests/fm-documentation-audiences.test.sh
+tests/fm-instruction-owners.test.sh
+git diff --check 3f71cddd764a49ab71bcd53a46b84e5e7336557a
+```
+
+Repository lint reported the pinned ShellCheck 0.11.0, and the documentation inventory reported 58 classified surfaces and 153 resolved local links.
+
+No current full-suite or live Telegram evidence is recorded; green pull-request checks remain required.

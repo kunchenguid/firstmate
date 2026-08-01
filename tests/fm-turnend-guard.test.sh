@@ -227,6 +227,7 @@ run_hook() {
 run_lock_owned_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # The single-quoted program is an intentional inner-shell fixture.
   printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" "$FAKE_CODEX" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     bash "$FM_HOME/bin/fm-turnend-guard.sh"
@@ -238,6 +239,7 @@ run_lock_owned_hook() {
 run_lock_refused_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # The single-quoted program is an intentional inner-shell fixture.
   printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" "$FAKE_CODEX" -c '
     bash "$FM_HOME/bin/fm-turnend-guard.sh"
     status=$?
@@ -248,6 +250,7 @@ run_lock_refused_hook() {
 run_nested_lock_owned_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # The single-quoted program is an intentional inner-shell fixture.
   printf '{"stop_hook_active":%s}' "$stop_active" | FM_HOME="$home" "$FAKE_GROK" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     "$1" -c "

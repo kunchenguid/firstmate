@@ -84,6 +84,7 @@ REQUEST_LOCK=
 PAYLOAD=
 BODY=
 PART_TEXT=
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
 cleanup() {
   [ -z "$REQUEST_LOCK" ] || fm_lock_release "$REQUEST_LOCK"
   rm -f -- "$PAYLOAD" "$BODY" "$PART_TEXT"
