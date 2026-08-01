@@ -133,9 +133,22 @@ gh_auth_config_present() {
     || [ -s "${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/gh}/hosts.yml" ]
 }
 
+# `gh auth status` validates the token over the network, and the observed Codex
+# sandbox denies exactly that (`CODEX_SANDBOX_NETWORK_DISABLED=1`), so present
+# credential material can be unvalidatable there. The network denial is the
+# cause, not one platform's sandbox implementation, so any non-empty
+# CODEX_SANDBOX counts too rather than only the macOS `seatbelt` label.
+codex_sandbox_blocks_auth_check() {
+  case "${CODEX_SANDBOX_NETWORK_DISABLED:-}" in
+    '' | 0 | false) ;;
+    *) return 0 ;;
+  esac
+  [ -n "${CODEX_SANDBOX:-}" ]
+}
+
 gh_auth_diagnostic() {
   gh auth status >/dev/null 2>&1 && return 0
-  if gh_auth_config_present && [ "${CODEX_SANDBOX:-}" = seatbelt ]; then
+  if gh_auth_config_present && codex_sandbox_blocks_auth_check; then
     echo "GH_AUTH_UNVERIFIED: Codex sandbox could not validate existing GitHub credential material; rerun the auth check outside the Codex sandbox or expose a valid GH_TOKEN/GITHUB_TOKEN to this session"
   else
     echo "NEEDS_GH_AUTH"

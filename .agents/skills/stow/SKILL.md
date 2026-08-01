@@ -1,6 +1,6 @@
 ---
 name: stow
-description: Use when the captain invokes /stow, before reset or compaction, or to sweep session knowledge into durable memory.
+description: Use when the captain invokes /stow or says "stow what you've learned", before reset or compaction, or periodically to sweep session knowledge into durable memory.
 user-invocable: true
 metadata:
   internal: true

@@ -314,6 +314,7 @@ SH
   chmod +x "$fakebin/gh"
   env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN \
     -u GH_CONFIG_DIR -u XDG_CONFIG_HOME -u CODEX_SANDBOX \
+    -u CODEX_SANDBOX_NETWORK_DISABLED \
     PATH="$fakebin:$BASE_PATH" HOME="$userhome" FM_HOME="$case_dir/home" \
     FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     "$@" "$ROOT/bin/fm-bootstrap.sh"
@@ -356,9 +357,37 @@ test_gh_auth_diagnostics_distinguish_codex_sandbox() {
     XDG_CONFIG_HOME="$case_dir/xdg" CODEX_SANDBOX=seatbelt)
   assert_contains "$out" "$unverified" "XDG_CONFIG_HOME credential material was ignored"
 
+  # The sandbox's denied network call is what `gh auth status` cannot survive, so
+  # the diagnostic must follow that marker rather than one platform's sandbox name.
+  case_dir="$TMP_ROOT/gh-network-disabled-only"
+  mkdir -p "$case_dir/userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/userhome/.config/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" CODEX_SANDBOX_NETWORK_DISABLED=1)
+  assert_contains "$out" "$unverified" "network-disabled Codex sandbox was mislabeled as missing login"
+
+  case_dir="$TMP_ROOT/gh-non-seatbelt-sandbox"
+  mkdir -p "$case_dir/userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/userhome/.config/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" \
+    CODEX_SANDBOX=landlock CODEX_SANDBOX_NETWORK_DISABLED=1)
+  assert_contains "$out" "$unverified" "non-seatbelt Codex sandbox was mislabeled as missing login"
+
+  # A sandbox that reports its network as available cannot excuse a failed check.
+  case_dir="$TMP_ROOT/gh-network-enabled"
+  mkdir -p "$case_dir/userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/userhome/.config/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" CODEX_SANDBOX_NETWORK_DISABLED=0)
+  [ "$out" = "NEEDS_GH_AUTH" ] \
+    || fail "a network-enabled session should request login, got: $out"
+
   case_dir="$TMP_ROOT/gh-missing"
   out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" CODEX_SANDBOX=seatbelt)
   [ "$out" = "NEEDS_GH_AUTH" ] || fail "missing credentials should request login, got: $out"
+
+  case_dir="$TMP_ROOT/gh-missing-network-disabled"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" CODEX_SANDBOX_NETWORK_DISABLED=1)
+  [ "$out" = "NEEDS_GH_AUTH" ] \
+    || fail "missing credentials in a network-disabled sandbox should request login, got: $out"
 
   # Outside the Codex sandbox, present-but-unvalidatable material is a real gap.
   case_dir="$TMP_ROOT/gh-unsandboxed"

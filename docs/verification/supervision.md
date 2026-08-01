@@ -28,7 +28,9 @@ Only an expired lease is stale-lock recovery, reclaimed through the unchanged `b
 The GitHub diagnostic was separated from the lock bug outside the sandbox.
 With the captain's normal environment, an authenticated account succeeded through `gh auth status` while `gh help environment` documents `GH_TOKEN`, `GITHUB_TOKEN`, and the `GH_CONFIG_DIR`, `$XDG_CONFIG_HOME/gh`, `~/.config/gh` config-directory order as the only credential material the CLI reads.
 Bootstrap now checks exactly that set, so its verdict cannot disagree with the `gh` and `gh-axi` calls in `bin/fm-pr-check.sh`, `bin/fm-pr-merge.sh`, `bin/fm-teardown.sh`, and `bin/fm-bearings-snapshot.sh`.
-Inside the Codex seatbelt that material can be present but unvalidatable, so bootstrap reports `GH_AUTH_UNVERIFIED` instead of requesting a fresh login; a throwaway home with no token and no `hosts.yml` still reports `NEEDS_GH_AUTH`.
+Inside a Codex sandbox that material can be present but unvalidatable, because `gh auth status` validates the token over the network and the probe above exported `CODEX_SANDBOX_NETWORK_DISABLED=1` alongside `CODEX_SANDBOX=seatbelt`.
+The denied network call is the cause, not one platform's sandbox implementation, so bootstrap keys the diagnostic on that marker and on any non-empty `CODEX_SANDBOX` rather than on the `seatbelt` label alone, and reports `GH_AUTH_UNVERIFIED` instead of requesting a fresh login.
+A throwaway home with no token and no `hosts.yml` still reports `NEEDS_GH_AUTH` in every one of those shapes, as does a session whose sandbox reports its network available.
 
 Skill-budget reproduction was bounded to repository-controlled inputs.
 `codex -C "$PWD" debug prompt-input` with a throwaway `CODEX_HOME` and no user plugins showed no 2% warning for Firstmate project skills alone, so the observed Ponytail-enabled user path is an independent budget contributor rather than a proven sole cause.
