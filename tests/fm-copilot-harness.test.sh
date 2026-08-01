@@ -45,7 +45,11 @@ test_existing_launch_templates_untouched() {
 
 test_copilot_is_a_known_bare_adapter_name() {
   # copilot must be accepted as a bare adapter name, not routed to the raw-launch hatch.
-  grep -Fq "|cline|cursor-agent|copilot)" "$SPAWN" \
+  # Match an executable case-pattern line, not the usage comment that spells the
+  # same allowlist, and stay robust to later adapters appended after copilot
+  # (e.g. |copilot|agy) - pinning the closing paren made this fence fail the
+  # moment a new adapter joined the list, while copilot was still in it.
+  grep -Eq "^[[:space:]]*[^#]*\|copilot[|)]" "$SPAWN" \
     || fail "fm-spawn: copilot not added to a known-harness allowlist"
   pass "fm-spawn: copilot is recognized as a known bare adapter name"
 }
@@ -54,7 +58,11 @@ test_copilot_model_and_effort_flags() {
   # copilot takes --model and maps effort to --reasoning-effort, accepting the
   # full shared low|medium|high|xhigh|max vocabulary (no tier omitted, unlike
   # cline/codex/grok).
-  grep -Fq "|cline|cursor-agent|copilot)" "$SPAWN" \
+  # Scope the needle to the function that actually builds the flag, so deleting
+  # copilot from model_flag_for_harness cannot stay green off some other line.
+  local model_fn
+  model_fn=$(sed -n '/^model_flag_for_harness()/,/^}/p' "$SPAWN")
+  printf '%s\n' "$model_fn" | grep -Eq '^ *[^)]*\|copilot[|)]' \
     || fail "fm-spawn: copilot not in the --model allowlist"
   grep -Fq "low|medium|high|xhigh|max) printf -- '--reasoning-effort %s '" "$SPAWN" \
     || fail "fm-spawn: copilot effort->--reasoning-effort mapping missing"
