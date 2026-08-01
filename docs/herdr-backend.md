@@ -248,6 +248,8 @@ It cannot prove its way out of that state: `launch` runs inside the very pane it
 The narrow manual fallback is the only supported exit, and it is deliberately external evidence rather than a new `status` guarantee.
 Decide which Herdr session and pane the crashed primary was meant to occupy, inspect that exact pane directly (`herdr agent get <pane-id> --session <name>` alongside `herdr pane process-info --pane <pane-id> --session <name>`), and only once that exact pane shows no registered Pi and no Pi foreground process, remove `state/primary-pi/lease` by hand and run `launch` again.
 If any of that evidence is missing, ambiguous, or contradictory, preserve the lease and stop; there is no automatic path out of this state.
+`status` names that lease `stale`, not `contradictory`: a lease cannot disagree with a custody record that does not exist, and `contradictory` is reserved for a lease whose token or PID/start identity differs from a readable custody record.
+An interrupted wrapper cannot leave anything in between, because the lease is published as one already-complete private record: what survives a crash is either no lease at all or a full version/token/PID/start identity.
 A stale lease that does have a custody record still belongs to `recover`, and a live lease, unknown state, or malformed lease refuses either way.
 
 Reconnect with:
@@ -264,6 +266,7 @@ Those proofs come from the backend's single owner of the idle-shell contract, so
 Strict validation is line-oriented like Pi's own reader: a record split across physical lines and two records concatenated onto one physical line both refuse.
 The restart strictly validates the canonical session file, enters its exact recorded cwd, and passes Pi its full exact header id through `--session`; it never uses `-c`, `--resume`, `--session-id`, labels, focus, interactive selection, a partial id, or an ambient Herdr target.
 A fresh token atomically binds the replacement wrapper, and recovery refuses to attach or report success until Pi attests the exact expected session from inside the new process.
+Because the restored pane runs its own shell rather than the recovering operator's, the generated command pins the resolved Firstmate home, code root, and state directory explicitly, clearing a stray `FM_STATE_OVERRIDE` when the parent uses the default one; otherwise the replacement wrapper would write its custody where the parent never looks.
 That attestation wait is bounded at roughly one minute by default, sized for a real cold Pi start rather than a stub, and it is also the longest a wedged recovery can hold the recovery lock against another one.
 Unknown state, a live or malformed lease, path aliases, symlinks, non-regular files, malformed JSONL, duplicate full ids, missing sessions, changed pane identity, and attestation mismatch all stop automatic restart.
 The fallback is attach-only or manual recovery, never a guessed launch.

@@ -35,6 +35,13 @@
 # Labels, focus, ambient HERDR_SESSION, partial Pi IDs, -c, -r, --session-id,
 # and unchecked paths are never recovery authority.
 #
+# The restored pane runs its own shell's environment, not the recovering
+# operator's, so the generated command pins every variable that resolves private
+# state: FM_HOME, FM_ROOT_OVERRIDE, and FM_STATE_OVERRIDE, the last one either
+# quoted to the parent's value or explicitly `env -u`d when the parent resolves
+# the default. Both directions matter - an unforwarded override and a stray one
+# in the pane both point the child at a private tree the parent never polls.
+#
 # Private state (mode 0600 files under mode 0700 state/primary-pi):
 #
 # custody.v1 (exactly one of every field):
@@ -56,18 +63,26 @@
 #   lease_owner_start=<normalized ps lstart identity>
 #   updated_epoch=<integer>
 #
-# lease/ contains version, token, owner_pid, and owner_start. The wrapper keeps
-# that directory for Pi's whole lifetime. Clean exit removes only a token-matched
-# lease. A stale recorded lease can be replaced only by the internal resume
+# lease is a single mode 0600 regular record holding exactly version, token, pid,
+# and start. It is published by the same primitive as the guards below - one
+# hardlink of an already fully written record onto the lease path - so an
+# interrupted wrapper leaves either no lease at all or a complete
+# version/token/PID/start identity, never an ownerless permanent blocker. The
+# wrapper keeps that record for Pi's whole lifetime. Clean exit removes only a
+# token-matched lease. A stale recorded lease can be replaced only by the internal resume
 # action after recover proves the exact pane is a stable restored shell. A stale
 # pre-attestation lease with no custody record is never reclaimed automatically:
 # `launch` runs inside the very pane it would have to prove agent-free, so no
 # in-pane proof can be honest. That lease is preserved untouched as evidence and
 # the documented narrow manual fallback applies (docs/herdr-backend.md). `status`
 # cannot serve that fallback: with no custody record there is no recorded pane to
-# report, so it prints pane=unknown agent=unknown by construction. The operator
-# inspects the intended pane externally through its exact named session and pane
-# id, and only then removes state/primary-pi/lease by hand before `launch` again.
+# report, so it prints pane=unknown agent=unknown by construction. It does report
+# that lease as stale rather than contradictory, because a lease cannot disagree
+# with a custody record that does not exist; contradictory is reserved for a lease
+# whose token or PID/start identity differs from a readable custody record. The
+# operator inspects the intended pane externally through its exact named session
+# and pane id, and only then removes state/primary-pi/lease by hand before
+# `launch` again.
 #
 # recovery.lock, .lease-steal, and .recovery-steal are all the same guard
 # primitive: a mode 0600 regular file holding exactly one pid and one start
@@ -75,10 +90,12 @@
 # the guard path, so it is atomic in both directions at once - it fails EEXIST
 # when another owner holds the guard, and it can never expose a guard that lacks
 # PID/start identity. A wrapper killed at any instant therefore leaves either no
-# guard or a complete, PID/start-reclaimable one, never a permanent brick. An
-# identity-less or non-regular object at a guard path is consequently not
-# something this script can produce; it is foreign, unknown state, and every
-# acquire refuses it rather than guessing.
+# guard or a complete, PID/start-reclaimable one, never a permanent brick. The
+# lifetime lease shares that publication primitive for the same reason, with its
+# own version/token fields alongside the PID/start identity. An identity-less or
+# non-regular object at a guard or lease path is consequently not something this
+# script can produce; it is foreign, unknown state, and every acquire refuses it
+# rather than guessing.
 #
 # .lease-steal and .recovery-steal serialize the two handoffs that cannot be a
 # single atomic primitive. They only avoid mutual clobbering; the real arbiters
@@ -314,33 +331,27 @@ write_record() {
 }
 
 load_lease() {
-  local canonical
   private_dir_is_canonical || return 1
-  canonical=$(canonical_dir "$LEASE") || return 1
-  [ "$canonical" = "$LEASE" ] || return 1
-  LEASE_VERSION=$(record_field "$LEASE/version" version) || return 1
-  LEASE_TOKEN=$(record_field "$LEASE/token" token) || return 1
-  LEASE_PID=$(record_field "$LEASE/owner" pid) || return 1
-  LEASE_START=$(record_field "$LEASE/owner" start) || return 1
+  LEASE_VERSION=$(record_field "$LEASE" version) || return 1
+  LEASE_TOKEN=$(record_field "$LEASE" token) || return 1
+  LEASE_PID=$(record_field "$LEASE" pid) || return 1
+  LEASE_START=$(record_field "$LEASE" start) || return 1
   [ "$LEASE_VERSION" = 1 ] || return 1
   token_is_valid "$LEASE_TOKEN" || return 1
+  case "$LEASE_PID" in ''|*[!0-9]*|1) return 1 ;; esac
 }
 
 write_lease() {
   local token=$1 owner=$2 start=$3
-  [ ! -e "$LEASE" ] && [ ! -L "$LEASE" ] || return 1
-  mkdir "$LEASE" 2>/dev/null || return 1
-  chmod 700 "$LEASE" || { rmdir "$LEASE"; return 1; }
-  write_record "$LEASE/version" version 1 || { rm -rf "$LEASE"; return 1; }
-  write_record "$LEASE/token" token "$token" || { rm -rf "$LEASE"; return 1; }
-  write_record "$LEASE/owner" pid "$owner" start "$start" || { rm -rf "$LEASE"; return 1; }
+  ensure_private_dir || return 1
+  publish_record "$LEASE" version 1 token "$token" pid "$owner" start "$start"
 }
 
 remove_token_lease() {
   local token=$1
   load_lease || return 1
   [ "$LEASE_TOKEN" = "$token" ] || return 1
-  rm -rf "$LEASE"
+  rm -f "$LEASE"
 }
 
 load_custody() {
@@ -541,15 +552,20 @@ current_env_identity() {
     || die "injected Herdr pane identity is absent or contradictory"
 }
 
-publish_guard() {
-  local path=$1 start=$2 tmp rc=0
-  tmp="$PRIVATE_DIR/.guard.$$.$(new_token)"
-  write_record "$tmp" pid "$$" start "$start" || { rm -f "$tmp"; return 1; }
+publish_record() {
+  local path=$1 tmp rc=0
+  shift
+  tmp="$PRIVATE_DIR/.publish.$$.$(new_token)"
+  write_record "$tmp" "$@" || { rm -f "$tmp"; return 1; }
   if [ -e "$path" ] || [ -L "$path" ] || ! ln "$tmp" "$path" 2>/dev/null; then
     rc=1
   fi
   rm -f "$tmp"
   return "$rc"
+}
+
+publish_guard() {
+  publish_record "$1" pid "$$" start "$2"
 }
 
 acquire_guard() {
@@ -607,7 +623,7 @@ replace_stale_lease() {
     old=$LEASE_TOKEN
     [ "$old" = "$old_token" ] || { release_guard "$LEASE_STEAL"; return 1; }
     pid_matches "$LEASE_PID" "$LEASE_START" && { release_guard "$LEASE_STEAL"; return 1; }
-    rm -rf "$LEASE" || { release_guard "$LEASE_STEAL"; return 1; }
+    rm -f "$LEASE" || { release_guard "$LEASE_STEAL"; return 1; }
   else
     [ "$old_token" = absent ] || { release_guard "$LEASE_STEAL"; return 1; }
   fi
@@ -886,7 +902,12 @@ command_recover() {
   strict_session "$C_SESSION_FILE" "$C_SESSION_DIR" "$C_SESSION_ID" "$C_CWD" \
     || die "recorded Pi session failed strict integrity or uniqueness validation"
   token=$(new_token)
-  cmd="exec env FM_HOME=$(shell_quote "$FM_HOME") FM_ROOT_OVERRIDE=$(shell_quote "$FM_ROOT") "
+  if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    cmd="exec env FM_STATE_OVERRIDE=$(shell_quote "$FM_STATE_OVERRIDE")"
+  else
+    cmd='exec env -u FM_STATE_OVERRIDE'
+  fi
+  cmd="$cmd FM_HOME=$(shell_quote "$FM_HOME") FM_ROOT_OVERRIDE=$(shell_quote "$FM_ROOT")"
   cmd="$cmd HERDR_ENV=1 HERDR_SESSION=$(shell_quote "$C_HERDR_SESSION") HERDR_SOCKET_PATH=$(shell_quote "$C_HERDR_SOCKET")"
   cmd="$cmd HERDR_WORKSPACE_ID=$(shell_quote "$C_HERDR_WORKSPACE") HERDR_TAB_ID=$(shell_quote "$C_HERDR_TAB") HERDR_PANE_ID=$(shell_quote "$C_HERDR_PANE")"
   cmd="$cmd $(shell_quote "$SCRIPT_DIR/fm-primary-pi.sh") resume --from-token $(shell_quote "$from") --token $(shell_quote "$token") --pi $(shell_quote "$C_PI_HARNESS")"
@@ -915,8 +936,9 @@ command_recover() {
 }
 
 command_status() {
-  local live=absent server=unknown pane=unknown agent=unknown integrity=unknown
+  local live=absent server=unknown pane=unknown agent=unknown integrity=unknown custody=0
   if load_custody; then
+    custody=1
     integrity=$C_INTEGRITY
     status_running_and_socket "$C_HERDR_SESSION" "$C_HERDR_SOCKET" && server=running || server=unavailable
     pane_json_exact "$C_HERDR_SESSION" "$C_HERDR_PANE" "$C_HERDR_WORKSPACE" "$C_HERDR_TAB" >/dev/null 2>&1 && pane=exact || pane=unavailable
@@ -924,8 +946,8 @@ command_status() {
   fi
   if [ -e "$LEASE" ] || [ -L "$LEASE" ]; then
     if load_lease; then
-      if [ "${C_LEASE_TOKEN:-}" != "$LEASE_TOKEN" ] || [ "${C_LEASE_PID:-}" != "$LEASE_PID" ] \
-        || [ "${C_LEASE_START:-}" != "$LEASE_START" ]; then
+      if [ "$custody" = 1 ] && { [ "$C_LEASE_TOKEN" != "$LEASE_TOKEN" ] || [ "$C_LEASE_PID" != "$LEASE_PID" ] \
+        || [ "$C_LEASE_START" != "$LEASE_START" ]; }; then
         live=contradictory
       elif pid_matches "$LEASE_PID" "$LEASE_START"; then
         live=live

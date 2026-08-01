@@ -78,7 +78,11 @@ case "$1 ${2:-}" in
     ;;
   'pane run')
     sleep "${TEST_PANE_RUN_DELAY:-0}"
-    (cd / && bash -c "$4") >> "$TEST_RESUME_LOG" 2>&1 &
+    # The restored pane runs its own shell, not the recovering operator's. Give
+    # it a stray FM_STATE_OVERRIDE the parent never uses, so any generated
+    # command that fails to pin that variable resolves a private state tree the
+    # parent never polls and cannot attest.
+    (cd / && env FM_STATE_OVERRIDE="$TEST_STRAY_STATE" bash -c "$4") >> "$TEST_RESUME_LOG" 2>&1 &
     ;;
   *) printf '{"error":{"code":"unexpected"}}\n'; exit 1 ;;
 esac
@@ -141,16 +145,23 @@ export TEST_PANE="$PANE" TEST_WORKSPACE="$WORKSPACE" TEST_TAB="$TAB"
 export TEST_FULL_ID="$FULL_ID" TEST_SESSION_FILE="$SESSION_FILE" TEST_SESSION_DIR="$SESSION_DIR" TEST_CWD="$T"
 export TEST_RESUME_LOG="$T/resume.log" TEST_PI_LOG="$T/pi.log" TEST_UMASK_FILE="$T/pi.umask" TEST_PI_CWD_FILE="$T/pi.cwd"
 export TEST_ATTACH_ENV_FILE="$T/attach.env"
+STRAY_STATE="$T/stray pane state"
+ALT_STATE="$T/specialized state"
+mkdir -p "$STRAY_STATE" "$ALT_STATE"
+export TEST_STRAY_STATE="$STRAY_STATE"
 SCRIPT="$ROOT/bin/fm-primary-pi.sh"
+LEASE="$HOME_FIXTURE/state/primary-pi/lease"
 RECOVERY_LOCK="$HOME_FIXTURE/state/primary-pi/recovery.lock"
 LAUNCH_PID=''
 RECOVERY_PID=''
 
 cleanup() {
-  if [ -f "$HOME_FIXTURE/state/primary-pi/lease/owner" ]; then
-    pid=$(grep '^pid=' "$HOME_FIXTURE/state/primary-pi/lease/owner" | cut -d= -f2-)
+  local held
+  for held in "$LEASE" "$ALT_STATE/primary-pi/lease"; do
+    [ -f "$held" ] || continue
+    pid=$(grep '^pid=' "$held" | cut -d= -f2-)
     kill -TERM "$pid" 2>/dev/null || true
-  fi
+  done
   [ -n "$LAUNCH_PID" ] && kill -TERM "$LAUNCH_PID" 2>/dev/null || true
   [ -n "$RECOVERY_PID" ] && kill -TERM "$RECOVERY_PID" 2>/dev/null || true
   rm -rf "$T"
@@ -169,11 +180,32 @@ wait_for() {
 }
 
 lease_live() {
-  [ -f "$HOME_FIXTURE/state/primary-pi/lease/owner" ] && [ "$(cat "$MODE")" = pi ]
+  [ -f "$LEASE" ] && [ "$(cat "$MODE")" = pi ]
 }
 
 lease_absent() {
-  [ ! -e "$HOME_FIXTURE/state/primary-pi/lease" ] && [ "$(cat "$MODE")" = shell ]
+  [ ! -e "$LEASE" ] && [ "$(cat "$MODE")" = shell ]
+}
+
+# The lifetime lease is one atomically published private object: a regular
+# mode 0600 record carrying exactly version, token, pid, and start.
+assert_whole_lease() {
+  [ -f "$LEASE" ] && [ ! -L "$LEASE" ] || fail "$1: the lease must be a regular non-symlink record"
+  [ "$(file_mode "$LEASE")" = 600 ] || fail "$1: the lease must be private mode 0600"
+  [ "$(cut -d= -f1 "$LEASE" | tr '\n' ' ')" = 'version token pid start ' ] \
+    || fail "$1: the lease must carry exactly version, token, pid, and start"
+  assert_grep 'version=1' "$LEASE" "$1: the lease must carry its schema version"
+  [ -n "$(lease_token)" ] || fail "$1: the lease must carry a custody token"
+  [ -n "$(grep '^start=' "$LEASE" | cut -d= -f2-)" ] || fail "$1: the lease must carry its owner start identity"
+}
+
+lease_token() {
+  grep '^token=' "$LEASE" | cut -d= -f2-
+}
+
+seed_lease() {
+  printf 'version=1\ntoken=%s\npid=999999\nstart=Mon Jan  1 00:00:00 2001\n' "$1" > "$LEASE"
+  chmod 600 "$LEASE"
 }
 
 recovery_lock_present() {
@@ -182,6 +214,10 @@ recovery_lock_present() {
 
 path_absent() {
   [ ! -e "$1" ]
+}
+
+mode_is() {
+  [ "$(cat "$MODE")" = "$1" ]
 }
 
 # A wrapped ordinary launch acquires lifetime custody and publishes exact state.
@@ -201,10 +237,8 @@ assert_grep "pi_session_id=$FULL_ID" "$CUSTODY" 'full Pi session id must be pers
 assert_grep "pi_session_file=$SESSION_FILE" "$CUSTODY" 'canonical Pi session file must be persisted'
 assert_grep 'session_integrity=ok' "$CUSTODY" 'strict session result must be persisted'
 [ "$(file_mode "$CUSTODY")" = 600 ] || fail 'custody must be private mode 0600'
-LEASE_DIR="$HOME_FIXTURE/state/primary-pi/lease"
-LEASE_TOKEN_FILE="$LEASE_DIR/token"
-[ "$(file_mode "$LEASE_DIR")" = 700 ] || fail 'lease directory must be private mode 0700'
-[ "$(file_mode "$LEASE_TOKEN_FILE")" = 600 ] || fail 'lease token must be private mode 0600'
+[ "$(file_mode "$HOME_FIXTURE/state/primary-pi")" = 700 ] || fail 'private custody directory must be mode 0700'
+assert_whole_lease 'a live lease'
 [ "$(cat "$TEST_UMASK_FILE")" = 0022 ] || fail "private state writes must not change the umask Pi inherits: $(cat "$TEST_UMASK_FILE")"
 pass 'wrapped launch publishes complete exact custody without widening the inherited umask'
 
@@ -326,12 +360,7 @@ pass 'named-server absence terminates within the configured bound'
 
 # A stale PID/start lease is reclaimable only once, and a concurrent recovery loses the lock.
 printf 'shell\n' > "$MODE"
-mkdir "$HOME_FIXTURE/state/primary-pi/lease"
-printf 'version=1\n' > "$HOME_FIXTURE/state/primary-pi/lease/version"
-printf 'token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$HOME_FIXTURE/state/primary-pi/lease/token"
-printf 'pid=999999\nstart=Mon Jan  1 00:00:00 2001\n' > "$HOME_FIXTURE/state/primary-pi/lease/owner"
-chmod 700 "$HOME_FIXTURE/state/primary-pi/lease"
-chmod 600 "$HOME_FIXTURE/state/primary-pi/lease/"*
+seed_lease aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 : > "$LOG"
 : > "$TEST_RESUME_LOG"
 : > "$TEST_PI_LOG"
@@ -359,9 +388,12 @@ assert_no_grep ' --session-id ' "$TEST_PI_LOG" 'Pi restart command must never us
 assert_no_grep ' -c ' "$TEST_PI_LOG" 'Pi restart command must never use -c'
 assert_grep 'result=ok' "$HOME_FIXTURE/state/primary-pi/attestation.v1" 'recovery must publish successful post-launch attestation'
 assert_grep "pi_session_id=$FULL_ID" "$CUSTODY" 'post-launch custody must attest the exact full id'
-new_token=$(grep '^token=' "$HOME_FIXTURE/state/primary-pi/lease/token" | cut -d= -f2-)
+new_token=$(lease_token)
 [ "$new_token" != aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ] || fail 'stale lease token was not atomically replaced'
+assert_whole_lease 'an atomically handed-off lease'
 assert_absent "$RECOVERY_LOCK" 'a completed no-attach restart must release its recovery ownership'
+assert_grep "env -u FM_STATE_OVERRIDE" "$LOG" 'a default-state restart must clear a stray pane state override'
+assert_absent "$STRAY_STATE/primary-pi" 'a default-state restart must never write into the pane shell stray state tree'
 assert_grep "pane get $PANE --session lab-exact" "$LOG" 'recovery must resolve only the exact recorded pane'
 assert_grep "pane run $PANE" "$LOG" 'restart must target only the exact recorded pane'
 assert_grep "'$ROOT/bin/fm-primary-pi.sh' resume" "$LOG" 'the restored pane must be driven through the canonical absolute script path'
@@ -429,7 +461,7 @@ assert_grep 'agent attach w1:p1 --session lab-exact' "$LOG" 'attach must also ca
 pass 'the exec attach pins the exact recorded named session over an ambient one'
 
 # Stop the recovered wrapper through exact recorded PID/start custody.
-owner=$(grep '^pid=' "$HOME_FIXTURE/state/primary-pi/lease/owner" | cut -d= -f2-)
+owner=$(grep '^pid=' "$LEASE" | cut -d= -f2-)
 kill -TERM "$owner"
 wait_for 'recovered owner cleanup' lease_absent
 
@@ -442,12 +474,61 @@ out=$(TEST_ATTEST_ID='wrong-full-id' FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>
 set -e
 [ "$rc" -ne 0 ] || fail 'post-launch identity mismatch unexpectedly recovered'
 assert_contains "$out" 'attestation failed' 'identity mismatch must be reported as failed attestation'
-wait_for 'failed token owner cleanup' path_absent "$HOME_FIXTURE/state/primary-pi/lease"
+wait_for 'failed token owner cleanup' path_absent "$LEASE"
 [ "$(cat "$MODE")" != pi ] || fail 'mismatched Pi remained presented as live'
 kill -0 "$unrelated" 2>/dev/null || fail 'token cleanup signaled an unrelated process'
 kill "$unrelated" 2>/dev/null || true
 wait "$unrelated" 2>/dev/null || true
 pass 'post-launch mismatch refuses success and cleans only fresh token custody'
+
+# A SIGKILL anywhere in a wrapper's lifetime can never publish a partial lease.
+# The lease is one hardlinked record, so an interrupted wrapper leaves either no
+# lease at all or a complete PID/start identity that the next recovery reclaims.
+printf 'shell\n' > "$MODE"
+out=$(FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1) || fail "the restart before the lease crash failed: $out"
+assert_whole_lease 'a live restarted lease'
+killed_owner=$(grep '^pid=' "$LEASE" | cut -d= -f2-)
+killed_token=$(lease_token)
+orphan_pi=$(grep '^pi_pid=' "$HOME_FIXTURE/state/primary-pi/attestation.v1" | cut -d= -f2-)
+kill -9 "$killed_owner"
+assert_whole_lease 'the lease a SIGKILLed wrapper leaves behind'
+kill -TERM "$orphan_pi" 2>/dev/null || true
+wait_for 'the orphaned Pi to leave a bare restored shell' mode_is shell
+assert_whole_lease 'the preserved lease after the orphaned Pi exits'
+: > "$LOG"
+out=$(FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1) \
+  || fail "the lease left by a SIGKILLed wrapper was not reclaimable: $out"
+assert_contains "$out" "pi_session=$FULL_ID" 'reclaiming a crash-left lease must restore the exact Pi session'
+assert_whole_lease 'the reclaimed lease'
+[ "$(lease_token)" != "$killed_token" ] || fail 'the crash-left lease token was not atomically replaced'
+owner=$(grep '^pid=' "$LEASE" | cut -d= -f2-)
+kill -TERM "$owner"
+wait_for 'crash-reclaim cleanup' lease_absent
+pass 'a SIGKILLed wrapper leaves only a complete, reclaimable lifetime lease'
+
+# A specialized state home is a supported operational override, and the restored
+# pane runs its own shell. The generated command must therefore carry that exact
+# resolved state path, apostrophe and space included, rather than inheriting the
+# pane's own stray value.
+mkdir -p "$ALT_STATE/primary-pi"
+chmod 700 "$ALT_STATE/primary-pi"
+cp "$T/custody.good" "$ALT_STATE/primary-pi/custody.v1"
+chmod 600 "$ALT_STATE/primary-pi/custody.v1"
+printf 'shell\n' > "$MODE"
+: > "$LOG"
+out=$(FM_STATE_OVERRIDE="$ALT_STATE" FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1) \
+  || fail "specialized-state recovery failed: $out"
+assert_contains "$out" "pi_session=$FULL_ID" 'specialized-state recovery must restore the exact Pi session'
+alt_quoted=$(printf '%s' "$ALT_STATE" | sed "s/'/'\\\\''/g")
+assert_grep "FM_STATE_OVERRIDE='$alt_quoted'" "$LOG" 'the generated resume command must pin the exact resolved state path with POSIX-safe quoting'
+assert_present "$ALT_STATE/primary-pi/lease" 'the restarted wrapper must hold its lease in the specialized state tree'
+assert_grep 'result=ok' "$ALT_STATE/primary-pi/attestation.v1" 'the specialized state tree must carry the attestation the parent polled'
+assert_absent "$STRAY_STATE/primary-pi" 'no restart may follow the pane shell stray state override'
+assert_absent "$LEASE" 'a specialized-state restart must not touch the default state tree'
+alt_owner=$(grep '^pid=' "$ALT_STATE/primary-pi/lease" | cut -d= -f2-)
+kill -TERM "$alt_owner"
+wait_for 'specialized-state cleanup' path_absent "$ALT_STATE/primary-pi/lease"
+pass 'recovery into an apostrophe-bearing specialized state home stays self-consistent'
 
 # Launch session-selection shortcuts are refused before invoking Pi.
 for bad in -c --resume --session-id=foo --session=foo --no-session; do
@@ -467,32 +548,39 @@ awk 'BEGIN{FS=OFS="="} $1=="pi_session_id"{$2="full session 1234567890"} {print}
 out=$("$SCRIPT" status 2>&1) || fail "status must report a malformed session id instead of exiting: $out"
 assert_contains "$out" 'custody=unknown' 'a malformed full Pi session id must read as unknown custody'
 cp "$T/custody.attested" "$CUSTODY"
-mkdir "$HOME_FIXTURE/state/primary-pi/lease"
-printf 'version=1\n' > "$HOME_FIXTURE/state/primary-pi/lease/version"
-printf 'token=not-a-hex-token\n' > "$HOME_FIXTURE/state/primary-pi/lease/token"
-printf 'pid=999999\nstart=Mon Jan  1 00:00:00 2001\n' > "$HOME_FIXTURE/state/primary-pi/lease/owner"
-chmod 700 "$HOME_FIXTURE/state/primary-pi/lease"
-chmod 600 "$HOME_FIXTURE/state/primary-pi/lease/"*
+seed_lease not-a-hex-token
 out=$("$SCRIPT" status 2>&1) || fail "status must report a malformed lease token instead of exiting: $out"
 assert_contains "$out" 'lease=malformed' 'a non-hex lease token must read as a malformed lease'
-rm -rf "$HOME_FIXTURE/state/primary-pi/lease"
-pass 'malformed custody and lease records are reported by status rather than exiting'
+# An old-layout or otherwise foreign object at the lease path is unknown state
+# this script cannot publish, so it reads as malformed rather than reclaimable.
+rm -f "$LEASE"
+mkdir "$LEASE"
+out=$("$SCRIPT" status 2>&1) || fail "status must report a non-regular lease instead of exiting: $out"
+assert_contains "$out" 'lease=malformed' 'a non-regular lease object must read as a malformed lease'
+rmdir "$LEASE"
+# A readable custody record whose recorded lease identity disagrees with the
+# on-disk lease is the one state that is genuinely contradictory.
+seed_lease cccccccccccccccccccccccccccccccc
+out=$("$SCRIPT" status 2>&1) || fail "status must report a mismatched lease instead of exiting: $out"
+assert_contains "$out" 'lease=contradictory' 'a lease disagreeing with readable custody must read as contradictory'
+rm -f "$LEASE"
+pass 'malformed, non-regular, and custody-contradicting lease records are reported by status rather than exiting'
 
 # A crash before first attestation leaves a lease with no custody. `launch` runs
 # inside the very pane it would have to prove agent-free, so it never reclaims
 # that lease automatically: it preserves the evidence, refuses, and leaves only
 # the documented manual removal as the supported exit.
 mv "$HOME_FIXTURE/state/primary-pi" "$T/previous-primary-state"
-mkdir -p "$HOME_FIXTURE/state/primary-pi/lease"
-printf 'version=1\n' > "$HOME_FIXTURE/state/primary-pi/lease/version"
-printf 'token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' > "$HOME_FIXTURE/state/primary-pi/lease/token"
-printf 'pid=999999\nstart=Mon Jan  1 00:00:00 2001\n' > "$HOME_FIXTURE/state/primary-pi/lease/owner"
-chmod 700 "$HOME_FIXTURE/state/primary-pi" "$HOME_FIXTURE/state/primary-pi/lease"
-chmod 600 "$HOME_FIXTURE/state/primary-pi/lease/"*
+mkdir -p "$HOME_FIXTURE/state/primary-pi"
+chmod 700 "$HOME_FIXTURE/state/primary-pi"
+seed_lease bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 # Without a custody record there is no recorded endpoint, so status reports the
-# lease it can read and refuses to guess a pane or agent it never recorded.
+# lease it can read and refuses to guess a pane or agent it never recorded. A
+# lease cannot contradict a custody record that does not exist, so this reads as
+# the plain PID/start-dead lease the documented manual fallback acts on.
 out=$("$SCRIPT" status 2>&1) || fail "status must report the pre-attestation state instead of exiting: $out"
 assert_contains "$out" 'custody=unknown' 'a pre-attestation state must read as unknown custody'
+assert_contains "$out" 'lease=stale' 'an absent-custody dead lease must read as stale, not contradictory'
 assert_contains "$out" 'pane=unknown' 'status must not name a pane it never recorded'
 assert_contains "$out" 'agent=unknown' 'status must not claim agent evidence it never recorded'
 for pane_state in unknown shell pi; do
@@ -503,7 +591,7 @@ for pane_state in unknown shell pi; do
   set -e
   [ "$rc" -ne 0 ] || fail "stale pre-attestation lease unexpectedly relaunched with a $pane_state pane"
   assert_contains "$out" 'preserved as evidence' "stale pre-attestation launch must refuse with a $pane_state pane"
-  assert_grep 'token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$HOME_FIXTURE/state/primary-pi/lease/token" 'refused stale launch must preserve its lease evidence'
+  assert_grep 'token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$LEASE" 'refused stale launch must preserve its lease evidence'
   assert_absent "$HOME_FIXTURE/state/primary-pi/custody.v1" 'refused stale launch must not publish custody'
   assert_absent "$RECOVERY_LOCK" 'refused stale launch must release its recovery ownership'
   assert_grep 'pane get' "$LOG" 'stale pre-attestation launch must still verify its own injected pane identity'
@@ -512,11 +600,11 @@ for pane_state in unknown shell pi; do
 done
 # The documented narrow manual fallback: remove the stale lease by hand, then launch.
 printf 'shell\n' > "$MODE"
-rm -rf "$HOME_FIXTURE/state/primary-pi/lease"
+rm -f "$LEASE"
 "$SCRIPT" launch --pi pi > "$T/stale-launch.out" 2>&1 &
 LAUNCH_PID=$!
 wait_for 'manual-fallback launch after the stale lease is removed' lease_live
-new_token=$(grep '^token=' "$HOME_FIXTURE/state/primary-pi/lease/token" | cut -d= -f2-)
+new_token=$(lease_token)
 [ "$new_token" != bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ] || fail 'manual-fallback launch reused the removed stale token'
 assert_present "$HOME_FIXTURE/state/primary-pi/custody.v1" 'manual-fallback launch must publish fresh attested custody'
 kill -TERM "$LAUNCH_PID"

@@ -31,7 +31,7 @@ assert_grep "$ROOT/bin/fm-primary-pi.sh" "$PLIST" 'plist must use the exact trac
 assert_grep '<string>server-ensure</string>' "$PLIST" 'plist must only ensure the recorded named server'
 assert_grep "<string>$SOURCE_HOME</string>" "$PLIST" 'plist must bind the canonical Firstmate home'
 assert_no_grep 'recover' "$PLIST" 'next-login job must not auto-launch Pi'
-assert_grep "exec env FM_HOME='$SOURCE_HOME' '$ROOT/bin/fm-primary-pi.sh' recover" "$HELPER" 'attach helper must bind the home and use exact-path recovery'
+assert_grep "exec env -u FM_STATE_OVERRIDE FM_HOME='$SOURCE_HOME' '$ROOT/bin/fm-primary-pi.sh' recover" "$HELPER" 'attach helper must bind the home, clear a stray state override, and use exact-path recovery'
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$PLIST" >/dev/null || fail 'installed LaunchAgent must be valid plist XML'
 fi

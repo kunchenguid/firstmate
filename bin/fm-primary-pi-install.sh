@@ -15,6 +15,9 @@
 #   ~/.local/bin/firstmate-attach
 #     - an exact-path wrapper for bin/fm-primary-pi.sh recover, suitable for a
 #       local or already-established remote shell such as a phone SSH session.
+#       It pins the installed Firstmate home and clears FM_STATE_OVERRIDE, so a
+#       stray value in a phone or login shell cannot point recovery at a private
+#       state tree the installed home never wrote.
 #
 # Installation is idempotent and atomic. Existing files are replaceable only
 # when they carry this installer's exact marker. Foreign files or symlinks are
@@ -92,7 +95,7 @@ render_helper() {
   cat <<EOF
 #!/bin/sh
 # $MARKER
-exec env FM_HOME='$SOURCE_HOME' '$OWNER' recover "\$@"
+exec env -u FM_STATE_OVERRIDE FM_HOME='$SOURCE_HOME' '$OWNER' recover "\$@"
 EOF
 }
 
