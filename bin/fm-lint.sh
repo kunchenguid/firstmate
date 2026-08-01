@@ -6,6 +6,8 @@
 # The lint command, the file set, the config, AND the pinned ShellCheck version
 # live here and ONLY here, so the gates cannot drift apart: both invoke this
 # script with no arguments.
+# The set covers bin/, the backend adapters, the relay scripts deployed
+# to task hosts, and the colocated tests.
 #   - CI:       .github/workflows/ci.yml installs the version this script prints
 #               via `--required-version`, then runs `bin/fm-lint.sh`.
 #   - Pre-push: .no-mistakes.yaml `commands.lint` runs `bin/fm-lint.sh`, so the
@@ -73,4 +75,4 @@ fi
 
 # Canonical file set: the ONE authoritative definition. Callers reference this
 # script; they never re-spell these globs.
-exec shellcheck --norc bin/*.sh bin/backends/*.sh tests/*.sh
+exec shellcheck --norc bin/*.sh bin/backends/*.sh control-root/*.sh control-root/verbs/*.sh tests/*.sh

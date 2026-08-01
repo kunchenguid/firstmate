@@ -167,6 +167,20 @@ FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+# The complete landed-work test needs local git, local remote-tracking refs, and
+# a provider query against the worktree that actually holds the work, so for a
+# relay task it must run on the HOST. This side decides and relays the refusal
+# verbatim; it never reimplements the judgement. A remote scout carries one extra
+# gate on top: the host refuses until this side proves it holds a byte-identical
+# copy of the report, because that scratch worktree is the only other place the
+# deliverable exists (bin/fm-relay-host.sh, control-root/verbs/fmr-verb.sh).
+if grep -q '^host=' "$META" 2>/dev/null; then
+  [ "$FORCE" != "--force" ] || {
+    echo "REFUSED: --force is not available for a relay task; discard authority must be exercised on the host itself" >&2
+    exit 1
+  }
+  exec "$SCRIPT_DIR/fm-relay-host.sh" teardown "$ID"
+fi
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)

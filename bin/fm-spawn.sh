@@ -2,6 +2,7 @@
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--launch <variant>] [--backend <name>] [--scout]
+#        fm-spawn.sh --host <name> <task-id> <project-name-on-host> [--harness <name>] [--model <name>] [--effort <level>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--launch <variant>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -83,6 +84,17 @@
 #   receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
+#   --host <name> dispatches the task to a REMOTE task host registered in
+#   config/relay-hosts.json instead of running it here. The second positional
+#   argument is then the PROJECT NAME under that host's own projects directory,
+#   not a local path. The host runs its own bin/fm-spawn.sh over the Bifrost
+#   relay, so the worktree assertion, harness launch, and trust dialog are all
+#   handled on that machine; this side records the returned metadata plus host=
+#   and returns. Arm the wake path afterwards with bin/fm-relay-check-make.sh,
+#   because a remote crewmate's status file and turn-end marker live on ITS
+#   machine and this home's signal scan cannot see them. --host is mutually
+#   exclusive with --secondmate, --backend, and --launch, and WITHOUT --host not
+#   one byte of the local path changes (bin/fm-relay-host.sh, docs/relay-host.md).
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -133,7 +145,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,86p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,98p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -175,11 +187,13 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+HOST_ARG=
 LAUNCH_VARIANT=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+HOST_SET=0
 LAUNCH_SET=0
 POS=()
 want_value=
@@ -193,6 +207,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      host) HOST_ARG=$a; HOST_SET=1 ;;
       launch) LAUNCH_VARIANT=$a; LAUNCH_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -210,6 +225,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --host) want_value=host ;;
+    --host=*) HOST_ARG=${a#--host=}; HOST_SET=1 ;;
     --launch) want_value=launch ;;
     --launch=*) LAUNCH_VARIANT=${a#--launch=}; LAUNCH_SET=1 ;;
     *) POS+=("$a") ;;
@@ -220,11 +237,63 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$HOST_SET" -eq 0 ] || [ -n "$HOST_ARG" ] || { echo "error: --host requires a non-empty value" >&2; exit 1; }
 [ "$LAUNCH_SET" -eq 0 ] || [ -n "$LAUNCH_VARIANT" ] || { echo "error: --launch requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+
+# --host dispatches the whole spawn to a REMOTE task host over the Bifrost relay
+# and returns before any local machinery runs. That ordering is the compatibility
+# contract: with no --host, not one byte of the path below changes, exactly like
+# the backend= rule further down. The remote host executes its OWN
+# bin/fm-spawn.sh, so the worktree-isolation assertion, the harness launch, and
+# the trust-dialog handling all happen locally over there rather than being
+# reimplemented across the link (bin/fm-relay-host.sh, docs/relay-host.md).
+if [ "$HOST_SET" -eq 1 ]; then
+  [ "$KIND" != secondmate ] || { echo "error: --host does not support --secondmate spawns" >&2; exit 1; }
+  [ "$BACKEND_SET" -eq 0 ] || { echo "error: --backend selects a LOCAL session provider and cannot combine with --host" >&2; exit 1; }
+  [ "$LAUNCH_SET" -eq 0 ] || { echo "error: --launch names a local launch variant and cannot combine with --host" >&2; exit 1; }
+  [ "${#POS[@]}" -ge 2 ] || { echo "error: --host needs <task-id> <project-name-on-host>" >&2; exit 1; }
+  HOST_ID=${POS[0]}
+  # Same task-id gate as the local path below, deliberately identical in check,
+  # message, and exit code. A remote task still gets a state/<id>.meta here, so a
+  # dot-leading name would write a HIDDEN record that every "$STATE"/*.meta glob
+  # skips, leaving a live remote task nothing on this side can find or steer.
+  fm_task_id_creation_valid "$HOST_ID" || { echo "error: invalid task id" >&2; exit 2; }
+  HOST_PROJECT=${POS[1]}
+  host_spawn_args=("$HOST_ARG" "$HOST_ID" "$HOST_PROJECT")
+  [ "$KIND" = scout ] && host_spawn_args+=(--scout)
+  [ -z "$HARNESS_ARG" ] || host_spawn_args+=(--harness "$HARNESS_ARG")
+  [ -z "$MODEL" ] || host_spawn_args+=(--model "$MODEL")
+  [ -z "$EFFORT" ] || host_spawn_args+=(--effort "$EFFORT")
+  host_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-relay-host.sh" spawn "${host_spawn_args[@]}") || exit 1
+  # The host answers with its own state/<id>.meta after the OK line. Recording it
+  # verbatim plus host= keeps every control-side reader pointed at the machine
+  # that actually owns the task instead of probing a local endpoint that is not
+  # there.
+  host_meta_rc=0
+  {
+    printf '%s\n' "$host_out" | sed -n '2,$p'
+    printf 'host=%s\n' "$HOST_ARG"
+  } > "$STATE/$HOST_ID.meta" || host_meta_rc=$?
+  if [ "$host_meta_rc" -ne 0 ] || ! grep -q '^worktree=' "$STATE/$HOST_ID.meta"; then
+    echo "error: the host did not return usable metadata for $HOST_ID; it may be running unsupervised" >&2
+    exit 1
+  fi
+  printf '%s\n' "$host_out" | sed -n '1p'
+  # Same durable backlog transition the local path makes below; a failure here is
+  # reported, never fatal, because the task is already live on the host.
+  if [ -f "$DATA/backlog.md" ] && command -v tasks-axi >/dev/null 2>&1; then
+    (cd "$FM_HOME" && tasks-axi start "$HOST_ID" --file "$DATA/backlog.md" >/dev/null 2>&1) \
+      || echo "warning: $HOST_ID is live on $HOST_ARG but data/backlog.md was not moved to In progress" >&2
+  fi
+  printf 'spawned on %s: %s (arm its wake path with bin/fm-relay-check-make.sh %s)\n' \
+    "$HOST_ARG" "$HOST_ID" "$HOST_ID"
+  exit 0
+fi
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else

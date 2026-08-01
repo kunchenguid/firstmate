@@ -77,6 +77,13 @@ ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
+# A relay task's run-step, pane, and status log all live on its host, so the
+# reconciliation below has nothing local to read. Ask that host to run ITS OWN
+# copy of this script and return the one line, rather than reimplementing the
+# reconciliation across the link.
+if [ -f "$META" ] && grep -q '^host=' "$META" 2>/dev/null; then
+  exec "$SCRIPT_DIR/fm-relay-host.sh" crew-state "$ID"
+fi
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
