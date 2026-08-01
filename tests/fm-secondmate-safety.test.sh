@@ -109,6 +109,20 @@ EOF
   pass "seed allows overlapping project clone lists and drops the owns/owner routing"
 }
 
+test_home_seed_validate_rejects_unparseable_registry_entry() {
+  local home err
+  home="$TMP_ROOT/unparseable-registry-home"
+  err="$TMP_ROOT/unparseable-registry.err"
+  mkdir -p "$home/data"
+  printf '%s\n' '- broken - prose (home: /tmp/child; scope: missing projects and date)' > "$home/data/secondmates.md"
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    fail "home-seed validation accepted an operationally unparseable registry record"
+  fi
+  grep -F 'malformed secondmate registry entry' "$err" >/dev/null \
+    || fail "home-seed validation did not explain the malformed registry record"
+  pass "home-seed validation rejects registry records no operational parser can consume"
+}
+
 test_home_seed_validate_rejects_duplicate_homes() {
   local home subhome subhome_abs err
   home="$TMP_ROOT/duplicate-home"
@@ -442,6 +456,33 @@ test_home_seed_no_projects_end_to_end() {
   proj_val=$(grep '^projects=' "$meta" | head -1 | cut -d= -f2-)
   [ -z "$proj_val" ] || fail "project-less spawn recorded a non-empty projects meta: '$proj_val'"
   pass "home seeding scaffolds, registers, and spawns a project-less home end to end"
+}
+
+test_secondmate_spawn_resolves_punctuated_registry_projects() {
+  local home sub sub_abs fakebin log meta projects
+  home="$TMP_ROOT/punctuated-spawn-home"
+  sub="$TMP_ROOT/punctuated-spawn-subhome"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  mkdir -p "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  mark_firstmate_home "$sub"
+  printf 'punctuated\n' > "$sub/.fm-secondmate-home"
+  printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
+  sub_abs=$(cd "$sub" && pwd -P)
+  printf -- '- punctuated - launch notes (parenthetical) (home: %s; scope: launch (child); semicolon is valid; projects: alpha, beta; added 2026-07-30)\n' \
+    "$sub_abs" > "$home/data/secondmates.md"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
+    || fail "home-seed validation rejected punctuated registry fields before spawn"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/punctuated-spawn-fake")
+  log="$TMP_ROOT/punctuated-spawn-fake/tmux.log"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/punctuated-spawn-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" punctuated "$sub" codex --secondmate >/dev/null 2>&1 \
+    || fail "secondmate spawn failed for punctuated registry fields"
+  meta="$home/state/punctuated.meta"
+  projects=$(grep '^projects=' "$meta" | cut -d= -f2-)
+  [ "$projects" = 'alpha, beta' ] \
+    || fail "secondmate spawn resolved the wrong projects field: '$projects'"
+  pass "secondmate spawn resolves home validation and projects from punctuated registry fields"
 }
 
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home() {
@@ -2167,6 +2208,7 @@ EOF
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
+test_home_seed_validate_rejects_unparseable_registry_entry
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
@@ -2179,6 +2221,7 @@ test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
+test_secondmate_spawn_resolves_punctuated_registry_projects
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home
 test_home_seed_refuses_projectless_conversion_of_populated_home
 test_home_seed_refuses_projectless_home_with_uninspectable_projects

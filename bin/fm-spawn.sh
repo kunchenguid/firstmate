@@ -566,18 +566,7 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
 fi
 
 secondmate_registry_value() {
-  local id=$1 key=$2 reg line value
-  reg="$DATA/secondmates.md"
-  [ -f "$reg" ] || return 1
-  line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
-  [ -n "$line" ] || return 1
-  case "$key" in
-    home) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p') ;;
-    projects) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: [^;)]*; scope: [^;)]*; projects: \([^;)]*\); added .*/\1/p') ;;
-    *) return 1 ;;
-  esac
-  [ -n "$value" ] || return 1
-  printf '%s\n' "$value"
+  secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
 
 shell_quote() {

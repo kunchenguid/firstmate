@@ -108,6 +108,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -173,7 +175,8 @@ public_followup_resolve_primary_home() {
   line_count=$(printf '%s\n' "$lines" | grep -c . || true)
   [ "$line_count" -eq 1 ] || return 1
   line=$(printf '%s\n' "$lines")
-  registry_home=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p')
+  secondmate_registry_parse_line "$line" || return 1
+  registry_home=$SECONDMATE_REGISTRY_HOME
   registry_home=$(CDPATH='' cd -- "$registry_home" 2>/dev/null && pwd -P) || return 1
   [ "$registry_home" = "$child" ] || return 1
   printf '%s\n' "$parent"
@@ -535,10 +538,6 @@ backlog_refresh_reminder() {
   fi
 }
 
-registry_home_for_line() {
-  sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
-}
-
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
@@ -897,10 +896,12 @@ registered_descendant_home_for_removal() {
   while IFS= read -r line; do
     case "$line" in
       "- "*)
-        id=${line#- }
-        id=${id%% *}
-        registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
-        [ -n "$registered_home" ] || continue
+        secondmate_registry_parse_line "$line" || {
+          echo "REFUSED: malformed secondmate registry entry: $line" >&2
+          return 2
+        }
+        id=$SECONDMATE_REGISTRY_ID
+        registered_home=$SECONDMATE_REGISTRY_HOME
         registered_abs=$(removal_target_abs_path "$registered_home" 2>/dev/null || true)
         [ -n "$registered_abs" ] || continue
         [ "$registered_abs" = "$target" ] && continue
@@ -991,9 +992,20 @@ validate_firstmate_home_for_removal() {
     fi
   fi
   validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
-  conflict=$(registered_descendant_home_for_removal "$SECONDMATE_REG" "$abs_home_path" || true)
+  conflict=
+  if conflict=$(registered_descendant_home_for_removal "$SECONDMATE_REG" "$abs_home_path"); then
+    :
+  else
+    conflict_rc=$?
+    [ "$conflict_rc" -eq 1 ] || return 1
+  fi
   if [ -z "$conflict" ]; then
-    conflict=$(registered_descendant_home_for_removal "$abs_home_path/data/secondmates.md" "$abs_home_path" || true)
+    if conflict=$(registered_descendant_home_for_removal "$abs_home_path/data/secondmates.md" "$abs_home_path"); then
+      :
+    else
+      conflict_rc=$?
+      [ "$conflict_rc" -eq 1 ] || return 1
+    fi
   fi
   if [ -n "$conflict" ]; then
     IFS=$'\t' read -r child_id child_home <<EOF

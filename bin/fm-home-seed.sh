@@ -38,14 +38,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
   echo "       fm-home-seed.sh validate" >&2
-}
-
-registry_home_for_line() {
-  sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
 }
 
 normalize_registry_text() {
@@ -182,10 +180,12 @@ registry_home_conflict_for_assignment() {
   while IFS= read -r line; do
     case "$line" in
       "- "*)
-        registered_id=${line#- }
-        registered_id=${registered_id%% *}
-        registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
-        [ -n "$registered_home" ] || continue
+        if ! secondmate_registry_parse_line "$line"; then
+          echo "error: malformed secondmate registry entry: $line" >&2
+          return 1
+        fi
+        registered_id=$SECONDMATE_REGISTRY_ID
+        registered_home=$SECONDMATE_REGISTRY_HOME
         registered_key=$(resolved_path "$registered_home")
         if [ "$registered_key" = "$target" ]; then
           [ "$registered_id" = "$id" ] && continue
@@ -209,11 +209,13 @@ registry_id_conflict_for_assignment() {
   while IFS= read -r line; do
     case "$line" in
       "- "*)
-        registered_id=${line#- }
-        registered_id=${registered_id%% *}
+        secondmate_registry_parse_line "$line" || {
+          echo "error: malformed secondmate registry entry: $line" >&2
+          return 1
+        }
+        registered_id=$SECONDMATE_REGISTRY_ID
         [ "$registered_id" = "$id" ] || continue
-        registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
-        [ -n "$registered_home" ] || continue
+        registered_home=$SECONDMATE_REGISTRY_HOME
         registered_key=$(resolved_path "$registered_home")
         [ "$registered_key" = "$target" ] && continue
         printf '%s\n' "$registered_key"
@@ -231,11 +233,13 @@ validate_registry() {
     while IFS= read -r line; do
       case "$line" in
         "- "*)
-          id=${line#- }
-          id=${id%% *}
-          registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
-          [ -n "$registered_home" ] || continue
-          home_key=$(resolved_path "$registered_home")
+          if ! secondmate_registry_parse_line "$line"; then
+            rm -f "$tmp"
+            printf 'error: malformed secondmate registry entry:\n%s\n' "$line" >&2
+            return 1
+          fi
+          id=$SECONDMATE_REGISTRY_ID
+          home_key=$(resolved_path "$SECONDMATE_REGISTRY_HOME")
           printf '%s\t%s\n' "$home_key" "$id" >> "$tmp"
           ;;
       esac
