@@ -1,6 +1,6 @@
 ---
 name: bearings
-description: Use when the captain invokes /bearings or asks for a fleet status, catch-up, morning brief, or "where did I leave off" report.
+description: Use when the captain invokes /bearings or asks for a bearings report, status report, morning brief, catch-up, "where did I leave off", or "what's in the works".
 user-invocable: true
 metadata:
   internal: true

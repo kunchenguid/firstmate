@@ -122,21 +122,19 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 
+# Credential material is exactly what the GitHub CLI itself reads: GH_TOKEN,
+# GITHUB_TOKEN, and hosts.yml under GH_CONFIG_DIR, then $XDG_CONFIG_HOME/gh,
+# then ~/.config/gh. Anything the CLI would not read is not evidence of auth,
+# because every downstream gh and gh-axi call in this repo sees only what gh
+# sees; treating a wider credential set as sufficient would silence a real
+# auth gap here and fail later at PR and merge time instead.
 gh_auth_config_present() {
-  [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ] \
-    || [ -s "${HOME:-}/.config/gh/hosts.yml" ]
-}
-
-gh_auth_status_ok() {
-  gh auth status >/dev/null 2>&1 && return 0
-  if [ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]; then
-    GH_TOKEN=$GITHUB_PERSONAL_ACCESS_TOKEN gh auth status >/dev/null 2>&1 && return 0
-  fi
-  return 1
+  [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ] \
+    || [ -s "${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/gh}/hosts.yml" ]
 }
 
 gh_auth_diagnostic() {
-  gh_auth_status_ok && return 0
+  gh auth status >/dev/null 2>&1 && return 0
   if gh_auth_config_present && [ "${CODEX_SANDBOX:-}" = seatbelt ]; then
     echo "GH_AUTH_UNVERIFIED: Codex sandbox could not validate existing GitHub credential material; rerun the auth check outside the Codex sandbox or expose a valid GH_TOKEN/GITHUB_TOKEN to this session"
   else

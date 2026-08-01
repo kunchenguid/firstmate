@@ -300,6 +300,72 @@ SH
   pass "Codex identity: thread marker covers ps-denied seatbelt without accepting invalid markers"
 }
 
+test_codex_thread_lock_is_reclaimable_by_other_sessions() {
+  local dir uuid other home out status denied_ps claude_ps
+  dir="$TMP_ROOT/codex-thread-stale"
+  uuid=019fbddb-b27d-7b23-86d2-7dc3bbaba31f
+  other=019fbddb-b27d-7b23-86d2-7dc3bbaba320
+  home="$dir/home"
+  mkdir -p "$home/state"
+
+  denied_ps=$(fm_fakebin "$dir/denied")
+  cat > "$denied_ps/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '/bin/ps: Operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$denied_ps/ps"
+
+  claude_ps=$(fm_fakebin "$dir/claude")
+  cat > "$claude_ps/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '%s\n' '/opt/test/bin/claude' ;;
+  4242:args=) printf '%s\n' 'claude' ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' '/bin/zsh' ;;
+  *:args=) printf '%s\n' 'zsh' ;;
+  *:ppid=) printf '%s\n' 4242 ;;
+esac
+SH
+  chmod +x "$claude_ps/ps"
+
+  printf 'codex-thread:%s\n' "$uuid" > "$home/state/.lock"
+  out=$(env -u CODEX_CI -u CODEX_THREAD_ID PATH="$claude_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: stale" \
+    "a foreign session must read a leftover Codex thread lock as stale"
+
+  out=$(env -u CODEX_CI -u CODEX_THREAD_ID PATH="$claude_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a leftover Codex thread lock must not wedge another harness: $out"
+  [ "$(cat "$home/state/.lock")" = 4242 ] \
+    || fail "reclaim left the Codex thread lock in place: $(cat "$home/state/.lock")"
+
+  printf 'codex-thread:%s\n' "$uuid" > "$home/state/.lock"
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$other" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a later Codex thread must reclaim the prior thread's lock: $out"
+  [ "$(cat "$home/state/.lock")" = "codex-thread:$other" ] \
+    || fail "later Codex session did not take the lock: $(cat "$home/state/.lock")"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$other" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness identity codex-thread:$other" \
+    "the owning Codex thread must still read its own lock as live"
+
+  pass "Codex identity: a leftover codex-thread lock is stale to every other session"
+}
+
 test_codex_thread_fallback_does_not_outrank_process_ancestry() {
   local dir fakebin uuid out harness
   dir="$TMP_ROOT/codex-thread-precedence"
@@ -2416,6 +2482,7 @@ test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_codex_thread_identity_fallback_after_ps_denial
+test_codex_thread_lock_is_reclaimable_by_other_sessions
 test_codex_thread_fallback_does_not_outrank_process_ancestry
 test_propagate_lib
 test_spawn_split_and_inherit

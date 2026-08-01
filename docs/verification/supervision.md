@@ -11,14 +11,22 @@ Task-specific chronology, temporary paths, run identifiers, and delivery transcr
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.
 
 Codex 0.146.0 was rechecked on 2026-08-01 with a throwaway `FM_HOME`, throwaway `HOME`, and throwaway `CODEX_HOME`.
-`codex -C "$PWD" sandbox bin/fm-session-start.sh` faithfully reproduced the supported Codex seatbelt shape: process inspection failed with `bash: line 1: /bin/ps: Operation not permitted`, while tool commands exposed `CODEX_CI=1`, `CODEX_SANDBOX=seatbelt`, and a UUID-shaped `CODEX_THREAD_ID`.
-Before the fix, that path printed `error: cannot locate harness process in ancestry`, reported primary harness `unknown`, and stayed read-only.
-The standalone `codex sandbox` command was read-only for throwaway roots in this environment, so writable lock acquisition was verified with the same denied-`ps` behavior and Codex markers in the executable session-start counterfactual plus the deterministic tests below.
-The session-lock owner now falls back to `codex-thread:<CODEX_THREAD_ID>` only after process ancestry fails, so markerless child process harnesses still win whenever `ps` is available.
+Two separate probes ran, and neither one covers what the other observed.
 
-The same probe separated the GitHub diagnostic from the lock bug.
-Outside the Codex sandbox, an authenticated account succeeded through `gh auth status`.
-Inside the Codex seatbelt, existing GitHub CLI credential material could be present but not validated, so bootstrap now reports `GH_AUTH_UNVERIFIED` instead of requesting a fresh login; a throwaway home with no token and no `hosts.yml` still reports `NEEDS_GH_AUTH`.
+`CODEX_HOME=<throwaway> codex sandbox -- /bin/sh -c '/bin/ps -o comm= -p $$'` reproduced the seatbelt process-inspection denial exactly: `/bin/sh: /bin/ps: Operation not permitted`.
+Against that denied-`ps` shape, `bin/fm-lock.sh` printed `error: cannot locate harness process in ancestry` before the fix, so `bin/fm-session-start.sh` reported primary harness `unknown` and stayed read-only.
+
+`CODEX_HOME=<throwaway> codex sandbox -- /usr/bin/env` exported only `CODEX_SANDBOX=seatbelt` and `CODEX_SANDBOX_NETWORK_DISABLED=1`.
+The standalone `codex sandbox` subcommand runs no thread, so it exports neither `CODEX_CI` nor `CODEX_THREAD_ID` and cannot exercise the marker gate in `fm_codex_thread_identity()`.
+Recapturing a fresh interactive Codex 0.146.0 session's exported tool-command environment was out of reach from this worktree, so the `CODEX_CI=1` plus UUID-shaped `CODEX_THREAD_ID` gate rests on the captain's original transcript and on the deterministic coverage below, not on a re-run live capture.
+That gate is the only condition under which the fallback fires; if a supported interactive session turns out not to export `CODEX_CI`, the fallback stays inert and the read-only symptom returns rather than misfiring.
+The session-lock owner falls back to `codex-thread:<CODEX_THREAD_ID>` only after process ancestry fails, so markerless child process harnesses still win whenever `ps` is available.
+A `codex-thread:` owner is live only for the session that still resolves to that same thread, so a leftover Codex lock is stale to every other session and is reclaimed through the unchanged `bin/fm-lock.sh` path.
+
+The GitHub diagnostic was separated from the lock bug outside the sandbox.
+With the captain's normal environment, an authenticated account succeeded through `gh auth status` while `gh help environment` documents `GH_TOKEN`, `GITHUB_TOKEN`, and the `GH_CONFIG_DIR`, `$XDG_CONFIG_HOME/gh`, `~/.config/gh` config-directory order as the only credential material the CLI reads.
+Bootstrap now checks exactly that set, so its verdict cannot disagree with the `gh` and `gh-axi` calls in `bin/fm-pr-check.sh`, `bin/fm-pr-merge.sh`, `bin/fm-teardown.sh`, and `bin/fm-bearings-snapshot.sh`.
+Inside the Codex seatbelt that material can be present but unvalidatable, so bootstrap reports `GH_AUTH_UNVERIFIED` instead of requesting a fresh login; a throwaway home with no token and no `hosts.yml` still reports `NEEDS_GH_AUTH`.
 
 Skill-budget reproduction was bounded to repository-controlled inputs.
 `codex -C "$PWD" debug prompt-input` with a throwaway `CODEX_HOME` and no user plugins showed no 2% warning for Firstmate project skills alone, so the observed Ponytail-enabled user path is an independent budget contributor rather than a proven sole cause.

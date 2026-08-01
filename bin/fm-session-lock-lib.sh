@@ -168,13 +168,19 @@ EOF
   return 1
 }
 
-# True if $1 is a live process, or a fail-closed non-process session identity,
-# that looks like a verified harness.
+# True if $1 is a live process, or a non-process session identity that the
+# calling environment still resolves to, and that looks like a verified harness.
+# A codex-thread identity has no observable process to probe, so the only
+# evidence that it is still live is the caller resolving to that same thread.
+# Every other session therefore sees a leftover codex-thread owner as stale and
+# reclaims it through the unchanged bin/fm-lock.sh path, instead of the first
+# Codex session poisoning the home's lock forever.
 fm_harness_pid_alive() {
   local pid=$1 comm args
   case "$pid" in
     "$FM_CODEX_THREAD_LOCK_PREFIX"*)
-      fm_codex_thread_lock_valid "$pid"
+      fm_codex_thread_lock_valid "$pid" \
+        && [ "$(fm_codex_thread_identity 2>/dev/null)" = "$pid" ]
       return
       ;;
   esac
