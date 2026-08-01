@@ -23,9 +23,14 @@
 # Herdr session/workspace/tab/pane, and chooses one of two paths:
 #   - a live registered Pi with a Pi foreground process is attached, never
 #     relaunched;
-#   - an exact restored shell with no agent may resume only after two stable
-#     reads, a dead/absent old lease, strict session-file validation, and an
-#     atomic lease handoff inside that pane.
+#   - an exact restored shell with no agent may resume only after two matching
+#     idle-shell observations, a dead/absent old lease, strict session-file
+#     validation, and an atomic lease handoff inside that pane.
+# The idle-shell proof itself is never re-derived here:
+# bin/backends/herdr.sh's fm_backend_herdr_pane_idle_shell_pid is its single
+# owner, including the bounded settle retry that tolerates an idle shell's
+# transient prompt helpers. This file only requires that two such proofs,
+# separated by exact pane and agent revalidation, report the same shell pid.
 # Every other live, unknown, contradictory, raced, or malformed shape refuses.
 # Labels, focus, ambient HERDR_SESSION, partial Pi IDs, -c, -r, --session-id,
 # and unchecked paths are never recovery authority.
@@ -55,8 +60,19 @@
 # that directory for Pi's whole lifetime. Clean exit removes only a token-matched
 # lease. A stale recorded lease can be replaced only by the internal resume
 # action after recover proves the exact pane is a stable restored shell. A stale
-# pre-attestation lease with no custody can be replaced by `launch` only after
-# two reads prove its exact injected pane is an agent-free bare shell.
+# pre-attestation lease with no custody record is never reclaimed automatically:
+# `launch` runs inside the very pane it would have to prove agent-free, so no
+# in-pane proof can be honest. That lease is preserved untouched as evidence and
+# the documented narrow manual fallback applies (docs/herdr-backend.md): confirm
+# through `status` that the recorded pane holds no Pi, remove
+# state/primary-pi/lease by hand, then `launch` again.
+#
+# .lease-steal and .recovery-steal serialize the two handoffs that cannot be a
+# single atomic primitive. Both are mkdir-created directories carrying the same
+# pid/start owner record as recovery.lock, so a wrapper killed mid-handoff leaves
+# a reclaimable guard rather than a permanent brick. They only avoid mutual
+# clobbering; the real arbiters stay atomic (mkdir for recovery.lock, the
+# old-token match for the lease), so a raced reclaim still converges on one owner.
 #
 # recovery.lock is the mkdir-created single-flight directory that keeps two
 # wrappers from deciding custody at once. Its owner record holds pid and start,
@@ -76,18 +92,29 @@
 # signals only the exact token/PID/start-bound wrapper.
 #
 # Strict JSONL validation requires: canonical existing regular non-symlink file,
-# canonical session directory and cwd, every nonblank physical line valid JSON,
-# supported session header with exact full id/cwd, and exactly one file with that
-# id in the session directory. Missing files are `pending` only for a brand-new
-# ordinary launch; recovery always refuses them.
+# canonical session directory and cwd, every nonblank physical line independently
+# valid JSON on that one physical line, supported session header with exact full
+# id/cwd, and exactly one file with that id in the session directory. A record
+# split across physical lines and two records concatenated onto one physical line
+# both refuse, because Pi's own reader is line-oriented. Missing files are
+# `pending` only for a brand-new ordinary launch; recovery always refuses them.
 #
 # Availability is bounded by FM_PRIMARY_SERVER_ATTEMPTS (default 6),
 # FM_PRIMARY_SERVER_DELAY (default 0.25s), FM_PRIMARY_ATTEST_ATTEMPTS (default
-# 40), and FM_PRIMARY_ATTEST_DELAY (default 0.10s). `recover` may start only the
-# recorded named server after the initial wait; --no-server-start disables that.
+# 600), and FM_PRIMARY_ATTEST_DELAY (default 0.10s). The 60 s post-launch
+# attestation default is sized for a real cold Pi start (node boot plus the three
+# tracked TypeScript extensions), not for the test stub. It is also the maximum
+# time a wedged `recover` holds recovery.lock against every other `recover`,
+# which is why it stays bounded rather than open-ended. `recover` may start only
+# the recorded named server after the initial wait; --no-server-start disables
+# that.
 #
-# Test-only transport overrides: FM_PRIMARY_HERDR_BIN and the timing variables.
-# They do not weaken identity, file, lease, or attestation checks.
+# Test-only overrides: FM_PRIMARY_HERDR_BIN, the timing variables, and
+# FM_PRIMARY_NO_ATTACH=1, which mirrors the `--no-attach` flag by printing the
+# resolved primary identity instead of exec-attaching. The delegated idle-shell
+# proof additionally honors its owner's FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS
+# and FM_HERDR_PS_BIN. None of them weaken identity, file, lease, or attestation
+# checks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,12 +125,14 @@ PRIVATE_DIR="$STATE/primary-pi"
 CUSTODY="$PRIVATE_DIR/custody.v1"
 LEASE="$PRIVATE_DIR/lease"
 LEASE_STEAL="$PRIVATE_DIR/.lease-steal"
+RECOVERY_STEAL="$PRIVATE_DIR/.recovery-steal"
 RECOVERY_LOCK="$PRIVATE_DIR/recovery.lock"
 ATTESTATION="$PRIVATE_DIR/attestation.v1"
+HERDR_BACKEND="$SCRIPT_DIR/backends/herdr.sh"
 HERDR_BIN="${FM_PRIMARY_HERDR_BIN:-herdr}"
 SERVER_ATTEMPTS="${FM_PRIMARY_SERVER_ATTEMPTS:-6}"
 SERVER_DELAY="${FM_PRIMARY_SERVER_DELAY:-0.25}"
-ATTEST_ATTEMPTS="${FM_PRIMARY_ATTEST_ATTEMPTS:-40}"
+ATTEST_ATTEMPTS="${FM_PRIMARY_ATTEST_ATTEMPTS:-600}"
 ATTEST_DELAY="${FM_PRIMARY_ATTEST_DELAY:-0.10}"
 
 # shellcheck disable=SC1091
@@ -114,7 +143,7 @@ usage() {
     NR == 1 { next }
     /^#/ { sub(/^# ?/, ""); print; next }
     { exit }
-  ' "$0"
+  ' "${BASH_SOURCE[0]}"
 }
 
 fail() {
@@ -401,7 +430,9 @@ process_json() {
 }
 
 process_is_pi() {
-  printf '%s' "$1" | jq -e '
+  printf '%s' "$1" | jq -e --arg pane "$2" '
+    .result.type == "pane_process_info" and
+    .result.process_info.pane_id == $pane and
     (.result.process_info.foreground_processes | type) == "array" and
     (.result.process_info.foreground_processes | length) >= 1 and
     ([.result.process_info.foreground_processes[] |
@@ -410,16 +441,20 @@ process_is_pi() {
   ' >/dev/null 2>&1
 }
 
-process_is_bare_shell() {
-  printf '%s' "$1" | jq -e '
-    .result.process_info as $p |
-    ($p.shell_pid | type) == "number" and
-    ($p.foreground_processes | type) == "array" and
-    ($p.foreground_processes | length) == 1 and
-    ($p.foreground_processes[0].pid == $p.shell_pid) and
-    (($p.foreground_processes[0].argv0 // $p.foreground_processes[0].name // "") |
-      sub("^-"; "") | test("^(ba|da|fi|k|mk|pdk|tc|z)?sh$|^fish$"))
-  ' >/dev/null 2>&1
+# bin/backends/herdr.sh owns the idle-shell proof, including the settle retry
+# that tolerates an idle interactive shell's transient prompt helpers. Source it
+# in a subshell so its own globals and libraries never leak into this state
+# machine, and re-point only its transport at this script's herdr binary so
+# FM_PRIMARY_HERDR_BIN keeps working without touching the proof itself.
+pane_idle_shell_pid() {
+  [ -r "$HERDR_BACKEND" ] || return 1
+  (
+    # shellcheck disable=SC1090
+    . "$HERDR_BACKEND" >/dev/null 2>&1 || exit 1
+    # shellcheck disable=SC2329 # invoked indirectly by the idle-shell proof.
+    fm_backend_herdr_cli() { HERDR_SESSION="$1" "$HERDR_BIN" "${@:2}" --session "$1"; }
+    fm_backend_herdr_pane_idle_shell_pid "$1" "$2"
+  )
 }
 
 strict_session() {
@@ -431,7 +466,9 @@ strict_session() {
   [ "$session_dir" = "$canonical_session_dir" ] || return 1
   [ "$cwd" = "$canonical_cwd" ] || return 1
   [ "${canonical_file%/*}" = "$canonical_session_dir" ] || return 1
-  jq -e . "$canonical_file" >/dev/null 2>&1 || return 1
+  jq -R '
+    select((sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "")) != "") | fromjson
+  ' "$canonical_file" >/dev/null 2>&1 || return 1
   first=$(awk 'NF { print; exit }' "$canonical_file")
   [ -n "$first" ] || return 1
   header_id=$(printf '%s' "$first" | jq -r 'select(.type == "session") | .id // empty' 2>/dev/null)
@@ -493,6 +530,30 @@ current_env_identity() {
     || die "injected Herdr pane identity is absent or contradictory"
 }
 
+acquire_steal_guard() {
+  local dir=$1 start owner_pid owner_start canonical
+  start=$(process_start "$$")
+  [ -n "$start" ] || return 1
+  if ! mkdir "$dir" 2>/dev/null; then
+    canonical=$(canonical_dir "$dir") || return 1
+    [ "$canonical" = "$dir" ] || return 1
+    owner_pid=$(record_field "$dir/owner" pid) || return 1
+    owner_start=$(record_field "$dir/owner" start) || return 1
+    pid_matches "$owner_pid" "$owner_start" && return 1
+    rm -rf "$dir" || return 1
+    mkdir "$dir" 2>/dev/null || return 1
+  fi
+  chmod 700 "$dir" || { rm -rf "$dir"; return 1; }
+  write_record "$dir/owner" pid "$$" start "$start" || { rm -rf "$dir"; return 1; }
+}
+
+release_steal_guard() {
+  local dir=$1 pid start
+  pid=$(record_field "$dir/owner" pid 2>/dev/null || true)
+  start=$(record_field "$dir/owner" start 2>/dev/null || true)
+  [ "$pid" = "$$" ] && [ "$start" = "$(process_start "$$")" ] && rm -rf "$dir"
+}
+
 acquire_recovery_lock() {
   local start stale_pid stale_start canonical
   ensure_private_dir || return 1
@@ -507,13 +568,13 @@ acquire_recovery_lock() {
   stale_pid=$(record_field "$RECOVERY_LOCK/owner" pid) || return 1
   stale_start=$(record_field "$RECOVERY_LOCK/owner" start) || return 1
   pid_matches "$stale_pid" "$stale_start" && return 1
-  if ! mkdir "$PRIVATE_DIR/.recovery-steal" 2>/dev/null; then return 1; fi
+  acquire_steal_guard "$RECOVERY_STEAL" || return 1
   stale_pid=$(record_field "$RECOVERY_LOCK/owner" pid 2>/dev/null || true)
   stale_start=$(record_field "$RECOVERY_LOCK/owner" start 2>/dev/null || true)
   if [ -n "$stale_pid" ] && ! pid_matches "$stale_pid" "$stale_start"; then
     rm -rf "$RECOVERY_LOCK"
   fi
-  rm -rf "$PRIVATE_DIR/.recovery-steal"
+  release_steal_guard "$RECOVERY_STEAL"
   mkdir "$RECOVERY_LOCK" 2>/dev/null || return 1
   write_record "$RECOVERY_LOCK/owner" pid "$$" start "$start" || { rm -rf "$RECOVERY_LOCK"; return 1; }
 }
@@ -532,22 +593,22 @@ lease_is_live() {
 
 replace_stale_lease() {
   local old_token=$1 new=$2 start old=''
-  if mkdir "$LEASE_STEAL" 2>/dev/null; then :; else return 1; fi
+  acquire_steal_guard "$LEASE_STEAL" || return 1
   if [ -e "$LEASE" ] || [ -L "$LEASE" ]; then
-    load_lease || { rmdir "$LEASE_STEAL"; return 1; }
+    load_lease || { release_steal_guard "$LEASE_STEAL"; return 1; }
     old=$LEASE_TOKEN
-    [ "$old" = "$old_token" ] || { rmdir "$LEASE_STEAL"; return 1; }
-    pid_matches "$LEASE_PID" "$LEASE_START" && { rmdir "$LEASE_STEAL"; return 1; }
-    rm -rf "$LEASE" || { rmdir "$LEASE_STEAL"; return 1; }
+    [ "$old" = "$old_token" ] || { release_steal_guard "$LEASE_STEAL"; return 1; }
+    pid_matches "$LEASE_PID" "$LEASE_START" && { release_steal_guard "$LEASE_STEAL"; return 1; }
+    rm -rf "$LEASE" || { release_steal_guard "$LEASE_STEAL"; return 1; }
   else
-    [ "$old_token" = absent ] || { rmdir "$LEASE_STEAL"; return 1; }
+    [ "$old_token" = absent ] || { release_steal_guard "$LEASE_STEAL"; return 1; }
   fi
   start=$(process_start "$$")
   if ! write_lease "$new" "$$" "$start"; then
-    rmdir "$LEASE_STEAL"
+    release_steal_guard "$LEASE_STEAL"
     return 1
   fi
-  rmdir "$LEASE_STEAL"
+  release_steal_guard "$LEASE_STEAL"
 }
 
 validate_launch_args() {
@@ -597,7 +658,7 @@ run_pi_owner() {
 }
 
 command_launch() {
-  local harness=${FM_PI_HARNESS:-pi} token start stale_token='' shape proc shape2 proc2
+  local harness=${FM_PI_HARNESS:-pi} token start
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --pi) shift; harness=${1:-}; shift ;;
@@ -618,31 +679,13 @@ command_launch() {
     if [ -e "$CUSTODY" ] || [ -L "$CUSTODY" ]; then
       die "a stale custody lease with recorded identity requires recover; launch will not reclaim it"
     fi
-    stale_token=$LEASE_TOKEN
+    die "a stale pre-attestation lease has no custody record and launch runs inside the pane it would have to prove agent-free; the lease is preserved as evidence and manual recovery is required (docs/herdr-backend.md)"
   elif [ -e "$CUSTODY" ] || [ -L "$CUSTODY" ]; then
     die "existing primary custody requires recover; launch will not create a second authority"
   fi
   token=$(new_token)
   start=$(process_start "$$")
-  if [ -n "$stale_token" ]; then
-    shape=$(agent_shape "$HERDR_SESSION" "$HERDR_PANE_ID")
-    proc=$(process_json "$HERDR_SESSION" "$HERDR_PANE_ID") || die "stale pre-attestation launch pane process state is unreadable"
-    if [ "$shape" = pi ]; then
-      process_is_pi "$proc" || die "stale pre-attestation lease has contradictory registered-Pi process state"
-      die "stale pre-attestation lease still has a live Pi; manual attach is required"
-    fi
-    [ "$shape" = none ] || die "stale pre-attestation lease has unknown agent state; refusing duplicate launch"
-    process_is_bare_shell "$proc" || die "stale pre-attestation lease does not resolve to a proven bare shell"
-    sleep "$SERVER_DELAY"
-    shape2=$(agent_shape "$HERDR_SESSION" "$HERDR_PANE_ID")
-    proc2=$(process_json "$HERDR_SESSION" "$HERDR_PANE_ID") || die "stale pre-attestation pane changed unreadably during revalidation"
-    if [ "$shape2" != none ] || ! process_is_bare_shell "$proc2"; then
-      die "stale pre-attestation pane stopped being a stable agent-free bare shell"
-    fi
-    replace_stale_lease "$stale_token" "$token" || die "could not atomically replace the stale pre-attestation lease"
-  else
-    write_lease "$token" "$$" "$start" || die "could not acquire the primary custody lease"
-  fi
+  write_lease "$token" "$$" "$start" || die "could not acquire the primary custody lease"
   release_recovery_lock
   trap - EXIT
   run_pi_owner "$token" "$harness" 0 '' '' '' '' "$@"
@@ -786,7 +829,7 @@ cleanup_new_token() {
 }
 
 command_recover() {
-  local no_attach=0 start_server=1 home shape proc shape2 proc2 from token cmd result i=0 pane_after agent_after
+  local no_attach=0 start_server=1 home shape proc shape2 shell_pid shell_pid2 from token cmd result i=0 pane_after agent_after
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --no-attach) no_attach=1 ;;
@@ -805,15 +848,16 @@ command_recover() {
   pane_json_exact "$C_HERDR_SESSION" "$C_HERDR_PANE" "$C_HERDR_WORKSPACE" "$C_HERDR_TAB" >/dev/null \
     || die "recorded Herdr pane identity is absent or contradictory"
   shape=$(agent_shape "$C_HERDR_SESSION" "$C_HERDR_PANE")
-  proc=$(process_json "$C_HERDR_SESSION" "$C_HERDR_PANE") || die "recorded pane process state is unreadable"
   if [ "$shape" = pi ]; then
-    process_is_pi "$proc" || die "registered Pi has contradictory foreground process identity"
+    proc=$(process_json "$C_HERDR_SESSION" "$C_HERDR_PANE") || die "recorded pane process state is unreadable"
+    process_is_pi "$proc" "$C_HERDR_PANE" || die "registered Pi has contradictory foreground process identity"
     attach_exact "$no_attach"
     trap - EXIT
     return 0
   fi
   [ "$shape" = none ] || die "recorded primary agent state is unknown; refusing duplicate launch"
-  process_is_bare_shell "$proc" || die "agent-free pane is not a proven bare restored shell"
+  shell_pid=$(pane_idle_shell_pid "$C_HERDR_SESSION" "$C_HERDR_PANE") \
+    || die "agent-free pane is not a proven bare restored shell"
   if [ -e "$LEASE" ] || [ -L "$LEASE" ]; then
     load_lease || die "custody lease is malformed; refusing duplicate launch"
     pid_matches "$LEASE_PID" "$LEASE_START" && die "custody lease owner is still live; refusing duplicate launch"
@@ -825,17 +869,17 @@ command_recover() {
   pane_json_exact "$C_HERDR_SESSION" "$C_HERDR_PANE" "$C_HERDR_WORKSPACE" "$C_HERDR_TAB" >/dev/null \
     || die "recorded pane changed during recovery revalidation"
   shape2=$(agent_shape "$C_HERDR_SESSION" "$C_HERDR_PANE")
-  proc2=$(process_json "$C_HERDR_SESSION" "$C_HERDR_PANE") || die "pane process state changed unreadably during recovery"
-  if [ "$shape2" != none ] || ! process_is_bare_shell "$proc2"; then
-    die "pane stopped being a stable agent-free restored shell"
-  fi
+  [ "$shape2" = none ] || die "pane stopped being a stable agent-free restored shell"
+  shell_pid2=$(pane_idle_shell_pid "$C_HERDR_SESSION" "$C_HERDR_PANE") \
+    || die "pane stopped being a stable agent-free restored shell"
+  [ "$shell_pid2" = "$shell_pid" ] || die "pane stopped being a stable agent-free restored shell"
   strict_session "$C_SESSION_FILE" "$C_SESSION_DIR" "$C_SESSION_ID" "$C_CWD" \
     || die "recorded Pi session failed strict integrity or uniqueness validation"
   token=$(new_token)
   cmd="exec env FM_HOME=$(shell_quote "$FM_HOME") FM_ROOT_OVERRIDE=$(shell_quote "$FM_ROOT") "
   cmd="$cmd HERDR_ENV=1 HERDR_SESSION=$(shell_quote "$C_HERDR_SESSION") HERDR_SOCKET_PATH=$(shell_quote "$C_HERDR_SOCKET")"
   cmd="$cmd HERDR_WORKSPACE_ID=$(shell_quote "$C_HERDR_WORKSPACE") HERDR_TAB_ID=$(shell_quote "$C_HERDR_TAB") HERDR_PANE_ID=$(shell_quote "$C_HERDR_PANE")"
-  cmd="$cmd $(shell_quote "$0") resume --from-token $(shell_quote "$from") --token $(shell_quote "$token") --pi $(shell_quote "$C_PI_HARNESS")"
+  cmd="$cmd $(shell_quote "$SCRIPT_DIR/fm-primary-pi.sh") resume --from-token $(shell_quote "$from") --token $(shell_quote "$token") --pi $(shell_quote "$C_PI_HARNESS")"
   cmd="$cmd --expected-id $(shell_quote "$C_SESSION_ID") --session-file $(shell_quote "$C_SESSION_FILE") --session-dir $(shell_quote "$C_SESSION_DIR") --cwd $(shell_quote "$C_CWD")"
   herdr_cli "$C_HERDR_SESSION" pane run "$C_HERDR_PANE" "$cmd" >/dev/null 2>&1 \
     || die "could not launch the token-bound exact-session wrapper in the restored pane"

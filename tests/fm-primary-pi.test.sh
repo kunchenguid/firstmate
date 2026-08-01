@@ -57,11 +57,11 @@ case "$1 ${2:-}" in
     ;;
   'pane process-info')
     if [ "$(cat "$TEST_MODE_FILE")" = pi ]; then
-      printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":20,"argv0":"pi","name":"pi"}]}}}\n'
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":10,"foreground_process_group_id":20,"foreground_processes":[{"pid":20,"argv0":"pi","name":"pi"}]}}}\n' "$TEST_PANE"
     elif [ "$(cat "$TEST_MODE_FILE")" = contradictory ]; then
-      printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":30,"argv0":"node","name":"node"}]}}}\n'
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":10,"foreground_process_group_id":30,"foreground_processes":[{"pid":30,"argv0":"node","name":"node"}]}}}\n' "$TEST_PANE"
     else
-      printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"argv0":"zsh","name":"zsh"}]}}}\n'
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":10,"foreground_process_group_id":10,"foreground_processes":[{"pid":10,"argv0":"-zsh","name":"zsh"}]}}}\n' "$TEST_PANE"
     fi
     ;;
   'pane run')
@@ -97,7 +97,24 @@ while :; do sleep 1; done
 SH
 chmod +x "$FAKEBIN/pi"
 
+# Recovery delegates its bare-shell decision to bin/backends/herdr.sh's single
+# authoritative idle-shell proof, which cross-checks the reported shell against
+# the real process table. Give that owner a fake table matching the fake pane so
+# the suite exercises the delegation rather than this machine's pid 10.
+FAKE_PS="$T/fake-ps"
+cat > "$FAKE_PS" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-axo pid=,ppid=") printf '1 0\n10 1\n' ;;
+  "-p 10 -o stat=") printf 'Ss\n' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKE_PS"
+
 export PATH="$FAKEBIN:$PATH"
+export FM_HERDR_PS_BIN="$FAKE_PS"
+export FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=2
 export FM_HOME="$HOME_FIXTURE"
 export FM_ROOT_OVERRIDE="$ROOT"
 export FM_PRIMARY_HERDR_BIN="$FAKEBIN/herdr"
@@ -197,6 +214,20 @@ set -e
 [ "$rc" -ne 0 ] || fail 'malformed JSONL unexpectedly recovered'
 assert_contains "$out" 'strict integrity' 'malformed JSONL must fail strict validation'
 write_session
+printf '{"type":"message","id":"m2",\n"parentId":null,"message":{"role":"user"}}\n' >> "$SESSION_FILE"
+set +e
+out=$(FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1); rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail 'a record split across physical lines unexpectedly recovered'
+assert_contains "$out" 'strict integrity' 'a record spanning two physical lines must fail strict validation'
+write_session
+printf '{"type":"message","id":"m2"} {"type":"message","id":"m3"}\n' >> "$SESSION_FILE"
+set +e
+out=$(FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1); rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail 'two records on one physical line unexpectedly recovered'
+assert_contains "$out" 'strict integrity' 'two records on one physical line must fail strict validation'
+write_session
 sed "s/\"id\":\"$FULL_ID\"/\"id\":\"wrong-full-id\"/" "$SESSION_FILE" > "$T/header-id.jsonl"
 mv "$T/header-id.jsonl" "$SESSION_FILE"
 set +e
@@ -238,7 +269,7 @@ set -e
 [ "$rc" -ne 0 ] || fail 'directory session path unexpectedly recovered'
 rmdir "$SESSION_DIR/not-file.jsonl"
 cp "$T/custody.good" "$CUSTODY"
-pass 'malformed, header-mismatched, duplicate, missing, and non-regular session authority refuses recovery'
+pass 'malformed, non-line-oriented, header-mismatched, duplicate, missing, and non-regular session authority refuses recovery'
 
 # Unknown/contradictory process evidence never becomes launch authority.
 printf 'unknown\n' > "$MODE"
@@ -283,7 +314,10 @@ chmod 600 "$HOME_FIXTURE/state/primary-pi/lease/"*
 : > "$LOG"
 : > "$TEST_RESUME_LOG"
 : > "$TEST_PI_LOG"
-TEST_PANE_RUN_DELAY=0.5 FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover > "$T/exact.out" 2>&1 &
+# Invoked exactly the way the operator docs document it: a relative path from the
+# code root. The fake pane runs its injected command from `/`, so a resume
+# wrapper built from the caller's `$0` could never be found there.
+(cd "$ROOT" && TEST_PANE_RUN_DELAY=0.5 FM_PRIMARY_NO_ATTACH=1 bin/fm-primary-pi.sh recover) > "$T/exact.out" 2>&1 &
 RECOVERY_PID=$!
 wait_for 'recovery ownership lock' bash -c "[ -d '$HOME_FIXTURE/state/primary-pi/recovery.lock' ]"
 set +e
@@ -309,6 +343,7 @@ new_token=$(grep '^token=' "$HOME_FIXTURE/state/primary-pi/lease/token" | cut -d
 assert_absent "$RECOVERY_LOCK" 'a completed no-attach restart must release its recovery ownership'
 assert_grep "pane get $PANE --session lab-exact" "$LOG" 'recovery must resolve only the exact recorded pane'
 assert_grep "pane run $PANE" "$LOG" 'restart must target only the exact recorded pane'
+assert_grep "'$ROOT/bin/fm-primary-pi.sh' resume" "$LOG" 'the restored pane must be driven through the canonical absolute script path'
 assert_no_grep 'workspace list' "$LOG" 'workspace labels must not participate in recovery'
 assert_no_grep 'tab list' "$LOG" 'tab labels or focus must not participate in recovery'
 pass 'stale lease and race handling converge on one exact attested session'
@@ -371,8 +406,10 @@ assert_contains "$out" 'lease=malformed' 'a non-hex lease token must read as a m
 rm -rf "$HOME_FIXTURE/state/primary-pi/lease"
 pass 'malformed custody and lease records are reported by status rather than exiting'
 
-# A crash before first attestation leaves no custody; only a stale lease plus a
-# twice-proven exact bare shell can be reclaimed by the supported launch path.
+# A crash before first attestation leaves a lease with no custody. `launch` runs
+# inside the very pane it would have to prove agent-free, so it never reclaims
+# that lease automatically: it preserves the evidence, refuses, and leaves only
+# the documented manual removal as the supported exit.
 mv "$HOME_FIXTURE/state/primary-pi" "$T/previous-primary-state"
 mkdir -p "$HOME_FIXTURE/state/primary-pi/lease"
 printf 'version=1\n' > "$HOME_FIXTURE/state/primary-pi/lease/version"
@@ -380,24 +417,34 @@ printf 'token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' > "$HOME_FIXTURE/state/primary
 printf 'pid=999999\nstart=Mon Jan  1 00:00:00 2001\n' > "$HOME_FIXTURE/state/primary-pi/lease/owner"
 chmod 700 "$HOME_FIXTURE/state/primary-pi" "$HOME_FIXTURE/state/primary-pi/lease"
 chmod 600 "$HOME_FIXTURE/state/primary-pi/lease/"*
-printf 'unknown\n' > "$MODE"
-set +e
-out=$("$SCRIPT" launch --pi pi 2>&1); rc=$?
-set -e
-[ "$rc" -ne 0 ] || fail 'unknown stale pre-attestation pane unexpectedly relaunched'
-assert_contains "$out" 'unknown agent state' 'unknown stale pre-attestation pane must refuse'
-assert_grep 'token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$HOME_FIXTURE/state/primary-pi/lease/token" 'refused stale launch must preserve its lease evidence'
+for pane_state in unknown shell pi; do
+  printf '%s\n' "$pane_state" > "$MODE"
+  : > "$LOG"
+  set +e
+  out=$("$SCRIPT" launch --pi pi 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "stale pre-attestation lease unexpectedly relaunched with a $pane_state pane"
+  assert_contains "$out" 'preserved as evidence' "stale pre-attestation launch must refuse with a $pane_state pane"
+  assert_grep 'token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$HOME_FIXTURE/state/primary-pi/lease/token" 'refused stale launch must preserve its lease evidence'
+  assert_absent "$HOME_FIXTURE/state/primary-pi/custody.v1" 'refused stale launch must not publish custody'
+  assert_absent "$RECOVERY_LOCK" 'refused stale launch must release its recovery ownership'
+  assert_grep 'pane get' "$LOG" 'stale pre-attestation launch must still verify its own injected pane identity'
+  assert_no_grep 'agent get' "$LOG" 'launch must never turn a pane agent reading into stale-lease authority'
+  assert_no_grep 'pane process-info' "$LOG" 'launch must never claim an in-pane bare-shell proof of itself'
+done
+# The documented narrow manual fallback: remove the stale lease by hand, then launch.
 printf 'shell\n' > "$MODE"
+rm -rf "$HOME_FIXTURE/state/primary-pi/lease"
 "$SCRIPT" launch --pi pi > "$T/stale-launch.out" 2>&1 &
 LAUNCH_PID=$!
-wait_for 'safe stale pre-attestation lease reclamation' lease_live
+wait_for 'manual-fallback launch after the stale lease is removed' lease_live
 new_token=$(grep '^token=' "$HOME_FIXTURE/state/primary-pi/lease/token" | cut -d= -f2-)
-[ "$new_token" != bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ] || fail 'stale pre-attestation lease token was not replaced'
-assert_present "$HOME_FIXTURE/state/primary-pi/custody.v1" 'reclaimed launch must publish fresh attested custody'
+[ "$new_token" != bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ] || fail 'manual-fallback launch reused the removed stale token'
+assert_present "$HOME_FIXTURE/state/primary-pi/custody.v1" 'manual-fallback launch must publish fresh attested custody'
 kill -TERM "$LAUNCH_PID"
 wait "$LAUNCH_PID" 2>/dev/null || true
 LAUNCH_PID=''
-wait_for 'reclaimed launch cleanup' lease_absent
-pass 'stale pre-attestation launch state safely refuses ambiguity and recovers a proven bare shell'
+wait_for 'manual-fallback launch cleanup' lease_absent
+pass 'stale pre-attestation launch preserves its evidence and exits only through the documented manual fallback'
 
 printf 'all fm-primary-pi executable-interface tests passed\n'
