@@ -1,11 +1,11 @@
-=== spawn: no arguments ===
-<ROOT>/bin/fm-spawn.sh: line <N>: POS[0]: unbound variable
-[exit 0]
 === spawn: invalid task id ===
 error: invalid task id
 [exit 2]
-=== spawn: project that does not exist ===
-<ROOT>/bin/fm-spawn.sh: line <N>: cd: <TMP>/no-such-project: No such file or directory
+=== spawn: invalid effort ===
+error: --effort must be one of low, medium, high, xhigh, max
+[exit 1]
+=== spawn: --backend combined with --host ===
+error: --backend selects a LOCAL session provider and cannot combine with --host
 [exit 1]
 === send: task with no metadata ===
 error: target 't-absent' is not resolvable (tried meta=<TMP>/home/state/t-absent.meta; metadata window/terminal lookup; backend=none). Use fm-t-absent for a recorded task/lane, or pass a well-formed explicit backend target such as session:window.

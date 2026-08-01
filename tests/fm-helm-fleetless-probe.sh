@@ -89,9 +89,23 @@ yolo=off
 EOF
 
 # --- probes -----------------------------------------------------------------
-run 'spawn: no arguments' "$ROOT/bin/fm-spawn.sh"
+#
+# Every probe below must produce FIRSTMATE'S OWN message, never a raw bash
+# diagnostic and never anything that depends on what is installed. Two earlier
+# probes did and had to go, because they made this transcript a record of the
+# machine rather than of the change:
+#   - `fm-spawn.sh` with no arguments trips a pre-existing `POS[0]: unbound
+#     variable` in bash, and the EXIT STATUS of that differs between bash
+#     builds (0 on macOS bash 5.3, 1 on the Linux CI runner). The gate sits
+#     ahead of argument parsing, so the invalid-id probe covers the same ground.
+#   - `fm-spawn.sh <id> <missing-project>` reaches a different refusal depending
+#     on which harness the machine happens to detect.
+# All three spawn probes exercise the gate, because the gate runs before any of
+# the argument handling they exercise.
 run 'spawn: invalid task id' "$ROOT/bin/fm-spawn.sh" .hidden "$PROJ"
-run 'spawn: project that does not exist' "$ROOT/bin/fm-spawn.sh" t-new "$TMP/no-such-project"
+run 'spawn: invalid effort' "$ROOT/bin/fm-spawn.sh" t-new "$PROJ" --effort turbo
+run 'spawn: --backend combined with --host' \
+  "$ROOT/bin/fm-spawn.sh" t-new "$PROJ" --host box --backend tmux
 run 'send: task with no metadata' "$ROOT/bin/fm-send.sh" t-absent hello
 run 'teardown: task with no metadata' "$ROOT/bin/fm-teardown.sh" t-absent
 run 'pr-merge: task with no metadata' \
