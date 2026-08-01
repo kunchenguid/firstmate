@@ -9,6 +9,14 @@ TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
+# Read from the adapter that owns it, so a reworded notice cannot leave the E2E asserting a
+# line the product no longer emits.
+CONTINUATION_NOTICE=$(
+  sed -n 's/^  "\(Firstmate supervision[^"]*\)";$/\1/p' \
+    "$ROOT/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
+)
+[ -n "$CONTINUATION_NOTICE" ] \
+  || fail "could not read the Calm continuation notice from its owner"
 # Fixtures copy .pi/extensions/lib as a directory rather than an enumerated list, so adding
 # a presentation adapter cannot leave a fixture silently missing the module it must load.
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
@@ -1146,6 +1154,7 @@ function restorableMode(steering, followUp, compaction) {
   ];
   let editorValue = "";
   let aborts = 0;
+  const statuses = [];
   mode.pendingMessagesContainer = new Container();
   mode.compactionQueuedMessages = (compaction ?? []).map((message) => ({ ...message }));
   mode.editor = {
@@ -1153,6 +1162,9 @@ function restorableMode(steering, followUp, compaction) {
     setText(text) {
       editorValue = text;
     },
+  };
+  mode.showStatus = (message) => {
+    statuses.push(message);
   };
   const session = {
     agent: {
@@ -1188,6 +1200,7 @@ function restorableMode(steering, followUp, compaction) {
       editorValue = text;
     },
     aborts: () => aborts,
+    statuses,
     // Read through the Pi accessor outside any render, so this is the queue Pi delivers from.
     queue: () => InteractiveMode.prototype.getAllQueuedMessages.call(mode),
     compaction: () => mode.compactionQueuedMessages,
@@ -1205,7 +1218,29 @@ function restoreOutcome(restorable) {
     delivery: restorable.delivery,
     compaction: restorable.compaction(),
     aborts: restorable.aborts(),
+    statuses: restorable.statuses,
   };
+}
+
+// The continuation notice must say only that supervision continues. Anything that could
+// carry a fragment of what was retained is a leak of the row the captain never saw.
+function assertContinuationNoticeIsContentFree(notice, retainedTexts) {
+  const forbidden = ["⁣", "FIRSTMATE_OP", "Supervisor escalate", "watcher", "turn-end-guard"];
+  for (const fragment of forbidden) {
+    if (notice.includes(fragment)) {
+      throw new Error(`the continuation notice carried ${JSON.stringify(fragment)}`);
+    }
+  }
+  for (const retained of retainedTexts) {
+    for (const word of retained.split(/[\s:()]+/).filter((part) => part.length >= 6)) {
+      if (notice.includes(word)) {
+        throw new Error(`the continuation notice carried retained text ${JSON.stringify(word)}`);
+      }
+    }
+  }
+  if (notice.length > 80 || notice.split("\n").length !== 1) {
+    throw new Error(`the continuation notice is not one short generic line: ${JSON.stringify(notice)}`);
+  }
 }
 
 // One delivered chat row, so a batch can be checked where the captain finally sees it.
@@ -1341,6 +1376,14 @@ if (JSON.stringify(escape.delivery) !== JSON.stringify([
 if (escape.rows().length !== 0) {
   throw new Error("the retained notifications became visible queued rows after Escape");
 }
+// Retaining across the abort leaves Pi a non-empty queue, so it continues into a new turn on
+// its own. That turn must never be silent, and its notice must say only that much.
+if (escape.statuses.length !== 1) {
+  throw new Error(
+    `Escape emitted ${escape.statuses.length} continuation notices instead of exactly one: ${JSON.stringify(escape.statuses)}`,
+  );
+}
+assertContinuationNoticeIsContentFree(escape.statuses[0], [watcherStale, watcherSignal, legacyAway]);
 
 // A queue holding nothing but notifications restores nothing, still aborts, and keeps every
 // notification queued rather than reporting a restore the captain cannot see.
@@ -1360,6 +1403,12 @@ if (JSON.stringify(escapeAllMarked.queue()) !== JSON.stringify({
 })) {
   throw new Error(`an all-notification queue was not retained intact: ${JSON.stringify(escapeAllMarked.queue())}`);
 }
+if (escapeAllMarked.statuses.length !== 1) {
+  throw new Error(
+    `an all-notification Escape emitted ${escapeAllMarked.statuses.length} continuation notices instead of exactly one`,
+  );
+}
+assertContinuationNoticeIsContentFree(escapeAllMarked.statuses[0], marked);
 
 // Compaction-queued notifications are retained in their own queue with their own mode, so a
 // pending compaction flush still delivers them while the captain message is restored.
@@ -1382,6 +1431,13 @@ if (JSON.stringify(escapeCompaction.compaction()) !== JSON.stringify([
     `compaction-queued notifications were lost or rerouted: ${JSON.stringify(escapeCompaction.compaction())}`,
   );
 }
+// The Option+Up dequeue does not abort, so Pi is not made to continue and there is nothing
+// to announce.
+if (escapeCompaction.statuses.length !== 0) {
+  throw new Error(
+    `the dequeue shortcut announced a continuation nothing triggered: ${JSON.stringify(escapeCompaction.statuses)}`,
+  );
+}
 
 // A queue with no notification in it stays the stock Pi restore, down to the abort and the count.
 const escapeCaptainOnly = restorableMode([captainSteer], [captainFollowUp]);
@@ -1399,15 +1455,10 @@ if (
 ) {
   throw new Error("Calm changed how Pi restores a queue holding only captain messages");
 }
-
-// If a future Pi drops the already-expanded queueing entry point, retention is impossible,
-// so the restore falls back to the stock Pi behavior rather than dropping a notification.
-const escapeWithoutRetention = restorableMode([], [watcherStale, captainFollowUp]);
-delete escapeWithoutRetention.session._queueFollowUp;
-const withoutRetentionCount = escapeWithoutRetention.mode.restoreQueuedMessagesToEditor();
-if (withoutRetentionCount !== 2 || !escapeWithoutRetention.editorText().includes("FIRSTMATE_OP:")) {
+// Nothing was retained, so nothing continues and nothing is announced.
+if (escapeCaptainOnly.statuses.length !== 0) {
   throw new Error(
-    "a Pi without the queueing entry point did not fall back to the stock restore, so a notification could be dropped",
+    `a captain-only Escape announced a continuation nothing triggered: ${JSON.stringify(escapeCaptainOnly.statuses)}`,
   );
 }
 
@@ -1489,6 +1540,9 @@ for (const queue of [[[], [watcherStale]], [marked.slice(0, 2), marked.slice(2)]
   ) {
     throw new Error(`Calm off changed the stock Pi queue restore for ${JSON.stringify(queue)}`);
   }
+  if (offCalm.statuses.length !== 0) {
+    throw new Error(`Calm off announced a continuation Pi never makes: ${JSON.stringify(offCalm.statuses)}`);
+  }
 }
 await calmCommand.handler("", ctx);
 if (renderQueued([], [watcherStale]).rows.length !== 0) {
@@ -1523,20 +1577,68 @@ if (bypassedRestore !== 2 || !restoreWitness.editorText().includes("FIRSTMATE_OP
 if (restoreWitness.queue().followUp.length !== 0 || restoreWitness.delivery.length !== 0) {
   throw new Error("the restore mutation witness did not reproduce the emptied queue");
 }
+// The stock restore leaves Pi nothing queued, so it never continues and never announces one.
+// That is what makes the continuation notice assertions above able to fail.
+if (restoreWitness.statuses.length !== 0) {
+  throw new Error("the restore mutation witness announced a continuation the stock restore cannot cause");
+}
 const adaptedRestore = restorableMode([], [watcherStale, watcherSignal]);
 if (
   adaptedRestore.mode.restoreQueuedMessagesToEditor({ abort: true }) !== 0 ||
   adaptedRestore.editorText() !== "" ||
-  adaptedRestore.delivery.length !== 2
+  adaptedRestore.delivery.length !== 2 ||
+  adaptedRestore.statuses.length !== 1
 ) {
   throw new Error("the restore mutation witness left the adapted restore path uninstalled");
+}
+
+// 9. Last, because it deliberately ends the queued-row hiding for the rest of this process:
+// if a future Pi drops the already-expanded queueing entry point, retention is impossible,
+// and a queued row must never stay hidden behind a restore this adapter cannot complete.
+const stillHidden = renderQueued([], [watcherStale, captainFollowUp]);
+if (JSON.stringify(stillHidden.rows) === JSON.stringify(renderStockQueued([], [watcherStale, captainFollowUp]))) {
+  throw new Error("the retention-unavailable case started with the queued notification already visible");
+}
+const withoutRetention = restorableMode([], [watcherStale, captainFollowUp]);
+delete withoutRetention.session._queueFollowUp;
+const withoutRetentionCount = withoutRetention.mode.restoreQueuedMessagesToEditor({ abort: true });
+if (withoutRetentionCount !== 2 || !withoutRetention.editorText().includes("FIRSTMATE_OP:")) {
+  throw new Error(
+    "a Pi without the queueing entry point did not fall back to the stock restore, so a notification could be dropped",
+  );
+}
+if (withoutRetention.statuses.length !== 0) {
+  throw new Error("the stock fallback restore announced a continuation it cannot cause");
+}
+// From here on Pi lists its own rows again, so no hidden row outlives the restore that could
+// not keep it hidden safely.
+const afterFallbackQueue = [[], [watcherStale, captainFollowUp]];
+if (JSON.stringify(renderQueued(...afterFallbackQueue).rows)
+  !== JSON.stringify(renderStockQueued(...afterFallbackQueue))) {
+  throw new Error("queued operational rows stayed hidden after a restore the adapter could not complete");
+}
+if (renderQueued([], [watcherStale]).rows.length === 0) {
+  throw new Error("an all-notification queue still collapsed to no rows after retention became impossible");
+}
+const afterFallback = restorableMode([], [watcherStale, captainFollowUp]);
+const afterFallbackStock = restorableMode([], [watcherStale, captainFollowUp]);
+const afterFallbackCount = afterFallback.mode.restoreQueuedMessagesToEditor({ abort: true });
+const afterFallbackStockCount = stockRestoreQueuedMessagesToEditor.call(
+  afterFallbackStock.mode,
+  { abort: true },
+);
+if (
+  afterFallbackCount !== afterFallbackStockCount ||
+  JSON.stringify(restoreOutcome(afterFallback)) !== JSON.stringify(restoreOutcome(afterFallbackStock))
+) {
+  throw new Error("the restore did not return to Pi byte for byte after retention became impossible");
 }
 JS
 )
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm queued-operational presentation failed: $out"
   [ -z "$out" ] || fail "Pi calm queued-operational test printed output: $out"
-  pass "Calm hides marker-authenticated notifications queued during an active turn - alone, as a batch, and once delivered - restores only genuine captain input on Escape or dequeue while keeping every notification queued in order, and keeps queued captain messages, near misses, Calm-off rendering, and export/share stock, with bypassing mutations reproducing both the visible Follow-up rows and the raw restored editor text"
+  pass "Calm hides marker-authenticated notifications queued during an active turn - alone, as a batch, and once delivered - restores only genuine captain input on Escape or dequeue while keeping every notification queued in order, announces the resulting continuation exactly once in one content-free line and never otherwise, stops hiding queued rows outright when retention becomes impossible, and keeps queued captain messages, near misses, Calm-off rendering, and export/share stock, with bypassing mutations reproducing both the visible Follow-up rows and the raw restored editor text"
 }
 
 test_operational_presentation_classifier_failure() {
@@ -2202,9 +2304,16 @@ TS
         "Pi queued-turn $label case restored hidden operational text into the editor on Escape"
       assert_not_contains "$pane" "QUEUED_MARKED_${label}_LEGACY" \
         "Pi queued-turn $label case restored the hidden supported-legacy notification into the editor on Escape"
+      # Retaining across the abort makes Pi continue into a new turn on its own, so it says so.
+      # This asserts the captain can see it; test_queued_operational_presentation owns the
+      # exactly-once and content-free properties, which a scrollback capture cannot settle.
+      assert_contains "$pane" "$CONTINUATION_NOTICE" \
+        "Pi queued-turn $label case restarted the agent after Escape without telling the captain"
     else
       assert_contains "$pane" "QUEUED_MARKED_${label}_WATCHER" \
         "Pi queued-turn $label case changed the Calm-off stock Escape restore"
+      assert_not_contains "$pane" "$CONTINUATION_NOTICE" \
+        "Pi queued-turn $label case announced a continuation Calm off never makes"
     fi
     # Submitting the restored editor is what an aborting captain does next, and it is when
     # the retained notifications must still be delivered.
@@ -2280,7 +2389,7 @@ JS
 
   run_queued_turn_case on calm_on
   run_queued_turn_case off calm_off
-  pass "Pi queued-operational turn E2E keeps marked notifications queued behind a busy turn off the transcript while Calm is on, still shows a genuine queued captain follow-up and the stock dequeue hint, renders every queued row Calm off, restores only the genuine captain message to the editor when the captain aborts with Escape, keeps Pi's stock whole-queue restore Calm off, and loses, duplicates, reorders, or reroutes no notification in the session"
+  pass "Pi queued-operational turn E2E keeps marked notifications queued behind a busy turn off the transcript while Calm is on, still shows a genuine queued captain follow-up and the stock dequeue hint, renders every queued row Calm off, restores only the genuine captain message to the editor when the captain aborts with Escape while announcing the resulting continuation once Calm on and never Calm off, keeps Pi's stock whole-queue restore Calm off, and loses, duplicates, reorders, or reroutes no notification in the session"
 }
 
 test_hidden_block_geometry_e2e() {

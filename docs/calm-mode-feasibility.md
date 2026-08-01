@@ -209,7 +209,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
 | `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height adapter (verified on Pi 0.81.1 through 0.82.0) under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
 | `synthetic-user` queued before delivery | `InteractiveMode.updatePendingMessagesDisplay` listing `Steering:`/`Follow-up:` rows, their leading spacer, and the dequeue hint from `InteractiveMode.getAllQueuedMessages` | A notification delivered while a turn is running reaches this listing before it is ever a transcript row. Calm filters only what that one listing reads (verified on Pi 0.82.1), so an all-operational queue collapses to no rows, spacer, or hint, while genuinely queued captain messages and the queue Pi delivers from and persists are untouched. |
-| `synthetic-user` restored from the queue | `InteractiveMode.restoreQueuedMessagesToEditor` reading `InteractiveMode.clearAllQueues`, reached by `Escape` during a run and by the `Option+Up` dequeue shortcut | Restoring a hidden row would hand the captain raw text nothing on screen ever showed, and clearing the editor would then drop it. Calm restores only genuinely captain-authored messages and re-queues every marker-authenticated notification in order through the same already-expanded queueing entry point Pi uses, so the next turn still delivers them; Calm off keeps the stock whole-queue restore byte for byte. |
+| `synthetic-user` restored from the queue | `InteractiveMode.restoreQueuedMessagesToEditor` reading `InteractiveMode.clearAllQueues`, reached by `Escape` during a run and by the `Option+Up` dequeue shortcut | Restoring a hidden row would hand the captain raw text nothing on screen ever showed, and clearing the editor would then drop it. Calm restores only genuinely captain-authored messages and re-queues every marker-authenticated notification in order through the same already-expanded queueing entry point Pi uses, so the next turn still delivers them; Calm off keeps the stock whole-queue restore byte for byte. A still-populated queue makes Pi continue into a new turn once the aborted run settles, announced by one content-free `showStatus` line. If that queueing entry point is ever missing, the adapter stops hiding queued rows for the rest of the process instead of leaving them hidden behind a restore it cannot complete. |
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
@@ -504,7 +504,20 @@ user inputs persisted: [
 ]
 ```
 
-No `FIRSTMATE_OP:` text ever appeared on screen or in the editor during that run.
+No `FIRSTMATE_OP:` text ever appeared on screen or in the editor during that run, and the screen carried the one generic line `Firstmate supervision continues in a new turn.`
+
+A separate trial pressed `Escape` and then sent nothing at all, which isolates what Pi does on its own:
+
+```text
+user inputs persisted: [
+ "CAPTAIN_PROMPT_NOENTER_ON",
+ "⁣FIRSTMATE_OP: v1 watcher: QUEUED_MARKED_NOENTER_ON_WATCHER",
+ "⁣FIRSTMATE_OP: v1 turn-end-guard: QUEUED_MARKED_NOENTER_ON_GUARD",
+ "⁣Supervisor escalate (QUEUED_MARKED_NOENTER_ON_LEGACY)"
+]
+```
+
+The retained notifications were delivered and a fresh assistant turn ran without any captain keystroke, which is why the notice exists: `AgentSession._handlePostAgentRun` returns `agent.hasQueuedMessages()` after the aborted run settles, and `_runAgentPrompt` then calls `agent.continue()`.
 With Calm off, the same keystroke produced Pi's stock restore, joining the whole queue into one editor submission, which is also what the pre-fix Calm-on run produced:
 
 ```text
@@ -519,7 +532,9 @@ user inputs persisted: [
 `test_queued_operational_presentation` drives the installed `InteractiveMode.updatePendingMessagesDisplay` against a real pi-tui `Container` and theme.
 It covers one marked notification, every supported marked kind alone and as a batch, the same messages once delivered, genuinely queued captain steering and follow-up messages, a mixed queue reduced to exactly the stock captain-only rows, queued near misses a captain can type, `/export` and `/share` stock rendering, byte-identical Calm-off rendering, and a mutation witness that restores the unpatched Pi renderer and requires the reported rows to reappear.
 It also asserts that ordinary queued text never reaches the classifier subprocess and that the marked kinds are classified only through `bin/fm-operational-input.sh`.
-The same regression drives the installed `InteractiveMode.restoreQueuedMessagesToEditor` over a queue that behaves like Pi's own, covering the mixed, all-notification, compaction-queued, and captain-only cases, byte-identical Calm-off restores, a fallback to the stock restore when the queueing entry point is absent, and a second mutation witness that requires the raw restored editor text to reappear.
+The same regression drives the installed `InteractiveMode.restoreQueuedMessagesToEditor` over a queue that behaves like Pi's own, covering the mixed, all-notification, compaction-queued, and captain-only cases, byte-identical Calm-off restores, and a second mutation witness that requires the raw restored editor text to reappear.
+It also pins the continuation notice: exactly one line when retained notifications make Pi continue, none for a captain-only queue, none for the `Option+Up` dequeue that never aborts, none with Calm off, none from the unpatched restore, and a content check that rejects the marker, `FIRSTMATE_OP`, a kind, or any word of the retained text.
+Its last block deliberately runs after everything else, because it removes the queueing entry point and requires the adapter to stop hiding queued rows for the rest of the process and hand the seam back to Pi byte for byte.
 
 `test_operational_presentation_classifier_failure` proves that a classifier subprocess that could not run leaves the presentation question open and self-heals on the next ask, while the answers the owner did give stay memoized.
 
