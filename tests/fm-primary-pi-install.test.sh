@@ -15,6 +15,13 @@ export FM_PRIMARY_INSTALL_HOME="$DEST" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SOURCE
 PLIST="$DEST/Library/LaunchAgents/dev.firstmate.primary-herdr.plist"
 HELPER="$DEST/.local/bin/firstmate-attach"
 
+# Portable octal mode. Platform-detected, never the `stat -f || stat -c` fallback:
+# GNU `stat -f` is --file-system, so it reads '%Lp' as a missing file and still
+# writes a filesystem dump for the real path, which the fallback mode then trails.
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+}
+
 out=$("$SCRIPT" install) || fail "install failed: $out"
 assert_present "$PLIST" 'installer must write the one-shot next-login plist'
 assert_present "$HELPER" 'installer must write the phone/local attach helper'
@@ -28,8 +35,8 @@ assert_grep "exec env FM_HOME='$SOURCE_HOME' '$ROOT/bin/fm-primary-pi.sh' recove
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$PLIST" >/dev/null || fail 'installed LaunchAgent must be valid plist XML'
 fi
-[ "$(stat -f '%Lp' "$PLIST" 2>/dev/null || stat -c '%a' "$PLIST")" = 600 ] || fail 'plist mode must be 0600'
-[ "$(stat -f '%Lp' "$HELPER" 2>/dev/null || stat -c '%a' "$HELPER")" = 700 ] || fail 'attach helper mode must be 0700'
+[ "$(file_mode "$PLIST")" = 600 ] || fail 'plist mode must be 0600'
+[ "$(file_mode "$HELPER")" = 700 ] || fail 'attach helper mode must be 0700'
 pass 'install writes bounded one-shot server ensure and exact recovery helper'
 
 first_plist=$(shasum -a 256 "$PLIST" | awk '{print $1}')

@@ -22,6 +22,13 @@ printf 'none\n' > "$MODE"
 : > "$LOG"
 : > "$SOCKET"
 
+# Portable octal mode. Platform-detected, never the `stat -f || stat -c` fallback:
+# GNU `stat -f` is --file-system, so it reads '%Lp' as a missing file and still
+# writes a filesystem dump for the real path, which the fallback mode then trails.
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+}
+
 write_session() {
   cat > "$SESSION_FILE" <<EOF
 {"type":"session","version":3,"id":"$FULL_ID","timestamp":"2026-01-01T00:00:00.000Z","cwd":"$T"}
@@ -179,11 +186,11 @@ assert_grep "herdr_pane_id=$PANE" "$CUSTODY" 'pane id must be persisted'
 assert_grep "pi_session_id=$FULL_ID" "$CUSTODY" 'full Pi session id must be persisted'
 assert_grep "pi_session_file=$SESSION_FILE" "$CUSTODY" 'canonical Pi session file must be persisted'
 assert_grep 'session_integrity=ok' "$CUSTODY" 'strict session result must be persisted'
-[ "$(stat -f '%Lp' "$CUSTODY" 2>/dev/null || stat -c '%a' "$CUSTODY")" = 600 ] || fail 'custody must be private mode 0600'
+[ "$(file_mode "$CUSTODY")" = 600 ] || fail 'custody must be private mode 0600'
 LEASE_DIR="$HOME_FIXTURE/state/primary-pi/lease"
 LEASE_TOKEN_FILE="$LEASE_DIR/token"
-[ "$(stat -f '%Lp' "$LEASE_DIR" 2>/dev/null || stat -c '%a' "$LEASE_DIR")" = 700 ] || fail 'lease directory must be private mode 0700'
-[ "$(stat -f '%Lp' "$LEASE_TOKEN_FILE" 2>/dev/null || stat -c '%a' "$LEASE_TOKEN_FILE")" = 600 ] || fail 'lease token must be private mode 0600'
+[ "$(file_mode "$LEASE_DIR")" = 700 ] || fail 'lease directory must be private mode 0700'
+[ "$(file_mode "$LEASE_TOKEN_FILE")" = 600 ] || fail 'lease token must be private mode 0600'
 [ "$(cat "$TEST_UMASK_FILE")" = 0022 ] || fail "private state writes must not change the umask Pi inherits: $(cat "$TEST_UMASK_FILE")"
 pass 'wrapped launch publishes complete exact custody without widening the inherited umask'
 
