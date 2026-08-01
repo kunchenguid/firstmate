@@ -18,6 +18,9 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
+# `--validation-lane <id>` emits the same verdict as a strict six-line record
+# with full, coarse, absent, or unavailable run identity plus run-start evidence.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
@@ -62,9 +65,18 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 
-ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+VALIDATION_LANE_MODE=0
+if [ "${1:-}" = --validation-lane ]; then
+  [ "$#" -eq 2 ] || { echo "usage: fm-crew-state.sh [--validation-lane] <id>" >&2; exit 2; }
+  VALIDATION_LANE_MODE=1
+  ID=$2
+else
+  ID=${1:-}
+  [ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--validation-lane] <id>" >&2; exit 2; }
+fi
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -77,10 +89,18 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
+RUN_KIND=unavailable
+RUN_ID=
+RUN_START=
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
+  if [ "$VALIDATION_LANE_MODE" -eq 1 ]; then
+    printf 'fm-crew-validation-v2\nstate=%s\nsource=%s\nrun-kind=%s\nrun-id=%s\nrun-start=%s\n' \
+      "$1" "$2" "$RUN_KIND" "$RUN_ID" "$RUN_START"
+    exit 0
+  fi
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
@@ -149,46 +169,19 @@ pane_readable() {  # <target>
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
-# crew_pane_is_busy: the busy-signature fallback, backend-aware the same way -
-# fm_backend_busy_state's native semantic state (herdr's agent.get) when
-# available, else the shared harness-scoped pane-regex reader
-# (fm_pane_is_busy, bin/fm-tmux-lib.sh).
-#
-# `busy` alone is trusted outright. Both `idle` and unknown/unparseable fall
-# through to the shared tail-regex corroboration, NOT just unknown: herdr's
-# agent.get reports generation state ("working" while the model is streaming
-# a turn, "done"/"idle" once it is not - docs/herdr-backend.md "Busy state"),
-# which is a narrower signal than "this crew's turn/tool call is still in
-# progress". A crew blocked on its own long-running foreground tool call (e.g.
-# `no-mistakes axi run` without --yes, which blocks synchronously until a gate
-# or outcome - AGENTS.md section 7) is not generating for that whole span, so
-# agent.get can read idle/blocked (bin/backends/herdr.sh maps both to `idle`)
-# while the pane's own rendered text still shows that recorded harness's busy
-# signature for the entire tool call, exactly like tmux's regex-only reader
-# would correctly report. Trusting herdr's `idle`
-# outright (skipping that corroboration) is what let a still-working crew read
-# as not-busy here, and - combined with a no-mistakes run-step lookup that also
-# missed attribution (see nm_runs_status_for_branch) - as not provably working in
-# fm-classify-lib.sh, triggering an immediate (non-wedge) stale wake instead of
-# the absorb-then-escalate path. A genuinely human-blocked agent (a permission
-# dialog, not mid-tool-call) does not render the busy banner, so this
-# corroboration does not mask that case: it stays correctly not-busy.
-crew_pane_is_busy() {  # <target>
-  case "$TASK_BACKEND" in
-    tmux) fm_pane_is_busy "$1" "$HARNESS" ;;
-    *)
-      local bs tail40
-      bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" 2>/dev/null)
-      case "$bs" in
-        busy) return 0 ;;
-        *)
-          tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
-          printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-            | fm_busy_lines_match "$HARNESS"
-          ;;
-      esac
-      ;;
+# crew_busy_verdict: the crew's semantic busy state from the one contract
+# owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
+# adapter answers from its own lifecycle record; Grok answers from its
+# isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
+# when no record exists, but its native `idle` is NOT, because agent.get
+# reports generation state (idle while a crew blocks on its own long-running
+# foreground tool call) rather than turn state.
+crew_busy_verdict() {  # <target>
+  local tail40=''
+  case "$HARNESS" in
+    grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
+  fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -208,7 +201,7 @@ strip_quotes() {
   trim "$s"
 }
 
-# Bounded no-mistakes call in the worktree; stdout only, never fails the script.
+# Bounded no-mistakes call in the worktree; stdout only.
 HAVE_TIMEOUT=none
 if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
@@ -216,10 +209,10 @@ elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
 fi
 nm_run() {  # <args...>
   case "$HAVE_TIMEOUT" in
-    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    *)        true ;;
+    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $status = $?; exit 125 if $status == -1; exit(128 + ($status & 127)) if $status & 127; exit($status >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    *)        return 127 ;;
   esac
 }
 
@@ -378,9 +371,13 @@ nm_ci_checks_state() {
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
-  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
+nm_runs_observation_for_branch() {  # <branch>
+  local branch=$1 out row st rest br sha date_part time_part limit selected_date='' selected_time='' occurrence=0
+  COARSE_STATUS=
+  COARSE_START=
+  limit=$FM_CREW_STATE_RUNS_LIMIT
+  [ "$VALIDATION_LANE_MODE" -eq 0 ] || limit=0
+  out=$(nm_run runs --limit "$limit") || return 1
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -398,10 +395,41 @@ nm_runs_status_for_branch() {  # <branch>
       if ! nm_coarse_head_matches_worktree "$sha"; then
         continue
       fi
-      printf '%s' "$st"
-      return 0
+      rest=${rest#* }
+      rest=$(trim "$rest")
+      selected_date=${rest%% *}
+      rest=${rest#* }
+      rest=$(trim "$rest")
+      selected_time=${rest%% *}
+      COARSE_STATUS=$st
+      break
     fi
   done <<< "$out"
+  [ -n "$COARSE_STATUS" ] || return 0
+  while IFS= read -r row; do
+    row=$(trim "$row")
+    [ -n "$row" ] || continue
+    rest=${row#* }
+    rest=$(trim "$rest")
+    br=${rest%% *}
+    rest=${rest#* }
+    rest=$(trim "$rest")
+    sha=${rest%% *}
+    rest=${rest#* }
+    rest=$(trim "$rest")
+    date_part=${rest%% *}
+    rest=${rest#* }
+    rest=$(trim "$rest")
+    time_part=${rest%% *}
+    if [ "$br" = "$branch" ] && [ "$date_part" = "$selected_date" ] && [ "$time_part" = "$selected_time" ] \
+      && nm_coarse_head_matches_worktree "$sha"; then
+      occurrence=$((occurrence + 1))
+    fi
+  done <<< "$out"
+  if [[ "$selected_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+    && [[ "$selected_time" =~ ^[0-9]{2}:[0-9]{2}$ ]] && [ "$occurrence" -gt 0 ]; then
+    COARSE_START="${selected_date}T${selected_time}#${occurrence}"
+  fi
   return 0
 }
 
@@ -453,14 +481,72 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+COARSE_START=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
-  if [ -n "$RUN_OUT" ]; then
+  status_ok=0
+  if RUN_OUT=$(nm_run axi status); then
+    status_ok=1
+  fi
+  if [ "$status_ok" -eq 1 ] && [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-      HAVE_RUN=1
+      if [ "$VALIDATION_LANE_MODE" -eq 1 ]; then
+        initial_run_id=$(strip_quotes "$(nm_field id)")
+        initial_run_status=$(strip_quotes "$(nm_field status)")
+        initial_run_outcome=$(strip_quotes "$(nm_field outcome)")
+        initial_run_head=$(strip_quotes "$(nm_field head)")
+        if nm_runs_observation_for_branch "$CREW_BRANCH"; then
+          observed_start=$COARSE_START
+          if recheck_out=$(nm_run axi status); then
+            RUN_OUT=$recheck_out
+            recheck_branch=$(strip_quotes "$(nm_field branch)")
+            recheck_run_id=$(strip_quotes "$(nm_field id)")
+            recheck_run_status=$(strip_quotes "$(nm_field status)")
+            recheck_run_outcome=$(strip_quotes "$(nm_field outcome)")
+            recheck_run_head=$(strip_quotes "$(nm_field head)")
+            snapshot_matches=0
+            if [ "$recheck_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+              if [ -n "$initial_run_id" ] && [ "$recheck_run_id" = "$initial_run_id" ]; then
+                snapshot_matches=1
+              elif [ -z "$initial_run_id" ] && [ -z "$recheck_run_id" ] \
+                && [ "$recheck_run_head" = "$initial_run_head" ] \
+                && [ "$recheck_run_status" = "$initial_run_status" ] \
+                && [ "$recheck_run_outcome" = "$initial_run_outcome" ]; then
+                snapshot_matches=1
+              fi
+            fi
+            if [ "$snapshot_matches" -eq 1 ]; then
+              HAVE_RUN=1
+              RUN_ID=$recheck_run_id
+              RUN_START=$observed_start
+              if [ -n "$RUN_ID" ]; then
+                RUN_KIND=full
+              else
+                RUN_KIND=unavailable
+              fi
+            else
+              RUN_OUT=
+              RUN_KIND=unavailable
+            fi
+          else
+            RUN_OUT=
+            RUN_KIND=unavailable
+          fi
+        else
+          RUN_OUT=
+          RUN_KIND=unavailable
+        fi
+      else
+        HAVE_RUN=1
+        RUN_ID=$(strip_quotes "$(nm_field id)")
+        if [ -n "$RUN_ID" ]; then
+          RUN_KIND=full
+        else
+          RUN_KIND=unavailable
+        fi
+      fi
     else
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
@@ -469,11 +555,31 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      if nm_runs_observation_for_branch "$CREW_BRANCH"; then
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+          RUN_KIND=coarse
+          RUN_START=$COARSE_START
+        else
+          RUN_KIND=absent
+        fi
+      else
+        RUN_KIND=unavailable
+      fi
+    fi
+  elif [ "$VALIDATION_LANE_MODE" -eq 1 ]; then
+    if nm_runs_observation_for_branch "$CREW_BRANCH"; then
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         RUN_SOURCE=coarse
+        RUN_KIND=coarse
+        RUN_START=$COARSE_START
+      else
+        RUN_KIND=absent
       fi
+    else
+      RUN_KIND=unavailable
     fi
   fi
 fi
@@ -605,9 +711,17 @@ fi
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
-# signature is not meaningful for them; read their state from the status log only.
-if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
-  emit working pane "harness busy"
+# state is not meaningful for them; read their state from the status log only.
+# Only an exact busy verdict reports working here, and only an exact idle
+# verdict permits the status-log fallback below. Missing, malformed, stale, or
+# unverified semantic state remains unknown.
+if [ "$KIND" != secondmate ]; then
+  BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+  case "${BUSY_VERDICT%% *}" in
+    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    idle) ;;
+    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+  esac
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real

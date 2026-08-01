@@ -482,9 +482,11 @@ test_registry_home_with_pre_home_parentheses() {
   setup_homes "$home" "$sub" "$id"
   local sub_abs
   sub_abs=$(cd "$sub" && pwd -P)
-  # Prose parentheses before (home: ...), matching live registry shape.
-  printf -- '- %s - issue triage (id is legacy) (home: %s; scope: issue triage; projects: alpha; added 2026-07-09)\n' \
+  # Prose parentheses before (home: ...) and punctuation inside scope match the live registry shape.
+  printf -- '- %s - issue triage (id is legacy) (home: %s; scope: issue triage (child); semicolon is meaningful; projects: alpha; added 2026-07-09)\n' \
     "$id" "$sub_abs" > "$home/data/secondmates.md"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
+    || fail "home-seed validation rejected punctuation-bearing registry fields"
 
   cat > "$home/data/backlog.md" <<'EOF'
 ## Queued

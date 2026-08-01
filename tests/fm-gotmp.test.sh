@@ -67,6 +67,13 @@ make_fake_root() {
   # fm-remote-lib.sh: teardown sources it to resolve the publish remote for its
   # landed-work check.
   ln -s "$ROOT/bin/fm-remote-lib.sh" "$fake/bin/fm-remote-lib.sh"
+  # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
+  # it for the relay-activation gate on the promised-public-reply check. Neither
+  # does anything in this fixture, which has no .env, but both are real siblings
+  # teardown now requires.
+  ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
+  ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
+  ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -136,6 +143,13 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # fm-remote-lib.sh: teardown sources it to resolve the publish remote for its
   # landed-work check.
   ln -s "$ROOT/bin/fm-remote-lib.sh" "$fake/bin/fm-remote-lib.sh"
+  # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
+  # it for the relay-activation gate on the promised-public-reply check. Neither
+  # does anything in this fixture, which has no .env, but both are real siblings
+  # teardown now requires.
+  ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
+  ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
+  ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

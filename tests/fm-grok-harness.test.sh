@@ -15,13 +15,42 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+screen=${FM_FAKE_SPAWN_SCREEN:?}
+staged_launch=${FM_FAKE_STAGED_LAUNCH:?}
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|kill-window) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  capture-pane) cat "$screen"; exit 0 ;;
+  send-keys)
+    text=${4:-}
+    case "$text" in
+      *"__FM_SPAWN_READY_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$screen"
+        exit 0
+        ;;
+      "FM_SPAWN_LAUNCH=''")
+        : > "$staged_launch"
+        exit 0
+        ;;
+      FM_SPAWN_LAUNCH=*)
+        staged=$(FM_SPAWN_LAUNCH="$(cat "$staged_launch")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
+        printf '%s' "$staged" > "$staged_launch"
+        exit 0
+        ;;
+      *"__FM_SPAWN_LAUNCH_OK_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$screen"
+        exit 0
+        ;;
+      'eval "$FM_SPAWN_LAUNCH"') exit 0 ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -47,11 +76,16 @@ make_spawn_case() {
 }
 
 run_grok_spawn() {
-  local home=$1 proj=$2 wt=$3 fakebin=$4 grok_home=$5 id=$6
+  local home=$1 proj=$2 wt=$3 fakebin=$4 grok_home=$5 id=$6 screen staged_launch
+  screen="$home/state/$id.spawn.screen"
+  staged_launch="$home/state/$id.staged-launch"
+  : > "$screen"
+  : > "$staged_launch"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_SPAWN_SCREEN="$screen" FM_FAKE_STAGED_LAUNCH="$staged_launch" \
     GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" grok 2>&1
 }

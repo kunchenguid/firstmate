@@ -286,6 +286,31 @@ case "${1:-}" in
     [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
     exit 0
     ;;
+  capture-pane)
+    cat "${FM_TMUX_CALL_LOG:?}.spawn-screen" 2>/dev/null || true
+    exit 0
+    ;;
+  send-keys)
+    screen="${FM_TMUX_CALL_LOG:?}.spawn-screen"
+    staged="$screen.staged"
+    text=${4:-}
+    case "$text" in
+      *"__FM_SPAWN_READY_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$screen"
+        ;;
+      "FM_SPAWN_LAUNCH=''") : > "$staged" ;;
+      FM_SPAWN_LAUNCH=*)
+        rebuilt=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
+        printf '%s' "$rebuilt" > "$staged"
+        ;;
+      *"__FM_SPAWN_LAUNCH_OK_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$screen"
+        ;;
+    esac
+    exit 0
+    ;;
   has-session) exit 0 ;;
 esac
 exit 0
