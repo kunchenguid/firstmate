@@ -35,6 +35,16 @@ No adapter starts a replacement with shell `&`.
 
 The turn-end guard remains the final backstop rather than the normal continuity mechanism and cooperates with the auto-arm in its `--claude` mode.
 
+## Boot recovery backstop
+
+`bin/fm-install-boot-recovery.sh` generates a machine-private systemd user timer for hosts where the terminal runtime restores persistent panes after reboot.
+The timer does not become the normal watcher owner.
+When the home watcher is stale, it starts one static `fm-boot-watcher.service` cycle whose `ExecStart` is the existing `bin/fm-watch-arm.sh`, then directly wakes the restored primary with one boot-id-deduplicated operational nudge.
+If the temporary cycle closes on an actionable reason before the primary resumes normal adapter ownership, the durable wake queue preserves the work and the same nudge directs the primary through the versioned reboot sweep.
+The recovery path also reports duplicate primary panes and non-bypass Claude secondmate footers, but it never sends repair input to a secondmate or authorizes an automatic respawn.
+The primary keeps the existing explicit-target exit and `fm-spawn.sh <id> --secondmate` recovery authority.
+The same narrow path starts the separate Bizmate review session when absent, without starting a Telegram listener or any channels session.
+
 ## Arm-layer cycle contract
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
@@ -59,6 +69,8 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, and exit-2 translation.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard.
+`tests/fm-reboot-sweep.test.sh` covers boot-id nudge dedupe, safe watcher and Bizmate starts, authority classification, forbidden repair absence, and generated user-unit content.
+`tests/fm-reboot-sweep-herdr-e2e.test.sh` captures real isolated Herdr panes to prove broken and bypass authority modes plus exactly one primary nudge across repeated recovery runs.
 
 ## Active limits and verification
 

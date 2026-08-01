@@ -198,6 +198,22 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+### Boot recovery backstop
+
+The boot recovery path was verified on 2026-08-01 with Herdr 0.7.4 protocol 16 and an isolated named lab session.
+The live default Herdr session was protected by `bin/fm-herdr-lab.sh`'s before-and-after fleet-state tripwire.
+
+```sh
+tests/fm-reboot-sweep.test.sh
+HERDR_LAB_HELPER=/home/kingstyle/firstmate/bin/fm-herdr-lab.sh tests/fm-reboot-sweep-herdr-e2e.test.sh
+```
+
+The deterministic suite reported three passing guarantees: authority classification distinguished bypass from every supported broken mode, stale-watcher and Bizmate recovery remained narrow while the primary nudge was exactly once, and generated user units preserved Telegram isolation.
+The real-Herdr suite reported `ok - real herdr: boot recovery re-arms the stale watcher, classifies authority, and sends one deduped primary nudge`.
+The real pane first rendered `accept edits on`, which the sweep surfaced as broken with its explicit backend target, and then rendered `bypass permissions on`, whose later footer correctly replaced the stale broken mode as healthy.
+Two recovery passes against the same boot id produced exactly one `FIRSTMATE_OP: v1 watcher` input in the fake primary pane.
+The timer-side command log contained the watcher service start and no `--secondmate`, `--channels`, or secondmate-pane send.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

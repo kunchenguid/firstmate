@@ -306,6 +306,17 @@ The locked bootstrap inheritance pass uses the same per-home changed-set and rer
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Boot recovery user units
+
+Linux hosts that restore persistent agent panes after a machine reboot can install a private user timer with `FM_HOME=/path/to/firstmate bin/fm-install-boot-recovery.sh`.
+The installer generates `fm-boot-recovery.timer`, `fm-boot-recovery.service`, and the static `fm-boot-watcher.service` under the user's systemd configuration, reloads the user manager, and enables the timer.
+The timer runs two minutes after each user-manager boot and retries the recovery service only while the restored primary is unavailable or a required safe repair fails.
+The recovery service starts one temporary `fm-watch-arm.sh` cycle when this home's identity-verified watcher is stale, restarts the separate Bizmate review session through `bizmate-start` when absent, detects broken Claude authority footers on registered secondmates, and sends one marked primary nudge per Linux boot id.
+It never exits, kills, sends repair input to, or respawns a secondmate.
+Run `bin/fm-reboot-sweep.sh` in the restored primary to see the duplicate-primary, watcher, Bizmate, and secondmate-authority checklist plus the explicit targets for any judgment-heavy repair.
+The generated units never start a Telegram listener or a channels session, and they do not enable or replace any intentionally disabled Telegram service.
+[`watcher-continuity.md`](watcher-continuity.md#boot-recovery-backstop) owns the watcher-boundary rationale and [`verification/supervision.md`](verification/supervision.md#boot-recovery-backstop) records the active regression evidence.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
