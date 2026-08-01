@@ -299,7 +299,7 @@ fm_procevent_is_handled() {
 # a paired effect that has not yet run), 1 = already recorded (repeat call; do
 # not repeat a paired effect), 2 = error.
 fm_procevent_mark_handled() {
-  local state=$1 id=$2 seq=$3 inbox result adapter_file marker
+  local state=$1 id=$2 seq=$3 inbox result adapter_file marker tmp
   fm_procevent_source_id_valid "$id" || return 2
   case "$seq" in ''|*[!0-9]*) return 2 ;; esac
   inbox=$(fm_procevent_inbox_dir "$state")
@@ -309,10 +309,16 @@ fm_procevent_mark_handled() {
   [ -f "$adapter_file" ] && [ ! -L "$adapter_file" ] || return 2
   marker=$(fm_procevent_handled_marker "$state" "$id" "$seq")
   [ ! -L "$marker" ] || return 2
-  if (set -o noclobber; : > "$marker") 2>/dev/null; then
-    chmod 0600 "$marker" 2>/dev/null || true
+  tmp=$(umask 077; mktemp "$inbox/.handled.XXXXXX") || return 2
+  if ! chmod 0600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 2
+  fi
+  if ln "$tmp" "$marker" 2>/dev/null; then
+    rm -f -- "$tmp"
     return 0
   fi
+  rm -f -- "$tmp"
   [ -f "$marker" ] && [ ! -L "$marker" ] && return 1
   return 2
 }

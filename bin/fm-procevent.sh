@@ -143,8 +143,12 @@ publish_pending() {
     adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
     [ -n "$adapter" ] || continue
     line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || continue
-    fm_wake_append check "procevent:$id:$seq" "check: $line" || continue
-    published=$((published + 1))
+    fm_procevent_source_lock_acquire "$id" || continue
+    if ! fm_procevent_is_handled "$STATE" "$id" "$seq" \
+      && fm_wake_append check "procevent:$id:$seq" "check: $line"; then
+      published=$((published + 1))
+    fi
+    fm_procevent_source_lock_release "$id"
   done < <(fm_procevent_pending "$STATE")
   printf '%s\n' "$published"
 }

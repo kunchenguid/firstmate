@@ -107,6 +107,24 @@ hold_source_lock() {  # <source-id> <ready-file> <release-file>
   HOLDER_PID=$!
 }
 
+hold_source_lock_then_handle() {  # <home> <source-id> <sequence> <ready-file> <release-file>
+  local home=$1 id=$2 seq=$3 ready=$4 release=$5 parent=$$
+  FM_HOME="$home" bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-procevent-lib.sh"
+    fm_procevent_source_lock_acquire "$2" || exit 1
+    trap "fm_procevent_source_lock_release \"$2\"" EXIT
+    printf "ready\n" > "$4"
+    while [ ! -e "$5" ]; do
+      kill -0 "$6" 2>/dev/null || exit 1
+      sleep 0.02
+    done
+    fm_procevent_mark_handled "$3/state" "$2" "$7"
+  ' _ "$ROOT" "$id" "$home" "$ready" "$release" "$parent" "$seq" &
+  HOLDER_PID=$!
+}
+
 # --- inert with nothing configured ------------------------------------------
 IDLE="$TMP_ROOT/idle"; new_home "$IDLE"
 out=$(pe "$IDLE" list)
@@ -192,6 +210,53 @@ case "$repeat_out" in
   handled:*) fail "a repeat acknowledgement re-authorized a second handled effect: $repeat_out" ;;
 esac
 pass "an unhandled result survives restart and repeat drains, and only explicit acknowledgement stops its re-announcement"
+
+HRACE="$TMP_ROOT/hrace"; new_home "$HRACE"
+mkdir -p "$HRACE/state/procevent-inbox"
+printf 'racing result\n' > "$HRACE/state/procevent-inbox/racing-src.1.result"
+printf 'lavish\n' > "$HRACE/state/procevent-inbox/racing-src.1.adapter"
+chmod 0600 "$HRACE/state/procevent-inbox/racing-src.1.result" "$HRACE/state/procevent-inbox/racing-src.1.adapter"
+RACE_PUBLISH_READY="$TMP_ROOT/race-publish-ready"
+RACE_PUBLISH_RELEASE="$TMP_ROOT/race-publish-release"
+RACE_RECONCILE_OUT="$TMP_ROOT/race-reconcile.out"
+hold_source_lock_then_handle "$HRACE" racing-src 1 "$RACE_PUBLISH_READY" "$RACE_PUBLISH_RELEASE"
+RACE_HANDLE_PID=$HOLDER_PID
+wait_for "$RACE_PUBLISH_READY" || fail "publication race barrier did not acquire the source lock"
+pe "$HRACE" reconcile > "$RACE_RECONCILE_OUT" &
+RACE_RECONCILE_PID=$!
+sleep 0.3
+assert_absent "$HRACE/state/.wake-queue" "publication bypassed the source serialization boundary"
+: > "$RACE_PUBLISH_RELEASE"
+wait "$RACE_HANDLE_PID" || fail "publication race barrier could not record handling"
+wait "$RACE_RECONCILE_PID" || fail "reconcile failed after the concurrent acknowledgement"
+assert_contains "$(cat "$RACE_RECONCILE_OUT")" "published=0" "reconcile rechecks handling at the serialized publication boundary"
+assert_present "$HRACE/state/procevent-inbox/racing-src.1.handled" "the concurrent acknowledgement remains durable"
+assert_absent "$HRACE/state/.wake-queue" "an acknowledged result was appended after handling completed"
+pass "publication cannot race a handled acknowledgement"
+
+HPRIVATE="$TMP_ROOT/hprivate"; new_home "$HPRIVATE"
+mkdir -p "$HPRIVATE/state/procevent-inbox"
+printf 'private result\n' > "$HPRIVATE/state/procevent-inbox/private-src.1.result"
+printf 'lavish\n' > "$HPRIVATE/state/procevent-inbox/private-src.1.adapter"
+chmod 0600 "$HPRIVATE/state/procevent-inbox/private-src.1.result" "$HPRIVATE/state/procevent-inbox/private-src.1.adapter"
+FAIL_CHMOD_BIN="$TMP_ROOT/fail-chmod-bin"
+mkdir -p "$FAIL_CHMOD_BIN"
+cat > "$FAIL_CHMOD_BIN/chmod" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$FAIL_CHMOD_BIN/chmod"
+private_status=0
+private_out=$(PATH="$FAIL_CHMOD_BIN:$PATH" pe "$HPRIVATE" handled private-src 1 2>&1) || private_status=$?
+[ "$private_status" -ne 0 ] || fail "handled succeeded when private mode enforcement failed"
+assert_contains "$private_out" "cannot durably record handling" "mode enforcement failure is reported through the owned interface"
+assert_absent "$HPRIVATE/state/procevent-inbox/private-src.1.handled" "failed mode enforcement left an authoritative marker"
+private_out=$(umask 000; pe "$HPRIVATE" handled private-src 1)
+assert_contains "$private_out" "handled: private-src 1" "handling succeeds after private mode enforcement recovers"
+private_mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
+  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$HPRIVATE/state/procevent-inbox/private-src.1.handled")
+assert_contains "$private_mode" 600 "the handled marker is private under a permissive caller umask"
+pass "handled acknowledgement creation is private and fails safely"
 
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
