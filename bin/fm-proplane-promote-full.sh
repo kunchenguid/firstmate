@@ -4,7 +4,8 @@
 # Standing captain workflow (also invoked via /promote skill):
 #   1. Push the active (or named) keeper branch if the worktree has unpushed commits
 #   2. fm-proplane-promote-to-prakrit.sh
-#   3. fm-proplane-promote-prakrit-to-main.sh --push-main (security review + no-mistakes)
+#   3. fm-proplane-promote-prakrit-to-main.sh --push-main (security review +
+#      no-mistakes, then the prakrit → main promotion record PR)
 #   4. scripts/promote-main-to-production.sh in the PropPlane git root
 #
 # Usage:
@@ -19,6 +20,8 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 
 # shellcheck source=bin/fm-proplane-agent-branches-lib.sh
 . "$SCRIPT_DIR/fm-proplane-agent-branches-lib.sh"
+# shellcheck source=bin/fm-proplane-promote-pr-lib.sh
+. "$SCRIPT_DIR/fm-proplane-promote-pr-lib.sh"
 
 DRY_RUN=0
 SKIP_PRODUCTION=0
@@ -106,12 +109,30 @@ push_agent_branch() {
   fi
 }
 
+# Preview the promotion record PR the prakrit → main step will open. The range
+# shown is the pre-promotion origin/main..origin/prakrit, since a dry run never
+# merges the agent branch into prakrit; the real PR records the merged range.
+preview_promotion_pr() {
+  local base_ref=origin/main head_ref=origin/prakrit
+  local base_sha head_sha title body_file pending
+  pending='pending (runs during the prakrit → main step)'
+  base_sha=$(fm_proplane_promote_pr_short_sha "$GIT_ROOT" "$base_ref")
+  head_sha=$(fm_proplane_promote_pr_short_sha "$GIT_ROOT" "$head_ref")
+  title=$(fm_proplane_promote_pr_title "$base_sha" "$head_sha")
+  body_file=$(mktemp)
+  fm_proplane_promote_pr_body "$GIT_ROOT" "$base_ref" "$head_ref" \
+    "$pending" "" "$pending" >"$body_file"
+  fm_proplane_promote_pr_sync "$GIT_ROOT" main prakrit "$title" "$body_file" 1 || true
+  rm -f "$body_file"
+}
+
 main() {
   push_agent_branch || exit 1
 
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "DRY $SCRIPT_DIR/fm-proplane-promote-to-prakrit.sh $AGENT_BRANCH"
     echo "DRY $SCRIPT_DIR/fm-proplane-promote-prakrit-to-main.sh --push-main"
+    preview_promotion_pr
     if [ "$SKIP_PRODUCTION" -eq 0 ]; then
       echo "DRY bash $GIT_ROOT/scripts/promote-main-to-production.sh"
     fi

@@ -36,8 +36,12 @@ Implement only in that worktree; never treat `projects/proplane-prakrit` as the 
 Also allowed on `origin`: `main` and `production` only besides the five agent/integration branches above.
 
 **Never push** `fm/*`, feature, or task branches to GitHub.
-**Never open a PR** unless the captain explicitly asks.
 Land commits on the owning keeper branch in that agent's worktree only.
+
+**Promotion PR (standing captain order, 2026-07-31):** every `prakrit` → `main` promotion opens a promotion-record PR from `prakrit` into `main`, carrying the promoted commit range, the security-review outcome, and the validation outcome.
+`bin/fm-proplane-promote-prakrit-to-main.sh --push-main` opens it, and `bin/fm-proplane-promote-pr-lib.sh` owns the contract.
+It is a record, not a second gate: the ladder fast-forwards `main` right after opening it, which closes it as merged, and a GitHub failure warns without stopping the promotion.
+Open **no other** PR unless the captain explicitly asks.
 
 ## After changes land
 

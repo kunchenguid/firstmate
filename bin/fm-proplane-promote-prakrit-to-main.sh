@@ -4,6 +4,11 @@
 # Keeper ladder: prakrit (integration) → main (Vercel Preview). Never pushes fm/*
 # branches. Uses a local integrate/prakrit-to-main branch for validation only.
 #
+# With --push-main this also opens a prakrit → main promotion-record PR before
+# the fast-forward, per the captain's standing order. See
+# bin/fm-proplane-promote-pr-lib.sh for that contract; the short version is that
+# the PR records what moved and never gates the promotion.
+#
 # Usage:
 #   fm-proplane-promote-prakrit-to-main.sh              # validate + restart prakrit dev server (no push)
 #   fm-proplane-promote-prakrit-to-main.sh --push-main  # after captain tests localhost
@@ -20,6 +25,8 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 
 # shellcheck source=bin/fm-proplane-agent-branches-lib.sh
 . "$SCRIPT_DIR/fm-proplane-agent-branches-lib.sh"
+# shellcheck source=bin/fm-proplane-promote-pr-lib.sh
+. "$SCRIPT_DIR/fm-proplane-promote-pr-lib.sh"
 
 INTEGRATE_BRANCH=integrate/prakrit-to-main
 DRY_RUN=0
@@ -28,6 +35,13 @@ PUSH_MAIN=0
 SKIP_GATES=0
 SKIP_SECURITY_REVIEW=0
 FORCE=0
+
+# Gate outcomes, recorded as they happen so the promotion PR states the evidence
+# this promotion actually ran on rather than what the flags implied.
+SECURITY_REVIEW_STATUS='not run in this invocation'
+SECURITY_REVIEW_REPORT=''
+VALIDATION_STATUS='not run in this invocation'
+
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
@@ -38,6 +52,11 @@ for arg in "$@"; do
     --force) FORCE=1 ;;
     --help|-h)
       echo "usage: fm-proplane-promote-prakrit-to-main.sh [--dry-run] [--validate-only] [--push-main] [--skip-gates] [--skip-security-review] [--force]"
+      echo "  --push-main   Also opens the prakrit → main promotion record PR just before"
+      echo "                the fast-forward. The PR records the promoted range and the"
+      echo "                gate outcomes; it never gates the promotion, and a GitHub"
+      echo "                failure is warned about rather than stopping the push."
+      echo "  --dry-run     Prints the promotion record PR it would open, and opens none."
       echo "  --force       CAPTAIN-AUTHORIZED ONLY: allow the staging reset and sandbox"
       echo "                realignment to discard uncommitted work in those worktrees."
       echo "  --skip-gates  CAPTAIN-AUTHORIZED ONLY: skip the security review and the"
@@ -86,7 +105,20 @@ prepare_integrate_branch() {
 }
 
 run_security_review() {
-  "$SCRIPT_DIR/fm-proplane-security-review.sh" "$GIT_ROOT" --base main --head "$INTEGRATE_BRANCH"
+  local log rc
+  log=$(mktemp)
+  # Tee stdout only: the review's own BLOCKED messages stay on stderr, and the
+  # report path it prints becomes evidence in the promotion PR.
+  "$SCRIPT_DIR/fm-proplane-security-review.sh" "$GIT_ROOT" --base main --head "$INTEGRATE_BRANCH" | tee "$log"
+  rc=${PIPESTATUS[0]}
+  SECURITY_REVIEW_REPORT=$(awk '
+    /^proplane-security-review: report / {
+      sub(/^proplane-security-review: report /, "")
+      print
+      exit
+    }' "$log")
+  rm -f "$log"
+  return "$rc"
 }
 
 run_no_mistakes() {
@@ -104,6 +136,33 @@ run_no_mistakes() {
       --intent "$intent" \
       --skip=push,pr,ci
   )
+}
+
+open_promotion_pr() {
+  local base_ref=origin/main head_ref=origin/prakrit
+  local count base_sha head_sha title body_file rc
+  # Best-effort refresh so the recorded range matches what GitHub will see. A
+  # fetch that cannot run only costs body accuracy, never the promotion, and a
+  # dry run touches nothing at all.
+  if [ "$DRY_RUN" -eq 0 ]; then
+    git -C "$GIT_ROOT" fetch origin main prakrit >/dev/null 2>&1 || true
+  fi
+  count=$(fm_proplane_promote_pr_range_count "$GIT_ROOT" "$base_ref" "$head_ref")
+  if [ "$count" -eq 0 ]; then
+    echo "proplane-promote-main: no commits between $base_ref and $head_ref, no promotion record needed"
+    return 0
+  fi
+  base_sha=$(fm_proplane_promote_pr_short_sha "$GIT_ROOT" "$base_ref")
+  head_sha=$(fm_proplane_promote_pr_short_sha "$GIT_ROOT" "$head_ref")
+  title=$(fm_proplane_promote_pr_title "$base_sha" "$head_sha")
+  body_file=$(mktemp)
+  fm_proplane_promote_pr_body "$GIT_ROOT" "$base_ref" "$head_ref" \
+    "$SECURITY_REVIEW_STATUS" "$SECURITY_REVIEW_REPORT" "$VALIDATION_STATUS" >"$body_file"
+  echo "== promotion record PR (prakrit → main) =="
+  fm_proplane_promote_pr_sync "$GIT_ROOT" main prakrit "$title" "$body_file" "$DRY_RUN"
+  rc=$?
+  rm -f "$body_file"
+  return "$rc"
 }
 
 merge_and_push_main() {
@@ -171,24 +230,29 @@ main() {
     prepare_integrate_branch || exit 1
     if [ "$SKIP_GATES" -eq 1 ] || [ "$SKIP_SECURITY_REVIEW" -eq 1 ]; then
       echo "== security review: SKIPPED (captain-authorized) =="
+      SECURITY_REVIEW_STATUS='SKIPPED (captain-authorized)'
     else
       echo "== security review =="
       run_security_review || exit 1
+      SECURITY_REVIEW_STATUS='passed (no Critical or High findings)'
     fi
   else
     run_git "$GIT_ROOT" checkout "$INTEGRATE_BRANCH" 2>/dev/null || {
       echo "proplane-promote-main: missing $INTEGRATE_BRANCH — run without --validate-only first" >&2
       exit 1
     }
+    SECURITY_REVIEW_STATUS='not re-run here (--validate-only resumes an earlier promotion run)'
   fi
 
   if [ "$SKIP_GATES" -eq 1 ]; then
     echo "== no-mistakes validation: SKIPPED by --skip-gates (captain-authorized) =="
+    VALIDATION_STATUS='SKIPPED by --skip-gates (captain-authorized)'
   else
     run_no_mistakes || {
       echo "proplane-promote-main: no-mistakes did not complete — drive gates with no-mistakes axi respond, then re-run --validate-only" >&2
       exit 1
     }
+    VALIDATION_STATUS='passed (no-mistakes: review, tests, document, lint)'
   fi
 
   if [ "$VALIDATE_ONLY" -eq 0 ]; then
@@ -198,9 +262,17 @@ main() {
 
   if [ "$PUSH_MAIN" -eq 0 ]; then
     echo "proplane-promote-main: validation complete — test on http://localhost:3000"
-    echo "proplane-promote-main: no push yet. After you approve, run with --push-main (no PR unless you ask)."
+    echo "proplane-promote-main: no push yet. After you approve, run with --push-main (which also opens the promotion record PR)."
     exit 0
   fi
+
+  # The record is opened BEFORE the fast-forward, because the fast-forward is
+  # what closes it as merged. A GitHub failure here is warned about and stepped
+  # over: losing the record is bad, leaving main and production diverged because
+  # an API call failed is worse.
+  open_promotion_pr || {
+    echo "proplane-promote-main: WARNING no promotion record PR was opened; the promotion continues so main and production do not diverge" >&2
+  }
 
   merge_and_push_main || exit 1
   echo "proplane-promote-main: ok — main pushed; Vercel Preview building"

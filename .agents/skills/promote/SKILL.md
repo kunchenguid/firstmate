@@ -43,7 +43,7 @@ The script:
 
 1. Pushes the agent branch if local commits are ahead of `origin/<branch>`.
 2. Runs `bin/fm-proplane-promote-to-prakrit.sh` (merge into prakrit, push, reset sandboxes).
-3. Runs `bin/fm-proplane-promote-prakrit-to-main.sh --push-main` (security review, no-mistakes validation, fast-forward `main`).
+3. Runs `bin/fm-proplane-promote-prakrit-to-main.sh --push-main` (security review, no-mistakes validation, promotion record PR, fast-forward `main`).
 4. Runs `scripts/promote-main-to-production.sh` in the PropPlane git root (fast-forward `production`, live deploy, **iOS TestFlight**).
 
 ## iOS (TestFlight)
@@ -81,5 +81,10 @@ bash "$GIT_ROOT/scripts/promote-main-to-production.sh"
 Translate outcomes per `AGENTS.md` section 9: integration on localhost **3000**, Preview on `main`, live site on **production** / prop-lane.space, **iOS TestFlight** after production push.
 Mention any blocked merge, failed push, or no-mistakes gate in plain language with the next action.
 When production was promoted, note whether the iOS TestFlight workflow is queued, running, or green.
+Give the captain the promotion PR's full `https://...` URL, and say plainly when it could not be opened and that the promotion itself still completed.
 
-Do not open a PR unless the captain explicitly asks.
+## Promotion PR
+
+The `prakrit` → `main` step opens a promotion-record PR by the captain's standing order, so each promotion leaves a readable record of what moved and on what evidence.
+`proplane-ladder` and `bin/fm-proplane-promote-pr-lib.sh` own that contract; nothing waits on the PR, and a re-run updates the open one instead of opening a second.
+Open no other PR unless the captain explicitly asks.
