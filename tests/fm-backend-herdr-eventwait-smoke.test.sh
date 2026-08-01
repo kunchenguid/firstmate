@@ -112,7 +112,7 @@ REC_PANE=$(fm_transition_pane_id "$REC")
 REC_TO=$(fm_transition_to_status "$REC")
 [ "$REC_PANE" = "$PANE_ID" ] || fail "the returned record's pane_id ('$REC_PANE') must match the driven pane ('$PANE_ID')"
 [ "$REC_TO" = "blocked" ] || fail "the returned record's to_status must be 'blocked', got '$REC_TO'"
-# Sub-second: comfortably under the ~240s stale-pane wedge timer this replaces.
+# Sub-second: comfortably ahead of the stale-pane polling backstop this replaces.
 UNDER_ONE=$(python3 -c "print('yes' if (($END)-($START)) < 1.0 else 'no')" 2>/dev/null || echo "no")
 [ "$UNDER_ONE" = yes ] || echo "note: idle->blocked wake took ${ELAPSED}s (>1s; still far under the 240s wedge timer, not fatal)" >&2
 pass "real herdr ($HERDR_VERSION): a driven idle->blocked transition returns the blocked record in ${ELAPSED}s (pane $PANE_ID)"
