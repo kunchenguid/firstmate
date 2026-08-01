@@ -96,19 +96,23 @@ test_stale_enqueue_before_suppressor() {
   pane_hash=$(hash_text "idle prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · ready in branch fm/stale'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for stale pane"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print stale wake"
+  grep -F "stale: $window (possible wedge:" "$out" >/dev/null || fail "watcher did not print stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after stale wake failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "stale wake was not queued"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not written"
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = possible-wedge ] || fail "stale candidate was not committed after enqueue"
+  unset FM_FAKE_CREW_STATE
   pass "stale wake is queued before suppressor state is advanced"
 }
 
-# Absorb-only-when-provably-working adds a new actionable wake: a non-terminal stale
-# whose crew is NOT provably working is surfaced immediately. That new path must keep
-# the queue-safety invariant - enqueue the stale wake BEFORE advancing the .stale-*
-# suppressor - so a watcher killed between the two never swallows the surfaced finish.
+# A possible-wedge state transition is actionable. That path must keep the
+# queue-safety invariant - enqueue the stale wake before committing its
+# .stale-candidate-* marker - so a watcher killed between the two retries it.
 test_not_working_stale_enqueue_before_suppressor() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig
   dir=$(make_case stale-stopped)
@@ -129,19 +133,19 @@ test_not_working_stale_enqueue_before_suppressor() {
   pane_hash=$(hash_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  # NOT provably working: no running pipeline, idle pane. (make_case installed the
-  # fake fm-crew-state.sh the watcher reads via FM_CREW_STATE_BIN.)
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # No current disconfirmer: only the old status-log note remains.
+  export FM_FAKE_CREW_STATE='state: working · source: status-log · implementing'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not surface a not-provably-working stale"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
+  wait_for_exit "$!" 40 || fail "watcher did not surface a possible-wedge transition"
+  grep -F "stale: $window (possible wedge:" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the immediate stale wake failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced after the enqueue"
+  [ "$(cat "$state/.stale-candidate-$key" 2>/dev/null || true)" = possible-wedge ] || fail "possible-wedge candidate was not committed after enqueue"
   unset FM_FAKE_CREW_STATE
-  pass "a not-provably-working stale wake is queued before its suppressor is advanced"
+  pass "a possible-wedge wake is queued before its candidate marker is committed"
 }
 
 test_check_output_is_queued() {

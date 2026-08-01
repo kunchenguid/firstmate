@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared wake classifier: the common source of truth for captain-relevant status
-# tests, declared-external-wait vocabulary, and the working/paused absorb
-# classification that makes no-verb signal and stale-pane wakes safe to absorb.
+# tests, declared-external-wait vocabulary, and the task-bound supervision
+# classification that makes no-verb signal and stale-pane decisions safe.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
 # overlapping triage policy lives in one place instead of two copies that can
@@ -13,17 +13,15 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are two documented exceptions. The absorb classification
-# (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
-# read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
-# to decide whether a crew that just stopped its turn or went stale is working,
-# deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
-# and first sighting of a stale hash, never on every wake, so the per-wake triage
-# stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
-# open-decisions fold" below) also writes: it persists a per-status-file byte
-# cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
-# stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time.
+# There are two documented exceptions. Task supervision classification is NOT a
+# pure status-file read: it reuses bin/fm-crew-state.sh, which may make a bounded
+# no-mistakes call, to distinguish an active run, gate, live turn, pause,
+# possible wedge, or unknown state. Callers keep it on supervision candidate
+# paths rather than unrelated wakes. status_open_decisions_incremental (see
+# "incremental (cursor-backed) open-decisions fold" below) also writes: it
+# persists a per-status-file byte cursor and folded open-set as a side effect, so
+# a per-drain fleet-wide scan stays bounded by new appends instead of re-reading
+# each task's whole lifetime log every time.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -544,47 +542,72 @@ signal_reason_is_actionable() {  # <file> ...
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
-#             pane; the crew is legitimately mid-work on a static-looking pane
-#             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
+#   active-run     - an actively-running no-mistakes step for this task;
+#   gate           - this task's run is parked at a no-mistakes gate;
+#   harness-turn   - this task's harness has a live turn in progress;
+#   external-pause - this task declared an external pause and its substrate is
+#                    live (fm-crew-state checks endpoint readability first);
+#   possible-wedge - no current task-bound disconfirmer exists;
+#   unknown        - the current-state source is unreadable or unrecognized.
+# One fm-crew-state.sh read gives every stale detector its task-bound evidence.
+# Reading the state authoritatively (not the status log) is what keeps run-step
+# precedence: a crew that appended paused: but then STARTED a run reports an
+# active run, never a pause.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
+# keep it on supervision candidate paths, never on unrelated wakes.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
+crew_supervision_class() {  # <id>
   local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
+  [ -n "$id" ] || { printf 'unknown'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+  case "$line" in state:*"source: "*) ;; *) printf 'unknown'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
-  if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
-  fi
-  printf 'none'
+  src=${line#*source: }; src=${src%% *}
+  case "$state:$src" in
+    working:run-step) printf 'active-run' ;;
+    parked:run-step)  printf 'gate' ;;
+    working:pane)     printf 'harness-turn' ;;
+    paused:status-log) printf 'external-pause' ;;
+    unknown:none)
+      case "$line" in
+        *"no current-state source available"*) printf 'possible-wedge' ;;
+        *)                                    printf 'unknown' ;;
+      esac
+      ;;
+    unknown:*)        printf 'unknown' ;;
+    *)
+      case "$state:$src" in
+        working:status-log|parked:status-log|done:run-step|done:status-log|blocked:run-step|blocked:status-log|failed:run-step|failed:status-log)
+          printf 'possible-wedge'
+          ;;
+        *)
+          printf 'unknown'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+# Compatibility classifier for no-verb signal triage and the away-mode daemon.
+# The state-specific stale path consumes crew_supervision_class directly.
+crew_absorb_class() {  # <id>
+  case "$(crew_supervision_class "$1")" in
+    active-run|harness-turn) printf 'working' ;;
+    external-pause)          printf 'paused' ;;
+    *)                       printf 'none' ;;
+  esac
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
 # reports `working`). This is the "provably working" predicate at the heart of
-# absorb-only-when-provably-working: a no-verb turn-end or stale wake is absorbed
-# ONLY when this returns 0, and SURFACED otherwise (the crew may be done, waiting
-# on a decision, or wedged). For stale panes it is checked before trusting the
-# status log so a pre-validation captain-relevant line does not override an active
-# run. See crew_absorb_class for the exact working/paused/none decision.
+# no-verb signal triage: a no-verb turn-end is absorbed only when this returns 0.
+# The state-specific stale path consumes crew_supervision_class directly.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
-# The stale path absorbs such a crew (on a long re-surface cadence) instead of
-# escalating a possible wedge.
+# Shared consumers can recognize that pause without parsing the status log.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }

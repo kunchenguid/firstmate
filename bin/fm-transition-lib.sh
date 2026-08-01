@@ -75,7 +75,7 @@ fm_transition_agent()        { fm_transition_field "$1" 5; }
 #                status today: herdr reports it precisely when a harness is
 #                waiting on the human (a permission/trust dialog, an interactive
 #                menu, a wedged prompt) - the cases that write no status file
-#                and otherwise sit until the stale-pane wedge timer.
+#                and otherwise wait for the stale-pane polling backstop.
 #   absorb     - do NOT wake, but CLEAR this pane's per-pane escalation dedupe
 #                marker so a later `->blocked` edge re-escalates. `working`
 #                (a crew resumed/started a turn) is the clearing edge.

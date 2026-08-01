@@ -2415,6 +2415,10 @@ SH
   printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' custom-replacement-ran" > "$state/b-custom.check.sh"
   chmod 0700 "$state/b-custom.check.sh"
   rm -f "$state/.last-check" "$x_poll_marker"
+  # Keep this watcher invocation bounded by an explicit actionable transition.
+  # An unknown stale pane is intentionally silent and must never be an implicit
+  # test-exit mechanism for unrelated check-authentication coverage.
+  printf 'done: custom replacement fixture inspected\n' > "$state/custom-replacement.status"
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
     FM_TEST_GH_STATE=OPEN FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
@@ -2432,6 +2436,7 @@ SH
   printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' forged-x-ran" > "$state/x-watch.check.sh"
   chmod 0700 "$state/x-watch.check.sh"
   rm -f "$state/.last-check" "$x_poll_marker"
+  printf 'done: X shim replacement fixture inspected\n' > "$state/x-replacement.status"
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
     FM_TEST_GH_STATE=OPEN FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
