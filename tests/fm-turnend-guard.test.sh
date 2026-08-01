@@ -84,10 +84,18 @@ test_predicate_x_mode_needs_supervision() {
   fm_supervision_needed "$state" 300 || fail "X-mode relay poll did not register as supervision need"
   [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "X-mode relay poll must not count as an in-flight task"
   [ "$FM_SUP_NEEDED" = true ] || fail "X-mode relay poll must set FM_SUP_NEEDED"
-  if fm_supervision_unhealthy "$state" 300; then
-    fail "task-specific unhealthy predicate must preserve its zero-task behavior"
-  fi
-  pass "fm_supervision_needed: X-mode relay poll needs supervision without changing the task predicate"
+  fm_supervision_unhealthy "$state" 300 || fail "X-mode relay poll with no beacon must be unhealthy"
+  pass "fm_supervision_needed: X-mode relay poll needs supervision"
+}
+
+test_predicate_source_needs_supervision() {
+  local state="$TMP_ROOT/pred-source/state"
+  mkdir -p "$state/procevent"
+  : > "$state/procevent/source-only.source"
+  fm_supervision_unhealthy "$state" 300 || fail "registered source with no beacon must be unhealthy"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a process-event source must not count as a task"
+  [ "$FM_SUP_SOURCES" -eq 1 ] || fail "expected one registered process-event source"
+  pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
@@ -228,6 +236,17 @@ test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
   expect_code 2 "$status" "hook must block when a fresh beacon has no live watcher lock"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks when a fresh beacon has no live watcher lock"
+}
+
+test_hook_blocks_source_only_home() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-source-only")
+  mkdir -p "$dir/state/procevent"
+  : > "$dir/state/procevent/source-only.source"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "non-Claude hook must block when a source-only home has no watcher"
+  assert_contains "$out" "1 process-event source(s) registered" "block reason must identify the source-only supervision need"
+  pass "fm-turnend-guard: non-Claude path blocks a source-only home"
 }
 
 test_hook_blocks_when_dead_lock_has_fresh_beacon() {
@@ -1110,8 +1129,10 @@ test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
+test_predicate_source_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
+test_hook_blocks_source_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
