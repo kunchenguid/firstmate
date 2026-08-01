@@ -127,6 +127,11 @@ Two files per machine, both LOCAL and gitignored.
 **`config/relay-hosts.json`** - add `"fleet": "<same id>"` to each host record that is a member.
 A registered host **without** that field is an ordinary Phase 1/2 task host: it never receives a lease, its fencing never switches on, and dispatch to it is unchanged.
 
+**Point each member's deployed control root at that machine's REAL firstmate home**, and redeploy it if it is not already.
+`adopt` discovers work through the peer's `task-list` verb, and that verb enumerates `<control-root>/config`'s own `FM_HOME` - not any field of `fleet.json`.
+A control root left pointing at the sandboxed host home a Phase 1/2 deployment gave it answers every question correctly and lists nothing the captain is actually running, so the handover mechanism passes while the handover itself moves an empty set.
+The same field decides which home a dispatch to that machine lands in, so on a machine that is both a fleet member and a GUI task host the two roles now share one home; [`relay-gui-host.md`](relay-gui-host.md) owns why that home must not share a worktree pool with the dispatching machine's own repositories.
+
 Then, on the machine that should steer: `bin/fm-helm.sh claim`, followed by `bin/fm-helm.sh adopt`.
 
 ## Everyday use
@@ -192,5 +197,23 @@ Events belonging to remote tasks are not affected: those replay from the host's 
 ## Verification status
 
 Everything above is covered by the hermetic two-machine suite.
-What has **not** been exercised on the real Mac↔151 pair is the live handover itself: real relay latency, a real captain moving between machines, and the adoption of a real running crewmate.
-The design's own advice applies - run the acceptance sequence with throwaway tasks on both machines before putting real work through it.
+The live handover has since been run on the real pair as well.
+
+Measured 2026-08-02, control machine macOS 26.5.2 arm64 with bifrost 0.0.167, peer Debian 5.15 x86_64 with bifrost 0.0.165, over `bifrost.bytedance.net`.
+The helm moved between the two machines six times, epoch 1 to 9, with one real claude crewmate live on each machine throughout and a throwaway repository on each side.
+
+What that run exercised:
+
+- A planned handover with a live task on both machines: the new control plane adopted the other's task, the demoted machine refused `spawn`, `send`, `teardown`, `pr-merge`, and `merge-local`, and neither crewmate was restarted - same pane pid, same agent pid, same start time before and after all six moves.
+- Event continuity: the adopted task's five unacknowledged status lines replayed from offset 0 at exactly the byte count recorded before the handover, and a `needs-decision` the old control plane never answered was answered by the new one and accepted by the still-running worker.
+- Fencing, both directions of wrongness: a control plane frozen at epoch N was refused by the peer with `ERR EPOCH_STALE` on `send` and on `teardown`, a call carrying no epoch at all was refused identically, and the peer's task, metadata, worktree, and lease were byte-for-byte unchanged afterwards.
+- The surprise-demotion path: `status --refresh` on the stale machine wrote `state/.helm-lost`, every mutating command then refused on that record, and `bin/fm-helm.sh claim` cleared it exactly as the refusal text says.
+- Two machines claiming a free helm at the same wall-clock instant: one won, the loser was told who won, and the epoch advanced by exactly one.
+- Zero impact on a fleetless home *on a machine that now holds a lease*: a clean home with no `config/fleet.json` ran all five gated commands with no helm output at all, and its session-start digest gained no `HELM` section.
+
+What that run did **not** exercise, and what therefore remains inference:
+
+- A handover of a real engineering task; both probes were scripted throwaways that only appended status lines.
+- The PR-monitoring move. Neither probe carried a `pr=`, so the `handover`/`demote` stand-down and the `adopt` re-arm prompt were never reached.
+- `claim --force` itself. The stale control plane was produced by advancing the peer's lease directly, which leaves the same state a forced claim during a link break leaves, but the command was not run.
+- A real link break, a real sleep and wake cycle, and a real `bin/fm-watch.sh` executing an adopted task's notification check - that check was run by hand exactly as the watcher runs it, and it produced the wake line, but no watcher was armed.
