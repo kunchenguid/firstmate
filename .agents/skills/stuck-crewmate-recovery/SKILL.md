@@ -15,6 +15,7 @@ Use this playbook when the session-start digest reports an ordinary direct repor
 
 Load `harness-adapters` before sending an interrupt, exit command, resume command, or harness-specific skill invocation.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
+Relaunch a ship task from its retained `state/<id>.launch-brief.md` whenever that file exists, because `data/<id>/brief.md` keeps the harness-neutral validation wording, including any unresolved `__FM_NO_MISTAKES_INVOCATION__` token, that only `fm-spawn` renders for the resolved harness.
 
 ## Session-start reconciliation for a dead ordinary direct report
 
