@@ -211,6 +211,9 @@ textarea:focus { outline: 2px solid var(--border-focus); outline-offset: 1px; bo
 .review-item p { margin: 5px 0 0; color: var(--text-secondary); }
 .review-item .selection { color: var(--text-primary); font-weight: var(--fw-semibold); }
 .confirmation { border: 1px solid color-mix(in srgb, var(--green-500) 55%, var(--border-hairline)); border-radius: var(--radius-md); background: color-mix(in srgb, var(--ruby-green) 22%, var(--bg-surface)); padding: 14px; color: #8FE0BF; }
+.payload-backup { margin-top: 18px; }
+.payload-backup p { margin: 6px 0 10px; color: var(--text-secondary); }
+.payload-backup textarea { min-height: 220px; font-family: var(--font-mono); font-size: var(--sm-size); }
 [hidden] { display: none !important; }
 @media (max-width: 600px) {
   main { width: min(100% - 20px, 980px); padding-top: 28px; }
@@ -238,6 +241,9 @@ function boardScript(decision) {
   const reviewList = document.querySelector('#review-list');
   const formError = document.querySelector('#form-error');
   const overallNote = document.querySelector('#overall-note');
+  const payloadBackup = document.querySelector('#payload-backup');
+  const submittedPayload = document.querySelector('#submitted-payload');
+  const downloadFilename = 'lavish-answer-' + MANIFEST.decision_id + '.json';
   window.__lavishPayload = null;
 
   function buildPayload() {
@@ -304,6 +310,19 @@ function boardScript(decision) {
     }
   }
 
+  function downloadPayload(payloadJson) {
+    const blob = new Blob([payloadJson], { type: 'application/json;charset=utf-8' });
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = downloadFilename;
+    anchor.hidden = true;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  }
+
   document.querySelector('#review-button').addEventListener('click', () => {
     const missing = MANIFEST.questions.find((question) => !form.querySelector(
       'input[data-question-key="' + question.key + '"]:checked',
@@ -332,7 +351,11 @@ function boardScript(decision) {
 
   document.querySelector('#submit-button').addEventListener('click', (event) => {
     const payload = buildPayload();
+    const payloadJson = JSON.stringify(payload, null, 2) + '\\n';
+    downloadPayload(payloadJson);
     window.__lavishPayload = payload;
+    submittedPayload.value = payloadJson;
+    payloadBackup.hidden = false;
     document.title = SUBMIT_MARKER;
     event.currentTarget.disabled = true;
     document.querySelector('#confirmation').hidden = false;
@@ -384,7 +407,12 @@ export async function renderBoard(decision) {
       <p class="eyebrow">Final review</p>
       <h2 id="review-title">Submit this complete answer batch?</h2>
       <div id="review-list" class="review-list"></div>
-      <p id="confirmation" class="confirmation" role="status" hidden>Answer captured. Firstmate will validate and confirm receipt.</p>
+      <p id="confirmation" class="confirmation" role="status" hidden>Answer downloaded. Firstmate will validate and confirm receipt.</p>
+      <section id="payload-backup" class="payload-backup" aria-labelledby="payload-backup-title" hidden>
+        <h3 id="payload-backup-title">Manual payload backup</h3>
+        <p>If the browser blocked the download, copy and save this complete JSON payload.</p>
+        <textarea id="submitted-payload" rows="14" readonly spellcheck="false" aria-label="Submitted payload JSON"></textarea>
+      </section>
       <div class="actions">
         <button id="back-button" class="button" type="button">Back</button>
         <button id="submit-button" class="button primary" type="button">Submit to firstmate</button>

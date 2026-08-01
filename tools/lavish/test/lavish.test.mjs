@@ -464,8 +464,16 @@ test('board renders the manifest, annotations, Markdown context, visuals, and su
   assert.ok(evidence);
   assert.match(evidence.getAttribute('src'), /^data:image\/png;base64,/);
   assert.equal(document.querySelectorAll('link[rel="stylesheet"]').length, 0);
+  const payloadBackup = document.querySelector('#submitted-payload');
+  assert.ok(payloadBackup);
+  assert.equal(payloadBackup.hasAttribute('readonly'), true);
   const script = document.querySelector('script').textContent;
   assert.match(script, /window\.__lavishPayload = payload/);
+  assert.match(script, /new Blob\(\[payloadJson\]/);
+  assert.match(script, /URL\.createObjectURL\(blob\)/);
+  assert.match(script, /anchor\.download = downloadFilename/);
+  assert.match(script, /anchor\.click\(\)/);
+  assert.match(script, /submittedPayload\.value = payloadJson/);
   assert.match(script, /document\.title = SUBMIT_MARKER/);
   assert.match(script, /LAVISH-SUBMIT v2/);
 });

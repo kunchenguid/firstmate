@@ -11,7 +11,9 @@ TMP_ROOT=$(fm_test_tmproot fm-lavish-board-tests)
 HOME_PATH="$TMP_ROOT/home"
 FAKEBIN="$TMP_ROOT/fakebin"
 LOG="$TMP_ROOT/calls.log"
-mkdir -p "$HOME_PATH/data/decisions/example" "$HOME_PATH/state" "$FAKEBIN"
+DOWNLOADS_PATH="$TMP_ROOT/Downloads"
+mkdir -p "$HOME_PATH/data/decisions/example" "$HOME_PATH/state" "$FAKEBIN" \
+  "$DOWNLOADS_PATH"
 
 cat > "$FAKEBIN/lavish" <<'SH'
 #!/usr/bin/env bash
@@ -41,6 +43,7 @@ printf 'chrome:%s session=%s headed=%s auto=%s browser=%s profile=%s args=%s por
 case "${1:-}" in
   open|stop) exit 0 ;;
   eval)
+    [ "${FM_TEST_PAGE_CLOSED:-0}" != 1 ] || exit 1
     FAKE_MARKER=${FM_TEST_MARKER:-absent} node -e '
       const present = process.env.FAKE_MARKER === "present";
       const snapshot = present
@@ -77,8 +80,9 @@ run_board() {
     CHROME_DEVTOOLS_AXI_PORT=9222 \
     CHROME_DEVTOOLS_AXI_USER_DATA_DIR=/captain/main/profile \
     CHROME_DEVTOOLS_AXI_WS_HEADERS=secret \
+    FM_LAVISH_BIN="$FAKEBIN/lavish" \
     PATH="$FAKEBIN:$PATH" \
-    "$BOARD" example --home "$HOME_PATH"
+    "$BOARD" example --home "$HOME_PATH" --downloads "$DOWNLOADS_PATH"
 }
 
 test_launcher_isolates_chrome_and_arms_check() {
@@ -98,8 +102,39 @@ test_launcher_isolates_chrome_and_arms_check() {
   pass "fm-lavish-board opens a headed named session with an isolated throwaway profile"
 }
 
+test_download_survives_closed_page_and_precedes_live_read() {
+  local check downloaded durable output lines
+  check="$HOME_PATH/state/lavish-board-example.check.sh"
+  downloaded="$DOWNLOADS_PATH/lavish-answer-example.json"
+  durable="$HOME_PATH/state/lavish-board-example.payload.json"
+  printf '%s\n' '{"schema_version":2,"decision_id":"example","request_sha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","answers":[{"key":"choice","value":"a","question_note":"survives close","option_comments":{"a":"download first"}}],"note":"closed-page proof"}' > "$downloaded"
+  : > "$LOG"
+
+  output=$(
+    FM_TEST_PAGE_CLOSED=1 FM_TEST_LOG="$LOG" PATH="$FAKEBIN:$PATH" "$check"
+  ) || fail "download-first closed-page check failed"
+  lines=$(printf '%s\n' "$output" | awk 'NF { count++ } END { print count + 0 }')
+  [ "$lines" -eq 1 ] || fail "download-first check printed $lines lines"
+  [ "$output" = "lavish-submit: example $durable" ] \
+    || fail "download-first check printed the wrong wake line: $output"
+  assert_absent "$check" "download-first check did not disarm itself"
+  assert_present "$durable" "download-first check did not persist the payload"
+  assert_no_grep 'chrome:eval' "$LOG" \
+    "download-first check tried to read the already closed page"
+  node -e '
+    const fs = require("node:fs");
+    const payload = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (payload.answers[0].question_note !== "survives close") process.exit(1);
+    if (payload.answers[0].option_comments.a !== "download first") process.exit(1);
+    if (payload.note !== "closed-page proof") process.exit(1);
+  ' "$durable" || fail "downloaded payload was not recovered intact after page close"
+  rm -f "$downloaded" "$durable"
+  pass "Lavish board download remains recoverable after the page closes"
+}
+
 test_check_is_silent_until_marker_then_prints_once() {
   local check absent present payload lines
+  run_board >/dev/null || fail "could not rearm live-page fallback check"
   check="$HOME_PATH/state/lavish-board-example.check.sh"
   absent=$(
     FM_TEST_MARKER=absent FM_TEST_LOG="$LOG" PATH="$FAKEBIN:$PATH" "$check"
@@ -127,4 +162,5 @@ test_check_is_silent_until_marker_then_prints_once() {
 }
 
 test_launcher_isolates_chrome_and_arms_check
+test_download_survives_closed_page_and_precedes_live_read
 test_check_is_silent_until_marker_then_prints_once

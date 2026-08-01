@@ -27,8 +27,14 @@ The command prints `answer saved; wake not queued`, exits nonzero, and the next 
 The HTML includes its CSS, JavaScript, and images and makes no request to a shared board service.
 Its dark default theme inlines the vendored Relvino tokens from `src/relvino-tokens.css`, including Inter, Ruby green, `#007AFF` actions, the semantic aliases, and the 16px card radius.
 
-Submitting the page assigns the complete JSON batch to `window.__lavishPayload` and sets `document.title` to `LAVISH-SUBMIT v2`.
-Those browser signals are transport only and do not write an answer until `lavish-axi collect` validates the payload.
+Submitting the page synchronously starts a JSON file download named `lavish-answer-<decision-id>.json` before it assigns the complete batch to `window.__lavishPayload` and sets `document.title` to `LAVISH-SUBMIT v2`.
+The downloaded file survives page and browser closure, while the browser signals remain a live-page fallback.
+The done screen also exposes the complete formatted JSON in a read-only selectable textarea for browsers that block downloads.
+None of these transports writes an answer until `lavish-axi collect` validates the payload.
+
+`bin/fm-lavish-board.sh` defaults to the shell user's `Downloads` directory and accepts `--downloads <path>` when the browser uses a different one.
+Its one-shot check copies a fresh matching download into the Firstmate home's durable state directory before attempting the live-page marker read.
+It never uses `localStorage`, which is not a reliable transport for `file://` boards.
 
 Every command accepts `--home <path>`.
 A captain command run from a shell that does not export `FM_HOME` must include that option, while `bin/fm-lavish-board.sh` resolves its Firstmate home and supplies the option itself.
