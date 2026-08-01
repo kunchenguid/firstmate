@@ -83,12 +83,9 @@ cmd_retire() {
 # as the first status line rather than an anchored whole-line match; anchoring on
 # "^status:" silently never matches and treats every ended review as feedback.
 cmd_classify() {
-  local file=${1-} status
+  local file=${1-} status error_code error_message
   [ -n "$file" ] || usage
   [ -f "$file" ] || die "result file does not exist: $file"
-  if grep -qiE 'No active Lavish Editor session|NOT_FOUND' "$file" 2>/dev/null; then
-    printf 'missing\n'; return 0
-  fi
   status=$(awk '
     $0 == "session:" { in_s=1; next }
     in_s && $0 !~ /^[[:space:]]/ { exit }
@@ -96,11 +93,22 @@ cmd_classify() {
       sub(/^[[:space:]]+status:[[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); print; exit }
   ' "$file")
   case "$status" in
-    feedback) printf 'feedback\n' ;;
-    ended)    printf 'ended\n' ;;
-    waiting)  printf 'waiting\n' ;;
-    *)        printf 'unknown\n' ;;
+    feedback) printf 'feedback\n'; return 0 ;;
+    ended)    printf 'ended\n'; return 0 ;;
+    waiting)  printf 'waiting\n'; return 0 ;;
   esac
+  error_message=$(awk 'NR == 1 && /^error:[[:space:]]*/ { sub(/^error:[[:space:]]*/, ""); print }' "$file")
+  error_code=$(awk '
+    NR == 1 && /^error:[[:space:]]*/ { in_error=1; next }
+    in_error && /^code:[[:space:]]*[A-Z_]+[[:space:]]*$/ {
+      sub(/^code:[[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); print; exit }
+    in_error { exit }
+  ' "$file")
+  if [ "$error_code" = NOT_FOUND ] || [[ "$error_message" == "No active Lavish Editor session"* ]]; then
+    printf 'missing\n'
+  else
+    printf 'unknown\n'
+  fi
 }
 
 case "${1-}" in
