@@ -18,10 +18,12 @@ import {
   listDecisions,
   readAnswer,
   readDecision,
+  validateCollectPayload,
 } from './protocol.mjs';
+import { renderBoard } from './board.mjs';
 import { migrateLegacy } from './migration.mjs';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const PROGRAM = basename(process.argv[1] ?? 'lavish-axi');
 const SOURCE_WAKE_ADAPTER = fileURLToPath(
   new URL('../../../bin/fm-lavish-wake.sh', import.meta.url),
@@ -34,17 +36,21 @@ Human commands:
   lavish inbox [--home <path>]
   lavish show <decision-id> [--home <path>]
   lavish answer <decision-id> [--home <path>]
+  lavish board <decision-id> [--home <path>] [--out <path>]
 
 Agent commands:
   lavish-axi create --id <id> --title <title> --request <request.md>
-    --questions <questions.json> --destination <relative-path> [--home <path>]
+    --questions <questions.json> --destination <relative-path>
+    [--visuals <dir>] [--home <path>]
+  lavish-axi collect <decision-id> --payload <json-file> [--home <path>]
   lavish-axi intake [--home <path>]
   lavish-axi configure-wake --command <absolute-executable> [--home <path>]
   lavish-axi migrate-legacy --state <state.json> --snapshot-dir <dir>
     [--pending-map <map.json>] [--home <path>]
 
 Every command reads files, performs bounded local work, and exits.
-There is no server, browser, listener, poll, watcher, or resident process.`;
+There is no server, listener, poller, watcher, or resident process.
+The board command writes self-contained HTML but does not open a browser.`;
 }
 
 function parseArguments(argv) {
@@ -313,6 +319,66 @@ async function answerCommand(id, options) {
   process.stdout.write(`Answer saved for ${id}; firstmate wake queued.\n`);
 }
 
+async function boardCommand(id, options) {
+  rejectUnknownOptions(options, ['home', 'out']);
+  const decision = await readDecision(resolveHome(options), id);
+  try {
+    const existing = await readAnswer(decision);
+    throw new LavishError(
+      `decision ${id} was already submitted at ${existing.answer.submitted_at}`,
+      3,
+    );
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  const outputPath = resolve(options.out ?? `${id}.html`);
+  await atomicWrite(outputPath, await renderBoard(decision), { mode: 0o600 });
+  process.stdout.write(`Board written: ${outputPath}\n`);
+}
+
+async function collectCommand(id, options) {
+  rejectUnknownOptions(options, ['home', 'payload']);
+  const home = resolveHome(options);
+  const decision = await readDecision(home, id);
+  const payloadPath = resolve(requireOption(options, 'payload'));
+  let payload;
+  try {
+    payload = JSON.parse(await readFile(payloadPath, 'utf8'));
+  } catch (error) {
+    throw new LavishError(`payload_invalid_json: ${error.message}`, 2);
+  }
+  const batch = validateCollectPayload(payload, decision.manifest);
+  try {
+    const existing = await readAnswer(decision);
+    if (
+      JSON.stringify(existing.answer.answers) === JSON.stringify(batch.selections)
+      && existing.answer.note === batch.note
+    ) {
+      process.stdout.write(
+        `Decision ${id} already contains this collected payload; answer unchanged.\n`,
+      );
+      return;
+    }
+    throw new LavishError(`decision ${id} is already answered with different content`, 3);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  const committed = await commitAnswer(decision, batch.selections, batch.note);
+  const wake = await enqueueWake(home, decision, committed.digest);
+  if (!wake.ok) {
+    process.stderr.write(
+      `answer saved; wake not queued${wake.detail ? `: ${wake.detail}` : ''}\n`,
+    );
+    process.exitCode = 5;
+    return;
+  }
+  process.stdout.write(`Collected answer for ${id}; firstmate wake queued.\n`);
+}
+
 async function createCommand(options) {
   rejectUnknownOptions(options, [
     'home',
@@ -321,6 +387,7 @@ async function createCommand(options) {
     'request',
     'questions',
     'destination',
+    'visuals',
     'created-at',
   ]);
   const home = resolveHome(options);
@@ -338,11 +405,12 @@ async function createCommand(options) {
     request: await readFile(requestPath),
     questions,
     destination: requireOption(options, 'destination'),
+    visualsDirectory: options.visuals === undefined ? undefined : resolve(options.visuals),
     createdAt: options['created-at'] ?? new Date().toISOString(),
   });
   process.stdout.write(
     `${result.created ? 'Created' : 'Already exists'}: ${result.decision.id}\n`
-    + `Run: lavish answer ${result.decision.id}\n`,
+    + `Run: lavish board ${result.decision.id} --home ${home}\n`,
   );
 }
 
@@ -418,9 +486,17 @@ async function main(argv) {
       if (id === undefined) throw new LavishError('answer requires a decision id', 2);
       await answerCommand(id, options);
       break;
+    case 'board':
+      if (id === undefined) throw new LavishError('board requires a decision id', 2);
+      await boardCommand(id, options);
+      break;
     case 'create':
       if (id !== undefined) throw new LavishError('create uses --id, not a positional id', 2);
       await createCommand(options);
+      break;
+    case 'collect':
+      if (id === undefined) throw new LavishError('collect requires a decision id', 2);
+      await collectCommand(id, options);
       break;
     case 'intake':
       if (id !== undefined) throw new LavishError('intake takes no decision id', 2);

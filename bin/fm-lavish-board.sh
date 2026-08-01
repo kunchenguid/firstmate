@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# Render one durable Lavish decision, open it in an isolated headed Chrome
+# session, and arm a one-shot watcher check for the browser submit marker.
+#
+# Usage:
+#   fm-lavish-board.sh <decision-id> [--home <path>]
+#
+# Internal watcher entry point:
+#   fm-lavish-board.sh --check <decision-id> --home <path> --session <name>
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+SUBMIT_MARKER='LAVISH-SUBMIT v2'
+
+usage() {
+  cat <<'USAGE'
+Usage: fm-lavish-board.sh <decision-id> [--home <path>]
+
+Render a self-contained Lavish board, open it in a headed isolated Chrome
+session, and arm a watcher check that captures LAVISH-SUBMIT v2.
+USAGE
+}
+
+fail() {
+  printf 'fm-lavish-board: %s\n' "$*" >&2
+  exit 2
+}
+
+validate_id() {
+  local value=$1
+  [[ "$value" =~ ^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$ ]] \
+    || fail 'decision id must be a lowercase slug of at most 64 characters'
+}
+
+resolve_home() {
+  local requested=$1
+  [ -d "$requested" ] && [ ! -L "$requested" ] \
+    || fail "unsafe or missing home: $requested"
+  (cd "$requested" && pwd -P)
+}
+
+isolated_chrome() {
+  local session=$1
+  shift
+  (
+    unset CHROME_DEVTOOLS_AXI_AUTO_CONNECT
+    unset CHROME_DEVTOOLS_AXI_BROWSER_URL
+    unset CHROME_DEVTOOLS_AXI_CHROME_ARGS
+    unset CHROME_DEVTOOLS_AXI_PORT
+    unset CHROME_DEVTOOLS_AXI_USER_DATA_DIR
+    unset CHROME_DEVTOOLS_AXI_WS_HEADERS
+    export CHROME_DEVTOOLS_AXI_SESSION="$session"
+    export CHROME_DEVTOOLS_AXI_HEADED=1
+    chrome-devtools-axi "$@"
+  )
+}
+
+check_submission() {
+  local decision_id=$1
+  local home=$2
+  local session=$3
+  local state_dir="$home/state"
+  local payload_path="$state_dir/lavish-board-$decision_id.payload.json"
+  local check_path="$state_dir/lavish-board-$decision_id.check.sh"
+  local evaluation result_line temporary
+
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || exit 0
+  evaluation=$(isolated_chrome "$session" eval \
+    'JSON.stringify({title: document.title, payload: window.__lavishPayload ?? null})' \
+    2>/dev/null) || exit 0
+  result_line=$(printf '%s\n' "$evaluation" | sed -n 's/^result: //p' | sed -n '1p')
+  [ -n "$result_line" ] || exit 0
+
+  temporary=$(mktemp "$state_dir/.lavish-board-$decision_id.payload.XXXXXX")
+  if printf '%s\n' "$result_line" | node -e '
+    const fs = require("node:fs");
+    const raw = fs.readFileSync(0, "utf8").trim();
+    const target = process.argv[1];
+    const marker = process.argv[2];
+    let snapshot = raw;
+    try {
+      for (let depth = 0; depth < 4 && typeof snapshot === "string"; depth += 1) {
+        snapshot = JSON.parse(snapshot);
+      }
+    } catch {
+      process.exit(4);
+    }
+    if (snapshot?.title !== marker || snapshot?.payload == null) process.exit(3);
+    fs.writeFileSync(target, JSON.stringify(snapshot.payload) + "\n", { mode: 0o600 });
+  ' "$temporary" "$SUBMIT_MARKER"; then
+    mv "$temporary" "$payload_path"
+  else
+    rm -f "$temporary"
+    exit 0
+  fi
+
+  rm -f "$check_path"
+  isolated_chrome "$session" stop >/dev/null 2>&1 || true
+  printf 'lavish-submit: %s %s\n' "$decision_id" "$payload_path"
+}
+
+MODE=board
+if [ "${1:-}" = '--check' ]; then
+  MODE=check
+  shift
+fi
+
+[ "$#" -gt 0 ] || { usage >&2; exit 2; }
+DECISION_ID=$1
+shift
+validate_id "$DECISION_ID"
+
+HOME_ARG=${FM_HOME:-$REPO_ROOT}
+SESSION=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --home)
+      [ "$#" -gt 1 ] || fail '--home requires a path'
+      HOME_ARG=$2
+      shift 2
+      ;;
+    --session)
+      [ "$MODE" = check ] || fail '--session is internal to the watcher check'
+      [ "$#" -gt 1 ] || fail '--session requires a name'
+      SESSION=$2
+      shift 2
+      ;;
+    --help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+HOME_PATH=$(resolve_home "$HOME_ARG")
+STATE_DIR="$HOME_PATH/state"
+
+if [ "$MODE" = check ]; then
+  [ -n "$SESSION" ] || fail '--session is required in check mode'
+  check_submission "$DECISION_ID" "$HOME_PATH" "$SESSION"
+  exit 0
+fi
+
+command -v lavish >/dev/null 2>&1 || fail 'lavish is not installed'
+command -v chrome-devtools-axi >/dev/null 2>&1 \
+  || fail 'chrome-devtools-axi is not installed'
+command -v node >/dev/null 2>&1 || fail 'node is not installed'
+
+mkdir -p "$STATE_DIR"
+[ ! -L "$STATE_DIR" ] || fail "unsafe state directory: $STATE_DIR"
+umask 077
+
+HOME_DIGEST=$(printf '%s' "$HOME_PATH" | shasum -a 256 | awk '{print substr($1,1,12)}')
+SESSION="lavish-${DECISION_ID:0:36}-$HOME_DIGEST"
+HTML_PATH="$STATE_DIR/lavish-board-$DECISION_ID.html"
+PAYLOAD_PATH="$STATE_DIR/lavish-board-$DECISION_ID.payload.json"
+CHECK_PATH="$STATE_DIR/lavish-board-$DECISION_ID.check.sh"
+CHECK_TMP=$(mktemp "$STATE_DIR/.lavish-board-$DECISION_ID.check.XXXXXX")
+
+lavish board "$DECISION_ID" --home "$HOME_PATH" --out "$HTML_PATH"
+rm -f "$PAYLOAD_PATH"
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'exec %q --check %q --home %q --session %q\n' \
+    "$SCRIPT_DIR/fm-lavish-board.sh" "$DECISION_ID" "$HOME_PATH" "$SESSION"
+} > "$CHECK_TMP"
+chmod 700 "$CHECK_TMP"
+mv "$CHECK_TMP" "$CHECK_PATH"
+
+BOARD_URL=$(node -e \
+  'const { pathToFileURL } = require("node:url"); console.log(pathToFileURL(process.argv[1]).href);' \
+  "$HTML_PATH")
+if ! isolated_chrome "$SESSION" open "$BOARD_URL"; then
+  rm -f "$CHECK_PATH"
+  fail 'could not open the isolated Chrome session'
+fi
+
+printf 'Opened Lavish board %s in isolated Chrome session %s.\n' \
+  "$DECISION_ID" "$SESSION"
+printf 'Armed submission check: %s\n' "$CHECK_PATH"
