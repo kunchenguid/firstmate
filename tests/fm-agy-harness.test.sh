@@ -67,7 +67,7 @@ test_separated_composer_is_harness_scoped() {
   local state
   # shellcheck source=bin/fm-composer-lib.sh
   . "$ROOT/bin/fm-composer-lib.sh"
-  state=$(FM_COMPOSER_HARNESS= fm_composer_separated_state "$(agy_empty_capture)")
+  state=$(FM_COMPOSER_HARNESS='' fm_composer_separated_state "$(agy_empty_capture)")
   [ -z "$state" ] || fail "unscoped separated check claimed a pane as an Agy composer: $state"
   state=$(FM_COMPOSER_HARNESS=claude fm_composer_separated_state "$(claude_lookalike_capture)")
   [ -z "$state" ] || fail "a Claude rule/quote/rule transcript was claimed as an Agy composer: $state"
@@ -76,9 +76,9 @@ test_separated_composer_is_harness_scoped() {
     . "$ROOT/bin/fm-tmux-lib.sh"
     tmux() {
       case "$*" in
-        *cursor_y*) printf '4\n' ;;
-        *capture-pane*) claude_lookalike_capture ;;
-        *) return 0 ;;
+        (*cursor_y*) printf '4\n' ;;
+        (*capture-pane*) claude_lookalike_capture ;;
+        (*) return 0 ;;
       esac
     }
     FM_COMPOSER_HARNESS=claude fm_tmux_composer_state pane
