@@ -415,10 +415,10 @@ owned_child_finished() {
       rm -f "$child_out" 2>/dev/null || true
       child=
       child_out=
+      takeover_hop_or_fail || return $?
       cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
       report_attached
       cycle_begin "$HEALTHY_PID" attached
-      takeover_hop_or_fail || return $?
       attach_and_wait "$HEALTHY_PID"
       return $?
     fi
