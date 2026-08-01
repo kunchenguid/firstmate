@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generic process-to-event runner: supervise a registered long-polling child
-# outside the agent's foreground turn and turn its completed result into one
-# normalized durable event.
+# outside the agent's foreground turn and turn completed results into normalized
+# durable wakes.
 #
 # Usage:
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
@@ -17,9 +17,10 @@
 #            directly, so there is no shell surface and no argument splitting.
 #            Adapters register sources; nothing here parses user text.
 # start      Claim the source, run its child to completion, durably capture the
-#            output, publish one normalized event, then release the claim. This
-#            blocks for as long as the source blocks and is meant to run as a
-#            supervised background process, never in a conversational turn.
+#            output, publish normalized wakes for pending results, then release
+#            the claim. It blocks for as long as the source blocks and is meant
+#            to run as a supervised background process, never in a conversational
+#            turn.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
 #            republish every durably captured result with no handled
 #            acknowledgement yet - regardless of any earlier publication - and
