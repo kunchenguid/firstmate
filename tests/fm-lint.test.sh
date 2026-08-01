@@ -465,6 +465,80 @@ CASES
   pass "ShellCheck installer selects each verified host asset and refuses unsupported platforms before download"
 }
 
+# A downloaded binary that cannot report the pin (arch mismatch under emulation,
+# or a release asset disagreeing with its tag) must never reach the destination:
+# an already-working pinned shellcheck there is what fm-lint.sh depends on.
+test_installer_preserves_installed_binary_when_download_fails_verification() {
+  local tmp fakebin destination out rc
+  tmp=$(fm_test_tmproot fm-shellcheck-preserve)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf 'Linux\n' ;;
+  -m) printf 'x86_64\n' ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    : > "$2"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  cat > "$fakebin/sha256sum" <<'SH'
+#!/usr/bin/env bash
+printf '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  %s\n' "$1"
+SH
+  cat > "$fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -C ]; then
+    mkdir -p "$2/shellcheck-v$REQUIRED_VERSION"
+    cat > "$2/shellcheck-v$REQUIRED_VERSION/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+exit 126
+EOF
+    chmod +x "$2/shellcheck-v$REQUIRED_VERSION/shellcheck"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  chmod +x "$fakebin/uname" "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar"
+
+  mkdir -p "$destination"
+  cat > "$destination/shellcheck" <<'SH'
+#!/usr/bin/env bash
+printf 'the good pinned binary\n'
+SH
+  chmod +x "$destination/shellcheck"
+
+  rc=0
+  out=$(REQUIRED_VERSION="$REQUIRED" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted a binary that could not report the pin"$'\n'"$out"
+  assert_contains "$out" "downloaded ShellCheck version is" \
+    "installer did not report the unusable downloaded binary"
+  [ "$("$destination/shellcheck")" = "the good pinned binary" ] \
+    || fail "installer clobbered the already-installed pinned ShellCheck"
+
+  rc=0
+  out=$(REQUIRED_VERSION="$REQUIRED" PATH="$fakebin:$PATH" "$INSTALLER" "$tmp/fresh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted an unusable binary into a fresh destination"
+  [ ! -e "$tmp/fresh/shellcheck" ] \
+    || fail "installer left an unverified binary in a fresh destination"
+
+  pass "ShellCheck installer verifies before installing and preserves an existing pinned binary"
+}
+
 test_rejects_wrong_shellcheck_version() {
   # Version-independent: a fake shellcheck reporting a different version must be
   # refused before any lint, proving local and CI cannot silently diverge.
@@ -794,6 +868,7 @@ test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
 test_installer_selects_verified_platform_asset
 test_installer_verifies_with_shasum_when_sha256sum_is_absent
+test_installer_preserves_installed_binary_when_download_fails_verification
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts

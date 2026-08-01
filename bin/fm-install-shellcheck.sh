@@ -5,8 +5,10 @@
 #   fm-install-shellcheck.sh <destination-directory>
 #
 # Selects the official GitHub Releases tar.xz asset for the host OS and
-# architecture, verifies its release SHA-256, installs the binary, and refuses
-# to finish unless that binary reports the exact version pinned by fm-lint.sh.
+# architecture, verifies its release SHA-256, and refuses to install unless the
+# downloaded binary itself reports the exact version pinned by fm-lint.sh. That
+# version assertion runs against a staged copy in the temporary directory, so a
+# failed run leaves any already-installed binary at the destination untouched.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -75,11 +77,11 @@ fi
 [ "$ACTUAL_SHA256" = "$SHA256" ] \
   || die "checksum mismatch for $ARCHIVE (expected $SHA256, got $ACTUAL_SHA256)"
 tar -xJf "$TMP/$ARCHIVE" -C "$TMP"
+STAGED="$TMP/staged-shellcheck"
+install -m 0755 "$TMP/shellcheck-v${VERSION}/shellcheck" "$STAGED"
+staged_version=$("$STAGED" --version 2>/dev/null | awk '/^version:/ {print $2; exit}')
+[ "$staged_version" = "$VERSION" ] \
+  || die "downloaded ShellCheck version is '${staged_version:-<empty>}', expected exact pin $VERSION"
 mkdir -p "$DESTINATION"
-install -m 0755 "$TMP/shellcheck-v${VERSION}/shellcheck" "$DESTINATION/shellcheck"
-installed_version=$("$DESTINATION/shellcheck" --version 2>/dev/null | awk '/^version:/ {print $2; exit}')
-[ "$installed_version" = "$VERSION" ] || {
-  rm -f "$DESTINATION/shellcheck"
-  die "installed ShellCheck version is '${installed_version:-<empty>}', expected exact pin $VERSION"
-}
+install -m 0755 "$STAGED" "$DESTINATION/shellcheck"
 "$DESTINATION/shellcheck" --version
