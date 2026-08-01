@@ -234,6 +234,12 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
     "local-only brief hard-coded captain-only authority"
   assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
     "local-only brief retained a personal review stacked on the selected delivery path"
+  assert_no_grep "make \`--intent\` preserve every relevant requirement from this brief" "$home/data/$id/brief.md" \
+    "local-only brief must not include the no-mistakes --intent contract"
+  id="brief-direct-intent-a4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  assert_no_grep "make \`--intent\` preserve every relevant requirement from this brief" "$home/data/$id/brief.md" \
+    "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
@@ -255,6 +261,10 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
+  assert_grep "make \`--intent\` preserve every relevant requirement from this brief" "$brief" \
+    "no-mistakes DOD must require --intent to retain the accepted task contract"
+  assert_grep "without condensing direct requirements into a diff summary or including generic scaffold boilerplate" "$brief" \
+    "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
