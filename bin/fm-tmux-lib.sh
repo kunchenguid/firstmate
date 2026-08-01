@@ -119,6 +119,15 @@ FM_TMUX_CURSOR_AGENT_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 # single Ctrl-C mid-turn (Esc is a no-op, unlike cline/cursor-agent); exit is
 # /exit.
 FM_TMUX_COPILOT_BUSY_REGEX_DEFAULT='Working.*esc interrupt'
+# agy (Antigravity CLI 1.1.9): the active-turn footer is a braille spinner plus
+# "Generating..." or "Running...", and the stable busy anchor is "esc to cancel"
+# (present only mid-turn; idle footer is "? for shortcuts"). Interrupt is a
+# single Esc, which prints "Interrupted · What should Antigravity CLI do
+# instead?". The token string is identical to cline's busy anchor, but each
+# harness owns its own constant and harness-scoped case so neither borrows the
+# other's identity; a supplied harness never falls through to the unscoped
+# default. Verified via tmux capture; docs/verification/agy-adapter.md.
+FM_TMUX_AGY_BUSY_REGEX_DEFAULT='esc to cancel'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -136,6 +145,7 @@ fm_busy_lines_match() {  # [harness]
       cline) regex=$FM_TMUX_CLINE_BUSY_REGEX_DEFAULT ;;
       cursor-agent) regex=$FM_TMUX_CURSOR_AGENT_BUSY_REGEX_DEFAULT ;;
       copilot) regex=$FM_TMUX_COPILOT_BUSY_REGEX_DEFAULT ;;
+      agy) regex=$FM_TMUX_AGY_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.

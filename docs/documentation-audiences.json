@@ -336,6 +336,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/agy-adapter.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/cline-adapter.md",
       "audience": "maintainer-verification"
     },
