@@ -27,6 +27,45 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
 fi
+if [ -n "${FM_ORCA_SPAWN_SCREEN:-}" ] && [ "${1:-} ${2:-}" = "terminal send" ]; then
+  text=
+  prev=
+  for arg in "$@"; do
+    if [ "$prev" = --text ]; then
+      text=$arg
+      break
+    fi
+    prev=$arg
+  done
+  staged="$FM_ORCA_SPAWN_SCREEN.staged"
+  evaluated="$FM_ORCA_SPAWN_SCREEN.evaluated"
+  case "$text" in
+    *"__FM_SPAWN_READY_"*)
+      token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
+      [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$FM_ORCA_SPAWN_SCREEN"
+      ;;
+    "FM_SPAWN_LAUNCH=''" )
+      : > "$staged"
+      ;;
+    FM_SPAWN_LAUNCH=*)
+      rebuilt=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
+      printf '%s' "$rebuilt" > "$staged"
+      ;;
+    *"__FM_SPAWN_LAUNCH_OK_"*)
+      FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text" > "$FM_ORCA_SPAWN_SCREEN"
+      ;;
+    'eval "$FM_SPAWN_LAUNCH"')
+      cat "$staged" > "$evaluated"
+      ;;
+  esac
+  printf '{"ok":true,"result":{"send":{"accepted":true}}}\n'
+  exit 0
+fi
+if [ -n "${FM_ORCA_SPAWN_SCREEN:-}" ] && [ "${1:-} ${2:-}" = "terminal read" ]; then
+  marker=$(tail -n 1 "$FM_ORCA_SPAWN_SCREEN" 2>/dev/null || true)
+  printf '{"ok":true,"result":{"terminal":{"tail":["%s"]}}}\n' "$marker"
+  exit 0
+fi
 n=$next
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
@@ -486,7 +525,11 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-spawn"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s"},"terminal":{"handle":"term-spawn"}}}\n' "$wt" > "$RESP/3.out"
+  : > "$CASE_DIR/spawn-screen"
+  : > "$CASE_DIR/spawn-screen.staged"
+  : > "$CASE_DIR/spawn-screen.evaluated"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_SPAWN_SCREEN="$CASE_DIR/spawn-screen" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
@@ -502,8 +545,9 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
-  assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
-    "spawn did not send the selected harness launch command through Orca"
+  assert_contains "$(cat "$CASE_DIR/spawn-screen.evaluated")" \
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
+    "spawn did not verify and evaluate the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
 }

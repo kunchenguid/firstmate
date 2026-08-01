@@ -24,8 +24,35 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys|kill-window)
+  has-session|new-session|new-window|kill-window)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    exit 0
+    ;;
+  send-keys)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    text=${4:-}
+    staged="$FM_FAKE_TMUX_CAPTURE.staged"
+    case "$text" in
+      *"__FM_SPAWN_READY_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$FM_FAKE_TMUX_CAPTURE"
+        ;;
+      "FM_SPAWN_LAUNCH=''" )
+        : > "$staged"
+        ;;
+      FM_SPAWN_LAUNCH=*)
+        rebuilt=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
+        printf '%s' "$rebuilt" > "$staged"
+        ;;
+      *"__FM_SPAWN_LAUNCH_OK_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$FM_FAKE_TMUX_CAPTURE"
+        ;;
+      'eval "$FM_SPAWN_LAUNCH"')
+        cat "$staged" >> "$FM_FAKE_TMUX_LOG"
+        printf '\n' >> "$FM_FAKE_TMUX_LOG"
+        ;;
+    esac
     exit 0
     ;;
   list-windows)

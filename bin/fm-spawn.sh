@@ -67,6 +67,14 @@
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
+#   Before any harness command runs, launch delivery waits for an executed shell
+#   round-trip, stages the command through bounded submitted assignments using the
+#   selected backend's send/capture primitives, and verifies the complete staged
+#   bytes before evaluation. A failed check clears the shell line and retries a
+#   bounded number of times; exhaustion records a failed task status and exits
+#   nonzero rather than reporting a spawn. This launch-delivery contract does not
+#   alter the backend adapters' text-submit verification contracts; its regression
+#   coverage lives in tests/fm-spawn-launch-delivery.test.sh.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -1236,6 +1244,85 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
+spawn_capture() {  # <target>
+  fm_backend_capture "$BACKEND" "$1" 160 "$W" 2>/dev/null || true
+}
+
+spawn_capture_has_line() {  # <capture> <exact-line>
+  printf '%s\n' "$1" | grep -Fqx "$2"
+}
+
+spawn_wait_for_marker() {  # <target> <marker>
+  local target=$1 marker=$2 pane i=0 max=${FM_SPAWN_LAUNCH_VERIFY_POLLS:-40}
+  case "$max" in ''|*[!0-9]*) max=40 ;; esac
+  [ "$max" -gt 0 ] || max=40
+  while [ "$i" -lt "$max" ]; do
+    pane=$(spawn_capture "$target")
+    spawn_capture_has_line "$pane" "$marker" && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "${FM_SPAWN_LAUNCH_POLL_INTERVAL:-0.05}"
+  done
+  return 1
+}
+
+spawn_wait_for_shell_ready() {  # <target> <token>
+  local target=$1 token=$2
+  local marker="__FM_SPAWN_READY_$token"
+  # The full marker is intentionally absent from the typed command, so seeing
+  # an exact marker line proves the shell executed the probe rather than merely
+  # echoing bytes that arrived before its line editor was ready.
+  spawn_send_text_line "$target" "printf '%s%s\\n' '__FM_SPAWN_READY_' '$token'" \
+    || return 1
+  spawn_wait_for_marker "$target" "$marker"
+}
+
+spawn_stage_launch() {  # <target> <launch> <token>
+  local target=$1 launch=$2 token=$3 chunk_size=${FM_SPAWN_LAUNCH_CHUNK_BYTES:-160}
+  local delay=${FM_SPAWN_LAUNCH_CHUNK_DELAY:-0.04} offset=0 chunk quoted expected marker check
+  case "$chunk_size" in ''|*[!0-9]*) chunk_size=160 ;; esac
+  [ "$chunk_size" -gt 0 ] || chunk_size=160
+  expected=$(printf '%s' "$launch" | cksum) || return 1
+  marker="__FM_SPAWN_LAUNCH_OK_$token"
+
+  # C-c clears an abandoned line from a prior failed attempt before short,
+  # independently submitted assignments rebuild the launch exactly in the
+  # target shell.  This avoids macOS's pre-ZLE canonical-input ceiling while
+  # retaining the backend adapters' own literal/key submission contracts.
+  spawn_send_key "$target" C-c || true
+  spawn_send_text_line "$target" "FM_SPAWN_LAUNCH=''" || return 1
+  while [ "$offset" -lt "${#launch}" ]; do
+    chunk=${launch:offset:chunk_size}
+    quoted=$(shell_quote "$chunk")
+    spawn_send_text_line "$target" "FM_SPAWN_LAUNCH=\"\${FM_SPAWN_LAUNCH}\"$quoted" || return 1
+    offset=$((offset + chunk_size))
+    sleep "$delay"
+  done
+  check="if [ \"\$(printf %s \"\$FM_SPAWN_LAUNCH\" | cksum)\" = $(shell_quote "$expected") ]; then printf '%s%s\\n' '__FM_SPAWN_LAUNCH_OK_' '$token'; else printf '%s%s\\n' '__FM_SPAWN_LAUNCH_BAD_' '$token'; fi"
+  spawn_send_text_line "$target" "$check" || return 1
+  spawn_wait_for_marker "$target" "$marker"
+}
+
+spawn_deliver_launch() {  # <target> <launch>
+  local target=$1 launch=$2 retries=${FM_SPAWN_LAUNCH_DELIVERY_RETRIES:-3}
+  local token token_sum attempt=1
+  case "$retries" in ''|*[!0-9]*) retries=3 ;; esac
+  [ "$retries" -gt 0 ] || retries=3
+  while [ "$attempt" -le "$retries" ]; do
+    token_sum=$(printf '%s' "$RANDOM:$attempt" | cksum) || return 1
+    token_sum=${token_sum%% *}
+    printf -v token '%010u' "$token_sum"
+    if spawn_wait_for_shell_ready "$target" "$token" \
+      && spawn_stage_launch "$target" "$launch" "$token"; then
+      # shellcheck disable=SC2016 # Expand the staged launch in the target shell.
+      spawn_send_text_line "$target" 'eval "$FM_SPAWN_LAUNCH"' || return 1
+      return 0
+    fi
+    spawn_send_key "$target" C-c || true
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -1555,17 +1642,20 @@ if [ "$KIND" = secondmate ]; then
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
+# process (go build, go test, ...) inherit it. The verified delivery routine
+# below then waits for that shell to round-trip a probe before staging the full
+# launch in bounded, independently submitted assignments.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
+if ! spawn_deliver_launch "$T" "$LAUNCH"; then
+  printf 'failed: launch command delivery could not be verified after %s attempts\n' \
+    "${FM_SPAWN_LAUNCH_DELIVERY_RETRIES:-3}" >> "$STATE/$ID.status"
+  echo "error: launch command delivery could not be verified after ${FM_SPAWN_LAUNCH_DELIVERY_RETRIES:-3} attempts; inspect window $T" >&2
+  exit 1
+fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

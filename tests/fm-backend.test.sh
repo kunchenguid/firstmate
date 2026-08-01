@@ -797,11 +797,26 @@ make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+screen="\${FM_TMUX_LOG:?}.spawn-screen"
 case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  capture-pane) cat "\$screen" 2>/dev/null || true; exit 0 ;;
+  send-keys)
+    text=\${4:-}
+    case "\$text" in
+      *"__FM_SPAWN_READY_"*)
+        token=\$(printf '%s\\n' "\$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\\([^']*\\)'.*/\\1/p")
+        [ -z "\$token" ] || printf '__FM_SPAWN_READY_%s\\n' "\$token" > "\$screen"
+        ;;
+      *"__FM_SPAWN_LAUNCH_OK_"*)
+        token=\$(printf '%s\\n' "\$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\\([^']*\\)'.*/\\1/p")
+        [ -z "\$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\\n' "\$token" > "\$screen"
+        ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -859,6 +874,7 @@ make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -
 #!/usr/bin/env bash
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+screen="\${FM_TMUX_LOG:?}.spawn-screen"
 case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*)
@@ -872,6 +888,20 @@ case "\${1:-}" in
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  capture-pane) cat "\$screen" 2>/dev/null || true; exit 0 ;;
+  send-keys)
+    text=\${4:-}
+    case "\$text" in
+      *"__FM_SPAWN_READY_"*)
+        token=\$(printf '%s\\n' "\$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\\([^']*\\)'.*/\\1/p")
+        [ -z "\$token" ] || printf '__FM_SPAWN_READY_%s\\n' "\$token" > "\$screen"
+        ;;
+      *"__FM_SPAWN_LAUNCH_OK_"*)
+        token=\$(printf '%s\\n' "\$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\\([^']*\\)'.*/\\1/p")
+        [ -z "\$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\\n' "\$token" > "\$screen"
+        ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH

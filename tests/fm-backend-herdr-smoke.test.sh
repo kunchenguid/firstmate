@@ -255,7 +255,7 @@ case "$out" in
 esac
 pass "real herdr: send_text_line runs a command atomically (pane run) and its output is capturable"
 
-# --- send_literal + send_key(Enter), the two-step launch-command form -------
+# --- send_literal + send_key(Enter), the two-step primitive composition -----
 
 fm_backend_herdr_send_literal "$TARGET" 'echo literal-then-key-captain' \
   || fail "send_literal failed"
