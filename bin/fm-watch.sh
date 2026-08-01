@@ -470,7 +470,7 @@ handle_state_specific_stale() {  # <window> <task> <hash> <tail40>
       busy_turn_over_age "$task" && class=turn-bound
       ;;
     external-pause)
-      pause_recheck_due "$win" "$task" && class=pause-recheck
+      pause_recheck_due "$win" "$task" && class='pause-recheck'
       ;;
   esac
   candidate="$task:$class"
