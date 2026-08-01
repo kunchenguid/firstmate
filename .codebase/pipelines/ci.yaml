@@ -53,9 +53,15 @@ jobs:
             tar -xJf /tmp/sc.tar.xz -C /tmp
             install -m 0755 /tmp/shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
             shellcheck --version
+      # Call the one owner of the lint definition rather than re-spelling its
+      # globs here. This file's copy had drifted: it omitted control-root/, so
+      # the scripts deployed to relay task hosts were never linted by the gate
+      # that actually runs on MRs, and a test sourcing one of them failed with
+      # SC1091 "not specified as input" - a finding about the file SET, not
+      # about the code. bin/fm-lint.sh also passes --norc, which this did not.
       - name: Shellcheck
         commands:
-          - shellcheck bin/*.sh bin/backends/*.sh tests/*.sh
+          - bin/fm-lint.sh
 
   tests:
     name: Behavior tests

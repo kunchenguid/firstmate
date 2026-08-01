@@ -56,6 +56,24 @@ test_ci_invokes_the_owner() {
   pass "CI lint job calls the one-owner script, not an inline command"
 }
 
+# The GitHub workflow was guarded and the Codebase pipeline was not, so only the
+# Codebase copy drifted - and it is the one that actually gates merge requests.
+# Its inline globs omitted control-root/, so the scripts deployed to relay task
+# hosts were never linted there, and a test sourcing one of them failed with
+# SC1091 "not specified as input": a finding about the file SET rather than
+# about any code.
+test_codebase_pipeline_invokes_the_owner() {
+  local pipeline="$ROOT/.codebase/pipelines/ci.yaml"
+  assert_present "$pipeline" "the Codebase pipeline is missing"
+  grep -Eq '^ +- bin/fm-lint\.sh$' "$pipeline" \
+    || fail "the Codebase lint job must invoke the one-owner script"
+  # `shellcheck --version` in the install step is fine; re-spelling the file set
+  # is what drifts.
+  assert_no_grep 'shellcheck bin/' "$pipeline" \
+    "the Codebase pipeline must call fm-lint.sh, not re-spell its globs inline"
+  pass "Codebase MR pipeline calls the one-owner script, not an inline command"
+}
+
 test_nomistakes_invokes_the_owner() {
   grep -Fqx "  lint: 'bin/fm-lint.sh'" "$NM" || fail "no-mistakes commands.lint must map exactly to the one-owner script"
   pass "no-mistakes pre-push lint calls the one-owner script"
@@ -239,6 +257,7 @@ SH
 test_owner_exists_and_executable
 test_owner_defines_canonical_set
 test_ci_invokes_the_owner
+test_codebase_pipeline_invokes_the_owner
 test_nomistakes_invokes_the_owner
 test_pins_an_explicit_version
 test_ci_installs_and_logs_the_pinned_version

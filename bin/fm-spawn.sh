@@ -95,6 +95,10 @@
 #   machine and this home's signal scan cannot see them. --host is mutually
 #   exclusive with --secondmate, --backend, and --launch, and WITHOUT --host not
 #   one byte of the local path changes (bin/fm-relay-host.sh, docs/relay-host.md).
+#   Exit 3 means a GUI-capable host declined for a reason that passes - locked
+#   screen, no desktop host session, or asleep and unable to answer. The task is
+#   NOT live and NOT lost: it is queued and its wake check is armed here, so it
+#   dispatches on its own once that machine can take it (docs/relay-gui-host.md).
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -145,7 +149,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,98p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,102p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -268,22 +272,38 @@ if [ "$HOST_SET" -eq 1 ]; then
   [ -z "$HARNESS_ARG" ] || host_spawn_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || host_spawn_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || host_spawn_args+=(--effort "$EFFORT")
+  host_rc=0
   host_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-    "$SCRIPT_DIR/fm-relay-host.sh" spawn "${host_spawn_args[@]}") || exit 1
-  # The host answers with its own state/<id>.meta after the OK line. Recording it
-  # verbatim plus host= keeps every control-side reader pointed at the machine
-  # that actually owns the task instead of probing a local endpoint that is not
-  # there.
-  host_meta_rc=0
-  {
-    printf '%s\n' "$host_out" | sed -n '2,$p'
-    printf 'host=%s\n' "$HOST_ARG"
-  } > "$STATE/$HOST_ID.meta" || host_meta_rc=$?
-  if [ "$host_meta_rc" -ne 0 ] || ! grep -q '^worktree=' "$STATE/$HOST_ID.meta"; then
-    echo "error: the host did not return usable metadata for $HOST_ID; it may be running unsupervised" >&2
+    "$SCRIPT_DIR/fm-relay-host.sh" spawn "${host_spawn_args[@]}") || host_rc=$?
+  # Exit 3 means the host declined for a reason that passes - a GUI host whose
+  # screen is locked, whose desktop host session is down, or that is asleep and
+  # could not answer at all. The dispatch is held rather than lost, and the wake
+  # check is armed HERE rather than left to a later step: a queued dispatch with
+  # no check would sit forever, since retrying it is the check's whole job. When
+  # it takes, the same check reverts to reporting the task's events.
+  if [ "$host_rc" -eq 3 ]; then
+    printf '%s\n' "$host_out"
+    if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-relay-check-make.sh" "$HOST_ID" >/dev/null 2>&1; then
+      printf 'queued on %s: %s will dispatch by itself once that machine can take it\n' \
+        "$HOST_ARG" "$HOST_ID"
+    else
+      echo "error: $HOST_ID is queued for $HOST_ARG but arming its retry failed; it will NOT dispatch on its own" >&2
+      exit 1
+    fi
+    exit 3
+  fi
+  if [ "$host_rc" -ne 0 ]; then
+    # A failure waiting will not fix, reported synchronously to whoever ran this
+    # and with no retry armed. Clearing the queued record here is what stops it
+    # becoming a leak: nothing would ever pick it up, and `queued` would list a
+    # dispatch that is going nowhere. A refusal that DOES pass is exit 3 above,
+    # and that one is kept and retried.
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-relay-host.sh" cancel "$HOST_ID" >/dev/null 2>&1 || true
     exit 1
   fi
-  printf '%s\n' "$host_out" | sed -n '1p'
+  printf '%s\n' "$host_out"
   # Same durable backlog transition the local path makes below; a failure here is
   # reported, never fatal, because the task is already live on the host.
   if [ -f "$DATA/backlog.md" ] && command -v tasks-axi >/dev/null 2>&1; then

@@ -71,6 +71,28 @@ test_absent_optional_fields_do_not_shift_later_ones() {
   pass "fm_relay_host_load: absent optional fields do not shift later ones"
 }
 
+# Command substitution strips TRAILING newlines, so a record whose last optional
+# fields are all absent - the normal shape for a laptop host with no ssh route -
+# loses those lines entirely and the reads run off the end of the input. Each
+# failed read returns non-zero, which in a `set -e` caller killed the whole
+# script with no message at all: `fm-relay-conn.sh deploy` simply exited 1 and
+# printed nothing. The parser carries a sentinel line so the last real field is
+# never the last line; this drives it through a REAL set -e caller, because that
+# is the only place the bug was visible.
+test_a_record_with_no_optional_fields_survives_a_set_e_caller() {
+  local home out rc
+  home="$TMP_ROOT/sparse"
+  write_registry "$home" ''
+  fm_relay_host_load "$home" box || fail "a record with no optional fields must load"
+  [ -z "$FM_RELAY_SSH" ] || fail "an absent ssh route must be empty, got '$FM_RELAY_SSH'"
+  [ "$FM_RELAY_HOST_DIR" = /srv ] \
+    || fail "home_dir must still default from home when later fields are absent: got '$FM_RELAY_HOST_DIR'"
+  rc=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-relay-conn.sh" audit box 2>&1) || rc=$?
+  assert_contains "$out" "RELAY" "a set -e caller must reach its own logic, not die inside the parser"
+  pass "fm_relay_host_load: a record with no optional fields does not kill a set -e caller"
+}
+
 test_incomplete_record_is_refused() {
   mkdir -p "$TMP_ROOT/h2/config"
   printf '{"box": {"client_id": "c"}}\n' > "$TMP_ROOT/h2/config/relay-hosts.json"
@@ -411,6 +433,7 @@ test_check_make_writes_a_thin_registered_check() {
 
 test_scripts_parse
 test_absent_optional_fields_do_not_shift_later_ones
+test_a_record_with_no_optional_fields_survives_a_set_e_caller
 test_incomplete_record_is_refused
 test_relative_paths_are_refused
 test_argument_charset

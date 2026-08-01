@@ -4,11 +4,20 @@
 #
 # Usage:
 #   fm-relay-conn.sh deploy <host>        install the verb entry point + host config
+#   fm-relay-conn.sh deploy-local <host>  same, run ON THE HOST ITSELF (no SSH)
 #   fm-relay-conn.sh up <host>            pair, then IMMEDIATELY tighten and assert
 #   fm-relay-conn.sh audit <host>         universal grant assertion + reachability
 #   fm-relay-conn.sh down <host>          revoke this caller's connection
 #   fm-relay-conn.sh tighten-local <policy>  run ON A TARGET to bind every grant
 #                                            to <policy> and drop full access
+#
+# `deploy-local` exists because a laptop task host has no inbound SSH, so the
+# control machine cannot push anything to it. The machine's own operator runs
+# this instead, reading the same host record and writing the same files, so there
+# is one definition of what a deployed host looks like rather than two. Pairing
+# such a host is the matching two-operator procedure in docs/relay-gui-host.md:
+# `up` still refuses to claim a pairing it cannot secure, and the host's operator
+# closes it with `tighten-local`.
 #
 # Host records come from <home>/config/relay-hosts.json; docs/configuration.md
 # owns that schema and docs/relay-host.md owns the measured behaviour below.
@@ -42,7 +51,38 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 usage() {
-  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# The deployed host config. ONE definition, written by both deploy paths, so a
+# host pushed from the control machine and a host installed by its own operator
+# cannot end up describing themselves differently.
+# control-root/verbs/fmr-verb.sh owns what each key means.
+host_config_text() {
+  printf 'FM_ROOT=%s\n' "$FM_RELAY_HOST_ROOT"
+  printf 'FM_HOME=%s\n' "$FM_RELAY_HOST_HOME"
+  printf 'HOME_DIR=%s\n' "$FM_RELAY_HOST_DIR"
+  printf 'PATH=%s\n' "$FM_RELAY_HOST_PATH"
+  printf 'PROJECTS=%s\n' "$FM_RELAY_HOST_HOME/projects"
+  printf 'FLEET_ROOT=%s\n' "$FM_RELAY_FLEET_ROOT"
+  printf 'LANG=%s\n' "$FM_RELAY_HOST_LANG"
+  if fm_relay_host_is_gui; then
+    printf 'GUI=1\n'
+    printf 'HOST_SESSION=%s\n' "$FM_RELAY_HOST_SESSION"
+    [ -z "$FM_RELAY_TMUX_SOCKET" ] || printf 'TMUX_SOCKET=%s\n' "$FM_RELAY_TMUX_SOCKET"
+  fi
+}
+
+# What a deployed control root contains. A GUI host additionally needs the
+# preflight library and the desktop host-session manager; a non-GUI host gets
+# neither, so a Phase 1 host is byte-identical to what it was before GUI hosts
+# existed and needs no redeploy.
+deploy_files() {
+  printf 'verbs/fmr-verb.sh\n'
+  if fm_relay_host_is_gui; then
+    printf 'fmr-gui-lib.sh\n'
+    printf 'fmr-host-session.sh\n'
+  fi
 }
 
 # shellcheck source=bin/fm-relay-lib.sh
@@ -107,26 +147,54 @@ case "$CMD" in
   deploy)
     HOST=${1:?usage: fm-relay-conn.sh deploy <host>}
     fm_relay_host_load "$FM_HOME" "$HOST"
-    VERB_SRC="$FM_ROOT/control-root/verbs/fmr-verb.sh"
-    [ -f "$VERB_SRC" ] || { echo "error: missing $VERB_SRC" >&2; exit 1; }
+    for rel in $(deploy_files); do
+      [ -f "$FM_ROOT/control-root/$rel" ] \
+        || { echo "error: missing $FM_ROOT/control-root/$rel" >&2; exit 1; }
+    done
     TMP_CFG=$(mktemp)
     trap 'rm -f "$TMP_CFG"' EXIT
-    {
-      printf 'FM_ROOT=%s\n' "$FM_RELAY_HOST_ROOT"
-      printf 'FM_HOME=%s\n' "$FM_RELAY_HOST_HOME"
-      printf 'HOME_DIR=%s\n' "$FM_RELAY_HOST_DIR"
-      printf 'PATH=%s\n' "$FM_RELAY_HOST_PATH"
-      printf 'PROJECTS=%s\n' "$FM_RELAY_HOST_HOME/projects"
-      printf 'FLEET_ROOT=%s\n' "$FM_RELAY_FLEET_ROOT"
-      printf 'LANG=%s\n' "$FM_RELAY_HOST_LANG"
-    } > "$TMP_CFG"
+    host_config_text > "$TMP_CFG"
     host_ssh "deploy the verb entry point" \
       "mkdir -p '$FM_RELAY_CONTROL_ROOT/verbs' '$FM_RELAY_CONTROL_ROOT/tasks' '$FM_RELAY_FLEET_ROOT/tasks'"
-    scp -o BatchMode=yes -q "$VERB_SRC" "$FM_RELAY_SSH:$FM_RELAY_CONTROL_ROOT/verbs/fmr-verb.sh"
+    for rel in $(deploy_files); do
+      scp -o BatchMode=yes -q "$FM_ROOT/control-root/$rel" "$FM_RELAY_SSH:$FM_RELAY_CONTROL_ROOT/$rel"
+    done
     scp -o BatchMode=yes -q "$TMP_CFG" "$FM_RELAY_SSH:$FM_RELAY_CONTROL_ROOT/config"
     host_ssh "set verb permissions" \
       "chmod 755 '$FM_RELAY_CONTROL_ROOT/verbs/fmr-verb.sh'; chmod 600 '$FM_RELAY_CONTROL_ROOT/config'"
+    if fm_relay_host_is_gui; then
+      host_ssh "set host-session manager permissions" \
+        "chmod 755 '$FM_RELAY_CONTROL_ROOT/fmr-host-session.sh'; chmod 644 '$FM_RELAY_CONTROL_ROOT/fmr-gui-lib.sh'"
+    fi
     echo "deployed: $FM_RELAY_HOST verbs + config"
+    ;;
+
+  deploy-local)
+    # Run ON the task host. Same host record, same files, same config text as the
+    # SSH path above - this only replaces the transport, because a laptop host
+    # has no inbound SSH for the control machine to push over.
+    HOST=${1:?usage: fm-relay-conn.sh deploy-local <host>}
+    fm_relay_host_load "$FM_HOME" "$HOST"
+    for rel in $(deploy_files); do
+      [ -f "$FM_ROOT/control-root/$rel" ] \
+        || { echo "error: missing $FM_ROOT/control-root/$rel" >&2; exit 1; }
+    done
+    mkdir -p "$FM_RELAY_CONTROL_ROOT/verbs" "$FM_RELAY_CONTROL_ROOT/tasks" \
+      "$FM_RELAY_FLEET_ROOT/tasks"
+    for rel in $(deploy_files); do
+      cp "$FM_ROOT/control-root/$rel" "$FM_RELAY_CONTROL_ROOT/$rel"
+    done
+    host_config_text > "$FM_RELAY_CONTROL_ROOT/config"
+    chmod 755 "$FM_RELAY_CONTROL_ROOT/verbs/fmr-verb.sh"
+    chmod 600 "$FM_RELAY_CONTROL_ROOT/config"
+    if fm_relay_host_is_gui; then
+      chmod 755 "$FM_RELAY_CONTROL_ROOT/fmr-host-session.sh"
+      chmod 644 "$FM_RELAY_CONTROL_ROOT/fmr-gui-lib.sh"
+      printf 'deployed locally: %s. Start its desktop host session from a terminal window on this machine:\n' "$FM_RELAY_HOST"
+      printf '  %s/fmr-host-session.sh start\n' "$FM_RELAY_CONTROL_ROOT"
+    else
+      echo "deployed locally: $FM_RELAY_HOST verbs + config"
+    fi
     ;;
 
   up)

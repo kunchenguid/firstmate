@@ -128,13 +128,17 @@ The name is the value passed to `fm-spawn.sh --host <name>` and must match `[A-Z
 | `lang` | no | locale for those scripts; defaults to `en_US.UTF-8`, and is load-bearing rather than cosmetic because without a UTF-8 locale the tmux endpoint lookup silently reports every live pane as gone |
 | `key` | pairing only | local path to the host's exported device key, used by `bin/fm-relay-conn.sh up` |
 | `ssh` | pairing/audit only | ordinary out-of-band SSH destination, used to deploy the verb and to tighten and audit authorizations, never to run fleet work |
+| `gui` | no | `true` marks a host with a real display, which must pass an awake, unlocked, and desktop-host-session check before it may claim work, and which receives the extra host-side files those checks need |
+| `tmux_socket` | GUI only | absolute path to the socket of the desktop host session a dispatched agent runs in; without it the host resolves its own default socket, and on macOS that risks the agent-wedging ancestry [`docs/relay-gui-host.md`](relay-gui-host.md) records |
+| `host_session` | no | absolute path to the host session's marker file; defaults to `<control_root>/host-session` |
 
 Every path must be absolute and must be the REAL path.
 A symlinked home directory (`/home/user` -> `/data00/home/user`) makes the file policy reject its own root.
 
-Absent optional fields are safe; the record is read one field per line precisely so an empty `lang` cannot shift `key` and `ssh` left.
+Absent optional fields are safe; the record is read one field per line precisely so an empty `lang` cannot shift `key` and `ssh` left, and the parser carries a sentinel line so a record whose LAST optional fields are all absent - a laptop host with no `ssh` and no `key` - does not lose them to command substitution's trailing-newline stripping.
 
 A host with no `ssh` route cannot be paired from here at all, and `bin/fm-relay-conn.sh` says so rather than pairing without being able to secure the result.
+Such a host is deployed and secured by its own operator instead; [`docs/relay-gui-host.md`](relay-gui-host.md) owns that two-operator procedure.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 

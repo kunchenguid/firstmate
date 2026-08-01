@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--host-home <path> --host-root <path>]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--host-home <path> --host-root <path>] [--gui-host]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --host-home/--host-root write a REMOTE TASK HOST variant: the brief file is
 #   still created in this home, but every path inside it - the status file, the
@@ -15,6 +15,10 @@
 #   The variant also states that its status appends are the ONLY signal reaching
 #   the supervisor, because a turn-end marker written on the host cannot be seen
 #   across the relay (bin/fm-relay-check-make.sh, docs/relay-host.md).
+#   --gui-host adds the graphical contract for a host with a real display: use a
+#   private browser instance and never the machine owner's own, and prove a
+#   window exists rather than claiming it. Requires the remote-host variant,
+#   because it only means anything on a task host (docs/relay-gui-host.md).
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -82,6 +86,7 @@ HERDR_LAB=0
 NO_PROJECTS=0
 HOST_HOME=
 HOST_ROOT=
+GUI_HOST=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -102,6 +107,7 @@ for a in "$@"; do
     --host-home=*) HOST_HOME=${a#--host-home=} ;;
     --host-root) want_value=host-root ;;
     --host-root=*) HOST_ROOT=${a#--host-root=} ;;
+    --gui-host) GUI_HOST=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -141,6 +147,23 @@ if [ -n "$HOST_HOME" ] || [ -n "$HOST_ROOT" ]; then
 '- Your status appends are the only signal that reaches it. Nothing else about this pane crosses the link, and there is no turn-end notification, so a phase change you do not append is a phase change firstmate never learns about.' \
 '- Expect a supervisor reply to take minutes rather than seconds; that is the polling cadence of the link, not a stall.' \
 '- Write every deliverable and every piece of evidence into the paths named below on THIS machine. Firstmate fetches them by hash; a file left anywhere else does not exist as far as it is concerned.')
+  if [ "$GUI_HOST" -eq 1 ]; then
+    BRIEF_REMOTE_NOTE="$BRIEF_REMOTE_NOTE$(printf '%s\n' \
+'' \
+'' \
+'## This machine has a real screen' \
+'You were sent here because the work needs a graphical session, so a headless browser defeats the point of running here at all.' \
+'' \
+'- Run your own browser instance and never the one the machine owner is using. Give it a private profile directory under your task worktree or /tmp and its own automation session name, and leave every already-running browser alone: do not attach to it, close it, or change its state.' \
+'- Prove a real window exists rather than asserting it. CGWindowListCopyWindowInfo with optionOnScreenOnly lists it at layer 0; a headless browser never appears in that list at all, which is exactly what makes it proof.' \
+'- A locked screen is not a broken screen. Windows still exist and can still be driven while locked, but a full-screen capture returns the lock screen and a per-window capture is refused outright. If your evidence needs pixels, say which shot you could not take instead of shipping the lock screen as if it were the page.' \
+'- A dark display is not a failure either: a full-screen capture taken with the display asleep is a valid, entirely black image with exit status 0. Judge such a capture by its size, not its status.')"
+  fi
+fi
+
+if [ "$GUI_HOST" -eq 1 ] && [ -z "$HOST_HOME" ]; then
+  echo "error: --gui-host applies only to a remote task host brief; pass --host-home and --host-root too" >&2
+  exit 1
 fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then

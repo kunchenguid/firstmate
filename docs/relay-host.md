@@ -22,9 +22,11 @@ One `fm-send` is at least four backend primitives - read the composer, type, Ent
 As one verb call it costs one round trip.
 The measured round trips are below.
 
+A host with a real display adds a desktop host session and three checks it must pass before it may claim work; [`docs/relay-gui-host.md`](relay-gui-host.md) owns that, and a host without `gui` in its record is unaffected by all of it.
+
 | Piece | Where it runs | What it owns |
 |---|---|---|
-| `bin/fm-relay-lib.sh` | control | the client: host records, verb calls, file put/get, the wake-check body |
+| `bin/fm-relay-lib.sh` | control | the client: host records, verb calls, file put/get, the wake-check body, the queued-dispatch record |
 | `bin/fm-relay-conn.sh` | control (+ SSH to the host) | pairing, tightening, the universal grant assertion, deploy |
 | `bin/fm-relay-host.sh` | control | one subcommand per fleet operation |
 | `bin/fm-relay-check-make.sh` | control | writes and registers the task's wake check |
@@ -295,8 +297,8 @@ The reverse leaves the caller with a 401, because revoking the key already dropp
 
 ## Not verified
 
-- The reverse direction as a task host.
-  Pairing and the file and exec boundaries were exercised both ways, but no task has ever been dispatched host to control, and the desktop-session requirements for a GUI-capable host are untouched here.
+- The reverse direction as a task host, at the time this was written.
+  It has since been built and partly measured: see [`docs/relay-gui-host.md`](relay-gui-host.md), which owns the desktop-session requirement, the checks a host with a screen runs before it claims, and its own list of what is still unverified.
 - Control-plane handover between machines.
   Out of scope by decision; the intended mechanism is an explicit human handover, not automatic arbitration.
 - Relay session-token lifetime.
