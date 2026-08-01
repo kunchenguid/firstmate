@@ -15,6 +15,9 @@
 #   (f) end to end: --push-main opens the record, then fast-forwards origin/main
 #   (g) end to end: a failing gh-axi warns but still fast-forwards origin/main
 #   (h) end to end: --dry-run opens nothing and pushes nothing
+#   (k) every gh-axi call is bounded, and a timed-out one only warns
+#   (l) an open PR that is not a promotion record is never rewritten
+#   (m) end to end: a failed fast-forward annotates the record it already opened
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -47,7 +50,8 @@ make_repo() {
 
 # make_gh_axi <fakebin> <mode>: gh-axi stub logging every call to
 # $FM_TEST_GH_AXI_LOG. Modes: none (no open PR), existing (one open PR #77),
-# create-fails (listing works, create does not), list-fails.
+# foreign (one open PR #66 that is NOT a promotion record), create-fails
+# (listing works, create does not), list-fails, comment-fails.
 make_gh_axi() {
   local fakebin=$1 mode=$2
   mkdir -p "$fakebin"
@@ -55,6 +59,10 @@ make_gh_axi() {
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
 mode=$mode
+# Keep the generated body, which the caller deletes as soon as the call returns.
+if [ -n "\${FM_TEST_GH_AXI_BODY:-}" ] && [ "\$#" -gt 0 ] && [ -f "\${!#}" ]; then
+  cat "\${!#}" > "\$FM_TEST_GH_AXI_BODY"
+fi
 case "\${1:-} \${2:-}" in
   "pr list")
     [ "\$mode" = list-fails ] && { echo "error: HTTP 401" >&2; exit 1; }
@@ -62,10 +70,21 @@ case "\${1:-} \${2:-}" in
       echo 'count: 1 of 1 total'
       echo 'pull_requests[1]{number,title,state,author,draft,review}:'
       echo '  77,"promote(ladder): prakrit -> main (aaa..bbb)",open,prakrit,no,none'
+    elif [ "\$mode" = foreign ]; then
+      # A listing that leads with a real, unrelated PR: what a gh-axi that
+      # stopped honoring --base/--head would hand back.
+      echo 'count: 1 of 1 total'
+      echo 'pull_requests[1]{number,title,state,author,draft,review}:'
+      echo '  66,"feat(billing): someone elses open work",open,someone,no,none'
     else
       echo 'count: 0'
       echo 'pull_requests: []'
     fi
+    exit 0
+    ;;
+  "pr comment")
+    [ "\$mode" = comment-fails ] && { echo "error: HTTP 502" >&2; exit 1; }
+    echo 'commented: https://github.com/PrakritR/PropLane/pull/91#issuecomment-1'
     exit 0
     ;;
   "pr create")
@@ -94,16 +113,52 @@ case_a="$TMP_ROOT/a"
 mkdir -p "$case_a"
 make_repo "$case_a/repo"
 body=$(fm_proplane_promote_pr_body "$case_a/repo" origin/main origin/prakrit \
-  'passed (no Critical or High findings)' "$case_a/security-review.md" \
+  'passed (no Critical or High findings)' 'proplane-security-review-abc1234.md' \
   'passed (no-mistakes: review, tests, document, lint)')
 assert_contains "$body" 'origin/main..origin/prakrit' 'body names the promoted range'
 assert_contains "$body" '- commits: 1' 'body counts the promoted commits'
 assert_contains "$body" 'feat: promoted change' 'body lists the promoted commit'
 assert_contains "$body" 'passed (no Critical or High findings)' 'body states the security outcome'
-assert_contains "$body" "$case_a/security-review.md" 'body links the security report'
+assert_contains "$body" 'proplane-security-review-abc1234.md' 'body names the security report'
 assert_contains "$body" 'passed (no-mistakes: review, tests, document, lint)' 'body states the validation outcome'
 assert_contains "$body" 'not a second approval gate' 'body says the PR does not gate the promotion'
 pass 'promotion PR body states range, security outcome, and validation outcome'
+
+# The record is published on GitHub, so the evidence pointer must be the report's
+# sha-keyed filename and never the absolute $FM_HOME path that produced it.
+[ "$(fm_proplane_promote_pr_report_label "/Users/somebody/firstmate/state/proplane-security-review-abc1234.md")" \
+  = 'proplane-security-review-abc1234.md' ] || fail 'report label should be the filename alone'
+[ -z "$(fm_proplane_promote_pr_report_label '')" ] || fail 'an empty report path should stay empty'
+report_body=$(fm_proplane_promote_pr_body "$case_a/repo" origin/main origin/prakrit 'passed' \
+  "$(fm_proplane_promote_pr_report_label "/Users/somebody/firstmate/state/proplane-security-review-abc1234.md")" 'passed')
+assert_not_contains "$report_body" '/Users/somebody' 'the record must not carry a local directory path'
+pass 'the security report is recorded by filename, never by absolute path'
+
+# --- the commit listing marks truncation, so it is not read as the filter ------
+
+case_cap="$TMP_ROOT/cap"
+mkdir -p "$case_cap"
+make_repo "$case_cap/repo"
+git -C "$case_cap/repo" checkout -q prakrit
+for n in 1 2 3 4 5; do
+  printf '%s\n' "$n" > "$case_cap/repo/bulk-$n.txt"
+  git -C "$case_cap/repo" add "bulk-$n.txt"
+  git -C "$case_cap/repo" commit -qm "feat: bulk change $n"
+done
+git -C "$case_cap/repo" push -q origin prakrit
+git -C "$case_cap/repo" fetch -q origin
+capped=$(FM_PROPLANE_PR_COMMIT_CAP=2 bash -c '
+  . "$1"
+  fm_proplane_promote_pr_body "$2" origin/main origin/prakrit passed "" passed
+' _ "$PR_LIB" "$case_cap/repo")
+assert_contains "$capped" '- commits: 6' 'the count above the listing stays exact'
+assert_contains "$capped" '- (... 4 more, listing capped at 2)' 'a truncated listing says how much it dropped'
+uncapped=$(FM_PROPLANE_PR_COMMIT_CAP=40 bash -c '
+  . "$1"
+  fm_proplane_promote_pr_body "$2" origin/main origin/prakrit passed "" passed
+' _ "$PR_LIB" "$case_cap/repo")
+assert_not_contains "$uncapped" 'listing capped at' 'an untruncated listing carries no marker'
+pass 'a capped commit listing is marked as truncated, not left to look filtered'
 
 # An empty report path must not leave a dangling "report:" line.
 body_no_report=$(fm_proplane_promote_pr_body "$case_a/repo" origin/main origin/prakrit \
@@ -219,6 +274,88 @@ assert_contains "$out" 'BODY-MARKER' 'dry run prints the PR body'
 [ ! -s "$FM_TEST_GH_AXI_LOG" ] || fail 'dry run must not call gh-axi'
 pass 'dry run prints the promotion PR and opens none'
 
+# --- (k) every GitHub call is bounded, and a timed-out one only warns ---------
+#
+# The record is opened between the passing gates and the fast-forward, so an
+# unbounded hang there strands a promotion that has already earned its push.
+
+# make_timeout <fakebin> <mode>: a `timeout` stub recording the bound it was
+# given. Modes: pass (run the wrapped command), expire (exit 124 like a real
+# timeout that fired).
+make_timeout() {
+  local fakebin=$1 mode=$2
+  cat > "$fakebin/timeout" <<SH
+#!/usr/bin/env bash
+printf 'timeout-wrapper:%s\n' "\$1" >> "\$FM_TEST_GH_AXI_LOG"
+[ "$mode" = expire ] && exit 124
+shift
+exec "\$@"
+SH
+  chmod +x "$fakebin/timeout"
+}
+
+case_k="$TMP_ROOT/k"
+mkdir -p "$case_k"
+make_repo "$case_k/repo"
+make_gh_axi "$case_k/fakebin" none
+make_timeout "$case_k/fakebin" pass
+printf 'body\n' > "$case_k/body.md"
+export FM_TEST_GH_AXI_LOG="$case_k/gh.log"
+: > "$FM_TEST_GH_AXI_LOG"
+out=$(PATH="$case_k/fakebin:$PATH" FM_PROPLANE_PR_GH_TIMEOUT=17 bash -c '
+  . "$1"
+  fm_proplane_promote_pr_sync "$2" main prakrit "promote(ladder): prakrit -> main (kkk..lll)" "$3" 0
+' _ "$PR_LIB" "$case_k/repo" "$case_k/body.md" 2>&1) || fail "bounded sync should succeed: $out"
+log=$(cat "$FM_TEST_GH_AXI_LOG")
+assert_contains "$log" 'timeout-wrapper:17' 'the GitHub call runs under the configured bound'
+[ "$(grep -c '^timeout-wrapper:' "$FM_TEST_GH_AXI_LOG")" = 2 ] ||
+  fail 'both the list and the create call must be bounded'
+assert_contains "$log" 'pr create --base main --head prakrit' 'the bounded call still opens the record'
+pass 'every GitHub call in the promotion record path is bounded'
+
+# A bound that fires is a failure like any other: reported, never fatal here.
+case_k2="$TMP_ROOT/k-expired"
+mkdir -p "$case_k2"
+make_repo "$case_k2/repo"
+make_gh_axi "$case_k2/fakebin" none
+make_timeout "$case_k2/fakebin" expire
+printf 'body\n' > "$case_k2/body.md"
+export FM_TEST_GH_AXI_LOG="$case_k2/gh.log"
+: > "$FM_TEST_GH_AXI_LOG"
+set +e
+out=$(PATH="$case_k2/fakebin:$PATH" bash -c '
+  . "$1"
+  fm_proplane_promote_pr_sync "$2" main prakrit "t" "$3" 0
+' _ "$PR_LIB" "$case_k2/repo" "$case_k2/body.md" 2>&1)
+rc=$?
+set -e
+expect_code 1 "$rc" 'a timed-out GitHub call should report failure'
+assert_contains "$out" 'could not list open PRs' 'the timed-out call is named'
+assert_no_grep 'pr create' "$FM_TEST_GH_AXI_LOG" 'a timed-out listing must not fall through to a create'
+pass 'a timed-out GitHub call is reported as a failure the caller can warn on'
+
+# --- (l) an open PR that is not a promotion record is never rewritten ---------
+#
+# Reuse rests on gh-axi honoring --base/--head. If that ever stops holding, the
+# tool must open its own record rather than overwrite somebody else's PR.
+
+case_l="$TMP_ROOT/l"
+mkdir -p "$case_l"
+make_repo "$case_l/repo"
+make_gh_axi "$case_l/fakebin" foreign
+printf 'body\n' > "$case_l/body.md"
+export FM_TEST_GH_AXI_LOG="$case_l/gh.log"
+: > "$FM_TEST_GH_AXI_LOG"
+out=$(PATH="$case_l/fakebin:$PATH" bash -c '
+  . "$1"
+  fm_proplane_promote_pr_sync "$2" main prakrit "promote(ladder): prakrit -> main (lll..mmm)" "$3" 0
+' _ "$PR_LIB" "$case_l/repo" "$case_l/body.md" 2>&1) || fail "sync should succeed: $out"
+log=$(cat "$FM_TEST_GH_AXI_LOG")
+assert_not_contains "$log" 'pr edit' 'a PR that is not a promotion record is never rewritten'
+assert_contains "$log" 'pr create --base main --head prakrit' 'a fresh record is opened instead'
+assert_contains "$out" 'not a promotion record' 'the skipped reuse is explained'
+pass 'reuse is refused for an open PR that is not a promotion record'
+
 # --- end-to-end promotion fixtures -------------------------------------------
 
 # make_promotion_case <name> <gh-axi mode>: a full FM_HOME + git root wired so
@@ -247,6 +384,7 @@ run_promotion() {
   shift
   FM_HOME="$case_dir/home" PATH="$case_dir/fakebin:$PATH" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh.log" FM_TEST_ORIGIN="$case_dir/repo.origin" \
+    FM_TEST_GH_AXI_BODY="$case_dir/pr-body.md" \
     "$PROMOTE_MAIN" "$@" 2>&1
 }
 
@@ -280,6 +418,32 @@ assert_grep "origin-main-at-create:$main_sha_before" "$case_f/gh.log" \
   'the record PR must be opened while origin/main is still behind prakrit'
 pass 'the record PR is opened ahead of the fast-forward that closes it'
 
+# The record describes the integrate branch this promotion was built on, not a
+# fresh read of prakrit. A commit another agent pushes to prakrit after the
+# integrate branch was cut is NOT delivered by this promotion, so listing it
+# would make the record claim commits main never received.
+case_r=$(make_promotion_case r none)
+: > "$case_r/gh.log"
+git -C "$case_r/repo" checkout -q prakrit
+printf 'later\n' > "$case_r/repo/later.txt"
+git -C "$case_r/repo" add later.txt
+git -C "$case_r/repo" commit -qm 'feat: pushed to prakrit after the integrate branch was cut'
+git -C "$case_r/repo" push -q origin prakrit
+git -C "$case_r/repo" checkout -q main
+integrate_sha=$(git -C "$case_r/repo" rev-parse integrate/prakrit-to-main)
+set +e
+out=$(run_promotion "$case_r" --validate-only --push-main --skip-gates)
+rc=$?
+set -e
+expect_code 0 "$rc" 'the promotion should succeed'
+recorded=$(cat "$case_r/pr-body.md")
+assert_contains "$recorded" 'feat: promoted change' 'the record lists the commits this promotion delivers'
+assert_not_contains "$recorded" 'after the integrate branch was cut' \
+  'the record must not list a commit this promotion does not push'
+assert_contains "$recorded" '- commits: 1' 'the recorded count matches what is fast-forwarded'
+[ "$(origin_sha "$case_r" main)" = "$integrate_sha" ] || fail 'main should land the integrate tip'
+pass 'the record describes the refs the promotion was built on, not a fresh read of prakrit'
+
 # --- (g) a failing PR call warns but never strands the promotion --------------
 
 case_g=$(make_promotion_case g create-fails)
@@ -295,6 +459,53 @@ assert_contains "$out" 'rate limit exceeded' 'the underlying GitHub error is sho
 [ "$(origin_sha "$case_g" main)" = "$prakrit_sha" ] || fail 'origin/main must still be fast-forwarded'
 pass 'a promotion whose record PR fails still lands main, with a warning'
 
+# --- (m) a failed fast-forward annotates the record it already opened ---------
+#
+# The record states that the ladder fast-forwards main right after opening it.
+# If that push never lands, an unannotated record permanently asserts a
+# promotion that did not happen.
+
+# advance_origin_main <case_dir>: put a commit on origin/main that the integrate
+# branch does not carry, so the promotion's push is rejected.
+advance_origin_main() {
+  local repo="$1/repo"
+  git -C "$repo" checkout -q -B other-main origin/main
+  printf 'hotfix\n' > "$repo/hotfix.txt"
+  git -C "$repo" add hotfix.txt
+  git -C "$repo" commit -qm 'fix: landed on main behind our back'
+  git -C "$repo" push -q origin other-main:main
+  git -C "$repo" checkout -q main
+}
+
+case_m=$(make_promotion_case m none)
+: > "$case_m/gh.log"
+advance_origin_main "$case_m"
+main_sha_before=$(origin_sha "$case_m" main)
+set +e
+out=$(run_promotion "$case_m" --validate-only --push-main --skip-gates)
+rc=$?
+set -e
+expect_code 1 "$rc" 'a failed fast-forward must still fail the promotion'
+log=$(cat "$case_m/gh.log")
+assert_contains "$log" 'pr create --base main --head prakrit' 'the record was opened before the push failed'
+assert_contains "$log" 'pr comment 91' 'the opened record is annotated when the push does not land'
+assert_contains "$log" 'did NOT complete' 'the annotation says the fast-forward did not complete'
+[ "$(origin_sha "$case_m" main)" = "$main_sha_before" ] || fail 'a rejected push must not move origin/main'
+pass 'a fast-forward that fails annotates the record so it claims nothing that did not land'
+
+# The annotation is best-effort: failing to post it must not change the exit code
+# of the push that actually failed, and must not go unmentioned either.
+case_n=$(make_promotion_case n comment-fails)
+: > "$case_n/gh.log"
+advance_origin_main "$case_n"
+set +e
+out=$(run_promotion "$case_n" --validate-only --push-main --skip-gates)
+rc=$?
+set -e
+expect_code 1 "$rc" 'a failed annotation must not mask the failed push exit'
+assert_contains "$out" 'WARNING could not annotate' 'the unannotated record is warned about'
+pass 'an annotation that cannot be posted warns without changing the promotion outcome'
+
 # --- (h) dry run opens nothing and pushes nothing -----------------------------
 
 case_h=$(make_promotion_case h none)
@@ -306,7 +517,9 @@ rc=$?
 set -e
 expect_code 0 "$rc" 'dry run should succeed'
 assert_contains "$out" 'DRY gh-axi pr create --base main --head prakrit' 'dry run prints the PR it would open'
-assert_contains "$out" 'origin/main..origin/prakrit' 'dry run prints the promoted range'
+# The recorded range is the integrate branch this promotion was built on, never a
+# fresh read of prakrit, which may have moved since.
+assert_contains "$out" 'origin/main..integrate/prakrit-to-main' 'dry run prints the promoted range'
 [ ! -s "$case_h/gh.log" ] || fail 'dry run must not call gh-axi'
 [ "$(origin_sha "$case_h" main)" = "$main_sha_before" ] || fail 'dry run must not move origin/main'
 pass 'a dry-run promotion prints the record PR and opens none'

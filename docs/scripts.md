@@ -90,6 +90,19 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-pool.sh`             | Select the next healthy agent account by equal round-robin, and own account cooldowns |
 | `fm-pool-failover.sh`    | Move a running task to a healthy account, refusing any worktree with uncommitted work |
+| `fm-proplane-promote-full.sh` | Run the whole PropPlane keeper ladder from one agent sandbox through prakrit, main, and production |
+| `fm-proplane-promote-to-prakrit.sh` | Merge one agent sandbox branch into prakrit, push it, prune strays, and realign the sandboxes |
+| `fm-proplane-promote-prakrit-to-main.sh` | Promote prakrit to main behind the security review and no-mistakes gates, opening the promotion record PR just before the fast-forward |
+| `fm-proplane-promote-pr-lib.sh` | Own the prakrit-to-main promotion-record PR contract: body, idempotent publish, annotation, and bounded GitHub calls |
+| `fm-proplane-security-review.sh` | Fail-closed security review of a PropPlane promotion diff, with a sha-keyed report as its evidence |
+| `fm-proplane-agent-branches-lib.sh` | Shared fail-closed readers for the `config/proplane-agent-branches` sandbox registry |
+| `fm-proplane-active-worktree.sh` | Print the active PropPlane sandbox worktree for this home                            |
+| `fm-proplane-dev-server.sh` | Start or restart one PropPlane sandbox's Next.js dev server on its keeper port     |
+| `fm-proplane-open-localhost.sh` | Restart the ladder dev servers on the keeper ports, with opt-in browser open     |
+| `fm-proplane-branch-e2e.sh` | Run the Playwright ladder smoke tests against the live sandbox localhost servers   |
+| `fm-proplane-prune-stray-branches.sh` | Delete every origin branch outside the PropPlane keeper set                   |
+| `fm-prakrit-sync-agent-branches.sh` | Sync the PropPlane sandboxes from origin/prakrit and refresh their review servers |
+| `fm-open-url.sh`         | Open a URL for captain manual testing through the first available opener            |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |

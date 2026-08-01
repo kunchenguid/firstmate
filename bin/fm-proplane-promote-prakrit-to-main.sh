@@ -42,6 +42,10 @@ SECURITY_REVIEW_STATUS='not run in this invocation'
 SECURITY_REVIEW_REPORT=''
 VALIDATION_STATUS='not run in this invocation'
 
+# Number of the promotion record once it is opened, so a fast-forward that then
+# fails can annotate the record it already published.
+PROMOTION_PR_NUMBER=''
+
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
@@ -117,6 +121,9 @@ run_security_review() {
       print
       exit
     }' "$log")
+  # The record is published to GitHub, so only the sha-keyed filename is kept:
+  # the printed path is under $FM_HOME and would carry this machine's layout.
+  SECURITY_REVIEW_REPORT=$(fm_proplane_promote_pr_report_label "$SECURITY_REVIEW_REPORT")
   rm -f "$log"
   return "$rc"
 }
@@ -138,15 +145,28 @@ run_no_mistakes() {
   )
 }
 
-open_promotion_pr() {
-  local base_ref=origin/main head_ref=origin/prakrit
-  local count base_sha head_sha title body_file rc
-  # Best-effort refresh so the recorded range matches what GitHub will see. A
-  # fetch that cannot run only costs body accuracy, never the promotion, and a
-  # dry run touches nothing at all.
-  if [ "$DRY_RUN" -eq 0 ]; then
-    git -C "$GIT_ROOT" fetch origin main prakrit >/dev/null 2>&1 || true
+# The recorded range describes the refs this promotion was actually built on:
+# $INTEGRATE_BRANCH against the origin/main prepare_integrate_branch fetched it
+# from. Re-fetching prakrit here would record whatever another agent had pushed
+# in the meantime, which is not what the fast-forward below delivers.
+promotion_range_refs() {
+  local base_ref=origin/main head_ref=$INTEGRATE_BRANCH
+  if ! git -C "$GIT_ROOT" rev-parse --verify --quiet "$head_ref" >/dev/null 2>&1; then
+    # A dry run never builds the integrate branch, so preview the range the real
+    # promotion would carry instead of reporting an empty one.
+    head_ref=origin/prakrit
+  elif ! git -C "$GIT_ROOT" merge-base --is-ancestor origin/main "$head_ref" 2>/dev/null; then
+    # origin/main moved past the base this promotion was built on, so name that
+    # base explicitly rather than a ref that no longer describes the range.
+    base_ref=$(git -C "$GIT_ROOT" merge-base origin/main "$head_ref" 2>/dev/null) || base_ref=origin/main
   fi
+  printf '%s\t%s\n' "$base_ref" "$head_ref"
+}
+
+open_promotion_pr() {
+  local base_ref head_ref
+  local count base_sha head_sha title body_file rc
+  IFS=$'\t' read -r base_ref head_ref < <(promotion_range_refs)
   count=$(fm_proplane_promote_pr_range_count "$GIT_ROOT" "$base_ref" "$head_ref")
   if [ "$count" -eq 0 ]; then
     echo "proplane-promote-main: no commits between $base_ref and $head_ref, no promotion record needed"
@@ -161,8 +181,24 @@ open_promotion_pr() {
   echo "== promotion record PR (prakrit → main) =="
   fm_proplane_promote_pr_sync "$GIT_ROOT" main prakrit "$title" "$body_file" "$DRY_RUN"
   rc=$?
+  PROMOTION_PR_NUMBER=$FM_PROPLANE_PROMOTE_PR_NUMBER
   rm -f "$body_file"
   return "$rc"
+}
+
+# The record announces that the ladder fast-forwards main right after opening it.
+# When that fast-forward does not complete, the record must say so rather than
+# stand as an unqualified claim that this range went live. Best-effort by
+# design: a failed annotation is warned about and never changes the exit code of
+# the push that actually failed.
+annotate_failed_fast_forward() {
+  local message
+  [ -n "$PROMOTION_PR_NUMBER" ] || return 0
+  message="proplane-promote-main: the fast-forward of \`main\` did NOT complete after this record was opened, so this record does not reflect a landed promotion. Re-run the promote once the cause is resolved."
+  fm_proplane_promote_pr_comment "$GIT_ROOT" "$PROMOTION_PR_NUMBER" "$message" "$DRY_RUN" || {
+    echo "proplane-promote-main: WARNING could not annotate promotion record PR #$PROMOTION_PR_NUMBER; it still claims a promotion that did not land" >&2
+  }
+  return 0
 }
 
 merge_and_push_main() {
@@ -274,7 +310,10 @@ main() {
     echo "proplane-promote-main: WARNING no promotion record PR was opened; the promotion continues so main and production do not diverge" >&2
   }
 
-  merge_and_push_main || exit 1
+  if ! merge_and_push_main; then
+    annotate_failed_fast_forward
+    exit 1
+  fi
   echo "proplane-promote-main: ok — main pushed; Vercel Preview building"
 }
 

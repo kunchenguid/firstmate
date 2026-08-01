@@ -25,15 +25,55 @@
 #     Markdown body: promoted commit range, security-review outcome, validation
 #     outcome. <security_report> may be empty when no report path was printed.
 #   fm_proplane_promote_pr_sync <git_root> <base> <head> <title> <body_file> <dry_run>
-#     Idempotent publish: updates the open <head> -> <base> PR when one exists,
-#     otherwise creates it. <dry_run>=1 prints the PR it would open and makes no
-#     GitHub call.
+#     Idempotent publish: updates the open <head> -> <base> PR when one exists
+#     AND its title marks it as a promotion record, otherwise creates one. Sets
+#     FM_PROPLANE_PROMOTE_PR_NUMBER to the record it published, when known.
+#     <dry_run>=1 prints the PR it would open and makes no GitHub call.
+#   fm_proplane_promote_pr_comment <git_root> <number> <message> <dry_run>
+#     Annotate an already-opened record, for when the promotion it describes did
+#     not finish landing.
+#   fm_proplane_promote_pr_report_label <path>
+#     The sha-keyed report filename alone, never the absolute local path.
 set -u
 
 # Commit lines carried in the PR body. A promotion that merges a long-running
 # sandbox can carry hundreds; the range and count above them stay exact either
 # way, so the listing is capped rather than allowed to dominate the record.
 FM_PROPLANE_PR_COMMIT_CAP=${FM_PROPLANE_PR_COMMIT_CAP:-40}
+
+# Seconds any single GitHub call may take. The record is opened in the window
+# between the passing gates and the fast-forward of main, so an unbounded hang
+# here stalls a promotion that has already earned its push. A capped call that
+# fails is just another warn-and-continue failure; a hang is not.
+FM_PROPLANE_PR_GH_TIMEOUT=${FM_PROPLANE_PR_GH_TIMEOUT:-60}
+
+# Title prefix that marks a PR as this ladder's promotion record. Shared by the
+# title builder and the reuse guard so the two can never drift apart.
+FM_PROPLANE_PR_TITLE_PREFIX='promote(ladder): prakrit -> main'
+
+# Number of the record fm_proplane_promote_pr_sync last published, when it could
+# be determined. Empty when nothing was published or the number was unreadable.
+FM_PROPLANE_PROMOTE_PR_NUMBER=''
+
+# Bounded gh-axi call. Prefers timeout, falls back to gtimeout, and runs the
+# call bare when neither is installed rather than refusing to record anything.
+fm_proplane_promote_pr_gh() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$FM_PROPLANE_PR_GH_TIMEOUT" gh-axi "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$FM_PROPLANE_PR_GH_TIMEOUT" gh-axi "$@"
+  else
+    gh-axi "$@"
+  fi
+}
+
+# The record is published to GitHub, so it carries the report's sha-keyed
+# filename alone: the absolute path would publish this machine's home layout.
+fm_proplane_promote_pr_report_label() {
+  local path=${1:-}
+  [ -n "$path" ] || return 0
+  printf '%s\n' "${path##*/}"
+}
 
 fm_proplane_promote_pr_range_count() {
   local git_root=$1 base_ref=$2 head_ref=$3 count
@@ -48,22 +88,35 @@ fm_proplane_promote_pr_short_sha() {
 }
 
 fm_proplane_promote_pr_title() {
-  printf 'promote(ladder): prakrit -> main (%s..%s)\n' "$1" "$2"
+  printf '%s (%s..%s)\n' "$FM_PROPLANE_PR_TITLE_PREFIX" "$1" "$2"
 }
 
 fm_proplane_promote_pr_body() {
   local git_root=$1 base_ref=$2 head_ref=$3
   local security_status=$4 security_report=$5 validation_status=$6
-  local base_sha head_sha count log report_line
+  local base_sha head_sha count listing listed log report_line
   base_sha=$(fm_proplane_promote_pr_short_sha "$git_root" "$base_ref")
   head_sha=$(fm_proplane_promote_pr_short_sha "$git_root" "$head_ref")
   count=$(fm_proplane_promote_pr_range_count "$git_root" "$base_ref" "$head_ref")
-  log=$(git -C "$git_root" log --no-merges --format='- %h %s' "$base_ref..$head_ref" 2>/dev/null |
-    head -n "$FM_PROPLANE_PR_COMMIT_CAP") || log=""
-  [ -n "$log" ] || log='- (no non-merge commits in this range)'
+  listing=$(git -C "$git_root" log --no-merges --format='- %h %s' "$base_ref..$head_ref" 2>/dev/null) || listing=""
+  if [ -z "$listing" ]; then
+    log='- (no non-merge commits in this range)'
+  else
+    listed=$(printf '%s\n' "$listing" | wc -l | tr -d '[:space:]')
+    log=$(printf '%s\n' "$listing" | head -n "$FM_PROPLANE_PR_COMMIT_CAP")
+    # Without this marker a capped listing is indistinguishable from one the
+    # --no-merges filter shortened, so a reader cannot tell which commits the
+    # record omitted or why.
+    if [ "$listed" -gt "$FM_PROPLANE_PR_COMMIT_CAP" ]; then
+      log="$log
+- (... $((listed - FM_PROPLANE_PR_COMMIT_CAP)) more, listing capped at $FM_PROPLANE_PR_COMMIT_CAP)"
+    fi
+  fi
   report_line=""
-  [ -n "$security_report" ] && report_line="
+  if [ -n "$security_report" ]; then
+    report_line="
 - report: \`$security_report\`"
+  fi
 
   cat <<EOF
 Promotion record for the PropPlane keeper ladder: \`prakrit\` -> \`main\`.
@@ -96,9 +149,16 @@ fm_proplane_promote_pr_first_url() {
   printf '%s\n' "$1" | grep -oE 'https://[^[:space:]"]+' | head -n 1 || true
 }
 
+# Echo the PR number in a GitHub pull URL, or nothing.
+fm_proplane_promote_pr_number_from_url() {
+  printf '%s\n' "$1" | sed -n 's#.*/pull/\([0-9][0-9]*\).*#\1#p' | head -n 1 || true
+}
+
 fm_proplane_promote_pr_sync() {
   local git_root=$1 base=$2 head=$3 title=$4 body_file=$5 dry_run=${6:-0}
   local listing number out url
+
+  FM_PROPLANE_PROMOTE_PR_NUMBER=''
 
   if [ "$dry_run" = 1 ]; then
     echo "DRY gh-axi pr create --base $base --head $head --title \"$title\" --body-file <generated>"
@@ -117,23 +177,40 @@ fm_proplane_promote_pr_sync() {
   # so a re-run updates it instead of stacking a duplicate. Once the ladder
   # fast-forwards main the PR closes as merged, so the next promotion of a new
   # range correctly finds nothing open and creates its own record.
-  listing=$(cd "$git_root" && gh-axi pr list --state open --base "$base" --head "$head" --limit 1 2>&1) || {
+  listing=$(cd "$git_root" && fm_proplane_promote_pr_gh pr list --state open --base "$base" --head "$head" --limit 1 2>&1) || {
     echo "proplane-promote-pr: could not list open PRs for $head -> $base" >&2
     printf '%s\n' "$listing" >&2
     return 1
   }
-  number=$(printf '%s\n' "$listing" |
-    awk '/^[[:space:]]+[0-9]+,/ { sub(/^[[:space:]]+/, ""); sub(/,.*/, ""); print; exit }')
+  # Reuse is decided on the row's title, not on its position in the listing.
+  # Trusting the first numeric row would rewrite an unrelated open PR's title and
+  # body outright if gh-axi ever stopped honoring --base/--head or changed the
+  # row layout, and that damage is not something a warning can undo.
+  number=$(printf '%s\n' "$listing" | awk -v want="$FM_PROPLANE_PR_TITLE_PREFIX" '
+    /^[[:space:]]+[0-9]+,/ {
+      row = $0
+      sub(/^[[:space:]]+/, "", row)
+      num = row
+      sub(/,.*/, "", num)
+      title = row
+      sub(/^[0-9]+,/, "", title)
+      sub(/^"/, "", title)
+      if (index(title, want) == 1) { print num; exit }
+    }')
+  if [ -z "$number" ] && printf '%s\n' "$listing" | grep -qE '^[[:space:]]+[0-9]+,'; then
+    echo "proplane-promote-pr: the open $head -> $base PR is not a promotion record, opening a new one rather than rewriting it" >&2
+  fi
 
   if [ -n "$number" ]; then
-    out=$(cd "$git_root" && gh-axi pr edit "$number" --title "$title" --body-file "$body_file" 2>&1) || {
+    out=$(cd "$git_root" && fm_proplane_promote_pr_gh pr edit "$number" --title "$title" --body-file "$body_file" 2>&1) || {
       echo "proplane-promote-pr: could not update promotion record PR #$number" >&2
       printf '%s\n' "$out" >&2
       return 1
     }
+    FM_PROPLANE_PROMOTE_PR_NUMBER=$number
     echo "proplane-promote-pr: updated promotion record PR #$number"
   else
-    out=$(cd "$git_root" && gh-axi pr create --base "$base" --head "$head" \
+    out=$(cd "$git_root" && fm_proplane_promote_pr_gh pr create --base "$base" --head "$head" \
       --title "$title" --body-file "$body_file" 2>&1) || {
       echo "proplane-promote-pr: could not open promotion record PR" >&2
       printf '%s\n' "$out" >&2
@@ -143,6 +220,41 @@ fm_proplane_promote_pr_sync() {
   fi
 
   url=$(fm_proplane_promote_pr_first_url "$out")
-  [ -n "$url" ] && echo "proplane-promote-pr: $url"
+  if [ -n "$url" ]; then
+    echo "proplane-promote-pr: $url"
+    [ -n "$FM_PROPLANE_PROMOTE_PR_NUMBER" ] ||
+      FM_PROPLANE_PROMOTE_PR_NUMBER=$(fm_proplane_promote_pr_number_from_url "$url")
+  fi
+  return 0
+}
+
+# Add a note to an already-opened record. Used when the fast-forward the record
+# announces did not complete, so the record never asserts a promotion that did
+# not happen. Returns non-zero for the caller to warn on: an annotation that
+# cannot be posted must never change the outcome of the promotion that failed.
+fm_proplane_promote_pr_comment() {
+  local git_root=$1 number=$2 message=$3 dry_run=${4:-0} out
+
+  [ -n "$number" ] || {
+    echo "proplane-promote-pr: no promotion record number to annotate" >&2
+    return 1
+  }
+
+  if [ "$dry_run" = 1 ]; then
+    echo "DRY gh-axi pr comment $number --body \"$message\""
+    return 0
+  fi
+
+  command -v gh-axi >/dev/null 2>&1 || {
+    echo "proplane-promote-pr: gh-axi unavailable, promotion record PR #$number not annotated" >&2
+    return 1
+  }
+
+  out=$(cd "$git_root" && fm_proplane_promote_pr_gh pr comment "$number" --body "$message" 2>&1) || {
+    echo "proplane-promote-pr: could not annotate promotion record PR #$number" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  }
+  echo "proplane-promote-pr: annotated promotion record PR #$number"
   return 0
 }
