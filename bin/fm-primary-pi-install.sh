@@ -25,6 +25,11 @@
 # idempotent. FM_PRIMARY_INSTALL_HOME is a test/specialized-setup override for
 # the destination user home; FM_HOME binds both generated files to the intended
 # Firstmate state home, and the tracked script path is always canonicalized.
+#
+# The tracked script path and the Firstmate home are embedded in both an XML
+# plist and a single-quoted /bin/sh line, so install refuses either path when the
+# joined string carries <, >, &, an apostrophe, CR, or LF rather than encoding it
+# two different ways.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -278,6 +278,8 @@ Its server, pane, and agent columns are exactly as good as the custody record th
 `bin/fm-primary-pi-install.sh install` optionally creates one reversible user-local next-login server-ensure plist and a `~/.local/bin/firstmate-attach` helper.
 It does not call `launchctl`, enable a login item, configure remote access, start Pi, or keep a process alive.
 The plist makes one bounded `server-ensure` call after a future login, while the helper runs the same exact `recover` path from any already-established local or remote shell.
+Both generated files bind the Firstmate home they were installed from, and the helper additionally clears `FM_STATE_OVERRIDE` so a stray value in a phone or login shell cannot aim recovery at a private state tree that home never wrote.
+A home whose state genuinely lives behind that override is therefore not served by the helper; it recovers by running `bin/fm-primary-pi.sh recover` with its own environment.
 `bin/fm-primary-pi-install.sh status` reports whether each file is absent, installer-owned, or foreign, and `uninstall` removes only installer-owned files.
 
 This path supports only a Pi or pi-signed primary in a native Herdr 0.7.5 pane with the complete injected identity.
