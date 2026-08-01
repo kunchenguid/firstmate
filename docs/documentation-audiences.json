@@ -260,6 +260,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/pr-stack-orchestrator.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/scripts.md",
       "audience": "operator-current"
     },
