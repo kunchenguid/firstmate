@@ -29,10 +29,10 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
-[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
   chmod +x "$fb/orca"
@@ -348,6 +348,22 @@ test_remove_worktree_rejects_orca_error_json() {
   [ "$status" -ne 0 ] || fail "remove_worktree should fail on Orca ok:false JSON"
   assert_contains "$out" "worktree not found" "remove_worktree should surface the Orca removal error"
   pass "fm_backend_orca_remove_worktree: fails closed on ok:false JSON"
+}
+
+test_remove_worktree_treats_selector_not_found_as_already_absent() {
+  local out status
+  orca_case remove-selector-not-found
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"worktree selector not found"}}\n' > "$RESP/1.out"
+  printf '1\n' > "$RESP/1.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree wt-already-gone' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "selector_not_found should be treated as an already-absent worktree"
+  assert_contains "$out" "already absent" \
+    "idempotent removal should report that the Orca worktree was already absent"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-already-gone' \
+    "idempotent removal should still call Orca with the recorded selector"
+  pass "fm_backend_orca_remove_worktree: selector_not_found is successful idempotent cleanup"
 }
 
 test_worktree_path_resolves_id() {
@@ -1061,6 +1077,42 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   pass "fm-teardown.sh backend=orca: preserves metadata on remove ok:false JSON"
 }
 
+test_teardown_remove_failure_is_loud_when_errexit_is_ignored() {
+  local proj wt data state config id out rc neutral
+  id="orcaremoveerrconditionalz3"
+  proj="$TMP_ROOT/remove-error-conditional-project"
+  wt="$TMP_ROOT/remove-error-conditional-wt"
+  data="$TMP_ROOT/remove-error-conditional-data"
+  state="$TMP_ROOT/remove-error-conditional-state"
+  config="$TMP_ROOT/remove-error-conditional-config"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-remove-error-conditional" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-remove-error-conditional" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case remove-error-conditional-teardown
+  printf '{"ok":true,"result":{}}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/2.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    bash -c 'if . "$1" "$2"; then exit 0; else exit "$?"; fi' _ "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown must not return success after Orca removal failure when errexit is ignored"
+  assert_contains "$out" "Orca worktree removal failed" \
+    "teardown should explain that Orca worktree removal failed"
+  assert_contains "$out" "preserving task state" \
+    "teardown should explain why cleanup records remain"
+  assert_present "$state/$id.meta" \
+    "teardown must preserve metadata after a partial Orca cleanup"
+  pass "fm-teardown.sh: Orca removal failure stays loud and non-zero without relying on errexit"
+}
+
 test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
   local proj wt data state config id out rc neutral
   id="orcanoreportz4"
@@ -1446,6 +1498,7 @@ test_send_key_refuses_escape_until_supported
 test_kill_is_best_effort_close
 test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
+test_remove_worktree_treats_selector_not_found_as_already_absent
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes
@@ -1471,6 +1524,7 @@ test_teardown_refuses_malformed_orca_id_as_endpoint_identity_not_unlanded_work
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json
+test_teardown_remove_failure_is_loud_when_errexit_is_ignored
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_removes_orca_worktree_when_id_path_matches

@@ -177,11 +177,39 @@ fm_backend_orca_send_literal() {  # <terminal-id> <text>
   fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --json
 }
 
+fm_backend_orca_selector_not_found() {  # <json>
+  node -e '
+const fs = require("fs");
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (err) {
+  process.exit(1);
+}
+process.exit(data.ok === false && data.error && data.error.code === "selector_not_found" ? 0 : 1);
+'
+}
+
 fm_backend_orca_remove_worktree() {  # <worktree-id>
-  local worktree_id=${1:-}
+  local worktree_id=${1:-} out status=0
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
   fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca worktree rm --worktree "id:$worktree_id" --force --json
+  if out=$(orca worktree rm --worktree "id:$worktree_id" --force --json 2>&1); then
+    :
+  else
+    status=$?
+  fi
+  if printf '%s' "$out" | fm_backend_orca_selector_not_found; then
+    echo "notice: Orca worktree $worktree_id is already absent; removal is complete" >&2
+    return 0
+  fi
+  if [ -n "$out" ]; then
+    if ! printf '%s' "$out" | fm_backend_orca_json_ok; then
+      [ "$status" -eq 0 ] || return "$status"
+      return 1
+    fi
+  fi
+  [ "$status" -eq 0 ] || return "$status"
 }
 
 fm_backend_orca_worktree_path() {
