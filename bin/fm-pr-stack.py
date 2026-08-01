@@ -240,18 +240,22 @@ def scan_worktrees(repo: Path) -> list[dict[str, Any]]:
     result = run_git(repo, ["worktree", "list", "--porcelain", "-z"])
     worktrees: list[dict[str, Any]] = []
     for record in parse_worktree_porcelain(result.stdout):
-        if "worktree" not in record or "HEAD" not in record:
+        bare = "bare" in record
+        if "worktree" not in record or ("HEAD" not in record and not bare):
             raise InventoryError(
                 "git worktree list returned an incomplete porcelain record"
             )
         path = decode(record["worktree"])
-        bare = "bare" in record
         branch_ref = decode(record["branch"]) if "branch" in record else None
         clean, cleanliness, cleanliness_reason = worktree_cleanliness(path, bare=bare)
+        head_oid = decode(record["HEAD"]) if "HEAD" in record else None
         worktrees.append(
             {
                 "path": path,
-                "head_oid": decode(record["HEAD"]),
+                "head_oid": head_oid,
+                "head_oid_reason": None
+                if head_oid is not None
+                else "bare worktree record reports no HEAD",
                 "branch_ref": branch_ref,
                 "detached": "detached" in record or (branch_ref is None and not bare),
                 "bare": bare,
@@ -418,7 +422,8 @@ SCHEMA_STATEMENTS = (
       repository_id INTEGER NOT NULL REFERENCES repositories(id),
       path TEXT NOT NULL,
       reconciliation_id INTEGER NOT NULL REFERENCES reconciliations(id),
-      head_oid TEXT NOT NULL,
+      head_oid TEXT,
+      head_oid_reason TEXT,
       branch_ref TEXT,
       detached INTEGER NOT NULL CHECK (detached IN (0, 1)),
       bare INTEGER NOT NULL CHECK (bare IN (0, 1)),
@@ -604,15 +609,16 @@ def reconcile_catalog(
                 connection.execute(
                     """
                     INSERT INTO worktree_observations(
-                      repository_id, path, reconciliation_id, head_oid, branch_ref,
-                      detached, bare, clean, cleanliness, cleanliness_reason,
+                      repository_id, path, reconciliation_id, head_oid, head_oid_reason,
+                      branch_ref, detached, bare, clean, cleanliness, cleanliness_reason,
                       locked_reason, prunable_reason, observed_at
-                    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         worktree["path"],
                         reconciliation_id,
                         worktree["head_oid"],
+                        worktree["head_oid_reason"],
                         worktree["branch_ref"],
                         int(worktree["detached"]),
                         int(worktree["bare"]),

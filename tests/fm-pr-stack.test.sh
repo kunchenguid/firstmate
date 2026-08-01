@@ -312,6 +312,25 @@ test_invalid_lock_timeout_env_diagnoses_cleanly() {
   pass "invalid FM_PR_STACK_LOCK_TIMEOUT_MS values fail cleanly with a bounded diagnostic"
 }
 
+test_bare_repository_with_linked_worktree_is_observed() {
+  local case_dir=$TMP_ROOT/bare-linked bare=$TMP_ROOT/bare-linked/gate.git wt=$TMP_ROOT/bare-linked/wt out
+  mkdir -p "$case_dir"
+  git init --bare -q "$bare"
+  git -C "$bare" worktree add -q -b feature "$wt" \
+    || fail "could not add linked worktree to bare repository"
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -q --allow-empty -m feature
+  out=$(cd "$wt" && "$CLI" inventory --base HEAD~0 --json) \
+    || fail "inventory crashed against a bare repository with a linked committed worktree"
+  [ "$(printf '%s' "$out" | jq -r '.worktrees[] | select(.bare == true) | .head_oid')" = "null" ] \
+    || fail "bare worktree record should report head_oid null instead of fabricating an OID"
+  [ -n "$(printf '%s' "$out" | jq -r '.worktrees[] | select(.bare == true) | .head_oid_reason')" ] \
+    || fail "bare worktree record should carry an explicit reason for its missing HEAD"
+  [ "$(printf '%s' "$out" | jq -r '.worktrees[] | select(.bare == false) | .head_oid')" != "null" ] \
+    || fail "linked worktree with a real commit should still report a head_oid"
+  pass "a bare repository with a linked committed worktree is observed without a HEAD-parsing crash"
+}
+
 test_human_output_is_concise() {
   local repo=$TMP_ROOT/inventory/repo out
   out=$(cd "$repo" && "$CLI" inventory --base main) || fail "human inventory failed"
@@ -329,4 +348,5 @@ test_refresh_reobserves_and_catalog_is_shared
 test_missing_and_ambiguous_default_base
 test_bounded_concurrent_writer_failure_is_atomic
 test_invalid_lock_timeout_env_diagnoses_cleanly
+test_bare_repository_with_linked_worktree_is_observed
 test_human_output_is_concise
