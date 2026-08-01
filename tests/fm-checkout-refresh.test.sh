@@ -1583,6 +1583,169 @@ SH
   pass "bounded refresh terminates and reaps its complete descendant tree"
 }
 
+test_per_home_treehouse_sources_isolate_same_origin_clones() {
+  local remote home_a home_b source_a source_b fakebin legacy_root lease_a lease_b
+  local common_a common_b lease_common_a lease_common_b config_a config_b
+  remote=$(build_origin per-home-treehouse)
+  home_a="$TMP_ROOT/treehouse-home-a"
+  home_b="$TMP_ROOT/treehouse-home-b"
+  source_a="$home_a/projects/shared"
+  source_b="$home_b/projects/shared"
+  fakebin="$TMP_ROOT/per-home-treehouse-fakebin"
+  legacy_root="$TMP_ROOT/per-home-treehouse-legacy"
+  mkdir -p "$home_a/projects" "$home_a/config" "$home_b/projects" "$home_b/config" \
+    "$fakebin" "$legacy_root"
+  clone_from "$remote" "$source_a"
+  clone_from "$remote" "$source_b"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = get ] && [ "${2:-}" = --lease ] || exit 64
+root=$(sed -n 's/^root = "\(.*\)"$/\1/p' "$PWD/treehouse.toml")
+[ -n "$root" ] || exit 65
+worktree="$root/.treehouse/shared-test/1/shared"
+if [ ! -d "$worktree" ]; then
+  mkdir -p "$(dirname "$worktree")"
+  git -C "$PWD" worktree add --quiet --detach "$worktree" HEAD || exit 66
+fi
+printf '%s\n' "$worktree"
+SH
+  chmod +x "$fakebin/treehouse"
+
+  lease_a=$(HOME="$TEST_HOME" FM_HOME="$home_a" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$home_a/refresh-state" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$home_a/locks" \
+    FM_TREEHOUSE_ROOT="$legacy_root" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-checkout-refresh.sh" acquire-worktree "$source_a" firstmate-home-a)
+  lease_b=$(HOME="$TEST_HOME" FM_HOME="$home_b" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$home_b/refresh-state" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$home_b/locks" \
+    FM_TREEHOUSE_ROOT="$legacy_root" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-checkout-refresh.sh" acquire-worktree "$source_b" firstmate-home-b)
+
+  common_a=$(git -C "$source_a" rev-parse --path-format=absolute --git-common-dir)
+  common_b=$(git -C "$source_b" rev-parse --path-format=absolute --git-common-dir)
+  lease_common_a=$(git -C "$lease_a" rev-parse --path-format=absolute --git-common-dir)
+  lease_common_b=$(git -C "$lease_b" rev-parse --path-format=absolute --git-common-dir)
+  [ "$lease_common_a" = "$common_a" ] \
+    || fail "home A acquired a worktree outside its declared clone"
+  [ "$lease_common_b" = "$common_b" ] \
+    || fail "home B acquired a worktree outside its declared clone"
+  [ "$lease_common_a" != "$lease_common_b" ] \
+    || fail "same-origin homes still shared one Git common directory"
+  assert_contains "$lease_a" "$home_a/.treehouse/" \
+    "home A lease did not use its managed Treehouse root"
+  assert_contains "$lease_b" "$home_b/.treehouse/" \
+    "home B lease did not use its managed Treehouse root"
+  assert_absent "$source_a/treehouse.toml" \
+    "managed Treehouse setup wrote into home A's declared project clone"
+  assert_absent "$source_b/treehouse.toml" \
+    "managed Treehouse setup wrote into home B's declared project clone"
+  config_a=$(find "$home_a/state/treehouse-sources" -name treehouse.toml -type f -print)
+  config_b=$(find "$home_b/state/treehouse-sources" -name treehouse.toml -type f -print)
+  assert_grep "root = \"$home_a\"" "$config_a" \
+    "home A control worktree did not carry its managed root"
+  assert_grep "root = \"$home_b\"" "$config_b" \
+    "home B control worktree did not carry its managed root"
+  pass "same-origin clones acquire from separate per-home pools owned by their declaring clone"
+}
+
+test_managed_treehouse_source_refuses_tracked_config_and_symlinks() {
+  local tracked_home tracked_source inspect_home inspect_source fakebin real_git out status outside
+  local state_home parent_home keyed_home keyed_source common key
+  tracked_home="$TMP_ROOT/treehouse-tracked-home"
+  tracked_source="$tracked_home/projects/tracked"
+  mkdir -p "$tracked_source" "$tracked_home/config"
+  fm_git_init_commit "$tracked_source"
+  printf '%s\n' 'root = "/project-owned"' > "$tracked_source/treehouse.toml"
+  git -C "$tracked_source" add treehouse.toml
+  git -C "$tracked_source" commit -qm tracked-treehouse-config
+  set +e
+  out=$(run_isolated_refresh "$tracked_home" "$tracked_home/refresh-state" \
+    acquire-worktree "$tracked_source" tracked-config 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "tracked project Treehouse config was overwritten"
+  assert_contains "$out" "declared project $tracked_source tracks treehouse.toml" \
+    "tracked-config refusal did not identify the declared project"
+  assert_contains "$out" "preventing Firstmate from applying its per-home root without mutating project state" \
+    "tracked-config refusal did not explain the required operator action"
+  assert_grep 'root = "/project-owned"' "$tracked_source/treehouse.toml" \
+    "tracked project Treehouse config changed during refusal"
+  assert_absent "$tracked_home/state" \
+    "tracked-config refusal created managed source state"
+
+  inspect_home="$TMP_ROOT/treehouse-inspection-home"
+  inspect_source="$inspect_home/projects/source"
+  fakebin="$TMP_ROOT/treehouse-inspection-fakebin"
+  real_git=$(command -v git)
+  mkdir -p "$inspect_source" "$inspect_home/config" "$fakebin"
+  fm_git_init_commit "$inspect_source"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${3:-}" = ls-files ] && [ "${5:-}" = treehouse.toml ]; then
+  exit 70
+fi
+exec "${FM_TEST_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+  set +e
+  out=$(FM_TEST_REAL_GIT="$real_git" PATH="$fakebin:$PATH" \
+    run_isolated_refresh "$inspect_home" "$inspect_home/refresh-state" \
+    acquire-worktree "$inspect_source" failed-inspection 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "failed tracked-config inspection continued acquisition"
+  assert_contains "$out" "cannot inspect whether declared project $inspect_source tracks treehouse.toml" \
+    "tracked-config inspection failure was not reported"
+  assert_absent "$inspect_home/state" \
+    "tracked-config inspection failure created managed source state"
+
+  outside="$TMP_ROOT/treehouse-source-outside"
+  state_home="$TMP_ROOT/treehouse-state-link-home"
+  mkdir -p "$outside" "$state_home/projects/source" "$state_home/config"
+  fm_git_init_commit "$state_home/projects/source"
+  ln -s "$outside" "$state_home/state"
+  set +e
+  run_isolated_refresh "$state_home" "$state_home/refresh-state" \
+    acquire-worktree "$state_home/projects/source" linked-state >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "managed Treehouse source accepted a symlinked state directory"
+  [ -z "$(find "$outside" -mindepth 1 -print -quit)" ] \
+    || fail "symlinked state directory caused an out-of-home write"
+
+  parent_home="$TMP_ROOT/treehouse-parent-link-home"
+  mkdir -p "$parent_home/projects/source" "$parent_home/config" "$parent_home/state"
+  fm_git_init_commit "$parent_home/projects/source"
+  ln -s "$outside" "$parent_home/state/treehouse-sources"
+  set +e
+  run_isolated_refresh "$parent_home" "$parent_home/refresh-state" \
+    acquire-worktree "$parent_home/projects/source" linked-parent >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "managed Treehouse source accepted a symlinked state parent"
+  [ -z "$(find "$outside" -mindepth 1 -print -quit)" ] \
+    || fail "symlinked state parent caused an out-of-home write"
+
+  keyed_home="$TMP_ROOT/treehouse-keyed-home"
+  keyed_source="$keyed_home/projects/source"
+  mkdir -p "$keyed_source" "$keyed_home/config" "$keyed_home/state/treehouse-sources"
+  fm_git_init_commit "$keyed_source"
+  common=$(fm_checkout_git_common_dir "$keyed_source")
+  key=$(fm_checkout_hash_value "$common" 24)
+  ln -s "$outside" "$keyed_home/state/treehouse-sources/$key"
+  set +e
+  run_isolated_refresh "$keyed_home" "$keyed_home/refresh-state" \
+    acquire-worktree "$keyed_source" linked-key >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "managed Treehouse source accepted a symlinked keyed directory"
+  [ -z "$(find "$outside" -mindepth 1 -print -quit)" ] \
+    || fail "symlinked keyed directory caused an out-of-home write"
+  pass "managed Treehouse source refuses tracked configs and redirected state paths"
+}
+
 test_acquisition_honors_shared_checkout_lock() {
   local source fakebin common key lock out status marker
   source="$TMP_ROOT/acquisition-lock-source"
@@ -2355,6 +2518,13 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
+  test_per_home_treehouse_sources_isolate_same_origin_clones
+  test_managed_treehouse_source_refuses_tracked_config_and_symlinks
+  test_acquisition_honors_shared_checkout_lock
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-7 ]; then
   test_discovery_rejects_nested_configured_and_scanned_paths
   exit 0
@@ -2431,6 +2601,8 @@ test_explicit_secondmate_home_requires_live_default_tip
 test_lock_owner_symlink_cannot_escape_state_directory
 test_worktree_freshness_verification_fails_closed
 test_bounded_refresh_terminates_descendants
+test_per_home_treehouse_sources_isolate_same_origin_clones
+test_managed_treehouse_source_refuses_tracked_config_and_symlinks
 test_acquisition_honors_shared_checkout_lock
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam
 test_logical_home_state_migrates_and_ambiguity_fails_closed

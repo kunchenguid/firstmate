@@ -6,7 +6,8 @@
 # This script owns the broader covered-set discovery and the independent cadence:
 #
 #   - projects/* under the active FM_HOME;
-#   - backing checkouts discovered from Treehouse's state under ~/.treehouse;
+#   - backing checkouts discovered from the active home's managed Treehouse pool
+#     and the legacy user-level pool under ~/.treehouse;
 #   - exact Git worktree roots from `path <checkout>` entries in config/checkout-refresh;
 #   - top-level clones under $HOME, plus explicit `scan <directory>` roots, whose
 #     origin URL matches one of the checkouts above.
@@ -36,6 +37,10 @@
 # fm-fleet-sync.sh owns the equivalent per-checkout refresh bound for every caller.
 # FM_TREEHOUSE_ACQUIRE_TIMEOUT applies the same process-tree ownership to the
 # synchronous durable lease acquired before a task endpoint is created.
+# Firstmate acquires each new task lease from a persistent detached control
+# worktree registered to the declared project clone. The control worktree carries
+# the repo-level root setting that Treehouse requires, while the declared clone
+# stays clean and every home gets its own pool under $FM_HOME/.treehouse.
 #
 # Cadence and spawn-preflight refreshes delegate to fm-fleet-sync.sh with pruning
 # disabled, while session-start pruning retains every branch whose landed state
@@ -103,6 +108,21 @@ FM_HOME_PHYSICAL_KEY=$(fm_checkout_physical_path_key "$FM_HOME_CANONICAL" direct
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 CONFIG_FILE="${FM_CHECKOUT_REFRESH_CONFIG:-$CONFIG/checkout-refresh}"
+MANAGED_TREEHOUSE_ROOT_RAW="$FM_HOME_CANONICAL/.treehouse"
+MANAGED_TREEHOUSE_ROOT=$MANAGED_TREEHOUSE_ROOT_RAW
+MANAGED_TREEHOUSE_ROOT_CANONICAL=
+MANAGED_TREEHOUSE_ROOT_INVALID=0
+if ! MANAGED_TREEHOUSE_ROOT=$(fm_checkout_lexical_path "$MANAGED_TREEHOUSE_ROOT_RAW" 1); then
+  MANAGED_TREEHOUSE_ROOT_INVALID=1
+  MANAGED_TREEHOUSE_ROOT=$MANAGED_TREEHOUSE_ROOT_RAW
+elif [ -e "$MANAGED_TREEHOUSE_ROOT" ] && [ ! -d "$MANAGED_TREEHOUSE_ROOT" ]; then
+  MANAGED_TREEHOUSE_ROOT_INVALID=1
+elif [ -d "$MANAGED_TREEHOUSE_ROOT" ] \
+  && MANAGED_TREEHOUSE_ROOT_CANONICAL=$(fm_checkout_trusted_dir "$MANAGED_TREEHOUSE_ROOT"); then
+  MANAGED_TREEHOUSE_ROOT=$MANAGED_TREEHOUSE_ROOT_CANONICAL
+elif [ -e "$MANAGED_TREEHOUSE_ROOT" ]; then
+  MANAGED_TREEHOUSE_ROOT_INVALID=1
+fi
 if [ "${FM_TREEHOUSE_ROOT+x}" = x ]; then
   TREEHOUSE_ROOT_RAW=$FM_TREEHOUSE_ROOT
 else
@@ -231,6 +251,32 @@ require_exact_git_root() {
   printf '%s\n' "$canonical"
 }
 
+ensure_managed_child_dir() {  # <trusted-parent> <child-name> <label>
+  local parent=$1 child=$2 label=$3 candidate trusted
+  parent=$(fm_checkout_trusted_dir "$parent") || {
+    echo "error: $label parent is unsafe or unreadable: $1" >&2
+    return 1
+  }
+  case "$child" in ''|.|..|*/*) return 1 ;; esac
+  candidate="$parent/$child"
+  if [ -L "$candidate" ] || { [ -e "$candidate" ] && [ ! -d "$candidate" ]; }; then
+    echo "error: $label is unsafe: $candidate" >&2
+    return 1
+  fi
+  if [ ! -e "$candidate" ]; then
+    mkdir "$candidate" || return 1
+  fi
+  trusted=$(fm_checkout_trusted_dir "$candidate") || {
+    echo "error: $label is unsafe or unreadable: $candidate" >&2
+    return 1
+  }
+  [ "$trusted" = "$candidate" ] || {
+    echo "error: $label changed identity: $candidate" >&2
+    return 1
+  }
+  printf '%s\n' "$trusted"
+}
+
 expand_config_path() {
   case "$1" in
     "~") printf '%s\n' "$HOME" ;;
@@ -304,22 +350,35 @@ parse_config() {
 }
 
 treehouse_worktree_paths() {
+  local roots=()
+  if [ "$MANAGED_TREEHOUSE_ROOT_INVALID" = 1 ]; then
+    echo "checkout-refresh: skipped: incomplete Treehouse coverage because the managed home root is unsafe or unreadable: $MANAGED_TREEHOUSE_ROOT_RAW" >&2
+    return 1
+  fi
   if [ "$TREEHOUSE_ROOT_INVALID" = 1 ]; then
     echo "checkout-refresh: skipped: incomplete Treehouse coverage because the configured root is unsafe or unreadable: $TREEHOUSE_ROOT_RAW" >&2
     return 1
   fi
-  if [ ! -e "$TREEHOUSE_ROOT" ] && [ ! -L "$TREEHOUSE_ROOT" ]; then
-    return 0
+  if [ -e "$MANAGED_TREEHOUSE_ROOT" ] || [ -L "$MANAGED_TREEHOUSE_ROOT" ]; then
+    [ -d "$MANAGED_TREEHOUSE_ROOT" ] || {
+      echo "checkout-refresh: skipped: incomplete Treehouse coverage because the managed home root is not a directory: $MANAGED_TREEHOUSE_ROOT" >&2
+      return 1
+    }
+    roots+=("$MANAGED_TREEHOUSE_ROOT")
   fi
-  [ -d "$TREEHOUSE_ROOT" ] || {
-    echo "checkout-refresh: skipped: incomplete Treehouse coverage because the root is not a directory: $TREEHOUSE_ROOT" >&2
-    return 1
-  }
+  if [ -e "$TREEHOUSE_ROOT" ] || [ -L "$TREEHOUSE_ROOT" ]; then
+    [ -d "$TREEHOUSE_ROOT" ] || {
+      echo "checkout-refresh: skipped: incomplete Treehouse coverage because the root is not a directory: $TREEHOUSE_ROOT" >&2
+      return 1
+    }
+    [ "$TREEHOUSE_ROOT" = "$MANAGED_TREEHOUSE_ROOT" ] || roots+=("$TREEHOUSE_ROOT")
+  fi
+  [ "${#roots[@]}" -ne 0 ] || return 0
   command -v python3 >/dev/null 2>&1 || {
     echo "checkout-refresh: skipped: incomplete Treehouse coverage because python3 is unavailable" >&2
     return 1
   }
-  python3 - "$TREEHOUSE_ROOT" <<'PY'
+  python3 - "${roots[@]}" <<'PY'
 import json
 import os
 import stat
@@ -341,18 +400,18 @@ def directory_entries(path, label):
         return sorted(entries, key=lambda entry: entry.name)
 
 
-root = sys.argv[1]
-try:
-    pool_entries = directory_entries(root, "Treehouse root")
-except OSError as error:
-    failed = True
-    pool_entries = []
-    print(
-        f"checkout-refresh: skipped: incomplete Treehouse coverage at {root}: {error}",
-        file=sys.stderr,
-    )
-
 state_paths = []
+pool_entries = []
+for root in sys.argv[1:]:
+    try:
+        pool_entries.extend(directory_entries(root, "Treehouse root"))
+    except OSError as error:
+        failed = True
+        print(
+            f"checkout-refresh: skipped: incomplete Treehouse coverage at {root}: {error}",
+            file=sys.stderr,
+        )
+
 for pool_entry in pool_entries:
     try:
         metadata = pool_entry.stat(follow_symlinks=False)
@@ -896,8 +955,97 @@ EOF
   cleanup_discovery_tmp "$tmp"
 }
 
+prepare_treehouse_source() {  # <declared-project>
+  local expected_source=$1 expected_common source_key source_parent source_dir source_common
+  local source_name config config_tmp config_value dirty state_dir managed_root tracked_config
+  [ "$MANAGED_TREEHOUSE_ROOT_INVALID" = 0 ] || {
+    echo "error: managed Treehouse root is unsafe or unreadable: $MANAGED_TREEHOUSE_ROOT_RAW" >&2
+    return 1
+  }
+  managed_root=$(ensure_managed_child_dir "$FM_HOME_CANONICAL" .treehouse "managed Treehouse root") || return 1
+  [ "$managed_root" = "$MANAGED_TREEHOUSE_ROOT" ] || {
+    echo "error: managed Treehouse root changed identity: $MANAGED_TREEHOUSE_ROOT" >&2
+    return 1
+  }
+  expected_common=$(fm_checkout_git_common_dir "$expected_source") || {
+    echo "error: cannot resolve Treehouse source repository identity for $expected_source" >&2
+    return 1
+  }
+  tracked_config=$(git -C "$expected_source" ls-files -- treehouse.toml) || {
+    echo "error: cannot inspect whether declared project $expected_source tracks treehouse.toml" >&2
+    return 1
+  }
+  if [ -n "$tracked_config" ]; then
+    echo "error: declared project $expected_source tracks treehouse.toml, preventing Firstmate from applying its per-home root without mutating project state" >&2
+    return 1
+  fi
+  source_key=$(fm_checkout_hash_value "$expected_common" 24) || {
+    echo "error: cannot derive Treehouse source identity for $expected_source" >&2
+    return 1
+  }
+  state_dir="$FM_HOME_CANONICAL/state"
+  state_dir=$(ensure_managed_child_dir "$FM_HOME_CANONICAL" state "Treehouse source state root") || return 1
+  source_parent=$(ensure_managed_child_dir "$state_dir" treehouse-sources "Treehouse source state directory") || return 1
+  source_parent=$(ensure_managed_child_dir "$source_parent" "$source_key" "Treehouse source directory") || return 1
+  source_name=${expected_source##*/}
+  [ -n "$source_name" ] || {
+    echo "error: Treehouse source repository name is unavailable for $expected_source" >&2
+    return 1
+  }
+  source_dir="$source_parent/$source_name"
+  if [ -e "$source_dir" ] || [ -L "$source_dir" ]; then
+    source_dir=$(require_exact_git_root "$source_dir" "managed Treehouse source") || return 1
+  else
+    git -C "$expected_source" worktree add --quiet --detach "$source_dir" HEAD || {
+      echo "error: cannot create the managed Treehouse source for $expected_source" >&2
+      return 1
+    }
+    source_dir=$(require_exact_git_root "$source_dir" "managed Treehouse source") || return 1
+  fi
+  source_common=$(fm_checkout_git_common_dir "$source_dir") || return 1
+  [ "$source_common" = "$expected_common" ] || {
+    echo "error: managed Treehouse source belongs to an unrelated repository: $source_dir" >&2
+    return 1
+  }
+  if git -C "$source_dir" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
+    echo "error: managed Treehouse source is not detached: $source_dir" >&2
+    return 1
+  fi
+  config="$source_dir/treehouse.toml"
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    [ -f "$config" ] && [ ! -L "$config" ] || {
+      echo "error: managed Treehouse config is unsafe: $config" >&2
+      return 1
+    }
+  fi
+  config_value=$(fm_checkout_system_perl -MJSON::PP=encode_json -e 'print encode_json(shift)' "$FM_HOME_CANONICAL") || {
+    echo "error: cannot encode the managed Treehouse root for $FM_HOME_CANONICAL" >&2
+    return 1
+  }
+  config_tmp=$(mktemp "$source_dir/.firstmate-treehouse-config.XXXXXX") || return 1
+  if ! printf 'root = %s\n' "$config_value" > "$config_tmp" \
+    || ! chmod 600 "$config_tmp" \
+    || ! mv "$config_tmp" "$config"; then
+    rm -f "$config_tmp"
+    echo "error: cannot publish the managed Treehouse config at $config" >&2
+    return 1
+  fi
+  dirty=$(git -C "$source_dir" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+    echo "error: managed Treehouse source cleanliness is uninspectable: $source_dir" >&2
+    return 1
+  }
+  case "$dirty" in
+    ''|'?? treehouse.toml') ;;
+    *)
+      echo "error: managed Treehouse source contains unexpected changes: $source_dir ($(printf '%s\n' "$dirty" | sed -n '1p'))" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$source_dir"
+}
+
 acquire_worktree() {
-  local expected_source=$1 lease_holder=$2 status=0 canonical
+  local expected_source=$1 lease_holder=$2 status=0 canonical treehouse_source
   canonical=$(require_exact_git_root "$expected_source" "Treehouse acquisition source") || return 1
   expected_source=$canonical
   (
@@ -913,7 +1061,8 @@ acquire_worktree() {
     fi
     process_guard="${FM_LOCK_OWNER_DIR:?}/process-group"
     trap 'fm_lock_release "$checkout_lock"' EXIT
-    cd "$expected_source" || exit 1
+    treehouse_source=$(prepare_treehouse_source "$expected_source") || exit 1
+    cd "$treehouse_source" || exit 1
     if FM_PROCESS_TREE_GUARD_FILE="$process_guard" \
         fm_run_bounded "$ACQUIRE_TIMEOUT" treehouse get --lease --lease-holder "$lease_holder"; then
       status=0

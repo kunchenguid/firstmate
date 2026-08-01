@@ -299,6 +299,10 @@ if [ "$DIRECT_SPAWN_ENDPOINT" = not-created ]; then
       exit 1
     }
 fi
+SPAWN_NEVER_LAUNCHED=0
+if [ "$DIRECT_SPAWN_CLEANUP" = pending ] && [ "$DIRECT_SPAWN_ENDPOINT" = not-created ]; then
+  SPAWN_NEVER_LAUNCHED=1
+fi
 ORCA_CLEANUP_PENDING_COUNT=$(grep -c '^orca_cleanup_pending=' "$META" 2>/dev/null || true)
 ORCA_CLEANUP_PENDING=0
 if [ "$ORCA_CLEANUP_PENDING_COUNT" -ne 0 ]; then
@@ -930,6 +934,10 @@ work_is_landed() {
 backlog_refresh_reminder() {
   local pr done_cmd report_path
   [ "$KIND" = secondmate ] && return 0
+  if [ "$SPAWN_NEVER_LAUNCHED" = 1 ]; then
+    printf '%s\n' "Backlog: $ID never launched. Retry its spawn or move it back to a ready state; no report was required for this cleanup."
+    return 0
+  fi
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
       scout)
@@ -4553,7 +4561,7 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
-if [ "$KIND" = scout ]; then
+if [ "$KIND" = scout ] && [ "$SPAWN_NEVER_LAUNCHED" != 1 ]; then
   REPORT="$DATA/$ID/report.md"
   if [ ! -f "$REPORT" ]; then
     echo "REFUSED: scout task $ID has no report at $REPORT." >&2
@@ -4697,7 +4705,7 @@ fi
 
 # Report-gated tasks restore any pending rollback generation and fail closed on
 # their machine-global completion report before lease release or worktree removal.
-if [ "$REPORT_GATED" = 1 ]; then
+if [ "$REPORT_GATED" = 1 ] && [ "$SPAWN_NEVER_LAUNCHED" != 1 ]; then
   if [ "$MANAGED_ACCOUNT" = 1 ]; then
     reconcile_managed_account_rollback "$META" "$ID" "$DATA" || exit $?
   fi

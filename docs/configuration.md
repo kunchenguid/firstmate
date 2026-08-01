@@ -287,7 +287,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 `bin/fm-checkout-refresh.sh` keeps worktree seed checkouts current independently of Firstmate's own PR lifecycle.
 Its header owns the exact discovery, configuration-file, cadence, state, and command contracts.
-The default covered set is every clone under the active home's `projects/`, every backing checkout referenced by a Treehouse pool under `~/.treehouse`, and every top-level clone under `$HOME` whose `origin` URL matches one of those tracked checkouts.
+The default covered set is every clone under the active home's `projects/`, every backing checkout referenced by that home's managed `$FM_HOME/.treehouse` pool or the legacy user-level `~/.treehouse` pool, and every top-level clone under `$HOME` whose `origin` URL matches one of those tracked checkouts.
 Matching by origin discovers parallel clones such as `~/relvino` without embedding a captain-specific path in shared code.
 Optional `path` and shallow `scan` directives in the gitignored `config/checkout-refresh` file extend that set.
 Every declared checkout and matching-origin scan result must resolve to its exact canonical Git worktree root, so nested directories can never redirect refresh to an enclosing repository.
@@ -322,6 +322,10 @@ An unproven branch is retained and surfaced as `STUCK:`.
 
 Treehouse v2.0 already excludes dirty pool entries, fetches `origin`, and resets only an available clean detached worktree to the freshest default ref.
 Firstmate surfaces matching dirty pool entries, acquires the selected path with `treehouse get --lease`, and verifies the durable lease before creating its endpoint.
+Because Treehouse keys pool names by `origin`, Firstmate gives every home a separate `$FM_HOME/.treehouse` root before acquisition.
+Treehouse has no root flag or environment override, so Firstmate runs acquisition from a persistent detached control worktree registered to the declared project clone and stores the generated repo-level `treehouse.toml` only in that ignored operational worktree under `$FM_HOME/state/treehouse-sources/`.
+The declared project clone remains clean, while every acquired worktree retains the declared clone's exact Git common directory.
+The legacy user-level pool remains scan-only coverage so existing leases can finish and return without migration, reclamation, or ownership changes.
 That synchronous acquisition holds the common-Git-directory mutation lock and is process-tree bounded by `FM_TREEHOUSE_ACQUIRE_TIMEOUT`, which defaults to 60 seconds.
 The accepted lease must be clean, belong to the requested repository, have the same origin identity, and match the live upstream default-branch tip.
 Remote-free `local-only` acquisitions use the same repository and cleanliness proof, with the requested checkout's local `main` or `master` tip as their freshness authority.
@@ -338,7 +342,6 @@ Orca is an explicit legacy-recovery-only exception because this change creates n
 ### Limitations / deferred
 
 - A checkout without `origin` still uses the local default-tip proof without first proving that its registered project mode is explicitly `local-only`.
-- Home-scoped refresh owners still enumerate the shared user-level Treehouse root without filtering pool entries by owning `FM_HOME`.
 - Secondmate home acquisition still relies on Treehouse's dirty-entry skip and does not run Firstmate's `pool-preflight` before requesting its durable lease.
 - The rare SIGKILL lock-to-guard handoff race, exact wrapped-exit-code fidelity, and setup-failure diagnostic precision remain deferred under `clone-refresh-followup-edges`; current fail-safe behavior may retain or refuse work or require retry, but must not claim healthy coverage or discard unlanded work.
 
@@ -582,7 +585,7 @@ FM_CHECKOUT_REFRESH_PROBE_TIMEOUT=15  # seconds allowed for one upstream-tip pro
 FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=60   # seconds allowed for one checkout refresh
 FM_TREEHOUSE_ACQUIRE_TIMEOUT=60       # seconds allowed for one durable task-worktree acquisition
 FM_TREEHOUSE_RETURN_TIMEOUT=60        # seconds allowed for one Treehouse worktree return
-# FM_TREEHOUSE_ROOT is unset by default; setting it empty is malformed, while a non-empty value overrides ~/.treehouse
+# FM_TREEHOUSE_ROOT is unset by default; setting it empty is malformed, while a non-empty value replaces the legacy ~/.treehouse scan root (the managed $FM_HOME/.treehouse root is always covered)
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature

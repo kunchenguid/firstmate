@@ -540,7 +540,7 @@ set -u
 # `treehouse get --lease` reports the leased worktree on stdout, and fm-spawn
 # refuses to launch without it. The stub has to answer that the same way.
 [ "${1:-}" != get ] || {
-  printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+  printf '%s\tcwd=%s\n' "$*" "$PWD" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
   printf '%s\n' "${FM_FAKE_TREEHOUSE_WORKTREE:?}"
   exit 0
 }
@@ -642,6 +642,51 @@ test_spawn_uses_direct_codex_home_without_agent_fleet() {
   if grep -q '^account_pool=' "$meta"; then fail "new direct spawn wrote legacy managed pool metadata"; fi
   [ ! -s "$TMP_ROOT/agent-fleet.log" ] || fail "new direct spawn invoked Agent Fleet"
   pass "new enforced Codex spawn uses CODEX_HOME and never enters Agent Fleet lease selection"
+}
+
+test_main_home_ship_and_scout_use_managed_treehouse_source() {
+  local record id out meta source_config treehouse_log
+  reset_accounts
+  : > "$TMP_ROOT/agent-fleet.log"
+
+  id=main-home-ship-z1
+  record=$(make_spawn_case main-home-ship codex "$id")
+  read_spawn_case "$record"
+  : > "$TREEHOUSE_LOG"
+  out=$(run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
+    "$id" "$SPAWN_PROJECT" 2>&1)
+  meta="$SPAWN_HOME/state/$id.meta"
+  treehouse_log=$(cat "$TREEHOUSE_LOG")
+  assert_contains "$out" "spawned $id harness=codex kind=ship" \
+    "main-home ship spawn regressed"
+  assert_grep 'kind=ship' "$meta" "main-home ship metadata changed kind"
+  assert_absent "$SPAWN_PROJECT/treehouse.toml" \
+    "main-home ship spawn wrote Treehouse config into the project clone"
+  assert_contains "$treehouse_log" "cwd=$SPAWN_HOME/state/treehouse-sources/" \
+    "main-home ship spawn did not acquire from its managed control worktree"
+  source_config=$(find "$SPAWN_HOME/state/treehouse-sources" -name treehouse.toml -type f -print)
+  assert_grep "root = \"$SPAWN_HOME\"" "$source_config" \
+    "main-home ship control worktree did not select the home pool"
+
+  id=main-home-scout-z1
+  record=$(make_spawn_case main-home-scout codex "$id")
+  read_spawn_case "$record"
+  : > "$TREEHOUSE_LOG"
+  out=$(run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
+    "$id" "$SPAWN_PROJECT" --scout 2>&1)
+  meta="$SPAWN_HOME/state/$id.meta"
+  treehouse_log=$(cat "$TREEHOUSE_LOG")
+  assert_contains "$out" "spawned $id harness=codex kind=scout" \
+    "main-home scout spawn regressed"
+  assert_grep 'kind=scout' "$meta" "main-home scout metadata changed kind"
+  assert_absent "$SPAWN_PROJECT/treehouse.toml" \
+    "main-home scout spawn wrote Treehouse config into the project clone"
+  assert_contains "$treehouse_log" "cwd=$SPAWN_HOME/state/treehouse-sources/" \
+    "main-home scout spawn did not acquire from its managed control worktree"
+  source_config=$(find "$SPAWN_HOME/state/treehouse-sources" -name treehouse.toml -type f -print)
+  assert_grep "root = \"$SPAWN_HOME\"" "$source_config" \
+    "main-home scout control worktree did not select the home pool"
+  pass "main-home ship and scout spawns acquire through their managed per-home Treehouse source"
 }
 
 test_spawn_uses_direct_claude_fallback_and_hook() {
@@ -1301,6 +1346,11 @@ if [ "${FM_TEST_FOCUSED:-}" = direct-recovery-lifecycle ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
+  test_main_home_ship_and_scout_use_managed_treehouse_source
+  exit 0
+fi
+
 test_codex_picks_highest_fresh_minimum_and_skips_no_window
 test_profile_eligibility_requires_enabled_worker
 test_claude_approval_marker_contract
@@ -1315,6 +1365,7 @@ test_claude_uses_only_explicit_last_resort_after_primary_exhaustion
 test_codex_rotates_accounts_tied_for_best_fresh_score
 test_default_root_uses_passwd_home_not_ambient_home
 test_prepare_installs_and_verifies_per_account_herdr_hooks
+test_main_home_ship_and_scout_use_managed_treehouse_source
 test_spawn_uses_direct_codex_home_without_agent_fleet
 test_spawn_uses_direct_claude_fallback_and_hook
 test_claude_spawn_rejects_mismatched_explicit_model

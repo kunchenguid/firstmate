@@ -3856,6 +3856,38 @@ test_never_created_direct_spawn_endpoint_is_not_quiesced() {
   pass "never-created direct-spawn endpoint skips endpoint quiescence"
 }
 
+test_never_created_scout_without_report_cleans_bookkeeping() {
+  local case_dir meta_tmp rc
+  case_dir=$(make_case never-created-scout-without-report)
+  write_meta "$case_dir" local-only scout
+  meta_tmp=$(mktemp "$case_dir/state/.never-created-scout-meta.XXXXXX")
+  awk '!/^window=/ && !/^tmux_session_target=/' "$case_dir/state/task-x1.meta" > "$meta_tmp"
+  printf '%s\n' \
+    'window=' \
+    'account_home=/tmp/direct-account-home' \
+    'direct_spawn_endpoint=not-created' \
+    'direct_spawn_cleanup=pending' \
+    'rollback_pending=1' \
+    'report_required=1' >> "$meta_tmp"
+  mv "$meta_tmp" "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "never-created scout teardown without report"
+  assert_no_grep 'has no report' "$case_dir/stderr" \
+    "never-launched scout was incorrectly held to the executed-scout report gate"
+  assert_present "$case_dir/fakebin/.tmux-live" \
+    "never-created scout cleanup acted on the currently focused tmux endpoint"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "never-created scout cleanup left orphaned task metadata"
+  assert_grep 'task-x1 never launched' "$case_dir/stdout" \
+    "never-created scout cleanup did not preserve the task's retry semantics"
+  pass "never-created scout cleanup skips only the report gates for a spawn that never launched"
+}
+
 test_secondmate_registry_duplicate_home_blocks_removal() {
   local case_dir home rc
   case_dir=$(make_case secondmate-registry-duplicate-home)
@@ -5077,6 +5109,12 @@ if [ "${FM_TEST_FOCUSED:-}" = reclaim-regressions ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
+  test_never_created_direct_spawn_endpoint_is_not_quiesced
+  test_never_created_scout_without_report_cleans_bookkeeping
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = already-returned ]; then
   test_already_returned_worktree_finishes_bookkeeping
   exit 0
@@ -5161,6 +5199,7 @@ test_secondmate_missing_treehouse_child_is_retained
 test_secondmate_registry_home_drift_blocks_removal
 test_retained_direct_spawn_requires_confirmed_endpoint_quiescence
 test_never_created_direct_spawn_endpoint_is_not_quiesced
+test_never_created_scout_without_report_cleans_bookkeeping
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
