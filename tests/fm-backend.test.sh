@@ -689,12 +689,15 @@ strip_send_preflight() {  # <log>
 }
 
 test_send_conformance_old_vs_new() {
-  local old_bin fb log_old log_new home rc_old rc_new filtered_old filtered_new
+  local old_bin fb log_old log_new home rc_old rc_new filtered_old filtered_new guarded_new expected_cursor expected_capture
   old_bin=$(build_old_bin send-old)
   fb=$(make_send_fakebin "$TMP_ROOT/send-fake")
   home="$TMP_ROOT/send-home"; mkdir -p "$home/state"
   log_old="$TMP_ROOT/send-old.log"; log_new="$TMP_ROOT/send-new.log"
   filtered_old="$TMP_ROOT/send-old.filtered.log"; filtered_new="$TMP_ROOT/send-new.filtered.log"
+  guarded_new="$TMP_ROOT/send-new.guarded.log"
+  expected_cursor=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{cursor_y}'
+  expected_capture=$'tmux\x1fcapture-pane\x1f-e\x1f-p\x1f-t\x1fsess:win\x1f-S\x1f0\x1f-E\x1f-'
 
   # Case 1: --key path.
   run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" --key Escape
@@ -717,7 +720,12 @@ test_send_conformance_old_vs_new() {
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send plain text: old vs new exit code"
   strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
+  strip_send_preflight "$log_new" > "$guarded_new"
+  [ "$(sed -n '1p' "$guarded_new")" = "$expected_cursor" ] \
+    || fail "fm-send plain text: strict composer guard did not read cursor position before typing"
+  [ "$(sed -n '2p' "$guarded_new")" = "$expected_capture" ] \
+    || fail "fm-send plain text: strict composer guard did not capture the composer before typing"
+  sed '1,2d' "$guarded_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
     || fail "fm-send plain text: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-plain.txt")"
   assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
@@ -733,11 +741,16 @@ test_send_conformance_old_vs_new() {
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
   strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
+  strip_send_preflight "$log_new" > "$guarded_new"
+  [ "$(sed -n '1p' "$guarded_new")" = "$expected_cursor" ] \
+    || fail "fm-send /skill: strict composer guard did not read cursor position before typing"
+  [ "$(sed -n '2p' "$guarded_new")" = "$expected_capture" ] \
+    || fail "fm-send /skill: strict composer guard did not capture the composer before typing"
+  sed '1,2d' "$guarded_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
     || fail "fm-send /skill: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-slash.txt")"
 
-  pass "fm-send.sh: explicit tmux targets are verified, while --key/plain/slash send command shape stays old-compatible"
+  pass "fm-send.sh: explicit targets and empty composers are verified before old-compatible key/plain/slash submission"
 }
 
 # --- old vs new: fm-peek.sh --------------------------------------------------

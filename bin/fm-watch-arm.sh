@@ -28,6 +28,10 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   watcher: delegated to Claude auto-arm owner=<N> watcher=<N>
+#                                                        - another live Stop-hook owner already
+#                                                          owns this cycle; a manual arm does not
+#                                                          attach a second lifecycle to it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -256,6 +260,19 @@ wait_for_healthy_successor() {
   done
 }
 
+pid_is_current_ancestor() {  # <pid>
+  local wanted=$1 pid=${BASHPID:-$$} parent i=0
+  case "$wanted" in ''|*[!0-9]*) return 1 ;; esac
+  while [ "$i" -lt 32 ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+    [ "$pid" = "$wanted" ] && return 0
+    parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
+    case "$parent" in ''|*[!0-9]*) return 1 ;; esac
+    pid=$parent
+    i=$((i + 1))
+  done
+  return 1
+}
+
 fail_unexplained_cycle() {
   echo "watcher: FAILED - cycle ended without an actionable reason"
   return 1
@@ -323,6 +340,25 @@ print_watch_output() {
   local out=$1
   [ -s "$out" ] && cat "$out"
 }
+
+# A manual repair and Claude's Stop hook can otherwise attach two arm lifecycles
+# to one watcher. The live ledger reproduced that shape directly: one started
+# arm and one attached arm named the same watcher, then the attached lifecycle
+# failed after the owner closed. When a foreign live auto-arm owner exists, do
+# not attach. Verify that its watcher is healthy and return an explicit delegated
+# outcome; the Stop-hook descendant itself is allowed through.
+AUTOARM_OWNER_LOCK="$STATE/.claude-autoarm.lock"
+autoarm_owner=$(cat "$AUTOARM_OWNER_LOCK/pid" 2>/dev/null || true)
+if fm_pid_alive "$autoarm_owner" && ! pid_is_current_ancestor "$autoarm_owner"; then
+  if wait_for_healthy_successor; then
+    echo "watcher: delegated to Claude auto-arm owner=$autoarm_owner watcher=$HEALTHY_PID"
+    exit 0
+  fi
+  if fm_pid_alive "$autoarm_owner"; then
+    echo "watcher: FAILED - Claude auto-arm owner=$autoarm_owner has no live watcher with a fresh beacon"
+    exit 1
+  fi
+fi
 
 mode=arm
 case "${1:-}" in

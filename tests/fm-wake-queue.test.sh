@@ -212,6 +212,33 @@ test_drain_dedupes_obvious_duplicates() {
   pass "drain collapses obvious duplicate heartbeat and signal records"
 }
 
+test_drain_preserves_consumed_queue_evidence() {
+  local dir state data out archived receipt digest bytes
+  dir=$(make_case custody)
+  state="$dir/state"
+  data="$dir/data"
+  out="$dir/drain.out"
+  mkdir -p "$data"
+  append_wake "$state" signal task.status "signal: $state/task.status" || fail "signal append failed"
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "heartbeat append failed"
+  digest=$(shasum -a 256 "$state/.wake-queue" | awk '{print $1}')
+  bytes=$(wc -c < "$state/.wake-queue" | tr -d '[:space:]')
+
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" "$DRAIN" > "$out" \
+    || fail "custody-preserving drain failed"
+  archived=$(find "$data/wake-receipts" -type f ! -name '*.receipt' | head -1)
+  receipt=$(find "$data/wake-receipts" -type f -name '*.receipt' | head -1)
+  assert_present "$archived" "drain erased the consumed queue without preserving its bytes"
+  assert_present "$receipt" "drain erased the consumed queue without a custody receipt"
+  [ "$(shasum -a 256 "$archived" | awk '{print $1}')" = "$digest" ] \
+    || fail "archived queue digest differs from the consumed queue"
+  assert_grep "sha256=$digest" "$receipt" "queue receipt digest does not bind the consumed bytes"
+  assert_grep "bytes=$bytes" "$receipt" "queue receipt byte count does not bind the consumed bytes"
+  assert_grep 'custody_class=consumed-wake-queue' "$receipt" "queue receipt omitted custody class"
+  [ ! -s "$state/.wake-queue" ] || fail "drain left consumed rows in the live queue"
+  pass "drain preserves consumed wake evidence before retiring live queue rows"
+}
+
 # The drain runs at the top of every wake-handling turn, so it also asserts
 # watcher liveness via fm-guard.sh: a lapsed re-arm chain then surfaces even on a
 # plain drain-and-handle turn that runs no other supervision script. It must warn
@@ -386,9 +413,12 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
 }
 
 test_interruption_before_and_after_raw_commit() {
-  local dir state before_out after_out replay_out empty_out pid rc count i
+  local dir state pre_data post_data before_out after_out replay_out empty_out pid rc count i
   dir=$(make_case interruption)
   state="$dir/state"
+  pre_data="$dir/pre-data"
+  post_data="$dir/post-data"
+  mkdir -p "$pre_data" "$post_data"
   before_out="$dir/before.out"
   after_out="$dir/after.out"
   replay_out="$dir/replay.out"
@@ -396,7 +426,7 @@ test_interruption_before_and_after_raw_commit() {
   printf 'done: interruption fixture\n' > "$state/task.status"
   append_wake "$state" signal task.status "signal: task" || fail "pre-commit interruption wake append failed"
 
-  FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=5 "$DRAIN" > "$before_out" &
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$pre_data" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=5 "$DRAIN" > "$before_out" &
   pid=$!
   i=0
   while [ "$i" -lt 100 ] && ! compgen -G "$state/.wake-queue.drain.*" >/dev/null; do
@@ -410,23 +440,37 @@ test_interruption_before_and_after_raw_commit() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" || fail "restored pre-commit wake did not drain"
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$pre_data" "$DRAIN" > "$replay_out" || fail "restored pre-commit wake did not drain"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
   [ "$count" -eq 1 ] || fail "pre-commit interruption lost or duplicated the restored row"
 
   append_wake "$state" signal task.status "signal: task after commit" || fail "post-commit interruption wake append failed"
-  FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=5 "$DRAIN" > "$after_out" &
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$post_data" FM_WAKE_ENRICH_TEST_DELAY=5 "$DRAIN" > "$after_out" &
   pid=$!
   wait_for_file_text "$after_out" "$(printf '\tsignal\ttask.status\t')" \
     || { kill "$pid" 2>/dev/null || true; fail "post-commit drain did not print its raw row"; }
+  i=0
+  while [ "$i" -lt 100 ] && ! compgen -G "$post_data/wake-receipts/.*.receipt" >/dev/null; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  compgen -G "$post_data/wake-receipts/.*.receipt" >/dev/null \
+    || { kill "$pid" 2>/dev/null || true; fail "post-commit drain did not custody-receipt consumed bytes"; }
+  i=0
+  while [ "$i" -lt 100 ] && [ -e "$state/.wake-queue.lock" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ ! -e "$state/.wake-queue.lock" ] \
+    || { kill "$pid" 2>/dev/null || true; fail "post-commit drain had not released queue ownership"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain after raw commitment"
   set +e
   wait "$pid"
   set -e
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$empty_out" || fail "drain after post-commit interruption failed"
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$post_data" "$DRAIN" > "$empty_out" || fail "drain after post-commit interruption failed"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$after_out" "$empty_out")
   [ "$count" -eq 1 ] || fail "post-commit interruption restored or duplicated the consumed row"
-  pass "interruptions restore before commitment and never replay after raw commitment"
+  pass "interruptions restore before custody commitment and never replay after receipt-bound retirement"
 }
 
 test_concurrent_append_and_drain
@@ -436,6 +480,7 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_drain_preserves_consumed_queue_evidence
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures

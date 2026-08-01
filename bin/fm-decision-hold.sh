@@ -22,6 +22,7 @@
 #     --title <title> --reason <reason> [--repo <repo>]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
+#   fm-decision-hold.sh verify-resolution <origin-id> <decision-key>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
 #
@@ -30,13 +31,29 @@
 # no unresolved captain decision. Later review passes may add keys; a live task's
 # metadata inventory is unioned idempotently. A post-teardown visual review can
 # complete against the surviving report and holds without recreating task state.
-# `verify` is read-only and is called by scout teardown so teardown cannot erase a
-# source before this gate has succeeded.
+# `verify` is read-only and is called by scout teardown. An unresolved hold is
+# cleanup-authoritative only after `complete` records a receipt under
+# data/decision-hold-receipts/ that binds origin id, endpoint dispatch id, the
+# exact backlog object digest, and a Bearings snapshot in which the hold appears.
+# Every live completion, including `--none`, also retains a report-bound origin
+# receipt so a later post-teardown visual-review pass keeps the authenticated
+# task and dispatch association needed to create and verify hold receipts.
+# This permits cleanup without requiring the captain to answer in the same session.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
 # final step leaves the captain hold open.
+# A resolved hold additionally retains the captain decision in
+# <hold-id>.decision.md and records <hold-id>.resolved beside it. Verification
+# requires one live-or-archived row, a nonzero decision digest, exact origin and
+# dispatch links, the canonical existing decision object, every routed task, and
+# matching object digests. Historical resolved rows without this receipt refuse;
+# there is no implicit or hand-written-row migration. An open historical hold may
+# reconstruct its cleanup receipt only by repeating `complete` while its exact
+# endpoint dispatch binding survives. Binding-less or already-resolved rows whose
+# script-owned objects are absent remain preserved and refused; no safe automatic
+# migration, force, or discard is supplied by this command.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +61,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+RECEIPT_DIR="$DATA/decision-hold-receipts"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -90,6 +108,38 @@ sha256_text() {  # <text>
   fi
 }
 
+sha256_file() {  # <path>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    fail "shasum or sha256sum is required"
+  fi
+}
+
+digest_is_nonzero_sha256() {  # <digest>
+  printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{64}$' || return 1
+  [ "$1" != 0000000000000000000000000000000000000000000000000000000000000000 ]
+}
+
+regular_nonsymlink_file() {  # <path>
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+write_atomic_file() {  # <path>  (content on stdin)
+  local path=$1 dir tmp
+  dir=${path%/*}
+  mkdir -p "$dir" || fail "could not create receipt directory: $dir"
+  tmp=$(mktemp "$dir/.receipt.tmp.XXXXXX") || fail "could not allocate receipt temporary file"
+  chmod 600 "$tmp" || { rm -f "$tmp"; fail "could not protect receipt temporary file"; }
+  if ! cat > "$tmp"; then
+    rm -f "$tmp"
+    fail "could not write receipt temporary file"
+  fi
+  mv "$tmp" "$path" || { rm -f "$tmp"; fail "could not publish receipt: $path"; }
+}
+
 hold_id() {  # <origin-id> <decision-key>
   validate_slug origin-id "$1"
   validate_slug decision-key "$2"
@@ -108,6 +158,70 @@ require_tasks_axi() {
 
 task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
+}
+
+task_row_count() {  # <id>
+  local id=$1 prefix file
+  prefix="- [x] $id - "
+  {
+    for file in "$DATA/backlog.md" "$DATA/done-archive.md"; do
+      [ -f "$file" ] || continue
+      awk -v open="- [ ] $id - " -v done="$prefix" '
+        index($0, open) == 1 || index($0, done) == 1 { count++ }
+        END { print count + 0 }
+      ' "$file"
+    done
+  } | awk '{ total += $1 } END { print total + 0 }'
+}
+
+task_row_source() {  # <id>
+  local id=$1 file count
+  [ "$(task_row_count "$id")" -eq 1 ] || return 1
+  for file in "$DATA/backlog.md" "$DATA/done-archive.md"; do
+    [ -f "$file" ] || continue
+    count=$(awk -v open="- [ ] $id - " -v done="- [x] $id - " '
+      index($0, open) == 1 || index($0, done) == 1 { count++ }
+      END { print count + 0 }
+    ' "$file") || return 1
+    if [ "$count" -eq 1 ]; then
+      printf '%s\n' "$file"
+      return 0
+    fi
+  done
+  return 1
+}
+
+archived_task_show() {  # <id>
+  local id=$1 archive="$DATA/done-archive.md" prefix
+  [ -f "$archive" ] || return 1
+  prefix="- [x] $id - "
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    awk -v prefix="$prefix" '
+      /^- \[[ x]\] / {
+        if (capture) exit
+        if (index($0, prefix) == 1) {
+          capture = 1
+          print
+        }
+        next
+      }
+      capture {
+        if ($0 ~ /^## /) exit
+        print
+      }
+    ' "$archive"
+  } | tasks_axi show "$id" --full --file /dev/stdin 2>/dev/null
+}
+
+task_show_durable() {  # <id>
+  local id=$1 source
+  source=$(task_row_source "$id") || return 1
+  if [ "$source" = "$DATA/backlog.md" ]; then
+    task_show "$id"
+  else
+    archived_task_show "$id"
+  fi
 }
 
 show_field() {  # <show-output> <field>
@@ -138,6 +252,21 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+meta_exact_value() {  # <meta> <key>
+  local meta=$1 key=$2 count
+  count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
+  [ "$count" -eq 1 ] || return 1
+  sed -n "s/^$key=//p" "$meta"
+}
+
+receipt_value() {  # <receipt> <key>
+  local receipt=$1 key=$2 count
+  regular_nonsymlink_file "$receipt" || return 1
+  count=$(grep -c "^$key=" "$receipt" 2>/dev/null || true)
+  [ "$count" -eq 1 ] || return 1
+  sed -n "s/^$key=//p" "$receipt"
 }
 
 origin_open_decisions() {  # <origin-id>
@@ -172,7 +301,7 @@ verify_hold_active() {  # <hold-id>
 
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
-  show=$(task_show "$id") || return 1
+  show=$(task_show_durable "$id") || return 1
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -184,9 +313,10 @@ verify_hold_resolved() {  # <hold-id>
   return 1
 }
 
-verify_hold_durable() {  # <hold-id>
-  local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+verify_hold_durable() {  # <origin-id> <hold-id>
+  local origin=$1 id=$2 show state held kind hold_kind body
+  show=$(task_show_durable "$id") \
+    || fail "captain decision $id is absent, duplicated, or indeterminate in the live backlog and archive"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -197,10 +327,255 @@ verify_hold_durable() {  # <hold-id>
   fi
   if [ "$state" = "done" ] && [ "$kind" = captain ]; then
     case "$body" in
-      *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
+      *"Resolution recorded by fm-decision-hold."*"Routed work:"*)
+        verify_resolution_receipt "$origin" "$id"
+        return 0
+        ;;
     esac
   fi
   fail "captain decision $id is neither actively held nor durably resolved"
+}
+
+resolution_body_fields() {  # <hold-id> <body>; sets RESOLUTION_DIGEST RESOLUTION_ROUTES
+  local id=$1 body=$2 fields prefix
+  prefix='"Resolution recorded by fm-decision-hold.\nDecision digest: '
+  case "$body" in
+    "$prefix"*) fields=${body#"$prefix"} ;;
+    *) fail "captain hold $id has no authoritative resolution body" ;;
+  esac
+  case "$fields" in
+    *'\nRouted identities: '*'\n\nCaptain decision:'*'\n\nRouted work:'*) : ;;
+    *) fail "captain hold $id has a malformed resolution body" ;;
+  esac
+  RESOLUTION_DIGEST=${fields%%\\n*}
+  fields=${fields#*\\nRouted identities: }
+  RESOLUTION_ROUTES=${fields%%\\n*}
+  digest_is_nonzero_sha256 "$RESOLUTION_DIGEST" \
+    || fail "captain hold $id must carry a nonzero sha256 decision digest"
+  [ -n "$RESOLUTION_ROUTES" ] || fail "captain hold $id has no routed task identities"
+}
+
+cleanup_receipt_path() {  # <hold-id>
+  printf '%s/%s.hold\n' "$RECEIPT_DIR" "$1"
+}
+
+resolution_receipt_path() {  # <hold-id>
+  printf '%s/%s.resolved\n' "$RECEIPT_DIR" "$1"
+}
+
+decision_object_path() {  # <hold-id>
+  printf '%s/%s.decision.md\n' "$RECEIPT_DIR" "$1"
+}
+
+origin_receipt_path() {  # <origin-id>
+  printf '%s/%s.origin\n' "$RECEIPT_DIR" "$1"
+}
+
+write_origin_receipt() {  # <origin-id> <dispatch-id>
+  local origin=$1 dispatch=$2 report="$DATA/$1/report.md" report_sha receipt
+  regular_nonsymlink_file "$report" || fail "origin $origin has no safe report object to retain its dispatch binding"
+  report_sha=$(sha256_file "$report")
+  digest_is_nonzero_sha256 "$report_sha" || fail "origin $origin produced an invalid report digest"
+  receipt=$(origin_receipt_path "$origin")
+  {
+    printf 'schema=fm-decision-hold-origin.v1\n'
+    printf 'origin_id=%s\n' "$origin"
+    printf 'dispatch_id=%s\n' "$dispatch"
+    printf 'origin_path=%s\n' "$report"
+    printf 'origin_sha256=%s\n' "$report_sha"
+  } | write_atomic_file "$receipt"
+}
+
+verify_origin_receipt() {  # <origin-id> [expected-dispatch-id]
+  local origin=$1 expected=${2:-} receipt schema recorded_origin recorded_dispatch origin_path origin_sha
+  receipt=$(origin_receipt_path "$origin")
+  regular_nonsymlink_file "$receipt" || fail "origin $origin has no trusted dispatch carrier"
+  schema=$(receipt_value "$receipt" schema) || fail "origin $origin has a malformed dispatch carrier schema"
+  recorded_origin=$(receipt_value "$receipt" origin_id) || fail "origin $origin dispatch carrier has no task identity"
+  recorded_dispatch=$(receipt_value "$receipt" dispatch_id) || fail "origin $origin dispatch carrier has no dispatch identity"
+  origin_path=$(receipt_value "$receipt" origin_path) || fail "origin $origin dispatch carrier has no source path"
+  origin_sha=$(receipt_value "$receipt" origin_sha256) || fail "origin $origin dispatch carrier has no source digest"
+  [ "$schema" = fm-decision-hold-origin.v1 ] || fail "origin $origin has an unsupported dispatch carrier"
+  [ "$recorded_origin" = "$origin" ] || fail "origin $origin dispatch carrier links a different task"
+  validate_slug dispatch-id "$recorded_dispatch"
+  [ "$recorded_dispatch" = "$origin" ] || fail "origin $origin dispatch carrier links a different endpoint dispatch: $recorded_dispatch"
+  [ -z "$expected" ] || [ "$recorded_dispatch" = "$expected" ] \
+    || fail "origin $origin dispatch carrier disagrees with cleanup dispatch $expected"
+  [ "$origin_path" = "$DATA/$origin/report.md" ] || fail "origin $origin dispatch carrier names an unauthorized source path"
+  regular_nonsymlink_file "$origin_path" || fail "origin $origin dispatch source path does not exist safely"
+  digest_is_nonzero_sha256 "$origin_sha" || fail "origin $origin dispatch source digest must be nonzero sha256"
+  [ "$(sha256_file "$origin_path")" = "$origin_sha" ] || fail "origin $origin dispatch source digest no longer matches"
+  printf '%s\n' "$recorded_dispatch"
+}
+
+completion_dispatch() {  # <origin-id> <meta-path> <has-meta>
+  local origin=$1 meta=$2 has_meta=$3 dispatch
+  if [ "$has_meta" = 1 ]; then
+    dispatch=$(meta_exact_value "$meta" endpoint_task_id) \
+      || fail "origin $origin has no unique endpoint dispatch binding; preserve origin metadata and holds because no safe automatic migration is shipped"
+    [ "$dispatch" = "$origin" ] || fail "origin $origin metadata links a different endpoint dispatch: $dispatch"
+    write_origin_receipt "$origin" "$dispatch"
+    verify_origin_receipt "$origin" "$dispatch" >/dev/null
+  else
+    dispatch=$(verify_origin_receipt "$origin") || return 1
+  fi
+  printf '%s\n' "$dispatch"
+}
+
+fail_missing_cleanup_receipt() {  # <origin-id> <hold-id>
+  local origin=$1 id=$2
+  if verify_hold_resolved "$id"; then
+    fail "historical or hand-written resolved row $id has no trusted cleanup receipt; preserve the origin and row: no safe automatic migration is shipped"
+  fi
+  fail "captain hold $id has no trusted cleanup receipt; re-run complete $origin with its full recorded decision inventory only while the hold remains open and the exact dispatch binding survives; otherwise preserve origin metadata and holds because no safe automatic migration is shipped"
+}
+
+verify_cleanup_receipt_base() {  # <origin-id> <dispatch-id> <hold-id>
+  local origin=$1 dispatch=$2 id=$3 receipt schema phase recorded_origin recorded_dispatch recorded_hold object_path object_sha bearings_sha
+  receipt=$(cleanup_receipt_path "$id")
+  regular_nonsymlink_file "$receipt" \
+    || fail_missing_cleanup_receipt "$origin" "$id"
+  schema=$(receipt_value "$receipt" schema) || fail "captain hold $id has a malformed cleanup receipt schema"
+  phase=$(receipt_value "$receipt" phase) || fail "captain hold $id has a malformed cleanup receipt phase"
+  recorded_origin=$(receipt_value "$receipt" origin_id) || fail "captain hold $id has no cleanup task identity"
+  recorded_dispatch=$(receipt_value "$receipt" dispatch_id) || fail "captain hold $id has no cleanup dispatch identity"
+  recorded_hold=$(receipt_value "$receipt" hold_id) || fail "captain hold $id has no cleanup hold identity"
+  object_path=$(receipt_value "$receipt" object_path) || fail "captain hold $id has no cleanup object path"
+  object_sha=$(receipt_value "$receipt" object_sha256) || fail "captain hold $id has no cleanup object digest"
+  bearings_sha=$(receipt_value "$receipt" bearings_sha256) || fail "captain hold $id has no Bearings evidence digest"
+  [ "$schema" = fm-decision-hold-receipt.v1 ] || fail "captain hold $id has an unsupported cleanup receipt"
+  [ "$phase" = hold ] || fail "captain hold $id cleanup receipt has the wrong phase"
+  [ "$recorded_origin" = "$origin" ] || fail "captain hold $id cleanup receipt links a different task"
+  [ "$recorded_dispatch" = "$dispatch" ] || fail "captain hold $id cleanup receipt links a different dispatch"
+  [ "$recorded_hold" = "$id" ] || fail "captain hold $id cleanup receipt links a different hold"
+  verify_origin_receipt "$origin" "$dispatch" >/dev/null
+  [ "$object_path" = "$DATA/backlog.md" ] || fail "captain hold $id cleanup receipt names an unauthorized object path"
+  regular_nonsymlink_file "$object_path" || fail "captain hold $id cleanup object path does not exist safely"
+  digest_is_nonzero_sha256 "$object_sha" || fail "captain hold $id cleanup object digest must be nonzero sha256"
+  digest_is_nonzero_sha256 "$bearings_sha" || fail "captain hold $id Bearings evidence digest must be nonzero sha256"
+}
+
+bearings_snapshot() {
+  local bearings=${FM_DECISION_HOLD_BEARINGS:-$SCRIPT_DIR/fm-bearings-snapshot.sh}
+  [ -x "$bearings" ] || fail "Bearings snapshot executable is unavailable: $bearings"
+  command -v jq >/dev/null 2>&1 || fail "jq is required for Bearings receipt verification"
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$bearings" --json --all-decisions
+}
+
+bearings_has_hold() {  # <json> <hold-id>
+  printf '%s\n' "$1" | jq -e --arg id "$2" \
+    '.schema == "fm-bearings.v1" and (.decisions_open | any(.id == $id and .verb == "captain-hold"))' \
+    >/dev/null 2>&1
+}
+
+verify_cleanup_receipt() {  # <origin-id> <dispatch-id> <hold-id>
+  local origin=$1 dispatch=$2 id=$3 receipt show recorded_sha fresh
+  verify_cleanup_receipt_base "$origin" "$dispatch" "$id"
+  receipt=$(cleanup_receipt_path "$id")
+  show=$(task_show_durable "$id") || fail "captain hold $id cleanup object is absent, duplicated, or indeterminate"
+  recorded_sha=$(receipt_value "$receipt" object_sha256) || fail "captain hold $id cleanup object digest is unavailable"
+  [ "$(sha256_text "$show")" = "$recorded_sha" ] \
+    || fail "captain hold $id cleanup object digest no longer matches"
+  fresh=$(bearings_snapshot) || fail "could not obtain fresh Bearings evidence for $id"
+  bearings_has_hold "$fresh" "$id" || fail "captain hold $id does not reappear in Bearings"
+}
+
+write_cleanup_receipt() {  # <origin-id> <dispatch-id> <hold-id> <bearings-json>
+  local origin=$1 dispatch=$2 id=$3 bearings=$4 show object_sha bearings_sha receipt
+  show=$(task_show_durable "$id") || fail "captain hold $id is not one durable backlog object"
+  object_sha=$(sha256_text "$show")
+  bearings_sha=$(sha256_text "$bearings")
+  digest_is_nonzero_sha256 "$object_sha" || fail "captain hold $id produced an invalid object digest"
+  digest_is_nonzero_sha256 "$bearings_sha" || fail "captain hold $id produced invalid Bearings evidence"
+  receipt=$(cleanup_receipt_path "$id")
+  {
+    printf 'schema=fm-decision-hold-receipt.v1\n'
+    printf 'phase=hold\n'
+    printf 'origin_id=%s\n' "$origin"
+    printf 'dispatch_id=%s\n' "$dispatch"
+    printf 'hold_id=%s\n' "$id"
+    printf 'object_path=%s\n' "$DATA/backlog.md"
+    printf 'object_sha256=%s\n' "$object_sha"
+    printf 'bearings_sha256=%s\n' "$bearings_sha"
+  } | write_atomic_file "$receipt"
+}
+
+verify_resolution_receipt() {  # <origin-id> <hold-id>
+  local origin=$1 id=$2 show state kind body receipt cleanup dispatch schema phase recorded_origin recorded_dispatch recorded_hold decision_path decision_sha routed_ids object_path object_sha source routed task
+  show=$(task_show_durable "$id") \
+    || fail "captain decision $id is absent, duplicated, or indeterminate in the live backlog and archive"
+  state=$(show_field "$show" state)
+  kind=$(show_field "$show" kind)
+  body=$(show_field "$show" body)
+  [ "$state" = "done" ] || fail "captain hold $id is unresolved"
+  [ "$kind" = captain ] || fail "backlog item $id is not kind captain"
+  resolution_body_fields "$id" "$body"
+
+  cleanup=$(cleanup_receipt_path "$id")
+  regular_nonsymlink_file "$cleanup" \
+    || fail_missing_cleanup_receipt "$origin" "$id"
+  dispatch=$(receipt_value "$cleanup" dispatch_id) || fail "captain hold $id cleanup receipt has no dispatch link"
+  verify_cleanup_receipt_base "$origin" "$dispatch" "$id"
+
+  receipt=$(resolution_receipt_path "$id")
+  regular_nonsymlink_file "$receipt" \
+    || fail "historical or hand-written resolved row $id has no trusted resolution receipt; repeat the exact resolve only when the script-owned cleanup receipt and canonical decision object survive; otherwise preserve the origin and row because no safe automatic migration is shipped"
+  schema=$(receipt_value "$receipt" schema) || fail "captain hold $id has a malformed resolution receipt schema"
+  phase=$(receipt_value "$receipt" phase) || fail "captain hold $id has a malformed resolution receipt phase"
+  recorded_origin=$(receipt_value "$receipt" origin_id) || fail "captain hold $id resolution receipt has no task link"
+  recorded_dispatch=$(receipt_value "$receipt" dispatch_id) || fail "captain hold $id resolution receipt has no dispatch link"
+  recorded_hold=$(receipt_value "$receipt" hold_id) || fail "captain hold $id resolution receipt has no hold link"
+  decision_path=$(receipt_value "$receipt" decision_path) || fail "captain hold $id resolution receipt has no decision object path"
+  decision_sha=$(receipt_value "$receipt" decision_sha256) || fail "captain hold $id resolution receipt has no decision digest"
+  routed_ids=$(receipt_value "$receipt" routed_ids) || fail "captain hold $id resolution receipt has no routed task links"
+  object_path=$(receipt_value "$receipt" object_path) || fail "captain hold $id resolution receipt has no row object path"
+  object_sha=$(receipt_value "$receipt" object_sha256) || fail "captain hold $id resolution receipt has no row object digest"
+  [ "$schema" = fm-decision-hold-receipt.v1 ] || fail "captain hold $id has an unsupported resolution receipt"
+  [ "$phase" = resolved ] || fail "captain hold $id resolution receipt has the wrong phase"
+  [ "$recorded_origin" = "$origin" ] || fail "captain hold $id resolution receipt links a different task"
+  [ "$recorded_dispatch" = "$dispatch" ] || fail "captain hold $id resolution receipt links a different dispatch"
+  [ "$recorded_hold" = "$id" ] || fail "captain hold $id resolution receipt links a different hold"
+  [ "$decision_path" = "$(decision_object_path "$id")" ] \
+    || fail "captain hold $id resolution receipt names an unauthorized decision object"
+  regular_nonsymlink_file "$decision_path" || fail "captain hold $id decision object path does not exist safely"
+  digest_is_nonzero_sha256 "$decision_sha" || fail "captain hold $id resolution receipt decision digest must be nonzero sha256"
+  [ "$(sha256_file "$decision_path")" = "$decision_sha" ] || fail "captain hold $id decision object digest does not match"
+  [ "$decision_sha" = "$RESOLUTION_DIGEST" ] || fail "captain hold $id row and decision object digests differ"
+  [ "$routed_ids" = "$RESOLUTION_ROUTES" ] || fail "captain hold $id row and receipt routed tasks differ"
+  source=$(task_row_source "$id") || fail "captain hold $id row object is no longer unique"
+  [ "$object_path" = "$source" ] || fail "captain hold $id resolution receipt names the wrong row object path"
+  regular_nonsymlink_file "$object_path" || fail "captain hold $id row object path does not exist safely"
+  digest_is_nonzero_sha256 "$object_sha" || fail "captain hold $id row object digest must be nonzero sha256"
+  [ "$(sha256_text "$show")" = "$object_sha" ] || fail "captain hold $id row object digest does not match"
+  routed=$(printf '%s\n' "$routed_ids" | tr ',' ' ')
+  for task in $routed; do
+    validate_slug routed-task "$task"
+    task_show_durable "$task" >/dev/null \
+      || fail "captain hold $id routed task $task is absent, duplicated, or indeterminate"
+  done
+}
+
+write_resolution_receipt() {  # <origin-id> <dispatch-id> <hold-id> <decision-path> <decision-sha> <routed-csv>
+  local origin=$1 dispatch=$2 id=$3 decision_path=$4 decision_sha=$5 routed_csv=$6 show source object_sha receipt
+  show=$(task_show_durable "$id") || fail "captain hold $id resolved row is absent, duplicated, or indeterminate"
+  source=$(task_row_source "$id") || fail "captain hold $id resolved row has no unique object path"
+  object_sha=$(sha256_text "$show")
+  digest_is_nonzero_sha256 "$decision_sha" || fail "captain hold $id decision digest must be nonzero sha256"
+  digest_is_nonzero_sha256 "$object_sha" || fail "captain hold $id row digest must be nonzero sha256"
+  receipt=$(resolution_receipt_path "$id")
+  {
+    printf 'schema=fm-decision-hold-receipt.v1\n'
+    printf 'phase=resolved\n'
+    printf 'origin_id=%s\n' "$origin"
+    printf 'dispatch_id=%s\n' "$dispatch"
+    printf 'hold_id=%s\n' "$id"
+    printf 'decision_path=%s\n' "$decision_path"
+    printf 'decision_sha256=%s\n' "$decision_sha"
+    printf 'routed_ids=%s\n' "$routed_csv"
+    printf 'object_path=%s\n' "$source"
+    printf 'object_sha256=%s\n' "$object_sha"
+  } | write_atomic_file "$receipt"
 }
 
 verify_resolution_identity() {
@@ -249,7 +624,7 @@ command_hold() {
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   id=$(hold_id "$origin" "$key")
-  if show=$(task_show "$id"); then
+  if show=$(task_show_durable "$id"); then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
@@ -275,7 +650,7 @@ command_hold() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' key status_file open raw_open key_seen=0 has_meta=0
+  local origin=${1:-} meta previous='' supplied='' keys='' key status_file open raw_open key_seen=0 has_meta=0 dispatch='' bearings='' id
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -297,15 +672,6 @@ command_complete() {
     previous=$(meta_value "$meta" decision_keys)
   fi
   keys=$(sorted_key_union "$previous" "$supplied")
-  if [ -n "$keys" ]; then
-    while IFS= read -r key; do
-      [ -n "$key" ] || continue
-      verify_hold_durable "$(hold_id "$origin" "$key")"
-    done <<EOF
-$(printf '%s\n' "$keys" | tr ',' '\n')
-EOF
-  fi
-
   status_file="$STATE/$origin.status"
   raw_open=$(status_open_decisions "$status_file")
   open=$(origin_open_decisions "$origin")
@@ -316,6 +682,29 @@ EOF
   done <<EOF
 $open
 EOF
+
+  dispatch=$(completion_dispatch "$origin" "$meta" "$has_meta") || return 1
+  if [ -n "$keys" ]; then
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      verify_hold_durable "$origin" "$(hold_id "$origin" "$key")"
+    done <<EOF
+$(printf '%s\n' "$keys" | tr ',' '\n')
+EOF
+
+    bearings=$(bearings_snapshot) || fail "could not obtain Bearings evidence for $origin"
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      id=$(hold_id "$origin" "$key")
+      if ! verify_hold_resolved "$id"; then
+        bearings_has_hold "$bearings" "$id" \
+          || fail "captain hold $id does not reappear in Bearings"
+        write_cleanup_receipt "$origin" "$dispatch" "$id" "$bearings"
+      fi
+    done <<EOF
+$(printf '%s\n' "$keys" | tr ',' '\n')
+EOF
+  fi
 
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
@@ -338,7 +727,7 @@ EOF
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys key open
+  local origin=${1:-} meta reviewed keys key open dispatch id
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -347,28 +736,52 @@ command_verify() {
   reviewed=$(meta_value "$meta" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed unresolved-decision inventory"
   keys=$(meta_value "$meta" decision_keys)
+  open=$(origin_open_decisions "$origin")
+  if [ -n "$keys" ] || [ -n "$open" ]; then
+    dispatch=$(meta_exact_value "$meta" endpoint_task_id) \
+      || fail "origin $origin has no unique endpoint dispatch binding; preserve origin metadata and holds because no safe automatic migration is shipped"
+    [ "$dispatch" = "$origin" ] || fail "origin $origin metadata links a different endpoint dispatch: $dispatch"
+  fi
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
-      verify_hold_durable "$(hold_id "$origin" "$key")"
+      id=$(hold_id "$origin" "$key")
+      if verify_hold_resolved "$id"; then
+        verify_resolution_receipt "$origin" "$id"
+      else
+        verify_hold_active "$id"
+        verify_cleanup_receipt "$origin" "$dispatch" "$id"
+      fi
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
   fi
-  open=$(origin_open_decisions "$origin")
   while IFS=$'\t' read -r key _verb _summary; do
     [ -n "$key" ] || continue
     list_has_key "$keys" "$key" \
       || fail "open structured decision $origin/$key is outside the reviewed inventory"
-    verify_hold_durable "$(hold_id "$origin" "$key")"
+    id=$(hold_id "$origin" "$key")
+    verify_hold_active "$id"
+    verify_cleanup_receipt "$origin" "$dispatch" "$id"
   done <<EOF
 $open
 EOF
   printf 'verified: %s unresolved-decision inventory\n' "$origin"
 }
 
+command_verify_resolution() {
+  local origin=${1:-} key=${2:-} id
+  [ "$#" -eq 2 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  require_tasks_axi
+  id=$(hold_id "$origin" "$key")
+  verify_resolution_receipt "$origin" "$id"
+  printf 'verified: %s trusted resolution receipt\n' "$id"
+}
+
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0 cleanup dispatch decision_object
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -394,21 +807,53 @@ command_resolve() {
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show "$id")
+    hold_show=$(task_show_durable "$id") \
+      || fail "captain hold $id disappeared after its durable resolution was found"
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
+    cleanup=$(cleanup_receipt_path "$id")
+    regular_nonsymlink_file "$cleanup" || fail_missing_cleanup_receipt "$origin" "$id"
+    dispatch=$(receipt_value "$cleanup" dispatch_id) \
+      || fail "historical resolved row $id has no trustworthy dispatch link; preserve the origin and row because no safe automatic migration is shipped"
+    verify_cleanup_receipt_base "$origin" "$dispatch" "$id"
+    decision_object=$(decision_object_path "$id")
+    regular_nonsymlink_file "$decision_object" \
+      || fail "historical resolved row $id has no canonical decision object; preserve the origin and row because no safe automatic migration is shipped"
+    [ "$(sha256_file "$decision_object")" = "$decision_digest" ] \
+      || fail "captain hold $id canonical decision object does not match the requested decision"
+    if [ ! -f "$(resolution_receipt_path "$id")" ]; then
+      write_resolution_receipt "$origin" "$dispatch" "$id" "$decision_object" "$decision_digest" "$routed_csv"
+    fi
+    verify_resolution_receipt "$origin" "$id"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
   verify_hold_active "$id"
   hold_show=$(task_show "$id")
   hold_body=$(show_field "$hold_show" body)
+  cleanup=$(cleanup_receipt_path "$id")
+  regular_nonsymlink_file "$cleanup" || fail_missing_cleanup_receipt "$origin" "$id"
+  dispatch=$(receipt_value "$cleanup" dispatch_id) \
+    || fail "captain hold $id has no trustworthy cleanup dispatch link; preserve origin metadata and holds because no safe automatic migration is shipped"
+  verify_cleanup_receipt_base "$origin" "$dispatch" "$id"
   case "$hold_body" in
     *"Resolution recorded by fm-decision-hold."*)
       verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
       resolution_recorded=1
       ;;
   esac
+  decision_object=$(decision_object_path "$id")
+  if [ "$resolution_recorded" = 1 ]; then
+    regular_nonsymlink_file "$decision_object" \
+      || fail "captain hold $id partial resolution lost its decision object"
+    [ "$(sha256_file "$decision_object")" = "$decision_digest" ] \
+      || fail "captain hold $id partial resolution decision object drifted"
+  else
+    verify_cleanup_receipt "$origin" "$dispatch" "$id"
+    printf '%s' "$decision" | write_atomic_file "$decision_object"
+    [ "$(sha256_file "$decision_object")" = "$decision_digest" ] \
+      || fail "captain hold $id decision object digest did not stabilize"
+  fi
 
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
@@ -449,7 +894,9 @@ command_resolve() {
     esac
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
-  verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution row"
+  write_resolution_receipt "$origin" "$dispatch" "$id" "$decision_object" "$decision_digest" "$routed_csv"
+  verify_resolution_receipt "$origin" "$id"
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 
@@ -458,6 +905,7 @@ case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  verify-resolution) shift; command_verify_resolution "$@" ;;
   resolve) shift; command_resolve "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;

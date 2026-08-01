@@ -12,9 +12,9 @@
 # belong in a script, not in N agent turns.
 #
 # COMPOSITION, NOT DUPLICATION: this script calls fm-lock.sh, fm-bootstrap.sh,
-# and fm-wake-drain.sh as real subprocesses and prints their real output. It
+# fm-record-reconcile.sh, and fm-wake-drain.sh as real subprocesses and prints their real output. It
 # never re-implements their logic; all sequencing/formatting logic added here
-# stays local to this file. Those three scripts remain fully working
+# stays local to this file. Those four scripts remain fully working
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
@@ -33,16 +33,19 @@
 #                       (legacy PR-check migration, secondmate fast-forward,
 #                       secondmate liveness, X-mode artifact writes, fleet sync)
 #                       also run only when locked.
-#   3. wake-drain     - mutates the durable wake queue, so it also only runs
+#   3. record reconcile - retires surfaced terminal rows into Done without
+#                       pruning and receipts every metadata/backlog mismatch.
+#                       It only runs while locked.
+#   4. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   5. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
-#   6. closing reminder - prints the context-specific watcher next step; this
+#   7. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
@@ -283,7 +286,16 @@ else
   printf '(silent - all good)\n'
 fi
 
-# --- 3. wake-drain -------------------------------------------------------
+# --- 3. record reconciliation --------------------------------------------
+subsection "RECORD RECONCILIATION"
+if [ "$READ_ONLY" -eq 1 ]; then
+  printf 'skipped (read-only session) - terminal rows and inventory drift remain untouched.\n'
+else
+  RECONCILE_OUT=$("$SCRIPT_DIR/fm-record-reconcile.sh" 2>&1)
+  printf '%s\n' "${RECONCILE_OUT:-'(no backlog to reconcile)'}"
+fi
+
+# --- 4. wake-drain -------------------------------------------------------
 # Drained records are this turn's first work queue (AGENTS.md section 8); the
 # drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest

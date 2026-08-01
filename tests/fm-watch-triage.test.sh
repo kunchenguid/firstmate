@@ -111,6 +111,15 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+make_clean_retained_worktree() {  # <path>
+  local path=$1
+  mkdir -p "$path"
+  git -C "$path" init -q
+  git -C "$path" config user.email test@example.com
+  git -C "$path" config user.name Test
+  git -C "$path" commit -q --allow-empty -m base
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 test_signal_reason_is_actionable_classifier() {
@@ -456,6 +465,95 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+test_surfaced_done_lane_retires_from_future_stale_escalation() {
+  local dir state fakebin out capture_file window key sig pid terminal worktree head
+  dir=$(make_case terminal-retained); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-complete"
+  terminal='done: ready in branch fm/complete at cf68fd9'
+  worktree="$dir/worktree"
+  make_clean_retained_worktree "$worktree"
+  head=$(git -C "$worktree" rev-parse HEAD)
+  printf 'idle composer after completion' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$worktree" > "$state/complete.meta"
+  printf '%s\n' "$terminal" > "$state/complete.status"
+  sig=$(seen_sig "$state/complete.status"); printf '%s' "$sig" > "$state/.seen-complete_status"
+  printf '%s' "$terminal" > "$state/.hb-surfaced-complete"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=1
+  pid=$!
+  if ! wait_live "$pid" 35; then
+    reap "$pid"
+    fail "surfaced done lane re-escalated as stale: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "surfaced done lane queued another stale wake"
+  assert_present "$state/.terminal-retained-$key" \
+    "watcher did not record that the complete lane remains intentionally retained"
+  assert_grep "head=$head" "$state/.terminal-retained-$key" \
+    "terminal retirement was not bound to the retained HEAD"
+  assert_grep 'tree_state=clean' "$state/.terminal-retained-$key" \
+    "terminal retirement did not verify a clean worktree"
+  assert_present "$state/complete.meta" "terminal retirement erased task metadata"
+  reap "$pid"
+
+  # A retained terminal lane is trusted only while the mechanically checked
+  # terminal/clean-tree/HEAD triple is unchanged.
+  printf 'new unreported work\n' > "$worktree/changed.txt"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=1
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "changed retained lane stayed hidden after its tree became dirty"
+  grep -F 'retained evidence changed' "$out" >/dev/null \
+    || fail "retained lane change did not surface an actionable reason: $(cat "$out")"
+  pass "surfaced done lane retires from stale escalation while its worktree metadata remains"
+}
+
+test_awaiting_captain_is_durable_but_resumed_work_still_wedges() {
+  local dir state fakebin out capture_file window key sig pid line worktree
+  dir=$(make_case awaiting-captain); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-awaiting"
+  line='awaiting-captain [key=gate]: approve the independent gate result'
+  worktree="$dir/worktree"
+  make_clean_retained_worktree "$worktree"
+  printf 'idle complete worker' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$worktree" > "$state/awaiting.meta"
+  printf '%s\n' "$line" > "$state/awaiting.status"
+  sig=$(seen_sig "$state/awaiting.status"); printf '%s' "$sig" > "$state/.seen-awaiting_status"
+  printf '%s' "$line" > "$state/.hb-surfaced-awaiting"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: awaiting-captain · source: status-log · approve the independent gate result'
+
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=1
+  pid=$!
+  if ! wait_live "$pid" 35; then
+    reap "$pid"
+    fail "awaiting-captain state resurfaced on a bounded stale cadence: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "awaiting-captain state queued a repeated stale wake"
+  assert_present "$state/.awaiting-captain-$key" "durable captain-wait marker was not recorded"
+  reap "$pid"
+
+  # A stale awaiting-captain line cannot hide work that has resumed. Once the
+  # authoritative run-step says working, the normal wedge timer applies again.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf 'identity-1\t100\n' > "$state/.progress-$key"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=1 \
+    FM_PROCESS_PROGRESS_BIN="$fakebin/fm-no-progress"
+  pid=$!
+  wait_for_exit "$pid" 50 || fail "resumed worker hid forever behind awaiting-captain"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    || fail "resumed worker did not return to normal wedge supervision: $(cat "$out")"
+  pass "awaiting-captain stays quiet indefinitely but cannot hide resumed wedged work"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -567,6 +665,49 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+}
+
+test_cumulative_cpu_delta_suppresses_false_wedge() {
+  local dir state fakebin out capture_file window key pane_hash sig pid progress counter
+  dir=$(make_case cumulative-progress); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; progress="$fakebin/progress-sample"
+  counter="$fakebin/progress-counter"
+  window="test:fm-progress"
+  printf 'unchanged terminal surface while tool runs' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/progress.meta"
+  printf 'working: long test run\n' > "$state/progress.status"
+  sig=$(seen_sig "$state/progress.status"); printf '%s' "$sig" > "$state/.seen-progress_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text 'unchanged terminal surface while tool runs')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf 'identity-1\t100\n' > "$state/.progress-$key"
+  printf '100\n' > "$counter"
+  cat > "$progress" <<SH
+#!/usr/bin/env bash
+value=\$(cat '$counter')
+value=\$((value + 20))
+printf '%s\n' "\$value" > '$counter'
+printf 'identity-1\t%s\n' "\$value"
+SH
+  chmod +x "$progress"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_PROCESS_PROGRESS_BIN="$progress" \
+    FM_STALE_ESCALATE_SECS=1
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "cumulative CPU delta was ignored and the progressing worker wedged: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "progressing worker queued a false stale wake"
+  grep -E '^identity-1[[:space:]][0-9]+$' "$state/.progress-$key" >/dev/null \
+    || fail "watcher did not retain the new cumulative progress sample"
+  reap "$pid"
+  pass "cumulative CPU delta resets stale escalation for a demonstrably progressing worker"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -1566,8 +1707,11 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_surfaced_done_lane_retires_from_future_stale_escalation
+test_awaiting_captain_is_durable_but_resumed_work_still_wedges
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_cumulative_cpu_delta_suppresses_false_wedge
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed

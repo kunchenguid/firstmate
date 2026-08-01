@@ -10,7 +10,10 @@
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
-# Text submission is verified: the line is typed ONCE, then Enter is sent and
+# Text submission first requires an affirmatively empty composer. Pending or
+# unreadable input fails before typing, because appending to a parked stale order
+# can execute the wrong work while a later empty-composer verdict falsely appears
+# to confirm the new order. The line is then typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the target backend confirms a
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
@@ -75,6 +78,8 @@ fi
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-model-capacity-hold-lib.sh
+. "$SCRIPT_DIR/fm-model-capacity-hold-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -240,6 +245,9 @@ fi
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
+  if [ "${2:-}" = Enter ]; then
+    fm_model_capacity_hold_refuse "Enter submission to $T" || exit 1
+  fi
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
     echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
@@ -247,6 +255,12 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$2" || exit 1
 else
   MESSAGE=$*
+  fm_model_capacity_hold_refuse "text submission to $T" || exit 1
+  composer_state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL")
+  if [ "$composer_state" != empty ]; then
+    echo "error: text not sent to $T because its composer is not affirmatively empty (verdict=${composer_state:-unknown}; backend=$TARGET_BACKEND; tried $RESOLUTION_TRIED). Preserve the pane and reconcile its pending input before retrying." >&2
+    exit 1
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never

@@ -50,7 +50,11 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
-    printf '╭────╮\n│    │\n╰────╯\n'
+    if [ -n "${FM_TMUX_CAPTURE_FILE:-}" ]; then
+      cat "$FM_TMUX_CAPTURE_FILE"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
     exit 0 ;;
   list-windows)
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
@@ -163,9 +167,33 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_stale_composer_refuses_before_typing() {
+  local dir fb home err log capture rc got
+  dir="$TMP_ROOT/stale-composer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home stalecomposer); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  capture="$dir/capture.txt"
+  printf '╭────────────────────╮\n│ stale prior order  │\n╰────────────────────╯\n' > "$capture"
+  fm_write_meta "$home/state/stale.meta" "window=sess:fm-stale" "kind=ship" "harness=codex"
+
+  rc=0
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_TMUX_CAPTURE_FILE="$capture" FM_SEND_SETTLE=0 \
+    "$SEND" stale "fresh order" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "stale composer accepted a second instruction"
+  got=$(cat "$log")
+  assert_not_contains "$got" 'literal=1 arg=fresh order' \
+    "fm-send typed the fresh order into a composer that already contained stale text"
+  assert_not_contains "$got" 'literal=0 arg=Enter' \
+    "fm-send submitted the stale composer while attempting the fresh order"
+  assert_contains "$(cat "$err")" 'composer is not affirmatively empty' \
+    "stale-composer refusal did not explain the delivery gap"
+  pass "fm-send strict: stale composer text refuses before any typing or Enter"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
+test_stale_composer_refuses_before_typing

@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--spec-forging]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -26,6 +26,15 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --spec-forging is mandatory when the task will forge requirements, design,
+#   or tasks from a signed product contract. It requires all eight Faber
+#   preflight data through these environment variables:
+#     FM_SPEC_FORGING_PRD FM_SPEC_FORGING_AGENTS FM_SPEC_FORGING_REPO
+#     FM_SPEC_FORGING_FILES FM_SPEC_FORGING_SLICE FM_SPEC_FORGING_VISUAL_GATE
+#     FM_SPEC_FORGING_SURFACE FM_SPEC_FORGING_VALIDATION_GATE
+#   Missing, whitespace-only, or multiline data fail before a task directory is
+#   created. The generated gate returns producer scope changes to an independently
+#   commissioned architect and never lets the producer appoint itself.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
@@ -38,7 +47,9 @@
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
-# blocked when firstmate must act.
+# blocked when firstmate must act. The separate fixed `awaiting-captain:` verb is
+# an unbounded captain decision after the producer work is complete; it remains
+# open until an explicit keyed resolution records the captain's answer.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -93,6 +104,7 @@ else
 fi
 KIND=ship
 HERDR_LAB=0
+SPEC_FORGING=0
 NO_PROJECTS=0
 POS=()
 for a in "$@"; do
@@ -100,6 +112,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --spec-forging) SPEC_FORGING=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     *) POS+=("$a") ;;
   esac
@@ -111,9 +124,42 @@ if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   exit 1
 fi
 
+if [ "$KIND" = secondmate ] && [ "$SPEC_FORGING" -eq 1 ]; then
+  echo "error: --spec-forging applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
+fi
+
+require_spec_forging_datum() {
+  local variable=$1 datum=$2 value=${!1:-}
+  case "$value" in
+    *[![:space:]]*) : ;;
+    *)
+      echo "error: --spec-forging missing $datum ($variable)" >&2
+      return 1
+      ;;
+  esac
+  case "$value" in
+    *$'\n'*|*$'\r'*)
+      echo "error: --spec-forging $datum must be one line ($variable)" >&2
+      return 1
+      ;;
+  esac
+}
+
+if [ "$SPEC_FORGING" -eq 1 ]; then
+  require_spec_forging_datum FM_SPEC_FORGING_PRD "exact PRD path and signature evidence" || exit 1
+  require_spec_forging_datum FM_SPEC_FORGING_AGENTS "target repo AGENTS.md path" || exit 1
+  require_spec_forging_datum FM_SPEC_FORGING_REPO "repo, root, verification ref, and push ref" || exit 1
+  require_spec_forging_datum FM_SPEC_FORGING_FILES "exact spec directory and files to produce" || exit 1
+  require_spec_forging_datum FM_SPEC_FORGING_SLICE "slice and out-of-scope" || exit 1
+  require_spec_forging_datum FM_SPEC_FORGING_VISUAL_GATE "visual-gate state" || exit 1
+  require_spec_forging_datum FM_SPEC_FORGING_SURFACE "forging surface" || exit 1
+  require_spec_forging_datum FM_SPEC_FORGING_VALIDATION_GATE "validation-gate mechanism" || exit 1
 fi
 
 BRIEF="$DATA/$ID/brief.md"
@@ -186,14 +232,15 @@ A message with NO marker is the captain typing directly into your pane: treat it
 Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+States: working, needs-decision, blocked, $PAUSED_VERB, awaiting-captain, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
+Use \`awaiting-captain [key=<slug>]: {exact question}\` only after the producer work is complete and the exact question requires an unbounded captain answer; it surfaces once, stays quiet while the terminal status, clean tree, and HEAD remain unchanged, and closes only with a matching \`resolved [key=<slug>]: {captain answer}\` event.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
 A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
 Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started.
 When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above, give that reported phase a stable key.
-If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
+If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`awaiting-captain\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
 When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
@@ -214,6 +261,34 @@ exit 0
 fi
 
 REPO=${POS[1]}
+
+if [ "$SPEC_FORGING" -eq 1 ]; then
+IFS= read -r -d '' SPEC_FORGING_SECTION <<EOF || true
+# Spec-forging contract - HARD GATE
+This brief was explicitly scaffolded with \`--spec-forging\`.
+Before forging, verify all eight data below against their live sources.
+If any datum is missing or contradicted, stop and ask firstmate; do not infer it.
+
+1. **Exact PRD path and signature evidence:** $FM_SPEC_FORGING_PRD
+2. **Target repo AGENTS.md path:** $FM_SPEC_FORGING_AGENTS
+3. **Repo, root, verification ref, and push ref:** $FM_SPEC_FORGING_REPO
+4. **Exact spec directory and files to produce:** $FM_SPEC_FORGING_FILES
+5. **Slice and out-of-scope:** $FM_SPEC_FORGING_SLICE
+6. **Visual-gate state:** $FM_SPEC_FORGING_VISUAL_GATE
+7. **Forging surface:** $FM_SPEC_FORGING_SURFACE
+8. **Validation-gate mechanism:** $FM_SPEC_FORGING_VALIDATION_GATE
+
+Do not approve what you forged.
+Architecture or scope changes return to Marco Antonio; the forger never authorizes or resolves them.
+The architect is the Marco Antonio station or role and may be an explicitly commissioned worker.
+That worker never self-appoints and never signs for Cesar.
+Agrippa is not the architect.
+After legitimate authorization, the correction returns to an independent gate.
+EOF
+SPEC_FORGING_SECTION=${SPEC_FORGING_SECTION%$'\n'}
+else
+SPEC_FORGING_SECTION=""
+fi
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -247,6 +322,12 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+if [ "$SPEC_FORGING" -eq 1 ]; then
+  BRIEF_CONTRACTS="$SPEC_FORGING_SECTION"$'\n\n'"$HERDR_SECTION"
+else
+  BRIEF_CONTRACTS=$HERDR_SECTION
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -254,7 +335,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
-$HERDR_SECTION
+$BRIEF_CONTRACTS
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -268,7 +349,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   States: working, needs-decision, blocked, $PAUSED_VERB, awaiting-captain, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
@@ -276,6 +357,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   Use \`awaiting-captain [key=<slug>]: {exact question}\` only after the producer work is complete and the exact question requires an unbounded captain answer; it stays retired while the terminal status, clean tree, and HEAD remain unchanged and closes only after the captain answers through a matching \`resolved [key=<slug>]: {captain answer}\` event.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -363,7 +445,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
-$HERDR_SECTION
+$BRIEF_CONTRACTS
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -380,7 +462,7 @@ $RULE1
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   States: working, needs-decision, blocked, $PAUSED_VERB, awaiting-captain, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
@@ -391,6 +473,7 @@ $RULE1
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   Use \`awaiting-captain [key=<slug>]: {exact question}\` only after the producer work is complete and the exact question requires an unbounded captain answer; it stays retired while the terminal status, clean tree, and HEAD remain unchanged and closes only after the captain answers through a matching \`resolved [key=<slug>]: {captain answer}\` event.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.

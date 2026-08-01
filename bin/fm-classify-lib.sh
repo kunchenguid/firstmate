@@ -43,6 +43,7 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # merely because its prose contains one of those tokens (for example
 # "working: rebased onto merged #76").
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+FM_CLASSIFY_AWAITING_CAPTAIN_VERB_DEFAULT='awaiting-captain'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
@@ -88,9 +89,19 @@ status_is_terminal_verb() {
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    done|needs-decision|blocked|failed) return 0 ;;
+    done|needs-decision|blocked|failed|"${FM_CLASSIFY_AWAITING_CAPTAIN_VERB:-$FM_CLASSIFY_AWAITING_CAPTAIN_VERB_DEFAULT}") return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# 0 only for a completed producer report. Unlike blocked, failed, or
+# needs-decision, a surfaced done event requires no repeated stale escalation.
+# Its worktree and metadata may still need retention for an independent gate or
+# unlanded commits; callers must not treat this predicate as cleanup authority.
+status_is_done() {  # <status-line>
+  local line=$1
+  [ -n "$line" ] || return 1
+  [ "$(status_line_verb "$line")" = 'done' ]
 }
 
 # 0 if the given (last) status line matches a captain-relevant verb.
@@ -110,7 +121,7 @@ status_is_captain_relevant() {
   esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
     case "$verb" in
-      done|needs-decision|blocked|failed) return 0 ;;
+      done|needs-decision|blocked|failed|"${FM_CLASSIFY_AWAITING_CAPTAIN_VERB:-$FM_CLASSIFY_AWAITING_CAPTAIN_VERB_DEFAULT}") return 0 ;;
     esac
   fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
@@ -125,6 +136,16 @@ status_is_paused() {  # <status-line>
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
+}
+
+# A durable, unbounded wait for a captain answer. Unlike paused, it is
+# captain-relevant once and never implies an external condition will clear on
+# its own. The keyed decision fold below keeps it open until resolved.
+status_is_awaiting_captain() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "${FM_CLASSIFY_AWAITING_CAPTAIN_VERB:-$FM_CLASSIFY_AWAITING_CAPTAIN_VERB_DEFAULT}" ]
 }
 
 # 0 if a status line declares either an external-wait pause or a verified
@@ -218,7 +239,7 @@ status_open_decisions() {  # <status-file>
     verb=$(status_line_verb "$line")
     key=$(_fm_decision_key "$line") || continue
     case "$verb" in
-      needs-decision|blocked)
+      needs-decision|blocked|"${FM_CLASSIFY_AWAITING_CAPTAIN_VERB:-$FM_CLASSIFY_AWAITING_CAPTAIN_VERB_DEFAULT}")
         note=$(status_line_note "$line")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
@@ -231,6 +252,11 @@ status_open_decisions() {  # <status-file>
     esac
   done < "$f"
   printf '%s' "$open"
+}
+
+status_awaiting_captain_decisions() {  # <status-file>
+  status_open_decisions "$1" | awk -F '\t' -v verb="${FM_CLASSIFY_AWAITING_CAPTAIN_VERB:-$FM_CLASSIFY_AWAITING_CAPTAIN_VERB_DEFAULT}" \
+    '$2 == verb { print }'
 }
 
 # Fold material routed-work phases in the same keyed event stream.
@@ -259,7 +285,7 @@ _fm_status_open_activities_stream() {
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      done|failed|needs-decision|blocked|"$resolve"|"$held")
+      done|failed|needs-decision|blocked|"${FM_CLASSIFY_AWAITING_CAPTAIN_VERB:-$FM_CLASSIFY_AWAITING_CAPTAIN_VERB_DEFAULT}"|"$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;

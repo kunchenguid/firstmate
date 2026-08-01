@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Atomically drain durable watcher wake records, optionally annotate validated
-# signal status keys after raw consumption commits, then assert liveness.
+# Atomically drain durable watcher wake records, preserve the consumed queue and
+# its digest-bound receipt, optionally annotate validated signal status keys
+# after raw consumption commits, then assert liveness.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-custody-lib.sh
+. "$SCRIPT_DIR/fm-custody-lib.sh"
+
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
@@ -67,6 +72,9 @@ if [ -n "$RAW_ROWS" ]; then
   # crash in this micro-gap may replay a wake, and annotations stay outside it.
   printf '%s\n' "$RAW_ROWS" || exit "$?"
 fi
+source_ref=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null || printf 'unversioned-firstmate-root')
+fm_custody_preserve "$DRAIN_TMP" "$DATA/wake-receipts" \
+  "$source_ref:$(basename "$FM_WAKE_QUEUE")" consumed-wake-queue >/dev/null || exit 1
 rm -f "$DRAIN_TMP" || exit "$?"
 DRAIN_TMP=
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"

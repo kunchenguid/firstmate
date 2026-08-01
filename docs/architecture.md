@@ -9,7 +9,7 @@ firstmate's always-loaded operating contract and routing index for conditional p
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
-Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or an X-mode mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
+Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or an X-mode mention, stale panes whose crew is not provably working, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 A busy pane is otherwise exempt from staleness, but only until its latest `state/<id>.turn-ended` marker reaches `FM_BUSY_TURN_MAX_SECS`, or its `state/<id>.meta` spawn record reaches that age before any turn completes; past that bound it is routed through the same wedge escalation, with the identical reason, escalation count, and `demand-deep-inspection` marker, for inspection only - never an automatic interrupt, signal, or restart.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
@@ -19,17 +19,21 @@ A concurrent replacement remains armed, every non-merged or invalid observation 
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+A crew that reports `done:` is retired from stale escalation after one mechanical retention check proves the exact terminal event, a clean worktree, and its current HEAD; `awaiting-captain [key=...]` uses the same baseline for an unbounded decision wait.
+The baseline is trusted until the terminal event digest, worktree cleanliness, HEAD, or resolved-decision set changes; a change surfaces exactly once for reconciliation while preserving the endpoint metadata, worktree, commits, and prior baseline as custody evidence.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
-After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
+After each drain, `fm-wake-drain.sh` first custody-versions the exact consumed queue bytes and writes a digest, byte count, source reference, custody class, and timestamp receipt, then runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
+For a running step with a recorded native-agent PID in the current step log, that process identity must still be live and unsuspended; a pane interrupt does not stop it, and a dead or suspended bound PID is reported as a pipeline contradiction rather than working.
+Older or unsupported run shapes without a verifiable PID remain explicitly indeterminate at the process layer instead of borrowing pane liveness.
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
@@ -97,7 +101,8 @@ Codex and standalone Kimi classify unknown behind explicit probes until a semant
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
-Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
+Endpoint death is the only pane-level process override and yields dead when no current-code-matched pipeline run accounts for the task; child process presence, instantaneous CPU, process sleep state, and marker modification times are not state signals.
+A positive cumulative-CPU delta across two samples of the same recorded root process and descendant closure is progress evidence only: it resets stale aging but never classifies current state, while zero delta proves nothing.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
@@ -152,6 +157,14 @@ The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistak
 Independently, `fm-spawn.sh`, `fm-send.sh`, and `fm-teardown.sh` source `bin/fm-gate-refuse-lib.sh` and exit with status 3 before fleet mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology.
 A normal primary checkout or crewmate worktree has neither signal and remains unaffected.
 The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
+
+## Model-capacity hold boundary
+
+`bin/fm-model-capacity-hold.sh` registers one durable home-wide capacity hold and retains registration and digest-bound release receipts under `data/model-capacity-holds/`.
+While the marker is active, Firstmate-controlled new model work is refused at `fm-spawn.sh`, text and Enter submission at `fm-send.sh`, and away-supervisor injection at `fm-supervise-daemon.sh`.
+Interrupt keys, watcher bookkeeping, evidence capture, and cleanup remain available, so a capacity hold does not strand finished work.
+The boundary is intentionally honest rather than universal: the primary's current model turn and harness-native same-session watcher or Stop-hook continuations, direct human input in a TUI, provider CLI or API calls, native subagent controls, direct no-mistakes commands, lower-level backend send functions invoked outside the guarded entrypoints, and agents or detached pipeline workers that were already running before registration remain outside Firstmate's enforcement.
+A capacity hold therefore prevents new work only through the listed supervised entrypoints; stopping an already-running worker requires its own explicit, evidence-preserving lifecycle action.
 
 ## Two task shapes
 

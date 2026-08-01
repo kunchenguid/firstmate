@@ -619,31 +619,47 @@ function shellInvocation(position) {
   const name = basename(position.command.value);
   if (!["sh", "bash", "zsh"].includes(name)) return null;
   const words = position.words;
+  let noexec = false;
   for (let i = position.index + 1; i < words.length; i += 1) {
     const option = words[i];
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(option.value)) {
+      if (option.value.slice(1).includes("n")) noexec = true;
       let payloadIndex = i + 1;
       if (words[payloadIndex]?.value === "--") payloadIndex += 1;
-      return { kind: "command", payload: words[payloadIndex] || null };
+      return { kind: "command", payload: words[payloadIndex] || null, noexec };
     }
     if (/^[-+]O$/.test(option.value)) {
       i += 1;
       continue;
     }
-    if (option.value === "--" || /^[-+]/.test(option.value)) continue;
-    return { kind: "script", payload: option };
+    if (option.value === "--noexec") {
+      noexec = true;
+      continue;
+    }
+    if (option.value === "--") {
+      const payload = words[i + 1] || null;
+      return payload ? { kind: "script", payload, noexec } : { kind: "stdin", payload: null, noexec };
+    }
+    if (/^[-+][A-Za-z]+$/.test(option.value)) {
+      if (option.value.slice(1).includes("n")) noexec = option.value.startsWith("-");
+      continue;
+    }
+    if (/^[-+]/.test(option.value)) continue;
+    return { kind: "script", payload: option, noexec };
   }
-  return { kind: "stdin", payload: null };
+  return { kind: "stdin", payload: null, noexec };
 }
 
 function shellHeredocPayloads(tokens, position) {
-  if (shellInvocation(position)?.kind !== "stdin") return [];
+  const shell = shellInvocation(position);
+  if (shell?.kind !== "stdin" || shell.noexec) return [];
   const heredocs = tokens.filter((token) => token.type === "redir" && token.fd === 0 && typeof token.heredoc === "string");
   return heredocs.length === 0 ? [] : [heredocs.at(-1).heredoc];
 }
 
 function shellHereStringPayloads(tokens, position) {
-  if (shellInvocation(position)?.kind !== "stdin") return [];
+  const shell = shellInvocation(position);
+  if (shell?.kind !== "stdin" || shell.noexec) return [];
   const payloads = [];
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
@@ -787,8 +803,8 @@ function analyzeProgram(command, context, depth = 0) {
     }
 
     const shell = shellInvocation(position);
-    const shellPayload = shell?.kind === "command" ? shell.payload : null;
-    const shellScript = shell?.kind === "script" ? shell.payload : null;
+    const shellPayload = shell?.kind === "command" && !shell.noexec ? shell.payload : null;
+    const shellScript = shell?.kind === "script" && !shell.noexec ? shell.payload : null;
     const sourceScript = sourcedScript(position);
     const literalEvalPayload = evalPayload(position);
     const heredocPayloads = shellHeredocPayloads(tokens, position);

@@ -16,7 +16,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|awaiting-captain|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -35,6 +35,11 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#      For an active full run whose step log names its native worker PID, the
+#      process is checked independently of the pane: live remains working,
+#      stopped/suspended or absent never inherits the stale running row, and an
+#      unrecognized reused PID becomes unknown. Pane interruption cannot stop or
+#      prove the state of this detached worker.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -119,6 +124,10 @@ log_last_line() {
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
 # and its reason rather than a wedge-suspect idle.
 map_log_state() {  # <line>
+  if status_is_awaiting_captain "$1"; then
+    echo awaiting-captain
+    return
+  fi
   if status_is_paused "$1"; then
     echo paused
     return
@@ -321,6 +330,53 @@ nm_ci_checks_state() {
     *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+# Resolve native no-mistakes step-worker health when the current step log exposes
+# a start PID. Absence of such an identity is an explicit unsupported shape and
+# leaves the run-record mapping unchanged; a named PID is never allowed to do so
+# when the process is dead, suspended, or has been reused by an unrelated command.
+NM_WORKER_HEALTH=unavailable
+NM_WORKER_PID=
+nm_headless_worker_health() {
+  local run_id step log started pid related ps_out stat command
+  NM_WORKER_HEALTH=unavailable
+  NM_WORKER_PID=
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] || return 0
+  step=$(printf '%s\n' "$RUN_OUT" \
+    | awk -F, '$2 ~ /^[[:space:]]*"?(running|fixing)"?[[:space:]]*$/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); found=$1 } END { print found }')
+  [ -n "$step" ] || step=$(strip_quotes "$(nm_field status)")
+  [ -n "$step" ] || return 0
+  log=$(nm_run axi logs --step "$step" --run "$run_id")
+  [ -n "$log" ] || return 0
+  started=$(printf '%s\n' "$log" \
+    | grep -Ei '(codex|claude|opencode|grok|kimi|pi|agent).*started.*pid[=: ]+[0-9]+' \
+    | tail -1)
+  [ -n "$started" ] || return 0
+  pid=$(printf '%s\n' "$started" | sed -nE 's/.*pid[=: ]+([0-9]+).*/\1/p')
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  NM_WORKER_PID=$pid
+  related=$(printf '%s\n' "$log" \
+    | grep -Ei "((started|exited|stopped).*(pid[=: ]+)?$pid)|((pid[=: ]+)?$pid.*(started|exited|stopped))" \
+    | tail -1)
+  case "$related" in
+    *exited*|*stopped*) NM_WORKER_HEALTH=dead; return 0 ;;
+  esac
+  ps_out=$(ps -p "$pid" -o stat= -o command= 2>/dev/null) || {
+    NM_WORKER_HEALTH=dead
+    return 0
+  }
+  stat=$(printf '%s\n' "$ps_out" | awk 'NR == 1 { print $1 }')
+  command=${ps_out#*"$stat"}
+  if ! printf '%s\n' "$command" | grep -Eiq 'codex|claude|opencode|grok|kimi|(^|[ /])pi([ /]|$)|agent'; then
+    NM_WORKER_HEALTH=unknown
+    return 0
+  fi
+  case "$stat" in
+    *T*) NM_WORKER_HEALTH=suspended ;;
+    *) NM_WORKER_HEALTH=live ;;
   esac
 }
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
@@ -551,6 +607,30 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
+  fi
+
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ]; then
+    nm_headless_worker_health
+    case "$NM_WORKER_HEALTH" in
+      live)
+        RUN_DETAIL="$RUN_DETAIL${SEP}headless pipeline worker live pid=$NM_WORKER_PID; pane state is independent"
+        ;;
+      dead)
+        RUN_STATE=blocked
+        RUN_DETAIL="run record still active${SEP}headless pipeline worker dead pid=$NM_WORKER_PID"
+        ;;
+      suspended)
+        RUN_STATE=blocked
+        RUN_DETAIL="run record still active${SEP}headless pipeline worker suspended pid=$NM_WORKER_PID"
+        ;;
+      unknown)
+        RUN_STATE=unknown
+        RUN_DETAIL="run record still active${SEP}headless worker pid=$NM_WORKER_PID has unrecognized identity"
+        ;;
+      *)
+        RUN_DETAIL="$RUN_DETAIL${SEP}headless worker identity unavailable; run record only"
+        ;;
+    esac
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

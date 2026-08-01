@@ -75,6 +75,10 @@ This covers statically-visible literal words in command position; opaque dynamic
 `bin/fm-watch.sh` is protected but is not a blessed entry point.
 A direct `bin/fm-watch.sh` execution - relative, `<code-root>`-anchored, `$VAR`-prefixed, or `~`-prefixed - always denies with `watcher-direct`, whose reason points the caller at `bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh`.
 
+Shell no-execute syntax checks such as `bash -n bin/fm-watch.sh`, combined short flags containing `n`, and `bash --noexec bin/fm-watch.sh` are read-only data uses and are allowed.
+The exception belongs to the semantic classifier, not the byte prefilter: the same path executed as `bash bin/fm-watch.sh` remains a denied direct watcher launch.
+The regression matrix covers both halves through every adapter transport, alongside the full dangerous-command deny corpus, so a syntax-validation allowance cannot weaken execution protection.
+
 The same bytes in an argument, comment, assertion, documentation query, Python string, `printf`, or `tmux send-keys` payload are data and do not make the outer command relevant.
 
 Literal `sh`, `bash`, or `zsh` `-c` payloads and literal `eval` payloads are recursively classified.

@@ -209,6 +209,8 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_no_grep "# Spec-forging contract - HARD GATE" "$brief" \
+      "$id: ordinary brief rendered the opt-in spec-forging contract"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -363,6 +365,65 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+test_spec_forging_authority_contract() {
+  local home id brief kind missing variable err status
+  home="$TMP_ROOT/spec-forging-authority-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-spec-forging-$kind"
+    set --
+    [ "$kind" = scout ] && set -- --scout
+    FM_SPEC_FORGING_PRD='docs/product.md plus Cesar signature receipt' \
+      FM_SPEC_FORGING_AGENTS='AGENTS.md' \
+      FM_SPEC_FORGING_REPO='coreldh/example at /work/example; verify origin/main; push fork/fm/spec' \
+      FM_SPEC_FORGING_FILES='.kiro/specs/example requirements.md design.md tasks.md' \
+      FM_SPEC_FORGING_SLICE='slice one; deployment excluded' \
+      FM_SPEC_FORGING_VISUAL_GATE='not applicable; no UI' \
+      FM_SPEC_FORGING_SURFACE='commissioned Faber worker' \
+      FM_SPEC_FORGING_VALIDATION_GATE='independent reviewer receives path and sha' \
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" example "$@" --spec-forging >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind spec-forging brief was not scaffolded"
+    assert_grep "# Spec-forging contract - HARD GATE" "$brief" \
+      "$kind spec-forging brief lost its hard gate"
+    assert_grep "Architecture or scope changes return to Marco Antonio; the forger never authorizes or resolves them." "$brief" \
+      "$kind spec-forging brief let the forger self-resolve architecture or scope"
+    assert_grep "The architect is the Marco Antonio station or role and may be an explicitly commissioned worker." "$brief" \
+      "$kind spec-forging brief lost the commissioned-architect definition"
+    assert_grep "That worker never self-appoints and never signs for Cesar." "$brief" \
+      "$kind spec-forging brief let a worker self-appoint or sign for Cesar"
+    assert_grep "Agrippa is not the architect." "$brief" \
+      "$kind spec-forging brief mislabeled Agrippa as architect"
+    assert_grep "After legitimate authorization, the correction returns to an independent gate." "$brief" \
+      "$kind spec-forging brief lost independent re-gating after authorization"
+  done
+
+  for variable in \
+    FM_SPEC_FORGING_PRD FM_SPEC_FORGING_AGENTS FM_SPEC_FORGING_REPO \
+    FM_SPEC_FORGING_FILES FM_SPEC_FORGING_SLICE FM_SPEC_FORGING_VISUAL_GATE \
+    FM_SPEC_FORGING_SURFACE FM_SPEC_FORGING_VALIDATION_GATE; do
+    id="brief-spec-missing-${variable#FM_SPEC_FORGING_}"
+    missing=$(printf '%s' "$variable" | tr '[:upper:]_' '[:lower:]-')
+    err="$home/$missing.err"
+    status=0
+    env \
+      FM_SPEC_FORGING_PRD='prd' FM_SPEC_FORGING_AGENTS='agents' FM_SPEC_FORGING_REPO='repo' \
+      FM_SPEC_FORGING_FILES='files' FM_SPEC_FORGING_SLICE='slice' \
+      FM_SPEC_FORGING_VISUAL_GATE='visual' FM_SPEC_FORGING_SURFACE='surface' \
+      FM_SPEC_FORGING_VALIDATION_GATE='gate' "$variable=" FM_HOME="$home" \
+      "$ROOT/bin/fm-brief.sh" "$id" example --spec-forging >/dev/null 2>"$err" || status=$?
+    expect_code 1 "$status" "missing $variable must refuse spec-forging scaffold"
+    assert_absent "$home/data/$id" "missing $variable created a partial task directory"
+  done
+
+  status=0
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-spec-secondmate --secondmate --no-projects --spec-forging \
+    >/dev/null 2>"$home/secondmate.err" || status=$?
+  expect_code 1 "$status" "secondmate charter must reject --spec-forging"
+  pass "fm-brief.sh: producer scope authority is fail-closed and never self-appointed"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -430,7 +491,7 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter did not limit keyed phases to reportable material changes"
   assert_grep "If its first reportable event is \`working [key=<work-slug>]: {material phase}\`" "$brief" \
     "secondmate charter lost keyed working syntax for a reportable material phase"
-  assert_grep "use the same key on its later \`paused\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event" "$brief" \
+  assert_grep "use the same key on its later \`paused\`, \`awaiting-captain\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event" "$brief" \
     "secondmate charter lost same-key closure for a reportable material phase"
   assert_grep 'resolved [key=<work-slug>]' "$brief" \
     "secondmate charter lost resolved closure for a keyed material phase"
@@ -445,8 +506,10 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost declared external waits"
   assert_grep 'a captain decision, a real blocker, a failure, or work ready for review' "$brief" \
     "secondmate charter lost decisions, blockers, failures, or ready outcomes"
-  assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
+  assert_grep 'States: working, needs-decision, blocked, paused, awaiting-captain, done, failed.' "$brief" \
     "secondmate charter changed the preserved status vocabulary"
+  assert_grep 'awaiting-captain [key=<slug>]' "$brief" \
+    "secondmate charter omitted the durable unbounded captain-wait vocabulary"
   pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
 }
 
@@ -579,7 +642,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+    assert_grep "States: working, needs-decision, blocked, awaiting, awaiting-captain, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
@@ -642,6 +705,7 @@ test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
+test_spec_forging_authority_contract
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract

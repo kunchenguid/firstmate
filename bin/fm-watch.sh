@@ -23,7 +23,10 @@
 #                          re-surface cadence, never as a wedge. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
+#                          both surfaced at once. Once a done event has been
+#                          surfaced, its retained lane is excluded from future
+#                          stale classification without deleting metadata or the
+#                          worktree. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
@@ -77,6 +80,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-custody-lib.sh
+. "$SCRIPT_DIR/fm-custody-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -261,6 +266,28 @@ recorded_windows() {
 # pane/hash state resets to genuinely active (see the two rm-on-reset call sites
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
+FM_PROCESS_PROGRESS_BIN=${FM_PROCESS_PROGRESS_BIN:-$SCRIPT_DIR/fm-process-progress.sh}
+
+# Compare cumulative CPU only across the same bound pane-root identity. A
+# positive delta is real progress even when pane bytes and sparse status events
+# are unchanged; it resets the wedge timer but never promotes current state.
+crew_cumulative_progress_advanced() {  # <window>
+  local win=$1 key sample identity cpu previous previous_identity previous_cpu
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  sample=$("$FM_PROCESS_PROGRESS_BIN" "$(window_backend "$win")" "$win" 2>/dev/null) || return 1
+  case "$sample" in *$'\t'*) : ;; *) return 1 ;; esac
+  identity=${sample%%$'\t'*}
+  cpu=${sample#*$'\t'}
+  [ -n "$identity" ] || return 1
+  case "$cpu" in ''|*[!0-9]*) return 1 ;; esac
+  previous=$(cat "$STATE/.progress-$key" 2>/dev/null || true)
+  printf '%s\n' "$sample" > "$STATE/.progress-$key"
+  previous_identity=${previous%%$'\t'*}
+  previous_cpu=${previous#*$'\t'}
+  [ "$previous_identity" = "$identity" ] || return 1
+  case "$previous_cpu" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$cpu" -gt "$previous_cpu" ]
+}
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
@@ -272,6 +299,12 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  if crew_cumulative_progress_advanced "$win"; then
+    date +%s > "$since_file"
+    rm -f "$escalation_file"
+    triage_log "absorbed $label (cumulative CPU advanced): $win"
+    return 0
+  fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -355,6 +388,93 @@ clear_pause_tracking() {  # <window>
   key=${key//./_}
   clear_pause_state "$win"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+}
+
+retained_marker_field() {  # <marker> <field>
+  sed -n "s/^${2}=//p" "$1" 2>/dev/null | tail -1
+}
+
+retained_marker_preserve() {  # <marker> <task> <window> <transition>
+  local marker=$1 task=$2 win=$3 transition=$4
+  [ -f "$marker" ] || return 0
+  fm_custody_preserve "$marker" "$FM_HOME/data/retention-receipts" \
+    "task=$task window=$win transition=$transition" 'retained-lane-prior-evidence' >/dev/null
+}
+
+# Verify and record the terminal/clean-tree/unchanged-HEAD triple that permits a
+# completed lane to leave stale escalation while its endpoint, worktree, and
+# unlanded commits remain retained. Return 0 when the evidence is stable, 1 when
+# retirement is unavailable, and 2 after a previously trusted HEAD, worktree, or
+# clean-tree condition changed. Every replacement/removal versions the prior
+# marker before the transition, so a reconciliation never destroys its evidence.
+retained_lane_check() {  # <task> <window> <status-evidence> <marker> <reason>
+  local task=$1 win=$2 evidence=$3 marker=$4 reason=$5 meta worktree head digest tmp count tree_status
+  local old_head old_worktree
+  meta="$STATE/$task.meta"
+  count=$(grep -c '^worktree=' "$meta" 2>/dev/null || true)
+  if [ "$count" -eq 1 ]; then
+    worktree=$(sed -n 's/^worktree=//p' "$meta")
+  else
+    worktree=
+  fi
+  if [ -z "$worktree" ] || [ ! -d "$worktree" ] \
+    || ! git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ -f "$marker" ]; then
+      retained_marker_preserve "$marker" "$task" "$win" 'worktree-unavailable' || return 1
+      rm -f "$marker"
+      return 2
+    fi
+    return 1
+  fi
+  head=$(git -C "$worktree" rev-parse HEAD 2>/dev/null) || return 1
+  tree_status=$(git -C "$worktree" status --porcelain --untracked-files=normal 2>/dev/null) \
+    || return 1
+  if [ -n "$tree_status" ]; then
+    if [ -f "$marker" ]; then
+      retained_marker_preserve "$marker" "$task" "$win" 'tree-became-dirty' || return 1
+      rm -f "$marker"
+      return 2
+    fi
+    return 1
+  fi
+  digest=$(printf '%s' "$evidence" | {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256; else sha256sum; fi
+  } | awk '{print $1}') || return 1
+  tmp=$(mktemp "$STATE/.retained-evidence.XXXXXX") || return 1
+  {
+    printf 'schema=fm-retained-lane.v2\n'
+    printf 'task=%s\n' "$task"
+    printf 'window=%s\n' "$win"
+    printf 'status_digest=%s\n' "$digest"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'head=%s\n' "$head"
+    printf 'tree_state=clean\n'
+    printf 'retained_reason=%s\n' "$reason"
+  } > "$tmp"
+  if [ ! -f "$marker" ]; then
+    mv "$tmp" "$marker"
+    return 0
+  fi
+  if cmp -s "$marker" "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  old_head=$(retained_marker_field "$marker" head)
+  old_worktree=$(retained_marker_field "$marker" worktree)
+  retained_marker_preserve "$marker" "$task" "$win" 'eligible-evidence-changed' \
+    || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$marker"
+  if [ "$old_head" != "$head" ] || [ "$old_worktree" != "$worktree" ]; then
+    return 2
+  fi
+  return 0
+}
+
+clear_answered_captain_wait() {  # <task> <window> <marker>
+  local task=$1 win=$2 marker=$3
+  [ -f "$marker" ] || return 0
+  retained_marker_preserve "$marker" "$task" "$win" 'captain-answer-recorded' || return 1
+  rm -f "$marker"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -871,6 +991,51 @@ EOF
     key=${key//\//_}
     key=${key//./_}
     last=$(last_status_line "$STATE/$task.status")
+    retained_key=${w//:/_}
+    retained_key=${retained_key//\//_}
+    retained_key=${retained_key//./_}
+    awaiting_marker="$STATE/.awaiting-captain-$retained_key"
+    awaiting_open=$(status_awaiting_captain_decisions "$STATE/$task.status")
+    if [ -z "$awaiting_open" ]; then
+      clear_answered_captain_wait "$task" "$w" "$awaiting_marker" || true
+    elif ! crew_is_provably_working "$task" \
+      && { [ -f "$awaiting_marker" ] \
+        || { status_is_awaiting_captain "$last" \
+          && [ "$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)" = "$last" ]; }; }; then
+      retained_lane_check "$task" "$w" "$awaiting_open" "$awaiting_marker" \
+        'complete-awaiting-unbounded-captain-decision'
+      retained_rc=$?
+      if [ "$retained_rc" -eq 0 ]; then
+        clear_pause_tracking "$w"
+        triage_log "retained awaiting-captain lane excluded from stale escalation: $w"
+        continue
+      elif [ "$retained_rc" -eq 2 ]; then
+        reason="stale: $w (retained evidence changed while awaiting captain)"
+        fm_wake_append stale "$w" "$reason" || exit 1
+        wake "$reason"
+      fi
+    fi
+    # A completed report is actionable once, via its signal or first stale
+    # fallback. After that exact done line is recorded as surfaced, an idle pane
+    # is expected and cannot become a wedge merely because its clean worktree is
+    # retained for an independent gate or unlanded commits. A live worker always
+    # overrides this status-log evidence and remains under wedge supervision.
+    if status_is_done "$last" \
+      && [ "$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)" = "$last" ] \
+      && ! crew_is_provably_working "$task"; then
+      retained_lane_check "$task" "$w" "$last" "$STATE/.terminal-retained-$retained_key" \
+        'completed-awaiting-lifecycle-reconciliation'
+      retained_rc=$?
+      if [ "$retained_rc" -eq 0 ]; then
+        clear_pause_tracking "$w"
+        triage_log "retained completed lane excluded from stale escalation: $w"
+        continue
+      elif [ "$retained_rc" -eq 2 ]; then
+        reason="stale: $w (retained evidence changed after terminal report)"
+        fm_wake_append stale "$w" "$reason" || exit 1
+        wake "$reason"
+      fi
+    fi
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi

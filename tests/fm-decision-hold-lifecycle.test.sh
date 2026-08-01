@@ -111,6 +111,7 @@ write_origin_meta() {  # <home> <id> [kind]
   local home=$1 id=$2 kind=${3:-scout}
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
     "worktree=$home/projects/missing-$id" \
     "project=$home/projects/sample" \
     "harness=codex" \
@@ -119,7 +120,7 @@ write_origin_meta() {  # <home> <id> [kind]
 }
 
 test_structured_holds_survive_teardown_and_route_resolution() {
-  local home id route_hold access_hold before after json open show
+  local home id route_hold access_hold before after json open show hold_receipt resolved_receipt decision_object saved_receipt invisible_bearings
   home=$(make_home durable-lifecycle)
   id=sample-systems-review
   mkdir -p "$home/data/$id"
@@ -167,6 +168,21 @@ EOF
     || fail "shared investigation completion gate failed"
   assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
   assert_grep "decision_keys=access,route" "$home/state/$id.meta" "decision inventory was not deterministic"
+  hold_receipt="$home/data/decision-hold-receipts/$route_hold.hold"
+  assert_present "$hold_receipt" "completion did not create a durable cleanup receipt"
+  assert_grep "schema=fm-decision-hold-receipt.v1" "$hold_receipt" \
+    "cleanup receipt lost its schema"
+  assert_grep "origin_id=$id" "$hold_receipt" "cleanup receipt lost task identity"
+  assert_grep "dispatch_id=$id" "$hold_receipt" "cleanup receipt lost dispatch identity"
+  assert_grep "hold_id=$route_hold" "$hold_receipt" "cleanup receipt lost hold identity"
+  grep -Eq '^object_sha256=[0-9a-f]{64}$' "$hold_receipt" \
+    || fail "cleanup receipt object digest is absent, zero, or malformed"
+  assert_no_grep "object_sha256=0000000000000000000000000000000000000000000000000000000000000000" "$hold_receipt" \
+    "cleanup receipt object digest is all zeroes"
+  grep -Eq '^bearings_sha256=[0-9a-f]{64}$' "$hold_receipt" \
+    || fail "cleanup receipt Bearings digest is absent, zero, or malformed"
+  assert_no_grep "bearings_sha256=0000000000000000000000000000000000000000000000000000000000000000" "$hold_receipt" \
+    "cleanup receipt Bearings digest is all zeroes"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
   [ -z "$open" ] || fail "captain-held transfer did not close duplicate live status decisions: $open"
@@ -180,6 +196,36 @@ EOF
       and (.decisions_open | any(.id == $access and .verb == "captain-hold" and .owner == "(main)"))
       and (.gates | any(.id == $route or .id == $access) | not)
   ' >/dev/null || fail "Bearings did not surface structured captain holds: $json"
+
+  saved_receipt=$(cat "$hold_receipt")
+  sed 's/^dispatch_id=.*/dispatch_id=other-dispatch/' "$hold_receipt" > "$hold_receipt.tmp"
+  mv "$hold_receipt.tmp" "$hold_receipt"
+  if run_teardown "$home" "$id" >"$home/unresolved-wrong-dispatch.out" 2>"$home/unresolved-wrong-dispatch.err"; then
+    fail "unresolved cleanup receipt with a wrong dispatch identity allowed teardown"
+  fi
+  assert_present "$home/state/$id.meta" "wrong-dispatch refusal removed scout metadata"
+  printf '%s\n' "$saved_receipt" > "$hold_receipt"
+
+  sed 's/^object_sha256=.*/object_sha256=0000000000000000000000000000000000000000000000000000000000000000/' \
+    "$hold_receipt" > "$hold_receipt.tmp"
+  mv "$hold_receipt.tmp" "$hold_receipt"
+  if run_teardown "$home" "$id" >"$home/unresolved-zero-digest.out" 2>"$home/unresolved-zero-digest.err"; then
+    fail "unresolved cleanup receipt with an all-zero digest allowed teardown"
+  fi
+  assert_present "$home/state/$id.meta" "zero-digest refusal removed scout metadata"
+  printf '%s\n' "$saved_receipt" > "$hold_receipt"
+
+  invisible_bearings="$home/invisible-bearings"
+  cat > "$invisible_bearings" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"schema":"fm-bearings.v1","decisions_open":[]}'
+EOF
+  chmod +x "$invisible_bearings"
+  if FM_DECISION_HOLD_BEARINGS="$invisible_bearings" run_teardown "$home" "$id" \
+    >"$home/unresolved-invisible.out" 2>"$home/unresolved-invisible.err"; then
+    fail "unresolved hold absent from fresh Bearings still allowed teardown"
+  fi
+  assert_present "$home/state/$id.meta" "Bearings-invisible refusal removed scout metadata"
 
   run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
     || fail "reviewed investigation teardown failed: $(cat "$home/teardown.err")"
@@ -248,6 +294,34 @@ EOF
   run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
     --routed-to sample-route-implementation --routed-to sample-route-followup >/dev/null \
     || fail "could not resume and complete partial decision routing"
+  resolved_receipt="$home/data/decision-hold-receipts/$route_hold.resolved"
+  decision_object="$home/data/decision-hold-receipts/$route_hold.decision.md"
+  assert_present "$resolved_receipt" "resolved hold did not create its trusted receipt"
+  assert_present "$decision_object" "resolved hold did not retain the digest-bound decision object"
+  assert_grep "origin_id=$id" "$resolved_receipt" "resolution receipt lost task identity"
+  assert_grep "dispatch_id=$id" "$resolved_receipt" "resolution receipt lost dispatch identity"
+  assert_grep "routed_ids=sample-route-followup,sample-route-implementation" "$resolved_receipt" \
+    "resolution receipt lost its routed task identities"
+  grep -Eq '^decision_sha256=[0-9a-f]{64}$' "$resolved_receipt" \
+    || fail "resolution receipt decision digest is absent, zero, or malformed"
+  assert_no_grep "decision_sha256=0000000000000000000000000000000000000000000000000000000000000000" "$resolved_receipt" \
+    "resolution receipt decision digest is all zeroes"
+  run_decisions "$home" verify-resolution "$id" route >/dev/null \
+    || fail "fresh trusted resolution receipt did not verify"
+  saved_receipt=$(cat "$resolved_receipt")
+  sed 's/^dispatch_id=.*/dispatch_id=some-other-dispatch/' "$resolved_receipt" > "$resolved_receipt.tmp"
+  mv "$resolved_receipt.tmp" "$resolved_receipt"
+  if run_decisions "$home" verify-resolution "$id" route >"$home/wrong-dispatch.out" 2>"$home/wrong-dispatch.err"; then
+    fail "resolution receipt with the wrong dispatch identity verified"
+  fi
+  printf '%s\n' "$saved_receipt" > "$resolved_receipt"
+  mv "$decision_object" "$decision_object.missing"
+  if run_decisions "$home" verify-resolution "$id" route >"$home/missing-object.out" 2>"$home/missing-object.err"; then
+    fail "resolution receipt verified while its decision object path was absent"
+  fi
+  mv "$decision_object.missing" "$decision_object"
+  run_decisions "$home" verify-resolution "$id" route >/dev/null \
+    || fail "restored trusted resolution receipt did not verify"
   run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
     --routed-to sample-route-implementation --routed-to sample-route-followup >/dev/null \
     || fail "identical resolution retry was not idempotent"
@@ -274,6 +348,102 @@ EOF
       and (.decisions_open | any(.id == "sample-systems-review") | not)
   ' >/dev/null || fail "resolved or decision-like report prose produced a false hold: $json"
   pass "captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close"
+}
+
+write_done_resolution_row() {  # <home> <hold-id> <digest> <routed-id> [body-marker]
+  local home=$1 hold=$2 digest=$3 routed=$4 marker=${5:-Routed work:}
+  cat >> "$home/data/backlog.md" <<EOF
+- [x] $hold - Historical route choice (repo: sample) (kind: captain) (done 2026-07-31)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: $digest
+  Routed identities: $routed
+
+  Captain decision:
+  Use the historical route.
+
+  $marker
+  - $routed
+EOF
+}
+
+test_resolution_receipt_attack_constructions_refuse() {
+  local home origin hold digest case_name duplicate_row
+  digest=123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0
+  for case_name in absent malformed duplicate wrong-origin faithful zero-digest; do
+    home=$(make_home "receipt-attack-$case_name")
+    origin="sample-$case_name-review"
+    hold="$origin-decision-route"
+    mkdir -p "$home/data/$origin"
+    write_origin_meta "$home" "$origin"
+    printf '# Historical review\n' > "$home/data/$origin/report.md"
+    tasks_in "$home" add routed-task "Routed task" --kind ship --repo sample >/dev/null
+    case "$case_name" in
+      absent) : ;;
+      malformed) write_done_resolution_row "$home" "$hold" "$digest" routed-task "Routed identities only:" ;;
+      duplicate)
+        write_done_resolution_row "$home" "$hold" "$digest" routed-task
+        duplicate_row=$(awk -v prefix="- [x] $hold - " '
+          index($0, prefix) == 1 {capture=1}
+          capture {print}
+        ' "$home/data/backlog.md")
+        printf '%s\n' "$duplicate_row" >> "$home/data/done-archive.md"
+        ;;
+      wrong-origin) write_done_resolution_row "$home" "different-review-decision-route" "$digest" routed-task ;;
+      faithful) write_done_resolution_row "$home" "$hold" "$digest" routed-task ;;
+      zero-digest) write_done_resolution_row "$home" "$hold" \
+        0000000000000000000000000000000000000000000000000000000000000000 routed-task ;;
+    esac
+    if run_decisions "$home" verify-resolution "$origin" route \
+      >"$home/$case_name.out" 2>"$home/$case_name.err"; then
+      fail "$case_name hand-written or indeterminate resolution construction verified"
+    fi
+  done
+  assert_grep "trusted cleanup receipt" "$TMP_ROOT/receipt-attack-faithful/faithful.err" \
+    "faithful hand-written historical row did not refuse for missing authority receipt"
+  assert_grep "preserve the origin and row" "$TMP_ROOT/receipt-attack-faithful/faithful.err" \
+    "historical resolved-row refusal did not name the non-destructive operator remedy"
+  assert_grep "no safe automatic migration is shipped" "$TMP_ROOT/receipt-attack-faithful/faithful.err" \
+    "historical resolved-row refusal promised an unavailable migration"
+  assert_grep "nonzero" "$TMP_ROOT/receipt-attack-zero-digest/zero-digest.err" \
+    "all-zero historical decision digest did not fail explicitly"
+  pass "absent, malformed, duplicate, wrong-origin, hand-written, and zero-digest resolution rows refuse"
+}
+
+test_historical_open_inventory_diagnostics_name_safe_remedies() {
+  local home origin hold receipt meta_tmp
+  home=$(make_home historical-open-remedy)
+  origin=sample-historical-open-review
+  mkdir -p "$home/data/$origin"
+  write_origin_meta "$home" "$origin"
+  printf '# Historical open review\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the historical route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register historical-open hold fixture"
+  run_decisions "$home" complete "$origin" route >/dev/null \
+    || fail "could not complete historical-open inventory fixture"
+  receipt="$home/data/decision-hold-receipts/$hold.hold"
+  assert_present "$receipt" "historical-open fixture did not establish its cleanup receipt"
+  rm "$receipt"
+
+  if run_decisions "$home" verify "$origin" >"$home/open.out" 2>"$home/open.err"; then
+    fail "historical open inventory without a receipt unexpectedly verified"
+  fi
+  assert_grep "re-run complete $origin with its full recorded decision inventory" "$home/open.err" \
+    "repairable historical open inventory did not name the safe complete retry"
+  assert_grep "only while the hold remains open and the exact dispatch binding survives" "$home/open.err" \
+    "historical open remedy overstated when receipt reconstruction is safe"
+
+  meta_tmp="$home/state/$origin.meta.next"
+  grep -v '^endpoint_task_id=' "$home/state/$origin.meta" > "$meta_tmp"
+  mv "$meta_tmp" "$home/state/$origin.meta"
+  if run_decisions "$home" verify "$origin" >"$home/bindingless.out" 2>"$home/bindingless.err"; then
+    fail "binding-less historical inventory unexpectedly verified"
+  fi
+  assert_grep "preserve origin metadata and holds" "$home/bindingless.err" \
+    "binding-less historical refusal did not preserve the only authoritative evidence"
+  assert_grep "no safe automatic migration is shipped" "$home/bindingless.err" \
+    "binding-less historical refusal promised an unavailable migration"
+  pass "historical open and binding-less refusals name only safe operator remedies"
 }
 
 test_scout_teardown_always_requires_inventory_verification() {
@@ -324,7 +494,7 @@ test_origin_slug_validation_precedes_path_construction() {
 }
 
 test_visual_review_uses_shared_completion_owner() {
-  local home id hold json
+  local home id hold json origin_receipt hold_receipt saved_origin routed decision
   home=$(make_home visual-review)
   id=sample-board-review
   mkdir -p "$home/data/$id"
@@ -334,6 +504,13 @@ test_visual_review_uses_shared_completion_owner() {
   printf '# Sample board investigation\n\nThe initial findings need no captain choice.\n' > "$home/data/$id/report.md"
   run_decisions "$home" complete "$id" --none >/dev/null \
     || fail "initial investigation could not pass the shared completion owner"
+  origin_receipt="$home/data/decision-hold-receipts/$id.origin"
+  assert_present "$origin_receipt" "empty initial inventory did not preserve its dispatch carrier"
+  assert_grep "origin_id=$id" "$origin_receipt" "dispatch carrier lost its task identity"
+  assert_grep "dispatch_id=$id" "$origin_receipt" "dispatch carrier lost its endpoint identity"
+  assert_grep "origin_path=$home/data/$id/report.md" "$origin_receipt" "dispatch carrier lost its exact report path"
+  grep -Eq '^origin_sha256=[0-9a-f]{64}$' "$origin_receipt" \
+    || fail "dispatch carrier source digest is absent, zero, or malformed"
   run_teardown "$home" "$id" >/dev/null 2> "$home/visual-teardown.err" \
     || fail "completed investigation teardown failed: $(cat "$home/visual-teardown.err")"
   tasks_in "$home" "done" "$id" --report "data/$id/report.md" --keep 0 >/dev/null
@@ -343,8 +520,17 @@ test_visual_review_uses_shared_completion_owner() {
   hold=$(run_decisions "$home" hold "$id" layout \
     --title "Choose the sample layout" --reason "captain layout choice pending" --repo sample) \
     || fail "post-teardown visual review could not use the shared hold owner"
+  saved_origin=$(cat "$origin_receipt")
+  sed 's#^origin_path=.*#origin_path=/tmp/forged-report.md#' "$origin_receipt" > "$origin_receipt.tmp"
+  mv "$origin_receipt.tmp" "$origin_receipt"
+  if run_decisions "$home" complete "$id" layout >"$home/forged-origin.out" 2>"$home/forged-origin.err"; then
+    fail "post-teardown completion accepted a forged report path"
+  fi
+  printf '%s\n' "$saved_origin" > "$origin_receipt"
   run_decisions "$home" complete "$id" layout >/dev/null \
     || fail "post-teardown visual review could not use the shared completion owner"
+  hold_receipt="$home/data/decision-hold-receipts/$hold.hold"
+  assert_present "$hold_receipt" "post-teardown completion did not create a cleanup receipt"
   [ "$hold" = "$id-decision-layout" ] || fail "visual review used a separate identity policy"
   json=$(run_bearings "$home") || fail "Bearings failed after the ended visual review"
   printf '%s' "$json" | jq -e --arg hold "$hold" '
@@ -352,7 +538,40 @@ test_visual_review_uses_shared_completion_owner() {
   ' >/dev/null || fail "ended visual review did not leave its durable Captain Call: $json"
   [ ! -e "$home/data/visual-review-decisions.json" ] \
     || fail "visual review created a second decision database"
+  routed=sample-layout-implementation
+  tasks_in "$home" add "$routed" "Apply the selected sample layout" --kind ship --repo sample >/dev/null
+  tasks_in "$home" block "$routed" --by "$hold" >/dev/null
+  decision="$home/layout-decision.txt"
+  printf 'Use the compact sample layout.\n' > "$decision"
+  run_decisions "$home" resolve "$id" layout --decision-file "$decision" --routed-to "$routed" >/dev/null \
+    || fail "post-teardown hold could not route its trusted resolution"
+  run_decisions "$home" verify-resolution "$id" layout >/dev/null \
+    || fail "post-teardown resolution receipt did not verify"
   pass "ended visual review follows the same decision-hold completion owner"
+}
+
+test_post_teardown_handwritten_resolution_refuses_completion() {
+  local home origin hold digest
+  home=$(make_home post-teardown-handwritten)
+  origin=sample-post-teardown-review
+  hold="$origin-decision-route"
+  digest=123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review the historical route" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Historical route review\n\nNo initial captain choice.\n' > "$home/data/$origin/report.md"
+  run_decisions "$home" complete "$origin" --none >/dev/null
+  run_teardown "$home" "$origin" >/dev/null 2>"$home/teardown.err"
+  tasks_in "$home" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
+  tasks_in "$home" add routed-task "Routed task" --kind ship --repo sample >/dev/null
+  write_done_resolution_row "$home" "$hold" "$digest" routed-task
+  if run_decisions "$home" complete "$origin" route >"$home/complete.out" 2>"$home/complete.err"; then
+    fail "post-teardown completion trusted a hand-written resolved row"
+  fi
+  assert_grep "trusted cleanup receipt" "$home/complete.err" \
+    "post-teardown hand-written row did not refuse for missing script authority"
+  pass "post-teardown completion rejects hand-written resolved rows"
 }
 
 test_none_inventory_and_resolved_prose_do_not_create_holds() {
@@ -481,6 +700,8 @@ test_resolve_matches_quoted_blocked_by_edges() {
   hold_absent=$(run_decisions "$home" hold "$origin" edge-absent \
     --title "Absent edge decision" --reason "captain absent pending" --repo sample) \
     || fail "could not register absent-edge hold"
+  run_decisions "$home" complete "$origin" edge-first edge-mid edge-last edge-absent >/dev/null \
+    || fail "could not record dispatch-bound cleanup receipts for quote-edge holds"
 
   tasks_in "$home" add pad-a "Pad A" --kind ship --repo sample >/dev/null \
     || fail "could not create pad-a blocker"
@@ -556,7 +777,10 @@ test_scout_teardown_always_requires_inventory_verification
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
+test_post_teardown_handwritten_resolution_refuses_completion
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_historical_open_inventory_diagnostics_name_safe_remedies
+test_resolution_receipt_attack_constructions_refuse
