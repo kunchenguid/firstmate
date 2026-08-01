@@ -65,6 +65,7 @@ matrix_case R18 allow "sh -c 'tmux send-keys -t lab \"bin/fm-watch-arm.sh &\" En
 matrix_case R19 allow "eval 'printf \"%s\\n\" \"bin/fm-watch-arm.sh &\"'"
 matrix_case R20 allow 'bash -n bin/fm-watch.sh'
 matrix_case R21 allow 'sed -n '\''1,20p'\'' bin/fm-watch.sh'
+matrix_case R22 allow 'bash --noexec bin/fm-watch.sh'
 
 matrix_case D01 deny 'bin/fm-watch-arm.sh &'
 matrix_case D02 deny 'nohup bin/fm-watch-arm.sh'
@@ -125,6 +126,18 @@ matrix_case D56 deny 'for x in 1; do pkill -f fm-watch; done'
 matrix_case D57 deny 'case x in x) pkill -f fm-watch ;; esac'
 matrix_case D58 deny 'until false; do kill $(pgrep -f fm-watch); done'
 matrix_case D59 deny 'bash bin/fm-watch.sh'
+matrix_case D60 deny 'bash --rcfile -n bin/fm-watch.sh'
+matrix_case D61 deny 'bash --init-file -n bin/fm-watch.sh'
+matrix_case D62 deny 'sh --rcfile -n bin/fm-watch.sh'
+matrix_case D63 deny 'bash -n bin/fm-watch.sh > bin/fm-watch.sh'
+matrix_case D64 deny ': > bin/fm-watch.sh'
+matrix_case D65 deny 'bash -n bin/fm-watch.sh > /tmp/fm-watch-syntax.out'
+matrix_case D66 deny 'bash -in bin/fm-watch.sh'
+matrix_case D67 deny 'bash -n -- bin/fm-watch.sh'
+matrix_case D68 deny 'bash -n bin/fm-watch.sh &'
+matrix_case D69 deny 'bash -o xtrace bin/fm-watch.sh'
+matrix_case D70 deny 'bash --rcfile /dev/null bin/fm-watch.sh'
+matrix_case D71 deny 'target=bin/fm-watch.sh; : > "$target"'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
@@ -237,7 +250,13 @@ test_direct_policy_contract() {
   assert_policy direct-watch-expanded $'deny\twatcher-direct' '$FM_HOME/bin/fm-watch.sh'
   assert_policy direct-watch-safe-shape $'deny\twatcher-direct' 'cd /tmp; bin/fm-watch.sh'
   assert_policy direct-watch-syntax-read allow 'bash -n bin/fm-watch.sh'
+  assert_policy direct-watch-noexec-read allow 'bash --noexec bin/fm-watch.sh'
   assert_policy direct-watch-script-wrapper $'deny\twatcher-nested' 'bash bin/fm-watch.sh'
+  assert_policy direct-watch-rcfile-value $'deny\twatcher-nested' 'bash --rcfile -n bin/fm-watch.sh'
+  assert_policy direct-watch-init-file-value $'deny\twatcher-nested' 'bash --init-file -n bin/fm-watch.sh'
+  assert_policy direct-watch-syntax-truncate $'deny\twatcher-redirection' 'bash -n bin/fm-watch.sh > bin/fm-watch.sh'
+  assert_policy direct-watch-leading-truncate $'deny\twatcher-redirection' ': > bin/fm-watch.sh'
+  assert_policy direct-watch-variable-truncate $'deny\twatcher-redirection' 'target=bin/fm-watch.sh; : > "$target"'
   heredoc_data=$'cat <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"

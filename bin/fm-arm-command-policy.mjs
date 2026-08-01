@@ -619,47 +619,35 @@ function shellInvocation(position) {
   const name = basename(position.command.value);
   if (!["sh", "bash", "zsh"].includes(name)) return null;
   const words = position.words;
-  let noexec = false;
   for (let i = position.index + 1; i < words.length; i += 1) {
     const option = words[i];
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(option.value)) {
-      if (option.value.slice(1).includes("n")) noexec = true;
       let payloadIndex = i + 1;
       if (words[payloadIndex]?.value === "--") payloadIndex += 1;
-      return { kind: "command", payload: words[payloadIndex] || null, noexec };
+      return { kind: "command", payload: words[payloadIndex] || null };
     }
     if (/^[-+]O$/.test(option.value)) {
       i += 1;
       continue;
     }
-    if (option.value === "--noexec") {
-      noexec = true;
-      continue;
-    }
     if (option.value === "--") {
       const payload = words[i + 1] || null;
-      return payload ? { kind: "script", payload, noexec } : { kind: "stdin", payload: null, noexec };
-    }
-    if (/^[-+][A-Za-z]+$/.test(option.value)) {
-      if (option.value.slice(1).includes("n")) noexec = option.value.startsWith("-");
-      continue;
+      return payload ? { kind: "script", payload } : { kind: "stdin", payload: null };
     }
     if (/^[-+]/.test(option.value)) continue;
-    return { kind: "script", payload: option, noexec };
+    return { kind: "script", payload: option };
   }
-  return { kind: "stdin", payload: null, noexec };
+  return { kind: "stdin", payload: null };
 }
 
 function shellHeredocPayloads(tokens, position) {
-  const shell = shellInvocation(position);
-  if (shell?.kind !== "stdin" || shell.noexec) return [];
+  if (shellInvocation(position)?.kind !== "stdin") return [];
   const heredocs = tokens.filter((token) => token.type === "redir" && token.fd === 0 && typeof token.heredoc === "string");
   return heredocs.length === 0 ? [] : [heredocs.at(-1).heredoc];
 }
 
 function shellHereStringPayloads(tokens, position) {
-  const shell = shellInvocation(position);
-  if (shell?.kind !== "stdin" || shell.noexec) return [];
+  if (shellInvocation(position)?.kind !== "stdin") return [];
   const payloads = [];
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
@@ -706,6 +694,16 @@ function hasDynamicExecutionPayload(position, context) {
   return false;
 }
 
+// Treat every statically visible watcher-script word passed to a shell as a
+// protected execution candidate, regardless of the options preceding it. This
+// deliberately does not model bash/zsh's open-ended option grammar: options
+// such as --rcfile and --init-file consume values, so inference from an `n`
+// byte is unsafe. decision() carries the sole exact no-execute allow-list.
+function shellCarriesProtectedWatcher(position, context) {
+  if (!position.command || !["sh", "bash", "zsh"].includes(basename(position.command.value))) return false;
+  return position.words.slice(position.index + 1).some((word) => protectedIdentity(word.value, context.root) === "watch");
+}
+
 function assignmentName(word) {
   const match = word.value.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
   return match ? match[1] : "";
@@ -731,6 +729,16 @@ function contextWithAssignments(context, words) {
 
 function nodeHasRedirection(tokens) {
   return tokens.some((token) => token.type === "redir");
+}
+
+function nodeHasProtectedOutputTarget(tokens, context) {
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token.type !== "redir" || token.inlineTarget || ![">", ">>", ">&"].includes(token.value)) continue;
+    const target = tokens[i + 1];
+    if (target?.type === "word" && (protectedIdentity(target.value, context.root) || wordReferencesAny(target, context.protectedVariables))) return true;
+  }
+  return false;
 }
 
 function nodeHasUnsafeSubstitution(tokens) {
@@ -803,8 +811,8 @@ function analyzeProgram(command, context, depth = 0) {
     }
 
     const shell = shellInvocation(position);
-    const shellPayload = shell?.kind === "command" && !shell.noexec ? shell.payload : null;
-    const shellScript = shell?.kind === "script" && !shell.noexec ? shell.payload : null;
+    const shellPayload = shell?.kind === "command" ? shell.payload : null;
+    const shellScript = shell?.kind === "script" ? shell.payload : null;
     const sourceScript = sourcedScript(position);
     const literalEvalPayload = evalPayload(position);
     const heredocPayloads = shellHeredocPayloads(tokens, position);
@@ -836,6 +844,8 @@ function analyzeProgram(command, context, depth = 0) {
     const protectedKind = protectedIdentity(executable, context.root);
     if (hasUnclassifiableProtectedExpansion(position.command, context.root)) unclassifiableProtected = true;
     const commandName = basename(executable);
+    const shellProtectedWatcher = shellCarriesProtectedWatcher(position, nodeContext);
+    nodeNestedProtected ||= shellProtectedWatcher;
     const args = position.words.slice(position.index + 1);
     if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
     if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
@@ -854,8 +864,10 @@ function analyzeProgram(command, context, depth = 0) {
       tokens,
       position,
       protectedKind,
+      shellProtectedWatcher,
       nestedProtected: nodeNestedProtected,
       redirection: nodeHasRedirection(tokens),
+      protectedOutputRedirection: nodeHasProtectedOutputTarget(tokens, nodeContext),
       substitution: nodeHasUnsafeSubstitution(tokens),
     });
   }
@@ -878,6 +890,23 @@ function xModePathAllowed(value, home) {
 
 function ordinaryWordsOnly(tokens) {
   return tokens.every((token) => token.type === "word" && token.subs.length === 0);
+}
+
+// The entire no-execute exception is an allow-list. Only these exact top-level
+// forms are accepted:
+//   bash -n <fm-watch.sh>
+//   bash --noexec <fm-watch.sh>
+// Any wrapper, extra option/argument, separator, substitution, or redirection
+// falls through to the normal protected-command denials.
+function allowedWatcherSyntaxCheck(analysis, context) {
+  if (analysis.nodeInfos.length !== 1 || analysis.program.separators.length !== 0) return false;
+  const info = analysis.nodeInfos[0];
+  if (!info.shellProtectedWatcher || info.redirection || info.substitution) return false;
+  if (!ordinaryWordsOnly(info.tokens) || info.position.prefixAssignments > 0 || info.position.wrappers.length > 0) return false;
+  if (basename(info.position.command?.value || "") !== "bash") return false;
+  const args = info.position.words.slice(info.position.index + 1);
+  if (args.length !== 2 || !["-n", "--noexec"].includes(args[0].value)) return false;
+  return protectedIdentity(args[1].value, context.root) === "watch";
 }
 
 function setupKind(info, context) {
@@ -920,9 +949,12 @@ function decision(command, root, home) {
   const analysis = analyzeProgram(command, context);
   if (analysis.broadKill) return deny("broad-watcher-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
+  // A protected output target is independently unsafe even when the command
+  // itself is unrelated. Check it before every allow path so `: > watcher` can
+  // never truncate a script while data-only heredocs remain ordinary data.
+  if (analysis.nodeInfos?.some((info) => info.protectedOutputRedirection)) return deny("watcher-redirection");
   if (!analysis.protectedFound) return { decision: "allow" };
   if (analysis.nodeInfos?.some((info) => info.protectedKind === "watch")) return deny("watcher-direct");
-  if (analysis.nestedProtected) return deny("watcher-nested");
 
   const separators = analysis.program.separators;
   if (separators.includes("&") || analysis.nodeInfos.some((info) => info.position.wrappers.includes("nohup")) || analysis.nodeInfos.some((info) => basename(info.position.words[0]?.value || "") === "disown")) {
@@ -931,6 +963,8 @@ function decision(command, root, home) {
   if (separators.includes("|") || separators.includes("|&")) return deny("watcher-pipeline");
   if (analysis.nodeInfos.some((info) => info.redirection)) return deny("watcher-redirection");
   if (analysis.nodeInfos.some((info) => info.substitution)) return deny("watcher-nested");
+  if (allowedWatcherSyntaxCheck(analysis, context)) return { decision: "allow" };
+  if (analysis.nestedProtected) return deny("watcher-nested");
   if (blessedProgram(analysis, context)) return { decision: "allow" };
   if (analysis.nodeInfos.some((info) => info.position.prefixAssignments > 0 || info.position.wrappers.some((wrapper) => wrapper !== "exec"))) {
     return deny("watcher-nested");
