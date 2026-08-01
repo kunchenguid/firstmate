@@ -54,6 +54,12 @@ type SessionGeneration = {
   retryFailures: number;
   restoring: boolean;
   seq: number;
+  // Circuit breaker. A permanently failing arm (a blocked migration, a home the
+  // watcher refuses to run in) fails identically on every attempt. Without a
+  // breaker the exhausted-retry notification prompts a repair, the repair
+  // re-arms, the arm fails again, and the session loops on one failure forever.
+  // Once tripped, automatic re-arming stops until an explicit reset.
+  tripped: boolean;
 };
 
 function refreshWatchToolShell(
@@ -98,6 +104,10 @@ const armReadyTimeoutMs = positiveInteger(
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
+const breakerOpenMessage =
+  "watcher: not armed - automatic re-arming is SUSPENDED because the watcher failed identically on every attempt, which means a permanent fault, not a transient one. Do NOT keep calling this tool: the arm will fail the same way and the retry will loop. Report the failure reason from the notification to the captain. Only the captain can resume supervision, by fixing the cause and running /fm-watch-arm-pi reset.";
+const breakerTrippedSuffix =
+  "\n\nwatcher: automatic re-arming is now SUSPENDED (repeated identical failures indicate a permanent fault). Do not re-arm in a loop. Surface this failure to the captain; once the cause is fixed the captain resumes supervision with /fm-watch-arm-pi reset.";
 
 let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
@@ -193,6 +203,7 @@ function createGeneration(): SessionGeneration {
     retryFailures: 0,
     restoring: false,
     seq: 0,
+    tripped: false,
   };
 }
 
@@ -324,7 +335,12 @@ export default function (pi: ExtensionAPI) {
     }
     owner.retryFailures += 1;
     if (owner.retryFailures > retryLimit) {
-      surfaceFailure(owner, `watcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries\n${message}`);
+      // Trip before notifying. The notification prompts a repair, and the repair
+      // calls startArm; if the breaker were still closed that arm would fail the
+      // same way and re-enter this branch immediately, with retryFailures already
+      // past the limit and therefore no delay at all.
+      owner.tripped = true;
+      surfaceFailure(owner, `watcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries\n${message}${breakerTrippedSuffix}`);
       return;
     }
     const timer = setTimeout(() => {
@@ -339,8 +355,13 @@ export default function (pi: ExtensionAPI) {
     owner.retryTimer = timer;
   }
 
-  function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
+  function startArm(owner: SessionGeneration, predecessorArmPid = "", reset = false): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
+    if (reset && owner.tripped) {
+      owner.tripped = false;
+      owner.retryFailures = 0;
+    }
+    if (owner.tripped) return { ok: false, message: breakerOpenMessage };
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
@@ -396,6 +417,10 @@ export default function (pi: ExtensionAPI) {
       readinessSettled = true;
       resolveReadiness(ready);
     };
+    // Readiness deliberately does not clear retryFailures. An arm can report
+    // "started" and still close clean with no wake, which is exactly the
+    // established-clean-close the bounded retry budget exists to stop; the
+    // budget is reset on an actionable close, where real progress is proven.
     const observeEstablishedArm = (): void => {
       if (/^watcher: (?:started|attached)\b/m.test(`${stdout}\n${stderr}`)) {
         settleReadiness(true);
@@ -428,6 +453,9 @@ export default function (pi: ExtensionAPI) {
           const failure = await restoreAfterActionableClose(owner, predecessor);
           if (generationIsLive(owner)) owner.restoring = false;
           if (!generationIsLive(owner)) return;
+          // Deliberately does NOT trip the breaker. A restore that could not
+          // confirm a successor is usually a slow or unretired one, and this
+          // path is required to stay supervised so the late close still lands.
           const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
           await sendWake(owner, message);
         })().catch(() => {
@@ -463,9 +491,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {
-    description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
-    handler: async (_args, ctx) => {
-      const result = startArm(generation);
+    description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash. Pass 'reset' to close a tripped re-arm breaker after fixing the reported cause.",
+    handler: async (args, ctx) => {
+      const result = startArm(generation, "", String(args ?? "").trim() === "reset");
       ctx.ui.notify(result.message, result.ok ? "info" : "warning");
     },
   });
@@ -477,6 +505,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Start the first required Pi watcher cycle or repair a cycle reported missing, failed, or unhealthy; ordinary re-arming is automatic.",
     promptGuidelines: [
       "Call fm_watch_arm_pi only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy. Do not call it after ordinary work, turn completion, or ordinary signal, stale, check, or heartbeat handling because the Pi extension owns re-arming. Never run bin/fm-watch-arm.sh through bash.",
+      "If a re-arm returns the same failure it returned last time, STOP calling this tool and report the reason to the captain. Repeated identical failures mean a permanent fault that re-arming cannot clear, and retrying it only loops the session on one error. Closing a suspended re-arm breaker is the captain's action, not yours.",
     ],
     parameters: Type.Object({}),
     renderShell: "self",
@@ -506,6 +535,9 @@ export default function (pi: ExtensionAPI) {
       return new Container();
     },
     execute: async () => {
+      // No reset parameter by design. Closing the breaker is the captain's call
+      // via `/fm-watch-arm-pi reset`; an agent able to reset its own breaker
+      // could clear it on the same failure it just hit and resume looping.
       const result = startArm(generation);
       return {
         content: [{ type: "text", text: result.message }],

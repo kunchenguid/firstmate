@@ -708,8 +708,12 @@ fi
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
+# Prefix the refusal with the `watcher: FAILED` marker the arm script and the Pi
+# extension classify on. Without it a permanent, self-explained refusal reaches
+# the arm as an unclassifiable non-zero exit, gets collapsed into "no actionable
+# reason", and is retried forever instead of being reported once.
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
-  echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
+  echo "watcher: FAILED - PR check migration blocked; refusing to execute state checks" >&2
   exit 1
 }
 

@@ -740,6 +740,82 @@ EOF
   pass "Pi established clean closes stop at the configured retry limit"
 }
 
+# A permanently failing arm fails the same way on every attempt. The exhausted
+# retry wake asks firstmate to repair the cycle, the repair re-arms, and the arm
+# fails again - a session-level loop that repeats one failure indefinitely. Once
+# the budget is spent, automatic re-arming must stay suspended until the captain
+# explicitly resets it.
+test_pi_exhausted_retries_suspend_rearming() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-breaker-root"
+  home="$TMP_ROOT/pi-breaker-home"
+  log="$TMP_ROOT/pi-breaker.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: FAILED - permanent fault that re-arming cannot clear\n'
+exit 1
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let command = null;
+let notification = "";
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") command = options.handler;
+  },
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-breaker", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt.includes("after 2 retries")) throw new Error(`retry exhaustion was not surfaced: ${prompt}`);
+if (!prompt.includes("SUSPENDED")) throw new Error(`suspended re-arming was not announced: ${prompt}`);
+const exhausted = rows().length;
+if (exhausted !== 3) throw new Error(`retry limit launched ${exhausted} arm cycles: ${rows().join(" | ")}`);
+
+// The wake tells firstmate to repair the cycle. That repair must be refused
+// rather than restarting the same failure, or the session loops on one error.
+const repair = await tool.execute("tool-call-breaker-repair", {}, undefined, undefined, {});
+const repairText = repair.content.map((item) => item.text).join("\n");
+if (!repairText.includes("SUSPENDED")) throw new Error(`breaker did not refuse the repair: ${repairText}`);
+await new Promise((resolve) => setTimeout(resolve, 60));
+if (rows().length !== exhausted) throw new Error(`breaker allowed another arm cycle: ${rows().join(" | ")}`);
+
+// Only the captain's explicit reset resumes supervision.
+await command("reset", { ui: { notify(message) { notification = message; } } });
+if (!notification.includes("started Pi extension arm child")) throw new Error(`reset did not re-arm: ${notification}`);
+await new Promise((resolve) => setTimeout(resolve, 60));
+if (rows().length <= exhausted) throw new Error(`reset did not launch a new arm cycle: ${rows().join(" | ")}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi exhausted retries must suspend automatic re-arming"
+  [ -z "$out" ] || fail "Pi breaker test printed output: $out"
+  pass "Pi exhausted retries suspend re-arming until the captain resets"
+}
+
 test_pi_actionable_close_rechecks_session_lock() {
   local repo home plugin log release out status
   repo="$TMP_ROOT/pi-close-lock-root"
@@ -2134,6 +2210,7 @@ test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
 test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
+test_pi_exhausted_retries_suspend_rearming
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner

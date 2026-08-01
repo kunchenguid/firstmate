@@ -324,6 +324,16 @@ print_watch_output() {
   [ -s "$out" ] && cat "$out"
 }
 
+# The watcher's stderr is captured rather than inherited so this script can tell
+# whether the child explained its own failure. Replay it verbatim at close so
+# capturing it never costs a diagnostic that used to reach the caller; the
+# supervising harness accumulates the stream until exit either way.
+print_watch_stderr() {
+  # Defined before child_err is assigned, so tolerate it being unset under set -u.
+  [ -n "${child_err:-}" ] && [ -s "$child_err" ] && cat "$child_err" >&2
+  return 0
+}
+
 mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
@@ -369,12 +379,19 @@ fi
 # wake exit propagates out so the harness re-notifies firstmate.
 child=
 child_out=
+# Captured separately from child_out so a refusal or crash message can be
+# reported verbatim without polluting the stdout stream that wake detection and
+# reason classification parse.
+child_err=
 cleanup_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
   fi
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
+  fi
+  if [ -n "$child_err" ]; then
+    rm -f "$child_err" 2>/dev/null || true
   fi
 }
 
@@ -399,7 +416,11 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
-"$WATCH" >"$child_out" &
+child_err=$(mktemp "$STATE/.watch-arm-stderr.XXXXXX") || {
+  echo "watcher: FAILED - no live watcher with a fresh beacon"
+  exit 1
+}
+"$WATCH" >"$child_out" 2>"$child_err" &
 child=$!
 cycle_begin "$child" started
 child_done=0
@@ -411,9 +432,11 @@ owned_child_finished() {
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
     print_watch_output "$child_out"
-    rm -f "$child_out" 2>/dev/null || true
+    print_watch_stderr
+    rm -f "$child_out" "$child_err" 2>/dev/null || true
     child=
     child_out=
+    child_err=
     return 0
   fi
 
@@ -421,9 +444,11 @@ owned_child_finished() {
     if wait_for_healthy_successor; then
       cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
       print_watch_output "$child_out"
-      rm -f "$child_out" 2>/dev/null || true
+      print_watch_stderr
+      rm -f "$child_out" "$child_err" 2>/dev/null || true
       child=
       child_out=
+      child_err=
       cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
       report_attached
       cycle_begin "$HEALTHY_PID" attached
@@ -432,9 +457,11 @@ owned_child_finished() {
     fi
     cycle_log_append "$rc" "$signal" unexpected-clean-exit none
     print_watch_output "$child_out"
-    rm -f "$child_out" 2>/dev/null || true
+    print_watch_stderr
+    rm -f "$child_out" "$child_err" 2>/dev/null || true
     child=
     child_out=
+    child_err=
     fail_unexplained_cycle
     return 1
   fi
@@ -443,12 +470,19 @@ owned_child_finished() {
   [ "$signal" = none ] || reason_type="signal-exit"
   cycle_log_append "$rc" "$signal" "$reason_type" none
   print_watch_output "$child_out"
-  if ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
+  print_watch_stderr
+  # Claim "no actionable reason" only when the watcher really gave none. A
+  # permanent refusal (a blocked migration, an unreadable home) explains itself
+  # on stderr; overriding that with a generic line hides the only detail that
+  # makes it fixable and makes a permanent fault read as a transient one.
+  if ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null \
+    && ! grep -q '^watcher: FAILED' "$child_err" 2>/dev/null; then
     echo "watcher: FAILED - watcher cycle exited $rc without an actionable reason"
   fi
-  rm -f "$child_out" 2>/dev/null || true
+  rm -f "$child_out" "$child_err" 2>/dev/null || true
   child=
   child_out=
+  child_err=
   status=$rc
   [ "$status" -gt 0 ] || status=1
   return "$status"
@@ -490,6 +524,7 @@ done
 
 trap - HUP TERM INT
 print_watch_output "$child_out"
+print_watch_stderr
 cleanup_child
 wait "$child" 2>/dev/null
 rc=$?
