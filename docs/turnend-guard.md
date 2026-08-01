@@ -94,6 +94,7 @@ If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot f
 That warning uses `bin/fm-supervision-instructions.sh --liveness-line`, so it always points to the active harness protocol rather than embedding another repair command.
 For Claude, the non-blocking pull warning leaves routine recovery to the upcoming Stop auto-arm; `--repair-line` remains reserved for a turn-end no-claim continuation or another confirmed failure.
 The bootstrap X-mode cadence transition is routine, not a confirmed failure, so it uses `--liveness-line` too.
+`--liveness-line` differs from `--repair-line` only for a Claude session that owns supervision: every other harness, a read-only session, and an away-mode session render the same instruction either flag would produce, and passing both flags together is refused with status 2.
 
 ## Compatibility limits
 
