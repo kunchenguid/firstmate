@@ -146,6 +146,46 @@ test_supported_backend_endpoint_records_validate() {
   pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
 }
 
+test_atom_validator_stays_strict_while_orca_shape_validates() {
+  local dir id
+  dir=$(make_case atom-strict)
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+
+  # The generic atom validator must stay strict: the Orca fix routes Orca
+  # worktree ids through a dedicated validator and must NOT widen the atom rule
+  # that guards every other backend's fields.
+  fm_backend_endpoint_atom_valid "term-7" || fail "atom validator regressed on an atom-clean value"
+  if fm_backend_endpoint_atom_valid "3bbb3ee8-c628-4390-992c-af5118987e86::/Users/x/wt"; then
+    fail "atom validator was widened: it now accepts ':' and '/'"
+  fi
+  if fm_backend_endpoint_atom_valid "surface/2"; then
+    fail "atom validator was widened: it now accepts '/'"
+  fi
+
+  # A non-Orca backend field carrying a '/' must still be refused by the strict
+  # atom validator, proving the Orca carve-out did not leak into other backends.
+  id=cmux-slash
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=workspace-1:surface/2" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=cmux" "cmux_workspace_id=workspace-1" "cmux_surface_id=surface/2"
+  if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+    fail "cmux surface id with a '/' must still be refused by the strict atom validator"
+  fi
+
+  # The real Orca shape validates only through the dedicated Orca validator.
+  id=orca-real-shape
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-9" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=3bbb3ee8-c628-4390-992c-af5118987e86::$dir/worktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "real-shaped Orca worktree id must validate through the dedicated validator"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = term-9 ] || fail "Orca validation did not select its terminal target"
+
+  pass "endpoint validation: atom rule stays strict for other backends while the real Orca shape validates"
+}
+
 test_tmux_empty_target_refuses_without_invocation() {
   local dir rc
   dir=$(make_case direct-empty)
@@ -270,6 +310,7 @@ SH
 
 test_invalid_endpoint_records_refuse_before_mutation
 test_supported_backend_endpoint_records_validate
+test_atom_validator_stays_strict_while_orca_shape_validates
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup

@@ -383,6 +383,43 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# fm_backend_endpoint_orca_worktree_id_valid: validate an Orca worktree id.
+# An Orca worktree id is <repo-id>::<absolute-path> by construction (see
+# bin/backends/orca.sh's worktree-id parsing), so it legitimately contains ':'
+# and '/'. The generic atom validator bans both and therefore rejects every real
+# Orca id, which made Orca endpoint validation - and so every Orca teardown -
+# refuse and leak worktrees. This keeps validation strict for the real shape
+# without borrowing the atom rule: a safe charset (the atom set plus ':' and
+# '/'), a required '::' separator, an atom-clean repo id before it (no ':' or
+# '/'), and an absolute path after it. A plain atom-clean value with no colon is
+# still accepted so simple recorded ids stay valid. Control characters, spaces,
+# shell metacharacters, a lone ':' separator, and a relative path are refused.
+fm_backend_endpoint_orca_worktree_id_valid() {  # <value>
+  local id_part path_part
+  case "$1" in
+    ''|*[!A-Za-z0-9._@%+:/-]*) return 1 ;;
+  esac
+  case "$1" in
+    *::*)
+      id_part=${1%%::*}
+      path_part=${1#*::}
+      case "$id_part" in
+        ''|*[!A-Za-z0-9._@%+-]*) return 1 ;;
+      esac
+      case "$path_part" in
+        /*) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *:*)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -501,10 +538,12 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: missing orca_worktree_id in $meta; cannot remove Orca worktree; preserving task state." >&2
         return 1
       }
-      if [ "$window" != "fm-$id" ] \
-        || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
-        echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+      if [ "$window" != "fm-$id" ] || ! fm_backend_endpoint_atom_valid "$terminal"; then
+        echo "REFUSED: endpoint identity validation failed for Orca task $id (window or terminal); this is a metadata identity problem, not an unlanded-work refusal; preserving task state." >&2
+        return 1
+      fi
+      if ! fm_backend_endpoint_orca_worktree_id_valid "$worktree_id"; then
+        echo "REFUSED: endpoint identity validation failed for Orca task $id: worktree id '$worktree_id' is not a valid <repo-id>::<absolute-path> identity; this is a metadata identity problem, not an unlanded-work refusal; preserving task state." >&2
         return 1
       fi
       window=$terminal

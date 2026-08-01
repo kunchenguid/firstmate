@@ -807,6 +807,156 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   pass "fm-teardown.sh backend=orca: scout report gate then helper-backed worktree removal"
 }
 
+# Real Orca worktree ids are <repo-id>::<absolute-path> by construction, so they
+# contain ':' and '/'. The generic atom validator bans both, which made every
+# Orca endpoint validation - and so every Orca teardown - refuse and leak the
+# worktree. These tests pin the dedicated Orca worktree-id validator and the
+# teardown behavior for the real shape, plus the loud, categorized refusal that
+# must stay distinct from an unlanded-work refusal.
+ORCA_TEST_UUID="3bbb3ee8-c628-4390-992c-af5118987e86"
+
+test_orca_worktree_id_validator_accepts_real_shape() {
+  local out
+  out=$( bash -c '
+    . "$0/bin/fm-backend.sh"
+    t() { if fm_backend_endpoint_orca_worktree_id_valid "$1"; then echo "ACCEPT $2"; else echo "REJECT $2"; fi; }
+    t "3bbb3ee8-c628-4390-992c-af5118987e86::/Users/x/orca/workspaces/diffusal/fm-a" real-shape
+    t "wt-teardown" plain-legacy-id
+    t "3bbb3ee8-c628-4390-992c-af5118987e86::relative/path" relative-path
+    t "repo:/single/colon" single-colon
+    t "repo::" empty-path
+    t "::/abs/path" empty-repo-id
+    t "" empty
+    t "a/b::/x" slash-in-repo-id
+    t "$(printf "repo::/evil\nrm")" control-char
+  ' "$ROOT" 2>&1 ) || fail "Orca worktree-id validator is not callable"$'\n'"$out"
+  assert_contains "$out" "ACCEPT real-shape" "validator must accept a real <repo-id>::<absolute-path> id"
+  assert_contains "$out" "ACCEPT plain-legacy-id" "validator must keep accepting a plain atom-clean id"
+  assert_contains "$out" "REJECT relative-path" "validator must refuse a relative path after ::"
+  assert_contains "$out" "REJECT single-colon" "validator must refuse a lone ':' separator"
+  assert_contains "$out" "REJECT empty-path" "validator must refuse an empty path"
+  assert_contains "$out" "REJECT empty-repo-id" "validator must refuse an empty repo id"
+  assert_contains "$out" "REJECT empty" "validator must refuse an empty id"
+  assert_contains "$out" "REJECT slash-in-repo-id" "validator must refuse a '/' in the repo id"
+  assert_contains "$out" "REJECT control-char" "validator must refuse a control character"
+  pass "fm_backend_endpoint_orca_worktree_id_valid: accepts the real shape and plain ids, refuses malformed ids"
+}
+
+test_atom_validator_stays_strict_for_other_backends() {
+  local out
+  out=$( bash -c '
+    . "$0/bin/fm-backend.sh"
+    t() { if fm_backend_endpoint_atom_valid "$1"; then echo "ACCEPT $2"; else echo "REJECT $2"; fi; }
+    t "term_2a46-0870" terminal-shape
+    t "3bbb3ee8-c628-4390-992c-af5118987e86::/Users/x" real-orca-shape
+    t "a:b" colon
+    t "a/b" slash
+  ' "$ROOT" 2>&1 ) || fail "atom validator is not callable"$'\n'"$out"
+  assert_contains "$out" "ACCEPT terminal-shape" "atom validator must still accept an atom-clean terminal id"
+  assert_contains "$out" "REJECT real-orca-shape" "atom validator must stay strict and still reject ':' and '/'"
+  assert_contains "$out" "REJECT colon" "atom validator must still reject a colon"
+  assert_contains "$out" "REJECT slash" "atom validator must still reject a slash"
+  pass "fm_backend_endpoint_atom_valid: unchanged and still strict (Orca fix did not widen it)"
+}
+
+test_validate_endpoint_accepts_real_shaped_orca_id() {
+  local dir id meta
+  id="orcavalidatez1"
+  dir="$TMP_ROOT/validate-real"; mkdir -p "$dir"
+  meta="$dir/$id.meta"
+  fm_write_meta "$meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-real" \
+    "worktree=/Users/x/orca/workspaces/diffusal/$id" "project=/Users/x/orca/workspaces/diffusal" \
+    "backend=orca" "orca_worktree_id=$ORCA_TEST_UUID::/Users/x/orca/workspaces/diffusal/$id"
+  bash -c '
+    . "$0/bin/fm-backend.sh"
+    fm_backend_validate_task_endpoint "$1" "$2" || { echo "REFUSED-CALL"; exit 1; }
+    echo "BACKEND=$FM_BACKEND_VALIDATED_BACKEND TARGET=$FM_BACKEND_VALIDATED_TARGET"
+  ' "$ROOT" "$meta" "$id" > "$dir/out" 2> "$dir/err"
+  assert_not_contains "$(cat "$dir/out")$(cat "$dir/err")" "REFUSED-CALL" \
+    "a real-shaped Orca worktree id must validate, not refuse"$'\n'"$(cat "$dir/err")"
+  assert_contains "$(cat "$dir/out")" "BACKEND=orca TARGET=term-real" \
+    "Orca validation must select the backend and its terminal target"
+  pass "fm_backend_validate_task_endpoint: accepts a real <repo-id>::<absolute-path> Orca worktree id"
+}
+
+test_teardown_removes_real_shaped_orca_worktree() {
+  local proj wt data state config id orca_id out rc neutral
+  id="orcarealidz2"
+  proj="$TMP_ROOT/real-id-project"
+  wt="$TMP_ROOT/real-id-wt"
+  data="$TMP_ROOT/real-id-data"
+  state="$TMP_ROOT/real-id-state"
+  config="$TMP_ROOT/real-id-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  orca_id="$ORCA_TEST_UUID::$wt"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-real-id" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=$orca_id" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case real-id-teardown
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$orca_id" "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "Orca teardown with a real-shaped worktree id must succeed"$'\n'"$out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$orca_id"$'\x1f''--force'$'\x1f''--json' \
+    "teardown did not remove the real-shaped Orca worktree through orca worktree rm"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-real-id'$'\x1f''--json' \
+    "teardown did not close the recorded Orca terminal"
+  assert_absent "$state/$id.meta" "successful Orca teardown must remove task metadata"
+  pass "fm-teardown.sh backend=orca: a real <repo-id>::<absolute-path> id is validated and the worktree is removed"
+}
+
+test_teardown_refuses_malformed_orca_id_as_endpoint_identity_not_unlanded_work() {
+  local proj wt data state config id orca_id out rc neutral log
+  id="orcabadidz4"
+  proj="$TMP_ROOT/bad-id-project"
+  wt="$TMP_ROOT/bad-id-wt"
+  data="$TMP_ROOT/bad-id-data"
+  state="$TMP_ROOT/bad-id-state"
+  config="$TMP_ROOT/bad-id-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  orca_id="$ORCA_TEST_UUID::relative/path/not/absolute"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-bad-id" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=$orca_id" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case bad-id-teardown
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  log=$(cat "$LOG")
+  [ "$rc" -ne 0 ] || fail "teardown must refuse a malformed Orca worktree id and exit non-zero"$'\n'"$out"
+  assert_contains "$out" "endpoint identity validation failed" \
+    "refusal must name itself as an endpoint-identity validation failure"
+  assert_contains "$out" "not an unlanded-work refusal" \
+    "refusal must state explicitly that it is not an unlanded-work refusal"
+  assert_not_contains "$out" "uncommitted changes" "endpoint-identity refusal must not read like an unlanded-work refusal"
+  assert_not_contains "$out" "not landed" "endpoint-identity refusal must not read like an unlanded-work refusal"
+  assert_not_contains "$out" "not yet merged" "endpoint-identity refusal must not read like an unlanded-work refusal"
+  assert_not_contains "$log" $'worktree'$'\x1f''rm' \
+    "a refused endpoint-identity validation must not reach orca worktree rm"
+  assert_present "$state/$id.meta" "refused teardown must preserve task metadata"
+  pass "fm-teardown.sh backend=orca: a malformed id refuses loudly as an endpoint-identity problem, distinct from unlanded work"
+}
+
 test_scout_teardown_refuses_orca_id_path_mismatch() {
   local proj wt other_wt data state config id out rc neutral
   id="orcascoutmismatchz5"
@@ -1313,6 +1463,11 @@ test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
+test_orca_worktree_id_validator_accepts_real_shape
+test_atom_validator_stays_strict_for_other_backends
+test_validate_endpoint_accepts_real_shaped_orca_id
+test_teardown_removes_real_shaped_orca_worktree
+test_teardown_refuses_malformed_orca_id_as_endpoint_identity_not_unlanded_work
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json
