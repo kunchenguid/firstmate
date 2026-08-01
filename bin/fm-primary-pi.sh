@@ -69,22 +69,31 @@
 # inspects the intended pane externally through its exact named session and pane
 # id, and only then removes state/primary-pi/lease by hand before `launch` again.
 #
-# .lease-steal and .recovery-steal serialize the two handoffs that cannot be a
-# single atomic primitive. Both are mkdir-created directories carrying the same
-# pid/start owner record as recovery.lock, so a wrapper killed mid-handoff leaves
-# a reclaimable guard rather than a permanent brick. They only avoid mutual
-# clobbering; the real arbiters stay atomic (mkdir for recovery.lock, the
-# old-token match for the lease), so a raced reclaim still converges on one owner.
+# recovery.lock, .lease-steal, and .recovery-steal are all the same guard
+# primitive: a mode 0600 regular file holding exactly one pid and one start
+# field. Publication is a single hardlink of an already fully written record onto
+# the guard path, so it is atomic in both directions at once - it fails EEXIST
+# when another owner holds the guard, and it can never expose a guard that lacks
+# PID/start identity. A wrapper killed at any instant therefore leaves either no
+# guard or a complete, PID/start-reclaimable one, never a permanent brick. An
+# identity-less or non-regular object at a guard path is consequently not
+# something this script can produce; it is foreign, unknown state, and every
+# acquire refuses it rather than guessing.
 #
-# recovery.lock is the mkdir-created single-flight directory that keeps two
-# wrappers from deciding custody at once. Its owner record holds pid and start,
-# so ownership is PID/start-bound rather than mtime-guessed. `launch` takes it
-# before reading custody and drops it once the lifetime lease is written, before
-# Pi starts. `recover` holds it across the whole decision, including a restart's
-# post-launch attestation, and drops it at the exact attach, before that attach
-# can exec away. Every other exit releases through the EXIT trap. Only a
-# self-owned lock is removed, and a PID/start-dead owner is reclaimed only
-# through the .recovery-steal guard, never a live or unreadable owner.
+# .lease-steal and .recovery-steal serialize the two handoffs that cannot be a
+# single atomic primitive. They only avoid mutual clobbering; the real arbiters
+# stay atomic (the guard hardlink for recovery.lock, the old-token match for the
+# lease), so a raced reclaim still converges on one owner.
+#
+# recovery.lock is the single-flight guard that keeps two wrappers from deciding
+# custody at once. Its record holds pid and start, so ownership is PID/start-bound
+# rather than mtime-guessed. `launch` takes it before reading custody and drops it
+# once the lifetime lease is written, before Pi starts. `recover` holds it across
+# the whole decision, including a restart's post-launch attestation, and drops it
+# at the exact attach, before that attach can exec away. Every other exit releases
+# through the EXIT trap. Only a self-owned lock is removed, and a PID/start-dead
+# owner is reclaimed only through the .recovery-steal guard, never a live or
+# unreadable owner.
 #
 # attestation.v1 contains version, token, result=ok|pending|failed, exact Pi
 # session identity, Pi PID/start identity, and a one-word reason. The tracked Pi
@@ -532,60 +541,57 @@ current_env_identity() {
     || die "injected Herdr pane identity is absent or contradictory"
 }
 
-acquire_steal_guard() {
-  local dir=$1 start owner_pid owner_start canonical
-  start=$(process_start "$$")
-  [ -n "$start" ] || return 1
-  if ! mkdir "$dir" 2>/dev/null; then
-    canonical=$(canonical_dir "$dir") || return 1
-    [ "$canonical" = "$dir" ] || return 1
-    owner_pid=$(record_field "$dir/owner" pid) || return 1
-    owner_start=$(record_field "$dir/owner" start) || return 1
-    pid_matches "$owner_pid" "$owner_start" && return 1
-    rm -rf "$dir" || return 1
-    mkdir "$dir" 2>/dev/null || return 1
+publish_guard() {
+  local path=$1 start=$2 tmp rc=0
+  tmp="$PRIVATE_DIR/.guard.$$.$(new_token)"
+  write_record "$tmp" pid "$$" start "$start" || { rm -f "$tmp"; return 1; }
+  if [ -e "$path" ] || [ -L "$path" ] || ! ln "$tmp" "$path" 2>/dev/null; then
+    rc=1
   fi
-  chmod 700 "$dir" || { rm -rf "$dir"; return 1; }
-  write_record "$dir/owner" pid "$$" start "$start" || { rm -rf "$dir"; return 1; }
+  rm -f "$tmp"
+  return "$rc"
 }
 
-release_steal_guard() {
-  local dir=$1 pid start
-  pid=$(record_field "$dir/owner" pid 2>/dev/null || true)
-  start=$(record_field "$dir/owner" start 2>/dev/null || true)
-  [ "$pid" = "$$" ] && [ "$start" = "$(process_start "$$")" ] && rm -rf "$dir"
+acquire_guard() {
+  local path=$1 start owner_pid owner_start
+  start=$(process_start "$$")
+  [ -n "$start" ] || return 1
+  publish_guard "$path" "$start" && return 0
+  owner_pid=$(record_field "$path" pid) || return 1
+  owner_start=$(record_field "$path" start) || return 1
+  pid_matches "$owner_pid" "$owner_start" && return 1
+  rm -f "$path" || return 1
+  publish_guard "$path" "$start"
+}
+
+release_guard() {
+  local path=$1 pid start
+  pid=$(record_field "$path" pid 2>/dev/null || true)
+  start=$(record_field "$path" start 2>/dev/null || true)
+  [ "$pid" = "$$" ] && [ "$start" = "$(process_start "$$")" ] && rm -f "$path"
 }
 
 acquire_recovery_lock() {
-  local start stale_pid stale_start canonical
+  local start stale_pid stale_start
   ensure_private_dir || return 1
   start=$(process_start "$$")
   [ -n "$start" ] || return 1
-  if mkdir "$RECOVERY_LOCK" 2>/dev/null; then
-    write_record "$RECOVERY_LOCK/owner" pid "$$" start "$start" || { rm -rf "$RECOVERY_LOCK"; return 1; }
-    return 0
-  fi
-  canonical=$(canonical_dir "$RECOVERY_LOCK") || return 1
-  [ "$canonical" = "$RECOVERY_LOCK" ] || return 1
-  stale_pid=$(record_field "$RECOVERY_LOCK/owner" pid) || return 1
-  stale_start=$(record_field "$RECOVERY_LOCK/owner" start) || return 1
+  publish_guard "$RECOVERY_LOCK" "$start" && return 0
+  stale_pid=$(record_field "$RECOVERY_LOCK" pid) || return 1
+  stale_start=$(record_field "$RECOVERY_LOCK" start) || return 1
   pid_matches "$stale_pid" "$stale_start" && return 1
-  acquire_steal_guard "$RECOVERY_STEAL" || return 1
-  stale_pid=$(record_field "$RECOVERY_LOCK/owner" pid 2>/dev/null || true)
-  stale_start=$(record_field "$RECOVERY_LOCK/owner" start 2>/dev/null || true)
+  acquire_guard "$RECOVERY_STEAL" || return 1
+  stale_pid=$(record_field "$RECOVERY_LOCK" pid 2>/dev/null || true)
+  stale_start=$(record_field "$RECOVERY_LOCK" start 2>/dev/null || true)
   if [ -n "$stale_pid" ] && ! pid_matches "$stale_pid" "$stale_start"; then
-    rm -rf "$RECOVERY_LOCK"
+    rm -f "$RECOVERY_LOCK"
   fi
-  release_steal_guard "$RECOVERY_STEAL"
-  mkdir "$RECOVERY_LOCK" 2>/dev/null || return 1
-  write_record "$RECOVERY_LOCK/owner" pid "$$" start "$start" || { rm -rf "$RECOVERY_LOCK"; return 1; }
+  release_guard "$RECOVERY_STEAL"
+  publish_guard "$RECOVERY_LOCK" "$start"
 }
 
 release_recovery_lock() {
-  local pid start
-  pid=$(record_field "$RECOVERY_LOCK/owner" pid 2>/dev/null || true)
-  start=$(record_field "$RECOVERY_LOCK/owner" start 2>/dev/null || true)
-  [ "$pid" = "$$" ] && [ "$start" = "$(process_start "$$")" ] && rm -rf "$RECOVERY_LOCK"
+  release_guard "$RECOVERY_LOCK"
 }
 
 lease_is_live() {
@@ -595,22 +601,22 @@ lease_is_live() {
 
 replace_stale_lease() {
   local old_token=$1 new=$2 start old=''
-  acquire_steal_guard "$LEASE_STEAL" || return 1
+  acquire_guard "$LEASE_STEAL" || return 1
   if [ -e "$LEASE" ] || [ -L "$LEASE" ]; then
-    load_lease || { release_steal_guard "$LEASE_STEAL"; return 1; }
+    load_lease || { release_guard "$LEASE_STEAL"; return 1; }
     old=$LEASE_TOKEN
-    [ "$old" = "$old_token" ] || { release_steal_guard "$LEASE_STEAL"; return 1; }
-    pid_matches "$LEASE_PID" "$LEASE_START" && { release_steal_guard "$LEASE_STEAL"; return 1; }
-    rm -rf "$LEASE" || { release_steal_guard "$LEASE_STEAL"; return 1; }
+    [ "$old" = "$old_token" ] || { release_guard "$LEASE_STEAL"; return 1; }
+    pid_matches "$LEASE_PID" "$LEASE_START" && { release_guard "$LEASE_STEAL"; return 1; }
+    rm -rf "$LEASE" || { release_guard "$LEASE_STEAL"; return 1; }
   else
-    [ "$old_token" = absent ] || { release_steal_guard "$LEASE_STEAL"; return 1; }
+    [ "$old_token" = absent ] || { release_guard "$LEASE_STEAL"; return 1; }
   fi
   start=$(process_start "$$")
   if ! write_lease "$new" "$$" "$start"; then
-    release_steal_guard "$LEASE_STEAL"
+    release_guard "$LEASE_STEAL"
     return 1
   fi
-  release_steal_guard "$LEASE_STEAL" || true
+  release_guard "$LEASE_STEAL" || true
   return 0
 }
 
@@ -811,6 +817,7 @@ attach_exact() {
     return 0
   fi
   exec env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH \
+    HERDR_SESSION="$C_HERDR_SESSION" \
     "$HERDR_BIN" agent attach "$C_HERDR_PANE" --session "$C_HERDR_SESSION"
 }
 

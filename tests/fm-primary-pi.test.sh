@@ -73,6 +73,9 @@ case "$1 ${2:-}" in
       printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":10,"foreground_process_group_id":10,"foreground_processes":[{"pid":10,"argv0":"-zsh","name":"zsh"}]}}}\n' "$TEST_PANE"
     fi
     ;;
+  'agent attach')
+    printf '%s\n' "${HERDR_SESSION-unset}" > "$TEST_ATTACH_ENV_FILE"
+    ;;
   'pane run')
     sleep "${TEST_PANE_RUN_DELAY:-0}"
     (cd / && bash -c "$4") >> "$TEST_RESUME_LOG" 2>&1 &
@@ -137,6 +140,7 @@ export TEST_HERDR_LOG="$LOG" TEST_MODE_FILE="$MODE" TEST_SESSION='lab-exact' TES
 export TEST_PANE="$PANE" TEST_WORKSPACE="$WORKSPACE" TEST_TAB="$TAB"
 export TEST_FULL_ID="$FULL_ID" TEST_SESSION_FILE="$SESSION_FILE" TEST_SESSION_DIR="$SESSION_DIR" TEST_CWD="$T"
 export TEST_RESUME_LOG="$T/resume.log" TEST_PI_LOG="$T/pi.log" TEST_UMASK_FILE="$T/pi.umask" TEST_PI_CWD_FILE="$T/pi.cwd"
+export TEST_ATTACH_ENV_FILE="$T/attach.env"
 SCRIPT="$ROOT/bin/fm-primary-pi.sh"
 RECOVERY_LOCK="$HOME_FIXTURE/state/primary-pi/recovery.lock"
 LAUNCH_PID=''
@@ -173,7 +177,7 @@ lease_absent() {
 }
 
 recovery_lock_present() {
-  [ -d "$RECOVERY_LOCK" ]
+  [ -f "$RECOVERY_LOCK" ]
 }
 
 path_absent() {
@@ -372,6 +376,57 @@ assert_contains "$out" 'primary live:' 'second recover must attach to the attest
 assert_no_grep 'pane run' "$LOG" 'second recover must not launch another Pi'
 assert_absent "$RECOVERY_LOCK" 'repeated no-attach recovery must not accumulate dead recovery ownership'
 pass 'repeated recovery remains idempotently attach-first and leaves no recovery lock'
+
+# A SIGKILL while the recovery guard is held can never publish an identity-less
+# guard: the guard is a complete private record or it is absent. Hold the guard
+# inside the bounded server wait so the kill lands long before any pane run.
+printf 'server-down\n' > "$MODE"
+FM_PRIMARY_SERVER_ATTEMPTS=2000 FM_PRIMARY_SERVER_DELAY=0.05 \
+  FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover --no-server-start > "$T/crash.out" 2>&1 &
+CRASH_PID=$!
+wait_for 'recovery guard published before the crash' recovery_lock_present
+kill -9 "$CRASH_PID"
+wait "$CRASH_PID" 2>/dev/null || true
+[ -f "$RECOVERY_LOCK" ] && [ ! -L "$RECOVERY_LOCK" ] || fail 'a killed wrapper must leave a regular guard record'
+[ "$(file_mode "$RECOVERY_LOCK")" = 600 ] || fail 'the guard left by a killed wrapper must stay private mode 0600'
+assert_grep "pid=$CRASH_PID" "$RECOVERY_LOCK" 'a killed wrapper must leave its owner pid in the guard'
+assert_grep 'start=' "$RECOVERY_LOCK" 'a killed wrapper must leave its owner start identity in the guard'
+[ "$(grep -c . "$RECOVERY_LOCK")" -eq 2 ] || fail 'the guard must carry exactly the pid and start identity fields'
+printf 'pi\n' > "$MODE"
+out=$(FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1) || fail "PID/start-dead guard was not reclaimable: $out"
+assert_contains "$out" 'primary live:' 'reclaiming a dead guard must still take the attach-first path'
+assert_absent "$RECOVERY_LOCK" 'reclaimed guard must be released again'
+# An identity-less or non-regular object at the guard path is foreign state this
+# script cannot produce, so it refuses instead of guessing ownership.
+for shape in empty directory; do
+  case "$shape" in
+    empty) : > "$RECOVERY_LOCK" ;;
+    directory) mkdir "$RECOVERY_LOCK" ;;
+  esac
+  set +e
+  out=$(FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a $shape guard shape unexpectedly granted recovery ownership"
+  assert_contains "$out" 'another recovery' "a $shape guard shape must refuse as ambiguous ownership"
+  case "$shape" in
+    empty) rm -f "$RECOVERY_LOCK" ;;
+    directory) rmdir "$RECOVERY_LOCK" ;;
+  esac
+done
+out=$(FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1) || fail "recovery did not resume after the foreign guard was removed: $out"
+assert_contains "$out" 'primary live:' 'removing the foreign guard must restore ordinary attach-first recovery'
+pass 'a killed wrapper leaves a complete reclaimable guard and foreign guard shapes refuse'
+
+# The real attach addresses only the exact recorded named session: an operator
+# running recover from a pane of some other session must not leak that ambient
+# selector into the attach it execs away into.
+: > "$TEST_ATTACH_ENV_FILE"
+HERDR_SESSION='decoy-ambient-session' "$SCRIPT" recover > "$T/attach.out" 2>&1 \
+  || fail "exact attach failed: $(cat "$T/attach.out")"
+[ "$(cat "$TEST_ATTACH_ENV_FILE")" = lab-exact ] \
+  || fail "attach must pin HERDR_SESSION to the exact recorded session: $(cat "$TEST_ATTACH_ENV_FILE")"
+assert_grep 'agent attach w1:p1 --session lab-exact' "$LOG" 'attach must also carry the explicit exact session selector'
+pass 'the exec attach pins the exact recorded named session over an ambient one'
 
 # Stop the recovered wrapper through exact recorded PID/start custody.
 owner=$(grep '^pid=' "$HOME_FIXTURE/state/primary-pi/lease/owner" | cut -d= -f2-)
