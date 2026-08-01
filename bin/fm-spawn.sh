@@ -341,6 +341,7 @@ SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 LAUNCH_BRIEF=
+LAUNCH_BRIEF_RETAINED=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -361,7 +362,13 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
-  if [ "$status" -ne 0 ] && [ -n "${LAUNCH_BRIEF:-}" ]; then
+  # The private rendered brief is the live worker's only copy of its
+  # instructions once the launch command has been handed to the pane, and
+  # several post-launch failures deliberately keep that pane and its meta for
+  # inspection. Remove it only for an abort that leaves no live endpoint
+  # behind; a retained endpoint's copy is teardown's to clean.
+  if [ "$status" -ne 0 ] && [ "$LAUNCH_BRIEF_RETAINED" != 1 ] \
+     && [ -n "${LAUNCH_BRIEF:-}" ]; then
     rm -f -- "$LAUNCH_BRIEF"
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
@@ -677,15 +684,6 @@ no_mistakes_invocation_for_harness() {  # <harness>
   printf '%s\n' "the \`no-mistakes\` skill by name in natural language"
 }
 
-render_launch_brief_for_harness() {  # <source> <destination> <harness>
-  local source=$1 destination=$2 harness=$3 invocation
-  invocation=$(no_mistakes_invocation_for_harness "$harness")
-  awk -v replacement="$invocation" '{
-    gsub(/__FM_NO_MISTAKES_INVOCATION__/, replacement)
-    print
-  }' "$source" > "$destination"
-}
-
 LEGACY_NO_MISTAKES_LINE_1='Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.'
 # shellcheck disable=SC2016 # Backticks are literal bytes in the historical scaffold.
 LEGACY_NO_MISTAKES_LINE_2='Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and `no-mistakes axi run --help` plus the `help` lines in each `axi` response are authoritative and version-matched to the installed binary.'
@@ -699,43 +697,39 @@ brief_is_recognized_legacy_no_mistakes() {  # <brief>
     && grep -qxF "$LEGACY_NO_MISTAKES_LINE_3" "$brief"
 }
 
-render_legacy_launch_brief_for_harness() {  # <source> <destination> <harness>
-  local source=$1 destination=$2 harness=$3 invocation
+# A current scaffold carries the token, so its invocation is substituted
+# wherever the token appears. A recognized pre-token scaffold carries no token,
+# so its invocation is substituted only inside the three exact historical lines
+# that constitute the recognized signature.
+render_launch_brief_for_harness() {  # <source> <destination> <harness> <legacy:0|1>
+  local source=$1 destination=$2 harness=$3 legacy=$4 invocation
   invocation=$(no_mistakes_invocation_for_harness "$harness")
-  awk -v replacement="$invocation" \
+  awk -v replacement="$invocation" -v legacy="$legacy" \
       -v line1="$LEGACY_NO_MISTAKES_LINE_1" \
       -v line2="$LEGACY_NO_MISTAKES_LINE_2" \
       -v line3="$LEGACY_NO_MISTAKES_LINE_3" '{
-    if ($0 == line1 || $0 == line2 || $0 == line3) {
-      gsub(/\/no-mistakes/, replacement)
+    if (legacy == "1") {
+      if ($0 == line1 || $0 == line2 || $0 == line3) {
+        gsub(/\/no-mistakes/, replacement)
+      }
+    } else {
+      gsub(/__FM_NO_MISTAKES_INVOCATION__/, replacement)
     }
     print
   }' "$source" > "$destination"
 }
 
 write_private_launch_brief() {  # <source> <destination> <harness> <legacy:0|1>
-  local source=$1 destination=$2 harness=$3 legacy=$4 old_umask status
+  local source=$1 destination=$2 harness=$3 legacy=$4 old_umask status=0
   rm -f -- "$destination"
   old_umask=$(umask)
   umask 077
-  if [ "$legacy" = 1 ]; then
-    if render_legacy_launch_brief_for_harness "$source" "$destination" "$harness"; then
-      status=0
-    else
-      status=$?
-    fi
-  else
-    if render_launch_brief_for_harness "$source" "$destination" "$harness"; then
-      status=0
-    else
-      status=$?
-    fi
-  fi
+  render_launch_brief_for_harness "$source" "$destination" "$harness" "$legacy" || status=$?
   umask "$old_umask"
   if [ "$status" -ne 0 ]; then
     rm -f -- "$destination"
-    return "$status"
   fi
+  return "$status"
 }
 
 brief_carries_no_mistakes_validation() {  # <brief>
@@ -1920,6 +1914,7 @@ fi
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
+LAUNCH_BRIEF_RETAINED=1
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0

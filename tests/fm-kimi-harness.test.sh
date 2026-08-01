@@ -488,6 +488,34 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
   pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
 }
 
+test_kimi_post_delivery_failure_retains_private_launch_brief() {
+  local id rec out rc launch_brief pointer home_real
+  id=kimi-launch-brief-retained-z5
+  rec=$(make_spawn_case launch-brief-retained "$id")
+  read_spawn_record "$rec"
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" "$id" project >/dev/null 2>&1
+  grep -qF '__FM_NO_MISTAKES_INVOCATION__' "$HOME_DIR/data/$id/brief.md" \
+    || fail "kimi fixture did not generate a tokenized no-mistakes ship brief"
+  launch_brief="$home_real/state/$id.launch-brief.md"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
+  pointer=$(cat "$CASE_DIR/pointer.log")
+  [ "$pointer" = "Read the brief at $launch_brief and follow it exactly." ] \
+    || fail "kimi pointer did not hand the private rendered brief to the pane: $pointer"
+  assert_present "$launch_brief" \
+    "kimi post-delivery failure deleted the live pane's only copy of its brief"
+  assert_grep '/no-mistakes' "$launch_brief" \
+    "retained kimi launch brief lost its harness-specific invocation"
+  assert_grep "window=" "$HOME_DIR/state/$id.meta" \
+    "kimi post-delivery failure did not retain the endpoint meta it keeps for inspection"
+  pass "fm-spawn: a kimi failure that keeps a live pane keeps that pane's rendered brief"
+}
+
 test_kimi_readiness_gate_precedes_pointer() {
   local id rec out rc
   id=kimi-not-ready-z3
@@ -668,6 +696,7 @@ test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
+test_kimi_post_delivery_failure_retains_private_launch_brief
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity

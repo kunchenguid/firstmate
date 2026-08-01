@@ -142,16 +142,33 @@ replace_brief_invocation_token() {
   mv "$tmp" "$brief"
 }
 
+# The exact pre-token scaffold fm-spawn recognizes. Pinned here as literal
+# historical text so a future rewording of the current scaffold cannot silently
+# stop exercising the legacy path.
+LEGACY_LINE_1='Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.'
+# shellcheck disable=SC2016 # Backticks are literal bytes in the historical scaffold.
+LEGACY_LINE_2='Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and `no-mistakes axi run --help` plus the `help` lines in each `axi` response are authoritative and version-matched to the installed binary.'
+# shellcheck disable=SC2016 # Backticks are literal bytes in the historical scaffold.
+LEGACY_LINE_3='After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append `done: PR {url} checks green` and stop. You are finished.'
+
 make_legacy_ship_brief() {
-  local home=$1 id=$2 brief tmp
+  local home=$1 id=$2 brief tmp line
   replace_brief_invocation_token "$home" "$id" "/no-mistakes"
   brief="$home/data/$id/brief.md"
   tmp="$brief.tmp"
-  awk '{
-    sub(/^Firstmate will then instruct you to invoke \/no-mistakes to validate and ship a PR\.$/, "Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.")
+  awk -v legacy1="$LEGACY_LINE_1" -v legacy3="$LEGACY_LINE_3" '{
+    if ($0 ~ /^Firstmate will then instruct you to invoke \/no-mistakes to validate and ship a PR\.$/) {
+      $0 = legacy1
+    } else if ($0 ~ /^Once you have invoked \/no-mistakes and it reports CI green /) {
+      $0 = legacy3
+    }
     print
   }' "$brief" > "$tmp"
   mv "$tmp" "$brief"
+  for line in "$LEGACY_LINE_1" "$LEGACY_LINE_2" "$LEGACY_LINE_3"; do
+    grep -qxF "$line" "$brief" \
+      || fail "legacy fixture did not reproduce the historical scaffold line: $line"
+  done
 }
 
 launched_brief_path() {
@@ -310,6 +327,9 @@ test_opencode_launch_brief_uses_harness_agnostic_no_mistakes_wording() {
   assert_present "$brief" "opencode launch did not point at a readable generated brief"
   assert_grep "the \`no-mistakes\` skill by name in natural language" "$brief" \
     "opencode launch brief did not use the harness-agnostic fallback"
+  assert_grep "Once you have invoked the \`no-mistakes\` skill by name in natural language and it reports CI green" \
+    "$brief" \
+    "opencode launch brief rendered the fallback phrase as a sentence subject"
   # shellcheck disable=SC2016 # The dollar-prefixed skill form is literal test data.
   assert_no_grep '$no-mistakes' "$brief" \
     "opencode launch brief guessed Codex's dollar-prefixed invocation"
