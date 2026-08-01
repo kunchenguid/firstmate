@@ -1,15 +1,15 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Verified against Pi 0.81.1 and 0.82.0, which expose built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons, agent_start and
+// Verified against Pi 0.81.1, 0.82.0, and 0.82.1, which expose built-in ToolDefinitions,
+// per-slot renderers, renderShell: "self", session_start replacement reasons, agent_start and
 // agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
 // with a disposable component factory, and setHiddenThinkingLabel().
 // ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
 // installs. The focused tests pin those assumptions but never reject a
-// newer Pi solely for its version. The collapsed-thinking and operational-user
-// presentation adapters probe the exact API they patch and degrade independently with a
-// diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it; Pi
-// still exposes no global renderer for arbitrary built-in or custom rows.
+// newer Pi solely for its version. The collapsed-thinking, operational-user, and
+// queued-operational presentation adapters probe the exact API they patch and degrade
+// independently with a diagnostic (see installCalmPresentationAdapter below) if a future Pi
+// removes it; Pi still exposes no global renderer for arbitrary built-in or custom rows.
 // docs/configuration.md owns the home-local Calm preference contract.
 import { randomUUID } from "node:crypto";
 import {
@@ -40,6 +40,7 @@ import { Box, Container, getKeybindings, type Component } from "@earendil-works/
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
+import { installCalmPendingOperationalLayout } from "./lib/fm-calm-pending-operational-layout.ts";
 import {
   CALM_WORKING_SHIP_WIDGET_KEY,
   createCalmWorkingShipAnimation,
@@ -98,6 +99,7 @@ function installCalmPresentationAdapter(name: string, install: () => void): void
 export default function (pi: ExtensionAPI) {
   installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
   installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
+  installCalmPresentationAdapter("queued-operational-row", installCalmPendingOperationalLayout);
 
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;

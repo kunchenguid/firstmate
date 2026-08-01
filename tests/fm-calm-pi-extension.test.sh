@@ -7,13 +7,10 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
-ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
-VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
-WORKING_SHIP="$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
-PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
+# Fixtures copy .pi/extensions/lib as a directory rather than an enumerated list, so adding
+# a presentation adapter cannot leave a fixture silently missing the module it must load.
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
@@ -91,11 +88,7 @@ test_home_resolution() {
     "$fixture/override" \
     "$fixture/launch-cwd"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
-  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
-  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
-  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$fixture/project/.pi/extensions/lib/"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
@@ -209,11 +202,7 @@ test_pi_compat_degraded_adapter() {
     "$fixture/project/.pi/extensions/lib" \
     "$fixture/project/node_modules/@earendil-works"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
-  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
-  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
-  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$fixture/project/.pi/extensions/lib/"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
@@ -308,11 +297,7 @@ test_pi_compat_missing_adapter_exports() {
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
     "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
-  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
-  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
-  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$fixture/project/.pi/extensions/lib/"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
   printf '%s\n' \
     '{"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}' \
@@ -325,10 +310,12 @@ test_pi_compat_missing_adapter_exports() {
   out=$(cd "$fixture/project" && node --input-type=module 2>&1 <<'JS'
 const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts");
 const operational = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
+const pending = await import("./.pi/extensions/lib/fm-calm-pending-operational-layout.ts");
 
 for (const [name, install, expected] of [
   ["collapsed-thinking", assistant.installCalmAssistantLayout, "AssistantMessageComponent"],
   ["operational-user-row", operational.installCalmOperationalUserLayout, "InteractiveMode"],
+  ["queued-operational-row", pending.installCalmPendingOperationalLayout, "InteractiveMode"],
 ]) {
   let reason;
   try {
@@ -366,11 +353,7 @@ test_rendering_and_session_lifecycle() {
   fixture="$TMP_ROOT/renderer"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
-  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
-  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$fixture/lib/"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
@@ -1006,6 +989,326 @@ JS
   pass "Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts"
 }
 
+test_queued_operational_presentation() {
+  local fixture out status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm queued-operational test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi calm queued-operational presentation"
+
+  fixture="$TMP_ROOT/queued-operational"
+  mkdir -p "$fixture/home/config" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$fixture/lib/"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+  # The captain reproduction ran with Calm already persisted on, so the session below loads
+  # it the same way rather than toggling into it.
+  printf '%s\n' on >"$fixture/home/config/calm"
+  cat >"$fixture/operational-input-probe.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1-}" >>"$FM_OPERATIONAL_INPUT_CALLS"
+exec "$FM_OPERATIONAL_INPUT_OWNER" "$@"
+SH
+  chmod +x "$fixture/operational-input-probe.sh"
+
+  out=$(cd "$fixture" && \
+    EXT="$fixture/fm-calm.ts" \
+    FM_HOME="$fixture/home" \
+    FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" \
+    FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" \
+    FM_OPERATIONAL_INPUT_CALLS="$fixture/operational-input-calls" \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    node --input-type=module 2>&1 <<'JS'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ InteractiveMode }, { initTheme }, { Container, Text, setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/interactive-mode.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+// The Pi queued-row renderer itself, captured before any Firstmate adapter is installed. It is
+// both the Calm-off baseline and the pre-fix production behavior the witness below restores.
+const stockUpdatePendingMessagesDisplay = InteractiveMode.prototype.updatePendingMessagesDisplay;
+if (typeof stockUpdatePendingMessagesDisplay !== "function") {
+  throw new Error(
+    "fixture precondition failed: installed Pi lacks InteractiveMode.updatePendingMessagesDisplay",
+  );
+}
+if (typeof InteractiveMode.prototype.getAllQueuedMessages !== "function") {
+  throw new Error(
+    "fixture precondition failed: installed Pi lacks InteractiveMode.getAllQueuedMessages",
+  );
+}
+
+const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?queued=${Date.now()}`);
+
+const handlers = new Map();
+let calmCommand;
+const pi = {
+  events: { emit() {}, on() {} },
+  on(event, handler) {
+    const list = handlers.get(event) ?? [];
+    list.push(handler);
+    handlers.set(event, list);
+  },
+  registerCommand(name, command) {
+    if (name === "calm") calmCommand = command;
+  },
+  registerEntryRenderer() {},
+  registerTool() {},
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?queued=${Date.now()}`);
+extension.default(pi);
+
+let editorText = "";
+let terminalInputHandler;
+const ctx = {
+  ui: {
+    getEditorText: () => editorText,
+    getToolsExpanded: () => false,
+    onTerminalInput(handler) {
+      terminalInputHandler = handler;
+      return () => {
+        if (terminalInputHandler === handler) terminalInputHandler = undefined;
+      };
+    },
+    setHiddenThinkingLabel() {},
+    setStatus() {},
+    setToolsExpanded() {},
+    setWidget() {},
+    setWorkingVisible() {},
+  },
+};
+await handlers.get("session_start")[0]({ reason: "startup" }, ctx);
+
+// One Pi interactive mode holding a queue, exactly as Pi assembles it while a turn runs.
+function pendingMode(steering, followUp) {
+  const mode = Object.create(InteractiveMode.prototype);
+  mode.pendingMessagesContainer = new Container();
+  mode.compactionQueuedMessages = [];
+  Object.defineProperty(mode, "session", {
+    configurable: true,
+    value: {
+      getSteeringMessages: () => steering,
+      getFollowUpMessages: () => followUp,
+    },
+  });
+  return mode;
+}
+
+function renderQueued(steering, followUp) {
+  const mode = pendingMode(steering, followUp);
+  mode.updatePendingMessagesDisplay();
+  return { mode, rows: mode.pendingMessagesContainer.render(150) };
+}
+
+function renderStockQueued(steering, followUp) {
+  const mode = pendingMode(steering, followUp);
+  stockUpdatePendingMessagesDisplay.call(mode);
+  return mode.pendingMessagesContainer.render(150);
+}
+
+// One delivered chat row, so a batch can be checked where the captain finally sees it.
+function renderDelivered(text) {
+  const chat = {
+    children: [new Text("VISIBLE_PREDECESSOR", 0, 0)],
+    addChild(component) {
+      this.children.push(component);
+    },
+  };
+  InteractiveMode.prototype.addMessageToChat.call(
+    {
+      chatContainer: chat,
+      editor: { addToHistory() {} },
+      getMarkdownThemeWithSettings: () => undefined,
+      getUserMessageText: (message) => typeof message.content === "string"
+        ? message.content
+        : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
+      outputPad: 1,
+    },
+    { role: "user", content: text },
+  );
+  return chat.children.slice(1).flatMap((component) => component.render(150));
+}
+
+const watcherStale = operationalInput.encodeFirstmateOperationalInput(
+  "watcher",
+  "FIRSTMATE WATCHER WAKE: stale: default:w2:pC (idle 241s, possible wedge, escalation 1)",
+);
+const watcherSignal = operationalInput.encodeFirstmateOperationalInput(
+  "watcher",
+  "FIRSTMATE WATCHER WAKE: signal: /fixture/state/art-7322-pr3838-pilot.status",
+);
+const turnEndGuard = operationalInput.encodeFirstmateOperationalInput(
+  "turn-end-guard",
+  "TURN WOULD END BLIND",
+);
+const awaySupervisor = operationalInput.encodeFirstmateOperationalInput(
+  "away-supervisor",
+  "QUEUED_AWAY_ESCALATION",
+);
+const legacyAway = "\u2063Supervisor escalate (QUEUED_LEGACY_AWAY)";
+const marked = [watcherStale, watcherSignal, turnEndGuard, awaySupervisor, legacyAway];
+const captainFollowUp = "captain: also re-check the failing CI job before you land it";
+const captainSteer = "captain: stop and summarize what you have so far";
+
+// 1. A single marked notification queued while a turn is active leaves no row and no spacer.
+const single = renderQueued([], [watcherStale]);
+if (single.rows.length !== 0) {
+  throw new Error(`Calm left a queued operational row or spacer visible: ${JSON.stringify(single.rows)}`);
+}
+if (single.mode.pendingMessagesContainer.children.length !== 0) {
+  throw new Error("Calm left queued operational components attached to the Pi pending container");
+}
+// Delivery is untouched: the queue Pi delivers from still holds the notification.
+const singleQueue = InteractiveMode.prototype.getAllQueuedMessages.call(single.mode);
+if (singleQueue.followUp.length !== 1 || singleQueue.followUp[0] !== watcherStale) {
+  throw new Error(`presentation changed the queue Pi delivers from: ${JSON.stringify(singleQueue)}`);
+}
+
+// 2. Every supported marked kind stays hidden alone, as a full batch, and once delivered.
+for (const message of marked) {
+  if (renderQueued([], [message]).rows.length !== 0) {
+    throw new Error(`Calm rendered a queued operational follow-up row: ${JSON.stringify(message)}`);
+  }
+  if (renderQueued([message], []).rows.length !== 0) {
+    throw new Error(`Calm rendered a queued operational steering row: ${JSON.stringify(message)}`);
+  }
+  if (renderDelivered(message).length !== 0) {
+    throw new Error(`Calm rendered the flushed operational row: ${JSON.stringify(message)}`);
+  }
+}
+const batch = renderQueued([marked[0]], marked.slice(1));
+if (batch.rows.length !== 0) {
+  throw new Error(`Calm rendered an accumulated operational batch: ${JSON.stringify(batch.rows)}`);
+}
+const batchQueue = InteractiveMode.prototype.getAllQueuedMessages.call(batch.mode);
+if (batchQueue.steering.length + batchQueue.followUp.length !== marked.length) {
+  throw new Error(`presentation dropped queued notifications: ${JSON.stringify(batchQueue)}`);
+}
+
+// 3. A real captain follow-up stays visible, and stays visible beside hidden marked rows.
+const captainOnly = renderQueued([captainSteer], [captainFollowUp]);
+const captainOnlyStock = renderStockQueued([captainSteer], [captainFollowUp]);
+if (JSON.stringify(captainOnly.rows) !== JSON.stringify(captainOnlyStock)) {
+  throw new Error("Calm changed how Pi renders genuinely queued captain messages");
+}
+const mixed = renderQueued([captainSteer, watcherStale], [watcherSignal, captainFollowUp, legacyAway]);
+const mixedStock = renderStockQueued([captainSteer], [captainFollowUp]);
+if (JSON.stringify(mixed.rows) !== JSON.stringify(mixedStock)) {
+  throw new Error(
+    `Calm did not reduce a mixed queue to exactly the captain-only Pi rows: ${JSON.stringify(mixed.rows)}`,
+  );
+}
+
+// 6. Near misses a captain can actually type stay visible: suppression is marker
+// authenticated through the classifier owner, never the visible words or a path fragment.
+const nearMisses = [
+  `Follow-up: ${captainFollowUp}`,
+  "FIRSTMATE_OP: v1 watcher: ASCII_ONLY_CAPTAIN_MESSAGE",
+  "\u2063FIRSTMATE_OP: legacy untyped captain message",
+  "\u2063ordinary captain text after an unrelated separator",
+  `Captain quote: ${watcherStale}`,
+  `Ordinary captain text before ${watcherSignal}`,
+  "FIRSTMATE WATCHER WAKE: captain-authored legacy-shaped message\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.",
+  "look at /Users/tiago/Workspace/firstmate/state/art-7322-pr3838-pilot.status",
+];
+for (const nearMiss of nearMisses) {
+  const rows = renderQueued([], [nearMiss]).rows;
+  if (JSON.stringify(rows) !== JSON.stringify(renderStockQueued([], [nearMiss]))) {
+    throw new Error(`Calm hid a queued near miss a captain can type: ${JSON.stringify(nearMiss)}`);
+  }
+}
+// Ordinary queued text is answered without paying for a classifier subprocess, and the
+// marked kinds are classified by the single shell owner rather than a second grammar.
+const classifierCalls = readFileSync(process.env.FM_OPERATIONAL_INPUT_CALLS, "utf8")
+  .split("\n")
+  .filter(Boolean);
+if (classifierCalls.length === 0 || classifierCalls.some((call) => call !== "encode" && call !== "kind")) {
+  throw new Error(`queued presentation used an unexpected classifier command: ${JSON.stringify(classifierCalls)}`);
+}
+const callsBeforeOrdinary = classifierCalls.length;
+for (let index = 0; index < 40; index += 1) {
+  renderQueued([], [`ORDINARY_QUEUED_CAPTAIN_MESSAGE_${index}`]);
+}
+if (readFileSync(process.env.FM_OPERATIONAL_INPUT_CALLS, "utf8").split("\n").filter(Boolean).length
+  !== callsBeforeOrdinary) {
+  throw new Error("ordinary queued captain rows invoked operational subprocess classification");
+}
+
+// 5. /share and /export keep stock rendering, and neither erases queued evidence.
+editorText = "/export queued.html";
+terminalInputHandler("\r");
+const exportRows = renderQueued([], [watcherStale, captainFollowUp]);
+if (JSON.stringify(exportRows.rows) !== JSON.stringify(renderStockQueued([], [watcherStale, captainFollowUp]))) {
+  throw new Error("export rendering did not restore the stock Pi queued rows");
+}
+editorText = "";
+await new Promise((resolve) => setTimeout(resolve, 0));
+if (renderQueued([], [watcherStale]).rows.length !== 0) {
+  throw new Error("Calm did not resume hiding queued operational rows after export rendering");
+}
+editorText = "/share";
+terminalInputHandler("\r");
+const shareRows = renderQueued([watcherStale], [legacyAway]);
+if (JSON.stringify(shareRows.rows) !== JSON.stringify(renderStockQueued([watcherStale], [legacyAway]))) {
+  throw new Error("share rendering did not restore the stock Pi queued rows");
+}
+editorText = "";
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+// 4. Calm off restores stock Pi queued rendering byte for byte.
+await calmCommand.handler("", ctx);
+if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "off\n") {
+  throw new Error("the queued-operational test did not leave Calm off before its stock comparison");
+}
+for (const queue of [[[], [watcherStale]], [marked.slice(0, 2), marked.slice(2)], [[captainSteer], [captainFollowUp]]]) {
+  const [steering, followUp] = queue;
+  if (JSON.stringify(renderQueued(steering, followUp).rows) !== JSON.stringify(renderStockQueued(steering, followUp))) {
+    throw new Error(`Calm off changed stock Pi queued rendering for ${JSON.stringify(queue)}`);
+  }
+}
+await calmCommand.handler("", ctx);
+if (renderQueued([], [watcherStale]).rows.length !== 0) {
+  throw new Error("turning Calm back on did not resume hiding queued operational rows");
+}
+
+// 7. Mutation witness: restoring the unpatched Pi queued renderer - the exact pre-fix
+// production behavior - must make the regression above fail rather than pass silently.
+const patched = InteractiveMode.prototype.updatePendingMessagesDisplay;
+InteractiveMode.prototype.updatePendingMessagesDisplay = stockUpdatePendingMessagesDisplay;
+const bypassed = renderQueued([], [watcherStale, watcherSignal]).rows.join("\n");
+InteractiveMode.prototype.updatePendingMessagesDisplay = patched;
+if (!bypassed.includes("Follow-up:") || !bypassed.includes("FIRSTMATE_OP:")) {
+  throw new Error(
+    "the mutation witness did not reproduce the queued Follow-up rows, so the regression cannot fail",
+  );
+}
+if (renderQueued([], [watcherStale, watcherSignal]).rows.length !== 0) {
+  throw new Error("the mutation witness left the queued-operational adapter uninstalled");
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm queued-operational presentation failed: $out"
+  [ -z "$out" ] || fail "Pi calm queued-operational test printed output: $out"
+  pass "Calm hides marker-authenticated notifications queued during an active turn - alone, as a batch, and once delivered - while keeping queued captain messages, near misses, Calm-off rendering, and export/share stock, and a bypassing mutation reproduces the visible Follow-up rows"
+}
+
 test_operational_followup_turn_e2e() {
   local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_line handled_line geometry_gap exact_session
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
@@ -1022,11 +1325,7 @@ test_operational_followup_turn_e2e() {
   mkdir -p "$project/.pi/extensions/lib" "$home/config" "$config" "$sessions"
   fm_git_init_commit "$project"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
-  cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
-  cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
-  cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$project/.pi/extensions/lib/"
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
 
   cat >"$project/followup-e2e.ts" <<'TS'
@@ -1359,6 +1658,253 @@ JS
   pass "Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics"
 }
 
+test_queued_operational_turn_e2e() {
+  local project home config sessions version label calm_state session_file pane i
+  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: pi or tmux not found for Pi queued-operational turn E2E"
+    return 0
+  fi
+  version=$(pi --version 2>/dev/null || true)
+  record_pi_version_evidence "$version" "Pi queued-operational turn E2E"
+
+  project="$TMP_ROOT/queued-turn-project"
+  home="$TMP_ROOT/queued-turn-home"
+  config="$TMP_ROOT/queued-turn-config"
+  sessions="$TMP_ROOT/queued-turn-sessions"
+  mkdir -p "$project/.pi/extensions/lib" "$home/config" "$config" "$sessions"
+  fm_git_init_commit "$project"
+  cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$project/.pi/extensions/lib/"
+  printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
+
+  # A turn that stays busy long enough for notifications to pile up behind it, which is the
+  # only window in which Pi shows queued rows at all.
+  cat >"$project/queued-turn-e2e.ts" <<'TS'
+import {
+  type AssistantMessage,
+  createAssistantMessageEventStream,
+} from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { encodeFirstmateOperationalInput } from "./.pi/extensions/lib/fm-operational-input.ts";
+
+let phase: "idle" | "captain" | "monitor" = "idle";
+let label = "";
+
+const BUSY_TURN_MS = Number(process.env.FM_QUEUED_E2E_BUSY_MS || "8000");
+
+function markedMessages(): string[] {
+  return [
+    encodeFirstmateOperationalInput("watcher", `QUEUED_MARKED_${label}_WATCHER`),
+    encodeFirstmateOperationalInput("turn-end-guard", `QUEUED_MARKED_${label}_GUARD`),
+    `\u2063Supervisor escalate (QUEUED_MARKED_${label}_LEGACY)`,
+  ];
+}
+
+function captainQueuedMessage(): string {
+  return `QUEUED_CAPTAIN_${label}`;
+}
+
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((item): item is { type: "text"; text: string } =>
+      typeof item === "object" && item !== null &&
+      (item as { type?: unknown }).type === "text" &&
+      typeof (item as { text?: unknown }).text === "string")
+    .map((item) => item.text)
+    .join("\n");
+}
+
+export default function (pi: ExtensionAPI): void {
+  pi.on("message_start", (event) => {
+    if (event.message.role !== "assistant" || phase !== "captain") return;
+    phase = "monitor";
+    // Marked notifications first, then one genuine captain follow-up. Once the captain row
+    // is on screen every marked one was queued before it, so its absence is decisive.
+    for (const message of markedMessages()) {
+      pi.sendUserMessage(message, { deliverAs: "followUp" });
+    }
+    pi.sendUserMessage(captainQueuedMessage(), { deliverAs: "followUp" });
+  });
+
+  pi.registerProvider("queued-turn-e2e", {
+    baseUrl: "http://127.0.0.1/unused",
+    apiKey: "test-only",
+    api: "queued-turn-e2e-api",
+    models: [{
+      id: "deterministic",
+      name: "Deterministic queued-operational presentation regression",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 128,
+    }],
+    streamSimple(model, context) {
+      const stream = createAssistantMessageEventStream();
+      const allUserText = context.messages
+        .filter((message) => message.role === "user")
+        .map((message) => contentText(message.content))
+        .join("\n");
+      const busy = !allUserText.includes(captainQueuedMessage());
+      const responseText = busy ? `CAPTAIN_ANSWER_${label}` : `QUEUED_HANDLED_${label}`;
+      const output: AssistantMessage = {
+        role: "assistant",
+        content: [],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      };
+      const finish = () => {
+        const block = { type: "text" as const, text: responseText };
+        output.content.push(block);
+        stream.push({ type: "text_start", contentIndex: 0, partial: output });
+        stream.push({ type: "text_delta", contentIndex: 0, delta: responseText, partial: output });
+        stream.push({ type: "text_end", contentIndex: 0, content: responseText, partial: output });
+        stream.push({ type: "done", reason: "stop", message: output });
+        stream.end();
+      };
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: output });
+        if (busy) setTimeout(finish, BUSY_TURN_MS);
+        else finish();
+      });
+      return stream;
+    },
+  });
+
+  pi.registerCommand("queued-turn-e2e", {
+    description: "Run one captain prompt whose turn stays busy while notifications queue.",
+    handler: async (args, ctx) => {
+      const nextLabel = args.trim();
+      if (!nextLabel) throw new Error("missing queued-turn E2E label");
+      const model = ctx.modelRegistry.find("queued-turn-e2e", "deterministic");
+      if (!model || !(await pi.setModel(model))) throw new Error("queued-turn E2E model unavailable");
+      label = nextLabel;
+      phase = "captain";
+      pi.sendUserMessage(`CAPTAIN_PROMPT_${label}`);
+    },
+  });
+}
+TS
+
+  run_queued_turn_case() {
+    calm_state=$1
+    label=$2
+
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    printf '%s\n' "$calm_state" >"$home/config/calm"
+    mkdir -p "$sessions/$label"
+
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./queued-turn-e2e.ts --session-dir '$sessions/$label'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+    i=0
+    while [ "$i" -lt 200 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      printf '%s\n' "$pane" | grep -Fq 'queued-turn-e2e.ts' && break
+      sleep 0.05
+      i=$((i + 1))
+    done
+    printf '%s\n' "$pane" | grep -Fq 'queued-turn-e2e.ts' \
+      || fail "Pi queued-turn $label case did not reach the ready composer"
+
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/queued-turn-e2e $label"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+
+    # Capture while the turn is still busy: this is the exact moment the captain screenshotted.
+    i=0
+    while [ "$i" -lt 200 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      printf '%s\n' "$pane" | grep -Fq "Follow-up: QUEUED_CAPTAIN_$label" && break
+      sleep 0.05
+      i=$((i + 1))
+    done
+    printf '%s\n' "$pane" | grep -Fq "Follow-up: QUEUED_CAPTAIN_$label" \
+      || fail "Pi queued-turn $label case never showed the genuine queued captain follow-up row"
+    assert_contains "$pane" "to edit all queued messages" \
+      "Pi queued-turn $label case lost the stock dequeue hint beside a genuine queued captain row"
+
+    if [ "$calm_state" = on ]; then
+      assert_not_contains "$pane" "FIRSTMATE_OP:" \
+        "Pi queued-turn $label case rendered a queued operational notification during the busy turn"
+      assert_not_contains "$pane" "QUEUED_MARKED_${label}_WATCHER" \
+        "Pi queued-turn $label case rendered the queued watcher notification"
+      assert_not_contains "$pane" "QUEUED_MARKED_${label}_GUARD" \
+        "Pi queued-turn $label case rendered the queued turn-end-guard notification"
+      assert_not_contains "$pane" "QUEUED_MARKED_${label}_LEGACY" \
+        "Pi queued-turn $label case rendered the queued supported-legacy notification"
+    else
+      assert_contains "$pane" "QUEUED_MARKED_${label}_WATCHER" \
+        "Pi queued-turn $label case lost the Calm-off queued watcher row"
+      assert_contains "$pane" "QUEUED_MARKED_${label}_GUARD" \
+        "Pi queued-turn $label case lost the Calm-off queued turn-end-guard row"
+      assert_contains "$pane" "QUEUED_MARKED_${label}_LEGACY" \
+        "Pi queued-turn $label case lost the Calm-off queued supported-legacy row"
+    fi
+
+    # Nothing was dropped: every queued notification still reaches the session and the model.
+    i=0
+    while [ "$i" -lt 400 ]; do
+      session_file=$(find "$sessions/$label" -type f -name '*.jsonl' 2>/dev/null | head -1 || true)
+      if [ -n "$session_file" ] && grep -Fq "QUEUED_HANDLED_$label" "$session_file"; then
+        break
+      fi
+      sleep 0.05
+      i=$((i + 1))
+    done
+    if [ -z "$session_file" ] || ! grep -Fq "QUEUED_HANDLED_$label" "$session_file"; then
+      fail "Pi queued-turn $label case never processed the queued notification batch"
+    fi
+    node - "$session_file" "$label" <<'JS' \
+      || fail "Pi queued-turn $label case lost or rerouted a queued notification"
+const fs = require("node:fs");
+const [file, label] = process.argv.slice(2);
+const entries = fs.readFileSync(file, "utf8").trim().split("\n").map(JSON.parse);
+const text = (content) => typeof content === "string"
+  ? content
+  : (content ?? []).filter((item) => item.type === "text").map((item) => item.text).join("\n");
+const users = entries
+  .filter((entry) => entry.type === "message" && entry.message.role === "user")
+  .map((entry) => text(entry.message.content));
+const expected = [
+  `CAPTAIN_PROMPT_${label}`,
+  `\u2063FIRSTMATE_OP: v1 watcher: QUEUED_MARKED_${label}_WATCHER`,
+  `\u2063FIRSTMATE_OP: v1 turn-end-guard: QUEUED_MARKED_${label}_GUARD`,
+  `\u2063Supervisor escalate (QUEUED_MARKED_${label}_LEGACY)`,
+  `QUEUED_CAPTAIN_${label}`,
+];
+for (const message of expected) {
+  if (users.filter((value) => value === message).length !== 1) {
+    throw new Error(`expected exactly one persisted user input ${JSON.stringify(message)}`);
+  }
+}
+if (entries.some((entry) => entry.type === "custom_message")) {
+  throw new Error("a queued notification was rerouted away from ordinary user input");
+}
+JS
+
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    sleep 0.2
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  }
+
+  run_queued_turn_case on calm_on
+  run_queued_turn_case off calm_off
+  pass "Pi queued-operational turn E2E keeps marked notifications queued behind a busy turn off the transcript while Calm is on, still shows a genuine queued captain follow-up and the stock dequeue hint, renders every queued row Calm off, and loses no notification from the session"
+}
+
 test_hidden_block_geometry_e2e() {
   local project home config sessions session_file snapshot expanded_snapshot calm_off_snapshot restarted_snapshot
   local version skill_line final_line gap i
@@ -1385,11 +1931,7 @@ test_hidden_block_geometry_e2e() {
     "$sessions"
   fm_git_init_commit "$project"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
-  cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
-  cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
-  cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$project/.pi/extensions/lib/"
   printf '%s\n' on >"$home/config/calm"
   printf '%s\n' '{"hideThinkingBlock":true,"terminal":{"clearOnShrink":false}}' >"$config/settings.json"
   printf '%s\n' 'tool result one' >"$project/probe-one.txt"
@@ -1617,11 +2159,7 @@ test_working_ship_geometry_and_lifecycle() {
   fixture="$TMP_ROOT/working-ship"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
-  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
-  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
-  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$fixture/lib/"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
@@ -2504,11 +3042,7 @@ test_interactive_terminal_e2e() {
   fm_git_init_commit "$project"
   : > "$project/AGENTS.md"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
-  cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
-  cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT"/.pi/extensions/lib/*.ts "$project/.pi/extensions/lib/"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/fm-primary-turnend-guard.ts"
   cp \
@@ -3278,7 +3812,9 @@ test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
 test_rendering_and_session_lifecycle
+test_queued_operational_presentation
 test_operational_followup_turn_e2e
+test_queued_operational_turn_e2e
 test_hidden_block_geometry_e2e
 test_working_ship_geometry_and_lifecycle
 test_interactive_terminal_e2e

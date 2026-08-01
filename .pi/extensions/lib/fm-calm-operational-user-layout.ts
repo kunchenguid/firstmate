@@ -1,12 +1,16 @@
-// Verified against Pi 0.81.1 and 0.82.0, which add the ordinary-user spacer and row
+// Verified against Pi 0.81.1, 0.82.0, and 0.82.1, which add the ordinary-user spacer and row
 // together via InteractiveMode.addMessageToChat. This adapter probes that exact method
 // and throws if it is missing; fm-calm.ts catches that and skips only this adapter with a
 // diagnostic instead of blocking Calm or Pi. It changes only that presentation and never
 // message delivery.
+//
+// This covers a delivered row. A notification queued while a turn is still running is shown
+// by a different Pi path first; ./fm-calm-pending-operational-layout.ts adapts that one.
+// ./fm-operational-input.ts owns the marker grammar both adapters authenticate against.
 import type { UserMessageComponent as PiUserMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
-import { classifyFirstmateCurrentOperationalText } from "./fm-operational-input.ts";
+import { isFirstmateOperationalPresentationText } from "./fm-operational-input.ts";
 
 type UserMessageConstructorArgs = ConstructorParameters<typeof PiUserMessageComponent>;
 type UserMessageLike = {
@@ -45,7 +49,6 @@ type CalmOperationalUserLayoutPatch = {
 const CALM_OPERATIONAL_USER_LAYOUT_PATCH = Symbol.for(
   "firstmate:calm-operational-user-layout:pi-0.81.1",
 );
-const LEGACY_CALM_OPERATIONAL_PREFIX = "\u2063Supervisor escalate (";
 
 function contentIsTextOnly(content: unknown): boolean {
   if (typeof content === "string") return true;
@@ -64,13 +67,8 @@ export function installCalmOperationalUserLayout(): void {
     [key: symbol]: CalmOperationalUserLayoutPatch | undefined;
   };
   const hidesOperationalInput = (): boolean => calmPresentationHides("synthetic-user");
-  const isOperationalInput = (text: string): boolean => {
-    if (!text.includes("\u2063")) return false;
-    return (
-      classifyFirstmateCurrentOperationalText(text) !== undefined ||
-      text.startsWith(LEGACY_CALM_OPERATIONAL_PREFIX)
-    );
-  };
+  const isOperationalInput = (text: string): boolean =>
+    isFirstmateOperationalPresentationText(text);
   const installed = registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH];
   if (installed) {
     installed.hidesOperationalInput = hidesOperationalInput;

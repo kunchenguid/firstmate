@@ -53,3 +53,30 @@ export function classifyFirstmateCurrentOperationalText(
 ): string | undefined {
   return runOperationalInputCommand("kind", content);
 }
+
+// The only legacy operational shape Firstmate presentation authenticates on top of the
+// current typed kinds, matching FM_LEGACY_AWAY_PREFIX in bin/fm-operational-input.sh.
+// The broader `classify` legacy set stays out: its bare FIRSTMATE_OP and bare prose
+// forms are shapes a captain can author, so hiding them would suppress real input.
+const LEGACY_OPERATIONAL_PRESENTATION_PREFIX = "\u2063Supervisor escalate (";
+// Presentation re-asks the same question for every queued row on every queue change, so
+// answers are memoized. Classification is a pure function of the text, and the bound keeps
+// a long session from retaining every distinct message.
+const PRESENTATION_MEMO_LIMIT = 512;
+const presentationMemo = new Map<string, boolean>();
+
+// Single owner of the marker-authenticated question "may Calm presentation hide this exact
+// input?", shared by every Calm operational adapter so the marker grammar is stated once.
+export function isFirstmateOperationalPresentationText(content: string): boolean {
+  // Ordinary captain text and replayed transcript rows never carry the marker, so they
+  // answer here without paying for a classifier subprocess.
+  if (!content.includes("\u2063")) return false;
+  const memoized = presentationMemo.get(content);
+  if (memoized !== undefined) return memoized;
+  const operational =
+    classifyFirstmateCurrentOperationalText(content) !== undefined ||
+    content.startsWith(LEGACY_OPERATIONAL_PRESENTATION_PREFIX);
+  if (presentationMemo.size >= PRESENTATION_MEMO_LIMIT) presentationMemo.clear();
+  presentationMemo.set(content, operational);
+  return operational;
+}

@@ -208,11 +208,12 @@ The test fixture enumerates every class below through the centralized policy, an
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
 | `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height adapter (verified on Pi 0.81.1 through 0.82.0) under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
+| `synthetic-user` queued before delivery | `InteractiveMode.updatePendingMessagesDisplay` listing `Steering:`/`Follow-up:` rows, their leading spacer, and the dequeue hint from `InteractiveMode.getAllQueuedMessages` | A notification delivered while a turn is running reaches this listing before it is ever a transcript row. Calm filters only what that one listing reads (verified on Pi 0.82.1), so an all-operational queue collapses to no rows, spacer, or hint, while genuinely queued captain messages and the queue Pi delivers from, restores to the editor, and persists are untouched. |
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
 The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
-Pi 0.81.1 through 0.82.0 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
+Pi 0.81.1 through 0.82.1 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant thinking layout, the complete operational-user transcript row, and the queued-notification listing, while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
 General component replacement, ANSI cursor erasure, provider-context mutation, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
 
 ## Cross-harness verification record
@@ -424,3 +425,81 @@ right-heading:  <|          over  \__/~~-~~~-~
 
 At 3 columns the sprite fell back to a single exact-width row, `<|~`.
 Escape aborted the run leaving `Operation aborted`, no boat, and no stale sprite rows, and the trial exited 0 after deleting its temporary state.
+
+## 2026-07-31 Pi 0.82.1 queued-notification verification
+
+The captain reproduced visible `Follow-up: FIRSTMATE_OP: ...` rows with `config/calm` set to `on` while a foreground `lavish-axi poll` held an active Pi turn.
+The installed Pi version was verified that day.
+
+```text
+$ pi --version
+0.82.1
+```
+
+Pi renders those rows from a path the delivered-row adapter never sees.
+`InteractiveMode.updatePendingMessagesDisplay` rebuilds `pendingMessagesContainer` from `InteractiveMode.getAllQueuedMessages`, and it is the only caller of that accessor in the installed build.
+
+```text
+$ grep -n --include='*.js' -e 'Follow-up' -e getAllQueuedMessages \
+    "$(npm root -g)/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js"
+3209:    getAllQueuedMessages() {
+3241:        const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
+3249:                const text = theme.fg("dim", `Follow-up: ${message}`);
+```
+
+The adapter filters only that accessor, and only for the duration of that one synchronous rebuild, so Pi still builds every row, spacer, and hint itself and every other reader sees the unfiltered queue.
+Because Pi skips the spacer and hint when nothing is queued, an all-operational queue collapses to zero rows rather than an empty framed block.
+
+### End-to-end reproduction on a real Pi TUI
+
+A deterministic provider held one turn busy for eight seconds while the fixture queued three canonically classified notifications and then one genuine captain follow-up, so the captain row appearing on screen proves the marked rows had already been queued.
+The trial ran real Pi in a 160 by 40 pty with the tracked extensions, an isolated `FM_HOME`, and `PI_OFFLINE=1`.
+
+With the pre-fix extensions and Calm on, the busy window reproduced the reported rows:
+
+```text
+ Follow-up: ⁣FIRSTMATE_OP: v1 watcher: QUEUED_MARKED_calm_on_red_WATCHER
+ Follow-up: ⁣FIRSTMATE_OP: v1 turn-end-guard: QUEUED_MARKED_calm_on_red_GUARD
+ Follow-up: ⁣Supervisor escalate (QUEUED_MARKED_calm_on_red_LEGACY)
+ Follow-up: QUEUED_CAPTAIN_calm_on_red
+ ↳ Option+Up to edit all queued messages
+```
+
+With the tracked extensions and Calm on, the same busy window kept the genuine captain row and the dequeue hint and dropped every marked row:
+
+```text
+ CAPTAIN_PROMPT_calm_on
+ Follow-up: QUEUED_CAPTAIN_calm_on
+ ↳ Option+Up to edit all queued messages
+```
+
+Nothing was lost from the session in that Calm-on run:
+
+```text
+user inputs persisted: [
+ "CAPTAIN_PROMPT_calm_on",
+ "⁣FIRSTMATE_OP: v1 watcher: QUEUED_MARKED_calm_on_WATCHER",
+ "⁣FIRSTMATE_OP: v1 turn-end-guard: QUEUED_MARKED_calm_on_GUARD",
+ "⁣Supervisor escalate (QUEUED_MARKED_calm_on_LEGACY)",
+ "QUEUED_CAPTAIN_calm_on"
+]
+custom_message entries: 0
+```
+
+With Calm off, the same fixture listed all four queued rows and the hint, confirming the regression exercises the real path rather than a fixture that never populates it.
+
+### Regression entry points
+
+`test_queued_operational_presentation` drives the installed `InteractiveMode.updatePendingMessagesDisplay` against a real pi-tui `Container` and theme.
+It covers one marked notification, every supported marked kind alone and as a batch, the same messages once delivered, genuinely queued captain steering and follow-up messages, a mixed queue reduced to exactly the stock captain-only rows, queued near misses a captain can type, `/export` and `/share` stock rendering, byte-identical Calm-off rendering, and a mutation witness that restores the unpatched Pi renderer and requires the reported rows to reappear.
+It also asserts that ordinary queued text never reaches the classifier subprocess and that the marked kinds are classified only through `bin/fm-operational-input.sh`.
+
+`test_queued_operational_turn_e2e` runs the same busy-turn scenario through a real Pi TUI for Calm on and Calm off, and checks the persisted session in both.
+
+```sh
+tests/fm-calm-pi-extension.test.sh
+```
+
+Verified on 2026-07-31 with Pi 0.82.1: the focused regression fails against the pre-fix extensions with `Calm left a queued operational row or spacer visible` and passes against the tracked ones.
+`bin/fm-lint.sh` reported ShellCheck 0.11.0 clean.
+The two type errors `tests/fm-pi-primary-types.test.sh` reports in `fm-calm.ts` under TypeScript 5.9.3 predate this change and reproduce identically against the previous commit; that check skips in CI because no workflow installs `tsc`.
