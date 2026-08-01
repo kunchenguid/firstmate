@@ -21,6 +21,14 @@
 # The reviewer is read-only against the forge and submits one bounded verdict
 # through this script.
 #
+# Verdict provenance is cooperative task identity: a submission is accepted only
+# when it names a reviewer task bound to the round whose recorded metadata is a
+# fresh scout in the resolved different family. That enforces provenance against
+# mistakes and drift, not against a deliberately dishonest same-UID agent.
+# Every firstmate agent runs as the same user, so a builder that chose to lie
+# could still record its own clear verdict; that sits outside the accepted
+# honest-but-fallible threat model and is not defended against here.
+#
 # Usage:
 #   fm-independent-review.sh ready <task-id> <pr-url> [--head-file <path>]
 #   fm-independent-review.sh submit <task-id> <review-task-id> <head> \
@@ -177,13 +185,13 @@ inspect_pr() {
   fm_pr_url_parse "$url" || return 1
   case "$FM_PR_PROVIDER" in
     github)
-      command -v gh-axi >/dev/null 2>&1 || {
-        fail 'could not establish pull request state and head because gh-axi is unavailable'
+      command -v gh >/dev/null 2>&1 || {
+        fail 'could not establish pull request state and head because gh is unavailable'
         return 1
       }
-      raw=$(gh-axi pr view "$FM_PR_NUMBER" --repo "$FM_PR_PATH" \
+      raw=$(gh pr view "$FM_PR_NUMBER" --repo "$FM_PR_PATH" \
         --json state,isDraft,headRefOid \
-        --template '{{.state}}{{"\t"}}{{.isDraft}}{{"\t"}}{{.headRefOid}}{{"\n"}}' 2>/dev/null) || {
+        -q '.state + "\t" + (.isDraft | tostring) + "\t" + .headRefOid' 2>/dev/null) || {
           fail 'could not establish pull request state and exact head from GitHub'
           return 1
         }
@@ -290,10 +298,12 @@ default_branch() {
 extract_task_criteria() {
   local source=$1 destination=$2
   awk '
-    /^# Task[[:space:]]*$/ { in_task=1; next }
-    in_task && /^# / { exit }
-    in_task { print }
-  ' "$source" > "$destination"
+    !in_task { if ($0 ~ /^# Task[[:space:]]*$/) in_task = 1; next }
+    /^[[:space:]]*(```|~~~)/ { fence = 1 - fence; print; next }
+    !fence && /^# / { done = 1; exit }
+    { print }
+    END { if (!done && fence) exit 3 }
+  ' "$source" > "$destination" || return 1
   [ -s "$destination" ]
 }
 
@@ -498,13 +508,54 @@ start_review() {
   set -e
   if [ "$spawn_status" -ne 0 ]; then
     printf '%s\n' 'status=launch-failed' >> "$round_file"
-    fail "different-family reviewer launch failed for round $round"
+    if round_never_launched "$round_file" && retire_round "$id" "$round" "$round_file"; then
+      fail "different-family reviewer launch failed for round $round; the round was retired so the next readiness call dispatches a fresh reviewer"
+    else
+      fail "different-family reviewer launch failed for round $round; retire $round_file before retrying"
+    fi
     return 1
   fi
   printf '%s\n' 'status=pending' >> "$round_file"
   printf 'independent review started: round %s reviewer=%s family=%s head=%s\n' \
     "$round" "$review_id" "$SELECTED_FAMILY" "$PR_HEAD"
   return 3
+}
+
+validate_round() {
+  local id=$1 url=$2 round=$3 round_file=$4
+  [ "$(meta_value "$round_file" format)" = firstmate-independent-review-round-v1 ] || {
+    fail "could not validate independent review round $round state"
+    return 1
+  }
+  [ "$(meta_value "$round_file" task)" = "$id" ] \
+    && [ "$(meta_value "$round_file" pr)" = "$url" ] || {
+      fail "independent review round $round is bound to another task or pull request"
+      return 1
+    }
+}
+
+# A round is replaceable only while its reviewer task provably never came into
+# existence: no reviewer metadata and no reviewer status file. A launch that got
+# far enough to create either is left in place for an operator to retire.
+round_never_launched() {
+  local round_file=$1 reviewer
+  reviewer=$(meta_value "$round_file" reviewer_task)
+  [ -n "$reviewer" ] && fm_pr_task_id_valid "$reviewer" || return 1
+  [ ! -e "$STATE/$reviewer.meta" ] && [ ! -L "$STATE/$reviewer.meta" ] || return 1
+  [ ! -e "$STATE/$reviewer.status" ] && [ ! -L "$STATE/$reviewer.status" ]
+}
+
+retire_round() {
+  local id=$1 round=$2 round_file=$3 reviewer bundle review_dir
+  reviewer=$(meta_value "$round_file" reviewer_task)
+  fm_pr_task_id_valid "$reviewer" || return 1
+  bundle="$STATE/$id.independent-review.bundle-$round"
+  review_dir="$DATA/$reviewer"
+  [ ! -L "$bundle" ] && [ ! -L "$review_dir" ] || return 1
+  [ ! -e "$bundle" ] || [ -d "$bundle" ] || return 1
+  [ ! -e "$review_dir" ] || [ -d "$review_dir" ] || return 1
+  rm -rf -- "$bundle" "$review_dir" || return 1
+  rm -f -- "$round_file"
 }
 
 verdict_matches_round() {
@@ -551,6 +602,7 @@ write_head_file() {
 ready_command() {
   local id=${1:-} url=${2:-} head_file='' meta builder_harness builder_model builder_family
   local round=0 round_file='' verdict verdict_round verdict_value last_status
+  local reviewer_id reviewer_model
   [ -n "$id" ] && [ -n "$url" ] || { usage >&2; return 2; }
   shift 2
   if [ "$#" -gt 0 ]; then
@@ -601,17 +653,27 @@ ready_command() {
     verdict_value=$(meta_value "$verdict" verdict)
   fi
 
+  # A round whose reviewer never came into existence can never produce a
+  # verdict, so it is retired rather than left wedging readiness. Retiring frees
+  # the round number: a failed launch does not consume one of the two permitted
+  # review rounds.
   if [ "$round" -gt 0 ]; then
     round_file="$STATE/$id.independent-review.round-$round"
-    [ "$(meta_value "$round_file" format)" = firstmate-independent-review-round-v1 ] || {
-      fail "could not validate independent review round $round state"
-      return 1
-    }
-    [ "$(meta_value "$round_file" task)" = "$id" ] \
-      && [ "$(meta_value "$round_file" pr)" = "$url" ] || {
-        fail "independent review round $round is bound to another task or pull request"
+    validate_round "$id" "$url" "$round" "$round_file" || return 1
+    if [ "$verdict_round" != "$round" ] && round_never_launched "$round_file"; then
+      retire_round "$id" "$round" "$round_file" || {
+        fail "independent review round $round never launched a reviewer and could not be retired; retire $round_file by hand and retry"
         return 1
       }
+      printf 'retired independent review round %s: no different-family reviewer was ever launched\n' "$round" >&2
+      round=$((round - 1))
+      round_file=''
+    fi
+  fi
+
+  if [ "$round" -gt 0 ]; then
+    round_file="$STATE/$id.independent-review.round-$round"
+    validate_round "$id" "$url" "$round" "$round_file" || return 1
     if [ "$(meta_value "$round_file" head)" = "$PR_HEAD" ]; then
       if [ "$verdict_round" = "$round" ]; then
         verdict_matches_round "$verdict" "$round_file" || {
@@ -628,20 +690,14 @@ ready_command() {
               fail 'could not publish the reviewed head binding for the readiness caller'
               return 1
             }
-            if [ "$(meta_value "$verdict" reviewer_model)" = default ]; then
-              printf 'Independent review: %s via %s (%s family) - %s\n' \
-                "$(meta_value "$verdict" reviewer_task)" \
-                "$(meta_value "$verdict" reviewer_harness)" \
-                "$(meta_value "$verdict" reviewer_family)" \
-                "$(meta_value "$verdict" summary)"
-            else
-              printf 'Independent review: %s via %s/%s (%s family) - %s\n' \
-                "$(meta_value "$verdict" reviewer_task)" \
-                "$(meta_value "$verdict" reviewer_harness)" \
-                "$(meta_value "$verdict" reviewer_model)" \
-                "$(meta_value "$verdict" reviewer_family)" \
-                "$(meta_value "$verdict" summary)"
-            fi
+            reviewer_id=$(meta_value "$verdict" reviewer_harness)
+            reviewer_model=$(meta_value "$verdict" reviewer_model)
+            [ "$reviewer_model" = default ] || reviewer_id="$reviewer_id/$reviewer_model"
+            printf 'Independent review: %s via %s (%s family) - %s\n' \
+              "$(meta_value "$verdict" reviewer_task)" \
+              "$reviewer_id" \
+              "$(meta_value "$verdict" reviewer_family)" \
+              "$(meta_value "$verdict" summary)"
             return 0
             ;;
           reject)
@@ -653,16 +709,18 @@ ready_command() {
       fi
       last_status=$(meta_value "$round_file" status)
       if [ "$last_status" = launch-failed ]; then
-        fail "different-family reviewer launch failed for round $round"
+        fail "different-family reviewer launch failed for round $round; retire $round_file to allow a fresh reviewer"
         return 1
       fi
-      printf 'independent review pending: round %s head=%s\n' "$round" "$PR_HEAD" >&2
+      printf 'independent review pending: round %s head=%s reviewer=%s; if that reviewer is gone, retire %s and retry\n' \
+        "$round" "$PR_HEAD" "$(meta_value "$round_file" reviewer_task)" "$round_file" >&2
       return 3
     fi
 
     if [ "$verdict_round" != "$round" ]; then
-      printf 'independent review pending for prior head %s; current head %s remains not ready\n' \
-        "$(meta_value "$round_file" head)" "$PR_HEAD" >&2
+      printf 'independent review pending for prior head %s; current head %s remains not ready; if reviewer %s is gone, retire %s and retry\n' \
+        "$(meta_value "$round_file" head)" "$PR_HEAD" \
+        "$(meta_value "$round_file" reviewer_task)" "$round_file" >&2
       return 3
     fi
     verdict_matches_round "$verdict" "$round_file" || {

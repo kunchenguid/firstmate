@@ -287,6 +287,7 @@ Supervise all live work under section 8.
 ### Selected delivery path and approval authority
 
 The selected delivery path owns its own rigor, with one named standing exception: the captain-mandated independent-verification gate reads every finished open PR cold through one reviewer whose model family is derived from and differs from the recorded builder family.
+That gate binds a verdict to the reviewer task recorded for the round, which enforces provenance against mistakes and drift, not against a deliberately dishonest same-uid agent; a builder that chose to lie could still record its own clear verdict, and that remains outside the accepted honest-but-fallible threat model.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI until it produces the finished PR; the independent-verification gate then owns only that one exact-head read and its one permitted fix re-read.
 Never hold work outside no-mistakes for any other manual clean verdict, stack serial manual reviews or reviewer-of-reviewer loops, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit beyond the named standing gate is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.

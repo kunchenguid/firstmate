@@ -69,6 +69,14 @@ if [ "$MIGRATION_STATUS" -ne 0 ]; then
   exit "$MIGRATION_STATUS"
 fi
 
+# The watcher-liveness and worktree-tangle banner must fire on every readiness
+# call, including the pending and rejected paths where a dead watcher matters
+# most. Its stdout is held alongside the migration notices so the review verdict
+# still leads.
+set +e
+GUARD_OUTPUT=$("$FM_ROOT/bin/fm-guard.sh")
+set -e
+
 # This is the structural captain-readiness boundary.
 # The reviewer gate inspects the current forge head, dispatches a cold
 # different-family reviewer when needed, and succeeds only for a clear verdict
@@ -85,6 +93,7 @@ if [ -n "$REVIEW_OUTPUT" ]; then
   printf '%s\n' "$REVIEW_OUTPUT"
 fi
 [ -z "$MIGRATION_OUTPUT" ] || printf '%s\n' "$MIGRATION_OUTPUT"
+[ -z "$GUARD_OUTPUT" ] || printf '%s\n' "$GUARD_OUTPUT"
 if [ "$REVIEW_STATUS" -ne 0 ]; then
   rm -f -- "$REVIEW_HEAD_TMP"
   exit "$REVIEW_STATUS"
@@ -100,8 +109,6 @@ fm_pr_head_valid "$PR_HEAD" || {
   echo "error: independent review did not return an exact reviewed head" >&2
   exit 1
 }
-
-"$FM_ROOT/bin/fm-guard.sh" || true
 
 META_TMP=
 pr_check_cleanup() {
