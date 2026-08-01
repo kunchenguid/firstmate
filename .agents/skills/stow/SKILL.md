@@ -56,6 +56,17 @@ The goal is a session that is safe to reset or destroy because everything durabl
    Summarize, in plain outcome language (section 9): what was stowed and where, what was filed to the backlog, and whether the session is now safe to reset or destroy - i.e. whether every durable finding from this sweep now lives on disk rather than only in this conversation.
    If something could not be captured yet (for example, project-intrinsic knowledge waiting on a crewmate to land it), say so explicitly rather than reporting the session fully safe.
 
+## Scope exclusion: this never moves the control plane
+
+When this machine belongs to a fleet, `/stow` is the step that comes **before** a control-plane switch, and it is never the step that performs one.
+A sweep leaves the session safe to reset; moving the helm to another machine is `bin/fm-helm.sh handover <machine>`, run afterwards, and then `bin/fm-helm.sh adopt` on the machine that received it.
+`docs/helm.md` owns that sequence.
+
+The two are kept separate on purpose.
+`/stow` runs routinely - before any context reset, on a single machine, and in secondmate homes - and none of those should relocate a fleet's control plane; a `/stow` that handed the helm over as a side effect would move it every time the captain compacted a conversation.
+A handover also has to name where the helm is going, which a sweep has no way to know.
+So when the captain's `/stow` is part of walking to another machine, finish the sweep, then tell them the one command that moves it and where to run `adopt`; do not run either yourself unless the captain asks for the switch.
+
 ## Scope exclusion: no skill storage
 
 `/stow` must **never** store, create, or edit a skill as a destination for any finding.

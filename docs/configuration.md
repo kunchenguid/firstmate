@@ -131,6 +131,7 @@ The name is the value passed to `fm-spawn.sh --host <name>` and must match `[A-Z
 | `gui` | no | `true` marks a host with a real display, which must pass an awake, unlocked, and desktop-host-session check before it may claim work, and which receives the extra host-side files those checks need |
 | `tmux_socket` | GUI only | absolute path to the socket of the desktop host session a dispatched agent runs in; without it the host resolves its own default socket, and on macOS that risks the agent-wedging ancestry [`docs/relay-gui-host.md`](relay-gui-host.md) records |
 | `host_session` | no | absolute path to the host session's marker file; defaults to `<control_root>/host-session` |
+| `fleet` | no | the id of the fleet this host belongs to, matching this home's `config/fleet.json`. Only a host carrying it takes part in helm handovers; a host without it is an ordinary task host whose dispatch path is unchanged ([`docs/helm.md`](helm.md)) |
 
 Every path must be absolute and must be the REAL path.
 A symlinked home directory (`/home/user` -> `/data00/home/user`) makes the file policy reject its own root.
@@ -139,6 +140,35 @@ Absent optional fields are safe; the record is read one field per line precisely
 
 A host with no `ssh` route cannot be paired from here at all, and `bin/fm-relay-conn.sh` says so rather than pairing without being able to secure the result.
 Such a host is deployed and secured by its own operator instead; [`docs/relay-gui-host.md`](relay-gui-host.md) owns that two-operator procedure.
+
+## Fleet membership and the helm (config/fleet.json)
+
+Optional, LOCAL, gitignored.
+Absent means this machine belongs to no fleet, and the whole helm layer is inert: no lease is read, no fencing token is attached to any relay call, no cross-machine call is made, and the session-start digest gains nothing.
+That is the state of every single-machine home, and [`docs/helm.md`](helm.md) owns the mechanism, the setup, and the guarantee.
+
+Present means this machine is one of several that can be firstmate's control plane, and exactly one of them holds the helm at a time.
+
+```json
+{
+  "fleet": "home",
+  "machine": "mac",
+  "control_root": "/Users/me/.fm-relay/control-root",
+  "anchor": "box151"
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `fleet` | yes | the fleet id, identical on every member. A lease write carrying a different id is refused, so two fleets cannot write each other's leases |
+| `machine` | yes | this machine's own name, which must match the name the OTHER members registered it under in their `config/relay-hosts.json` |
+| `control_root` | yes | this machine's own control root, the one its peers were deployed against; the lease lives at `<control_root>/helm/lease` and is only ever written through a verb |
+| `anchor` | yes | the member whose copy of the lease is authoritative, given as this machine's own name or a registered peer's. Choose the always-on machine: every write goes to the anchor first, and a disagreement is resolved in its favour |
+
+The lease itself is host-side state under the control root, not a config file, and nothing edits it by hand: `bin/fm-helm.sh` is the only writer and the `helm-set` verb the only mechanism.
+Each member of the fleet must also carry `"fleet": "<same id>"` in the other members' `config/relay-hosts.json` records; a registered host without it never receives a lease and its fencing never switches on.
+
+`config/fleet.json` is not inherited by secondmate homes: a secondmate is a domain agent inside one home, not a machine that could steer a fleet.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 

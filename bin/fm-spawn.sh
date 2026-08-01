@@ -180,9 +180,15 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-remote-preflight-lib.sh
 . "$SCRIPT_DIR/fm-remote-preflight-lib.sh"
+# shellcheck source=bin/fm-helm-lib.sh
+. "$SCRIPT_DIR/fm-helm-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+# A machine that is not the control plane of its fleet may not start work
+# anywhere - here or on a peer. Silent and free on a home that declared no
+# fleet, which is every single-machine home (bin/fm-helm-lib.sh).
+fm_helm_assert "$FM_HOME" "starting a task" || exit 1
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true

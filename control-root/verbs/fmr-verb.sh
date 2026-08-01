@@ -32,6 +32,22 @@
 # Claim atomicity is one local mkdir under <control-root>/tasks/<id>. A blind
 # re-dispatch of the same id therefore loses the race on the host that owns the
 # task, which is the only place the answer can be authoritative.
+#
+# EPOCH FENCING. Once this machine has a helm lease at <control-root>/helm/lease,
+# every verb that CHANGES state here must arrive as `<verb>@<epoch>` with an
+# epoch matching that lease, and answers `ERR EPOCH_STALE ...` without doing
+# anything otherwise. It rides on the verb token rather than as an argument of
+# its own because the shell policy caps this path at eight arguments and `spawn`
+# already uses all eight; see helm_require_epoch below. The
+# point is where the check runs: a control machine that has handed the helm away
+# is still running and can still send commands, and refusing them HERE does not
+# require it to be honest, to have a correct clock, or to know the link is up.
+# The lease itself lives under the control root, which the peer cannot write with
+# `remote file write` because it sits outside the file roots, so the only way to
+# move it is the helm-set verb below and its compare-and-swap.
+#
+# No lease file means no fencing, which is what keeps a Phase 1/2 task host that
+# never joined a fleet byte-identical to what it was before helm existed.
 set -u
 
 self=${BASH_SOURCE[0]}
@@ -91,6 +107,14 @@ export PATH=$CFG_PATH
 export LANG=$CFG_LANG
 export LC_ALL=$CFG_LANG
 export FM_HOME=$CFG_FM_HOME
+# The firstmate scripts this verb drives run as a TASK HOST, not as a control
+# plane, so their own helm gate must stand aside: a task host is by definition
+# not the holder, and asking it to be would refuse every dispatch. The authority
+# question is already settled by the time any of them runs - helm_require_epoch
+# below checked the caller's epoch against this machine's own lease, which is a
+# stronger answer than "am I the holder" because it cannot be given by the stale
+# machine about itself.
+export FM_HELM_HOST_EXEC=1
 FLEET_ROOT=$CFG_FLEET_ROOT
 TASKS="$control_root/tasks"
 BIN="$CFG_FM_ROOT/bin"
@@ -255,10 +279,85 @@ settle_trust_dialog() {  # <id>
   printf 'none'
 }
 
+# ---- helm lease --------------------------------------------------------------
+HELM_DIR="$control_root/helm"
+HELM_LEASE="$HELM_DIR/lease"
+
+helm_field() {  # <key>
+  [ -f "$HELM_LEASE" ] || return 1
+  grep "^$1=" "$HELM_LEASE" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+helm_epoch() {
+  local e
+  e=$(helm_field epoch) || return 1
+  case "$e" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$e" ;; esac
+}
+
+# The fencing epoch rides on the VERB TOKEN, as `<verb>@<epoch>`, and not as an
+# argument of its own. That is forced by the deployed shell policy, which
+# allowlists this path plus AT MOST EIGHT arguments:
+#
+#   ^<path>/fmr-verb\.sh( [A-Za-z0-9._@=+-]{1,96}){0,8}$
+#
+# `spawn <id> <kind> <project> <briefref> <harness> <model> <effort>` already
+# uses all eight. A ninth token would be rejected by the policy layer before
+# this script ran - and widening the allowlist is not a small change either:
+# a grant snapshots the policy version, so any edit invalidates it and forces a
+# re-pair through another full-access window (docs/relay-host.md).
+#
+# Riding on the verb token costs nothing: `@` is already in the allowed charset,
+# and a machine that is in no fleet sends the bare verb exactly as before.
+# Split inline rather than through a function that prints. A command
+# substitution runs in a SUBSHELL, so a function assigning HELM_GIVEN_EPOCH
+# there would lose it on return and every fenced call would arrive looking like
+# it carried no epoch - refused, with the caller told to check a lease that was
+# perfectly correct.
+HELM_GIVEN_EPOCH=
+
+# The fence. Silent and free when this machine has no lease; otherwise the
+# caller's epoch must equal this machine's, exactly.
+#
+# A missing token is refused as loudly as a wrong one. Treating "no epoch" as
+# "not fenced" would mean a stale control plane could skip the check simply by
+# being older than the code that adds it.
+helm_require_epoch() {  # <verb-name>
+  local mine
+  [ -f "$HELM_LEASE" ] || return 0
+  mine=$(helm_epoch)
+  if [ -z "$HELM_GIVEN_EPOCH" ]; then
+    printf 'ERR EPOCH_STALE %s carries no helm epoch; this machine is at epoch %s (holder %s) and changed nothing\n' \
+      "$1" "$mine" "$(helm_field holder)"
+    exit 1
+  fi
+  case "$HELM_GIVEN_EPOCH" in
+    ''|*[!0-9]*)
+      printf 'ERR EPOCH_STALE %s carried an unreadable helm epoch; this machine changed nothing\n' "$1"
+      exit 1 ;;
+  esac
+  if [ "$HELM_GIVEN_EPOCH" != "$mine" ]; then
+    printf 'ERR EPOCH_STALE %s came from helm epoch %s but this machine is at epoch %s (holder %s); nothing was changed\n' \
+      "$1" "$HELM_GIVEN_EPOCH" "$mine" "$(helm_field holder)"
+    exit 1
+  fi
+  return 0
+}
+
 # ---- verbs -------------------------------------------------------------------
-verb=${1-}
+verb_token=${1-}
+case "$verb_token" in
+  *@*) HELM_GIVEN_EPOCH=${verb_token#*@}; verb=${verb_token%%@*} ;;
+  *) verb=$verb_token ;;
+esac
 [ -n "$verb" ] || emit_err badarg "no verb"
 shift || true
+
+# Demand the epoch for exactly the verbs that change something on this machine.
+# Read-only verbs stay callable from a demoted control plane on purpose: it must
+# still be able to see what is here, it just may not touch it.
+case "$verb" in
+  spawn|send|key|ack|teardown) helm_require_epoch "$verb" ;;
+esac
 
 case "$verb" in
 
@@ -285,20 +384,145 @@ case "$verb" in
     ;;
 
   task-list)
+    # THIS MACHINE'S OWN task inventory, which is a wider question than "what
+    # did a control machine claim here". A machine that was the control plane
+    # spawned its tasks locally and they have no claim directory at all, yet
+    # after a handover they are exactly the tasks the new control plane has to
+    # pick up. Enumerating state/*.meta is what makes the truth of a task live
+    # on the machine running it.
+    #
+    # Two exclusions, both load-bearing:
+    #   - kind=secondmate is a persistent domain agent, never a work item, and
+    #     adopting one as a task would put an agent in a backlog.
+    #   - a meta carrying host= is this machine's MIRROR of a task running
+    #     somewhere else. Listing it would hand a peer its own tasks back and
+    #     the two machines would adopt each other's mirrors forever.
     printf 'OK\n'
-    [ -d "$TASKS" ] || exit 0
-    for d in "$TASKS"/*; do
-      [ -d "$d" ] || continue
-      tid=${d##*/}
-      meta="$STATE/$tid.meta"
-      if [ -f "$meta" ]; then
-        printf '%s kind=%s window=%s\n' "$tid" \
-          "$(grep '^kind=' "$meta" | cut -d= -f2- | head -1)" \
-          "$(grep '^window=' "$meta" | cut -d= -f2- | head -1)"
-      else
-        printf '%s kind=? window=?\n' "$tid"
-      fi
+    [ -d "$STATE" ] || exit 0
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      tid=${meta##*/}; tid=${tid%.meta}
+      grep -q '^host=' "$meta" && continue
+      kind=$(grep '^kind=' "$meta" | cut -d= -f2- | head -1)
+      [ "$kind" = secondmate ] && continue
+      claimed=0
+      [ -d "$TASKS/$tid" ] && claimed=1
+      ackv=$(cat "$TASKS/$tid/ack" 2>/dev/null || true)
+      case "$ackv" in ''|*[!0-9]*) ackv=0 ;; esac
+      printf '%s kind=%s window=%s claimed=%s ack=%s\n' "$tid" \
+        "${kind:-?}" \
+        "$(grep '^window=' "$meta" | cut -d= -f2- | head -1)" \
+        "$claimed" "$ackv"
     done
+    ;;
+
+  task-meta)
+    # The whole of a task's metadata, so a control machine adopting it records
+    # the same fields the dispatching path records rather than a summary it
+    # would then have to guess the rest of.
+    require_id "${1-}"
+    tid=$1
+    meta="$STATE/$tid.meta"
+    [ -f "$meta" ] || emit_err nometa "no metadata for task $tid on this host"
+    grep -q '^host=' "$meta" \
+      && emit_err notlocal "task $tid is a mirror of work running elsewhere, not a task on this host"
+    printf 'OK id=%s\n' "$tid"
+    cat "$meta"
+    ;;
+
+  helm-read)
+    # Never fenced, and never refused for being demoted: a machine that has lost
+    # the helm has to be able to find that out, and the answer is the lease.
+    if [ ! -f "$HELM_LEASE" ]; then
+      printf 'OK epoch=0 holder=none fleet=none present=0\n'
+      exit 0
+    fi
+    printf 'OK epoch=%s holder=%s fleet=%s present=1\n' \
+      "$(helm_epoch)" "$(helm_field holder)" "$(helm_field fleet)"
+    cat "$HELM_LEASE"
+    ;;
+
+  helm-set)
+    # helm-set fleet=<f> expect=<n> next=<n+1> holder=<machine|none> by=<machine> [force=1]
+    #
+    # `expect=` and `next=` are the compare-and-swap pair; naming the new epoch
+    # `next=` rather than `epoch=` keeps it from reading like the fencing token,
+    # which is a different thing that travels on the verb token.
+    #
+    # The compare-and-swap that makes concurrent handovers safe. Both sides read
+    # the same epoch, both send the same expect=, and the ANCHOR machine's copy
+    # of this verb serializes them: exactly one swap lands, the other is told
+    # what it lost to, and the epoch advances by exactly one either way.
+    #
+    # The lock is a directory because mkdir is the one filesystem operation that
+    # is atomic on every filesystem this runs on. It is held for the read and
+    # the write together; splitting them is what would let two callers both see
+    # the old epoch.
+    hs_fleet=; hs_expect=; hs_epoch=; hs_holder=; hs_by=; hs_force=0
+    for a in "$@"; do
+      case "$a" in
+        fleet=*) hs_fleet=${a#fleet=} ;;
+        expect=*) hs_expect=${a#expect=} ;;
+        next=*) hs_epoch=${a#next=} ;;
+        holder=*) hs_holder=${a#holder=} ;;
+        by=*) hs_by=${a#by=} ;;
+        force=*) hs_force=${a#force=} ;;
+        *) emit_err badarg "unknown helm-set field" ;;
+      esac
+    done
+    ref_ok "$hs_fleet" || emit_err badarg "helm-set needs a valid fleet name"
+    ref_ok "$hs_by" || emit_err badarg "helm-set needs a valid by= machine name"
+    case "$hs_holder" in
+      none) ;;
+      *) ref_ok "$hs_holder" || emit_err badarg "helm-set needs holder=<machine> or holder=none" ;;
+    esac
+    num_ok "$hs_expect" || emit_err badarg "helm-set needs a numeric expect="
+    num_ok "$hs_epoch" || emit_err badarg "helm-set needs a numeric next="
+    mkdir -p "$HELM_DIR" || emit_err io "cannot create the helm directory"
+    lock="$HELM_DIR/.lock"
+    if ! mkdir "$lock" 2>/dev/null; then
+      emit_err helmbusy "another helm write is in progress on this machine"
+    fi
+    # shellcheck disable=SC2064  # $lock is fixed at trap time on purpose
+    trap "rmdir '$lock' 2>/dev/null || true" EXIT
+    cur_epoch=0; cur_holder=none; cur_fleet=$hs_fleet
+    if [ -f "$HELM_LEASE" ]; then
+      cur_epoch=$(helm_epoch)
+      cur_holder=$(helm_field holder)
+      cur_fleet=$(helm_field fleet)
+      [ -n "$cur_holder" ] || cur_holder=none
+    fi
+    if [ "$cur_fleet" != "$hs_fleet" ]; then
+      printf 'ERR helmfleet this machine carries the lease of fleet %s, not %s; nothing was changed\n' \
+        "$cur_fleet" "$hs_fleet"
+      exit 1
+    fi
+    if [ "$hs_force" != 1 ] && [ "$hs_expect" != "$cur_epoch" ]; then
+      printf 'ERR helmstale expected epoch %s but this machine is at epoch %s (holder %s); nothing was changed\n' \
+        "$hs_expect" "$cur_epoch" "$cur_holder"
+      exit 1
+    fi
+    # Monotonic in both directions, forced or not. An epoch that could stand
+    # still or go backwards is not a fencing token any more, and every refusal
+    # above rests on it only ever moving forward.
+    if [ "$hs_epoch" -le "$cur_epoch" ]; then
+      printf 'ERR helmepoch epoch %s does not advance past this machine current epoch %s; nothing was changed\n' \
+        "$hs_epoch" "$cur_epoch"
+      exit 1
+    fi
+    tmp="$HELM_LEASE.tmp$$"
+    {
+      printf 'helm-v1\n'
+      printf 'fleet=%s\n' "$hs_fleet"
+      printf 'epoch=%s\n' "$hs_epoch"
+      printf 'holder=%s\n' "$hs_holder"
+      printf 'updated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'by=%s\n' "$hs_by"
+      printf 'forced=%s\n' "$hs_force"
+    } > "$tmp" || emit_err io "cannot stage the lease"
+    mv -f "$tmp" "$HELM_LEASE" || emit_err io "cannot install the lease"
+    printf 'OK epoch=%s holder=%s previous_epoch=%s previous_holder=%s\n' \
+      "$hs_epoch" "$hs_holder" "$cur_epoch" "$cur_holder"
     ;;
 
   claim-status)
@@ -444,7 +668,15 @@ case "$verb" in
     require_id "${1-}"
     tid=$1; off=${2-}
     num_ok "$off" || emit_err badarg "invalid offset"
-    [ -d "$TASKS/$tid" ] || emit_err noclaim "task $tid is not claimed on this host"
+    # A claim directory is no longer required, only a task. After a helm
+    # handover the new control plane acknowledges events for tasks this machine
+    # STARTED ITSELF while it was the control plane, and those never had a
+    # claim - demanding one would leave exactly the adopted tasks unable to
+    # record what has been presented, which is how events get replayed forever
+    # or silently skipped.
+    [ -f "$STATE/$tid.meta" ] || [ -d "$TASKS/$tid" ] \
+      || emit_err notask "no task $tid on this host"
+    mkdir -p "$TASKS/$tid" || emit_err io "cannot create the task record"
     printf '%s\n' "$off" > "$TASKS/$tid/ack" || emit_err io "cannot record ack"
     printf 'OK ack=%s\n' "$off"
     ;;

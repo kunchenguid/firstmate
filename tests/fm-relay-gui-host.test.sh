@@ -311,6 +311,9 @@ setup_queue_home() {  # <tag> -> echoes the home
   home="$TMP_ROOT/q-$tag"; bin="$home/bin"
   mkdir -p "$home/state" "$home/data" "$bin"
   cp "$ROOT/bin/fm-relay-lib.sh" "$bin/fm-relay-lib.sh"
+  # The helm library is a hard dependency of the relay library, which refuses to
+  # load without it rather than silently shipping unfenced calls.
+  cp "$ROOT/bin/fm-helm-lib.sh" "$bin/fm-helm-lib.sh"
   printf '%s' "$home"
 }
 

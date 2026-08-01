@@ -42,6 +42,27 @@ FM_RELAY_ID_RE='^[A-Za-z0-9._-]{1,64}$'
 # without the caller putting bin/ on PATH.
 FM_RELAY_LIB_DIR=$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
+# Which machine is the control plane. Sourced here rather than in each caller
+# because fm_relay_exec is the ONE funnel every cross-machine call goes through,
+# so it is the one place the fencing token can be attached without a caller
+# being able to forget. The dependency is one-way: fm-helm-lib.sh knows nothing
+# about this file.
+#
+# A missing sibling STOPS this library rather than being tolerated. Sourcing a
+# file that is not there leaves fm_helm_epoch_for_home undefined, every fenced
+# verb call then quietly ships no epoch, and on a fleet machine the fence is
+# gone with nothing to show for it. Refusing is the only honest answer to
+# "half of this layer is installed".
+if [ ! -f "$FM_RELAY_LIB_DIR/fm-helm-lib.sh" ]; then
+  echo "error: $FM_RELAY_LIB_DIR/fm-helm-lib.sh is missing beside fm-relay-lib.sh; refusing to run a relay call that could not be fenced" >&2
+  # `return` when sourced, which is the only supported use; `exit` if someone
+  # runs this file directly, where `return` is a syntax error at runtime.
+  # shellcheck disable=SC2317  # the exit is the fallback for the direct-run case
+  return 1 2>/dev/null || exit 1
+fi
+# shellcheck source=bin/fm-helm-lib.sh
+. "$FM_RELAY_LIB_DIR/fm-helm-lib.sh"
+
 # Set by fm_relay_exec / fm_relay_file_* for the caller to read.
 FM_RELAY_OUT=
 FM_RELAY_ERR=
@@ -64,6 +85,7 @@ FM_RELAY_VERB=
 FM_RELAY_GUI=
 FM_RELAY_TMUX_SOCKET=
 FM_RELAY_HOST_SESSION=
+FM_RELAY_FLEET=
 
 fm_relay_bifrost() {
   printf '%s' "${FM_RELAY_BIFROST:-bifrost}"
@@ -92,7 +114,7 @@ fm_relay_host_load() {  # <home> <host-name>
   FM_RELAY_HOST=; FM_RELAY_CLIENT_ID=; FM_RELAY_CONTROL_ROOT=; FM_RELAY_FLEET_ROOT=
   FM_RELAY_HOST_HOME=; FM_RELAY_HOST_ROOT=; FM_RELAY_HOST_DIR=; FM_RELAY_HOST_PATH=
   FM_RELAY_HOST_LANG=; FM_RELAY_KEY=; FM_RELAY_SSH=; FM_RELAY_VERB=
-  FM_RELAY_GUI=; FM_RELAY_TMUX_SOCKET=; FM_RELAY_HOST_SESSION=
+  FM_RELAY_GUI=; FM_RELAY_TMUX_SOCKET=; FM_RELAY_HOST_SESSION=; FM_RELAY_FLEET=
   fm_relay_arg_valid "$name" || { echo "error: invalid relay host name '$name'" >&2; return 1; }
   file=$(fm_relay_hosts_file "$home")
   [ -f "$file" ] || { echo "error: no relay host registry at $file" >&2; return 1; }
@@ -116,7 +138,8 @@ fm_relay_host_load() {  # <home> <host-name>
           ($h.home // ""), ($h.root // ""), ($h.home_dir // ""), ($h.path // ""),
           ($h.lang // ""), ($h.key // ""), ($h.ssh // ""),
           (if ($h.gui // false) then "1" else "" end),
-          ($h.tmux_socket // ""), ($h.host_session // ""), "." ]
+          ($h.tmux_socket // ""), ($h.host_session // ""),
+          ($h.fleet // ""), "." ]
       | .[]
     end' "$file" 2>/dev/null) || {
     echo "error: $file is not valid JSON" >&2; return 1; }
@@ -126,7 +149,7 @@ fm_relay_host_load() {  # <home> <host-name>
     read -r FM_RELAY_HOST_HOME; read -r FM_RELAY_HOST_ROOT; read -r FM_RELAY_HOST_DIR
     read -r FM_RELAY_HOST_PATH; read -r FM_RELAY_HOST_LANG; read -r FM_RELAY_KEY
     read -r FM_RELAY_SSH; read -r FM_RELAY_GUI; read -r FM_RELAY_TMUX_SOCKET
-    read -r FM_RELAY_HOST_SESSION
+    read -r FM_RELAY_HOST_SESSION; read -r FM_RELAY_FLEET
   } <<< "$raw"
   FM_RELAY_HOST=$name
   [ -n "$FM_RELAY_HOST_PATH" ] || FM_RELAY_HOST_PATH=/usr/local/bin:/usr/bin:/bin
@@ -159,12 +182,43 @@ fm_relay_hosts_list() {  # <home>
   jq -r 'keys[]' "$file" 2>/dev/null || true
 }
 
+# The verbs that CHANGE something on the peer, and therefore the verbs that
+# carry this machine's helm epoch so the peer can refuse a stale control plane.
+# Read-only verbs are deliberately absent: a demoted machine must still be able
+# to look at what is running, it just may not touch it.
+fm_relay_verb_is_fenced() {  # <verb>
+  case "$1" in
+    spawn|send|key|ack|teardown) return 0 ;;
+  esac
+  return 1
+}
+
 # Run one verb on the loaded host. Output lands in FM_RELAY_OUT, the exit status
 # in FM_RELAY_RC, and any transport/policy diagnosis in FM_RELAY_ERR.
+#
+# On a home that declared no fleet, fm_helm_epoch_for_home prints nothing and the
+# argument list below is byte-identical to the one this function sent before the
+# helm layer existed. That is the whole compatibility contract for Phase 1/2
+# hosts, and it costs one stat().
 fm_relay_exec() {  # <verb> [arg...]
-  local timeout=${FM_RELAY_TIMEOUT_MS:-120000} shell_text a out rc
+  local timeout=${FM_RELAY_TIMEOUT_MS:-120000} shell_text a out rc epoch
   [ -n "$FM_RELAY_HOST" ] || { echo "error: no relay host loaded" >&2; return 1; }
   shell_text=$FM_RELAY_VERB
+  # The epoch rides on the VERB TOKEN as `<verb>@<epoch>`, never as an extra
+  # argument. The host's shell policy allowlists this path plus at most EIGHT
+  # arguments and `spawn` already uses all eight, so a ninth token would be
+  # refused by the policy layer before the verb ran - and widening the allowlist
+  # invalidates the grant and forces a re-pair (docs/relay-host.md).
+  # With no fleet declared, fm_helm_epoch_for_home prints nothing and the token
+  # stays the bare verb, byte-identical to what Phase 1/2 sent.
+  if [ "${FM_HELM_NO_FENCE:-0}" != 1 ] && fm_relay_verb_is_fenced "${1:-}"; then
+    epoch=$(fm_helm_epoch_for_home "${FM_HOME:-}")
+    if [ -n "$epoch" ]; then
+      local fenced_verb="$1@$epoch"
+      shift
+      set -- "$fenced_verb" "$@"
+    fi
+  fi
   for a in "$@"; do
     fm_relay_arg_valid "$a" || {
       FM_RELAY_ERR="refusing to send an argument outside the verb allowlist charset: $a"
@@ -376,6 +430,17 @@ fm_relay_pending_emit() {  # <home> <id>
   state="${FM_STATE_OVERRIDE:-$home/state}"
   pending=$(fm_relay_pending_file "$state" "$id")
   host=$(fm_relay_pending_field "$pending" host) || return 0
+  # A machine that is no longer the control plane must not keep trying to start
+  # this work: the peer would refuse it as stale every time, and each refusal is
+  # a NEW reason, so the alert marker would change on every check and wake a
+  # supervisor that cannot act anyway. Silence here is not dropping the work -
+  # the queued record stays on disk, and bin/fm-helm.sh handover reports it as
+  # something that does not travel.
+  if fm_helm_in_fleet "$home"; then
+    fm_helm_fleet_load "$home" >/dev/null 2>&1 || return 0
+    fm_helm_lease_load
+    [ "$FM_HELM_HOLDER" = "$FM_HELM_MACHINE" ] || return 0
+  fi
   limit=${FM_RELAY_QUEUE_WAKE_AFTER:-3}
   rc=0
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" \

@@ -263,6 +263,25 @@ if [ "$LOCK_RC" -ne 0 ]; then
   }
 fi
 
+# --- 1b. helm ------------------------------------------------------------
+# Which MACHINE is the control plane, which is a different question from the
+# session lock above (that one settles which SESSION on this machine may act).
+#
+# Nothing is printed - not the heading, not a reassuring "no fleet" line - on a
+# home that never declared fleet membership, which is every single-machine home.
+# The digest such a home sees has to stay identical to what it saw before the
+# helm layer existed, so the whole block is behind one stat().
+if [ -f "$CONFIG/fleet.json" ]; then
+  subsection "HELM"
+  HELM_RC=0
+  HELM_OUT=$("$SCRIPT_DIR/fm-helm.sh" status --refresh --brief 2>&1) || HELM_RC=$?
+  printf '%s\n' "$HELM_OUT"
+  if [ "$HELM_RC" -ne 0 ]; then
+    printf 'This session may READ fleet state and may not change it: no spawn, no steer,\n'
+    printf 'no merge, no cleanup. Those commands refuse here on their own.\n'
+  fi
+fi
+
 # --- 2. bootstrap --------------------------------------------------------
 subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
