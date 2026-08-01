@@ -40,7 +40,12 @@
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
-#   check: <script>: <out> authenticated check output, always actionable
+#   check: <script>: <out> authenticated check output, always actionable. A
+#                          check paired with a state/<id>.check-hot marker (see
+#                          hot_check_scan below for the full contract) can
+#                          produce this reason on any cycle, not just a
+#                          CHECK_INTERVAL sweep - the reason line itself is
+#                          identical either way.
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -471,6 +476,112 @@ run_check() {
   ( run_check_process "$@" ) 2>/dev/null || true
 }
 
+# The single owner of *.check.sh dispatch: the x-watch shim, a validated
+# PR-poll snapshot, or a hash-bound custom-check snapshot (fm-check-register.sh
+# binding). Both the CHECK_INTERVAL sweep and the hot-check fast path below
+# call this so a hot marker runs through the exact same trusted validation - it
+# can never bypass or weaken check-trust. On non-empty output this enqueues and
+# calls wake() (which exits the watcher), identically to a sweep-produced wake.
+# <touch-last-check> is 1 for the sweep (preserves its original .last-check
+# bookkeeping before an exiting wake) and 0 for the hot path, which must never
+# touch .last-check - that timer belongs to the sweep alone.
+# Sets RUN_CHECK_REJECTED to <c> when the check could not be authenticated, so
+# the caller can accumulate one combined "rejected unauthenticated state
+# checks" wake; left empty otherwise.
+RUN_CHECK_REJECTED=
+run_one_check() {  # <check-path> <touch-last-check:0|1>
+  local c=$1 touch_last=$2
+  local is_pr_poll=0 out id provider url host path number custom_snapshot reason
+  RUN_CHECK_REJECTED=
+  if [ "$(basename "$c")" = x-watch.check.sh ]; then
+    if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
+      && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
+      FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
+      out=$FM_CHECK_RESULT
+    else
+      RUN_CHECK_REJECTED=$c
+      return 0
+    fi
+  else
+    id=$(basename "$c" .check.sh)
+    if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+      is_pr_poll=1
+      provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
+      url=$FM_PR_POLL_SNAPSHOT_URL
+      host=$FM_PR_POLL_SNAPSHOT_HOST
+      path=$FM_PR_POLL_SNAPSHOT_PATH
+      number=$FM_PR_POLL_SNAPSHOT_NUMBER
+      run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+        "$provider" "$url" "$host" "$path" "$number" || exit 1
+      out=$FM_CHECK_RESULT
+    elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
+      custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
+      run_check_capture "$custom_snapshot" || exit 1
+      out=$FM_CHECK_RESULT
+      fm_custom_check_snapshot_cleanup
+    else
+      fm_custom_check_snapshot_cleanup
+      RUN_CHECK_REJECTED=$c
+      return 0
+    fi
+  fi
+  if [ -n "$out" ]; then
+    reason="check: $c: $out"
+    fm_wake_append check "$c" "$reason" || exit 1
+    if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+      if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
+        fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+          || triage_log "merged PR poll retirement remains recoverable for $id"
+      else
+        triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
+      fi
+    fi
+    [ "$touch_last" != 1 ] || touch "$STATE/.last-check"
+    wake "$reason"
+  fi
+}
+
+# Hot-check fast path: a check may opt in to sub-poll-cycle reaction by pairing
+# state/<id>.check.sh with a sibling state/<id>.check-hot marker file whose
+# content is the absolute path of an "events pending" file (typically appended
+# to by an external daemon, e.g. a launchd watcher). Each cycle, any such check
+# whose events file currently exists and is non-empty runs immediately through
+# run_one_check above - the identical trusted execution/validation path the
+# CHECK_INTERVAL sweep uses, check-trust binding included - independent of
+# .last-check, so a pending event waits out this ~POLL-second loop instead of
+# the full sweep window. The CHECK_INTERVAL sweep still runs every check on its
+# own cadence regardless, the fallback if whatever feeds the events file dies.
+# Bounded to at most one hot run per check per cycle by construction (this
+# block makes exactly one pass per outer while iteration) and never touches
+# .last-check, so it can neither starve nor accelerate the sweep's own cadence
+# for other checks - a check that never clears its events file simply reruns
+# once every POLL seconds, not in a tighter loop.
+# The marker is local gitignored state (state/*.check-hot is not a tracked
+# schema), so opting a check in is a home-local choice with no config change.
+hot_check_scan() {
+  local hotf id c events_file reason
+  local rejected=
+  for hotf in "$STATE"/*.check-hot; do
+    [ -e "$hotf" ] || continue
+    [ -f "$hotf" ] && [ ! -L "$hotf" ] || continue
+    id=$(basename "$hotf" .check-hot)
+    fm_pr_task_id_valid "$id" || continue
+    c="$STATE/$id.check.sh"
+    [ -e "$c" ] || continue
+    events_file=
+    IFS= read -r events_file < "$hotf" 2>/dev/null || true
+    [ -n "$events_file" ] || continue
+    [ -s "$events_file" ] || continue
+    run_one_check "$c" 0
+    [ -z "$RUN_CHECK_REJECTED" ] || rejected="$rejected $RUN_CHECK_REJECTED"
+  done
+  if [ -n "$rejected" ]; then
+    reason="check: rejected unauthenticated state checks:$rejected"
+    fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+    wake "$reason"
+  fi
+}
+
 FM_ACTIVE_CHECK_PID=
 FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
@@ -727,6 +838,13 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
+  # Hot-check fast path: any state/<id>.check.sh paired with a state/<id>.check-hot
+  # marker whose events file is currently non-empty runs now, ahead of the
+  # CHECK_INTERVAL sweep below. See hot_check_scan's own comment for the
+  # contract. Evaluated first for the same starvation reason the sweep below
+  # is evaluated before the signal scan.
+  hot_check_scan
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -738,53 +856,8 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
-      is_pr_poll=0
-      if [ "$(basename "$c")" = x-watch.check.sh ]; then
-        if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
-          && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
-          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
-          out=$FM_CHECK_RESULT
-        else
-          rejected_checks="$rejected_checks $c"
-          continue
-        fi
-      else
-        id=$(basename "$c" .check.sh)
-        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
-          is_pr_poll=1
-          provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
-          url=$FM_PR_POLL_SNAPSHOT_URL
-          host=$FM_PR_POLL_SNAPSHOT_HOST
-          path=$FM_PR_POLL_SNAPSHOT_PATH
-          number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
-          out=$FM_CHECK_RESULT
-        elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
-          custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-          run_check_capture "$custom_snapshot" || exit 1
-          out=$FM_CHECK_RESULT
-          fm_custom_check_snapshot_cleanup
-        else
-          fm_custom_check_snapshot_cleanup
-          rejected_checks="$rejected_checks $c"
-          continue
-        fi
-      fi
-      if [ -n "$out" ]; then
-        reason="check: $c: $out"
-        fm_wake_append check "$c" "$reason" || exit 1
-        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
-          if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
-            fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-              || triage_log "merged PR poll retirement remains recoverable for $id"
-          else
-            triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
-          fi
-        fi
-        touch "$STATE/.last-check"
-        wake "$reason"
-      fi
+      run_one_check "$c" 1
+      [ -z "$RUN_CHECK_REJECTED" ] || rejected_checks="$rejected_checks $RUN_CHECK_REJECTED"
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"

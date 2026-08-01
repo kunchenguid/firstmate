@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
 # Usage: fm-check-register.sh <id>
+# A registered check that needs faster-than-sweep reaction may also add a
+# sibling state/<id>.check-hot marker; bin/fm-watch.sh's header owns that
+# contract, and this registration is unchanged either way.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
