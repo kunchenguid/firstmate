@@ -105,6 +105,7 @@ SH
 write_adopted_meta() {  # <state> <id> <ws> <sf> <worktree>
   fm_write_meta "$1/$2.meta" \
     "window=$3:$4" \
+    "endpoint_task_id=$2" \
     "worktree=$5" \
     "project=$5" \
     "harness=adopted" \
@@ -157,6 +158,7 @@ test_adopt_writes_meta() {
     || fail "fm-adopt.sh should succeed for a live surface"
 
   assert_grep "window=$WS_A:$SF_A" "$state/adopt-x.meta" "meta missing window=<ws>:<sf>"
+  assert_grep "endpoint_task_id=adopt-x" "$state/adopt-x.meta" "meta missing endpoint_task_id"
   assert_grep "backend=cmux" "$state/adopt-x.meta" "meta missing backend=cmux"
   assert_grep "kind=adopted" "$state/adopt-x.meta" "meta missing kind=adopted"
   assert_grep "mode=adopted" "$state/adopt-x.meta" "meta missing mode=adopted"

@@ -131,6 +131,7 @@ PROJECT=$WSCWD
 mkdir -p "$STATE"
 {
   echo "window=$WS:$SURFACE"
+  echo "endpoint_task_id=$ID"
   echo "worktree=$WORKTREE"
   echo "project=$PROJECT"
   echo "harness=adopted"
