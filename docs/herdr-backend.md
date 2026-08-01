@@ -226,6 +226,53 @@ U+2063 survives Herdr terminal input as text, unlike the legacy ASCII control se
 `bin/fm-operational-input.sh` owns current operational construction and parsing, and the AFK skill owns legacy away-input compatibility.
 No Herdr-specific copy of that protocol exists.
 
+## Primary Pi persistence and exact recovery
+
+Herdr 0.7.5 preserves workspace, tab, and pane ids when a named server restarts, but it does not preserve the Pi process or native agent registration.
+A disconnected Herdr client and a lost server can therefore look identical to an operator while requiring opposite actions.
+Use `bin/fm-primary-pi.sh` when a Pi or pi-signed primary must be recoverable without guessing which condition occurred.
+
+Start a new guarded primary from its intended native Herdr pane:
+
+```sh
+FM_HOME=/canonical/firstmate/home bin/fm-primary-pi.sh launch --pi pi
+```
+
+The wrapper requires Herdr's complete injected session, socket, workspace, tab, and pane identity.
+It holds a PID/start-bound lease for Pi's whole lifetime and loads the custody, turn-end, and watcher extensions explicitly.
+The custody extension records the canonical Firstmate home, exact Herdr endpoint, Pi harness, full Pi session id, canonical session file and directory, session cwd, and lease identity under private `state/primary-pi/` records.
+A normal `/new`, `/resume`, or `/fork` inside the same Pi process updates that record through the same attestation path.
+
+Reconnect with:
+
+```sh
+FM_HOME=/canonical/firstmate/home bin/fm-primary-pi.sh recover
+```
+
+Recovery reads only recorded immutable ids and always passes the named session explicitly to Herdr.
+When that exact pane still has a registered Pi and corroborating foreground process, recovery attaches to it and never starts another Pi.
+When the server is absent, recovery retries for a bounded interval and may start only the recorded named server before retrying again.
+A restored pane may restart Pi only when two stable reads prove one agent-free bare shell, the old lifetime lease is absent or PID/start-stale, and the recorded session passes strict file, path, header, cwd, and duplicate-id validation.
+The restart strictly validates the canonical session file and passes Pi its full exact header id through `--session`; it never uses `-c`, `--resume`, `--session-id`, labels, focus, interactive selection, a partial id, or an ambient Herdr target.
+A fresh token atomically binds the replacement wrapper, and recovery refuses to attach or report success until Pi attests the exact expected session from inside the new process.
+Unknown state, a live or malformed lease, path aliases, symlinks, non-regular files, malformed JSONL, duplicate full ids, missing sessions, changed pane identity, and attestation mismatch all stop automatic restart.
+The fallback is attach-only or manual recovery, never a guessed launch.
+
+`bin/fm-primary-pi-install.sh install` optionally creates one reversible user-local next-login server-ensure plist and a `~/.local/bin/firstmate-attach` helper.
+It does not call `launchctl`, enable a login item, configure remote access, start Pi, or keep a process alive.
+The plist makes one bounded `server-ensure` call after a future login, while the helper runs the same exact `recover` path from any already-established local or remote shell.
+Run `bin/fm-primary-pi-install.sh uninstall` to remove only installer-owned files.
+
+This path supports only a Pi or pi-signed primary in a native Herdr 0.7.5 pane with the complete injected identity.
+It does not recover other harnesses, other runtime backends, workers, secondmates, in-memory Pi sessions, or Pi processes launched outside this wrapper.
+It does not configure remote access, reconnect a phone automatically, change login settings in the current session, or promise automatic restart when private state or process evidence is incomplete.
+Those axes are intentionally manual or owned by their existing runtime lifecycle.
+
+`tests/fm-primary-pi.test.sh` covers executable launch, attach-first, strict resumption, lease, retry, contradiction, corruption, duplicate, path, and post-launch-attestation behavior.
+`tests/fm-primary-custody-extension.test.sh` covers Pi-side input blocking, successful startup attestation, and shutdown after startup or later integrity failure.
+`tests/fm-primary-pi-install.test.sh` covers idempotent install, status, uninstall, permissions, and foreign-file refusal.
+Real lifecycle verification remains restricted to generated non-default sessions through `bin/fm-herdr-lab.sh`.
+
 ## Restart and liveness behavior
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.

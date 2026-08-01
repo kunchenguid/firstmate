@@ -154,6 +154,27 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Primary Pi custody and exact recovery
+
+A guarded non-default Herdr 0.7.5 protocol-17 lab confirmed that two client detach and reattach cycles preserved the exact Pi process, pane, Pi session, and conversation.
+A guarded stop and reprovision of the same named lab preserved the workspace, tab, and pane ids but removed the Pi process and agent registration.
+Resuming the persisted canonical session file restored the exact conversation in the exact pane.
+The same lab established that stock Pi alone is not launch custody: two processes could use one session file concurrently, a partial session selector chose a newer decoy, a missing `--session-id` created a new session, and malformed JSONL handling was not strict enough to authorize recovery.
+The default Herdr session remained byte-identical through the lifecycle proof.
+
+The shipped state machine is covered deterministically through its executable interfaces:
+
+```sh
+tests/fm-primary-pi.test.sh
+tests/fm-primary-custody-extension.test.sh
+tests/fm-primary-pi-install.test.sh
+```
+
+The first suite proves attach-first behavior, lifetime lease exclusion, stable restored-shell restart, canonical-file validation with full-exact-id Pi invocation, bounded named-server absence, strict malformed/duplicate/missing/symlink refusal, unknown and contradictory state refusal, post-launch attestation, token-bound cleanup, and repeated-recovery idempotence.
+The extension suite proves input remains blocked before or after failed attestation and that a startup or later integrity failure requests Pi shutdown.
+The install suite proves the optional next-login server ensure and attach helper are idempotent, private, reversible, inert until a future login or explicit invocation, and refuse foreign files and symlinks.
+Any repeated live lifecycle verification must use `bin/fm-herdr-lab.sh` with a generated non-default session and the default-session tripwire.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:
