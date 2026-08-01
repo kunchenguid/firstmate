@@ -4,7 +4,9 @@ set -u
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-T=$(mktemp -d "${TMPDIR:-/tmp}/fm-primary-pi.XXXXXX")
+T_RAW=$(mktemp -d "${TMPDIR:-/tmp}/fm-primary-pi.XXXXXX")
+T="${T_RAW}-captain's-recovery"
+mv "$T_RAW" "$T"
 T=$(cd "$T" && pwd -P)
 HOME_FIXTURE="$T/home"
 FAKEBIN=$(fm_fakebin "$T")
@@ -170,6 +172,14 @@ lease_absent() {
   [ ! -e "$HOME_FIXTURE/state/primary-pi/lease" ] && [ "$(cat "$MODE")" = shell ]
 }
 
+recovery_lock_present() {
+  [ -d "$RECOVERY_LOCK" ]
+}
+
+path_absent() {
+  [ ! -e "$1" ]
+}
+
 # A wrapped ordinary launch acquires lifetime custody and publishes exact state.
 umask 022
 "$SCRIPT" launch --pi pi > "$T/launch.out" 2>&1 &
@@ -326,7 +336,7 @@ chmod 600 "$HOME_FIXTURE/state/primary-pi/lease/"*
 # wrapper built from the caller's `$0` could never be found there.
 (cd "$ROOT" && TEST_PANE_RUN_DELAY=0.5 FM_PRIMARY_NO_ATTACH=1 bin/fm-primary-pi.sh recover) > "$T/exact.out" 2>&1 &
 RECOVERY_PID=$!
-wait_for 'recovery ownership lock' bash -c "[ -d '$HOME_FIXTURE/state/primary-pi/recovery.lock' ]"
+wait_for 'recovery ownership lock' recovery_lock_present
 set +e
 race=$(FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>&1); race_rc=$?
 set -e
@@ -353,7 +363,7 @@ assert_grep "pane run $PANE" "$LOG" 'restart must target only the exact recorded
 assert_grep "'$ROOT/bin/fm-primary-pi.sh' resume" "$LOG" 'the restored pane must be driven through the canonical absolute script path'
 assert_no_grep 'workspace list' "$LOG" 'workspace labels must not participate in recovery'
 assert_no_grep 'tab list' "$LOG" 'tab labels or focus must not participate in recovery'
-pass 'stale lease and race handling converge on one exact attested session'
+pass 'stale lease and race handling preserve an apostrophe-bearing exact recovery path'
 
 # A second concurrent/repeated recover observes live custody and does not relaunch.
 : > "$LOG"
@@ -377,7 +387,7 @@ out=$(TEST_ATTEST_ID='wrong-full-id' FM_PRIMARY_NO_ATTACH=1 "$SCRIPT" recover 2>
 set -e
 [ "$rc" -ne 0 ] || fail 'post-launch identity mismatch unexpectedly recovered'
 assert_contains "$out" 'attestation failed' 'identity mismatch must be reported as failed attestation'
-wait_for 'failed token owner cleanup' bash -c "[ ! -e '$HOME_FIXTURE/state/primary-pi/lease' ]"
+wait_for 'failed token owner cleanup' path_absent "$HOME_FIXTURE/state/primary-pi/lease"
 [ "$(cat "$MODE")" != pi ] || fail 'mismatched Pi remained presented as live'
 kill -0 "$unrelated" 2>/dev/null || fail 'token cleanup signaled an unrelated process'
 kill "$unrelated" 2>/dev/null || true

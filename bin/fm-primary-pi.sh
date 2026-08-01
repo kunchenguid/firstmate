@@ -816,7 +816,7 @@ attach_exact() {
 
 shell_quote() {
   printf "'"
-  printf '%s' "$1" | sed "s/'/'\\''/g"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
 }
 
