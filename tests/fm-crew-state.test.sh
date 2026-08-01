@@ -71,6 +71,9 @@ case "${1:-}" in
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
+        if [ "${FM_FAKE_WORKER_LOG_UNAVAILABLE:-0}" != 1 ]; then
+          printf 'codex started pid=4242\n'
+        fi
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
     ;;
@@ -180,10 +183,11 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  FM_FAKE_WORKER_PS_STATE=""
+  FM_FAKE_WORKER_PS_STATE='S+'
+  FM_FAKE_WORKER_LOG_UNAVAILABLE=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_WORKER_PS_STATE
+  export FM_FAKE_WORKER_PS_STATE FM_FAKE_WORKER_LOG_UNAVAILABLE
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -409,6 +413,24 @@ test_dead_or_suspended_pipeline_worker_is_not_recorded_working() {
   assert_contains "$out" 'headless pipeline worker suspended pid=4242' \
     "suspended step worker was not distinguished from a live worker"
   pass "dead and suspended headless workers never inherit a stale running verdict"
+}
+
+test_unbound_pipeline_worker_is_indeterminate() {
+  reset_fakes
+  local d out
+  d=$(new_case headless-unbound)
+  make_repo_on_branch "$d/wt" fm/headless-unbound
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/headless-unbound.meta" "window=fm:fm-headless-unbound" "worktree=$d/wt" "kind=ship" "harness=codex"
+  FM_FAKE_AXI_STATUS="$(run_running fm/headless-unbound)"
+  FM_FAKE_CI_LOGS='pipeline log shape without a native worker pid'
+  FM_FAKE_WORKER_LOG_UNAVAILABLE=1
+  out=$(run_crew_state "$d" headless-unbound)
+  assert_contains "$out" 'state: unknown' \
+    "PID-unbound run inherited a live verdict from the stale running ledger"
+  assert_contains "$out" 'headless worker identity unavailable' \
+    "PID-unbound run did not report its process-level evidence limit"
+  pass "PID-unbound pipeline workers remain indeterminate rather than guessed live or dead"
 }
 
 # (b) needs-decision log + a resumed (running/fixing) run = SUPERSEDED
@@ -1365,6 +1387,7 @@ test_missing_run_head_falls_back_to_current_state() {
 test_active_run_is_authoritative
 test_headless_pipeline_worker_liveness_overrides_pane_interruption
 test_dead_or_suspended_pipeline_worker_is_not_recorded_working
+test_unbound_pipeline_worker_is_indeterminate
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded

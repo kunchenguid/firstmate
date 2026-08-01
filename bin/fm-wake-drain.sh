@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Atomically drain durable watcher wake records, preserve the consumed queue and
-# its digest-bound receipt, optionally annotate validated signal status keys
-# after raw consumption commits, then assert liveness.
+# its digest-bound receipt, reconcile verified terminal status signals, optionally
+# annotate validated status keys after raw consumption commits, then assert
+# liveness.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,6 +10,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-custody-lib.sh
 . "$SCRIPT_DIR/fm-custody-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
@@ -29,6 +32,28 @@ RAW_ROWS=
 # drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
+}
+
+# A terminal status wake is the ordinary completion path, so reconcile its
+# structured row in the same turn rather than waiting for session restart.
+# Status keys are structurally mapped and read without following symlinks; queue
+# payload prose never supplies a path. Nonterminal signals remain read-only.
+reconcile_terminal_status_wakes() {  # <deduped-raw-rows>
+  local rows=$1 epoch seq kind key payload receipt
+  while IFS=$(printf '\t') read -r epoch seq kind key payload; do
+    [ "$kind" = signal ] || continue
+    fm_wake_status_key_map "$key" || continue
+    fm_wake_latest_event "$STATE/$FM_WAKE_STATUS_KEY" 65536 || continue
+    if status_is_done "$FM_WAKE_EVENT_LINE" || status_is_awaiting_captain "$FM_WAKE_EVENT_LINE"; then
+      receipt=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+        "$SCRIPT_DIR/fm-record-reconcile.sh") || return 1
+      [ -z "$receipt" ] || printf 'record reconciliation: %s\n' "$receipt"
+      return 0
+    fi
+  done <<EOF
+$rows
+EOF
+  return 0
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
@@ -80,8 +105,12 @@ DRAIN_TMP=
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
 
-# Raw output and queue deletion are authoritative. Everything below is
-# best-effort and cannot restore, duplicate, hide, or fail the consumed rows.
+# Raw output, custody, and queue retirement are authoritative. Reconciliation
+# below may fail the command visibly but can never restore, duplicate, or hide
+# the already receipt-bound consumed rows. Annotation and liveness remain
+# best-effort even after reconciliation failure.
+reconcile_status=0
+reconcile_terminal_status_wakes "$RAW_ROWS" || reconcile_status=$?
 (fm_wake_print_annotations "$RAW_ROWS") || true
 assert_watcher_liveness
-exit 0
+exit "$reconcile_status"

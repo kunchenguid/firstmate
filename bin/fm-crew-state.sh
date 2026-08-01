@@ -628,7 +628,8 @@ if [ "$HAVE_RUN" = 1 ]; then
         RUN_DETAIL="run record still active${SEP}headless worker pid=$NM_WORKER_PID has unrecognized identity"
         ;;
       *)
-        RUN_DETAIL="$RUN_DETAIL${SEP}headless worker identity unavailable; run record only"
+        RUN_STATE=unknown
+        RUN_DETAIL="run record still active${SEP}headless worker identity unavailable; live/dead state is indeterminate"
         ;;
     esac
   fi

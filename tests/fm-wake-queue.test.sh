@@ -320,7 +320,7 @@ SH
 }
 
 test_enrichment_caps_and_status_file_failures() {
-  local dir state out fake_perl_log perl_bin i raw_count annotation_bytes annotation_count oversized_lines perl_reads
+  local dir state out fake_perl_log perl_bin i raw_count annotation_bytes annotation_count oversized_lines perl_reads terminal_reads
   dir=$(make_case caps)
   state="$dir/state"
   out="$dir/drain.out"
@@ -329,7 +329,13 @@ test_enrichment_caps_and_status_file_failures() {
   cat > "$dir/fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = -MFcntl=:DEFAULT ]; then
-  printf 'read\n' >> "$FM_WAKE_ENRICH_PERL_LOG"
+  previous=
+  current=
+  for arg in "$@"; do
+    previous=$current
+    current=$arg
+  done
+  printf 'read\t%s\n' "$previous" >> "$FM_WAKE_ENRICH_PERL_LOG"
 fi
 exec "$FM_WAKE_ENRICH_REAL_PERL" "$@"
 SH
@@ -366,7 +372,11 @@ SH
   annotation_count=$(grep -c '^wake annotation: latest' "$out" || true)
   [ "$annotation_count" -lt 9 ] || fail "global cap did not omit any of the nine readable status annotations"
   perl_reads=$(wc -l < "$fake_perl_log" | tr -d ' ')
-  [ "$perl_reads" -eq 8 ] || fail "enrichment read cap allowed $perl_reads safe reads instead of 8"
+  [ "$perl_reads" -eq 9 ] \
+    || fail "terminal detection plus capped enrichment used $perl_reads safe reads instead of exactly 9"
+  terminal_reads=$(awk -F '\t' -v path="$state/huge.status" '$2 == path { count++ } END { print count + 0 }' "$fake_perl_log")
+  [ "$terminal_reads" -eq 2 ] \
+    || fail "terminal status was not read exactly once for reconciliation and once inside the eight-read annotation cap"
   grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(enrichment read cap\)$' "$out" >/dev/null \
     || fail "enrichment read-cap omission marker was not emitted"
   if grep -E ': (empty|missing|malformed|unreadable)\.status:' "$out" >/dev/null; then
