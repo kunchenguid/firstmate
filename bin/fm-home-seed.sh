@@ -177,7 +177,7 @@ registry_home_conflict_for_assignment() {
   local id=$1 home=$2 target line registered_id registered_home registered_key
   [ -f "$REG" ] || return 1
   target=$(resolved_path "$home")
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "- "*)
         if ! secondmate_registry_parse_line "$line"; then
@@ -206,7 +206,7 @@ registry_id_conflict_for_assignment() {
   local id=$1 home=$2 target line registered_id registered_home registered_key
   [ -f "$REG" ] || return 1
   target=$(resolved_path "$home")
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "- "*)
         secondmate_registry_parse_line "$line" || {
@@ -227,7 +227,8 @@ registry_id_conflict_for_assignment() {
 }
 
 validate_registry() {
-  [ ! -f "$REG" ] || secondmate_registry_validate_bindings "$REG" resolved_path || {
+  [ -e "$REG" ] || [ -L "$REG" ] || return 0
+  secondmate_registry_validate_bindings "$REG" resolved_path || {
     printf 'error: %s\n' "$SECONDMATE_REGISTRY_ERROR" >&2
     return 1
   }

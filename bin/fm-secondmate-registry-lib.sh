@@ -48,7 +48,7 @@ secondmate_registry_line_for_id() {
   local reg=$1 id=$2 line count=0
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   [ -f "$reg" ] && [ ! -L "$reg" ] || return 1
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     [ "$line" = "- $id" ] || case "$line" in "- $id "*) ;; *) continue ;; esac
     count=$((count + 1))
     [ "$count" -eq 1 ] || return 1
@@ -96,7 +96,7 @@ secondmate_registry_validate_bindings() {
     SECONDMATE_REGISTRY_ERROR="could not create secondmate registry validation state"
     return 1
   }
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "- "*)
         if ! secondmate_registry_parse_line "$line"; then

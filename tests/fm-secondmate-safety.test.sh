@@ -123,6 +123,30 @@ test_home_seed_validate_rejects_unparseable_registry_entry() {
   pass "home-seed validation rejects registry records no operational parser can consume"
 }
 
+test_home_seed_refuses_broken_registry_symlink() {
+  local home sub err target
+  home="$TMP_ROOT/broken-registry-symlink-home"
+  sub="$TMP_ROOT/broken-registry-symlink-subhome"
+  err="$TMP_ROOT/broken-registry-symlink.err"
+  target="$home/data/missing-secondmates.md"
+  mkdir -p "$home/data" "$home/state" "$home/projects"
+  ln -s "$target" "$home/data/secondmates.md"
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    fail "home-seed validation accepted a broken registry symlink"
+  fi
+  grep -F 'secondmate registry is unavailable or unsafe' "$err" >/dev/null \
+    || fail "home-seed validation did not explain the broken registry symlink"
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='design domain' \
+    "$ROOT/bin/fm-home-seed.sh" design "$sub" alpha >/dev/null 2>"$err"; then
+    fail "home seeding accepted a broken registry symlink"
+  fi
+  [ -L "$home/data/secondmates.md" ] || fail "home seeding replaced the broken registry symlink"
+  [ ! -e "$target" ] || fail "home seeding wrote through the broken registry symlink"
+  [ ! -e "$sub" ] || fail "home seeding provisioned a home before broken registry refusal"
+  [ ! -e "$home/data/design" ] || fail "home seeding created a brief before broken registry refusal"
+  pass "home seeding refuses broken registry symlinks before provisioning"
+}
+
 test_home_seed_validate_rejects_duplicate_homes() {
   local home subhome subhome_abs err
   home="$TMP_ROOT/duplicate-home"
@@ -468,7 +492,7 @@ test_secondmate_spawn_resolves_punctuated_registry_projects() {
   printf 'punctuated\n' > "$sub/.fm-secondmate-home"
   printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
   sub_abs=$(cd "$sub" && pwd -P)
-  printf -- '- punctuated - launch notes (parenthetical) (home: %s; scope: launch (child); semicolon is valid; projects: alpha, beta; added 2026-07-30)\n' \
+  printf -- '- punctuated - launch notes (parenthetical) (home: %s; scope: launch (child); semicolon is valid; projects: alpha, beta; added 2026-07-30)' \
     "$sub_abs" > "$home/data/secondmates.md"
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
     || fail "home-seed validation rejected punctuated registry fields before spawn"
@@ -476,7 +500,7 @@ test_secondmate_spawn_resolves_punctuated_registry_projects() {
   log="$TMP_ROOT/punctuated-spawn-fake/tmux.log"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/punctuated-spawn-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" punctuated "$sub" codex --secondmate >/dev/null 2>&1 \
+    "$ROOT/bin/fm-spawn.sh" punctuated codex --secondmate >/dev/null 2>&1 \
     || fail "secondmate spawn failed for punctuated registry fields"
   meta="$home/state/punctuated.meta"
   projects=$(grep '^projects=' "$meta" | cut -d= -f2-)
@@ -487,7 +511,7 @@ test_secondmate_spawn_resolves_punctuated_registry_projects() {
 
 test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings() {
   local row case_name home sub other fakebin log err meta_before
-  for row in duplicate-id duplicate-home supplied-mismatch metadata-mismatch; do
+  for row in duplicate-id unterminated-duplicate-id duplicate-home supplied-mismatch metadata-mismatch; do
     case_name=${row%%|*}
     home="$TMP_ROOT/spawn-binding-$case_name-home"
     sub="$TMP_ROOT/spawn-binding-$case_name-sub"
@@ -503,6 +527,10 @@ test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings() {
 - domain - primary route (home: $sub; scope: valid (scope); punctuation; projects: alpha; added 2026-07-30)
 - domain - duplicate route (home: $other; scope: duplicate; projects: beta; added 2026-07-30)
 EOF
+        ;;
+      unterminated-duplicate-id)
+        printf -- '- domain - primary route (home: %s; scope: valid (scope); punctuation; projects: alpha; added 2026-07-30)\n- domain - duplicate route (home: %s; scope: duplicate; projects: beta; added 2026-07-30)' \
+          "$sub" "$other" > "$home/data/secondmates.md"
         ;;
       duplicate-home)
         cat > "$home/data/secondmates.md" <<EOF
@@ -2313,6 +2341,7 @@ test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
 test_home_seed_validate_rejects_unparseable_registry_entry
+test_home_seed_refuses_broken_registry_symlink
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes

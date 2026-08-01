@@ -889,7 +889,7 @@ registered_descendant_home_for_removal() {
     echo "REFUSED: $SECONDMATE_REGISTRY_ERROR" >&2
     return 2
   fi
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "- "*)
         secondmate_registry_parse_line "$line" || {
