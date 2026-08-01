@@ -63,9 +63,11 @@
 # pre-attestation lease with no custody record is never reclaimed automatically:
 # `launch` runs inside the very pane it would have to prove agent-free, so no
 # in-pane proof can be honest. That lease is preserved untouched as evidence and
-# the documented narrow manual fallback applies (docs/herdr-backend.md): confirm
-# through `status` that the recorded pane holds no Pi, remove
-# state/primary-pi/lease by hand, then `launch` again.
+# the documented narrow manual fallback applies (docs/herdr-backend.md). `status`
+# cannot serve that fallback: with no custody record there is no recorded pane to
+# report, so it prints pane=unknown agent=unknown by construction. The operator
+# inspects the intended pane externally through its exact named session and pane
+# id, and only then removes state/primary-pi/lease by hand before `launch` again.
 #
 # .lease-steal and .recovery-steal serialize the two handoffs that cannot be a
 # single atomic primitive. Both are mkdir-created directories carrying the same
@@ -608,7 +610,8 @@ replace_stale_lease() {
     release_steal_guard "$LEASE_STEAL"
     return 1
   fi
-  release_steal_guard "$LEASE_STEAL"
+  release_steal_guard "$LEASE_STEAL" || true
+  return 0
 }
 
 validate_launch_args() {

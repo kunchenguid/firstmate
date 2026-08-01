@@ -417,6 +417,12 @@ printf 'token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' > "$HOME_FIXTURE/state/primary
 printf 'pid=999999\nstart=Mon Jan  1 00:00:00 2001\n' > "$HOME_FIXTURE/state/primary-pi/lease/owner"
 chmod 700 "$HOME_FIXTURE/state/primary-pi" "$HOME_FIXTURE/state/primary-pi/lease"
 chmod 600 "$HOME_FIXTURE/state/primary-pi/lease/"*
+# Without a custody record there is no recorded endpoint, so status reports the
+# lease it can read and refuses to guess a pane or agent it never recorded.
+out=$("$SCRIPT" status 2>&1) || fail "status must report the pre-attestation state instead of exiting: $out"
+assert_contains "$out" 'custody=unknown' 'a pre-attestation state must read as unknown custody'
+assert_contains "$out" 'pane=unknown' 'status must not name a pane it never recorded'
+assert_contains "$out" 'agent=unknown' 'status must not claim agent evidence it never recorded'
 for pane_state in unknown shell pi; do
   printf '%s\n' "$pane_state" > "$MODE"
   : > "$LOG"

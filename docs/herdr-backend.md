@@ -244,7 +244,10 @@ The tracked custody extension only reports Pi's live exact session identity; the
 A normal `/new`, `/resume`, or `/fork` inside the same Pi process updates that record through the same attestation path.
 If a crash leaves a PID/start-stale lease before the first custody record exists, `launch` refuses and preserves that lease untouched as evidence.
 It cannot prove its way out of that state: `launch` runs inside the very pane it would have to prove agent-free, so any in-pane bare-shell proof would be reading its own launcher.
-The narrow manual fallback is the only supported exit: run `bin/fm-primary-pi.sh status`, confirm no Pi is registered or running in the recorded pane, remove `state/primary-pi/lease` by hand, and run `launch` again.
+`status` cannot answer this one, and it does not try to: with no custody record there is no recorded pane, so it reports `pane=unknown agent=unknown` by construction rather than guessing which pane was meant.
+The narrow manual fallback is the only supported exit, and it is deliberately external evidence rather than a new `status` guarantee.
+Decide which Herdr session and pane the crashed primary was meant to occupy, inspect that exact pane directly (`herdr agent get <pane-id> --session <name>` alongside `herdr pane process-info --pane <pane-id> --session <name>`), and only once that exact pane shows no registered Pi and no Pi foreground process, remove `state/primary-pi/lease` by hand and run `launch` again.
+If any of that evidence is missing, ambiguous, or contradictory, preserve the lease and stop; there is no automatic path out of this state.
 A stale lease that does have a custody record still belongs to `recover`, and a live lease, unknown state, or malformed lease refuses either way.
 
 Reconnect with:
@@ -267,6 +270,7 @@ The fallback is attach-only or manual recovery, never a guessed launch.
 
 `bin/fm-primary-pi.sh status` is the read-only way to tell a merely disconnected client, a lost server, and a lost Pi apart before acting.
 It reports the recorded custody, lease, server, pane, and agent state without touching a process, and a missing, unknown, contradictory, or malformed private record reads as one of those reported states rather than an error exit.
+Its server, pane, and agent columns are exactly as good as the custody record they read: without a readable custody record there is no recorded endpoint to query, so all three report `unknown` and the pre-attestation manual fallback above applies instead.
 
 `bin/fm-primary-pi-install.sh install` optionally creates one reversible user-local next-login server-ensure plist and a `~/.local/bin/firstmate-attach` helper.
 It does not call `launchctl`, enable a login item, configure remote access, start Pi, or keep a process alive.
