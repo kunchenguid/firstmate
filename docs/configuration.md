@@ -151,6 +151,17 @@ An inherited `data/captain-shared.md` counts in a secondmate's total but remains
 The internal `/stow` skill curates only the editable local files in that case and reports the primary-owned shared file as a concrete exception if it alone exceeds the budget.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
+## Context ceiling (config/context-ceiling)
+
+`data/captain-shared.md` is the sole authority for the routing rule; this section owns only the local configuration schema and executable entry points.
+`config/context-ceiling` optionally selects the percentage used by `bin/fm-context.sh`, with `45` used when the file is absent.
+When present, the file must contain exactly one base-10 integer from `0` through `100` followed by one newline, in a regular single-linked file beneath a non-symlinked `config/` directory.
+Malformed, multi-line, symlinked, hardlinked, special, or otherwise unsafe values produce an over verdict rather than an implicit safe value.
+The primary value or its absence is inherited by secondmate homes through the existing local-material convergence path.
+Use `bin/fm-context.sh show <task-id>` for a human-readable verdict or `bin/fm-context.sh eligible <task-id>` for the routing exit status.
+Meter-invisible sessions can run `bin/fm-context.sh self-report <percent>` through the task-bound environment installed by `bin/fm-spawn.sh`; reports expire after five minutes and are rejected after task metadata changes.
+`bin/fm-context.sh` owns exact output, self-report, and expiry mechanics.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -300,7 +311,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `context-ceiling`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.

@@ -53,6 +53,8 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+#   context-ceiling: ...   fleet-scan found a newly over-ceiling or externally
+#                          unreadable session; data/captain-shared.md owns the rule
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -82,6 +84,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-context-lib.sh
+. "$SCRIPT_DIR/fm-context-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -621,6 +625,46 @@ heartbeat_scan_finds_actionable() {
   return 1
 }
 
+context_ceiling_marker_path() {  # <task-id>
+  printf '%s/.context-ceiling-surfaced-%s\n' "$STATE" "$1"
+}
+
+# Print each newly actionable context verdict once per task incarnation.
+# An under result clears the prior marker so a later crossing surfaces again.
+heartbeat_context_ceiling_findings() {
+  local meta id marker identity
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    marker=$(context_ceiling_marker_path "$id")
+    fm_context_inspect_meta "$meta" "$STATE" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+    if [ "$FM_CONTEXT_STATUS" = under ]; then
+      rm -f "$marker"
+      continue
+    fi
+    identity="$FM_CONTEXT_META_IDENTITY:over"
+    [ "$(cat "$marker" 2>/dev/null || true)" = "$identity" ] && continue
+    printf '%s\n' "$FM_CONTEXT_RESULT"
+  done
+}
+
+mark_all_context_ceiling_surfaced() {
+  local meta id marker
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    marker=$(context_ceiling_marker_path "$id")
+    fm_context_inspect_meta "$meta" "$STATE" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+    if [ "$FM_CONTEXT_STATUS" = under ]; then
+      rm -f "$marker"
+    else
+      printf '%s\n' "$FM_CONTEXT_META_IDENTITY:over" > "$marker"
+    fi
+  done
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -1099,7 +1143,15 @@ EOF
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present; then
+    context_findings=$(heartbeat_context_ceiling_findings)
+    if [ -n "$context_findings" ]; then
+      reason="context-ceiling: $(printf '%s\n' "$context_findings" | paste -sd ';' -)"
+      fm_wake_append heartbeat context-ceiling "$reason" || exit 1
+      touch "$STATE/.last-heartbeat"
+      mark_all_captain_relevant_surfaced
+      mark_all_context_ceiling_surfaced
+      wake "$reason"
+    elif afk_present; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"

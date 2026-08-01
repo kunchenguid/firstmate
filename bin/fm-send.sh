@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
-# Usage: fm-send.sh <target> <text...>
+# Usage: fm-send.sh <target> [--new-work] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -9,6 +9,10 @@
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
+# `--new-work` is the only context-gated path and follows the authority in
+# data/captain-shared.md. Plain text and --key remain operational messages and
+# never perform a context preflight, so urgent corrections and stop orders cannot
+# be delayed or refused by this gate.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the target backend confirms a
@@ -48,6 +52,23 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+usage() {
+  cat <<'EOF'
+usage: fm-send.sh <target> [--new-work] <text...>
+       fm-send.sh <target> --key <Enter|Escape|C-c>
+
+Send one operational message by default.
+Use --new-work only when assigning a new task to an existing recorded session;
+that explicit path checks the context-routing authority in data/captain-shared.md.
+Operational text and keys never run or block on that context check.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") usage >&2; exit 2 ;;
+esac
+
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never steer
@@ -75,6 +96,8 @@ fi
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-context-lib.sh
+. "$SCRIPT_DIR/fm-context-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -211,6 +234,13 @@ fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
 
+NEW_WORK=0
+if [ "${1:-}" = "--new-work" ]; then
+  NEW_WORK=1
+  shift
+fi
+[ "$#" -gt 0 ] || { usage >&2; exit 2; }
+
 fm_backend_validate "$TARGET_BACKEND" || exit 1
 
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved
@@ -240,12 +270,28 @@ fi
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
+  if [ "$NEW_WORK" = 1 ]; then
+    echo "error: --new-work cannot be combined with --key; keys are operational control" >&2
+    exit 2
+  fi
+  [ "$#" -eq 2 ] || { usage >&2; exit 2; }
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
     echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
   fm_send_record_interrupt "$2" || exit 1
 else
+  if [ "$NEW_WORK" = 1 ]; then
+    if [ -z "$TARGET_META" ]; then
+      echo "error: new work refused for '$RAW_TARGET': no recorded task metadata is available for a context verdict" >&2
+      exit 1
+    fi
+    fm_context_inspect_meta "$TARGET_META" "$STATE" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+    if [ "$FM_CONTEXT_STATUS" != under ]; then
+      echo "error: new work refused for '$RAW_TARGET': $FM_CONTEXT_RESULT; see data/captain-shared.md" >&2
+      exit 1
+    fi
+  fi
   MESSAGE=$*
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a

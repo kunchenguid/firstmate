@@ -40,7 +40,8 @@
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       state/.afk, a per-task context-ceiling verdict, and a
+#                       cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
@@ -105,6 +106,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
+# shellcheck source=bin/fm-context-lib.sh
+. "$SCRIPT_DIR/fm-context-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -367,6 +370,9 @@ for meta in "$STATE"/*.meta; do
   else
     printf 'endpoint: unknown (no window recorded)\n'
   fi
+
+  fm_context_inspect_meta "$meta" "$STATE" "$CONFIG"
+  printf '%s\n' "$FM_CONTEXT_RESULT"
 
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
