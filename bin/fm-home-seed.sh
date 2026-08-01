@@ -27,8 +27,9 @@
 #       to override the registry routing scope. Otherwise the registry summary
 #       and scope are derived from the filled charter brief.
 #   fm-home-seed.sh validate
-#       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
-#       data/secondmates.md.
+#       Refuse records that operational consumers cannot parse, unavailable or
+#       unsafe registry files when present, non-absolute or unresolvable homes,
+#       duplicate ids or homes, and nested or overlapping homes.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
