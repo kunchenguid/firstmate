@@ -13,6 +13,15 @@
             "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --claude"
           }
         ]
+      },
+      {
+        "matcher": "^AskUserQuestion$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-decision-pretool-check.sh --claude"
+          }
+        ]
       }
     ],
     "Stop": [

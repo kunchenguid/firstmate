@@ -27,6 +27,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-arm-command-policy.mjs` | Semantic owner of the watcher-arm PreToolUse policy (docs/arm-pretool-check.md)   |
 | `fm-cd-pretool-check.sh` | Stable PreToolUse transport for the primary cd-guard command policy (docs/cd-guard.md) |
 | `fm-cd-command-policy.mjs` | Semantic owner of the cd-guard's persistent-directory-change decision (docs/cd-guard.md) |
+| `fm-decision-pretool-check.sh` | Exact-identity gate that routes structured captain decisions to Lavish (docs/decision-pretool-check.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
 | `fm-spawn.sh`            | Spawn, native-resume, or provider-neutrally continue crewmates on the resolved account and runtime backend |
