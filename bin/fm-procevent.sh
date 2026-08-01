@@ -43,7 +43,10 @@
 #
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
-# only a claim whose runner is gone is reclaimed.
+# only a claim whose whole generation is gone is reclaimed. A runner leads its
+# own process group, so a crashed leader whose group still has members is not
+# stale: reconcile stops that surviving group and releases its generation before
+# any replacement starts, and keeps the claim for a later retry when it cannot.
 #
 # Durability boundary: see bin/fm-procevent-lib.sh. This runner proves capture
 # before publication and bounded re-announcement until handled, and nothing
@@ -66,7 +69,7 @@ REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,49p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,53p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -328,6 +331,31 @@ cmd_reconcile() {
           detach_runner "$id"
           started=$((started + 1))
           continue
+        elif [ "$claim_state" -eq 3 ]; then
+          # The leader crashed but its owned group is still consuming the
+          # source. Never start a replacement alongside it: stop that group and
+          # release its generation first, and if either cannot be proved, keep
+          # the claim and retry on a later cycle rather than adding a second
+          # poller. Only the owning home may signal its own group.
+          owner=$FM_PROCEVENT_CLAIM_HOME
+          pid=$FM_PROCEVENT_CLAIM_PID
+          token=$FM_PROCEVENT_CLAIM_TOKEN
+          identity=$FM_PROCEVENT_CLAIM_IDENTITY
+          stop_state=2
+          if [ "$owner" = "$FM_HOME" ]; then
+            stop_runner_pid "$pid" "$identity"
+            stop_state=$?
+          fi
+          if [ "$stop_state" -eq 0 ] \
+            && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+            rm -f -- "$(staging_file "$id" "$token")"
+            rm -f -- "$(runner_file "$id")"
+            fm_procevent_source_lock_release "$id"
+            detach_runner "$id"
+            started=$((started + 1))
+            continue
+          fi
+          uncertain=$((uncertain + 1))
         elif [ "$claim_state" -eq 2 ]; then
           uncertain=$((uncertain + 1))
         fi
@@ -348,9 +376,20 @@ stop_runner_pid() {  # <pid> <identity>
   [ -n "$identity" ] || return 2
   fm_procevent_pid_state "$pid" "$identity"
   state=$?
-  [ "$state" -eq 0 ] || return "$state"
-  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
-  [ "$pgid" = "$pid" ] || return 2
+  case "$state" in
+    0)
+      # A live identity-matched leader still owns its group, so prove the group
+      # really is the one this pid leads before signalling it.
+      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
+      [ "$pgid" = "$pid" ] || return 2
+      ;;
+    3)
+      # The leader crashed but its owned group is still running. Its pgid cannot
+      # be read from the dead leader, and it does not need to be: only an absent
+      # leader reaches this state, so the group cannot belong to a reused pid.
+      ;;
+    *) return "$state" ;;
+  esac
   kill -TERM -"$pid" 2>/dev/null || return 2
   while [ "$i" -lt 20 ]; do
     kill -0 -"$pid" 2>/dev/null || return 0
@@ -547,7 +586,7 @@ cmd_list() {
     adapter=$(read_adapter "$id" 2>/dev/null || echo '?')
     fm_procevent_source_lock_acquire "$id" || continue
     fm_procevent_claim_state_locked "$id"
-    case "$?" in 0) owner=live ;; 1) owner=none ;; *) owner=uncertain ;; esac
+    case "$?" in 0) owner=live ;; 1) owner=none ;; 3) owner=orphaned ;; *) owner=uncertain ;; esac
     fm_procevent_source_lock_release "$id"
     pending=$(fm_procevent_pending "$STATE" | grep -c "/$id\." || true)
     printf '%-28s %-12s %-10s %s\n' "$id" "$adapter" "$owner" "$pending"

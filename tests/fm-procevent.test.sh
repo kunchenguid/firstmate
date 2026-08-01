@@ -438,6 +438,65 @@ sleep 0.5
 for race_pid in "${race_pids[@]}"; do wait "$race_pid" 2>/dev/null || true; done
 pass "concurrent stale-claim replacement starts exactly one runner"
 
+# --- a crashed runner leader must not make its live child group look stale ---
+# The runner is its own process group leader, so SIGKILL on the leader alone
+# leaves the blocking source child running in that group. Classifying the
+# missing leader as stale would release ownership and start a second poller
+# against one canonical source, which for a destructive source means two
+# concurrent long polls racing on the same session. The surviving group must be
+# stopped before ownership can move.
+HG="$TMP_ROOT/hg"; new_home "$HG"
+ORPHAN_TRIGGER="$TMP_ROOT/orphan-trigger"
+ORPHAN_LOG="$TMP_ROOT/orphan-executions"
+pe_register "$HG" lavish orphan-src -- "$RACE_BLOCKER" "$ORPHAN_LOG" "$ORPHAN_TRIGGER" >/dev/null
+pe "$HG" reconcile >/dev/null
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" || fail "leader-crash fixture never claimed its source"
+wait_for "$ORPHAN_LOG" || fail "leader-crash fixture source never started"
+orphan_leader=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim")
+case "$orphan_leader" in ''|*[!0-9]*) fail "could not read the runner leader pid: $orphan_leader" ;; esac
+
+kill -KILL "$orphan_leader" 2>/dev/null || fail "could not kill the runner leader"
+for _ in $(seq 1 50); do kill -0 "$orphan_leader" 2>/dev/null || break; sleep 0.1; done
+kill -0 "$orphan_leader" 2>/dev/null && fail "the runner leader survived SIGKILL"
+kill -0 -"$orphan_leader" 2>/dev/null || fail "fixture invalid: the owned child group did not survive the leader"
+
+orphan_out=$(pe "$HG" reconcile)
+kill -0 -"$orphan_leader" 2>/dev/null \
+  && fail "reconcile left the crashed generation's process group alive: $orphan_out"
+sleep 0.5
+[ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" -le 2 ] \
+  || fail "reconcile started more than one replacement source: $(cat "$ORPHAN_LOG")"
+case "$orphan_out" in
+  *"started=1"*)
+    [ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
+      || fail "a replacement runner started without recording its own claim"
+    ;;
+  *"started=0"*)
+    [ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
+      || fail "refusing to replace must preserve the claim for retry: $orphan_out"
+    ;;
+  *) fail "unexpected reconcile result for a crashed leader: $orphan_out" ;;
+esac
+: > "$ORPHAN_TRIGGER"
+pe "$HG" retire orphan-src >/dev/null
+pass "a crashed runner leader never lets a live owned group be reclaimed as stale"
+
+# Counterexample: a genuinely dead generation - no leader and no surviving
+# group - must still be reclaimable, or crash recovery would deadlock.
+HG2="$TMP_ROOT/hg2"; new_home "$HG2"
+DEAD_TRIGGER="$TMP_ROOT/dead-gen-trigger"
+DEAD_LOG="$TMP_ROOT/dead-gen-executions"
+pe_register "$HG2" lavish dead-gen-src -- "$RACE_BLOCKER" "$DEAD_LOG" "$DEAD_TRIGGER" >/dev/null
+printf '%s\n%s\ndead-token\ndead-identity\n%s\n' "$HG2" 999999 "$HG2/state/procevent" \
+  > "$FM_PROCEVENT_CLAIM_ROOT/dead-gen-src.claim"
+chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/dead-gen-src.claim"
+dead_out=$(pe "$HG2" reconcile)
+assert_contains "$dead_out" "started=1" "a generation with no leader and no group is still reclaimable"
+wait_for "$DEAD_LOG" || fail "the replacement source never started for a truly dead generation"
+: > "$DEAD_TRIGGER"
+pe "$HG2" retire dead-gen-src >/dev/null
+pass "a truly dead generation with no surviving group is still safely reclaimed"
+
 HJ="$TMP_ROOT/hj"; new_home "$HJ"
 TORN_TRIGGER="$TMP_ROOT/torn-trigger"
 pe_register "$HJ" lavish torn-src -- "$BLOCKER" "$TORN_TRIGGER" "torn" >/dev/null

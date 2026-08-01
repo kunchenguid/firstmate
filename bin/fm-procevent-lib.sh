@@ -117,18 +117,44 @@ fm_procevent_claim_load_locked() {  # <source-id>
   FM_PROCEVENT_CLAIM_REG_DIR=$reg_dir
 }
 
-fm_procevent_pid_state() {  # <pid> <identity>: 0 live match, 1 stale, 2 uncertain
+# fm_procevent_group_alive <pid>
+# True while any process remains in the process group a runner leads. A runner
+# started by reconcile is its own group leader, so this is what distinguishes a
+# generation that is really gone from one whose leader died while its blocking
+# source child kept running.
+fm_procevent_group_alive() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 -"$1" 2>/dev/null
+}
+
+# fm_procevent_pid_state <pid> <identity>
+# 0 live match, 1 stale, 2 uncertain, 3 orphaned group.
+#
+# State 3 is the crash cut: the runner leader is gone, but its owned process
+# group still has members, so the old generation can still be consuming the
+# source. Treating that as stale would release ownership and let a second
+# poller start against one canonical source. Only the leader being absent
+# reaches state 3, which is also what makes signalling that group safe: if this
+# pid had been reused by an unrelated process the leader would be alive, so the
+# identity comparison below would classify it stale or uncertain and no group
+# signal would ever follow.
+fm_procevent_pid_state() {
   local pid=$1 expected=$2 actual
-  fm_pid_alive "$pid" || return 1
+  if ! fm_pid_alive "$pid"; then
+    fm_procevent_group_alive "$pid" && return 3
+    return 1
+  fi
   if actual=$(fm_pid_identity "$pid" 2>/dev/null); then
     [ "$actual" = "$expected" ] && return 0
     return 1
   fi
-  fm_pid_alive "$pid" || return 1
+  fm_pid_alive "$pid" || { fm_procevent_group_alive "$pid" && return 3; return 1; }
   return 2
 }
 
-fm_procevent_claim_state_locked() {  # <source-id>: 0 live, 1 stale/absent, 2 uncertain
+# <source-id>: 0 live, 1 stale/absent, 2 uncertain, 3 leader gone with its owned
+# process group still alive (see fm_procevent_pid_state).
+fm_procevent_claim_state_locked() {
   local claim
   claim=$(fm_procevent_claim_path "$1")
   [ -e "$claim" ] || return 1
@@ -152,7 +178,7 @@ fm_procevent_claim_acquire_locked() {
     fm_procevent_claim_state_locked "$id"
     claim_state=$?
     case "$claim_state" in
-      0|2) status=2 ;;
+      0|2|3) status=2 ;;
       1)
         if [ -f "$claim" ] && [ ! -L "$claim" ]; then
           old_home=$FM_PROCEVENT_CLAIM_HOME

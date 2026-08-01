@@ -420,8 +420,10 @@ Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `F
 Each claim binds its home and runner PID to a process identity and unique generation.
 Registration, acquisition, replacement, retirement, and generation-bound release are serialized at one machine-wide boundary per source.
 A live identity-matched owner is never displaced, and release removes only the exact generation the caller acquired.
-Retirement and orphan reconciliation signal a runner process group only while its recorded process identity still matches.
-If identity cannot be established for a live PID, the operation preserves the registration and claim for safe retry.
+Retirement and orphan reconciliation signal a runner process group only while its recorded process identity still matches, or when the recorded leader is gone and only its own owned group survives.
+A runner leads its own process group, so a claim counts as reclaimable only when that whole generation is gone: a crashed leader whose group still has members is not stale, and reconcile stops that surviving group and releases its generation before starting any replacement.
+If identity cannot be established for a live PID, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
+A live PID whose identity no longer matches is a reused PID, so it is treated as stale and its process group is never signalled.
 
 Supported secondmate retirement preflights each target home's bounded `sweep-home` command before destructive teardown, snapshots its registrations outside the target, then runs the sweep at that home's final deletion or return boundary.
 If deletion or return fails, teardown restores those registrations and reconciles them before returning the refusal.
