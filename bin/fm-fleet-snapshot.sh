@@ -452,7 +452,10 @@ task_json_lines() {
     # multiplex many concerns onto one stream, so activity on one concern must
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
-    # open decision surfacing.
+    # open decision surfacing. `run-step-degraded` is deliberately absent from the
+    # live-activity sources: it is a remembered step the reader could not
+    # re-confirm, which is enough to keep a crew provably working for wedge triage
+    # but never enough to clear a captain decision.
     open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \

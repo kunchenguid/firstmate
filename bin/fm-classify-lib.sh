@@ -340,7 +340,13 @@ crew_absorb_class() {  # <id>
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    # run-step-degraded is a run-step the reader could not re-confirm because the
+    # no-mistakes lookup did not complete, replayed from its own recent record and
+    # only while the crew's endpoint is still alive. It is positive working
+    # evidence for the same reason run-step is - a run WAS observed executing -
+    # so a saturated daemon no longer turns a validating crew into a wedge
+    # suspect. fm-crew-state.sh bounds how long it may stand in.
+    case "$src" in run-step|run-step-degraded|pane) printf 'working'; return ;; esac
   fi
   printf 'none'
 }

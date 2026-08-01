@@ -26,8 +26,15 @@
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      the same line of history). It also matches in two cases the pipeline's own
+#      commits create, both narrowed to the run that is demonstrably current:
+#      an ACTIVELY-EXECUTING run whose head the tip has advanced past (it
+#      authored that advance), and a LIVE run answered for this branch whose head
+#      is not an object in this worktree at all (the pipeline owns the branch and
+#      commits in a copy this worktree has never fetched). Local work that
+#      advanced past a parked or terminal run head, a rewritten or diverged tip,
+#      and an unresolvable sha read out of the historical runs listing all still
+#      invalidate attribution. nm_head_attributable owns the exact rule.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -47,8 +54,21 @@
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
-# Read-only and side-effect free. Always exits 0 on a successful read regardless
-# of state; exit 2 only on a usage error (no id).
+# A run LOOKUP FAILURE is not a run ABSENCE. The bounded no-mistakes call can
+# fail to complete - it times out under a saturated daemon, errors, or cannot be
+# bounded at all - and that used to be indistinguishable from "this branch has no
+# run", collapsing a crew that was demonstrably mid-validation to unknown · none.
+# Because fm-classify-lib.sh's crew_is_provably_working() reads this same line, a
+# working crew stopped being provably working exactly during the longest phase of
+# a run, and every idle repaint raised a fresh possible-wedge escalation. A
+# failure now degrades to the LAST KNOWN run-step (see the run-step record below)
+# and reports source `run-step-degraded`; only a completed lookup that found no
+# run falls through to the pane/log sources.
+#
+# Writes exactly one thing: state/<id>.run-step, the last known run-step record
+# that makes that degrade possible (runstep_record_write below is the only
+# writer). Every other read is side-effect free. Always exits 0 on a successful
+# read regardless of state; exit 2 only on a usage error (no id).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,6 +98,16 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
+# How long a recorded run-step stays usable as the degraded answer after the run
+# lookup starts failing. This is the bound that keeps the degrade from becoming a
+# worse bug than the one it fixes: a permanently broken no-mistakes daemon would
+# otherwise let every idle crew claim it is still validating forever, and a real
+# wedge would never surface again. Past this age the record is ignored and the
+# crew falls through to the pane/log sources exactly as it does today. 0 disables
+# the degrade entirely, restoring the strict "cannot re-confirm it, do not claim
+# it" reading for a home that wants it.
+FM_CREW_STATE_DEGRADED_MAX_AGE=${FM_CREW_STATE_DEGRADED_MAX_AGE:-900}
+case "$FM_CREW_STATE_DEGRADED_MAX_AGE" in ''|*[!0-9]*) FM_CREW_STATE_DEGRADED_MAX_AGE=900 ;; esac
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -166,6 +196,48 @@ crew_busy_verdict() {  # <target>
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
+# --- last known run-step record ---------------------------------------------
+# state/<id>.run-step: one line, "<epoch>\t<state>\t<detail>", atomically
+# replaced on every successful run-derived verdict and read back ONLY when a
+# later lookup could not complete. It is what lets a lookup FAILURE answer
+# "still validating, lookup unavailable" instead of "unknown", without ever
+# inventing evidence: nothing is degraded for a crew that was never seen
+# validating in the first place, so a crew that genuinely stopped before any run
+# has no record to fall back on and still surfaces as a wedge suspect.
+RUNSTEP_RECORD="$STATE/$ID.run-step"
+
+# Record a run-derived verdict. Never fails the read: a state dir that is
+# read-only or already torn down just leaves the previous record in place.
+runstep_record_write() {  # <state> <detail>
+  local tmp flat
+  case "$1" in working|parked|done|failed) ;; *) return 0 ;; esac
+  [ -d "$STATE" ] || return 0
+  flat=$(printf '%s' "${2:-}" | tr '\t\n' '  ')
+  tmp="$RUNSTEP_RECORD.$$.tmp"
+  if printf '%s\t%s\t%s\n' "$(date +%s)" "$1" "$flat" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$RUNSTEP_RECORD" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+  return 0
+}
+
+# Print "<state>\t<detail>\t<age-seconds>" for a record still inside the
+# freshness bound; return 1 for a missing, malformed, or expired record.
+runstep_record_read() {
+  local ts st detail now age
+  [ -f "$RUNSTEP_RECORD" ] || return 1
+  IFS=$'\t' read -r ts st detail < "$RUNSTEP_RECORD" 2>/dev/null || return 1
+  case "${ts:-}" in ''|*[!0-9]*) return 1 ;; esac
+  case "${st:-}" in working|parked|done|failed) ;; *) return 1 ;; esac
+  now=$(date +%s)
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  age=$(( now - ts ))
+  [ "$age" -ge 0 ] || return 1
+  [ "$age" -lt "$FM_CREW_STATE_DEGRADED_MAX_AGE" ] || return 1
+  printf '%s\t%s\t%s' "$st" "${detail:-}" "$age"
+}
+
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 
 trim() {
@@ -183,7 +255,12 @@ strip_quotes() {
   trim "$s"
 }
 
-# Bounded no-mistakes call in the worktree; stdout only, never fails the script.
+# Bounded no-mistakes call in the worktree; stdout only, never fails the script
+# (there is no `set -e`). The EXIT STATUS is deliberately propagated rather than
+# swallowed: 124 from a timeout, or any other non-zero, is what tells the caller
+# the lookup could not COMPLETE, which must never be read as "this branch has no
+# run". With no bounding mechanism available at all the call is not made, and 127
+# reports that same inability rather than a silent empty answer.
 HAVE_TIMEOUT=none
 if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
@@ -191,10 +268,10 @@ elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
 fi
 nm_run() {  # <args...>
   case "$HAVE_TIMEOUT" in
-    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    *)        true ;;
+    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    *)        return 127 ;;
   esac
 }
 
@@ -352,10 +429,14 @@ nm_ci_checks_state() {
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
-  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
+# when the branch has no attributable run in the listing.
+#
+# A PURE PARSER over a listing the caller already captured. The call itself is
+# made by the caller so a listing that could not be fetched is classified as a
+# lookup failure there; parsing an empty string here would otherwise report the
+# same "no run for this branch" as a listing that genuinely lacks the branch.
+nm_runs_status_for_branch() {  # <branch> <runs-listing>
+  local branch=$1 out=${2:-} row st rest br sha authoring
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -368,11 +449,13 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+      # Same code-identity rule as axi status, including the fix-round case: an
+      # actively-executing run authors its own commits, so a tip that advanced
+      # past this row's sha is still that run's work.
+      case "$st" in running|fixing) authoring=1 ;; *) authoring=0 ;; esac
+      # Never branch-scoped: this is the historical listing, not an answer about
+      # the worktree's current branch, so an unresolvable sha stays rejected.
+      nm_head_attributable "$sha" "$authoring" 0 || continue
       printf '%s' "$st"
       return 0
     fi
@@ -384,41 +467,107 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rules:
-#   - missing/empty head field: cannot bind; reject the run
-#   - equal commits (short or full SHA): match
-#   - worktree HEAD is an ancestor of run head: match (pipeline fix commits on
-#     the same history advanced the run tip)
-#   - run head is a strict ancestor of worktree HEAD: no match (local work
-#     advanced outside the run)
-#   - diverged / run head not in this worktree: no match (rewritten branch tip)
-nm_run_head_matches_worktree() {
-  local run_head local_full run_full
-  run_head=$(strip_quotes "$(nm_field head)")
-  [ -n "$run_head" ] || return 1
-  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
-  [ "$run_full" = "$local_full" ] && return 0
+# How a run's recorded head <sha> relates to this worktree's HEAD. One owner for
+# the commit-relationship test both the `axi status` head field and the coarse
+# runs-list short sha are judged by. Prints exactly one token:
+#   equal       the run head IS the worktree HEAD
+#   run-ahead   worktree HEAD is an ancestor of the run head - pipeline fix
+#               commits advanced the run tip past what this worktree has read
+#   run-behind  the run head is a strict ancestor of the worktree HEAD - the tip
+#               advanced past the sha this run recorded
+#   unresolved  the sha is not an object in this worktree at all, so no
+#               relationship can be computed (the pipeline is committing in a
+#               copy this worktree has never fetched from)
+#   missing     no sha to judge, or this worktree has no readable HEAD
+#   diverged    resolvable but on neither side of the worktree HEAD - a
+#               rewritten branch tip
+nm_head_relation() {  # <sha>
+  local run_head=${1:-} local_full run_full
+  [ -n "$run_head" ] || { printf 'missing'; return; }
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || { printf 'missing'; return; }
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || { printf 'unresolved'; return; }
+  if [ "$run_full" = "$local_full" ]; then printf 'equal'; return; fi
   if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
-    return 0
+    printf 'run-ahead'; return
   fi
-  return 1
+  if git -C "$WT" merge-base --is-ancestor "$run_full" "$local_full" 2>/dev/null; then
+    printf 'run-behind'; return
+  fi
+  printf 'diverged'
 }
 
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
-nm_coarse_head_matches_worktree() {  # <short-sha>
-  local run_head=$1 local_full run_full
-  [ -n "$run_head" ] || return 1
-  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
-  [ "$run_full" = "$local_full" ] && return 0
-  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
-    return 0
+# 0 when a run recorded at <sha> may be attributed to this worktree's current
+# code. Branch match is a precondition (caller). <authoring> is 1 only while the
+# run sits in an actively-executing step - the states in which the pipeline
+# commits its OWN fixes. <branch-scoped> is 1 only for an answer the CLI gave for
+# THIS worktree's current branch, never for a row read out of the historical
+# runs listing.
+#
+# `run-behind` is the fix-round case. When a review finding is answered
+# `--action fix`, the pipeline commits that fix and the branch tip advances past
+# the sha the run recorded; rejecting the row outright made the run that was
+# CURRENTLY authoring those commits stop matching its own worktree, and the crew
+# read as unknown for the rest of the fix round. An actively-executing run is the
+# author of that advance and keeps attribution. A PARKED run is by definition
+# waiting on a response and commits nothing, so a tip that advanced past it is
+# local work outside the run and must still invalidate - as must a terminal run.
+#
+# `unresolved` is the pipeline-owned case, and is NOT the same evidence as a
+# rewritten tip. While the pipeline owns the branch it commits in its own copy,
+# so the head it reports is simply an object this worktree has never fetched;
+# refusing it made a crew parked at a live fix_review gate read as having no run
+# at all. Only a LIVE run answered for THIS branch earns that benefit: the
+# historical runs listing has no notion of "current", so an unresolvable sha
+# there stays rejected, and a terminal run's unseen head is evidence of nothing.
+# `missing` and `diverged` are always rejected - an absent sha cannot bind, and a
+# resolvable sha on neither side of HEAD is a genuinely rewritten branch.
+nm_head_attributable() {  # <sha> <authoring:0|1> <branch-scoped-live:0|1>
+  case "$(nm_head_relation "$1")" in
+    equal|run-ahead) return 0 ;;
+    run-behind)      [ "${2:-0}" = 1 ] && return 0; return 1 ;;
+    unresolved)      [ "${3:-0}" = 1 ] && return 0; return 1 ;;
+    *)               return 1 ;;
+  esac
+}
+
+# 1 when the `axi status` run in $RUN_OUT is in an actively-executing step and so
+# able to author pipeline fix commits; 0 for a parked, terminal, or unrecognized
+# run. A run parked at a gate reports a plain `running` status in some shapes, so
+# the gate markers are checked before the status word.
+nm_run_is_authoring() {
+  local outcome status
+  outcome=$(strip_quotes "$(nm_field outcome)")
+  [ -z "$outcome" ] || { printf '0'; return; }
+  if printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*awaiting_agent:'; then
+    printf '0'; return
   fi
-  return 1
+  if nm_has_gate; then printf '0'; return; fi
+  status=$(strip_quotes "$(nm_field status)")
+  case "$status" in
+    awaiting_approval|fix_review) printf '0' ;;
+    running|fixing|ci)            printf '1' ;;
+    *)                            printf '0' ;;
+  esac
+}
+
+# 1 when the `axi status` run in $RUN_OUT has not reached a terminal result, so
+# it is still this branch's current run whether it is executing or parked at a
+# gate. Broader than nm_run_is_authoring on purpose: a run parked at fix_review
+# commits nothing right now but is emphatically still live.
+nm_run_is_live() {
+  local outcome status
+  outcome=$(strip_quotes "$(nm_field outcome)")
+  [ -z "$outcome" ] || { printf '0'; return; }
+  status=$(strip_quotes "$(nm_field status)")
+  case "$status" in completed|failed|cancelled) printf '0' ;; *) printf '1' ;; esac
+}
+
+# 0 if the axi-status run's head field is attributable to this worktree. The
+# caller has already established this answer is for the crew's own branch, which
+# is what makes it branch-scoped for the pipeline-owned rule above.
+nm_run_head_matches_worktree() {
+  nm_head_attributable "$(strip_quotes "$(nm_field head)")" \
+    "$(nm_run_is_authoring)" "$(nm_run_is_live)"
 }
 
 HAVE_RUN=0
@@ -428,11 +577,25 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+# LOOKUP_FAILED=1 means a bounded no-mistakes call could not COMPLETE - it timed
+# out under a saturated daemon, errored, or could not be bounded at all. That is
+# emphatically NOT the same as a completed lookup that found no run for this
+# branch, and only a failure may degrade to the recorded run-step below. A
+# genuine absence still falls through to the pane and status-log sources.
+LOOKUP_FAILED=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
-  if [ -n "$RUN_OUT" ]; then
+  nm_rc=$?
+  # Empty stdout is a failure, not an absence: `axi status` answers a branch with
+  # no run of its own with some OTHER branch's run as informational display (the
+  # cross-branch case the coarse fallback below exists for), so it has no
+  # "nothing to report" empty answer to confuse this with.
+  if [ "$nm_rc" != 0 ] || [ -z "$RUN_OUT" ]; then
+    RUN_OUT=""
+    LOOKUP_FAILED=1
+  else
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
@@ -440,14 +603,20 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
       # attribution missed) - try the coarse fallback.
-      # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
+      # Deliberately reached only when the primary call ANSWERED: a timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
-        HAVE_RUN=1
-        RUN_SOURCE=coarse
+      runs_out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
+      runs_rc=$?
+      if [ "$runs_rc" != 0 ] || [ -z "$runs_out" ]; then
+        LOOKUP_FAILED=1
+      else
+        COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH" "$runs_out")
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+        fi
       fi
     fi
   fi
@@ -568,14 +737,22 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # Remember this verdict so a later lookup that cannot complete degrades to it
+  # instead of collapsing to unknown. Recorded from the authoritative run-step
+  # path only, so nothing but a genuinely observed run is ever replayed.
+  runstep_record_write "$RUN_STATE" "$RUN_DETAIL"
+
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
-# The run-step path above already handled any crew with a run, regardless of pane
-# liveness, so a finished-but-pane-closed crew never reaches here. Down here there
-# is no run to consult, so a dead/unreadable target means the crew is gone: report
-# unknown rather than trusting a possibly-stale status log as the current state.
+# The run-step path above already handled any crew with an attributed run,
+# regardless of pane liveness, so a finished-but-pane-closed crew never reaches
+# here. Down here either the lookup completed and found no run, or it could not
+# complete at all; in both cases there is no live run to consult, so a
+# dead/unreadable target means the crew is gone: report unknown rather than
+# trusting a possibly-stale status log - or a remembered run-step - as the
+# current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
@@ -583,14 +760,44 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # state is not meaningful for them; read their state from the status log only.
 # Only an exact busy verdict reports working here, and only an exact idle
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
-# unverified semantic state remains unknown.
+# unverified semantic state remains unknown - deferred rather than emitted here
+# only so the degraded run-step below can answer first; it still outranks the
+# status-log fallback exactly as before.
+BUSY_STATE=""
+BUSY_VERDICT=""
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
-    idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    idle) BUSY_STATE=idle ;;
+    *)    BUSY_STATE=unknown ;;
   esac
+fi
+
+# The run lookup could not complete, and this crew has a recent run-step on
+# record: report that last known step, degraded, rather than unknown. Bounded by
+# FM_CREW_STATE_DEGRADED_MAX_AGE so a permanently unreachable daemon stops
+# absorbing wedge suspicion instead of hiding it forever, and never reached at
+# all on a completed lookup that simply found no run.
+#
+# Placement is the safety property. It sits BELOW the endpoint checks and the
+# exact busy verdict, so live positive evidence - a gone endpoint proving the
+# crew stopped, or a busy harness proving it is working right now - always
+# outranks a remembered step. It sits ABOVE the unreadable-harness and
+# status-log fallbacks, which is the whole point: an observed run-step, even one
+# that could not be re-confirmed this poll, is better current-state evidence
+# than an append-only event log.
+if [ "$LOOKUP_FAILED" = 1 ]; then
+  if DEGRADED=$(runstep_record_read); then
+    IFS=$'\t' read -r deg_state deg_detail deg_age <<< "$DEGRADED"
+    deg_line="run lookup unavailable"
+    [ -n "$deg_detail" ] && deg_line="$deg_detail${SEP}$deg_line"
+    emit "$deg_state" run-step-degraded "$deg_line (last known ${deg_age}s ago)"
+  fi
+fi
+
+if [ "$BUSY_STATE" = unknown ]; then
+  emit unknown pane "harness state unavailable ($BUSY_VERDICT)"
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real

@@ -62,6 +62,12 @@ make_fakebin() {  # <dir> -> echoes fakebin path
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
+# A lookup that cannot COMPLETE, as opposed to one that completes and finds no
+# run. FM_FAKE_NM_SLEEP outlasts the helper's own bound so the REAL timeout
+# wrapper kills the call; FM_FAKE_NM_RC returns a timeout's exit status directly
+# for the cases that only need the failure, not the wall-clock wait.
+[ -n "${FM_FAKE_NM_SLEEP:-}" ] && sleep "$FM_FAKE_NM_SLEEP"
+[ "${FM_FAKE_NM_RC:-0}" = 0 ] || exit "${FM_FAKE_NM_RC}"
 case "${1:-}" in
   axi)
     shift
@@ -149,6 +155,13 @@ new_case() {  # <name> -> echoes case dir with an empty state/
   printf '%s\n' "$d"
 }
 
+arm_busy_record() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+}
+
 arm_idle_record() {  # <state-dir> <id>
   local state=$1 id=$2 gen
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
@@ -170,8 +183,13 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_NM_RC=0
+  FM_FAKE_NM_SLEEP=""
+  FM_CREW_STATE_DEGRADED_MAX_AGE=""
+  FM_CREW_STATE_NM_TIMEOUT=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_NM_RC FM_FAKE_NM_SLEEP FM_CREW_STATE_DEGRADED_MAX_AGE FM_CREW_STATE_NM_TIMEOUT
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -262,6 +280,42 @@ steps[3]{step,status,findings,duration_ms}:
   intent,completed,0,0
   review,fix_review,1,0
   test,pending,0,0
+EOF
+}
+
+# The pipeline owns the branch and is committing in its own copy, so the head it
+# reports is not an object this crew's worktree has ever seen. Shape copied from
+# a live `axi status` observed 2026-08-01 on a run parked at fix_review.
+run_pipeline_owned_fix_review() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  awaiting_agent: parked 2m6s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings: 3 awaiting
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,10
+    rebase,completed,0,2966
+    review,fix_review,3,2004104
+    test,pending,0,0
+branch_sync:
+  state: pipeline_owned
+  changed: false
+EOF
+}
+
+run_terminal_unresolvable_head() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: passed
 EOF
 }
 
@@ -1309,6 +1363,367 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# ---------------------------------------------------------------------------
+# (l) A run lookup that could not COMPLETE must not read like a run ABSENCE.
+# Regression pair for the 2026-07-28 tsa-451-mc-compute-budget observation: the
+# helper reported working/run-step/validating, then a saturated no-mistakes
+# daemon made the bounded query exceed its timeout and the crew flipped to
+# unknown/none for ~10 minutes while it was demonstrably mid-sweep. Because
+# crew_is_provably_working() reads this same line, the watcher could no longer
+# absorb the stale wake and re-escalated a possible wedge on every idle repaint.
+
+# A crew whose state is read once while validating, then read again while the
+# lookup times out, stays at its last known step instead of going unknown.
+seed_known_run_step() {  # <case-dir> <id> <branch>
+  local out
+  FM_FAKE_AXI_STATUS="$(run_running "$3")"
+  out=$(run_crew_state "$1" "$2")
+  assert_contains "$out" "source: run-step" "seed read must establish a real run-step"
+}
+
+test_lookup_timeout_degrades_to_last_known_run_step() {
+  reset_fakes
+  local d out; d=$(new_case lookup-timeout-degrades)
+  make_repo_on_branch "$d/wt" fm/feat-degraded
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/degraded.meta" "window=fm:fm-degraded" "worktree=$d/wt" "kind=ship" "harness=claude"
+  seed_known_run_step "$d" degraded fm/feat-degraded
+  # Now the daemon stops answering within the bound, and the pane looks idle -
+  # exactly the shape that used to collapse to unknown/none.
+  FM_FAKE_NM_RC=124
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" degraded
+  out=$(run_crew_state "$d" degraded)
+  assert_not_contains "$out" "state: unknown" "a timed-out lookup must not read as unknown"
+  assert_contains "$out" "state: working" "degrades to the last known run-step state"
+  assert_contains "$out" "source: run-step-degraded" "degraded answer is labelled as such"
+  assert_contains "$out" "run lookup unavailable" "degraded answer names why it is degraded"
+  assert_contains "$out" "validating (running)" "degraded answer replays the last known step"
+  pass "a timed-out run lookup degrades to the last known run-step, not unknown"
+}
+
+# The same property through the REAL timeout wrapper rather than a canned exit
+# code, so the bound itself is proven to produce the degraded path.
+test_real_timeout_bound_degrades_to_last_known_run_step() {
+  reset_fakes
+  local d out; d=$(new_case lookup-timeout-real)
+  make_repo_on_branch "$d/wt" fm/feat-realtimeout
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/realtimeout.meta" "window=fm:fm-realtimeout" "worktree=$d/wt" "kind=ship" "harness=claude"
+  seed_known_run_step "$d" realtimeout fm/feat-realtimeout
+  FM_CREW_STATE_NM_TIMEOUT=1
+  FM_FAKE_NM_SLEEP=5
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" realtimeout
+  out=$(run_crew_state "$d" realtimeout)
+  assert_contains "$out" "source: run-step-degraded" "a genuinely killed query degrades"
+  assert_contains "$out" "state: working" "genuinely killed query keeps the last known state"
+  pass "the real timeout bound produces the degraded run-step, not unknown"
+}
+
+# SAFETY: the degrade must never invent evidence. A crew that stopped before any
+# run was ever observed has nothing on record and must still surface.
+test_lookup_timeout_without_known_run_step_still_surfaces() {
+  reset_fakes
+  local d out; d=$(new_case lookup-timeout-no-record)
+  make_repo_on_branch "$d/wt" fm/feat-norecord
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/norecord.meta" "window=fm:fm-norecord" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_NM_RC=124
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" norecord
+  out=$(run_crew_state "$d" norecord)
+  assert_not_contains "$out" "run-step-degraded" "no recorded step means nothing to degrade to"
+  assert_contains "$out" "state: unknown" "a stopped crew with no observed run still surfaces"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working norecord \
+    && fail "a crew that never validated was treated as provably working on a failed lookup"
+  pass "a failed lookup with no recorded run-step still surfaces the crew"
+}
+
+# SAFETY: the degrade is time-bounded, so a permanently unreachable daemon stops
+# standing in for evidence instead of hiding a real wedge forever.
+test_degraded_run_step_expires() {
+  reset_fakes
+  local d out; d=$(new_case degraded-expires)
+  make_repo_on_branch "$d/wt" fm/feat-expires
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/expires.meta" "window=fm:fm-expires" "worktree=$d/wt" "kind=ship" "harness=claude"
+  seed_known_run_step "$d" expires fm/feat-expires
+  FM_FAKE_NM_RC=124
+  FM_FAKE_BUSY=0
+  FM_CREW_STATE_DEGRADED_MAX_AGE=0
+  arm_idle_record "$d/state" expires
+  out=$(run_crew_state "$d" expires)
+  assert_not_contains "$out" "run-step-degraded" "an expired record must not be replayed"
+  assert_contains "$out" "state: unknown" "an expired record surfaces the crew again"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working expires \
+    && fail "an expired degraded record was still treated as provably working"
+  pass "the degraded run-step expires instead of absorbing wedge suspicion forever"
+}
+
+# SAFETY: a dead endpoint is positive evidence the crew stopped, and must keep
+# outranking a recent memory of it validating.
+test_degraded_run_step_not_used_when_endpoint_gone() {
+  reset_fakes
+  local d out; d=$(new_case degraded-endpoint-gone)
+  make_repo_on_branch "$d/wt" fm/feat-gone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/gone.meta" "window=fm:fm-gone" "worktree=$d/wt" "kind=ship" "harness=claude"
+  seed_known_run_step "$d" gone fm/feat-gone
+  FM_FAKE_NM_RC=124
+  FM_FAKE_TMUX_MISSING=1
+  out=$(run_crew_state "$d" gone)
+  assert_not_contains "$out" "run-step-degraded" "a gone endpoint must not replay a recorded step"
+  assert_contains "$out" "state: unknown" "a gone endpoint still reports unknown"
+  assert_contains "$out" "backend target gone" "the gone endpoint is the reported reason"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working gone \
+    && fail "a crew whose endpoint is gone was treated as provably working"
+  pass "a gone endpoint outranks the recorded run-step"
+}
+
+# SAFETY: absence is not failure. A lookup that COMPLETES and finds no run for
+# this branch must fall through to the live sources, never replay the record.
+test_completed_lookup_without_run_does_not_degrade() {
+  reset_fakes
+  local d out; d=$(new_case absence-not-failure)
+  make_repo_on_branch "$d/wt" fm/feat-absent
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/absent.meta" "window=fm:fm-absent" "worktree=$d/wt" "kind=ship" "harness=claude"
+  seed_known_run_step "$d" absent fm/feat-absent
+  # The CLI answers normally; the run for this branch is simply gone from both
+  # the bare status answer and the runs list.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  running    fm/other-crew aaaaaaa  2026-08-01 22:10
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" absent
+  out=$(run_crew_state "$d" absent)
+  assert_not_contains "$out" "run-step-degraded" "a completed lookup must not degrade"
+  assert_contains "$out" "state: unknown" "a completed lookup with no run falls through"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working absent \
+    && fail "a completed lookup that found no run was treated as provably working"
+  pass "a completed lookup that finds no run never degrades to the recorded step"
+}
+
+# SAFETY: live positive evidence outranks a remembered step. A harness that is
+# busy right now is better current-state evidence than any record.
+test_busy_pane_outranks_degraded_record() {
+  reset_fakes
+  local d out; d=$(new_case degraded-vs-busy)
+  make_repo_on_branch "$d/wt" fm/feat-degvbusy
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/degvbusy.meta" "window=fm:fm-degvbusy" "worktree=$d/wt" "kind=ship" "harness=claude"
+  # Last observed step was terminal, so a replayed record would say done.
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-degvbusy)"
+  out=$(run_crew_state "$d" degvbusy)
+  assert_contains "$out" "state: done" "seed read must record the terminal step"
+  FM_FAKE_NM_RC=124
+  FM_FAKE_BUSY=1
+  arm_busy_record "$d/state" degvbusy
+  out=$(run_crew_state "$d" degvbusy)
+  assert_contains "$out" "source: pane" "a busy harness outranks the recorded step"
+  assert_contains "$out" "state: working" "a busy harness reads working, not the remembered done"
+  pass "a live busy harness outranks the recorded run-step"
+}
+
+# The degraded step still outranks the append-only status log, which is the
+# reason this reader exists: a resolved gate leaves its needs-decision line
+# behind forever, and a remembered run-step must not lose to it.
+test_degraded_record_outranks_stale_status_log() {
+  reset_fakes
+  local d out; d=$(new_case degraded-vs-log)
+  make_repo_on_branch "$d/wt" fm/feat-degvlog
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/degvlog.meta" "window=fm:fm-degvlog" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: review gate\n' > "$d/state/degvlog.status"
+  seed_known_run_step "$d" degvlog fm/feat-degvlog
+  FM_FAKE_NM_RC=124
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" degvlog
+  out=$(run_crew_state "$d" degvlog)
+  assert_contains "$out" "source: run-step-degraded" "the recorded step outranks the status log"
+  assert_contains "$out" "state: working" "a resolved gate's stale line must not resurface as parked"
+  pass "the degraded run-step outranks a stale status-log line"
+}
+
+# ---------------------------------------------------------------------------
+# (n) Pipeline-owned head: the run reports a head this worktree cannot resolve.
+# Verified live 2026-08-01 on task arkrh-corpus-types-unbound-unconstructible:
+# `axi status` in the crew's own worktree returned that crew's own branch,
+# status running, parked at fix_review with 3 findings and
+# `branch_sync.state: pipeline_owned` - but the head it reported was not an
+# object in the worktree at all (`git rev-parse --verify` failed: "malformed
+# object name"), because the pipeline commits in its own copy. This is neither
+# recorded cause: the lookup completed in under a second, and the sha was not
+# behind the tip, it was unresolvable. A head we cannot resolve is not the same
+# evidence as a head that diverged.
+
+# A non-resolvable sha of the right shape. Deliberately not an object anywhere.
+UNRESOLVABLE_HEAD=1c17405cdeadbeefdeadbeefdeadbeefdeadbeef
+
+test_pipeline_owned_unresolvable_head_attributes() {
+  reset_fakes
+  local d out; d=$(new_case pipeline-owned-head)
+  make_repo_on_branch "$d/wt" fm/feat-pipeowned
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/pipeowned.meta" "window=fm:fm-pipeowned" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  git -C "$d/wt" rev-parse --verify -q "$UNRESOLVABLE_HEAD^{commit}" >/dev/null 2>&1 \
+    && fail "fixture head must not resolve in the worktree"
+  FM_FAKE_RUN_HEAD="$UNRESOLVABLE_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_fix_review fm/feat-pipeowned)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" pipeowned
+  out=$(run_crew_state "$d" pipeowned)
+  assert_contains "$out" "source: run-step" "a live run whose head this worktree cannot see still attributes"
+  assert_contains "$out" "state: parked" "the pipeline-owned run reports its real gate"
+  assert_contains "$out" "parked at review" "the gate is named"
+  assert_contains "$out" "3 finding(s)" "the gate finding count survives"
+  pass "a live run whose head the worktree cannot resolve still attributes to its branch"
+}
+
+# SAFETY: only a LIVE run may claim an unresolvable head. A finished run whose
+# head this worktree never saw is not evidence of anything current.
+test_terminal_unresolvable_head_still_rejected() {
+  reset_fakes
+  local d out; d=$(new_case terminal-unresolvable-head)
+  make_repo_on_branch "$d/wt" fm/feat-termunres
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/termunres.meta" "window=fm:fm-termunres" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: stage 2 implementation in progress\n' > "$d/state/termunres.status"
+  FM_FAKE_RUN_HEAD="$UNRESOLVABLE_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_terminal_unresolvable_head fm/feat-termunres)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" termunres
+  out=$(run_crew_state "$d" termunres)
+  assert_not_contains "$out" "source: run-step" "a finished run with an unseen head must not attribute"
+  assert_contains "$out" "source: status-log" "falls back to the current-state sources"
+  pass "a terminal run with an unresolvable head is still rejected"
+}
+
+# SAFETY: the runs LISTING is a historical log with no notion of "current", so an
+# unresolvable sha there stays too weak to attribute even on a running row. Only
+# the branch-scoped `axi status` answer earns that trust.
+test_runs_list_unresolvable_head_still_rejected() {
+  reset_fakes
+  local d out; d=$(new_case coarse-unresolvable-head)
+  make_repo_on_branch "$d/wt" fm/feat-coarseunres
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarseunres.meta" "window=fm:fm-coarseunres" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: stage 2 implementation in progress\n' > "$d/state/coarseunres.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-coarseunres ${UNRESOLVABLE_HEAD}  2026-08-01 22:05
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" coarseunres
+  out=$(run_crew_state "$d" coarseunres)
+  assert_not_contains "$out" "source: run-step" "a historical row with an unseen sha must not attribute"
+  assert_contains "$out" "source: status-log" "falls back to the current-state sources"
+  pass "an unresolvable sha in the runs listing is still rejected"
+}
+
+# crew_is_provably_working end-to-end: the degraded read is what the watcher's
+# absorb path actually consumes, so prove the predicate flips back to true.
+test_provably_working_via_degraded_run_step() {
+  reset_fakes
+  local d; d=$(new_case provably-working-degraded)
+  make_repo_on_branch "$d/wt" fm/feat-provable-degraded
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/provdeg.meta" "window=fm:fm-provdeg" "worktree=$d/wt" "kind=ship" "harness=claude"
+  seed_known_run_step "$d" provdeg fm/feat-provable-degraded
+  FM_FAKE_NM_RC=124
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" provdeg
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working provdeg \
+    || fail "a validating crew whose lookup timed out was not treated as provably working"
+  pass "crew_is_provably_working absorbs a validating crew whose run lookup timed out"
+}
+
+# ---------------------------------------------------------------------------
+# (m) Fix-round attribution: a run that advances the tip with its OWN commits.
+# Regression pair for the 2026-08-01 tsa-396-postgres-flow-sources observation:
+# a review finding was answered `--action fix`, the pipeline committed the fix
+# and the branch head advanced past the sha the run had recorded, and the crew
+# immediately read unknown/none. The code-identity skip is right for a stale or
+# rewritten run and wrong for the run currently authoring those commits.
+
+test_fix_round_advanced_tip_attributes_via_runs_list() {
+  reset_fakes
+  local d base_short out; d=$(new_case fix-round-coarse)
+  make_repo_on_branch "$d/wt" fm/feat-fixround
+  base_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  # The pipeline commits its own fix; the tip advances past the recorded sha.
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix commit'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/fixround.meta" "window=fm:fm-fixround" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-01 22:10
+  running    fm/feat-fixround ${base_short}  2026-08-01 22:05
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" fixround
+  out=$(run_crew_state "$d" fixround)
+  assert_contains "$out" "source: run-step" "an active run that advanced the tip keeps attribution"
+  assert_contains "$out" "state: working" "a mid-fix-round crew reads as working"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working fixround \
+    || fail "a crew mid-fix-round was not treated as provably working"
+  pass "an active run that advanced the tip with its own fix commits still attributes"
+}
+
+test_fix_round_advanced_tip_attributes_via_axi_status() {
+  reset_fakes
+  local d base_head out; d=$(new_case fix-round-axi)
+  make_repo_on_branch "$d/wt" fm/feat-fixround-axi
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix commit'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/fixaxi.meta" "window=fm:fm-fixaxi" "worktree=$d/wt" "kind=ship" "harness=claude"
+  # The run still reports the head it recorded before committing the fix.
+  FM_FAKE_RUN_HEAD="$base_head"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-fixround-axi)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" fixaxi
+  out=$(run_crew_state "$d" fixaxi)
+  assert_contains "$out" "source: run-step" "an active run behind its own fix commit keeps attribution"
+  assert_contains "$out" "validating (fixing)" "the fix round reports its own step"
+  pass "an active axi-status run behind its own fix commits still attributes"
+}
+
+# SAFETY: only an ACTIVELY-EXECUTING run may claim an advanced tip. A terminal
+# run whose branch moved on afterwards is exactly the stale run the skip exists
+# for, and must still be rejected.
+test_terminal_run_behind_advanced_tip_still_invalidates() {
+  reset_fakes
+  local d base_short out; d=$(new_case terminal-behind-tip)
+  make_repo_on_branch "$d/wt" fm/feat-terminal-behind
+  base_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'local stage-2 work after the run finished'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/terminalbehind.meta" "window=fm:fm-terminalbehind" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 implementation in progress\n' > "$d/state/terminalbehind.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  completed  fm/feat-terminal-behind ${base_short}  2026-08-01 21:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" terminalbehind
+  out=$(run_crew_state "$d" terminalbehind)
+  assert_not_contains "$out" "source: run-step" "a finished run must not claim later local commits"
+  assert_contains "$out" "source: status-log" "falls back after the terminal run is rejected"
+  pass "a terminal run behind an advanced tip is still not attributed"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1353,6 +1768,21 @@ test_torn_down_worktree
 test_missing_meta
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
+test_lookup_timeout_degrades_to_last_known_run_step
+test_real_timeout_bound_degrades_to_last_known_run_step
+test_lookup_timeout_without_known_run_step_still_surfaces
+test_degraded_run_step_expires
+test_degraded_run_step_not_used_when_endpoint_gone
+test_completed_lookup_without_run_does_not_degrade
+test_busy_pane_outranks_degraded_record
+test_degraded_record_outranks_stale_status_log
+test_provably_working_via_degraded_run_step
+test_fix_round_advanced_tip_attributes_via_runs_list
+test_fix_round_advanced_tip_attributes_via_axi_status
+test_terminal_run_behind_advanced_tip_still_invalidates
+test_pipeline_owned_unresolvable_head_attributes
+test_terminal_unresolvable_head_still_rejected
+test_runs_list_unresolvable_head_still_rejected
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
