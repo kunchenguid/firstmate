@@ -1,0 +1,36 @@
+=== spawn: invalid task id ===
+error: invalid task id
+[exit 2]
+=== spawn: invalid effort ===
+error: --effort must be one of low, medium, high, xhigh, max
+[exit 1]
+=== spawn: --backend combined with --host ===
+error: --backend selects a LOCAL session provider and cannot combine with --host
+[exit 1]
+=== send: task with no metadata ===
+error: target 't-absent' is not resolvable (tried meta=<TMP>/home/state/t-absent.meta; metadata window/terminal lookup; backend=none). Use fm-t-absent for a recorded task/lane, or pass a well-formed explicit backend target such as session:window.
+[exit 1]
+=== teardown: task with no metadata ===
+error: no meta for task t-absent at <TMP>/home/state/t-absent.meta
+[exit 1]
+=== pr-merge: task with no metadata ===
+error: task metadata is unavailable
+[exit 1]
+=== pr-merge: malformed url ===
+error: invalid PR merge request
+[exit 2]
+=== merge-local: task with no metadata ===
+error: no meta for task t-absent at <TMP>/home/state/t-absent.meta
+[exit 1]
+=== merge-local: real fast-forward ===
+merged fm/t-merge into local main (<sha> -> <sha>) in <TMP>/home/projects/alpha
+[exit 0]
+=== merge-local: resulting main ===
+work
+base
+=== bifrost invocations ===
+(none)
+=== files written under state/ ===
+./t-merge.meta
+=== files written under config/ ===
+(end)

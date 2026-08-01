@@ -17,6 +17,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-scm-lib.sh
 . "$SCRIPT_DIR/fm-scm-lib.sh"
+# shellcheck source=bin/fm-helm-lib.sh
+. "$SCRIPT_DIR/fm-helm-lib.sh"
+
+# Merging is the one irreversible thing in the lifecycle: a second machine that
+# still thought it was the control plane would land the same work twice on a
+# shared default branch. So the gate is here, ahead of everything else this
+# script does. Silent and free on a home that declared no fleet.
+fm_helm_assert "$FM_HOME" "merging a change" || exit 1
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2

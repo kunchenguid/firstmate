@@ -16,8 +16,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-helm-lib.sh
+. "$SCRIPT_DIR/fm-helm-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=${1:?usage: fm-merge-local.sh <task-id>}
+# Same reasoning as bin/fm-pr-merge.sh: landing work is irreversible, so a
+# machine that is not the control plane refuses before it looks at anything
+# else. Silent and free on a home that declared no fleet.
+fm_helm_assert "$FM_HOME" "merging $ID into the local default branch" || exit 1
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 

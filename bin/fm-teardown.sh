@@ -153,6 +153,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-helm-lib.sh
+. "$SCRIPT_DIR/fm-helm-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -162,6 +164,9 @@ FORCE=${2:-}
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+# A machine that is not the control plane of its fleet may not clean anything
+# up. Silent and free on a home that declared no fleet (bin/fm-helm-lib.sh).
+fm_helm_assert "$FM_HOME" "cleaning up $ID" || exit 1
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 

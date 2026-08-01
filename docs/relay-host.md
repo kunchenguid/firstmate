@@ -2,6 +2,9 @@
 
 How firstmate dispatches a task to another machine over a Bifrost relay while staying the single control plane, and the empirical record behind every design choice in it.
 
+Which machine *is* the control plane, and how that moves between machines, is a separate contract owned by [`helm.md`](helm.md).
+Nothing here changes on a machine that never joined a fleet.
+
 This is a verification document, not a narrative.
 Every number below was measured, every refusal below was reproduced, and anything reasoned rather than run is listed under "Not verified" at the end.
 

@@ -70,6 +70,7 @@ config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents,
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/relay-hosts.json  remote relay task hosts this home may dispatch to; LOCAL, gitignored; absent means the relay layer is wholly inert (docs/configuration.md, docs/relay-host.md)
+config/fleet.json    this machine's fleet membership, naming which machine may be the control plane; LOCAL, gitignored; absent means this machine belongs to no fleet and the helm layer is wholly inert - no lease, no check, no cross-machine call, and no session-start line (docs/helm.md). Not inherited by secondmate homes
 config/herdr-presentation-spaces  optional presence flag for Herdr's default-off disposable single-task visual projection; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Optional disposable single-task presentation spaces"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
@@ -109,6 +110,7 @@ state/               volatile runtime signals; gitignored
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
+  .helm-lost         durable record that this machine was removed as the fleet's control plane while it was running; every state-changing command refuses until the captain resolves it (docs/helm.md)
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```
@@ -132,6 +134,8 @@ If the session lock is refused, tell the captain another active session is manag
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
 
 1. **Lock** - acquires the per-home session lock first, before anything mutates shared state.
+   When this machine belongs to a fleet, a `HELM` block follows and says which machine is the control plane; a session on any other machine is read-only in the same practical sense as a refused lock (`docs/helm.md`).
+   A machine in no fleet gets no such block and a byte-identical digest.
 2. **Bootstrap** - detect-only checks (tool/version problems, GitHub auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.
    When the lock could not be acquired, the worktree-tangle check uses read-only advisory wording without a checkout repair command.
    The five MUTATING sweeps - non-executing legacy PR-check migration, fleet sync, the local secondmate fast-forward sweep, the secondmate liveness sweep, and X-mode artifact writes - run only when this session actually holds the lock from step 1.
@@ -181,6 +185,14 @@ Honor lock-refused read-only mode exactly as section 3 requires.
 Treat digest status tails as wake-event history and use targeted current-state reconciliation when the live state matters.
 
 Reconcile only this home's recorded direct reports and their recorded backend inventory; never sweep a shared endpoint namespace for matching names or claim another home's work.
+
+**One explicit exception, and only after this machine has taken the helm of a fleet.**
+`bin/fm-helm.sh adopt` asks each machine of this fleet for its OWN task inventory and records a mirror of what it is running, which discovers work this home never dispatched.
+That is deliberate: after a control-plane handover the tasks running on the other machine are exactly the work this session must now supervise, and the truth about a task lives on the machine running it rather than in any handover package.
+It stays inside the rule it extends because the inventory asked for is one fleet member's own tasks, identified by fleet id, and never a shared endpoint namespace: a persistent secondmate is excluded, another machine's mirror of this home's own work is excluded, and an id that already names a different local task is refused rather than overwritten.
+Nothing else may discover work this way, and `adopt` refuses to run at all on a machine that does not hold the helm.
+`docs/helm.md` owns the whole contract.
+
 For an ordinary direct report whose endpoint is dead or metadata has no window, load `stuck-crewmate-recovery` and preserve the recorded worktree and unlanded work while reconciling ownership.
 For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home.
 Each secondmate reconciles work already in its own home and then idles; recovery never authorizes it to invent work.
@@ -249,6 +261,8 @@ Write the task-specific brief under section 11 before spawning.
 
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 A task may instead run on a registered REMOTE task host with `--host`, which dispatches to that machine's own firstmate over a Bifrost relay and requires arming its wake path afterwards; `docs/relay-host.md` owns that whole procedure, its pairing and authorization contract, and its measured limits.
+When this machine belongs to a fleet, spawn, steer, merge, local merge, and cleanup all refuse unless this machine currently holds the helm, and a command sent to a fleet peer is refused by that peer when it comes from a superseded control plane; moving the helm is an explicit captain action with no automatic takeover, and `docs/helm.md` owns the whole contract.
+On a machine that declared no fleet none of that exists: the check is absent rather than passing, which is what keeps a single-machine home unchanged.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.

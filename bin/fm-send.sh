@@ -74,6 +74,11 @@ fi
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-helm-lib.sh
+. "$SCRIPT_DIR/fm-helm-lib.sh"
+# A machine that is not the control plane of its fleet may not steer anyone.
+# Silent and free on a home that declared no fleet (bin/fm-helm-lib.sh).
+fm_helm_assert "$FM_HOME" "steering a worker" || exit 1
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
