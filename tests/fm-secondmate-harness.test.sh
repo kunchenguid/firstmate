@@ -339,11 +339,20 @@ esac
 SH
   chmod +x "$claude_ps/ps"
 
+  # A Codex thread lock whose lease is still fresh belongs to a session no other
+  # harness can probe, so it must be respected, not reclaimed.
   printf 'codex-thread:%s\n' "$uuid" > "$home/state/.lock"
+  out=$(env -u CODEX_CI -u CODEX_THREAD_ID PATH="$claude_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 1 "$status" "a fresh Codex thread lease must refuse another harness: $out"
+  [ "$(cat "$home/state/.lock")" = "codex-thread:$uuid" ] \
+    || fail "a fresh Codex thread lease was overwritten: $(cat "$home/state/.lock")"
+
+  touch -t 200001010000 "$home/state/.lock"
   out=$(env -u CODEX_CI -u CODEX_THREAD_ID PATH="$claude_ps:$BASE_PATH" \
     FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
   assert_contains "$out" "lock: stale" \
-    "a foreign session must read a leftover Codex thread lock as stale"
+    "a foreign session must read an expired Codex thread lease as stale"
 
   out=$(env -u CODEX_CI -u CODEX_THREAD_ID PATH="$claude_ps:$BASE_PATH" \
     FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
@@ -352,9 +361,10 @@ SH
     || fail "reclaim left the Codex thread lock in place: $(cat "$home/state/.lock")"
 
   printf 'codex-thread:%s\n' "$uuid" > "$home/state/.lock"
+  touch -t 200001010000 "$home/state/.lock"
   out=$(CODEX_CI=1 CODEX_THREAD_ID="$other" PATH="$denied_ps:$BASE_PATH" \
     FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
-  expect_code 0 "$status" "a later Codex thread must reclaim the prior thread's lock: $out"
+  expect_code 0 "$status" "a later Codex thread must reclaim the prior thread's expired lease: $out"
   [ "$(cat "$home/state/.lock")" = "codex-thread:$other" ] \
     || fail "later Codex session did not take the lock: $(cat "$home/state/.lock")"
 
@@ -363,7 +373,77 @@ SH
   assert_contains "$out" "lock: held by live harness identity codex-thread:$other" \
     "the owning Codex thread must still read its own lock as live"
 
-  pass "Codex identity: a leftover codex-thread lock is stale to every other session"
+  pass "Codex identity: a codex-thread lock is stale to every other session once its lease expires"
+}
+
+# Two live Codex primaries on one FM_HOME, both with `ps` denied: neither can
+# probe the other's thread, so the lock lease is the only ownership proof. The
+# second session must stay read-only instead of trading the lock back and forth,
+# while an expired lease still reclaims and the owner's own guarded commands
+# keep renewing it.
+test_concurrent_codex_threads_are_mutually_exclusive() {
+  local dir denied_ps a b c home out status lock
+  dir="$TMP_ROOT/codex-thread-concurrent"
+  a=019fbddb-b27d-7b23-86d2-7dc3bbaba30a
+  b=019fbddb-b27d-7b23-86d2-7dc3bbaba30b
+  c=019fbddb-b27d-7b23-86d2-7dc3bbaba30c
+  home="$dir/home"
+  lock="$home/state/.lock"
+  mkdir -p "$home/state"
+
+  denied_ps=$(fm_fakebin "$dir/denied")
+  cat > "$denied_ps/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '/bin/ps: Operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$denied_ps/ps"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$a" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "first Codex thread should acquire: $out"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$b" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 1 "$status" "a second live Codex thread must not take a leased lock: $out"
+  assert_contains "$out" "another Codex session holds the lock (owner codex-thread:$a)" \
+    "the refusal must name the leased Codex owner"
+  assert_contains "$out" "operate read-only until resolved" \
+    "the refusal must keep the contending session read-only"
+  [ "$(cat "$lock")" = "codex-thread:$a" ] \
+    || fail "a contending Codex thread overwrote the leased lock: $(cat "$lock")"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$b" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness identity codex-thread:$a" \
+    "a contending Codex thread must read a leased lock as held, not stale"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$a" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "the owning Codex thread must still re-acquire its own lock: $out"
+
+  # A guarded command run by the owner renews the lease, so a long-lived Codex
+  # primary keeps exclusive control between session starts.
+  touch -t 200001010000 "$lock"
+  CODEX_CI=1 CODEX_THREAD_ID="$a" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1 || true
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$c" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 1 "$status" "a renewed lease must still refuse another live Codex thread: $out"
+  [ "$(cat "$lock")" = "codex-thread:$a" ] \
+    || fail "a renewed lease lost the lock to another thread: $(cat "$lock")"
+
+  # A non-owner's guarded command must never renew someone else's lease.
+  touch -t 200001010000 "$lock"
+  CODEX_CI=1 CODEX_THREAD_ID="$c" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1 || true
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$c" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "an expired lease must still be reclaimable: $out"
+  [ "$(cat "$lock")" = "codex-thread:$c" ] \
+    || fail "expired-lease reclaim did not take the lock: $(cat "$lock")"
+
+  pass "Codex identity: simultaneous live Codex threads keep strict mutual exclusion"
 }
 
 test_codex_thread_fallback_does_not_outrank_process_ancestry() {
@@ -2483,6 +2563,7 @@ test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_codex_thread_identity_fallback_after_ps_denial
 test_codex_thread_lock_is_reclaimable_by_other_sessions
+test_concurrent_codex_threads_are_mutually_exclusive
 test_codex_thread_fallback_does_not_outrank_process_ancestry
 test_propagate_lib
 test_spawn_split_and_inherit

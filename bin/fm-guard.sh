@@ -18,6 +18,9 @@
 # suppressed by that dedup. Normal wake handling (watcher briefly down between a
 # wake and the next supervision resume) stays inside the grace window and stays
 # silent. Always exits 0: the guard warns, it never blocks.
+# Because every guarded command runs inside the primary's own harness session,
+# this is also where a Codex primary renews its session-lock thread lease
+# (bin/fm-session-lock-lib.sh); it is a no-op for every other session.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,6 +45,15 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
+# Every guarded command runs inside the primary's own harness session, which for
+# Codex is the only recurring place its per-thread markers are observable. Renew
+# the lock lease here so a long-lived Codex primary keeps proving exclusive
+# ownership between session starts. No-op for every session that does not
+# already own the lock, and for numeric owners, which prove liveness by process.
+fm_session_lock_refresh_self "$STATE"
 
 # Deterministic episode key from beacon state: same continuous stale beacon
 # (or continuous absence) shares a key; a recovered-then-restale beacon gets a

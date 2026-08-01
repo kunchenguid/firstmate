@@ -21,7 +21,9 @@ The standalone `codex sandbox` subcommand runs no thread, so it exports neither 
 Recapturing a fresh interactive Codex 0.146.0 session's exported tool-command environment was out of reach from this worktree, so the `CODEX_CI=1` plus UUID-shaped `CODEX_THREAD_ID` gate rests on the captain's original transcript and on the deterministic coverage below, not on a re-run live capture.
 That gate is the only condition under which the fallback fires; if a supported interactive session turns out not to export `CODEX_CI`, the fallback stays inert and the read-only symptom returns rather than misfiring.
 The session-lock owner falls back to `codex-thread:<CODEX_THREAD_ID>` only after process ancestry fails, so markerless child process harnesses still win whenever `ps` is available.
-A `codex-thread:` owner is live only for the session that still resolves to that same thread, so a leftover Codex lock is stale to every other session and is reclaimed through the unchanged `bin/fm-lock.sh` path.
+A `codex-thread:` owner names a conversation, not a process, so no other session can probe it and its liveness is a lease on `state/.lock`.
+The owning session rewrites the lock when it acquires it and renews it from every guarded command (`bin/fm-guard.sh`), so a live Codex primary keeps strict exclusive ownership: any other session, Codex or not, reads a lock refreshed inside `FM_CODEX_THREAD_LEASE_SECS` (default 900) as held and stays read-only with an error naming the owner and the lock to remove once that session is confirmed gone.
+Only an expired lease is stale-lock recovery, reclaimed through the unchanged `bin/fm-lock.sh` path, so one Codex session still cannot poison a home's lock forever.
 
 The GitHub diagnostic was separated from the lock bug outside the sandbox.
 With the captain's normal environment, an authenticated account succeeded through `gh auth status` while `gh help environment` documents `GH_TOKEN`, `GITHUB_TOKEN`, and the `GH_CONFIG_DIR`, `$XDG_CONFIG_HOME/gh`, `~/.config/gh` config-directory order as the only credential material the CLI reads.

@@ -29,7 +29,7 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then
+  if fm_harness_pid_alive "$old" "$LOCK"; then
     case "$old" in
       "$FM_CODEX_THREAD_LOCK_PREFIX"*) echo "lock: held by live harness identity $old" ;;
       *) echo "lock: held by live harness pid $old" ;;
@@ -73,8 +73,15 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (owner $old); operate read-only until resolved" >&2
+  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old" "$LOCK"; then
+    case "$old" in
+      "$FM_CODEX_THREAD_LOCK_PREFIX"*)
+        echo "error: another Codex session holds the lock (owner $old) and refreshed it inside the $(fm_codex_thread_lease_secs)s thread lease; operate read-only until resolved, or remove $LOCK once that session is confirmed gone" >&2
+        ;;
+      *)
+        echo "error: another live firstmate session holds the lock (owner $old); operate read-only until resolved" >&2
+        ;;
+    esac
     exit 1
   fi
 fi

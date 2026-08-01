@@ -12,6 +12,15 @@
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 FM_CODEX_THREAD_LOCK_PREFIX='codex-thread:'
+# A codex-thread identity names a Codex conversation, not a process, so no other
+# session can probe it for liveness. Ownership is proven by a lease instead: the
+# owning session rewrites state/.lock when it acquires the lock and refreshes it
+# from every guarded command it runs (bin/fm-guard.sh), and any OTHER session
+# must read a lock refreshed inside this window as a live owner it may not
+# displace. Only an expired lease is stale-lock recovery. Long enough that a
+# live-but-idle Codex primary keeps exclusive control, short enough that a
+# crashed session's home frees itself unattended.
+FM_CODEX_THREAD_LEASE_SECS_DEFAULT=900
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
@@ -96,6 +105,39 @@ fm_codex_thread_lock_valid() {
   fm_codex_thread_id_valid "${id#"$FM_CODEX_THREAD_LOCK_PREFIX"}"
 }
 
+fm_codex_thread_lease_secs() {
+  local secs=${FM_CODEX_THREAD_LEASE_SECS:-$FM_CODEX_THREAD_LEASE_SECS_DEFAULT}
+  case "$secs" in
+    ''|*[!0-9]*|0) secs=$FM_CODEX_THREAD_LEASE_SECS_DEFAULT ;;
+  esac
+  printf '%s\n' "$secs"
+}
+
+# Portable mtime in epoch seconds. Kept self-contained so the SessionStart nudge
+# keeps sourcing this leaf lib alone.
+fm_session_lock_mtime() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
+# True when lock file $1 was refreshed inside the codex-thread lease window.
+# A missing path, an unreadable mtime, or an unreadable clock is uncertainty
+# about a foreign Codex owner, and uncertainty fails CLOSED as "still live": the
+# caller then refuses to mutate and stays read-only, rather than letting two
+# simultaneously live Codex primaries trade one home's lock back and forth.
+fm_codex_thread_lease_fresh() {
+  local lock=${1:-} mtime now
+  [ -n "$lock" ] || return 0
+  mtime=$(fm_session_lock_mtime "$lock") || return 0
+  now=$(date +%s 2>/dev/null) || return 0
+  case "$mtime" in ''|*[!0-9]*) return 0 ;; esac
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$(( now - mtime ))" -lt "$(fm_codex_thread_lease_secs)" ]
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -170,17 +212,20 @@ EOF
 
 # True if $1 is a live process, or a non-process session identity that the
 # calling environment still resolves to, and that looks like a verified harness.
-# A codex-thread identity has no observable process to probe, so the only
-# evidence that it is still live is the caller resolving to that same thread.
-# Every other session therefore sees a leftover codex-thread owner as stale and
-# reclaims it through the unchanged bin/fm-lock.sh path, instead of the first
-# Codex session poisoning the home's lock forever.
+# $2 is the lock file $1 was read from, needed only to age a codex-thread lease.
+# A codex-thread identity has no observable process to probe, so liveness is
+# either the caller resolving to that same thread, or - for a FOREIGN thread -
+# the lease on the lock file still being fresh. A fresh foreign lease keeps
+# mutual exclusion between two simultaneously live Codex primaries; an expired
+# one is stale-lock recovery through the unchanged bin/fm-lock.sh path, so the
+# first Codex session still cannot poison the home's lock forever.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
+  local pid=$1 lock=${2:-} comm args
   case "$pid" in
     "$FM_CODEX_THREAD_LOCK_PREFIX"*)
-      fm_codex_thread_lock_valid "$pid" \
-        && [ "$(fm_codex_thread_identity 2>/dev/null)" = "$pid" ]
+      fm_codex_thread_lock_valid "$pid" || return 1
+      [ "$(fm_codex_thread_identity 2>/dev/null)" = "$pid" ] && return 0
+      fm_codex_thread_lease_fresh "$lock"
       return
       ;;
   esac
@@ -215,4 +260,16 @@ fm_session_lock_owned_by_self() {
 $pids
 EOF
   return 1
+}
+
+# Renew this session's codex-thread lease on state dir $1's lock, so a long
+# Codex session keeps proving exclusive ownership between session starts. A
+# numeric owner proves liveness through its own process and needs no lease, so
+# this is a no-op there, as it is for any session that does not own the lock.
+fm_session_lock_refresh_self() {
+  local state=${1:-} lock_identity
+  lock_identity=$(cat "$state/.lock" 2>/dev/null) || return 0
+  fm_codex_thread_lock_valid "$lock_identity" || return 0
+  [ "$(fm_codex_thread_identity 2>/dev/null)" = "$lock_identity" ] || return 0
+  touch "$state/.lock" 2>/dev/null || true
 }
