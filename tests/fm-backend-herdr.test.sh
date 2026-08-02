@@ -568,7 +568,7 @@ test_server_ensure_own_pane_identity_skips_probe_and_never_restarts() {
   expect_code 0 "$status" "server_ensure must succeed when firstmate's own pane already proves the session is live"
   assert_not_contains "$(cat "$log")" $'\x1f''status'$'\x1f''--json' \
     "the own-pane short-circuit must never even reach the liveness probe"
-  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\n' \
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\x1f' \
     "the own-pane short-circuit must never invoke 'herdr ... server' - the disruptive restart from the 2026-08-01 incident"
   pass "fm_backend_herdr_server_ensure: an own-pane identity match skips the liveness probe entirely and never restarts"
 }
@@ -599,7 +599,7 @@ test_server_ensure_no_ancestry_registry_confirms_already_running() {
   expect_code 0 "$status" "server_ensure must succeed when the session registry shows this name already running"
   assert_contains "$(cat "$log")" $'\x1f''session'$'\x1f''list'$'\x1f''--json' \
     "server_ensure did not consult the session registry before concluding it was safe to start a server"
-  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\n' \
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\x1f' \
     "a misreported liveness probe must never cause a server to be started against an already-registered, already-running session"
   pass "fm_backend_herdr_server_ensure: with no launcher identity, a misreported probe does not restart a session the registry shows is already running"
 }
@@ -615,7 +615,7 @@ test_server_ensure_no_ancestry_ambiguous_registry_refuses() {
   status=$?
   expect_code 1 "$status" "server_ensure must refuse, not guess, when the session registry shows more than one registration under this name"
   assert_contains "$out" "2 herdr sessions are already registered" "the ambiguity refusal did not explain itself"
-  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\n' \
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\x1f' \
     "an ambiguous registration must never be resolved by starting yet another server"
   pass "fm_backend_herdr_server_ensure: refuses loudly on an ambiguous session registry instead of guessing or starting another server"
 }

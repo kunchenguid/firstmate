@@ -1355,8 +1355,12 @@ fm_backend_herdr_workspace_find() {  # <session>
 # FM_BACKEND_HERDR_OWN_SOCKET_REASON, so each call site's message stays
 # specific to what it was trying to do (place a worker vs. bind a server).
 #
-# Sets, only on a 0 return, FM_BACKEND_HERDR_OWN_SOCKET to the canonical
-# claimed socket. Always sets FM_BACKEND_HERDR_OWN_SOCKET_REASON.
+# Sets FM_BACKEND_HERDR_OWN_SOCKET (the canonical claimed socket) and
+# FM_BACKEND_HERDR_OWN_SESSION_SOCKET (<session>'s resolved socket) as soon
+# as each is known - so BOTH are also populated on a socket-mismatch refusal,
+# which callers' mismatch error messages rely on; a set value is therefore
+# not by itself proof of a match. Always sets
+# FM_BACKEND_HERDR_OWN_SOCKET_REASON.
 #
 # Returns:
 #   0 - this process's own pane's session and socket both match <session>.
