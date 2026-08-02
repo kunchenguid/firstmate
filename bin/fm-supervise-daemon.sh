@@ -806,8 +806,19 @@ wedge_alarm_via_osascript() {  # <summary>
 
 # Post a herdr UI notification - herdr's own surface, separate from the pane and
 # its status-line. Best-effort: logs and returns 1 on failure.
+#
+# `herdr notification show` can exit 0 while its own JSON result reports
+# shown=false (verified live on Linux/WSL2, herdr 0.7.4: reason "disabled" -
+# NotificationShowReason also allows rate_limited, no_foreground_client, and
+# busy). A prior version trusted the exit code alone, so a captain who set
+# config/wedge-alarm=herdr on Linux got a silently no-op active alert: the log
+# showed nothing wrong and the captain had no way to learn the channel never
+# delivers on this host short of a live away-mode incident. jq is already a
+# hard dependency of the herdr backend (bin/backends/herdr.sh), so parsing the
+# result here adds no new dependency; when jq is unavailable the exit code is
+# the only signal available and is trusted as before.
 wedge_alarm_via_herdr() {  # <summary>
-  local summary=$1 rc
+  local summary=$1 rc out shown reason
   wedge_alarm_os_notifier_override herdr "$summary"
   rc=$?
   case "$rc" in
@@ -816,9 +827,17 @@ wedge_alarm_via_herdr() {  # <summary>
   esac
   command -v herdr >/dev/null 2>&1 || {
     log "wedge alarm: herdr not found; cannot post a herdr notification"; return 1; }
-  wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
-    --body "$summary" --sound request >/dev/null 2>&1 && return 0
-  log "wedge alarm: herdr notification failed"
+  out=$(wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
+    --body "$summary" --sound request 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] || { log "wedge alarm: herdr notification failed"; return 1; }
+  command -v jq >/dev/null 2>&1 || return 0
+  shown=$(printf '%s' "$out" | jq -r '.result.shown // empty' 2>/dev/null)
+  case "$shown" in
+    true) return 0 ;;
+  esac
+  reason=$(printf '%s' "$out" | jq -r '.result.reason // "unknown"' 2>/dev/null)
+  log "wedge alarm: herdr notification exited 0 but was not shown (reason: ${reason:-unknown}); this channel is not delivering on this host - configure a command: channel instead"
   return 1
 }
 

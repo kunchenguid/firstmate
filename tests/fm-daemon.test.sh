@@ -1356,6 +1356,50 @@ test_wedge_alarm_herdr_channel_selected() {
   pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
 }
 
+# The active-alert channel must not lie about delivery. `herdr notification
+# show` can exit 0 while its own structured result reports shown=false
+# (verified live on Linux/WSL2, herdr 0.7.4: reason "disabled" - the captain
+# had just set config/wedge-alarm=herdr believing it gave real-time delivery,
+# and it silently did not). A bare exit-code check treated this as success;
+# these two pin that the real JSON result now governs the verdict.
+test_wedge_alarm_herdr_not_shown_is_a_failure() {
+  local dir fb daemon_log rc
+  dir="$TMP_ROOT/wedge-herdr-not-shown"; fb="$dir/fakebin"; mkdir -p "$fb"
+  daemon_log="$dir/daemon.log"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}\n'
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "herdr exiting 0 with shown=false was treated as a successful delivery"
+  grep -F 'not shown (reason: disabled)' "$daemon_log" >/dev/null \
+    || fail "a shown=false herdr result did not log its reason: $(cat "$daemon_log" 2>/dev/null)"
+  pass "wedge_alarm_via_herdr: an exit-0 herdr result with shown=false is a failure, not a silent success"
+}
+
+test_wedge_alarm_herdr_shown_true_succeeds() {
+  local dir fb daemon_log rc
+  dir="$TMP_ROOT/wedge-herdr-shown"; fb="$dir/fakebin"; mkdir -p "$fb"
+  daemon_log="$dir/daemon.log"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '{"id":"cli:notification:show","result":{"reason":"shown","shown":true,"type":"notification_show"}}\n'
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a genuine shown=true herdr result was treated as a failure ($rc)"
+  [ ! -s "$daemon_log" ] || fail "a genuine shown=true herdr result logged a spurious failure: $(cat "$daemon_log")"
+  pass "wedge_alarm_via_herdr: a shown=true herdr result succeeds without a spurious failure log"
+}
+
 test_wedge_alarm_command_channel_receives_summary() {
   local dir out_argv out_stdin chan
   dir=$(make_wedge_case wedge-command)
@@ -1902,6 +1946,8 @@ test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
 test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
+test_wedge_alarm_herdr_not_shown_is_a_failure
+test_wedge_alarm_herdr_shown_true_succeeds
 test_wedge_alarm_command_channel_receives_summary
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive

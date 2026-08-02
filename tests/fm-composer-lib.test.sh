@@ -120,6 +120,32 @@ test_idle_placeholder_case_mode_is_explicit() {
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
+# --- Non-breaking space after a bare agent glyph is still empty (task
+# fm-afk-inject-pending, the 2026-08-02 two-hour away-mode delivery failure) --
+# Real claude renders the space after a bare "❯" as U+00A0 (NO-BREAK SPACE,
+# UTF-8 C2 A0), not a plain ASCII space (verified live, herdr 0.7.4). Neither
+# bash's [:space:] class nor the literal ' ' glyph-strip patterns recognized
+# it, so a genuinely idle "❯"+NBSP row fell through to `pending` forever.
+
+test_nbsp_after_bare_glyph_is_empty() {
+  local out
+  out=$(classify 0 $'\xe2\x9d\xaf\xc2\xa0')
+  [ "$out" = empty ] \
+    || fail "a bare claude glyph followed only by a non-breaking space should read empty, got '$out'"
+  out=$(classify 0 $'\xe2\x80\xba\xc2\xa0')
+  [ "$out" = empty ] \
+    || fail "a bare codex glyph followed only by a non-breaking space should read empty, got '$out'"
+  pass "fm_composer_classify_content: a bare agent glyph followed only by a non-breaking space reads empty"
+}
+
+test_nbsp_after_bare_glyph_with_text_is_pending() {
+  local out
+  out=$(classify 0 $'\xe2\x9d\xaf\xc2\xa0land pr 416 now')
+  [ "$out" = pending ] \
+    || fail "real text after an NBSP-rendered glyph should still read pending, got '$out'"
+  pass "fm_composer_classify_content: real text after an NBSP-rendered glyph still reads pending"
+}
+
 # --- Real text is pending ---------------------------------------------------
 
 test_real_text_is_pending() {
@@ -536,6 +562,8 @@ test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
+test_nbsp_after_bare_glyph_is_empty
+test_nbsp_after_bare_glyph_with_text_is_pending
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
