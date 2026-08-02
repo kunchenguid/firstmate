@@ -31,14 +31,16 @@ test_cursor_detection_marker_and_ancestry() {
   fakebin=$(fm_fakebin "$dir")
   cfg="$dir/config"
   mkdir -p "$cfg"
-  # The CURSOR_AGENT marker resolves to cursor before ancestry.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
   out=$(env -u CLAUDECODE -u CODEX_THREAD_ID -u PI_CODING_AGENT -u GROK_AGENT \
     CURSOR_AGENT=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = cursor ] || fail "CURSOR_AGENT marker did not resolve to cursor, got '$out'"
-  # A verified env marker still wins over cursor ancestry precedence.
   out=$(CLAUDECODE=1 CURSOR_AGENT=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
-  # Markerless cursor-agent is detected by process ancestry command name.
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -65,7 +67,28 @@ SH
   out=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_CONVERSATION_ID -u PI_CODING_AGENT -u GROK_AGENT \
     CODEX_THREAD_ID=thread-stale PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = cursor ] || fail "an inherited Codex thread id outranked cursor-agent ancestry, got '$out'"
-  pass "fm-harness: cursor detected by marker and by cursor-agent ancestry, marker precedence preserved"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= ; pid= ; prev=
+for arg in "$@"; do
+  [ "$prev" = -o ] && field=$arg
+  [ "$prev" = -p ] && pid=$arg
+  prev=$arg
+done
+case "$field:$pid" in
+  comm=:4242) printf '/usr/local/bin/opencode\n' ;;
+  comm=:*) printf '/bin/bash\n' ;;
+  ppid=:4242) printf '1\n' ;;
+  ppid=:*) printf '4242\n' ;;
+  args=:*) printf 'bash\n' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  out=$(env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_CONVERSATION_ID -u PI_CODING_AGENT -u GROK_AGENT \
+    CURSOR_AGENT=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = opencode ] || fail "inherited CURSOR_AGENT outranked opencode ancestry, got '$out'"
+  pass "fm-harness: cursor detected by cursor-agent ancestry and fallback marker without outranking real ancestry"
 }
 
 test_cursor_session_lock_identity() {

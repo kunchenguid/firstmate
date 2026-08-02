@@ -879,7 +879,7 @@ test_cursor_hook_files_are_allowed_but_cursor_deliverables_refuse() {
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
   mkdir -p "$case_dir/wt/.cursor"
-  printf '{}\n' > "$case_dir/wt/.cursor/hooks.json"
+  printf '{"version":1,"hooks":{"stop":[{"command":".cursor/fm-turn-end.sh"}]}}\n' > "$case_dir/wt/.cursor/hooks.json"
   printf '#!/bin/sh\n' > "$case_dir/wt/.cursor/fm-turn-end.sh"
 
   set +e
@@ -888,6 +888,23 @@ test_cursor_hook_files_are_allowed_but_cursor_deliverables_refuse() {
   set -e
   expect_code 0 "$rc" "cursor-untracked: firstmate's own cursor hook files must not block teardown"
   ! grep -q REFUSED "$case_dir/stderr" || fail "cursor-untracked: teardown refused its own cursor hook files"
+
+  case_dir=$(make_case cursor-project-hook)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  mkdir -p "$case_dir/wt/.cursor"
+  printf '{}\n' > "$case_dir/wt/.cursor/hooks.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cursor-project-hook: uncommitted cursor hooks.json must refuse teardown"
+  grep -q REFUSED "$case_dir/stderr" || fail "cursor-project-hook: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" || fail "cursor-project-hook: refusal did not cite uncommitted changes"
+  [ -f "$case_dir/wt/.cursor/hooks.json" ] || fail "cursor-project-hook: uncommitted cursor hook was discarded"
 
   case_dir=$(make_case cursor-deliverable)
   write_meta "$case_dir" local-only ship

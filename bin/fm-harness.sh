@@ -19,7 +19,7 @@
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
 # Detection layers: verified environment markers a live harness sets for its own
-# processes first, then process ancestry, then the inheritable CODEX_THREAD_ID.
+# processes first, then process ancestry, then inheritable fallback markers.
 # Record each newly verified env marker here.
 set -u
 
@@ -31,8 +31,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers a live harness sets for its own processes.
   # Keep this detection before ancestry detection as an explicit precedence rule.
-  # Claude, pi, grok, and cursor set verified markers of their own; opencode and
-  # kimi are markerless, so a foreign marker retained in a terminal multiplexer's
+  # Claude, pi, and grok set verified markers of their own; opencode, kimi, and
+  # cursor are ancestry-first, so a foreign marker retained in a multiplexer
   # stored environment can in principle misidentify one of them before ancestry
   # is consulted. This is a precedence hazard, not evidence that CLAUDECODE
   # inheritance into a kimi child was observed; it was not observed. Codex's
@@ -46,10 +46,6 @@ detect_own() {
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # Cursor Agent CLI sets CURSOR_AGENT=1 and CURSOR_INVOKED_AS=cursor-agent for its
-  # session and tool processes (verified, cursor-agent 2026.07.23). The executable
-  # is cursor-agent, not cursor, so the ancestry match below keys on "cursor".
-  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
@@ -80,11 +76,8 @@ detect_own() {
       break
     fi
   done
-  # Layer 3: CODEX_THREAD_ID. Codex sets it on its own session, but a tmux
-  # server first started from a Codex primary carries it into every later
-  # window, so an opencode or kimi primary in one of those windows reads it too.
-  # It is therefore trusted only after the ancestry walk finds nothing at all -
-  # the sandboxed case it exists for, where `ps` is denied.
+  # Layer 3: inheritable fallback markers.
+  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ -n "${CODEX_THREAD_ID:-}" ] && { echo codex; return; }
   echo unknown
 }

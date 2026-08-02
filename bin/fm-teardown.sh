@@ -973,7 +973,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty dirty_line unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -992,7 +992,23 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.cursor/(hooks\.json|fm-turn-end\.sh)$|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty=
+  while IFS= read -r dirty_line || [ -n "$dirty_line" ]; do
+    [ -n "$dirty_line" ] || continue
+    case "$dirty_line" in
+      '?? .claude/'*|'?? .fm-grok-turnend'|'?? .fm-kimi-turnend') continue ;;
+      '?? .cursor/hooks.json')
+        fm_cursor_hook_is_ours "$WT" && continue
+        ;;
+      '?? .cursor/fm-turn-end.sh')
+        fm_cursor_hook_script_is_ours "$WT" && continue
+        ;;
+    esac
+    dirty=$dirty_line
+    break
+  done <<EOF
+$dirty_raw
+EOF
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
