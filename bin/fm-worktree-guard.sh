@@ -139,12 +139,6 @@ worktree_evidence() {  # <worktree>
     fi
     return 0
   fi
-  # Landed content still checked out on a named branch is a live claim on the
-  # slot: acquiring it detaches that branch out from under whoever owns it.
-  if [ -n "$branch" ]; then
-    printf 'checked out on branch %s\n' "$branch"
-    return 0
-  fi
   return 1
 }
 
@@ -284,8 +278,7 @@ cmd_check() {  # <project-dir>
   [ -n "$rows" ] || return 0
 
   while IFS=$'\t' read -r name path; do
-    [ -n "$path" ] || continue
-    if [ "${path#/}" = "$path" ]; then
+    if [ -z "$path" ] || [ "${path#/}" = "$path" ]; then
       echo "error: worktree guard read a non-absolute slot path ('$path') from treehouse in $proj_real." >&2
       echo "       Refusing rather than allocating blind." >&2
       return 1

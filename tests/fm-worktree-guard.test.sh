@@ -20,7 +20,7 @@
 #       (an absent record is never a released slot)
 #   (e) demonstrably empty slot                          -> pass, silent
 #   (f) dirty slot reported available                    -> refuse
-#   (g) landed content still on a named branch           -> refuse
+#   (g) zero-ahead named branch                          -> pass, silent
 #   (h) in-use slot holding unlanded work                -> pass (normal fleet
 #       operation must not wedge: every live crewmate holds unlanded work)
 #   (i) unparseable / failed treehouse output            -> refuse, fail closed
@@ -218,14 +218,15 @@ out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") && fail "(f) guard a
 assert_contains "$out" "uncommitted or untracked entries" "(f) names uncommitted evidence"
 pass "(f) a dirty slot is refused even if treehouse were to report it available"
 
-# --- (g) landed content still checked out on a named branch -----------------
+# --- (g) a zero-ahead named branch passes silently --------------------------
 
 proj=$(make_pool named-branch 1)
 slot=$(slot_path "$proj" 1)
 git -C "$slot" checkout -q -b fm/landed main
-out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") && fail "(g) guard accepted a slot holding a named branch"
-assert_contains "$out" "checked out on branch fm/landed" "(g) names the branch claim"
-pass "(g) a slot still checked out on a named branch is refused, since acquiring it detaches that branch"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  || fail "(g) guard refused a clean named branch with zero commits ahead: $out"
+[ -z "$out" ] || fail "(g) guard was not silent for a zero-ahead named branch: $out"
+pass "(g) a clean named branch with zero commits ahead passes silently"
 
 # --- (h) in-use slots holding unlanded work must NOT wedge the fleet --------
 
@@ -259,6 +260,13 @@ out=$(run_guard "$proj" '[{"name":"1","status":"available","path":"slots/1","pro
   && fail "(i3) guard passed on a non-absolute slot path"
 assert_contains "$out" "non-absolute slot path" "(i3) names the malformed path"
 pass "(i3) a non-absolute slot path refuses the spawn instead of being resolved against the cwd"
+
+proj=$(make_pool empty-path 1)
+out=$(run_guard "$proj" '[{"name":"1","status":"available","path":null,"processes":[]}]') \
+  && fail "(i4) guard passed on an empty slot path"
+assert_contains "$out" "non-absolute slot path ('')" "(i4) names the malformed empty path"
+assert_contains "$out" "Refusing rather than allocating blind" "(i4) fails closed"
+pass "(i4) an empty available-slot path refuses the spawn instead of being skipped"
 
 # --- (j) missing jq fails closed --------------------------------------------
 
