@@ -52,10 +52,14 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force|--discard-approved-by-captain]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --discard-approved-by-captain enables one narrower recovery for an ordinary
+#   Herdr task whose exact recorded endpoint cannot be inspected. It still
+#   refuses dirty, shared, mismatched, detached, or otherwise unprovable git
+#   worktrees and does not authorize any other task or cleanup path.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -115,7 +119,15 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   exit 2
 fi
 ID=$1
-FORCE=${2:-}
+[ "$#" -le 2 ] || { echo "error: invalid teardown request" >&2; exit 2; }
+FORCE=
+DISCARD_APPROVED_BY_CAPTAIN=0
+case "${2:-}" in
+  '') ;;
+  --force) FORCE=--force ;;
+  --discard-approved-by-captain) DISCARD_APPROVED_BY_CAPTAIN=1 ;;
+  *) echo "error: invalid teardown approval flag" >&2; exit 2 ;;
+esac
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -568,6 +580,152 @@ worktree_registered_for_project() {
 $listed
 EOF
   return 1
+}
+
+canonical_git_dir() {  # <repo-or-worktree> <git-rev-parse-key>
+  local repo=$1 key=$2 path
+  path=$(git -C "$repo" rev-parse --path-format=absolute "$key" 2>/dev/null) || return 1
+  [ -d "$path" ] || return 1
+  (cd "$path" 2>/dev/null && pwd -P)
+}
+
+herdr_discard_meta_is_unambiguous() {  # <canonical-worktree>
+  local expected=$1 other other_id recorded canonical
+  for other in "$STATE"/*.meta; do
+    [ -e "$other" ] || [ -L "$other" ] || continue
+    [ "$other" != "$META" ] || continue
+    if [ ! -f "$other" ] || [ -L "$other" ]; then
+      if grep -Fqx "worktree=$WT" "$other" 2>/dev/null; then
+        echo "REFUSED: another task record ambiguously claims Herdr worktree $WT; preserving task state." >&2
+        return 1
+      fi
+      continue
+    fi
+    other_id=$(basename "$other" .meta)
+    recorded=$(fm_backend_meta_exact_value "$other" worktree 2>/dev/null || true)
+    [ -n "$recorded" ] || continue
+    if [ "$recorded" = "$WT" ]; then
+      echo "REFUSED: Herdr worktree $WT is also recorded for task $other_id; preserving both task records." >&2
+      return 1
+    fi
+    [ -d "$recorded" ] || continue
+    canonical=$(canonical_existing_dir "$recorded" 2>/dev/null || true)
+    if [ -n "$canonical" ] && [ "$canonical" = "$expected" ]; then
+      echo "REFUSED: Herdr worktree $WT is canonically shared with task $other_id; preserving both task records." >&2
+      return 1
+    fi
+  done
+}
+
+validate_herdr_unreachable_discard_worktree() {
+  local project_abs worktree_abs project_top worktree_top project_common worktree_common
+  local expected_branch branch head branch_head listed line listed_abs
+  local record_path record_head record_branch path_matches=0 branch_matches=0 dirty_raw dirty
+  [ "$DISCARD_APPROVED_BY_CAPTAIN" = 1 ] || return 1
+  [ "$KIND" != secondmate ] || {
+    echo "REFUSED: endpoint-independent Herdr discard is not supported for secondmates." >&2
+    return 1
+  }
+  case "$PROJ:$WT" in
+    /*:/*) ;;
+    *) echo "REFUSED: Herdr discard requires absolute recorded project and worktree paths." >&2; return 1 ;;
+  esac
+  project_abs=$(canonical_existing_dir "$PROJ") || {
+    echo "REFUSED: recorded project $PROJ is unavailable; cannot prove repository identity." >&2
+    return 1
+  }
+  worktree_abs=$(canonical_existing_dir "$WT") || {
+    echo "REFUSED: recorded Herdr worktree $WT is unavailable; cannot prove checkout identity." >&2
+    return 1
+  }
+  [ "$project_abs" = "$PROJ" ] && [ "$worktree_abs" = "$WT" ] || {
+    echo "REFUSED: recorded Herdr project or worktree path is not canonical; preserving task state." >&2
+    return 1
+  }
+  [ "$project_abs" != "$worktree_abs" ] || {
+    echo "REFUSED: recorded Herdr worktree is the project checkout itself; preserving it." >&2
+    return 1
+  }
+  project_top=$(git -C "$project_abs" rev-parse --show-toplevel 2>/dev/null) || return 1
+  worktree_top=$(git -C "$worktree_abs" rev-parse --show-toplevel 2>/dev/null) || return 1
+  project_top=$(canonical_existing_dir "$project_top") || return 1
+  worktree_top=$(canonical_existing_dir "$worktree_top") || return 1
+  if [ "$project_top" != "$project_abs" ] || [ "$worktree_top" != "$worktree_abs" ]; then
+    echo "REFUSED: recorded Herdr repository/worktree roots do not match their canonical git roots." >&2
+    return 1
+  fi
+  project_common=$(canonical_git_dir "$project_abs" --git-common-dir) || return 1
+  worktree_common=$(canonical_git_dir "$worktree_abs" --git-common-dir) || return 1
+  if [ "$project_common" != "$worktree_common" ]; then
+    echo "REFUSED: recorded Herdr worktree does not belong to the recorded project repository." >&2
+    return 1
+  fi
+  expected_branch="fm/$ID"
+  branch=$(git -C "$worktree_abs" symbolic-ref --quiet --short HEAD 2>/dev/null) || {
+    echo "REFUSED: recorded Herdr worktree is detached; task branch ownership is unprovable." >&2
+    return 1
+  }
+  [ "$branch" = "$expected_branch" ] || {
+    echo "REFUSED: recorded Herdr worktree is on branch $branch, expected $expected_branch for task $ID." >&2
+    return 1
+  }
+  head=$(git -C "$worktree_abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
+  branch_head=$(git -C "$worktree_abs" rev-parse --verify "refs/heads/$expected_branch^{commit}" 2>/dev/null) || return 1
+  [ "$head" = "$branch_head" ] || {
+    echo "REFUSED: recorded Herdr task branch does not resolve to the inspected worktree HEAD." >&2
+    return 1
+  }
+  listed=$(git -C "$project_abs" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+  record_path=
+  record_head=
+  record_branch=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      worktree\ *)
+        record_path=${line#worktree }
+        record_head=
+        record_branch=
+        ;;
+      HEAD\ *) record_head=${line#HEAD } ;;
+      branch\ *) record_branch=${line#branch } ;;
+      '')
+        if [ -n "$record_path" ]; then
+          listed_abs=$(canonical_existing_dir "$record_path" 2>/dev/null || true)
+          if [ "$listed_abs" = "$worktree_abs" ]; then
+            path_matches=$((path_matches + 1))
+            [ "$record_head" = "$head" ] && [ "$record_branch" = "refs/heads/$expected_branch" ] || {
+              echo "REFUSED: git worktree registration does not match the recorded Herdr branch and HEAD." >&2
+              return 1
+            }
+          fi
+          [ "$record_branch" != "refs/heads/$expected_branch" ] || branch_matches=$((branch_matches + 1))
+        fi
+        record_path=
+        ;;
+    esac
+  done <<FMEOF
+$listed
+
+FMEOF
+  if [ "$path_matches" -ne 1 ] || [ "$branch_matches" -ne 1 ]; then
+    echo "REFUSED: recorded Herdr checkout ownership is missing, duplicated, or ambiguous in git worktree registration." >&2
+    return 1
+  fi
+  herdr_discard_meta_is_unambiguous "$worktree_abs" || return 1
+  dirty_raw=$(git -C "$worktree_abs" status --porcelain 2>/dev/null) || {
+    echo "REFUSED: cannot inspect the recorded Herdr worktree for uncommitted changes." >&2
+    return 1
+  }
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  [ -z "$dirty" ] || {
+    echo "REFUSED: recorded Herdr worktree $WT is dirty; explicit discard approval does not authorize an unproved dirty checkout." >&2
+    return 1
+  }
+  if [ -e "$STATE/$ID.herdr-presentation" ] || [ -L "$STATE/$ID.herdr-presentation" ]; then
+    echo "REFUSED: task $ID has a Herdr presentation journal whose endpoint-independent ownership cannot be proved." >&2
+    return 1
+  fi
+  return 0
 }
 
 inspectable_git_worktree() {
@@ -1533,7 +1691,25 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+HERDR_UNREACHABLE_DISCARD=0
+if [ "$BACKEND" = herdr ] && [ "$DISCARD_APPROVED_BY_CAPTAIN" = 1 ]; then
+  teardown_herdr_require_prerequisites "$ID" || exit 1
+  fm_backend_herdr_parse_target "$T" || exit 1
+  herdr_presence=$(fm_backend_herdr_pane_presence_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  case "$herdr_presence" in
+    unknown)
+      validate_herdr_unreachable_discard_worktree || exit 1
+      HERDR_UNREACHABLE_DISCARD=1
+      ;;
+    dead|present) ;;
+    *)
+      echo "REFUSED: Herdr endpoint inspection returned an unsupported state; preserving task state." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ] && [ "$HERDR_UNREACHABLE_DISCARD" != 1 ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -1556,7 +1732,7 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$HERDR_UNREACHABLE_DISCARD" != 1 ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
@@ -1636,7 +1812,7 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
-elif [ "$BACKEND" = herdr ]; then
+elif [ "$BACKEND" = herdr ] && [ "$HERDR_UNREACHABLE_DISCARD" != 1 ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
   else
@@ -1661,7 +1837,7 @@ fi
 # the locked close. Only a structured not-found proves the pane gone; unknown
 # presence, missing or malformed endpoint identity, and missing confirmation
 # machinery all refuse.
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$HERDR_UNREACHABLE_DISCARD" != 1 ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
     echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
