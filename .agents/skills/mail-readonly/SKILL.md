@@ -51,8 +51,9 @@ Relay the meaning in your own words per `AGENTS.md` section 9, and keep the mail
 
 ## When the tool withholds or masks a message
 
-A withheld or redacted message means the local classifier saw authentication material.
-Relay that fact and the stated reasons, and stop there.
+A withheld body always means the local classifier saw authentication material.
+A masked body means either that or that the read was run with `--redacted`, which masks whatever message it is pointed at; the tool says which case it is and prints reasons only for the first.
+Relay what the tool reported, including any stated reasons, and stop there.
 
 Do not try to reconstruct what was masked, do not fetch the message another way, and do not enter a code, link or credential from a message into any other system on the captain's behalf.
 If the captain genuinely needs that message, tell them it is in their mailbox and let them read it themselves.
