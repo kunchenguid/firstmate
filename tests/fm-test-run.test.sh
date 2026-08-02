@@ -432,7 +432,10 @@ exit 1
 SH
   cat >"$repo/$a" <<'SH'
 #!/usr/bin/env bash
-sleep 0.5
+# Keep a generous margin over the fast fixture so a loaded host can still
+# start the replacement worker before this marker appears. 0.5s was flaky
+# when reaping and recording the fast worker took hundreds of milliseconds.
+sleep 2
 touch "$SCHED_EVIDENCE/slow-done"
 echo "ok - slow fixture"
 SH
