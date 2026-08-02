@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Guarded, default-off task deployment capability.
 #
-# The private config/deployment-capabilities.json schema, grant, subprocess,
-# receipt, recovery, and cleanup contracts are owned by docs/configuration.md.
+# docs/configuration.md owns the operator-facing capability and schema.
+# This entrypoint's usage block owns the command spelling, while fm-deploy.js
+# owns the grant, subprocess, receipt, recovery, and cleanup mechanics.
 # This shell entrypoint deliberately delegates the file-identity-sensitive work
 # to Node so deployment never depends on shell parsing or word splitting.
 #
