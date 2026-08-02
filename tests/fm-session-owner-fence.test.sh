@@ -62,6 +62,10 @@ write_watcher_lock() {
   printf '%s\n' "$pid" > "$state/.watch.lock/pid"
   printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  # A healthy watcher lock includes the immutable generation token. Without it
+  # the arm correctly rejects this peer before it can exercise the successor
+  # handoff being tested below.
+  printf 'test-fence-cycle:%s\n' "$pid" > "$state/.watch.lock/cycle-id"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
 }
 
