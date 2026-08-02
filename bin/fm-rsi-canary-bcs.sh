@@ -46,16 +46,27 @@ done
 case "$candidate_sha" in
   *[!0123456789abcdef]*|'') printf 'fm-rsi-canary-bcs: candidate SHA must be lowercase hexadecimal\n' >&2; exit 2 ;;
 esac
-[ "${#candidate_sha}" -ge 40 ] && [ "${#candidate_sha}" -le 64 ] || {
-  printf 'fm-rsi-canary-bcs: candidate SHA must be 40 to 64 characters\n' >&2
-  exit 2
-}
+case "${#candidate_sha}" in
+  40|64) ;;
+  *) printf 'fm-rsi-canary-bcs: candidate SHA must be exactly 40 or 64 characters\n' >&2; exit 2 ;;
+esac
+case "$positive" in
+  *"$candidate_sha"*) ;;
+  *) printf 'fm-rsi-canary-bcs: positive marker must contain the candidate SHA\n' >&2; exit 2 ;;
+esac
 case "$attempts" in
   ''|*[!0-9]*) printf 'fm-rsi-canary-bcs: attempts must be a positive integer\n' >&2; exit 2 ;;
 esac
 [ "$attempts" -gt 0 ] || { printf 'fm-rsi-canary-bcs: attempts must be a positive integer\n' >&2; exit 2; }
 case "$retry_seconds" in
   ''|*[!0-9]*) printf 'fm-rsi-canary-bcs: retry seconds must be a non-negative integer\n' >&2; exit 2 ;;
+esac
+
+negative_regex_status=0
+grep -E -i -q -- "$negative_regex" /dev/null || negative_regex_status=$?
+case "$negative_regex_status" in
+  0|1) ;;
+  *) printf 'fm-rsi-canary-bcs: negative regex is invalid\n' >&2; exit 2 ;;
 esac
 
 body=$(mktemp "${TMPDIR:-/tmp}/fm-rsi-canary-bcs.XXXXXX")
@@ -72,16 +83,18 @@ while [ "$attempt" -le "$attempts" ]; do
   fi
   positive_found=false
   negative_clear=false
-  if [ "$http" = 200 ] && grep -F -q -- "$positive" "$body" && ! grep -E -i -q -- "$negative_regex" "$body"; then
-    positive_found=true
-    negative_clear=true
-    break
-  fi
   if grep -F -q -- "$positive" "$body"; then
     positive_found=true
   fi
-  if ! grep -E -i -q -- "$negative_regex" "$body"; then
-    negative_clear=true
+  negative_status=0
+  grep -E -i -q -- "$negative_regex" "$body" || negative_status=$?
+  case "$negative_status" in
+    0) negative_clear=false ;;
+    1) negative_clear=true ;;
+    *) printf 'fm-rsi-canary-bcs: negative regression check failed\n' >&2; exit 2 ;;
+  esac
+  if [ "$http" = 200 ] && [ "$positive_found" = true ] && [ "$negative_clear" = true ]; then
+    break
   fi
   attempt=$((attempt + 1))
   if [ "$attempt" -le "$attempts" ] && [ "$retry_seconds" -gt 0 ]; then

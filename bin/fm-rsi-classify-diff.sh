@@ -5,8 +5,9 @@
 #
 # Emits one JSON evidence object to stdout and exits zero for every successful
 # classification, including a full-lane result. Invalid repositories or refs
-# fail non-zero. Fast requires a non-empty diff with no behavior-bearing JS/TS
-# files, sensitive paths, changed HTML script blocks, or deleted test lines.
+# fail non-zero. Fast requires a non-empty diff limited to presentation assets,
+# documentation, or additive tests, with no sensitive paths or changed script
+# blocks.
 set -euo pipefail
 
 usage() {
@@ -24,16 +25,19 @@ fi
 }
 
 repo=$1
-base=$2
-candidate=$3
+base_ref=$2
+candidate_ref=$3
 
-git -C "$repo" rev-parse --verify "$base^{commit}" >/dev/null
-git -C "$repo" rev-parse --verify "$candidate^{commit}" >/dev/null
+base=$(git -C "$repo" rev-parse --verify --end-of-options "$base_ref^{commit}")
+candidate=$(git -C "$repo" rev-parse --verify --end-of-options "$candidate_ref^{commit}")
 
+file_list=$(mktemp "${TMPDIR:-/tmp}/fm-rsi-classify-diff.XXXXXX")
+trap 'rm -f "$file_list"' EXIT HUP INT TERM
+git -C "$repo" diff --no-renames --name-only -z "$base" "$candidate" -- > "$file_list"
 files=()
-while IFS= read -r file; do
+while IFS= read -r -d '' file; do
   files+=("$file")
-done < <(git -C "$repo" diff --name-only "$base" "$candidate")
+done < "$file_list"
 
 if [ "${#files[@]}" -eq 0 ]; then
   jq -cn '{lane: "empty", files: [], reasons: ["no_diff"]}'
@@ -56,32 +60,53 @@ file_at_ref() {
   git -C "$repo" show "$1:$2" 2>/dev/null || true
 }
 
+is_test_path() {
+  case "$1" in
+    *.test.*|*.spec.*|*_test.*|test/*|tests/*|*/test/*|*/tests/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_fast_content_path() {
+  case "$1" in
+    *.css|*.scss|*.sass|*.less|*.styl|*.html|*.htm|*.xhtml|*.svg|\
+    *.png|*.jpg|*.jpeg|*.gif|*.webp|*.avif|*.ico|\
+    *.woff|*.woff2|*.ttf|*.otf|*.eot|\
+    *.md|*.mdx|*.rst|*.txt) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_sensitive_path() {
+  case "/$1/" in
+    *auth*|*billing*|*payment*|*checkout*|*sms*|*delete*|*secret*|\
+    *credential*|*webhook*|*migration*|*database*|*deploy*|\
+    */api/*|*/server/*|*/backend/*|*/infra/*|*/.github/workflows/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+shopt -s nocasematch
 for file in "${files[@]}"; do
+  if is_sensitive_path "$file"; then
+    add_reason "sensitive_path:$file"
+  fi
+
+  if is_test_path "$file"; then
+    test_stats=$(git -C "$repo" diff --no-renames --numstat "$base" "$candidate" -- "$file")
+    if printf '%s\n' "$test_stats" | awk -F '\t' 'NF >= 2 && $2 != "0" { non_additive=1 } END { exit non_additive ? 0 : 1 }'; then
+      add_reason "test_not_additive:$file"
+    fi
+  elif ! is_fast_content_path "$file"; then
+    add_reason "behavior_file:$file"
+  fi
+
   case "$file" in
-    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs)
-      add_reason "behavior_file:$file"
-      ;;
-  esac
-  shopt -s nocasematch
-  case "$file" in
-    *auth*|*billing*|*sms*|*delete*|*secret*)
-      add_reason "sensitive_path:$file"
-      ;;
-  esac
-  shopt -u nocasematch
-  case "$file" in
-    *.html|*.htm)
+    *.html|*.htm|*.xhtml|*.svg|*.md|*.mdx)
       base_scripts=$(file_at_ref "$base" "$file" | html_scripts)
       candidate_scripts=$(file_at_ref "$candidate" "$file" | html_scripts)
       if [ "$base_scripts" != "$candidate_scripts" ]; then
         add_reason "script_touch:$file"
-      fi
-      ;;
-  esac
-  case "$file" in
-    *.test.*|*.spec.*|*_test.*|test/*|tests/*|*/test/*|*/tests/*)
-      if git -C "$repo" diff --unified=0 "$base" "$candidate" -- "$file" | grep -q '^-.'; then
-        add_reason "test_not_additive:$file"
       fi
       ;;
   esac

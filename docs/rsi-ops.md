@@ -5,4 +5,3 @@ The locked RSI workflow consensus is the policy owner and is retained in the act
 `bin/fm-rsi-canary-bcs.sh` records one bounded BCS production observation using the supplied SHA-specific positive marker and a negative regression pattern.
 `bin/fm-rsi-ledger-append.sh` appends one event to `FM_HOME/data/rsi-events.jsonl` without changing previous rows.
 Firstmate is the sole policy-authorized ledger writer, while workers emit claims only through their task status files.
-The ledger schema and event meanings are owned by the locked consensus, including the rule that final production success is `prod_verified` rather than bare `prod`.
