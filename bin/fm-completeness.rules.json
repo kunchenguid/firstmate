@@ -1,0 +1,57 @@
+{
+  "name": "firstmate_task_completeness",
+  "_comment": "Firstmate's task-completion invariants as DATA. Hard rules gate (a violation is UNSAT and blocks the lifecycle action); soft rules score into a compliance number and never block. Axes are the facts firstmate reads before declaring done. Rule semantics: a rule with `when` applies only when every listed axis matches; `require` demands an axis equal a value; `forbid` rejects an axis equal a value; soft `require_meta` demands a truthy metadata key. See AGENTS.md sections 1, 2, 7.",
+  "axes": {
+    "kind": ["ship", "scout", "secondmate"],
+    "landed": ["merged", "pushed", "local_merged", "none"],
+    "report": ["present", "absent"],
+    "worktree": ["clean", "holds_unlanded_work"],
+    "captain_approval": ["granted", "not_required", "pending"]
+  },
+  "hard_rules": [
+    {
+      "name": "SCOUT_REQUIRES_REPORT",
+      "when": {"kind": "scout"},
+      "require": {"report": "present"},
+      "reason": "scout task declared done with no report.md; the report is the deliverable (directive #3 scout carve-out)"
+    },
+    {
+      "name": "SHIP_REQUIRES_LANDED",
+      "when": {"kind": "ship"},
+      "forbid": {"landed": "none"},
+      "reason": "ship task declared done but the work is not landed (not merged, pushed to a remote/fork, or merged into local main) (directive #3)"
+    },
+    {
+      "name": "NO_UNLANDED_AT_TEARDOWN",
+      "forbid": {"worktree": "holds_unlanded_work"},
+      "reason": "worktree still holds unlanded work; teardown would discard it (directive #3)"
+    },
+    {
+      "name": "MERGE_NEEDS_CAPTAIN_WORD",
+      "when": {"landed": "merged"},
+      "forbid": {"captain_approval": "pending"},
+      "reason": "merge performed without the captain's explicit approval (directive #2)"
+    }
+  ],
+  "soft_rules": [
+    {
+      "name": "PREFER_EVIDENCE_CITED",
+      "require_meta": "evidence_cited",
+      "weight": 3,
+      "reason": "deliverable does not cite file:line evidence"
+    },
+    {
+      "name": "PREFER_AGENTS_MD_UPDATED",
+      "when": {"kind": "ship"},
+      "require_meta": "agents_md_touched",
+      "weight": 2,
+      "reason": "ship task recorded no durable project knowledge in AGENTS.md"
+    },
+    {
+      "name": "PREFER_BACKLOG_RECORDED",
+      "require_meta": "backlog_recorded",
+      "weight": 1,
+      "reason": "completion not yet recorded in the backlog"
+    }
+  ]
+}

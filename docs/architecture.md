@@ -310,6 +310,15 @@ The update is fast-forward only: dirty, diverged, offline, and off-default targe
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
+## Lifecycle claims are provable
+
+An optional formal completeness gate (`bin/fm-completeness-check.sh`, Z3-backed via `fm-completeness.py` and `fm-completeness.rules.json`) wires into `fm-teardown.sh` and `fm-merge-local.sh` to prove each done, teardown, or merge claim consistent with the directives before the irreversible step.
+Hard rules gate and soft rules score; a blocked claim names the invariant it violated instead of refusing anonymously.
+Bootstrap reports it as an optional capability only when `python3` can import `z3`, and when the solver is absent the gate steps aside so the existing bash safety checks remain the hard guarantee.
+`FM_COMPLETENESS_GATE=0` disables it entirely, and `FM_COMPLETENESS_STRICT=1` refuses instead of stepping aside when the tooling is absent or broken.
+The gate never re-derives whether remote-backed ship work has landed: `fm-teardown.sh` owns that test, and duplicating it is what once made the gate false-block squash-merged work.
+A local-only merge asserts the captain's approval explicitly through `FM_CAPTAIN_APPROVED` (`granted`, or `not_required` under yolo); without it the gate blocks the merge when the solver is installed.
+
 ## Restart-proof
 
 Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.

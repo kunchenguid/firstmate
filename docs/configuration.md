@@ -548,6 +548,11 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalati
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+# formal completeness gate (bin/fm-completeness-check.sh); optional, steps aside without z3
+FM_COMPLETENESS_GATE=1     # set to 0 to skip the gate entirely (always exits 0)
+FM_COMPLETENESS_STRICT=0   # set to 1 to refuse instead of stepping aside when the solver tooling is absent/broken
+FM_COMPLETENESS_RULES=     # optional override for the rules file (default bin/fm-completeness.rules.json)
+FM_CAPTAIN_APPROVED=       # assert the captain's merge approval at the merge gate: granted|yes|1|true, or not_required under yolo
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature

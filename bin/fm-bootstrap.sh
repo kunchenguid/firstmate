@@ -18,7 +18,13 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "BOOTSTRAP_INFO: completeness gate available".
+#          z3 (z3-solver) is an OPTIONAL capability powering the formal
+#          completeness gate (bin/fm-completeness-check.sh), reported only under
+#          FM_BOOTSTRAP_VERBOSE_FACTS=1 and only when python3 can import z3. It is
+#          never a MISSING line and never prompts an install: without it the gate
+#          steps aside. Opt in with "fm-bootstrap.sh install z3".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
 #          purely local fast-forward and never an origin fetch. Remote routes
@@ -659,6 +665,7 @@ install_cmd() {
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
+    z3) echo "python3 -m pip install z3-solver" ;;
     *) return 1 ;;
   esac
 }
@@ -1064,6 +1071,13 @@ crew_dispatch_validate
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
+fi
+# z3 is an OPTIONAL capability, never a MISSING line and never an install prompt:
+# without it bin/fm-completeness-check.sh steps aside and the bash lifecycle
+# checks remain the hard guarantee. Opt in with "fm-bootstrap.sh install z3".
+if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
+  && command -v python3 >/dev/null 2>&1 && python3 -c 'import z3' >/dev/null 2>&1; then
+  echo "BOOTSTRAP_INFO: completeness gate available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep

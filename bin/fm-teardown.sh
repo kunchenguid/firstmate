@@ -29,6 +29,11 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# When the optional Z3 completeness gate (bin/fm-completeness-check.sh) is
+# installed, it additionally proves the teardown claim consistent with the
+# directives before anything irreversible runs (skipped under --force and for
+# secondmates); without the solver it steps aside and the checks above remain the
+# hard guarantee.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -1744,6 +1749,24 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   fi
   require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
   ORCA_PATH_MATCH_VERIFIED=1
+fi
+
+# Formal completeness gate (AGENTS.md section 7): prove the "done" claim consistent
+# with the directives before the irreversible teardown. It STEPS ASIDE when the
+# solver tooling is absent, so the bash checks below remain the hard guarantee;
+# when present it gives a provable, named refusal first. Exit 64 is invalid facts
+# (a typo or corrupted record), which blocks rather than passing. Skipped under
+# --force (the explicit discard path) and for secondmates (governed elsewhere).
+if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+  set +e
+  gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
+  gate_rc=$?
+  set -e
+  if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ] || [ "$gate_rc" = 64 ]; then
+    printf '%s\n' "$gate_out" >&2
+    echo "REFUSED: completeness gate blocked teardown of $ID." >&2
+    exit 1
+  fi
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
