@@ -76,7 +76,11 @@ This covers statically-visible literal words in command position; opaque dynamic
 A direct `bin/fm-watch.sh` execution - relative, `<code-root>`-anchored, `$VAR`-prefixed, or `~`-prefixed - always denies with `watcher-direct`, whose reason points the caller at `bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh`.
 
 The no-execute exception is an explicit allow-list containing only `bash -n <fm-watch.sh>` and `bash --noexec <fm-watch.sh>` as sole top-level commands with no wrapper, extra option or argument, separator, substitution, or redirection.
-The exception belongs to the semantic classifier, not the byte prefilter: every other shell invocation carrying the watcher script is denied, including `--rcfile`, `--init-file`, combined flags, and direct execution.
+The exception belongs to the semantic classifier, not the byte prefilter: every other statically recognized shell invocation carrying the watcher script is denied, including `--rcfile`, `--init-file`, combined flags, and direct execution.
+The known [`bash -s <operand>` gap](https://github.com/kunchenguid/firstmate/issues/1489) makes shell-invocation analysis mistake the operand for a script path, so a heredoc or here-string payload is not inspected and can execute `bin/fm-watch.sh`.
+The guard therefore does not cover every payload-hiding shell form.
+The three discovered holes - `--rcfile`, `--init-file`, and `-s` - are all argument-consuming or payload-hiding invocation forms, and that class is demonstrably not exhausted.
+That open-ended class is why the syntax exception remains an allow-list: a fourth unmodeled form that reaches protected-invocation classification must fall through to denial instead of acquiring read-only status.
 Independently, every redirection on a protected execution and every output redirection targeting a protected script is denied before an allow decision, so a syntax check or unrelated command cannot truncate the script it is checking.
 The regression matrix covers the two allowed forms and the executing/destructive counterforms through every adapter transport, alongside the full dangerous-command deny corpus.
 
