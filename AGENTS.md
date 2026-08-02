@@ -534,3 +534,4 @@ Keep this file for knowledge useful to almost every future agent session in this
 Do not repeat what the codebase already shows; point to the authoritative file, skill, command, or doc.
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve every safety boundary and keep the always-loaded contract concise.
+After a material model upgrade or evidence that instructions are stale, test removals in a bounded isolated run and restore only instructions whose absence causes repeated failures.
