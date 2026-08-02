@@ -403,6 +403,64 @@ EOF
   pass "Pi context-ceiling close starts one successor before wake delivery settles"
 }
 
+test_pi_context_ceiling_rejects_failed_close() {
+  local close_kind repo home plugin log out status
+  for close_kind in nonzero signal; do
+    repo="$TMP_ROOT/pi-context-ceiling-$close_kind-root"
+    home="$TMP_ROOT/pi-context-ceiling-$close_kind-home"
+    log="$TMP_ROOT/pi-context-ceiling-$close_kind.log"
+    mkdir -p "$repo/bin" "$home/state" "$home/config"
+    install_pi_watch_extension_fixture "$repo"
+    plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'context-ceiling: CONTEXT_CEILING id=pi-failed status=over percent=91\n'
+case "${FM_CLOSE_KIND:?}" in
+  nonzero) exit 7 ;;
+  signal) kill -TERM "$$"; sleep 1 ;;
+esac
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_CLOSE_KIND="$close_kind" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-context-failed", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 2) throw new Error(`failed context-ceiling close launched ${rows.length} cycles: ${rows.join(" | ")}`);
+if (!prompt.includes("could not restore watcher continuity after 1 retries")) throw new Error(`failed context-ceiling close was delivered as actionable: ${prompt}`);
+const detail = process.env.FM_CLOSE_KIND === "nonzero" ? "fm-watch-arm.sh exited 7" : "ended from SIGTERM";
+if (!prompt.includes(detail)) throw new Error(`failed context-ceiling close lost termination detail ${detail}: ${prompt}`);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "Pi context-ceiling $close_kind close must remain a watcher failure"
+    [ -z "$out" ] || fail "Pi context-ceiling $close_kind test printed output: $out"
+  done
+  pass "Pi context-ceiling requires a clean zero exit"
+}
+
 test_pi_hung_successor_falls_back_to_typed_wake() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-hung-successor-root"
@@ -1483,6 +1541,68 @@ EOF
   pass "OpenCode watcher plugin delivers context-ceiling after starting one successor"
 }
 
+test_opencode_context_ceiling_rejects_failed_close() {
+  local close_kind plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  for close_kind in nonzero signal; do
+    repo="$TMP_ROOT/opencode-context-ceiling-$close_kind-root"
+    home="$TMP_ROOT/opencode-context-ceiling-$close_kind-home"
+    log="$TMP_ROOT/opencode-context-ceiling-$close_kind.log"
+    mkdir -p "$repo/bin" "$home/state" "$home/config"
+    git init -q "$repo"
+    : > "$repo/AGENTS.md"
+    : > "$home/state/task.meta"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'context-ceiling: CONTEXT_CEILING id=opencode-failed status=over percent=91\n'
+sleep 0.05
+case "${FM_CLOSE_KIND:?}" in
+  nonzero) exit 7 ;;
+  signal) kill -TERM "$$"; sleep 1 ;;
+esac
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_CLOSE_KIND="$close_kind" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompt = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts[0].text;
+    },
+  },
+};
+await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const armStatus = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (armStatus !== "failed") throw new Error(`streaming failed context-ceiling settled as ${armStatus}`);
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 2) throw new Error(`failed context-ceiling close launched ${rows.length} cycles: ${rows.join(" | ")}`);
+if (!prompt.includes("could not restore watcher continuity after 1 retries")) throw new Error(`failed context-ceiling close was delivered as actionable: ${prompt}`);
+const detail = process.env.FM_CLOSE_KIND === "nonzero" ? "fm-watch-arm.sh exited 7" : "ended from SIGTERM";
+if (!prompt.includes(detail)) throw new Error(`failed context-ceiling close lost termination detail ${detail}: ${prompt}`);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "OpenCode context-ceiling $close_kind close must remain a watcher failure"
+    [ -z "$out" ] || fail "OpenCode context-ceiling $close_kind test printed output: $out"
+  done
+  pass "OpenCode context-ceiling requires a clean zero exit"
+}
+
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   local plugin repo home log release retired stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -2139,6 +2259,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_context_ceiling_close_starts_single_successor_before_delivery
+test_pi_context_ceiling_rejects_failed_close
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
@@ -2155,6 +2276,7 @@ test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_context_ceiling
+test_opencode_context_ceiling_rejects_failed_close
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

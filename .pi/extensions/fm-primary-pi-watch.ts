@@ -156,7 +156,9 @@ function actionableLine(output: string): string {
 function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
-  if (reason) return { kind: "actionable", message: reason };
+  if (reason && (!reason.startsWith("context-ceiling:") || (code === 0 && signal === null))) {
+    return { kind: "actionable", message: reason };
+  }
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
