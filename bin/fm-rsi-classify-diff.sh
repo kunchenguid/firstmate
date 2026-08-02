@@ -6,8 +6,8 @@
 # Emits one JSON evidence object to stdout and exits zero for every successful
 # classification, including a full-lane result. Invalid repositories or refs
 # fail non-zero. Fast requires a non-empty diff limited to presentation assets,
-# documentation, or additive tests, with no sensitive paths or changed script
-# blocks.
+# documentation, or additive tests, with no sensitive paths or markup that
+# contains a script tag.
 set -euo pipefail
 
 usage() {
