@@ -70,11 +70,12 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
-| Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
+| Codex pane worker | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
+| Codex App worker | codex-cli 0.146.0 | App-server thread lifecycle | A real turn reported busy while running and idle after completion; server restart preserved the durable thread. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
-Codex was probed two ways, both refused:
+Codex pane workers were probed two ways, both refused:
 
 ```sh
 codex app-server daemon start
@@ -84,7 +85,7 @@ codex exec --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-
 The daemon refused with `managed standalone Codex install not found`, and an interactive TUI worker neither starts nor attaches to the app-server control socket, so no client can observe its turns.
 Firstmate-written project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while global `~/.codex/hooks.json` `SessionStart` hooks fired in the same runs.
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
-The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
+The separate `codex-app` backend now runs the worker as the app-server thread itself and therefore uses that exact lifecycle; the pane-worker gate remains closed.
 
 Deterministic entry points:
 

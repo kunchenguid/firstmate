@@ -30,7 +30,8 @@
     "docs/herdr-backend.md",
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
-    "docs/cmux-backend.md"
+      "docs/cmux-backend.md",
+      "docs/codex-app-backend.md"
   ],
   "requiredOwnerPointers": [
     {

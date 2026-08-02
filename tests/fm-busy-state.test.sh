@@ -260,6 +260,24 @@ test_codex_unverified_gate() {
   pass "codex classifies unknown until a semantic source passes its verification gate"
 }
 
+test_codex_app_native_lifecycle() {
+  local state out
+  state=$(new_state_dir codex-app-native)
+  fm_backend_busy_state() { printf '%s' "$FM_TEST_CODEX_APP_STATE"; }
+  FM_TEST_CODEX_APP_STATE=busy
+  out=$(fm_busy_classify codex-app thread-1 codex t1 "$state")
+  [ "$out" = "busy codex-appserver" ] || fail "active Codex App turn must classify busy, got '$out'"
+  FM_TEST_CODEX_APP_STATE=idle
+  out=$(fm_busy_classify codex-app thread-1 codex t1 "$state")
+  [ "$out" = "idle codex-appserver" ] || fail "settled Codex App turn must classify idle, got '$out'"
+  FM_TEST_CODEX_APP_STATE=unknown
+  out=$(fm_busy_classify codex-app thread-1 codex t1 "$state")
+  [ "$out" = "unknown codex-appserver" ] || fail "unreadable Codex App turn must classify unknown, got '$out'"
+  unset -f fm_backend_busy_state
+  unset FM_TEST_CODEX_APP_STATE
+  pass "Codex App workers classify from the native app-server lifecycle"
+}
+
 test_kimi_unverified_gate() {
   local state gen out
   state=$(new_state_dir kimi-gate)
@@ -371,6 +389,7 @@ test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate
+test_codex_app_native_lifecycle
 test_kimi_unverified_gate
 test_dead_endpoint_overrides
 test_herdr_native_busy_only

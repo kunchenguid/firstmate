@@ -31,14 +31,15 @@
 #   docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
-#   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
+#   herdr, zellij, orca, cmux, and codex-app. Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
 #   session provider only, exactly like herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
-#   auto-detected tmux stays silent; zellij and orca are never auto-detected.
-#   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
-#   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   auto-detected tmux stays silent; zellij, orca, and codex-app are never
+#   auto-detected. codex-app runs only the verified codex harness as a durable
+#   Codex app-server thread and uses a directly leased treehouse worktree.
+#   Default tmux spawns do not write backend= to meta; absent backend= means
+#   tmux. cmux and codex-app do not support --secondmate spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -318,12 +319,17 @@ if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
   exit 1
 fi
+if [ "$BACKEND" = codex-app ] && [ "$KIND" = secondmate ]; then
+  echo "error: backend=codex-app does not support --secondmate spawns yet" >&2
+  exit 1
+fi
 if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+CODEX_APP_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -397,6 +403,17 @@ spawn_abort_cleanup() {
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
+      fi
+    fi
+  fi
+  if [ "$CODEX_APP_ABORT_CLEANUP" = 1 ]; then
+    CODEX_APP_ABORT_CLEANUP=0
+    if [ -n "${T:-}" ]; then
+      fm_backend_kill codex-app "$T" 2>/dev/null || true
+    fi
+    if [ -n "${WT:-}" ] && [ -n "${PROJ_ABS:-}" ]; then
+      if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null 2>&1 ); then
+        echo "warning: Codex App spawn cleanup could not return worktree $WT; preserving it for manual recovery" >&2
       fi
     fi
   fi
@@ -609,6 +626,13 @@ esac
 if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
   exit 1
+fi
+if [ "$BACKEND" = codex-app ]; then
+  if [ "$HARNESS" != codex ]; then
+    echo "error: backend=codex-app supports only the verified codex harness" >&2
+    exit 1
+  fi
+  fm_backend_codex_app_runtime_check || exit 1
 fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -1301,6 +1325,17 @@ EOF
     fi
     T="$ORCA_TERMINAL"
     ;;
+  codex-app)
+    WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+      echo "error: treehouse get --lease failed for Codex App task $ID" >&2
+      exit 1
+    }
+    [ -n "$WT" ] || { echo "error: treehouse get --lease returned no worktree for Codex App task $ID" >&2; exit 1; }
+    CODEX_APP_ABORT_CLEANUP=1
+    validate_spawn_worktree "treehouse get --lease" "$W"
+    T=$(fm_backend_codex_app_create_task "$W" "$WT" "${MODEL:-default}" "${EFFORT:-default}") || exit 1
+    [ -n "$T" ] || { echo "error: Codex App did not return a thread id for $W" >&2; exit 1; }
+    ;;
 esac
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
@@ -1395,7 +1430,7 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$BACKEND" != codex-app ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -1478,7 +1513,7 @@ if [ "$KIND" != secondmate ]; then
   BUSY_GEN=
   case "$HARNESS" in
     codex*)
-      if fm_busy_codex_semantic_source; then
+      if fm_busy_codex_semantic_source "$BACKEND" && [ "$BACKEND" != codex-app ]; then
         echo "error: codex semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
         exit 1
       fi
@@ -1612,14 +1647,9 @@ export default function (pi: any) {
 EOF
       ;;
     codex*)
-      # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
-      # probes and the evidence). Neither Codex path is usable on the
-      # installed binary: a pane worker's turns are not observable through
-      # the app-server protocol, and its lifecycle hooks did not fire for a
-      # firstmate-launched worker. Codex therefore classifies unknown with
-      # an explicit reason rather than falling back to idle, and no busy
-      # wiring is installed. The turn-end NOTIFICATION marker still rides
-      # the launch command via -c notify=[...] and __TURNEND__.
+      # Codex App workers expose exact turn lifecycle through their backend.
+      # Pane-based Codex workers remain unknown because their hooks are not
+      # verified and their turns are unrelated to Firstmate's app-server.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
@@ -1741,12 +1771,16 @@ META_WINDOW=$T
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
   fi
+  if [ "$BACKEND" = codex-app ]; then
+    echo "codex_app_thread_id=$T"
+  fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+[ "$BACKEND" = codex-app ] && CODEX_APP_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -1782,15 +1816,27 @@ fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-  HERDR_PROJECTION_ABORT_CLEANUP=0
-  spawn_herdr_presentation_order_lock_release
+if [ "$BACKEND" = codex-app ]; then
+  INITIAL_PROMPT=$("$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief < "$BRIEF")
+  CODEX_APP_SUBMIT_VERDICT=$(fm_backend_send_text_submit "$BACKEND" "$T" "$INITIAL_PROMPT" 1 0 0 "$W") || {
+    echo "error: Codex App launch brief could not be submitted; task metadata was preserved for recovery" >&2
+    exit 1
+  }
+  [ "$CODEX_APP_SUBMIT_VERDICT" = empty ] || {
+    echo "error: Codex App launch brief delivery was not confirmed; task metadata was preserved for recovery" >&2
+    exit 1
+  }
+else
+  spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+  sleep 0.3
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    spawn_herdr_presentation_order_lock_release
+  fi
+  spawn_send_key "$T" Enter
 fi
-spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

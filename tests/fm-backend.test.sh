@@ -17,7 +17,7 @@
 #      exact-selector change lands on the default branch, merge-base with main
 #      collapses to HEAD and can no longer supply that baseline.
 #   3. Asserts the `--backend`/`FM_BACKEND` selection refuses unknown backends
-#      and the blocked `codex-app` backend loudly.
+#      and accepts every implemented adapter.
 #
 # fm-watch.sh's signal/stale/check/heartbeat wake-string contract is already
 # exercised end-to-end against this refactor by tests/fm-watch-triage.test.sh
@@ -483,15 +483,13 @@ test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
   fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
   local out
-  # bogus names a backend with no adapter at all; tmux, herdr, zellij, orca,
-  # and cmux are all known adapters and spawn-supported.
+  # bogus names a backend with no adapter at all.
   out=$(fm_backend_validate bogus 2>&1) && fail "fm_backend_validate should refuse bogus (no such adapter)"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate did not name the rejected backend"
-  out=$(fm_backend_validate codex-app 2>&1) && fail "fm_backend_validate should refuse codex-app"
-  assert_contains "$out" "unknown backend 'codex-app'" "fm_backend_validate accepted codex-app"
+  fm_backend_validate codex-app 2>/dev/null || fail "fm_backend_validate should accept codex-app"
   out=$(fm_backend_validate "tmux herdr" 2>&1) && fail "fm_backend_validate should refuse a multi-token backend name"
   assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate accepted a multi-token backend name"
-  pass "fm_backend_validate: implemented adapters accepted, unknown and blocked codex-app backends refused loudly"
+  pass "fm_backend_validate: implemented adapters accepted and unknown backends refused loudly"
 }
 
 test_backend_source_shell_portable() {
@@ -526,10 +524,9 @@ test_backend_validate_spawn_accepts_orca() {
   fm_backend_validate_spawn zellij 2>/dev/null || fail "fm_backend_validate_spawn should accept zellij"
   fm_backend_validate_spawn orca 2>/dev/null || fail "fm_backend_validate_spawn should accept orca"
   fm_backend_validate_spawn cmux 2>/dev/null || fail "fm_backend_validate_spawn should accept cmux"
+  fm_backend_validate_spawn codex-app 2>/dev/null || fail "fm_backend_validate_spawn should accept codex-app"
   out=$(fm_backend_validate_spawn bogus 2>&1) && fail "fm_backend_validate_spawn should still refuse unknown backends"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate_spawn did not preserve unknown-backend validation"
-  out=$(fm_backend_validate_spawn codex-app 2>&1) && fail "fm_backend_validate_spawn should refuse codex-app"
-  assert_contains "$out" "unknown backend 'codex-app'" "fm_backend_validate_spawn accepted codex-app"
   out=$(fm_backend_validate_spawn "tmux herdr" 2>&1) && fail "fm_backend_validate_spawn should refuse a multi-token backend name"
   assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate_spawn accepted a multi-token backend name"
   pass "fm_backend_validate_spawn: all implemented lifecycle backends are spawn-supported"
@@ -1035,15 +1032,15 @@ test_spawn_refuses_unknown_backend_flag() {
   pass "fm-spawn.sh --backend bogus is refused loudly"
 }
 
-test_spawn_refuses_codex_app_backend_flag() {
+test_spawn_refuses_incompatible_codex_app_harness() {
   local out status
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" nope-codex-app-z1 projects/none claude --mode no-mistakes --yolo off --backend codex-app 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "fm-spawn --backend codex-app should refuse"
-  assert_contains "$out" "unknown backend 'codex-app'" "fm-spawn did not preserve the blocked codex-app contract"
-  pass "fm-spawn.sh --backend codex-app is refused"
+  [ "$status" -ne 0 ] || fail "fm-spawn --backend codex-app with claude should refuse"
+  assert_contains "$out" "backend=codex-app supports only the verified codex harness" "fm-spawn did not enforce the Codex App harness binding"
+  pass "fm-spawn.sh: codex-app refuses an incompatible harness before project allocation"
 }
 
 test_spawn_refuses_unknown_fm_backend_env() {
@@ -1156,7 +1153,7 @@ test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
-test_spawn_refuses_codex_app_backend_flag
+test_spawn_refuses_incompatible_codex_app_harness
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env

@@ -1563,6 +1563,18 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
+# A Codex App worker runs outside the leased worktree, so treehouse cannot
+# terminate it. Archive the exact validated thread before returning the
+# worktree; refusal preserves both metadata and the lease for recovery.
+CODEX_APP_ENDPOINT_CLOSED=0
+if [ "$BACKEND" = codex-app ]; then
+  if ! fm_backend_kill "$BACKEND" "$T"; then
+    echo "error: Codex App thread $T could not be interrupted and archived; teardown aborted" >&2
+    exit 1
+  fi
+  CODEX_APP_ENDPOINT_CLOSED=1
+fi
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -1642,7 +1654,7 @@ elif [ "$BACKEND" = herdr ]; then
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
-elif [ "$BACKEND" != orca ]; then
+elif [ "$BACKEND" != orca ] && [ "$CODEX_APP_ENDPOINT_CLOSED" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then

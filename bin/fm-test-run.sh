@@ -854,6 +854,10 @@ families_for_changed_path() {
       printf '%s\n' cmux
       printf '%s\n' backend-dispatch
       ;;
+    bin/backends/codex-app*)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      ;;
     bin/backends/orca*|bin/backends/tmux.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' orca
