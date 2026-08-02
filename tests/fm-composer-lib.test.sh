@@ -73,6 +73,19 @@ test_stripped_unbordered_content_uses_plain_content() {
   pass "fm_composer_classify_content: stripped unbordered content is unknown except verified agent glyphs"
 }
 
+test_nbsp_only_content_is_judged_by_plain_content() {
+  local out
+  # A ghost-strip that leaves nothing but an NBSP is empty content, not an
+  # empty composer: the dead shell still visible in plain_content decides.
+  out=$(classify 0 $'\xc2\xa0' '' sensitive $'user@host $\xc2\xa0')
+  [ "$out" = unknown ] \
+    || fail "NBSP-only content over a dead-shell plain row must read unknown, got '$out'"
+  out=$(classify 0 $'\xc2\xa0' '' sensitive '❯')
+  [ "$out" = empty ] \
+    || fail "NBSP-only content over a bare agent glyph must read empty, got '$out'"
+  pass "fm_composer_classify_content: NBSP-only content falls through to the plain_content safety check"
+}
+
 test_bare_shell_prompt_with_command_is_not_empty() {
   local out
   # A dead shell showing a typed command must not read empty either.
@@ -579,6 +592,7 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
 test_bare_shell_glyphs_are_unknown
 test_bare_shell_glyph_with_only_a_separator_is_unknown
 test_stripped_unbordered_content_uses_plain_content
+test_nbsp_only_content_is_judged_by_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare

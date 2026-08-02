@@ -15,7 +15,7 @@ It lists channel directives, one per non-empty, non-comment line, and every list
 - `auto` or `default` resolves to `osascript` on macOS.
   Other platforms have no built-in OS channel, so configure `command:` when a durable marker alone is insufficient.
 - `osascript` posts a macOS Notification Center banner outside the terminal pane.
-- `herdr` calls `herdr notification show` outside the supervised pane.
+- `herdr` calls `herdr notification show` outside the supervised pane, and verifies herdr's own JSON result rather than trusting a zero exit: an explicit non-true `shown` logs the reason and fails the channel, while unparseable output or a missing `jq` falls back to trusting the exit code.
 - `command:<cmd>` runs `<cmd>` through `sh -c` with the alarm summary as `$1` and on stdin, allowing delivery to a phone or pager service.
 
 An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.
