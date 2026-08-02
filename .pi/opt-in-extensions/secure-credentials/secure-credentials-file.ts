@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { chmod, lstat, mkdtemp, open, rename, rmdir, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, rename, rmdir, unlink } from "node:fs/promises";
 import { basename, dirname, parse, resolve } from "node:path";
 
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
@@ -59,7 +59,7 @@ export async function withSecureCredentialsDestinationLock<T>(
 	const lockPath = `${absolutePath}.lock`;
 
 	try {
-		await mkdirPrivateLockDirectory(lockPath);
+		await mkdir(lockPath, { mode: 0o700 });
 	} catch (error) {
 		if (isErrorCode(error, "EEXIST")) return { locked: false };
 		throw new SecureCredentialsFileError("the destination lock could not be created");
@@ -304,11 +304,6 @@ function countSecureCredentialKeys(text: string): Map<string, number> {
 
 function findSecureCredentialsLineEnding(lines: SecureCredentialsLine[]): string {
 	return lines.find((line) => line.ending.length > 0)?.ending ?? "\n";
-}
-
-async function mkdirPrivateLockDirectory(lockPath: string): Promise<void> {
-	const { mkdir } = await import("node:fs/promises");
-	await mkdir(lockPath, { mode: 0o700 });
 }
 
 async function syncSecureCredentialsDirectory(directoryPath: string): Promise<void> {
