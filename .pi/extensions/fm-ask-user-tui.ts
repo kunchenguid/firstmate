@@ -553,8 +553,12 @@ class AskUserQuestionsScreen implements Component, Focusable {
     this.lastMaxScroll = Math.max(0, body.length - viewport);
     if (this.scrollToCursor && this.focusedLineRange) {
       const { start, end } = this.focusedLineRange;
-      if (start < this.pageScroll) this.pageScroll = start;
-      else if (end > this.pageScroll + viewport) this.pageScroll = end - viewport;
+      const indicatorReserve = this.lastMaxScroll > 0 ? 1 : 0;
+      if (start - indicatorReserve < this.pageScroll) {
+        this.pageScroll = start - indicatorReserve;
+      } else if (end + indicatorReserve > this.pageScroll + viewport) {
+        this.pageScroll = end + indicatorReserve - viewport;
+      }
     }
     this.scrollToCursor = false;
     this.pageScroll = Math.max(0, Math.min(this.pageScroll, this.lastMaxScroll));
