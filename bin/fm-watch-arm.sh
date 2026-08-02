@@ -24,20 +24,30 @@
 # before it settles in. It confirms a watcher process is genuinely alive AND the
 # liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
 # single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
-# exactly one unambiguous status line:
+# exactly one unambiguous TERMINAL status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s, verified <W>s[, beacon advanced])
 #                                                        - a live+fresh successor holds the lock
 #                                                          and STAYED this home's live watcher for
 #                                                          the whole verification window; this arm
 #                                                          attaches and follows it
-#   watcher: restarting after a failed attach - <why>    - the target stopped verifying inside that
-#                                                          window, so this arm restarts instead of
-#                                                          reporting a healthy attach
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
+# A failed attach prints one non-terminal line before that terminal line, exactly
+# one of:
+#   watcher: restarting after a failed attach - <why>    - the target stopped verifying inside the
+#                                                          verification window, so this arm
+#                                                          re-executes itself as --restart and the
+#                                                          terminal line is the exec'd arm's own
+#   watcher: attach abandoned - <why> (no restart budget left)
+#                                                        - the restart budget is spent, so this arm
+#                                                          starts its own watcher and the terminal
+#                                                          line is the started/FAILED one it reports
+# Neither non-terminal line matches the adapters' `^watcher: (started|attached)`
+# readiness pattern, so a restart is spent out of the adapter's arm-readiness
+# budget (FM_PI_ARM_READY_TIMEOUT_MS / FM_OPENCODE_ARM_READY_TIMEOUT_MS).
 # Every FAILED line carries concrete evidence in parentheses - exit code, trapped
 # signal, watcher-reported step, stderr tail, lock pid and liveness, beacon age,
 # queued-wake count, and the last recorded lifecycle row for the watcher - because
@@ -64,7 +74,11 @@
 # verifying inside the window is a FAILED attach, and this arm re-executes itself
 # as `--restart` (bounded by FM_ARM_RESTART_MAX, tracked through
 # FM_ARM_RESTART_DEPTH) so supervision is genuinely restored instead of reported
-# restored. Past that window the attached poll keeps re-checking the same three
+# restored. A lock that MOVES inside the window to a different pid which passes
+# that same gate is not a failed attach at all - that successor is healthy, and
+# `--restart` would TERM it - so the arm retargets onto it and verifies it from
+# scratch, bounded by FM_ARM_ATTACH_RETARGET_MAX so a flapping lock cannot loop
+# forever. Past the window the attached poll keeps re-checking the same three
 # facts every FM_ARM_ATTACH_POLL, so a later death is caught within one poll.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
@@ -103,13 +117,18 @@ CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 # How long an attach candidate must keep verifying as this home's live watcher
-# before the attached line may claim it, and how many times one arm may
-# re-execute itself as --restart after a failed attach.
+# before the attached line may claim it, how many times one attach may retarget
+# onto a healthy successor that takes the lock mid-window, and how many times one
+# arm may re-execute itself as --restart after a failed attach.
 ATTACH_VERIFY=${FM_ARM_ATTACH_VERIFY:-2}
+ATTACH_RETARGET_MAX=${FM_ARM_ATTACH_RETARGET_MAX:-2}
 ARM_RESTART_MAX=${FM_ARM_RESTART_MAX:-1}
 ARM_RESTART_DEPTH=${FM_ARM_RESTART_DEPTH:-0}
 STDERR_TAIL_LINES=${FM_ARM_STDERR_TAIL_LINES:-5}
-case "$ATTACH_VERIFY" in *[!0-9]*|'') ATTACH_VERIFY=2 ;; esac
+# A zero window would collapse the gate to the single healthy read this script
+# exists to stop trusting, while still printing "verified 0s" as if it passed.
+case "$ATTACH_VERIFY" in *[!0-9]*|''|0) ATTACH_VERIFY=2 ;; esac
+case "$ATTACH_RETARGET_MAX" in *[!0-9]*|'') ATTACH_RETARGET_MAX=2 ;; esac
 case "$ARM_RESTART_MAX" in *[!0-9]*|'') ARM_RESTART_MAX=1 ;; esac
 case "$ARM_RESTART_DEPTH" in *[!0-9]*|'') ARM_RESTART_DEPTH=0 ;; esac
 case "$STDERR_TAIL_LINES" in *[!0-9]*|''|0) STDERR_TAIL_LINES=5 ;; esac
@@ -287,13 +306,17 @@ healthy_watcher() {
 # inside the grace can coexist with no watcher process at all. Keep re-checking
 # liveness, lock identity, and beacon freshness for the whole window, and record
 # whether the beacon actually advanced - the one positive proof of progress
-# rather than of recent existence. Sets ATTACH_VERIFY_REASON on failure.
+# rather than of recent existence. Sets ATTACH_VERIFY_REASON on failure and
+# ATTACH_VERIFIED_PID to the pid the window actually ended on, which is not the
+# pid passed in when the lock was handed to a healthy successor mid-window.
 ATTACH_VERIFY_REASON=
 ATTACH_VERIFY_BEACON_ADVANCED=0
+ATTACH_VERIFIED_PID=
 attach_verified() {  # <pid>
-  local pid=$1 deadline before now
+  local pid=$1 deadline before now retargets=0
   ATTACH_VERIFY_REASON=
   ATTACH_VERIFY_BEACON_ADVANCED=0
+  ATTACH_VERIFIED_PID=$pid
   before=$(fm_path_mtime "$BEAT" 2>/dev/null || true)
   deadline=$(( $(date +%s) + ATTACH_VERIFY ))
   while :; do
@@ -303,9 +326,23 @@ attach_verified() {  # <pid>
       return 1
     fi
     if [ "$HEALTHY_PID" != "$pid" ]; then
-      ATTACH_VERIFY_REASON="the watcher lock moved from pid=$pid to pid=$HEALTHY_PID within ${ATTACH_VERIFY}s of attaching"
-      HEALTHY_PID=$pid
-      return 1
+      # The lock now names a DIFFERENT pid that just passed the same liveness,
+      # identity, and beacon gate. That is a handover to a healthy successor, not
+      # a failed attach: restarting here would TERM a watcher that is fine.
+      # Retarget onto it and verify it from scratch, bounded so a lock that keeps
+      # flapping still resolves to an honest failure instead of looping.
+      if [ "$retargets" -ge "$ATTACH_RETARGET_MAX" ]; then
+        ATTACH_VERIFY_REASON="the watcher lock kept moving during verification (pid=$pid to pid=$HEALTHY_PID after ${ATTACH_RETARGET_MAX} retargets, ${ATTACH_VERIFY}s each)"
+        HEALTHY_PID=$pid
+        return 1
+      fi
+      retargets=$((retargets + 1))
+      pid=$HEALTHY_PID
+      ATTACH_VERIFIED_PID=$pid
+      ATTACH_VERIFY_BEACON_ADVANCED=0
+      before=$(fm_path_mtime "$BEAT" 2>/dev/null || true)
+      deadline=$(( $(date +%s) + ATTACH_VERIFY ))
+      continue
     fi
     now=$(fm_path_mtime "$BEAT" 2>/dev/null || true)
     if [ -n "$now" ] && [ "$now" != "$before" ]; then
@@ -460,6 +497,22 @@ restart_after_failed_attach() {
   exec "$SCRIPT_DIR/fm-watch-arm.sh" --restart
 }
 
+# The single owner of a failed attach, so the budget-spent semantics are the same
+# wherever verification fails. The restart never returns when it fires; with the
+# budget spent the disposition decides what this arm says. "abandon" leaves the
+# caller to start its own watcher, "fail" is the typed nonzero cycle failure.
+handle_failed_attach() {  # <abandon|fail> [exit-code] [signal]
+  local disposition=$1 exit_code=${2:-unknown} signal=${3:-unknown}
+  cycle_log_append "$exit_code" "$signal" attach-verification-failed none
+  restart_after_failed_attach || true
+  if [ "$disposition" = abandon ]; then
+    echo "watcher: attach abandoned - $ATTACH_VERIFY_REASON (no restart budget left)"
+    return 0
+  fi
+  echo "watcher: FAILED - cycle ended without an actionable reason ($ATTACH_VERIFY_REASON; no restart budget left)"
+  return 1
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, report the wake that cycle durably
 # delivered, or fail loudly - never a clean empty completion that an adapter
@@ -479,6 +532,7 @@ attach_and_wait() {
           sleep "$ATTACH_POLL"
           continue
         fi
+        candidate=$ATTACH_VERIFIED_PID
         cycle_log_append unknown unknown lock-replaced "attached:$candidate"
         attached_pid=$candidate
         # HEALTHY_IDENTITY is the identity attach_verified just proved for this
@@ -493,6 +547,7 @@ attach_and_wait() {
     if wait_for_healthy_successor; then
       candidate=$HEALTHY_PID
       if attach_verified "$candidate"; then
+        candidate=$ATTACH_VERIFIED_PID
         cycle_log_append unknown unknown attached-cycle-ended "attached:$candidate"
         attached_pid=$candidate
         cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
@@ -506,9 +561,7 @@ attach_and_wait() {
         cycle_log_append unknown unknown attached-delivered-wake none
         return 0
       fi
-      cycle_log_append unknown unknown attach-verification-failed none
-      restart_after_failed_attach || true
-      echo "watcher: FAILED - cycle ended without an actionable reason ($ATTACH_VERIFY_REASON; no restart budget left)"
+      handle_failed_attach fail
       return 1
     fi
     if close_unobserved_cycle; then
@@ -625,6 +678,7 @@ if [ "$mode" = arm ] && healthy_watcher; then
   # cycle is still recorded against the identity this arm actually saw.
   attach_candidate_identity=$HEALTHY_IDENTITY
   if attach_verified "$attach_candidate"; then
+    attach_candidate=$ATTACH_VERIFIED_PID
     cycle_mark_predecessor_successor "attached:$attach_candidate"
     cycle_begin "$attach_candidate" attached "$HEALTHY_IDENTITY"
     report_attached
@@ -635,9 +689,7 @@ if [ "$mode" = arm ] && healthy_watcher; then
   # With the restart budget spent, fall through to the ordinary start path, which
   # either self-heals a now-dead lock or reports the honest failure below.
   cycle_begin "$attach_candidate" attached "$attach_candidate_identity"
-  cycle_log_append unknown unknown attach-verification-failed none
-  restart_after_failed_attach || true
-  echo "watcher: attach abandoned - $ATTACH_VERIFY_REASON"
+  handle_failed_attach abandon
 fi
 
 # Start a watcher as a tracked child and confirm it before settling in. The child
@@ -653,6 +705,11 @@ handle_arm_signal() {
     wait "$child" 2>/dev/null || true
   fi
   cycle_log_append "$rc" "$signal" arm-interrupted none
+  # The watcher's stderr is captured, not inherited, so an interrupted arm has to
+  # replay it before cleanup_child deletes the file. A refusal written at t=0 is
+  # exactly what an operator needs when the harness tears the arm down at a turn
+  # boundary, and it used to appear live.
+  print_watch_stderr "$child_err"
   cleanup_child
   exit "$rc"
 }
@@ -692,6 +749,7 @@ owned_child_finished() {
     if wait_for_healthy_successor; then
       successor=$HEALTHY_PID
       if attach_verified "$successor"; then
+        successor=$ATTACH_VERIFIED_PID
         cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$successor"
         print_watch_output "$child_out"
         print_watch_stderr "$child_err"
@@ -712,9 +770,7 @@ owned_child_finished() {
         cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
         return 0
       fi
-      cycle_log_append "$rc" "$signal" attach-verification-failed none
-      restart_after_failed_attach || true
-      echo "watcher: FAILED - cycle ended without an actionable reason ($ATTACH_VERIFY_REASON; no restart budget left)"
+      handle_failed_attach fail "$rc" "$signal"
       return 1
     fi
     print_watch_output "$child_out"
