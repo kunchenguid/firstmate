@@ -1,12 +1,10 @@
 # Linear mirror
 
-firstmate can mirror `data/backlog.md` into Linear as a browsable view, link each
-task's pull request to its mirrored issue, and refresh that view in place.
+firstmate can mirror `data/backlog.md` into Linear as a browsable view, link each task's pull request to its mirrored issue, and refresh that view in place.
 
 `data/backlog.md` stays authoritative for execution.
 Linear is a view: reordering or reprioritising there does not reach the backlog.
-That split is the captain's decision of 2026-08-02, recorded in this fleet's own
-`data/060-linear-backlog-dump/decision-linear-mirror-authority.md`.
+That split is the captain's decision of 2026-08-02.
 
 **Linear is never a gate.**
 Every code path here degrades quietly.
@@ -16,24 +14,8 @@ Nothing in this feature can prevent a PR from being checked, reported, or merged
 
 ## Configuration
 
-Opt in exactly like X mode: put the values in the firstmate home's gitignored
-`.env`, or set them in the environment (the environment wins).
-`LINEAR_API_KEY` is the only required value; absent, every entry point below is a
-hard no-op.
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `LINEAR_API_KEY` | - | Linear personal API key (Settings -> Security & access -> Personal API keys). Presence is the opt-in. |
-| `LINEAR_TEAM_KEY` | - | Team key (e.g. `PSY`) scoping refresh, and the team new issues are created in. Without it, refresh infers the team from the issues already mirrored. |
-| `LINEAR_API_URL` | `https://api.linear.app/graphql` | Endpoint override; only a developer pointing at a fake needs this. |
-| `LINEAR_MAGIC_WORD` | `Part of` | The magic word firstmate writes into a PR body. See below. |
-| `LINEAR_TIMEOUT` | `10` | Per-request curl timeout in seconds. |
-| `FM_LINEAR_DISABLE` | unset | Truthy turns the PR-link step off without touching the rest of the PR check. |
-| `FM_LINEAR_PR_TIMEOUT` | `8` | Tighter per-request bound on the PR path, so a slow Linear cannot delay a PR being reported. |
-
-The key is sent as the bare `Authorization` header value, which is what Linear's
-personal API keys expect; a value starting `lin_oauth_` is sent as `Bearer`
-instead.
+[`configuration.md`](configuration.md#linear-mirror-env) owns the opt-in, supported settings, and defaults.
+The key is sent as the bare `Authorization` header value expected by Linear personal API keys; OAuth access tokens use the `Bearer` scheme.
 
 ## The join
 
@@ -106,7 +88,7 @@ Part of PSY-42
 - **A missing issue is the normal case.** Only queued items were ever mirrored,
   so most in-flight work has no issue. That is reported, not treated as an error.
 
-Every outcome prints one `linear: ...` line and exits 0.
+After valid arguments are supplied, every operational outcome prints one `linear: ...` line and exits 0.
 
 ## Refreshing in place: `bin/fm-linear-refresh.sh`
 
@@ -151,5 +133,4 @@ fakebin `curl` answering per GraphQL operation, and pin the degradation contract
 the additive and idempotent body edit, the exact first-line join, and the
 in-place reconciliation.
 
-Live verification against the real Linear API and a real GitHub PR is recorded in
-`docs/linear-verification.md`.
+Live verification against the real Linear API and the non-gating PR-check path is recorded in [`linear-verification.md`](linear-verification.md).

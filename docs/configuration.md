@@ -461,13 +461,19 @@ When absent, `bin/fm-linear-pr-link.sh` and `bin/fm-linear-refresh.sh` are no-op
 
 ```sh
 LINEAR_API_KEY=           # required opt-in
-LINEAR_TEAM_ID=           # optional team override
-LINEAR_PROJECT_ID=        # optional project for newly created issues
-LINEAR_DONE_STATE_ID=     # optional completed-state override
+LINEAR_TEAM_KEY=          # optional team key used to scope refresh and create issues
+LINEAR_API_URL=https://api.linear.app/graphql # optional endpoint override
 LINEAR_MAGIC_WORD="Part of" # non-closing by default
-LINEAR_BODY_STYLE=preserve   # preserve backlog note formatting
-FM_LINEAR_TIMEOUT=20      # refresh request timeout
-FM_LINEAR_PR_TIMEOUT=8    # tighter per-request bound on the PR path
+LINEAR_TIMEOUT=10         # per-request timeout
+```
+
+Those settings may be supplied through `.env` or the process environment.
+The following runtime-only controls must be set in the process environment:
+
+```sh
+LINEAR_BODY_STYLE=preserve # preserve backlog note formatting
+FM_LINEAR_DISABLE=         # truthy disables only the PR-link step
+FM_LINEAR_PR_TIMEOUT=8     # tighter per-request bound on the PR path
 ```
 
 `docs/linear.md` owns the join, verified PR-linking mechanism, strictly additive and idempotent body-edit contract, and refresh semantics.

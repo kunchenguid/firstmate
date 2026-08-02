@@ -1,15 +1,11 @@
 # Linear mirror: live verification
 
-Evidence, not narrative. Every command and output below was run against the real
-Linear API and the real `psychogenesis` workspace on the date shown.
-The behavior contract itself is pinned by `tests/fm-linear.test.sh`, which stubs
-the network; this file records what was checked against production.
+Every command and output below was run against the real Linear API and the real `psychogenesis` workspace on the date shown, with personal fields redacted.
+The behavior contract itself is pinned by `tests/fm-linear.test.sh`, which stubs the network; this file records what was checked against production.
 
 Date: 2026-08-02.
 Workspace: `psychogenesis` (organisation `levelupself` on the GitHub side).
-Credential: the captain's existing `LINEAR_API_KEY`, already provisioned in
-Infisical (`psychogenesis`, env `prod`). It was passed through the environment
-and is not written anywhere in this repo.
+Credential: an existing `LINEAR_API_KEY` passed through the environment and not written anywhere in this repo.
 
 ## 1. How Linear links a PR - established, not assumed
 
@@ -20,16 +16,13 @@ ID in the PR description), that "To link a PR that is already open, modify the P
 title or description", that "Magic words in PR comments won't create links", and
 the exact closing and non-closing magic-word lists.
 
-firstmate writes the non-closing `Part of <IDENT>` into the PR body. The
-reasoning is in `docs/linear.md`; the short version is that a closing word would
-make GitHub a second writer of the issue's status on merge, competing with
-`fm-linear-refresh.sh`, which owns the Done transition.
+[`linear.md`](linear.md#how-linear-links-a-pull-request) owns why firstmate writes the non-closing `Part of <IDENT>` into the PR body.
 
 ## 2. Authentication and the join, against live Linear
 
 ```
 $ curl ... -H "Authorization: $LINEAR_API_KEY" --data '{"query":"query { viewer { name email } organization { name urlKey } }"}'
-{"viewer":{"name":"Andrew Kim","email":"kim.andrew.h.w@gmail.com"},"organization":{"name":"psychogenesis","urlKey":"psychogenesis"}}
+{"viewer":{"name":"[redacted]","email":"[redacted]"},"organization":{"name":"psychogenesis","urlKey":"psychogenesis"}}
 ```
 
 `fml_find_issue` run against live Linear through the real library:
@@ -145,40 +138,7 @@ All 45 mirrored issues matched their backlog id. Zero duplicates were planned
 for them. The 53 creates are ids that never existed in Linear (in-flight items,
 Done items, and queued items filed after the original mirror run).
 
-## 6. Bug found and fixed during this verification
-
-The first live run corrupted PSY-7: its note body landed in the **Blocked by**
-line and the blocker id in **Delivered**.
-
-Cause: `IFS=$'\t' read -r state id title link blocked body`. Tab is IFS
-whitespace, so bash collapses runs of it; an item with no recorded link but a
-non-empty blocked-by produced two adjacent tabs and shifted every later column
-one to the left. It corrupted data instead of failing.
-
-Fixed by splitting the row with exact parameter expansion (`split_row` in
-`bin/fm-linear-refresh.sh`). A regression test was added and confirmed to fail
-against the old reader:
-
-```
---- with the old collapsing reader restored ---
-not ok - the blocked-by lands in the Blocked by line (missing: '**Blocked by:** 028-spine')
---- restored ---
-all linear tests passed
-```
-
-PSY-7 was repaired by re-running the refresh with the fixed code, and now reads:
-
-```
-`firstmate: 010-basic-combat-damage`
-
-**Blocked by:** 028-engine-seam-spine
-
-```
-Basic combat MVP: damage from real stats, HP, death, and death's persistent
-consequences. Spec: ...
-```
-
-## 7. Note-body rendering
+## 6. Note-body rendering
 
 Because the first mirror run had to repair a formatting corruption Linear's
 Markdown parser introduced, the refresh emits the backlog note body verbatim
@@ -186,11 +146,4 @@ inside a fenced code block by default (`LINEAR_BODY_STYLE=preserve`). Whitespace
 ASCII diagrams, and aligned tables therefore cannot be reflowed or mangled.
 `LINEAR_BODY_STYLE=markdown` renders the body as Markdown instead.
 
-This is a visible change to how a mirrored issue reads, and it is the captain's
-call to overrule.
-
-## 8. Linking a real PR - end to end
-
-Deferred to this change's own pull request, which is the first PR whose task has
-a mirrored issue (PSY-50, created in section 5). The result is appended here
-before the task is reported complete.
+The exact empty-column TSV split that protects this rendering is covered by the regression test in `tests/fm-linear.test.sh`.
