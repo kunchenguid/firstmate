@@ -35,7 +35,7 @@ The stored record therefore carries `provider`, `url`, `host`, `path`, and `numb
 Two things about plain `glab` were established by running it, because assuming either one would have failed silently into a permanent "not merged".
 
 First, plain `glab` has no field selector.
-`gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
+`gh` selects the fields it wants with `--json`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
 Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
 Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
 
