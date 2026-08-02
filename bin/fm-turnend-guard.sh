@@ -133,6 +133,20 @@ budget_reset() {
   rm -f "$BUDGET_FILE" 2>/dev/null || true
 }
 
+# This guard's own records are private to the home, exactly like the
+# process-event state it reports on. A symlink planted at one of these paths
+# would make an ordinary redirect truncate a file outside the home, and a fifo
+# would hang the whole Stop hook, so a record is read only when it is an
+# ordinary regular file and written only when the path is free or already one.
+guard_record_readable() {  # <path>
+  [ ! -L "$1" ] && [ -f "$1" ]
+}
+
+guard_record_writable() {  # <path>
+  [ ! -L "$1" ] || return 1
+  [ ! -e "$1" ] || [ -f "$1" ]
+}
+
 # A systemMessage is the one operator-visible channel a Claude Stop hook has on
 # an allow, so emit at most one and never alongside a second stdout object.
 # Succeeds only when this call actually wrote one, so a caller never records an
@@ -170,11 +184,13 @@ fi
 # episode is one session plus one damaged path: a new session (so any restart
 # re-announces), a different damaged path, or a repaired-then-damaged-again home
 # all start a new one. Without a session identity nothing is ever suppressed.
+# A latch path that is not an ordinary private file is never read and never
+# written, so a planted symlink can neither escape the home nor mute the notice.
 containment_notice_due() {
   local recorded_session recorded_path
   [ -n "$PROCEVENT_WARNING" ] || return 1
   [ "$SESSION_ID" != unknown ] || return 0
-  [ -f "$CONTAINMENT_FILE" ] || return 0
+  guard_record_readable "$CONTAINMENT_FILE" || return 0
   recorded_session=$(sed -n '1s/^session=//p' "$CONTAINMENT_FILE" 2>/dev/null || true)
   recorded_path=$(sed -n '2s/^path=//p' "$CONTAINMENT_FILE" 2>/dev/null || true)
   [ "$recorded_session" = "$SESSION_ID" ] \
@@ -183,6 +199,7 @@ containment_notice_due() {
 }
 
 containment_notice_record() {
+  guard_record_writable "$CONTAINMENT_FILE" || return 0
   printf 'session=%s\npath=%s\n' "$SESSION_ID" "$FM_SUP_PROCEVENT_UNSAFE_PATH" \
     > "$CONTAINMENT_FILE" 2>/dev/null || true
 }
@@ -274,7 +291,7 @@ fi
 # budget so the session can always end and Claude's 8-block override is never
 # approached.
 COUNT=0
-if [ -f "$BUDGET_FILE" ]; then
+if guard_record_readable "$BUDGET_FILE"; then
   old_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
   old_count=$(sed -n '2s/^count=//p' "$BUDGET_FILE" 2>/dev/null || true)
   case "$old_count" in
@@ -303,5 +320,8 @@ if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
   fi
   exit 0
 fi
-printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$COUNT" > "$BUDGET_FILE" 2>/dev/null || true
+guard_record_writable "$BUDGET_FILE" || rm -f "$BUDGET_FILE" 2>/dev/null || true
+if guard_record_writable "$BUDGET_FILE"; then
+  printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$COUNT" > "$BUDGET_FILE" 2>/dev/null || true
+fi
 block_stop

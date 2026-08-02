@@ -1387,6 +1387,61 @@ test_hook_claude_mode_containment_notice_is_once_per_episode() {
   pass "fm-turnend-guard --claude: containment notices are once per episode, never muted across sessions"
 }
 
+# The episode latch is private state in the same home whose damaged private
+# state it reports on, so it gets the same treatment: a symlink planted there
+# must not let an ordinary redirect truncate a file outside the home, and must
+# not become a way to mute the warning either.
+test_hook_claude_mode_containment_latch_refuses_symlink() {
+  local dir outside target out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-latch-symlink")
+  outside="$TMP_ROOT/hook-claude-latch-outside"
+  target="$TMP_ROOT/hook-claude-latch-target"
+  mkdir -p "$outside"
+  printf 'PRECIOUS\n' > "$target"
+  ln -s "$outside" "$dir/state/procevent"
+  ln -s "$target" "$dir/state/.turnend-claude-containment"
+
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "a symlinked latch must not change the guard's verdict"
+  [ "$(claude_notice_count "$out")" -eq 1 ] \
+    || fail "the first allow must announce even with an unusable latch: $out"
+  out=$(run_hook_claude "$dir" false)
+  [ "$(claude_notice_count "$out")" -eq 1 ] \
+    || fail "an unusable latch must fail open to announcing, never mute the notice: $out"
+
+  [ "$(cat "$target")" = PRECIOUS ] \
+    || fail "the guard wrote through a symlinked latch: $(cat "$target")"
+  [ -L "$dir/state/.turnend-claude-containment" ] \
+    || fail "the guard replaced the planted latch symlink instead of refusing it"
+  pass "fm-turnend-guard --claude: a symlinked containment latch is neither written through nor trusted"
+}
+
+# The sibling block-budget record has the same escape shape, but refusing it
+# outright would strand the budget below its cap and march the session toward
+# Claude's hard 8-block override, so it is repaired in place instead.
+test_hook_claude_mode_block_budget_refuses_symlink() {
+  local dir target out status i
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget-symlink")
+  target="$TMP_ROOT/hook-claude-budget-target"
+  : > "$dir/state/task1.meta"
+  printf 'PRECIOUS\n' > "$target"
+  ln -s "$target" "$dir/state/.turnend-claude-blocks"
+
+  for i in 1 2 3; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+    expect_code 2 "$status" "--claude block $i must still exit 2 with a planted budget symlink"
+  done
+  [ "$(cat "$target")" = PRECIOUS ] \
+    || fail "the guard wrote the block budget through a symlink: $(cat "$target")"
+  [ ! -L "$dir/state/.turnend-claude-blocks" ] \
+    || fail "the guard kept writing budget state at a symlinked path"
+
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "the repaired budget must still reach its degraded allow"
+  assert_contains "$out" 'block budget exhausted' "the repaired budget must still bound consecutive blocks"
+  pass "fm-turnend-guard --claude: a symlinked block-budget record is replaced, never written through"
+}
+
 # The degraded allow already owns stdout, so the containment notice must fold
 # into that one object rather than emitting a second, unparseable one.
 test_hook_claude_mode_degraded_allow_folds_containment_notice() {
@@ -1538,6 +1593,8 @@ test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_block_budget_then_degraded_allow
 test_hook_claude_mode_reports_unsafe_state_on_allow
 test_hook_claude_mode_containment_notice_is_once_per_episode
+test_hook_claude_mode_containment_latch_refuses_symlink
+test_hook_claude_mode_block_budget_refuses_symlink
 test_hook_claude_mode_degraded_allow_folds_containment_notice
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
