@@ -1334,6 +1334,24 @@ test_attribution_reuses_one_schema_section_across_teardowns() {
   pass "attribution closes an unterminated legacy row and keeps one schema section"
 }
 
+test_attribution_names_every_absent_runtime_field() {
+  local case_dir row task worktree harness model effort rest
+  case_dir=$(make_case attribution-absent-fields)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'started_at=2026-08-01T05:00:00Z' >> "$case_dir/state/task-x1.meta"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "attribution-absent-fields: forced teardown failed"
+
+  row=$(tail -n 1 "$case_dir/data/cost-attribution.tsv")
+  IFS=$'\t' read -r task worktree harness model effort rest <<EOF
+$row
+EOF
+  [ "$harness|$model|$effort" = "default|default|default" ] \
+    || fail "attribution-absent-fields: absent runtime fields are blank, not named: $row"
+  pass "attribution names an absent harness, model, and effort instead of leaving blanks"
+}
+
 test_teardown_missing_busy_sidecar_completes() {
   local case_dir gen rc
   case_dir=$(make_case missing-busy-sidecar)
@@ -1794,6 +1812,85 @@ test_forced_secondmate_child_attribution_failure_still_retires() {
   pass "forced retirement proceeds and says so when a child attribution record fails"
 }
 
+test_forced_secondmate_preserves_the_home_own_attribution_record() {
+  local case_dir home file
+  case_dir=$(make_case attribution-secondmate-home)
+  write_meta "$case_dir" local-only secondmate
+  printf '%s\n' 'started_at=2026-08-01T06:00:00Z' >> "$case_dir/state/task-x1.meta"
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  # Rows this home recorded for tasks that already had their own teardown, plus
+  # a hand-written section whose schema is not the v2 join.
+  printf '%s\n' \
+    $'task\tworktree\tnote' \
+    $'hand-written\t/hand/wt\tkeep out of the v2 section' \
+    '# schema=firstmate-effort-attribution-v2' \
+    $'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tstarted_at\tended_at' \
+    $'home-task-a\t/home/wt-a\tcodex\tgpt-test\thigh\tship\t/home/project\t2026-07-30T00:00:00Z\t2026-07-30T01:00:00Z' \
+    $'home-task-b\t/home/wt-b\tclaude\tdefault\tdefault\tscout\t/home/project\t2026-07-30T02:00:00Z\t2026-07-30T03:00:00Z' \
+    > "$home/data/cost-attribution.tsv"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "attribution-secondmate-home: forced secondmate teardown failed"
+
+  assert_absent "$home" "attribution-secondmate-home: the retired home was not removed"
+  file="$case_dir/data/cost-attribution.tsv"
+  [ "$(grep -c $'^home-task-a\t' "$file")" = 1 ] \
+    || fail "attribution-secondmate-home: the home's own recorded row was destroyed with it"
+  [ "$(grep -c $'^home-task-b\t' "$file")" = 1 ] \
+    || fail "attribution-secondmate-home: only part of the home's record survived"
+  grep -q $'^home-task-a\t/home/wt-a\tcodex\tgpt-test\thigh\tship\t/home/project\t2026-07-30T00:00:00Z\t2026-07-30T01:00:00Z$' "$file" \
+    || fail "attribution-secondmate-home: a preserved row was rewritten"
+  grep -q '^hand-written	' "$file" \
+    && fail "attribution-secondmate-home: a foreign-schema row was merged into the v2 section"
+  [ "$(grep -cxF '# schema=firstmate-effort-attribution-v2' "$file")" = 1 ] \
+    || fail "attribution-secondmate-home: preservation opened a duplicate schema section"
+  grep -q '^task-x1	' "$file" \
+    || fail "attribution-secondmate-home: the retired secondmate's own row is missing"
+  pass "retiring a secondmate home lifts its accumulated attribution into the parent"
+}
+
+test_secondmate_home_attribution_survives_a_refused_removal_exactly_once() {
+  local case_dir home file rc=0
+  case_dir=$(make_case attribution-secondmate-home-retry)
+  write_meta "$case_dir" local-only secondmate
+  printf '%s\n' 'started_at=2026-08-01T07:00:00Z' >> "$case_dir/state/task-x1.meta"
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    '# schema=firstmate-effort-attribution-v2' \
+    $'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tstarted_at\tended_at' \
+    $'home-task-a\t/home/wt-a\tcodex\tgpt-test\thigh\tship\t/home/project\t2026-07-30T00:00:00Z\t2026-07-30T01:00:00Z' \
+    > "$home/data/cost-attribution.tsv"
+  # A non-directory operational path makes home removal refuse before it starts.
+  rm -rf "$home/projects"
+  : > "$home/projects"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  [ "$rc" != 0 ] || fail "attribution-secondmate-home-retry: refused removal should fail teardown"
+  file="$case_dir/data/cost-attribution.tsv"
+  if [ -f "$file" ]; then
+    grep -q $'^home-task-a\t' "$file" \
+      && fail "attribution-secondmate-home-retry: a refused removal already lifted the home's rows"
+  fi
+  [ -f "$home/data/cost-attribution.tsv" ] \
+    || fail "attribution-secondmate-home-retry: the retained home lost its own record"
+
+  rm -f "$home/projects"
+  mkdir -p "$home/projects"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "attribution-secondmate-home-retry: the retry teardown failed"
+
+  [ "$(grep -c $'^home-task-a\t' "$file")" = 1 ] \
+    || fail "attribution-secondmate-home-retry: the home's row was lost or duplicated across the retry"
+  pass "a refused home removal defers preservation so the retry lifts each row once"
+}
+
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -2003,6 +2100,7 @@ test_local_only_force_overrides_unpushed
 test_teardown_appends_attribution_after_legacy_rows
 test_attribution_failure_warns_but_teardown_completes
 test_attribution_reuses_one_schema_section_across_teardowns
+test_attribution_names_every_absent_runtime_field
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
@@ -2012,6 +2110,8 @@ test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_secondmate_records_child_attribution_before_discard
 test_forced_secondmate_child_attribution_failure_still_retires
+test_forced_secondmate_preserves_the_home_own_attribution_record
+test_secondmate_home_attribution_survives_a_refused_removal_exactly_once
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed

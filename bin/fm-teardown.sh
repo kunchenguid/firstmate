@@ -62,12 +62,20 @@
 # `\t`, `\r`, and `\n`. A legacy file whose last line has no trailing newline is
 # closed with one first, so no hand-written row is ever joined or rewritten, and
 # each task contributes its marker, header, and row as a single append so
-# concurrent teardowns cannot interleave. Forced secondmate retirement records
-# the same row for every child task it discards, into the surviving parent
-# home's data/, because those children never get their own teardown run. New
-# tasks carry an exact UTC spawn timestamp in metadata; pre-existing metadata
-# falls back to its filesystem birth time, then mtime. Attribution failure warns
-# but never changes teardown eligibility, retirement, or completion.
+# concurrent teardowns cannot interleave. That append is serialized under
+# data/.cost-attribution.lock so two concurrent teardowns cannot each open a
+# second schema section; if the lock cannot be taken within its bounded wait the
+# row is still appended, because losing a row is worse than a duplicate header.
+# Forced secondmate retirement records the same row for every child task it
+# discards, into the surviving parent home's data/, because those children never
+# get their own teardown run. Removing a secondmate home also harvests that
+# home's own accumulated v2 rows before the removal and appends them to the
+# surviving parent's record once the removal succeeds, so retirement never
+# erases the joins that home already recorded and a failed removal never
+# duplicates them. New tasks carry an exact UTC spawn timestamp in metadata;
+# pre-existing metadata falls back to its filesystem birth time, then mtime.
+# Attribution failure warns but never changes teardown eligibility, retirement,
+# home removal, or completion.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -278,12 +286,52 @@ attribution_legacy_started_at() {
   fi
 }
 
+ATTRIBUTION_MARKER='# schema=firstmate-effort-attribution-v2'
+ATTRIBUTION_COLUMNS=$'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tstarted_at\tended_at'
+ATTRIBUTION_LOCK_ATTEMPTS=${FM_ATTRIBUTION_LOCK_ATTEMPTS:-50}
+
+attribution_lock_ready() {
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh" || return 1
+  fi
+  declare -F fm_lock_try_acquire >/dev/null 2>&1 \
+    && declare -F fm_lock_release >/dev/null 2>&1
+}
+
+attribution_append_rows() {
+  local data=$1 rows=$2 file lock payload locked=0 attempt=0 status=0
+  [ -n "$rows" ] || return 0
+  mkdir -p "$data" || return 1
+  file="$data/cost-attribution.tsv"
+  lock="$data/.cost-attribution.lock"
+  if attribution_lock_ready; then
+    while [ "$attempt" -lt "$ATTRIBUTION_LOCK_ATTEMPTS" ]; do
+      if fm_lock_try_acquire "$lock"; then
+        locked=1
+        break
+      fi
+      sleep 0.1
+      attempt=$((attempt + 1))
+    done
+  fi
+  payload=
+  if [ -s "$file" ] && [ -n "$(tail -c 1 "$file" 2>/dev/null || true)" ]; then
+    payload=$'\n'
+  fi
+  if [ ! -s "$file" ] || ! grep -qxF "$ATTRIBUTION_MARKER" "$file"; then
+    payload+="$ATTRIBUTION_MARKER"$'\n'
+    payload+="$ATTRIBUTION_COLUMNS"$'\n'
+  fi
+  payload+="$rows"$'\n'
+  printf '%s' "$payload" >> "$file" || status=1
+  [ "$locked" -eq 0 ] || fm_lock_release "$lock"
+  return "$status"
+}
+
 record_cost_attribution() {
   local data=$1 meta=$2 id=$3 wt=$4 kind=$5 proj=$6
-  local file marker started_at ended_at harness model effort payload row
-  marker='# schema=firstmate-effort-attribution-v2'
-  file="$data/cost-attribution.tsv"
-  mkdir -p "$data" || return 1
+  local started_at ended_at harness model effort row
   started_at=$(meta_value "$meta" started_at)
   if [ -z "$started_at" ]; then
     started_at=$(attribution_legacy_started_at "$meta") || return 1
@@ -292,17 +340,10 @@ record_cost_attribution() {
   harness=$(meta_value "$meta" harness)
   model=$(meta_value "$meta" model)
   effort=$(meta_value "$meta" effort)
+  [ -n "$harness" ] || harness=default
   [ -n "$model" ] || model=default
   [ -n "$effort" ] || effort=default
-  payload=
-  if [ -s "$file" ] && [ -n "$(tail -c 1 "$file" 2>/dev/null || true)" ]; then
-    payload=$'\n'
-  fi
-  if [ ! -s "$file" ] || ! grep -qxF "$marker" "$file"; then
-    payload+="$marker"$'\n'
-    payload+=$'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tstarted_at\tended_at\n'
-  fi
-  printf -v row '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf -v row '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
     "$(attribution_escape "$id")" \
     "$(attribution_escape "$wt")" \
     "$(attribution_escape "$harness")" \
@@ -312,8 +353,35 @@ record_cost_attribution() {
     "$(attribution_escape "$proj")" \
     "$(attribution_escape "$started_at")" \
     "$(attribution_escape "$ended_at")"
-  payload+=$row
-  printf '%s' "$payload" >> "$file" || return 1
+  attribution_append_rows "$data" "$row"
+}
+
+# Read a retiring home's own v2 data rows so they can outlive that home. Only
+# the rows below the v2 marker are portable: anything the captain hand-wrote
+# above it has an unknown schema and must not be merged into a v2 section.
+collect_firstmate_home_attribution() {
+  local home=$1 file src dest
+  file="$home/data/cost-attribution.tsv"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 0
+  src=$(CDPATH='' cd -- "$home/data" 2>/dev/null && pwd -P) || return 0
+  dest=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) || dest=
+  [ "$src" != "$dest" ] || return 0
+  awk -F '\t' -v marker="$ATTRIBUTION_MARKER" '
+    !seen { if ($0 == marker) { seen = 1 } ; next }
+    /^#/ { next }
+    $0 == "" { next }
+    $1 == "task" && $2 == "worktree" { next }
+    { print }
+  ' "$file"
+}
+
+preserve_firstmate_home_attribution() {
+  local label=$1 home=$2 rows=$3
+  [ -n "$rows" ] || return 0
+  if ! attribution_append_rows "$DATA" "$rows"; then
+    echo "warning: could not preserve the AI effort attribution rows recorded by $label $home; removal completed and those rows are lost" >&2
+  fi
+  return 0
 }
 
 require_orca_worktree_id() {
@@ -1106,11 +1174,18 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup preserved_rows
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
+  # Harvest before the removal, hand off only after it succeeds: a removal that
+  # fails and leaves the home in place must not seed duplicate rows upstream.
+  preserved_rows=
+  if ! preserved_rows=$(collect_firstmate_home_attribution "$abs_home_path"); then
+    preserved_rows=
+    echo "warning: could not read the AI effort attribution record in $label $abs_home_path; removal will continue and those rows may be lost" >&2
+  fi
   process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
@@ -1128,10 +1203,12 @@ remove_firstmate_home() {
       return 1
     }
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+    preserve_firstmate_home_attribution "$label" "$abs_home_path" "$preserved_rows"
     return 0
   fi
   if safe_rm_rf "$abs_home_path" "$label"; then
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+    preserve_firstmate_home_attribution "$label" "$abs_home_path" "$preserved_rows"
     return 0
   fi
   restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
