@@ -266,6 +266,8 @@ test_claude_hooks_semantic_lifecycle() {
   settings="$WT_DIR/.claude/settings.local.json"
   assert_present "$settings" "claude spawn did not write hook settings"
   jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
+  [ "$(wc -l <"$settings")" -gt 1 ] \
+    || fail "claude hook settings must be pretty-printed multi-line JSON, not minified to one line"
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
