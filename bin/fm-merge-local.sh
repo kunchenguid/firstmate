@@ -14,11 +14,13 @@
 # core.ignoreCase semantics; info/exclude and global excludes do not count.
 # An ignored directory is allowed only when the target head tracks nothing under
 # its prefix. Unresolved paths refuse before advancing; the first 50 receive
-# per-path diagnostics, followed by a +N summary for any remainder. Proven
-# ignored files are retained byte-for-byte; proven ignored symlinks retain their
-# readlink targets; proven ignored directories remain directories without
-# walking or hashing their contents. Other present entry types and entries that
-# cannot be inspected refuse. Every previously dirty path is then verified clean.
+# per-path diagnostics, followed by a +N summary for any remainder. An ignored
+# file or symlink that the merge moves aside must be restored with its exact blob
+# bytes or readlink target. Proven ignored directories remain directories without
+# walking or hashing their contents. A changed-but-still-present ignored entry
+# that the merge did not move aside is reported as live-runtime churn, because
+# the target tree cannot touch it; a lost or unreadable entry still fails loudly.
+# Other present entry types refuse. Every previously dirty path is then verified clean.
 # A preservation or cleanliness failure after the fast-forward is reported
 # without attempting rollback. Diverged branches still refuse and require the
 # crewmate to rebase. See AGENTS.md prime directives, project management, and
@@ -437,6 +439,19 @@ move_preserved_path_out_of_merge() {
   fi
 }
 
+preserved_path_was_moved_out_of_merge() {
+  local moved_path path=$1
+  for moved_path in "${MOVED_PATHS[@]}"; do
+    [ "$moved_path" = "$path" ] && return 0
+  done
+  return 1
+}
+
+report_ignored_runtime_churn() {
+  printf 'info: fast-forward completed, but ignored path %q changed during the merge window; the target tree ignores it and did not require a preservation move\n' \
+    "$1"
+}
+
 if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
   if ! init_target_view; then
     echo "error: could not construct the $BRANCH ignore view; refusing to merge a dirty checkout" >&2
@@ -653,6 +668,12 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
 fi
 
 for ((i = 0; i < ${#RESOLVED_PATHS[@]}; i++)); do
+  if [ "${RESOLVED_ACTIONS[$i]}" = "remove-index" ]; then
+    move_preserved_path_out_of_merge "${RESOLVED_PATHS[$i]}"
+  fi
+done
+
+for ((i = 0; i < ${#RESOLVED_PATHS[@]}; i++)); do
   path=${RESOLVED_PATHS[$i]}
   case "${RESOLVED_ACTIONS[$i]}" in
     set-index)
@@ -661,7 +682,6 @@ for ((i = 0; i < ${#RESOLVED_PATHS[@]}; i++)); do
       ;;
     remove-index)
       git -C "$PROJ" update-index --force-remove -- "$path"
-      move_preserved_path_out_of_merge "$path"
       ;;
     remove-index-preserve-directory)
       git -C "$PROJ" update-index --force-remove -- "$path"
@@ -706,9 +726,12 @@ for ((i = 0; i < ${#PRESERVE_PATHS[@]}; i++)); do
       exit 1
     fi
     if [ "$preserved_oid" != "${PRESERVE_OIDS[$i]}" ]; then
-      printf 'error: fast-forward completed, but ignored symlink %q changed target\n' \
-        "$path" >&2
-      exit 1
+      if preserved_path_was_moved_out_of_merge "$path"; then
+        printf 'error: fast-forward completed, but ignored symlink %q changed target\n' \
+          "$path" >&2
+        exit 1
+      fi
+      report_ignored_runtime_churn "$path"
     fi
     continue
   fi
@@ -718,9 +741,12 @@ for ((i = 0; i < ${#PRESERVE_PATHS[@]}; i++)); do
     exit 1
   fi
   if [ "$preserved_oid" != "${PRESERVE_OIDS[$i]}" ]; then
-    printf 'error: fast-forward completed, but ignored path %q changed from blob %s to blob %s\n' \
-      "$path" "${PRESERVE_OIDS[$i]}" "$preserved_oid" >&2
-    exit 1
+    if preserved_path_was_moved_out_of_merge "$path"; then
+      printf 'error: fast-forward completed, but ignored path %q changed from blob %s to blob %s\n' \
+        "$path" "${PRESERVE_OIDS[$i]}" "$preserved_oid" >&2
+      exit 1
+    fi
+    report_ignored_runtime_churn "$path"
   fi
 done
 

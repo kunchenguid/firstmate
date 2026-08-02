@@ -29,6 +29,9 @@
 #   (w) NUL bytes in a staged symlink blob cannot collapse during comparison
 #   (x) nested directly ignored directories are preserved without descending
 #   (y) current parent ignores cannot hide a narrower target directory boundary
+#   (z) untouched ignored runtime-file churn during the merge window is informational
+#   (aa) an ignored path that disappears after the fast-forward still fails loudly
+#   (ab) a pre-merge preservation failure leaves the checkout index unchanged
 set -u
 
 # shellcheck disable=SC1091
@@ -70,6 +73,39 @@ run_merge_local() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
     "$MERGE_LOCAL" task-x1
+}
+
+run_merge_local_with_post_merge_mutation() {
+  local case_dir=$1 fakebin mutation=$2 real_git
+  fakebin=$(fm_fakebin "$case_dir")
+  real_git=$(command -v git)
+  cat >"$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -eu
+
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_MERGE_MUTATION_PROJECT" ] \
+  && [ "${3:-}" = merge ] && [ "${4:-}" = --ff-only ]; then
+  "$FM_REAL_GIT" "$@"
+  case "$FM_MERGE_MUTATION" in
+    rewrite)
+      printf 'runtime state rewritten during merge\n' >"$FM_MERGE_MUTATION_PATH"
+      ;;
+    remove)
+      rm -f -- "$FM_MERGE_MUTATION_PATH"
+      ;;
+  esac
+  exit 0
+fi
+
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  FM_REAL_GIT="$real_git" \
+  FM_MERGE_MUTATION="$mutation" \
+  FM_MERGE_MUTATION_PROJECT="$case_dir/project" \
+  FM_MERGE_MUTATION_PATH="$case_dir/project/state/breaking-watch-last-run" \
+  PATH="$fakebin:$PATH" \
+    run_merge_local "$case_dir"
 }
 
 assert_main_reached_branch() {
@@ -235,6 +271,112 @@ test_branch_ignored_untracked_file_permits() {
   assert_main_reached_branch "$case_dir" \
     "ignored-untracked: main did not fast-forward to the task branch"
   pass "fm-merge-local permits an untracked path ignored at the branch head"
+}
+
+test_branch_ignored_runtime_churn_during_merge_is_info() {
+  local case_dir
+  case_dir=$(make_case ignored-runtime-churn)
+  printf 'state/breaking-watch-last-run\n' >"$case_dir/branch/.gitignore"
+  printf 'incoming change\n' >"$case_dir/branch/incoming.txt"
+  git -C "$case_dir/branch" add .gitignore incoming.txt
+  git -C "$case_dir/branch" commit -qm "ignore live runtime state"
+  mkdir -p "$case_dir/project/state"
+  printf 'runtime state before merge\n' \
+    >"$case_dir/project/state/breaking-watch-last-run"
+
+  run_merge_local_with_post_merge_mutation "$case_dir" rewrite \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "ignored-runtime-churn: merge should succeed despite live runtime churn"
+
+  assert_main_reached_branch "$case_dir" \
+    "ignored-runtime-churn: main did not fast-forward to the task branch"
+  assert_grep 'info: fast-forward completed, but ignored path state/breaking-watch-last-run changed during the merge window' \
+    "$case_dir/stdout" \
+    "ignored-runtime-churn: live churn was not classified as info"
+  assert_grep 'runtime state rewritten during merge' \
+    "$case_dir/project/state/breaking-watch-last-run" \
+    "ignored-runtime-churn: live runtime rewrite did not occur"
+  if grep -q 'fast-forward completed, but ignored path' "$case_dir/stderr"; then
+    fail "ignored-runtime-churn: live churn was still reported as an error"
+  fi
+  pass "fm-merge-local reports untouched ignored runtime churn as info"
+}
+
+test_branch_ignored_runtime_loss_after_merge_still_errors() {
+  local case_dir rc
+  case_dir=$(make_case ignored-runtime-loss)
+  printf 'state/breaking-watch-last-run\n' >"$case_dir/branch/.gitignore"
+  printf 'incoming change\n' >"$case_dir/branch/incoming.txt"
+  git -C "$case_dir/branch" add .gitignore incoming.txt
+  git -C "$case_dir/branch" commit -qm "ignore live runtime state"
+  mkdir -p "$case_dir/project/state"
+  printf 'runtime state before merge\n' \
+    >"$case_dir/project/state/breaking-watch-last-run"
+
+  set +e
+  run_merge_local_with_post_merge_mutation "$case_dir" remove \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ignored-runtime-loss: missing ignored path should still fail"
+  assert_main_reached_branch "$case_dir" \
+    "ignored-runtime-loss: fast-forward did not complete before the loud preservation failure"
+  assert_grep 'ignored path state/breaking-watch-last-run was blob ' \
+    "$case_dir/stderr" \
+    "ignored-runtime-loss: loss did not identify the preserved blob"
+  assert_grep 'before the merge and is now absent or unreadable' \
+    "$case_dir/stderr" \
+    "ignored-runtime-loss: loss was not reported loudly"
+  pass "fm-merge-local still errors when an ignored runtime path is lost"
+}
+
+test_preservation_failure_before_merge_leaves_index_unchanged() {
+  local after_hash before before_hash before_index case_dir fakebin rc real_mv
+  case_dir=$(make_case preservation-failure-index)
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  printf 'resolved target\n' >"$case_dir/branch/resolved.txt"
+  git -C "$case_dir/branch" add .gitignore resolved.txt
+  git -C "$case_dir/branch" rm -q runtime-state.txt
+  git -C "$case_dir/branch" commit -qm "ignore runtime state"
+  printf 'resolved target\n' >"$case_dir/project/resolved.txt"
+  printf 'runtime base\nruntime append\n' >"$case_dir/project/runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+  before_hash=$(git -C "$case_dir/project" hash-object -- runtime-state.txt)
+  before_index=$(git -C "$case_dir/project" write-tree)
+
+  fakebin=$(fm_fakebin "$case_dir")
+  real_mv=$(command -v mv)
+  cat >"$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -eu
+
+if [ "${1:-}" = -- ] && [ "${2:-}" = "$FM_FAIL_MOVE_PATH" ]; then
+  printf 'injected preservation move failure\n' >&2
+  exit 73
+fi
+
+exec "$FM_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  set +e
+  FM_FAIL_MOVE_PATH="$case_dir/project/runtime-state.txt" \
+  FM_REAL_MV="$real_mv" \
+  PATH="$fakebin:$PATH" \
+    run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "preservation-failure-index: injected move failure should stop the merge"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "preservation-failure-index: preservation failure advanced main"
+  [ "$(git -C "$case_dir/project" write-tree)" = "$before_index" ] \
+    || fail "preservation-failure-index: preservation failure changed the index"
+  after_hash=$(git -C "$case_dir/project" hash-object -- runtime-state.txt)
+  [ "$after_hash" = "$before_hash" ] \
+    || fail "preservation-failure-index: preservation failure changed runtime content"
+  pass "fm-merge-local preserves the index when pre-merge preservation fails"
 }
 
 test_branch_ignored_untracked_directory_permits_without_descending() {
@@ -978,6 +1120,9 @@ test_untracked_conversion_permits_and_preserves_file
 test_untracked_conversion_refuses_divergent_staged_content
 test_untracked_conversion_refuses_divergent_staged_mode
 test_branch_ignored_untracked_file_permits
+test_branch_ignored_runtime_churn_during_merge_is_info
+test_branch_ignored_runtime_loss_after_merge_still_errors
+test_preservation_failure_before_merge_leaves_index_unchanged
 test_branch_ignored_untracked_directory_permits_without_descending
 test_nested_branch_ignored_untracked_file_permits
 test_branch_ignored_directory_with_incoming_collision_refuses
