@@ -168,6 +168,7 @@ The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `gr
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
+`bin/fm-quota-gate.sh` is a separate deterministic backstop inside `fm-spawn`: it refuses a crewmate or scout spawn (never secondmate) when Claude-provider quota is low, with `FM_QUOTA_OVERRIDE=1` as the bypass; its own header owns the thresholds and exit-code contract.
 When dispatch profiles exist, consult them at every crewmate or scout intake and pass the resolved concrete profile required by `fm-spawn`.
 Routing precedence is an explicit per-task captain override, then the best-fit configured rule, then the configured default, then the static crewmate harness.
 Firstmate alone resolves a matched profile array: run `quota-axi --json` at that intake, evaluate every configured candidate against that current output, and choose with inspectable effective headroom and usable runway, using pace and reserve only later when needed.

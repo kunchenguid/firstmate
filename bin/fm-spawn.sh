@@ -96,6 +96,9 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A crewmate or scout spawn (never secondmate) is also gated on Claude
+#   provider quota headroom; bin/fm-quota-gate.sh owns the check, its
+#   thresholds, and FM_QUOTA_OVERRIDE.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -565,6 +568,45 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
         *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
       esac
     fi
+  fi
+fi
+
+# Claude-provider quota gate (bin/fm-quota-gate.sh owns the check and its
+# thresholds/exit-code contract). Crewmate and scout spawns only - a
+# secondmate is a persistent supervisor that must stay recoverable even at
+# low quota, so it is exempt. MODEL is fully resolved by this point for
+# every kind.
+if [ "$KIND" != secondmate ]; then
+  QUOTA_LINE=$("$SCRIPT_DIR/fm-quota-gate.sh") || true
+  QUOTA_STATUS=${QUOTA_LINE%% *}
+  QUOTA_REMAINING=${QUOTA_LINE#*remaining=}
+  quota_refuse() {
+    local title=$1 body=$2
+    local qrule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+    {
+      printf '●%s\n' "$qrule"
+      printf '●  %s\n' "$title"
+      printf '●  %s\n' "$body"
+      printf '●  Set FM_QUOTA_OVERRIDE=1 to spawn anyway.\n'
+      printf '●%s\n' "$qrule"
+    } >&2
+  }
+  if [ "$QUOTA_STATUS" = pause ] && [ "${FM_QUOTA_OVERRIDE:-0}" != 1 ]; then
+    quota_refuse "QUOTA PAUSE - SPAWN REFUSED" \
+      "Claude quota remaining is ${QUOTA_REMAINING}%, at or below the pause threshold."
+    exit 1
+  fi
+  if [ "$QUOTA_STATUS" = sonnet-only ]; then
+    QUOTA_MODEL_LC=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')
+    case "$QUOTA_MODEL_LC" in
+      *opus*|*fable*)
+        if [ "${FM_QUOTA_OVERRIDE:-0}" != 1 ]; then
+          quota_refuse "QUOTA SONNET-ONLY - SPAWN REFUSED" \
+            "Claude quota remaining is ${QUOTA_REMAINING}%; model '$MODEL' is refused. Use a sonnet or haiku model instead."
+          exit 1
+        fi
+        ;;
+    esac
   fi
 fi
 
