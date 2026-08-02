@@ -1663,6 +1663,49 @@ test_dead_reap_refuses_recent_hand_edit_shaped_output() {
   pass "dead reap refuses recent hand-edit-shaped ignored output"
 }
 
+test_dead_reap_refuses_old_ambiguous_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-old-ambiguous)
+  prepare_reap_case "$case_dir" $'build/'
+  mkdir -p "$case_dir/wt/build"
+  printf 'old manual recovery code\n' > "$case_dir/wt/build/manual-recovery.js"
+  touch -t 202001010000 "$case_dir/wt/build/manual-recovery.js"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "dead reap must refuse old ambiguous ignored output"
+  assert_grep 'build/manual-recovery.js (ambiguous)' "$case_dir/stderr" \
+    "old ambiguous refusal omitted the exact ignored file"
+  pass "dead reap never ages ambiguous ignored output into safety"
+}
+
+test_dead_reap_protects_work_roots_before_dependencies() {
+  local case_dir rc
+  case_dir=$(make_case reap-protected-dependencies)
+  prepare_reap_case "$case_dir" $'docs/\ndata/\n.agents/skills/'
+  mkdir -p "$case_dir/wt/docs/node_modules" \
+    "$case_dir/wt/data/.venv" \
+    "$case_dir/wt/.agents/skills/x/node_modules"
+  printf 'docs recovery\n' > "$case_dir/wt/docs/node_modules/recovery.md"
+  printf 'operator note\n' > "$case_dir/wt/data/.venv/operator-note"
+  printf 'skill draft\n' \
+    > "$case_dir/wt/.agents/skills/x/node_modules/draft.md"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "protected work roots must outrank dependency ownership"
+  assert_grep 'docs/node_modules/recovery.md (work-shaped)' "$case_dir/stderr" \
+    "docs dependency refusal omitted the exact ignored file"
+  assert_grep 'data/.venv/operator-note (work-shaped)' "$case_dir/stderr" \
+    "data dependency refusal omitted the exact ignored file"
+  assert_grep '.agents/skills/x/node_modules/draft.md (work-shaped)' \
+    "$case_dir/stderr" \
+    "skill dependency refusal omitted the exact ignored file"
+  pass "protected work roots outrank dependency ownership"
+}
+
 test_dead_reap_allows_dependency_tree_contents() {
   local case_dir rc
   case_dir=$(make_case reap-dependency-ignored)
@@ -1712,6 +1755,34 @@ SH
   assert_present "$case_dir/state/task-x1.meta" \
     "locked open-PR refusal cleared task metadata"
   pass "dead reap repeats open-PR protection under the checkout lock"
+}
+
+test_dead_reap_rechecks_endpoint_after_local_proofs() {
+  local case_dir rc
+  case_dir=$(make_case reap-endpoint-restored-during-scan)
+  prepare_reap_case "$case_dir" $'build/'
+  mkdir -p "$case_dir/wt/build/assets"
+  printf 'bundle\n' > "$case_dir/wt/build/assets/app.js"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' ls-files --others --ignored --exclude-standard '*)
+    : > "$(dirname "$0")/.tmux-live"
+    ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "endpoint restored during local proof must block return"
+  assert_grep 'found a live endpoint' "$case_dir/stderr" \
+    "post-scan endpoint proof did not detect the restored endpoint"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "restored-endpoint refusal cleared task metadata"
+  pass "dead reap repeats endpoint proof after slow local scans"
 }
 
 test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
@@ -5400,8 +5471,11 @@ if [ "${FM_TEST_FOCUSED:-}" = review-reap-final-proofs ]; then
   test_dead_reap_refuses_work_shaped_ignored_output
   test_dead_reap_refuses_ambiguous_ignored_output
   test_dead_reap_refuses_recent_hand_edit_shaped_output
+  test_dead_reap_refuses_old_ambiguous_output
+  test_dead_reap_protects_work_roots_before_dependencies
   test_dead_reap_allows_dependency_tree_contents
   test_dead_reap_rechecks_open_pr_at_locked_return
+  test_dead_reap_rechecks_endpoint_after_local_proofs
   exit 0
 fi
 
@@ -5586,8 +5660,11 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_dead_reap_refuses_work_shaped_ignored_output
   test_dead_reap_refuses_ambiguous_ignored_output
   test_dead_reap_refuses_recent_hand_edit_shaped_output
+  test_dead_reap_refuses_old_ambiguous_output
+  test_dead_reap_protects_work_roots_before_dependencies
   test_dead_reap_allows_dependency_tree_contents
   test_dead_reap_rechecks_open_pr_at_locked_return
+  test_dead_reap_rechecks_endpoint_after_local_proofs
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
   test_preserve_scratch_never_cleans_unlanded_commits
   test_preserve_scratch_refuses_tracked_drift_before_cleanup

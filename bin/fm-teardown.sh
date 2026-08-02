@@ -1728,10 +1728,22 @@ for entry in entries:
         or basename.endswith((".map", ".pyc"))
     )
     reason = None
-    if dependency_owned:
-        continue
-    if not parts or lowered[0] in work_roots or ".agents" in lowered and "skills" in lowered:
+    dependency_index = next(
+        (index for index, part in enumerate(lowered) if part in dependency_roots),
+        len(lowered),
+    )
+    protected_prefix = lowered[:dependency_index]
+    protected_work_path = (
+        not parts
+        or lowered[0] in work_roots
+        or ".agents" in protected_prefix and "skills" in protected_prefix
+        or any(part in {"draft", "drafts", "note", "notes", "report", "reports"}
+               for part in protected_prefix)
+    )
+    if protected_work_path:
         reason = "work-shaped"
+    elif dependency_owned:
+        continue
     elif any(word in basename for word in work_words):
         reason = "work-shaped"
     elif generated_root is None:
@@ -1740,6 +1752,8 @@ for entry in entries:
         try:
             if os.stat(os.path.join(worktree, entry), follow_symlinks=False).st_mtime >= recent_cutoff:
                 reason = "recent-ambiguous"
+            else:
+                reason = "ambiguous"
         except OSError:
             reason = "uninspectable"
     if reason:
@@ -5019,9 +5033,9 @@ validate_returned_worktree_bookkeeping_locked() {
 }
 
 validate_reap_return_safety() {
+  validate_reap_worktree_safety_and_summarize_ignored || return 1
   require_reap_endpoint_absent || return 1
-  validate_reap_open_pr_absent || return 1
-  validate_reap_worktree_safety_and_summarize_ignored
+  validate_reap_open_pr_absent
 }
 
 reap_github_repo_for_worktree() {
