@@ -44,6 +44,10 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Every scaffold carries a shared presentation contract: plain ASCII diagrams
+# for CLI and terminal output, Mermaid input translated to ASCII on terminal
+# surfaces, Mermaid only after positively verifying a Codex App/Desktop surface
+# where it materially helps, and no diagram when prose is clearer.
 # Refuses to overwrite an existing brief.
 set -eu
 
