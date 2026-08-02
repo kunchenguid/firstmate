@@ -34,7 +34,20 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      green, so a green PR is never silently read as still-validating. ALSO:
+#      when the run reached a TRUE terminal outcome of done or cancelled and the
+#      status log's last verb is a declared paused:, emit paused with source
+#      status-log and keep the terminal run outcome as the LEADING detail - a
+#      historical record must not overrule a self-declared wait. That override
+#      is keyed on the run's own terminal outcome, never on the mapped state, so
+#      the ci-green case above (mapped done while the run is still monitoring)
+#      stays an active run. Active and parked runs still outrank a pause line,
+#      and a terminal FAILED run always surfaces as failed: neither the status
+#      log's lines nor `axi status` carries a timestamp, so there is no way to
+#      prove the pause is fresher than the failure, and a pause appended before
+#      or during a run that then failed would otherwise mask real work failure.
+#      Cancelled is a supervisor abort rather than a work failure, so it stays
+#      overridable.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -458,6 +471,11 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
+  # The run's own TERMINAL outcome, independent of the mapped RUN_STATE:
+  # none (still active, whatever the mapping says), done, cancelled, or failed.
+  # Only the run's own reported outcome/status sets this, so a mapping override
+  # (ci-green -> done while the run keeps monitoring) never reads as terminal.
+  RUN_TERMINAL=none
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -471,9 +489,9 @@ if [ "$HAVE_RUN" = 1 ]; then
     # coarse-vs-full distinction, so a real gate is never silently missed.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
-      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+      completed) RUN_STATE="done";  RUN_DETAIL="run completed"; RUN_TERMINAL="done" ;;
+      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed"; RUN_TERMINAL=failed ;;
+      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled"; RUN_TERMINAL=cancelled ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -487,10 +505,10 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
-        failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed"; RUN_TERMINAL="done" ;;
+        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"; RUN_TERMINAL="done" ;;
+        failed)        RUN_STATE=failed; RUN_DETAIL="run failed"; RUN_TERMINAL=failed ;;
+        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled"; RUN_TERMINAL=cancelled ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
@@ -512,9 +530,9 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
-        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+        completed)      RUN_STATE="done"; RUN_DETAIL="run completed"; RUN_TERMINAL="done" ;;
+        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed"; RUN_TERMINAL=failed ;;
+        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled"; RUN_TERMINAL=cancelled ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
@@ -563,6 +581,32 @@ if [ "$HAVE_RUN" = 1 ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
         else
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded (run $RUN_STATE)"
+        fi
+      fi
+      ;;
+  esac
+
+  # Declared pause outranks a run that reached a TRUE terminal outcome, and only
+  # done or cancelled. Keyed on RUN_TERMINAL, not on the mapped RUN_STATE, so an
+  # active run the ci-green check mapped to done is still an active run and wins.
+  # Active/parked runs win for the same reason: the crew is mid-validation, so a
+  # pause line is stale. A terminal FAILED run also wins, deliberately: no
+  # freshness signal exists to prove the pause came AFTER the failure (status-log
+  # lines carry no timestamp, and `axi status` reports no completion time), and a
+  # pause appended before or during the run would otherwise mask a real failure
+  # behind a benign external wait. Cancelled is a supervisor abort, not failed
+  # work, so it stays overridable. Mirror the CI-green status-log override shape:
+  # emit from status-log with the terminal run outcome LEADING the detail, so the
+  # fact that the run finished survives downstream truncation, and the pause
+  # reason follows.
+  case "$RUN_TERMINAL" in
+    done|cancelled)
+      if status_is_paused "$LOG_LINE"; then
+        pause_note=$(status_line_note "$LOG_LINE")
+        if [ -n "$pause_note" ]; then
+          emit paused status-log "$RUN_DETAIL${SEP}$pause_note"
+        else
+          emit paused status-log "$RUN_DETAIL"
         fi
       fi
       ;;

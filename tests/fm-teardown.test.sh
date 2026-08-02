@@ -58,7 +58,10 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
-REAL_GIT_FOR_TEST=$(command -v git)
+# Absolute real binary. Do not use `command -v git` here: after lib.sh is
+# sourced that resolves to the test PATH shim, and a mock re-execing it under
+# its own fakebin-first PATH would re-enter a PATH fake instead of real git.
+REAL_GIT_FOR_TEST=$FM_TEST_REAL_GIT
 export REAL_GIT_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
@@ -1705,7 +1708,7 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
 }
 
 configure_herdr_projection_teardown_case() {  # <case-dir>
-  local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
+  local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv  # leak-ok: fixture projection id
   sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
   rm -f "$case_dir/state/task-x1.meta.bak"
   printf '%s\n' \
