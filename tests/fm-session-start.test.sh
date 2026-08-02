@@ -231,6 +231,8 @@ make_fake_tmux_secondmate_recovery() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# shellcheck source=/dev/null
+. "$(dirname "$0")/pane-shell.sh"
 mode=${FM_FAKE_TMUX_MODE:?}
 log=${FM_FAKE_TMUX_LOG:?}
 spawned=${FM_FAKE_TMUX_SPAWNED:?}
@@ -306,34 +308,18 @@ case "${1:-}" in
     ;;
   set-window-option) exit 0 ;;
   capture-pane)
-    cat "$spawned.spawn-screen" 2>/dev/null || true
+    fm_fake_pane_capture
     exit 0
     ;;
   send-keys)
-    screen="$spawned.spawn-screen"
-    staged="$screen.staged"
-    text=${4:-}
-    case "$text" in
-      *"__FM_SPAWN_READY_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
-        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$screen"
-        ;;
-      "FM_SPAWN_LAUNCH=''") : > "$staged" ;;
-      FM_SPAWN_LAUNCH=*)
-        rebuilt=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
-        printf '%s' "$rebuilt" > "$staged"
-        ;;
-      *"__FM_SPAWN_LAUNCH_OK_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
-        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$screen"
-        ;;
-    esac
+    fm_fake_pane_send "$@"
     exit 0
     ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_pane_shell "$fakebin"
 }
 
 make_fake_herdr_secondmate_recovery() {
@@ -344,13 +330,13 @@ make_fake_herdr_secondmate_recovery() {
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
+# shellcheck source=/dev/null
+. "$(dirname "$0")/pane-shell.sh"
 log=${FM_FAKE_HERDR_LOG:?}
 state=${FM_FAKE_HERDR_STATE:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
 killed="${state}.killed"
 spawned="${state}.spawned"
-screen="${state}.spawn-screen"
-staged="${screen}.staged"
 printf '%s\n' "$*" >> "$log"
 case "${1:-} ${2:-}" in
   "status --json")
@@ -407,27 +393,14 @@ case "${1:-} ${2:-}" in
     [ "${3:-}" = p-old ] && : > "$killed"
     ;;
   "pane read")
-    cat "$screen" 2>/dev/null || true
+    fm_fake_pane_capture
     ;;
-  "pane run"|"pane send-text")
-    text=${4:-}
-    case "$text" in
-      *"__FM_SPAWN_READY_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
-        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$screen"
-        ;;
-      "FM_SPAWN_LAUNCH=''") : > "$staged" ;;
-      FM_SPAWN_LAUNCH=*)
-        rebuilt=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
-        printf '%s' "$rebuilt" > "$staged"
-        ;;
-      *"__FM_SPAWN_LAUNCH_OK_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
-        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$screen"
-        ;;
-    esac
+  "pane run")
+    # herdr submits the whole line in one call, so feed the pane shell directly
+    # rather than through the tmux send-keys argv parser.
+    fm_fake_pane_line "${4:-}"
     ;;
-  "pane send-keys"|"tab close")
+  "pane send-text"|"pane send-keys"|"tab close")
     ;;
   *)
     exit 1
@@ -436,6 +409,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/herdr"
+  fm_fake_pane_shell "$fakebin"
 }
 
 # make_fake_herdr <fakebin> <live-pane>: `herdr pane get <pane>` succeeds only

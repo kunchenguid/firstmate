@@ -107,10 +107,14 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial
     runs-on: ubuntu-latest
-    # Measured serial remainder is ~13 min wall without Herdr. Cap is a hang
-    # tripwire above observed p99 script cost and suite wall, not the expected
-    # healthy end (interim 25m full-suite slack reduced after sharding).
-    timeout-minutes: 20
+    # Measured 2026-08-02: 16.1 min wall over 78 scripts on one hosted runner
+    # and 17.9 min over 69 on another, while two same-revision runs exceeded 20
+    # min and were killed by the previous cap. That spread is runner speed, not
+    # test growth, so a cap set near the typical wall lands inside the variance
+    # and reads as a red suite. This is a hang tripwire at roughly 2.5x the
+    # measured wall, matching the Herdr lane. Measurements and dates:
+    # docs/fm-test-portable-shards.md ("Measured serial wall").
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
         with:

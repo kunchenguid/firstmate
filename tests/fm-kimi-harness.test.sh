@@ -27,10 +27,10 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# shellcheck source=/dev/null
+. "$(dirname "$0")/pane-shell.sh"
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
 state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
-spawn_screen=${FM_FAKE_SPAWN_SCREEN:-"${FM_FAKE_LAUNCH_LOG}.screen"}
-staged_launch=${FM_FAKE_STAGED_LAUNCH:-"${FM_FAKE_LAUNCH_LOG}.staged"}
 fake_screen() {
   case "$state" in
     ready)
@@ -82,30 +82,11 @@ case "${1:-}" in
       esac
       exit 0
     fi
-    text=${4:-}
-    case "$text" in
-      *"__FM_SPAWN_READY_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
-        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$spawn_screen"
-        exit 0
-        ;;
-      "FM_SPAWN_LAUNCH=''" )
-        : > "$staged_launch"
-        exit 0
-        ;;
-      FM_SPAWN_LAUNCH=*)
-        staged=$(FM_SPAWN_LAUNCH="$(cat "$staged_launch")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
-        printf '%s' "$staged" > "$staged_launch"
-        exit 0
-        ;;
-      *"__FM_SPAWN_LAUNCH_OK_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
-        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$spawn_screen"
-        exit 0
-        ;;
+    fm_fake_pane_send "$@"
+    # The shared pane shell owns the launch-delivery protocol and the launch
+    # log; this fake still owns kimi's own post-launch readiness state.
+    case "${4:-}" in
       'eval "$FM_SPAWN_LAUNCH"')
-        cat "$staged_launch" >> "$FM_FAKE_LAUNCH_LOG"
-        printf '\n' >> "$FM_FAKE_LAUNCH_LOG"
         if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
           printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
         else
@@ -147,7 +128,7 @@ case "${1:-}" in
       case "$arg" in -S|-E) prev=$arg ;; *) prev= ;; esac
     done
     {
-      cat "$spawn_screen" 2>/dev/null || true
+      fm_fake_pane_capture 2>/dev/null || true
       fake_screen
     } | case "$start:$end" in
       *[!0-9:]*|'':*|*:'') cat ;;
@@ -160,6 +141,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_pane_shell "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
@@ -181,8 +163,6 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
   : > "$case_dir/pointer.log"
-  : > "$case_dir/launch.log.screen"
-  : > "$case_dir/launch.log.staged"
   : > "$case_dir/kimi.state"
   : > "$case_dir/tmux-calls.log"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
@@ -202,7 +182,6 @@ run_spawn() {
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
-    FM_FAKE_SPAWN_SCREEN="$case_dir/launch.log.screen" FM_FAKE_STAGED_LAUNCH="$case_dir/launch.log.staged" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi "$@" 2>&1

@@ -52,6 +52,21 @@ The two parallel lanes use longest-processing-time assignment from those measure
 `portable-serial` includes every `tests/*.test.sh` that is neither proven-isolated nor `real-herdr-gated`.
 It keeps watcher, lock, AFK, real tmux, daemon, secondmate lifecycle, bootstrap, live-harness opt-in, GUI-backend, and other unproven work serial.
 
+### Measured serial wall
+
+This lane grows whenever a new script is neither proven-isolated nor Herdr-gated, so record a fresh measurement here when you add to it.
+Each row is the lane's own `FM_TEST_SUMMARY duration_ms` from that run's uploaded timing artifact.
+
+| Date | Scripts | Wall | Run |
+|---|---:|---:|---|
+| 2026-07-30 | 69 | 17.9 min | 30584117685 (green) |
+| 2026-08-01 | 78 | 16.1 min | 30723357472 (green) |
+| 2026-08-01 | 78 | over 20 min | 30723993373 (killed by the then-current 20 min cap) |
+| 2026-08-02 | 78 | over 20 min | 30727407628 (killed by the then-current 20 min cap) |
+
+The same 78 scripts measured 16.1 minutes on one hosted runner and exceeded 20 on two others, so runner speed moves this lane by more than a third.
+Read the wall as a distribution rather than a number, and keep the timeout a multiple of it rather than a margin above the typical case.
+
 ## Coverage guard
 
 `bin/fm-test-run.sh --check-coverage` verifies that both parallel lanes partition the proven-isolated set.
@@ -73,7 +88,8 @@ Portable shards, the portable serial lane, and the Herdr lane upload runner-gene
 | Job | timeout-minutes | Rationale |
 |---|---:|---|
 | portable parallel 1/2 | 10 | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial | 20 | The serial remainder needs a larger hang tripwire. |
+| portable serial | 40 | Roughly 2.5x the measured wall above, chosen so ordinary runner variance cannot reach it. |
 | Herdr | 40 | The real-Herdr lane keeps its dedicated timeout. |
 
 Timeouts are hang tripwires rather than expected healthy durations.
+A cap set close to a lane's typical wall converts runner variance into a red suite, which is what the previous 20 minute serial cap did on 2026-08-01 and 2026-08-02.

@@ -108,6 +108,107 @@ SH
   done
 }
 
+# --- fm-spawn launch-delivery pane shell ------------------------------------
+#
+# fm-spawn refuses to report a spawn until the target pane proves it executed a
+# probe and rebuilt the complete launch command; bin/fm-spawn.sh's header owns
+# that launch-delivery contract. Every suite whose fake terminal drives a real
+# spawn therefore needs a pane that behaves like a shell.
+#
+# fm_fake_pane_shell <fakebin> writes <fakebin>/pane-shell.sh, a helper the
+# suite's own fake sources to answer exactly that protocol and nothing else; the
+# fake stays the owner of every other subcommand:
+#
+#   . "$(dirname "$0")/pane-shell.sh"
+#   case "${1:-}" in
+#     capture-pane) fm_fake_pane_capture; exit 0 ;;
+#     send-keys) fm_fake_pane_send "$@"; exit 0 ;;
+#   esac
+#
+# One shared owner matters here beyond deduplication: a per-suite copy answers
+# the staged-launch check by echoing the marker it parsed out of the submitted
+# line, so it reports success even when the staging it was meant to verify is
+# corrupt. This helper instead executes the submitted checksum against what the
+# pane actually accumulated, so every suite runs the real verification.
+#
+# fm_fake_pane_send parses tmux's send-keys argv; a fake for another backend
+# passes the submitted line straight to fm_fake_pane_line instead, the way a
+# herdr fake answers `pane run` and `pane read`.
+#
+# The emulated screen and staged command live beside the helper, so no suite has
+# to plumb state through the environment. A fake that also prints its own pane
+# content composes it with fm_fake_pane_capture, keeping its own line offsets. When
+# FM_FAKE_LAUNCH_LOG is set, the launch the pane finally evaluates is appended to
+# it, which is how a suite asserts on the constructed launch command.
+#
+# This emulates a healthy pane only. Truncation, wrapping, and retry injection
+# belong to tests/fm-spawn-launch-delivery.test.sh, which owns that contract and
+# keeps its own purpose-built fake.
+
+fm_fake_pane_shell() {
+  local fakebin=$1
+  mkdir -p "$fakebin"
+  cat > "$fakebin/pane-shell.sh" <<'SH'
+# Sourced by a suite's fake terminal. Owner: fm_fake_pane_shell in tests/lib.sh.
+FM_FAKE_PANE_STATE="${BASH_SOURCE[0]%/*}/pane-shell-state"
+mkdir -p "$FM_FAKE_PANE_STATE"
+FM_FAKE_PANE_SCREEN="$FM_FAKE_PANE_STATE/screen"
+FM_FAKE_PANE_STAGED="$FM_FAKE_PANE_STATE/staged"
+
+fm_fake_pane_capture() {
+  cat "$FM_FAKE_PANE_SCREEN" 2>/dev/null
+  return 0
+}
+
+# fm_fake_pane_line <text>: run one submitted shell line as the pane would.
+fm_fake_pane_line() {
+  local text=${1:-} token staged rebuilt result
+  staged=$(cat "$FM_FAKE_PANE_STAGED" 2>/dev/null || printf '')
+  case "$text" in
+    *__FM_SPAWN_READY_*)
+      token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
+      [ -n "$token" ] && printf '__FM_SPAWN_READY_%s\n' "$token" > "$FM_FAKE_PANE_SCREEN"
+      ;;
+    "FM_SPAWN_LAUNCH=''")
+      : > "$FM_FAKE_PANE_STAGED"
+      ;;
+    FM_SPAWN_LAUNCH=*)
+      rebuilt=$(FM_SPAWN_LAUNCH="$staged" bash -c "$text"'; printf %s "$FM_SPAWN_LAUNCH"')
+      printf '%s' "$rebuilt" > "$FM_FAKE_PANE_STAGED"
+      ;;
+    *__FM_SPAWN_LAUNCH_OK_*)
+      # Execute the submitted check against the real staged bytes rather than
+      # echoing the marker back, so corrupt staging cannot report success.
+      result=$(FM_SPAWN_LAUNCH="$staged" bash -c "$text")
+      printf '%s\n' "$result" > "$FM_FAKE_PANE_SCREEN"
+      ;;
+    'eval "$FM_SPAWN_LAUNCH"')
+      [ -n "${FM_FAKE_LAUNCH_LOG:-}" ] && printf '%s\n' "$staged" >> "$FM_FAKE_LAUNCH_LOG"
+      # The delivery markers scroll away once the launch runs, so a fixture that
+      # composes its own pane content is not left reading a stale marker line.
+      : > "$FM_FAKE_PANE_SCREEN"
+      ;;
+  esac
+  return 0
+}
+
+# fm_fake_pane_send <the fake's full argv>: accept a tmux send-keys call in any
+# of the three shapes the backend uses - "-t <target> <text> Enter",
+# "-t <target> -l <text>", and "-t <target> <key>".
+fm_fake_pane_send() {
+  local text
+  shift
+  [ "${1:-}" = -t ] && shift 2
+  if [ "${1:-}" = -l ]; then
+    text=${2:-}
+  else
+    text=${1:-}
+  fi
+  fm_fake_pane_line "$text"
+}
+SH
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

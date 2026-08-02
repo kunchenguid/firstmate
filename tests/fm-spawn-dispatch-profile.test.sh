@@ -19,8 +19,8 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-screen=${FM_FAKE_SPAWN_SCREEN:-"${FM_FAKE_LAUNCH_LOG:?}.screen"}
-staged_launch=${FM_FAKE_STAGED_LAUNCH:-"${FM_FAKE_LAUNCH_LOG:?}.staged"}
+# shellcheck source=/dev/null
+. "$(dirname "$0")/pane-shell.sh"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -28,35 +28,9 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  capture-pane) cat "$screen"; exit 0 ;;
+  capture-pane) fm_fake_pane_capture; exit 0 ;;
   send-keys)
-    text=${4:-}
-    case "$text" in
-      *"__FM_SPAWN_READY_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
-        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$screen"
-        exit 0
-        ;;
-      "FM_SPAWN_LAUNCH=''" )
-        : > "$staged_launch"
-        exit 0
-        ;;
-      FM_SPAWN_LAUNCH=*)
-        staged=$(FM_SPAWN_LAUNCH="$(cat "$staged_launch")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
-        printf '%s' "$staged" > "$staged_launch"
-        exit 0
-        ;;
-      *"__FM_SPAWN_LAUNCH_OK_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
-        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$screen"
-        exit 0
-        ;;
-      'eval "$FM_SPAWN_LAUNCH"')
-        cat "$staged_launch" >> "$FM_FAKE_LAUNCH_LOG"
-        printf '\n' >> "$FM_FAKE_LAUNCH_LOG"
-        exit 0
-        ;;
-    esac
+    fm_fake_pane_send "$@"
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -72,6 +46,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_pane_shell "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse pi-signed
   printf '%s\n' "$fakebin"
 }
@@ -114,8 +89,6 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  : > "$launchlog.screen"
-  : > "$launchlog.staged"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -126,7 +99,6 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
-    FM_FAKE_SPAWN_SCREEN="$CASE_DIR/spawn.screen" FM_FAKE_STAGED_LAUNCH="$CASE_DIR/staged-launch" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -177,8 +149,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
       FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
-      FM_FAKE_SPAWN_SCREEN="$CASE_DIR/spawn.screen" FM_FAKE_STAGED_LAUNCH="$CASE_DIR/staged-launch" \
-      GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
+        GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$id" "$PROJ_DIR" 2>&1
   )
   status=$?
@@ -207,8 +178,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
-      FM_FAKE_SPAWN_SCREEN="$CASE_DIR/spawn.screen" FM_FAKE_STAGED_LAUNCH="$CASE_DIR/staged-launch" \
-      GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
+        GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$relative_id" "$PROJ_DIR" 2>&1
   )
   status=$?
