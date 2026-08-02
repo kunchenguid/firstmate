@@ -1062,7 +1062,7 @@ EOF
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
   # fm-bootstrap.sh's own exact invalid-backend line format.
-  assert_contains "$out" "BACKEND_INVALID: unverified-test-backend (known: tmux herdr zellij orca cmux)" \
+  assert_contains "$out" "BACKEND_INVALID: unverified-test-backend (known: tmux herdr zellij orca cmux codex-app)" \
     "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
   assert_contains "$out" "$(printf 'signal\ttask-z.status\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
