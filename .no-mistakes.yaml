@@ -40,3 +40,7 @@ commands:
 test:
   evidence:
     store_in_repo: false
+
+# Configure push target to use fork instead of upstream.
+push:
+  target: fork
