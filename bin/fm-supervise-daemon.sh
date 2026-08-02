@@ -818,7 +818,7 @@ wedge_alarm_via_osascript() {  # <summary>
 # result here adds no new dependency; when jq is unavailable the exit code is
 # the only signal available and is trusted as before.
 wedge_alarm_via_herdr() {  # <summary>
-  local summary=$1 rc out shown reason
+  local summary=$1 rc out shown reason capture
   wedge_alarm_os_notifier_override herdr "$summary"
   rc=$?
   case "$rc" in
@@ -827,14 +827,26 @@ wedge_alarm_via_herdr() {  # <summary>
   esac
   command -v herdr >/dev/null 2>&1 || {
     log "wedge alarm: herdr not found; cannot post a herdr notification"; return 1; }
-  out=$(wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
-    --body "$summary" --sound request 2>/dev/null)
+  # The output is captured through a temp file, NOT a command substitution: a
+  # substitution would run wedge_alarm_run_bounded in a subshell, where its
+  # WEDGE_ALARM_NOTIFIER_PID assignment is invisible to the daemon's shutdown
+  # trap and a hung notifier process group would survive TERM/INT.
+  capture=$(mktemp "${TMPDIR:-/tmp}/fm-wedge-herdr.XXXXXX" 2>/dev/null) || capture=/dev/null
+  wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
+    --body "$summary" --sound request > "$capture" 2>/dev/null
   rc=$?
+  out=$(cat "$capture" 2>/dev/null || printf '')
+  [ "$capture" = /dev/null ] || rm -f "$capture"
   [ "$rc" -eq 0 ] || { log "wedge alarm: herdr notification failed"; return 1; }
+  # Only a parseable result OBJECT proves anything about delivery. Unparseable
+  # output, a missing result, or an absent `shown` field all mean "cannot
+  # verify", which trusts the exit code exactly like the no-jq fallback above;
+  # the failure path is reserved for an explicit non-true `shown`.
   command -v jq >/dev/null 2>&1 || return 0
-  shown=$(printf '%s' "$out" | jq -r '.result.shown // empty' 2>/dev/null)
+  shown=$(printf '%s' "$out" \
+    | jq -r '.result | objects | select(has("shown")) | .shown | tostring' 2>/dev/null)
   case "$shown" in
-    true) return 0 ;;
+    ''|true) return 0 ;;
   esac
   reason=$(printf '%s' "$out" | jq -r '.result.reason // "unknown"' 2>/dev/null)
   log "wedge alarm: herdr notification exited 0 but was not shown (reason: ${reason:-unknown}); this channel is not delivering on this host - configure a command: channel instead"

@@ -1400,6 +1400,53 @@ SH
   pass "wedge_alarm_via_herdr: a shown=true herdr result succeeds without a spurious failure log"
 }
 
+test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code() {
+  local dir fb daemon_log rc
+  dir="$TMP_ROOT/wedge-herdr-unparseable"; fb="$dir/fakebin"; mkdir -p "$fb"
+  daemon_log="$dir/daemon.log"
+  # An older herdr build, or extra non-JSON chatter on stdout, leaves nothing
+  # to parse. That is an inability to VERIFY delivery, not proof of a
+  # non-delivery, so it must fall back to the exit code like the no-jq path.
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+printf 'notification sent\n'
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "unparseable herdr output was treated as a proven non-delivery ($rc)"
+  [ ! -s "$daemon_log" ] \
+    || fail "unparseable herdr output logged a false non-delivery: $(cat "$daemon_log")"
+  pass "wedge_alarm_via_herdr: output it cannot parse trusts the exit code instead of claiming non-delivery"
+}
+
+test_wedge_alarm_herdr_notifier_pid_survives_capture() {
+  local dir fb daemon_log
+  dir="$TMP_ROOT/wedge-herdr-pid"; fb="$dir/fakebin"; mkdir -p "$fb"
+  daemon_log="$dir/daemon.log"
+  # Capturing herdr's JSON must not push the bounded runner into a subshell:
+  # the daemon's shutdown trap can only kill a hung notifier group through the
+  # WEDGE_ALARM_NOTIFIER_PID this shell can see.
+  cat > "$fb/herdr" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$\$" > "$dir/notifier.pid"
+printf '{"result":{"shown":true}}\n'
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  unset WEDGE_ALARM_NOTIFIER_PID
+  PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  [ -s "$dir/notifier.pid" ] || fail "the fake herdr notifier never ran"
+  [ -n "${WEDGE_ALARM_NOTIFIER_PID+set}" ] \
+    || fail "wedge_alarm_via_herdr never touched WEDGE_ALARM_NOTIFIER_PID in this shell (still subshell-scoped)"
+  [ -z "$WEDGE_ALARM_NOTIFIER_PID" ] \
+    || fail "a finished herdr notifier left a stale PID behind: $WEDGE_ALARM_NOTIFIER_PID"
+  pass "wedge_alarm_via_herdr: the notifier PID stays visible to this shell, so shutdown can still kill its group"
+}
+
 test_wedge_alarm_command_channel_receives_summary() {
   local dir out_argv out_stdin chan
   dir=$(make_wedge_case wedge-command)
@@ -1948,6 +1995,8 @@ test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
 test_wedge_alarm_herdr_not_shown_is_a_failure
 test_wedge_alarm_herdr_shown_true_succeeds
+test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code
+test_wedge_alarm_herdr_notifier_pid_survives_capture
 test_wedge_alarm_command_channel_receives_summary
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive

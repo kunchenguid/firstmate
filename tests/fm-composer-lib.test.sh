@@ -36,6 +36,25 @@ test_bare_shell_glyphs_are_unknown() {
   pass "fm_composer_classify_content: a bare shell prompt glyph (>/\$/%/#) reads unknown, never empty"
 }
 
+test_bare_shell_glyph_with_only_a_separator_is_unknown() {
+  local g out
+  # Same dead-shell row, but the glyph is trailed by a separator: an ASCII
+  # space, or the U+00A0 normalized to one. Neither turns a dead shell into a
+  # safe injection target - only a composer box does.
+  for g in '>' '$' '%' '#'; do
+    out=$(classify 0 "$g ")
+    [ "$out" = unknown ] \
+      || fail "bare shell glyph '$g' plus a space must read unknown, got '$out'"
+    out=$(classify 0 "$g"$'\xc2\xa0')
+    [ "$out" = unknown ] \
+      || fail "bare shell glyph '$g' plus a non-breaking space must read unknown, got '$out'"
+    out=$(classify 1 "$g"$'\xc2\xa0')
+    [ "$out" = empty ] \
+      || fail "a bordered shell glyph '$g' plus a non-breaking space must stay empty, got '$out'"
+  done
+  pass "fm_composer_classify_content: a bare shell glyph trailed only by a separator (space or NBSP) stays unknown"
+}
+
 test_stripped_unbordered_content_uses_plain_content() {
   local plain out
   for plain in '$' 'user@host $'; do
@@ -558,6 +577,7 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
 }
 
 test_bare_shell_glyphs_are_unknown
+test_bare_shell_glyph_with_only_a_separator_is_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
