@@ -205,10 +205,22 @@ pass 'promotion PR body reports skipped gates as skipped'
 case_s="$TMP_ROOT/s"
 mkdir -p "$case_s"
 make_repo "$case_s/repo"
+# main moves first, so merging prakrit into it produces a REAL merge commit
+# rather than a fast-forward. Without that the promoted range holds no merge at
+# all, and the count assertions below pass whether or not the counts and their
+# listings share a filter, which would document nothing.
+git -C "$case_s/repo" checkout -q main
+printf 'hotfix\n' > "$case_s/repo/hotfix.txt"
+git -C "$case_s/repo" add hotfix.txt
+git -C "$case_s/repo" commit -qm 'fix: landed on main before this promotion'
+git -C "$case_s/repo" push -q origin main
+git -C "$case_s/repo" fetch -q origin
 # What a real promotion validates on: origin/prakrit merged into origin/main,
 # plus a fix the validation committed there, which never reaches prakrit.
 git -C "$case_s/repo" checkout -q -B integrate/prakrit-to-main origin/main
 git -C "$case_s/repo" merge -q --no-edit origin/prakrit -m 'integrate(prakrit): test fixture'
+[ "$(git -C "$case_s/repo" rev-list --count --merges origin/main..integrate/prakrit-to-main)" -ge 1 ] ||
+  fail 'the fixture must carry a real integration merge for the count assertions to discriminate'
 printf 'fix\n' > "$case_s/repo/fix.txt"
 git -C "$case_s/repo" add fix.txt
 git -C "$case_s/repo" commit -qm 'fix: committed onto integrate by the validation'
@@ -239,6 +251,23 @@ assert_contains "$diverged" 'does not show them (1):' 'the count describes the s
 assert_contains "$diverged" 'did not land them (1):' 'the unlanded count describes its own list'
 pass 'the body reconciles the promoted range against the diff GitHub renders'
 
+# The same rule one section up: the promoted total counts merges, the listing
+# under it does not, so the record must say which number the list is showing.
+assert_contains "$diverged" 'merges included' 'a total larger than its listing says so'
+assert_contains "$diverged" 'non-merge commits are what the listing below shows' \
+  'the record names the number the listing actually shows'
+promoted_total=$(printf '%s\n' "$diverged" | sed -n 's/^- commits: \([0-9][0-9]*\).*/\1/p')
+promoted_listed=$(printf '%s\n' "$diverged" | sed -n 's/.*; the \([0-9][0-9]*\) non-merge commits are what.*/\1/p')
+[ "$promoted_total" -gt "$promoted_listed" ] ||
+  fail 'the fixture must make the promoted total exceed its non-merge listing'
+[ "$promoted_listed" = "$(printf '%s\n' "$diverged" | awk '
+  /^- commits: / { on = 1; next }
+  on && /^- / && !/^- .main. is/ { n++ }
+  on && /^## / { exit }
+  END { print n + 0 }')" ] ||
+  fail 'the stated non-merge count must match the promoted listing'
+pass 'the promoted commit total says which of its commits the listing shows'
+
 # A count and the bullet list under it must describe the same set, or a section
 # whose whole purpose is saying what is missing disagrees with itself.
 for section in 'does not show them' 'did not land them'; do
@@ -260,6 +289,51 @@ assert_contains "$aligned" 'the same non-merge commits as the promoted range' 'a
 assert_contains "$aligned" 'which closes this PR as merged' 'an aligned record states the close it does get'
 assert_not_contains "$aligned" 'NOT promoted' 'nothing is reported as unlanded when nothing is'
 pass 'a head branch matching the promoted range is recorded as the promotion itself'
+
+# A divergence made only of merge commits is routine: sync_prakrit_from_main and
+# fm-prakrit-sync-agent-branches.sh both put a bare merge(main) on prakrit. The
+# head then carries no non-merge commit the promotion misses, yet is still not
+# contained in it, so a body that decided alignment and closing separately would
+# call the head aligned and in the next breath say it carries undelivered work.
+case_x="$TMP_ROOT/x"
+mkdir -p "$case_x"
+make_repo "$case_x/repo"
+# main moves, so the integrate branch is a real merge of main and prakrit, and
+# the ladder's own realignment merge of main back into prakrit is a real merge
+# too. Both sides then hold the same content and differ only by which merge
+# commit carries it.
+git -C "$case_x/repo" checkout -q main
+printf 'hotfix\n' > "$case_x/repo/hotfix.txt"
+git -C "$case_x/repo" add hotfix.txt
+git -C "$case_x/repo" commit -qm 'fix: landed on main before this promotion'
+git -C "$case_x/repo" push -q origin main
+git -C "$case_x/repo" fetch -q origin
+git -C "$case_x/repo" checkout -q -B integrate/prakrit-to-main origin/main
+git -C "$case_x/repo" merge -q --no-edit origin/prakrit -m 'integrate(prakrit): test fixture'
+git -C "$case_x/repo" checkout -q prakrit
+git -C "$case_x/repo" merge -q --no-edit origin/main -m 'merge(main): keep integration aligned after main promote'
+git -C "$case_x/repo" push -q origin prakrit
+git -C "$case_x/repo" fetch -q origin
+[ "$(fm_proplane_promote_pr_commit_count "$case_x/repo" no-merges origin/prakrit --not integrate/prakrit-to-main)" = 0 ] &&
+  [ "$(fm_proplane_promote_pr_commit_count "$case_x/repo" no-merges origin/main..integrate/prakrit-to-main --not origin/prakrit)" = 0 ] ||
+  fail 'the fixture must diverge by merge commits alone'
+! git -C "$case_x/repo" merge-base --is-ancestor origin/prakrit integrate/prakrit-to-main 2>/dev/null ||
+  fail 'the fixture must leave prakrit outside the promoted range'
+
+merge_only=$(fm_proplane_promote_pr_body "$case_x/repo" origin/main integrate/prakrit-to-main \
+  passed '' passed origin/prakrit)
+assert_contains "$merge_only" 'the difference is merge commits only (1):' \
+  'a merge-only divergence is named and counted'
+assert_contains "$merge_only" 'keep integration aligned after main promote' \
+  'the merge that causes it is listed as evidence'
+assert_contains "$merge_only" 'is still not contained in it' \
+  'the head is never called aligned outright when it is not contained in the range'
+assert_contains "$merge_only" 'does NOT close as merged' 'a record that will not close says so'
+assert_contains "$merge_only" 'merge commits only, listed above' \
+  'the reason the record will not close points at the evidence'
+assert_not_contains "$merge_only" 'diff is the promotion.' \
+  'the aligned wording is never printed for a head the promotion does not contain'
+pass 'a divergence of merge commits alone is explained, never self-contradicted'
 
 # With no head ref to reconcile against, the record states the condition for
 # closing rather than asserting an outcome it cannot know.
@@ -779,8 +853,15 @@ pass 'a plain --dry-run runs no security review and still previews the promotion
 
 # A dry run has not built the integrate branch this run would promote, so it must
 # say what it does not know rather than reporting a leftover branch as the record.
+# It does know the tip of the ref it read, though, so it names that instead of
+# claiming ignorance directly beneath a range it printed from that same ref.
 assert_contains "$out" 'This is a preview, not a record' 'the dry run marks its output as a preview'
-assert_contains "$out" 'not known yet' 'the preview does not invent the tip main lands on'
+assert_contains "$out" "integrate/prakrit-to-main\` is at" 'the preview names the tip of the ref it read'
+assert_contains "$out" "$(git -C "$case_t/repo" rev-parse integrate/prakrit-to-main)" \
+  'the preview names the sha it actually has'
+assert_contains "$out" 'as that branch stands when it runs' \
+  'the preview says the recorded tip comes from the real run, not from this read'
+assert_not_contains "$out" 'main` is fast-forwarded to' 'the preview claims no fast-forward target'
 assert_not_contains "$out" 'which closes this PR as merged' 'the preview asserts no close it cannot know'
 assert_not_contains "$out" 'the same non-merge commits as the promoted range' \
   'the preview claims no alignment it cannot know'
@@ -854,7 +935,9 @@ pass 'the full ladder dry run previews the promotion record PR without opening i
 # real promotion lands an integrate tip carrying the integration merge and the
 # validation's own commits.
 assert_contains "$out" 'This is a preview, not a record' 'the ladder preview says it is a preview'
-assert_contains "$out" 'not known yet' 'the ladder preview does not invent the tip main lands on'
+assert_not_contains "$out" 'main` is fast-forwarded to' 'the ladder preview claims no fast-forward target'
+assert_contains "$out" 'as that branch stands when it runs' \
+  'the ladder preview says the recorded tip comes from the real run'
 assert_contains "$out" 'integrate/prakrit-to-main' 'the preview names where the real record comes from'
 assert_contains "$out" 'no-mistakes validation itself makes' \
   'the preview says the real record can carry commits the validation adds'

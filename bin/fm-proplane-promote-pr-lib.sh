@@ -31,7 +31,13 @@
 #
 # Public functions:
 #   fm_proplane_promote_pr_range_count <git_root> <base_ref> <head_ref>
-#     Commits in <base_ref>..<head_ref>, or 0 when the range cannot be read.
+#     Commits in <base_ref>..<head_ref>, merges included, or 0 when the range
+#     cannot be read. This is the size of what lands, so it decides whether there
+#     is anything to record at all.
+#   fm_proplane_promote_pr_commit_count <git_root> <no-merges|with-merges> <rev-args...>
+#   fm_proplane_promote_pr_commit_listing <git_root> <empty_text> <no-merges|with-merges> <rev-args...>
+#     A count and its listing, taken under the same filter. Every number the body
+#     prints beside a list comes from the first with the filter the second used.
 #   fm_proplane_promote_pr_title <base_sha> <head_sha>
 #     One-line PR title naming the promoted range.
 #   fm_proplane_promote_pr_body <git_root> <base_ref> <head_ref> <security_status> <security_report> <validation_status> [pr_head_ref] [kind]
@@ -156,15 +162,36 @@ fm_proplane_promote_pr_title() {
   printf '%s (%s..%s)\n' "$FM_PROPLANE_PR_TITLE_PREFIX" "$1" "$2"
 }
 
-# A capped `- <sha> <subject>` listing for the given rev-list arguments. The cap
-# keeps a long promotion from drowning the record; the marker keeps a capped
-# listing from reading as one the --no-merges filter shortened, so a reader can
-# always tell which commits the record omitted and why.
-fm_proplane_promote_pr_commit_listing() {
-  local git_root=$1 empty_text=$2
+# Commits matching the given rev-list arguments under <merges>, which is
+# `no-merges` or `with-merges`. Every number the body prints beside a listing is
+# taken from here with the SAME <merges> the listing used: a count and a list
+# that disagree are how a record ends up contradicting itself about what is
+# missing, and the truncation marker is the only thing allowed to explain a gap.
+fm_proplane_promote_pr_commit_count() {
+  local git_root=$1 merges=$2
   shift 2
+  local count
+  if [ "$merges" = with-merges ]; then
+    count=$(git -C "$git_root" rev-list --count "$@" 2>/dev/null) || count=0
+  else
+    count=$(git -C "$git_root" rev-list --count --no-merges "$@" 2>/dev/null) || count=0
+  fi
+  printf '%s\n' "${count:-0}"
+}
+
+# A capped `- <sha> <subject>` listing for the given rev-list arguments, under the
+# same <merges> filter its count was taken with. The cap keeps a long promotion
+# from drowning the record; the marker keeps a capped listing from reading as one
+# a filter shortened, so a reader can always tell what the record omitted and why.
+fm_proplane_promote_pr_commit_listing() {
+  local git_root=$1 empty_text=$2 merges=$3
+  shift 3
   local listing listed out
-  listing=$(git -C "$git_root" log --no-merges --format='- %h %s' "$@" 2>/dev/null) || listing=""
+  if [ "$merges" = with-merges ]; then
+    listing=$(git -C "$git_root" log --format='- %h %s' "$@" 2>/dev/null) || listing=""
+  else
+    listing=$(git -C "$git_root" log --no-merges --format='- %h %s' "$@" 2>/dev/null) || listing=""
+  fi
   if [ -z "$listing" ]; then
     printf '%s\n' "$empty_text"
     return 0
@@ -182,14 +209,23 @@ fm_proplane_promote_pr_body() {
   local git_root=$1 base_ref=$2 head_ref=$3
   local security_status=$4 security_report=$5 validation_status=$6
   local pr_head_ref=${7:-} kind=${8:-record}
-  local base_sha head_sha head_tip tip_line count log report_line
-  local pr_head_label diff_section lands_section
-  local unshown_count unlanded_count unshown_log unlanded_log
+  local base_sha head_sha head_tip tip_line count listed_count count_line log report_line
+  local pr_head_label diff_section lands_section will_close
+  local unshown_count unlanded_count unshown_log unlanded_log merge_only_count merge_only_log
   base_sha=$(fm_proplane_promote_pr_short_sha "$git_root" "$base_ref")
   head_sha=$(fm_proplane_promote_pr_short_sha "$git_root" "$head_ref")
   count=$(fm_proplane_promote_pr_range_count "$git_root" "$base_ref" "$head_ref")
+  listed_count=$(fm_proplane_promote_pr_commit_count "$git_root" no-merges "$base_ref..$head_ref")
   log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
-    '- (no non-merge commits in this range)' "$base_ref..$head_ref")
+    '- (no non-merge commits in this range)' no-merges "$base_ref..$head_ref")
+  # The listing below is non-merge commits, so a bare total would tell a reader
+  # the list is short by a number with no truncation marker to explain it. The
+  # total is what lands on main, so it stays, labelled with what the list shows.
+  if [ "$count" = "$listed_count" ]; then
+    count_line="- commits: $count"
+  else
+    count_line="- commits: $count (merges included; the $listed_count non-merge commits are what the listing below shows)"
+  fi
   report_line=""
   if [ -n "$security_report" ]; then
     report_line="
@@ -198,15 +234,20 @@ fm_proplane_promote_pr_body() {
 
   diff_section=""
   if [ "$kind" = preview ]; then
-    # A preview runs before the integrate branch is built, so the tip main lands
-    # on does not exist yet and neither does the comparison against it. Saying so
-    # is the honest answer; synthesising a tip from origin/prakrit would print
-    # three sentences that are normally false for the run being previewed.
-    tip_line="- \`main\` is fast-forwarded to: not known yet, this preview runs before the integrate branch is built"
+    # A preview reports the ref it actually read, and never claims that ref is
+    # what main lands on: only the real run builds the branch it fast-forwards to.
+    # Where the ref cannot be read at all, saying so is the honest answer, and
+    # synthesising a tip would be a sentence that is false for the run previewed.
+    head_tip=$(git -C "$git_root" rev-parse "$head_ref" 2>/dev/null) || head_tip=""
+    if [ -n "$head_tip" ]; then
+      tip_line="- \`$head_ref\` is at \`$head_tip\` right now; the real promotion records the tip of \`integrate/prakrit-to-main\` as that branch stands when it runs"
+    else
+      tip_line="- \`$head_ref\` cannot be read here, so this preview names no tip; the real promotion records the tip of \`integrate/prakrit-to-main\` as that branch stands when it runs"
+    fi
     diff_section="## This is a preview, not a record
 
 This is the promotion record a real promote would open, built from \`$base_ref..$head_ref\` as they stand right now.
-The real promotion validates on \`integrate/prakrit-to-main\` and records that branch's tip, which normally also carries the integration merge and any commits the no-mistakes validation itself makes, so both the range and the tip can differ by the time the real record is written.
+The real promotion validates on \`integrate/prakrit-to-main\` and records that branch's tip, which normally also carries the integration merge and any commits the no-mistakes validation itself makes, so both the range and the tip above can still move before the real record is written.
 No pull request is opened, updated, or read by this preview, and nothing here is compared against the branch GitHub would render.
 
 "
@@ -236,14 +277,19 @@ The promoted range above still states exactly what lands on \`main\`.
 
 "
       else
-        # Counted with --no-merges because the listings below are: a section whose
-        # whole purpose is saying what is missing must not disagree with itself
-        # about how many things are missing.
-        unshown_count=$(git -C "$git_root" rev-list --count --no-merges "$base_ref..$head_ref" --not "$pr_head_ref" 2>/dev/null) || unshown_count=0
-        unlanded_count=$(git -C "$git_root" rev-list --count --no-merges "$pr_head_ref" --not "$head_ref" 2>/dev/null) || unlanded_count=0
+        # Whether GitHub closes the PR is an ancestry question, not a commit-count
+        # one: a merge commit moves no file yet still decides it. That answer also
+        # decides the alignment sentence below, so the body can never call the head
+        # aligned and then say it carries work the promotion does not deliver.
+        will_close=0
+        if git -C "$git_root" merge-base --is-ancestor "$pr_head_ref" "$head_ref" 2>/dev/null; then
+          will_close=1
+        fi
+        unshown_count=$(fm_proplane_promote_pr_commit_count "$git_root" no-merges "$base_ref..$head_ref" --not "$pr_head_ref")
+        unlanded_count=$(fm_proplane_promote_pr_commit_count "$git_root" no-merges "$pr_head_ref" --not "$head_ref")
         if [ "${unshown_count:-0}" -gt 0 ]; then
           unshown_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
-            '- (none)' "$base_ref..$head_ref" --not "$pr_head_ref")
+            '- (none)' no-merges "$base_ref..$head_ref" --not "$pr_head_ref")
           diff_section="$diff_section
 Promoted but NOT on \`$pr_head_label\`, so this PR's diff does not show them ($unshown_count):
 
@@ -252,7 +298,7 @@ $unshown_log
         fi
         if [ "${unlanded_count:-0}" -gt 0 ]; then
           unlanded_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
-            '- (none)' "$pr_head_ref" --not "$head_ref")
+            '- (none)' no-merges "$pr_head_ref" --not "$head_ref")
           diff_section="$diff_section
 On \`$pr_head_label\` but NOT promoted, so this PR's diff shows them even though this promotion did not land them ($unlanded_count):
 
@@ -260,20 +306,38 @@ $unlanded_log
 "
         fi
         if [ "${unshown_count:-0}" -eq 0 ] && [ "${unlanded_count:-0}" -eq 0 ]; then
-          diff_section="$diff_section
+          if [ "$will_close" -eq 1 ]; then
+            diff_section="$diff_section
 \`$pr_head_label\` carries the same non-merge commits as the promoted range, so this PR's diff is the promotion.
 "
+          else
+            # The ladder's own sync puts bare merge(main) commits on prakrit, so a
+            # divergence of merges alone is routine. Naming and listing it is what
+            # keeps the record from asserting a close it will not get with no
+            # evidence a reader can act on.
+            merge_only_count=$(fm_proplane_promote_pr_commit_count "$git_root" with-merges "$pr_head_ref" --not "$head_ref")
+            merge_only_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
+              '- (none)' with-merges "$pr_head_ref" --not "$head_ref")
+            diff_section="$diff_section
+\`$pr_head_label\` carries the same non-merge commits as the promoted range, so this PR's diff is the promotion, but \`$pr_head_label\` is still not contained in it: the difference is merge commits only ($merge_only_count):
+
+$merge_only_log
+"
+          fi
         fi
         diff_section="$diff_section
 "
-        # Whether GitHub closes the PR is an ancestry question, not a commit-count
-        # one, so it is answered by ancestry: a merge commit on either side moves
-        # no file yet still decides this.
-        if git -C "$git_root" merge-base --is-ancestor "$pr_head_ref" "$head_ref" 2>/dev/null; then
+        if [ "$will_close" -eq 1 ]; then
           lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR, which closes this PR as merged: \`main\` then contains \`$pr_head_label\`."
         else
-          lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
-This PR does NOT close as merged, because \`main\` does not contain \`$pr_head_label\` after that fast-forward: \`$pr_head_label\` carries work this promotion does not deliver.
+          if [ "${unlanded_count:-0}" -gt 0 ]; then
+            lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
+This PR does NOT close as merged, because \`main\` does not contain \`$pr_head_label\` after that fast-forward: \`$pr_head_label\` carries $unlanded_count commit(s) this promotion does not deliver, listed above."
+          else
+            lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
+This PR does NOT close as merged, because \`main\` does not contain \`$pr_head_label\` after that fast-forward: the difference is merge commits only, listed above."
+          fi
+          lands_section="$lands_section
 It stays open until a later promotion records the range that catches that work up; \`main\` carries the promoted range above either way."
         fi
       fi
@@ -286,7 +350,7 @@ Promotion record for the PropPlane keeper ladder: \`prakrit\` -> \`main\`.
 ## What is being promoted
 
 - range: \`$base_ref..$head_ref\` (\`$base_sha..$head_sha\`)
-- commits: $count
+$count_line
 $tip_line
 
 $log
