@@ -22,6 +22,10 @@
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
+# Each open decision carries the date it was registered, how many days it has been
+# waiting, and the canonical snapshot's ageing flag, so a decision that has been
+# waiting cannot read as a fresh one. Ageing decisions sort first and therefore
+# survive the bounded decisions_open cap.
 #
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
@@ -104,7 +108,8 @@ Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
-  decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,summary,since,waiting_days,aging,owner} ordered ageing-first
+  then oldest-first, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
@@ -385,11 +390,21 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",
-            summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
+            summary:((.title + ": " + .hold_reason) | trunc(90)),
+            since:(.since // null),
+            waiting_days:(.waiting_days // null),
+            aging:(.decision_aging // false),
+            owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
          | select(.source == "backlog" and .verb == "captain-hold")
          | {id:($m.id + "/" + .id),key,verb,
-            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
+            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),
+            since:(.since // null),
+            waiting_days:(.waiting_days // null),
+            aging:(.aging // false),
+            owner:$m.id} ]) as $decisions_all
+  # Oldest first, so the decisions that have waited longest lead the section.
+  | ($decisions_all | sort_by([(if .aging then 0 else 1 end), (.since // "9999-99-99"), .id])) as $decisions_all
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),

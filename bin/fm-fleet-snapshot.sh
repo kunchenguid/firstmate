@@ -20,6 +20,10 @@
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
 #     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
+#     Every captain-actionable row also carries waiting_days, the whole days since
+#     its `since` date, and decision_aging, true once that reaches
+#     FM_SNAPSHOT_DECISION_AGING_DAYS (default 3), so an open decision's age is
+#     visible in the fleet view without anyone remembering to look for it.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
@@ -94,6 +98,13 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+# Days an open captain decision may wait before every fleet view marks it as
+# ageing. Three days is the shortest span that cannot fire on a decision the
+# captain simply has not reached yet - it always covers at least one full working
+# day plus a weekend edge - while still surfacing a stalled decision long before
+# the week-long silences this threshold exists to prevent.
+FM_SNAPSHOT_DECISION_AGING_DAYS=${FM_SNAPSHOT_DECISION_AGING_DAYS:-3}
+case "$FM_SNAPSHOT_DECISION_AGING_DAYS" in ''|*[!0-9]*) FM_SNAPSHOT_DECISION_AGING_DAYS=3 ;; esac
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -255,7 +266,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   fi
 
   # shellcheck disable=SC2094
-  jq -Rn --arg path "$backlog" '
+  jq -Rn --arg path "$backlog" \
+    --argjson now_epoch "$SNAPSHOT_EPOCH" \
+    --argjson aging_days "$FM_SNAPSHOT_DECISION_AGING_DAYS" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def section_state:
       if . == "In flight" then "in_flight"
@@ -392,6 +405,16 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .captain_actionable =
               (.state == "queued" and .kind == "captain" and .hold_kind == "captain"
                and .hold_reason != null and (.unresolved_blocker_ids | length) == 0)
+          # An unanswered decision is otherwise indistinguishable from one raised
+          # an hour ago, so every open captain decision carries how long it has
+          # been waiting and whether that has passed the ageing threshold.
+          | .waiting_days =
+              (if .captain_actionable and .since != null then
+                 ((try (($now_epoch - (.since | strptime("%Y-%m-%d") | mktime)) / 86400 | floor)
+                   catch null) as $d
+                  | if $d == null or $d < 0 then null else $d end)
+               else null end)
+          | .decision_aging = (.waiting_days != null and .waiting_days >= $aging_days)
         else . end)
     | del(.section,.order)
   ' < "$backlog"
@@ -616,7 +639,11 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $queued_all[]
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
-            reason:(.hold_reason | trunc(160)),source:"backlog"} ]) as $captain_holds_all
+            reason:(.hold_reason | trunc(160)),
+            since:(.since // null),
+            waiting_days:(.waiting_days // null),
+            aging:(.decision_aging // false),
+            source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
@@ -714,6 +741,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           captain_actionable:(.captain_actionable // false),
+          waiting_days:(.waiting_days // null),
+          decision_aging:(.decision_aging // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
