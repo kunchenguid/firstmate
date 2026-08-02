@@ -120,6 +120,19 @@ test_classifier_rejects_mdx_and_all_script_tag_forms() {
   pass "fm-rsi-classify-diff: rejects MDX and every script tag form"
 }
 
+test_classifier_rejects_script_relocation() {
+  local base candidate output
+  printf '<head><script src="app.js"></script></head><body></body>\n' > "$REPO/relocated.html"
+  base=$(commit_fixture script-position-base)
+  printf '<head></head><body><script src="app.js"></script></body>\n' > "$REPO/relocated.html"
+  candidate=$(commit_fixture script-position-candidate)
+  output=$("$ROOT/bin/fm-rsi-classify-diff.sh" "$REPO" "$base" "$candidate")
+  [ "$(printf '%s' "$output" | jq -r .lane)" = full ] || fail "relocated script diff was not full: $output"
+  printf '%s' "$output" | jq -e '.reasons | index("script_touch:relocated.html") != null' >/dev/null \
+    || fail "relocated script classification omitted evidence: $output"
+  pass "fm-rsi-classify-diff: rejects script relocation"
+}
+
 test_classifier_preserves_unusual_paths() {
   local base candidate output path
   path='café.js'
@@ -252,6 +265,7 @@ test_classifier_rejects_non_additive_tests
 test_classifier_allows_additive_tests
 test_classifier_rejects_case_variants_and_sensitive_paths
 test_classifier_rejects_mdx_and_all_script_tag_forms
+test_classifier_rejects_script_relocation
 test_classifier_preserves_unusual_paths
 test_classifier_freezes_moving_refs
 test_canary

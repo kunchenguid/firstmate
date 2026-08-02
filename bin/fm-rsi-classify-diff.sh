@@ -52,8 +52,8 @@ add_reason() {
   full=1
 }
 
-script_fingerprints() {
-  perl -0777 -MDigest::SHA=sha256_hex -ne 'while (/<script\b[^>]*>.*?<\/script\s*>|<script\b[^>]*\/\s*>|<script\b[^>]*>.*\z|<\/script\s*>/gis) { print sha256_hex($&), "\n" }'
+script_presence() {
+  perl -0777 -ne 'print "present\n" if /<\/?script\b/i'
 }
 
 file_at_ref() {
@@ -112,9 +112,9 @@ for file in "${files[@]}"; do
   fi
 
   if is_fast_markup_path "$file"; then
-    base_scripts=$(file_at_ref "$base" "$file" | script_fingerprints)
-    candidate_scripts=$(file_at_ref "$candidate" "$file" | script_fingerprints)
-    if [ "$base_scripts" != "$candidate_scripts" ]; then
+    base_script=$(file_at_ref "$base" "$file" | script_presence)
+    candidate_script=$(file_at_ref "$candidate" "$file" | script_presence)
+    if [ -n "$base_script" ] || [ -n "$candidate_script" ]; then
       add_reason "script_touch:$file"
     fi
   fi
