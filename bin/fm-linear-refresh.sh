@@ -242,6 +242,7 @@ while IFS= read -r row; do
   compose_description "$id" "$blocked" "$body" "$link" "$fp" "$TMP/desc"
   desc=$(cat "$TMP/desc")
   existing=$(awk -F'\t' -v id="$id" '$1 == id {print; exit}' "$TMP/linear.tsv")
+  content_unchanged=
 
   if [ -z "$existing" ]; then
     if [ -z "$TEAM_ID" ]; then
@@ -259,7 +260,8 @@ while IFS= read -r row; do
       issueCreate(input: { teamId: $t, title: $ti, description: $d }) {
         success issue { id identifier }
       }
-    }' "$vars" "$TMP/created.json"; then
+    }' "$vars" "$TMP/created.json" \
+      && fml_mutation_succeeded "$TMP/created.json" issueCreate; then
       new_ident=$(jq -r '.data.issueCreate.issue.identifier // ""' "$TMP/created.json")
       new_id=$(jq -r '.data.issueCreate.issue.id // ""' "$TMP/created.json")
       report "created" "${new_ident:-?}" "$id"
@@ -279,6 +281,7 @@ while IFS= read -r row; do
     cur_desc=$(printf '%s' "$existing" | cut -f9 | base64 -d 2>/dev/null || true)
     if [ "$cur_title" = "$title" ] && case "$cur_desc" in *"firstmate-sync: $fp"*) true ;; *) false ;; esac; then
       unchanged=$((unchanged + 1))
+      content_unchanged=1
     elif [ -n "$DRY" ]; then
       report "update" "$ident" "$id"
       updated=$((updated + 1))
@@ -286,7 +289,8 @@ while IFS= read -r row; do
       vars=$(jq -cn --arg i "$issue_uuid" --arg ti "$title" --arg d "$desc" '{i:$i, ti:$ti, d:$d}')
       if fml_graphql 'mutation fmUpdate($i: String!, $ti: String!, $d: String!) {
         issueUpdate(id: $i, input: { title: $ti, description: $d }) { success }
-      }' "$vars" "$TMP/updated.json"; then
+      }' "$vars" "$TMP/updated.json" \
+        && fml_mutation_succeeded "$TMP/updated.json" issueUpdate; then
         report "updated" "$ident" "$id"
         updated=$((updated + 1))
       else
@@ -315,7 +319,8 @@ while IFS= read -r row; do
         vars=$(jq -cn --arg i "$issue_uuid" --arg s "$DONE_STATE" '{i:$i, s:$s}')
         if fml_graphql 'mutation fmState($i: String!, $s: String!) {
           issueUpdate(id: $i, input: { stateId: $s }) { success }
-        }' "$vars" "$TMP/state.json"; then
+        }' "$vars" "$TMP/state.json" \
+          && fml_mutation_succeeded "$TMP/state.json" issueUpdate; then
           report "->done" "$ident" "$id"
           done_moved=$((done_moved + 1))
         else
@@ -326,18 +331,21 @@ while IFS= read -r row; do
     fi
     case "$link" in
       http://*|https://*)
+        [ -z "$content_unchanged" ] || continue
         if [ -n "$DRY" ]; then
           attached=$((attached + 1))
         else
           # attachmentLinkURL is keyed on (issue, url), so re-running the refresh
           # updates the same attachment instead of stacking duplicates.
           vars=$(jq -cn --arg i "$issue_uuid" --arg u "$link" --arg t "Pull request" '{i:$i, u:$u, t:$t}')
-          if fml_graphql 'mutation fmAttach($i: String!, $u: String!, $t: String!) {
+          if { fml_graphql 'mutation fmAttach($i: String!, $u: String!, $t: String!) {
             attachmentLinkURL(issueId: $i, url: $u, title: $t) { success }
           }' "$vars" "$TMP/attach.json" \
-            || fml_graphql 'mutation fmAttachCreate($i: String!, $u: String!, $t: String!) {
+              && fml_mutation_succeeded "$TMP/attach.json" attachmentLinkURL; } \
+            || { fml_graphql 'mutation fmAttachCreate($i: String!, $u: String!, $t: String!) {
             attachmentCreate(input: { issueId: $i, url: $u, title: $t }) { success }
-          }' "$vars" "$TMP/attach.json"; then
+          }' "$vars" "$TMP/attach.json" \
+              && fml_mutation_succeeded "$TMP/attach.json" attachmentCreate; }; then
             attached=$((attached + 1))
           else
             report "FAILED" "$ident" "could not attach $link"

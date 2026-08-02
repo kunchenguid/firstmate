@@ -19,6 +19,7 @@
 #   fml_available                - 0 when configured and curl+jq exist, else 1
 #   fml_unavailable_reason       - one-line reason fml_available returned 1
 #   fml_graphql <query> <vars-json> <body-file> [timeout] - POST one GraphQL request
+#   fml_mutation_succeeded <body-file> <field> - verify a mutation payload succeeded
 #   fml_marker_id <first-line>   - task id from a description's first line, or empty
 #   fml_find_issue <task-id>     - locate the mirrored issue for one task id
 #   fml_reference_line <identifier> - the exact magic-word line firstmate appends
@@ -173,6 +174,11 @@ fml_graphql() (
   jq -e 'has("errors") | not' "$body_file" >/dev/null 2>&1 || return 6
   return 0
 )
+
+fml_mutation_succeeded() {
+  local body_file=$1 field=$2
+  jq -e --arg field "$field" '.data[$field].success == true' "$body_file" >/dev/null 2>&1
+}
 
 # fml_marker_id <first-line>: print the task id a mirrored description's first
 # line encodes, or nothing. Strips backticks and whitespace, so both

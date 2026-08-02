@@ -363,7 +363,38 @@ n=$(grep -c '^fmCreate' "$FAKE_DIR/calls.log" || true)
 [ "$n" = 0 ] || fail "a converged refresh must not create anything, got $n creates"
 n=$(grep -c '^fmUpdate' "$FAKE_DIR/calls.log" || true)
 [ "$n" = 0 ] || fail "a converged refresh must not update anything, got $n updates"
-pass "refresh is convergent: a second run against its own result creates and updates nothing"
+n=$(grep -c '^fmAttach\|^fmAttachCreate' "$FAKE_DIR/calls.log" || true)
+[ "$n" = 0 ] || fail "a converged refresh must not attach anything, got $n attachment calls"
+pass "refresh is convergent: a second run against its own result performs no mutations"
+
+# A successful HTTP/GraphQL exchange can still carry a rejected mutation.
+# That item is failed, while later items continue reconciling normally.
+new_home refreshreject
+printf 'LINEAR_API_KEY=lin_api_test\nLINEAR_TEAM_KEY=PSY\n' > "$HOME_DIR/.env"
+cat > "$HOME_DIR/data/backlog.md" <<'MD'
+# Backlog
+
+## Queued
+- [ ] 010-rejected - Linear rejects this update (repo: p)
+- [ ] 011-continues - This update must still run (repo: p)
+MD
+: > "$HOME_DIR/data/done-archive.md"
+jq -cn '{data:{issues:{pageInfo:{hasNextPage:false,endCursor:null},nodes:[
+  {id:"u1",identifier:"PSY-7",url:"l/7",title:"stale",description:"`firstmate: 010-rejected`",
+   state:{name:"Backlog",type:"backlog"},team:{id:"team-uuid",key:"PSY"}},
+  {id:"u2",identifier:"PSY-8",url:"l/8",title:"stale",description:"`firstmate: 011-continues`",
+   state:{name:"Backlog",type:"backlog"},team:{id:"team-uuid",key:"PSY"}}]}}}' > "$FAKE_DIR/fmList.json"
+jq -cn '{data:{teams:{nodes:[{id:"team-uuid",key:"PSY",states:{nodes:[]}}]}}}' > "$FAKE_DIR/fmTeam.json"
+jq -cn '{data:{issueUpdate:{success:false}}}' > "$FAKE_DIR/fmUpdate.json"
+out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-linear-refresh.sh" 2>&1); rc=$?
+expect_code 4 "$rc" "a rejected mutation makes refresh incomplete"
+assert_contains "$out" "FAILED    PSY-7" "a success:false mutation is reported as failed"
+assert_contains "$out" "FAILED    PSY-8" "refresh continues after the first rejected mutation"
+assert_contains "$out" "updated 0" "rejected mutations are not counted as updates"
+assert_contains "$out" "failed 2" "rejected mutations contribute to the failed tally"
+n=$(grep -c '^fmUpdate' "$FAKE_DIR/calls.log" || true)
+[ "$n" = 2 ] || fail "expected both updates to be attempted after rejection, got $n"
+pass "refresh treats success:false as failure and continues remaining items"
 
 # --- 10. refresh degrades quietly -------------------------------------------
 
