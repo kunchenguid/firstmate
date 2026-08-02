@@ -992,6 +992,52 @@ SH
   pass "bootstrap rejects browser-era Lavish and installs the fork with its wake adapter"
 }
 
+test_bootstrap_surfaces_low_treehouse_capacity_read_only() {
+  local case_dir fakebin pool out
+  case_dir="$TMP_ROOT/treehouse-capacity"
+  pool="$case_dir/pools/demo"
+  mkdir -p "$case_dir/home/config" "$pool"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fm_git_init_commit "$pool/1/wt"
+  fm_git_init_commit "$pool/2/wt"
+  printf '%s\n' dirty > "$pool/2/wt/operator-note.txt"
+  python3 - "$pool/treehouse-state.json" "$pool" <<'PY'
+import json
+import os
+import sys
+
+state, pool = sys.argv[1:]
+entries = [
+    {"name": "1", "path": os.path.join(pool, "1", "wt")},
+    {"name": "2", "path": os.path.join(pool, "2", "wt")},
+    {
+        "name": "3",
+        "path": os.path.join(pool, "3", "wt"),
+        "leased": True,
+        "lease_holder": "firstmate-a",
+    },
+    {
+        "name": "4",
+        "path": os.path.join(pool, "4", "wt"),
+        "leased": True,
+        "lease_holder": "firstmate-b",
+    },
+]
+with open(state, "w", encoding="utf-8") as stream:
+    json.dump({"worktrees": entries}, stream)
+PY
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_TREEHOUSE_ROOT="$case_dir/pools" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" \
+    "TREEHOUSE_CAPACITY: LOW pool=$pool available=1 total=4 leased=2 dirty=1 invalid=0 threshold=2 threshold_percent=50" \
+    "bootstrap did not surface low Treehouse capacity during read-only detection"
+  pass "bootstrap reports low Treehouse capacity before spawn pressure becomes a failure"
+}
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-22 ]; then
   test_python3_is_required_for_descriptor_relative_artifact_reads
   exit 0
@@ -1009,6 +1055,11 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-40 ]; then
   test_perl_is_a_universal_process_control_dependency
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = treehouse-capacity ]; then
+  test_bootstrap_surfaces_low_treehouse_capacity_read_only
   exit 0
 fi
 
@@ -1037,3 +1088,4 @@ test_agent_fleet_install_requires_manual_release
 test_invalid_account_routing_policy_is_reported
 test_enforced_dispatch_validation_rejects_poolless_quota_rules
 test_lavish_requires_store_forward_fork
+test_bootstrap_surfaces_low_treehouse_capacity_read_only

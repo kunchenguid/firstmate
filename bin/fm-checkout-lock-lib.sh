@@ -7,6 +7,9 @@
 # same-process nested calls for the same common Git directory.
 # Use fm_checkout_treehouse_return <checkout> <lock-root> <project> for a
 # process-tree-bounded `treehouse return --force` under that lock.
+# Use fm_checkout_treehouse_return_safe with the expected lease holder for the
+# same boundary with a non-forcing `treehouse return`, which refuses rather than
+# clean an unexpectedly dirty tree or release somebody else's lease.
 # shellcheck disable=SC2016
 
 if [ "${FM_CHECKOUT_LOCK_LIB_LOADED:-0}" = 1 ]; then
@@ -327,7 +330,15 @@ fm_checkout_lock_run() {
 }
 
 fm_checkout_treehouse_return_locked() {
-  local checkout=$1 lock_root=$2 project=$3 checkout_lock timeout status previous_dir cleanup_status
+  local checkout=$1 lock_root=$2 project=$3 mode=${4:---force}
+  local checkout_lock timeout status previous_dir cleanup_status
+  case "$mode" in
+    --force|--safe) ;;
+    *)
+      echo "error: invalid Treehouse return mode: $mode" >&2
+      return "$FM_CHECKOUT_TREEHOUSE_RETURN_CONFIG_STATUS"
+      ;;
+  esac
   checkout_lock=$(fm_checkout_lock_path "$checkout" "$lock_root") || {
     echo "error: cannot resolve shared checkout mutation lock identity for $checkout" >&2
     return "$FM_CHECKOUT_LOCK_FAILURE_STATUS"
@@ -352,6 +363,9 @@ import sys
 
 target = os.path.abspath(sys.argv[1])
 project = os.path.abspath(sys.argv[2])
+mode = sys.argv[3]
+if mode not in ("--force", "--safe"):
+    raise SystemExit(64)
 if not target or target == os.path.sep or os.path.realpath(os.getcwd()) != project:
     raise SystemExit(74)
 current = os.path.sep
@@ -431,8 +445,17 @@ os.fchdir(descriptor)
 bound = os.stat(".")
 if (opened.st_dev, opened.st_ino) != (bound.st_dev, bound.st_ino):
     raise SystemExit(74)
-os.execvp("treehouse", ("treehouse", "return", "--force", "."))
-' "$checkout" "$project"; then
+if mode == "--safe":
+    null_input = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null_input, 0)
+    os.close(null_input)
+arguments = ("treehouse", "return", "--force", ".") if mode == "--force" else (
+    "treehouse",
+    "return",
+    ".",
+)
+os.execvp("treehouse", arguments)
+' "$checkout" "$project" "$mode"; then
     status=0
   else
     status=$?
@@ -454,6 +477,68 @@ fm_checkout_treehouse_return() {
   local checkout=$1 lock_root=$2 project=$3
   fm_checkout_lock_run "$checkout" "$lock_root" \
     fm_checkout_treehouse_return_locked "$checkout" "$lock_root" "$project"
+}
+
+fm_checkout_treehouse_lease_owned() {
+  local checkout=$1 expected_holder=$2 canonical slot pool state
+  canonical=$(fm_checkout_trusted_dir "$checkout") || return 1
+  slot=$(fm_checkout_trusted_dir "$(dirname "$canonical")") || return 1
+  pool=$(fm_checkout_trusted_dir "$(dirname "$slot")") || return 1
+  state="$pool/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  python3 - "$state" "$canonical" "$expected_holder" <<'PY'
+import json
+import os
+import stat
+import sys
+
+state_path, expected_path, expected_holder = sys.argv[1:]
+try:
+    metadata = os.lstat(state_path)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
+        raise OSError("state is not a bounded regular file")
+    with open(state_path, encoding="utf-8") as stream:
+        state = json.load(stream)
+    entries = state.get("worktrees")
+    if not isinstance(entries, list) or len(entries) > 256:
+        raise ValueError("worktrees is not a bounded array")
+    matches = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("path"), str)
+        and os.path.realpath(entry["path"]) == expected_path
+    ]
+    if len(matches) != 1:
+        raise ValueError("expected exactly one matching worktree entry")
+    entry = matches[0]
+    if entry.get("destroying") is True:
+        raise ValueError("worktree is already being destroyed")
+    if entry.get("leased") is not True:
+        raise ValueError("worktree is not durably leased")
+    if entry.get("lease_holder") != expected_holder:
+        raise ValueError("lease holder does not match")
+except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+    print(
+        f"error: Treehouse lease ownership for {expected_path} is unprovable: {error}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+
+fm_checkout_treehouse_return_safe_locked() {
+  local checkout=$1 lock_root=$2 project=$3 expected_holder=$4
+  fm_checkout_treehouse_lease_owned "$checkout" "$expected_holder" \
+    || return "$FM_CHECKOUT_TREEHOUSE_RETURN_CONFIG_STATUS"
+  fm_checkout_treehouse_return_locked "$checkout" "$lock_root" "$project" --safe
+}
+
+fm_checkout_treehouse_return_safe() {
+  local checkout=$1 lock_root=$2 project=$3 expected_holder=$4
+  fm_checkout_lock_run "$checkout" "$lock_root" \
+    fm_checkout_treehouse_return_safe_locked \
+      "$checkout" "$lock_root" "$project" "$expected_holder"
 }
 
 fm_checkout_treehouse_return_requires_retention() {

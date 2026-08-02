@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, MISSING_MANUAL, BACKEND_INVALID, ACCOUNT_ROUTING, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, REPORT_RETENTION, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one.
+  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, MISSING_MANUAL, BACKEND_INVALID, ACCOUNT_ROUTING, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, REPORT_RETENTION, TREEHOUSE_CAPACITY, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one.
   A silent bootstrap section means all good and needs no skill load.
 user-invocable: false
 metadata:
@@ -49,5 +49,8 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
   A secondmate that was skipped, already current, or whose advance changed no instructions is not listed and must not be disturbed.
 - `REPORT_RETENTION: unavailable: <reason>` - the machine-global report-retention LaunchAgent is absent, stale, unloaded, or has not reported a recent successful prune, so opportunistic bounded pruning remains available but post-minimum-age cleanup is not guaranteed to run while Firstmate is idle.
   Surface the failure, wait for the captain's consent, then run `bin/fm-bootstrap.sh install report-retention`; never install or activate it without that consent.
+- `TREEHOUSE_CAPACITY: LOW pool=<path> available=<n> total=<n> ... threshold=<n>` - available clean unleased worktrees fell below the printed low-water mark.
+  Inspect the accompanying reap refusals, completed-but-unmerged tasks, and dirty slots before dispatch pressure becomes a spawn failure; never raise the pool size merely to hide leaked leases.
+- `TREEHOUSE_CAPACITY: unavailable ...` - the bounded read-only check could not classify a pool or cleanly terminate; do not infer healthy capacity from silence, and investigate when the pool is needed for dispatch.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts (`docs/configuration.md` "X mode (.env)").
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.

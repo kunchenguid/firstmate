@@ -1516,8 +1516,16 @@ spawn_return_created_worktree() {
   [ "${BACKEND:-tmux}" != orca ] || return 0
   [ -n "${WT:-}" ] && [ -d "$WT" ] || return 0
   if [ "$WORKTREE_RETAIN_ON_ABORT" = 1 ]; then
-    echo "warning: retained unsafe acquired worktree $WT for manual recovery" >&2
-    return 1
+    if return_output=$(fm_checkout_treehouse_return_safe \
+        "$WT" "$CHECKOUT_LOCK_ROOT" "$PROJ_ABS" "firstmate-$ID" 2>&1); then
+      [ -z "$return_output" ] || printf '%s\n' "$return_output" >&2
+      return 0
+    else
+      return_status=$?
+    fi
+    [ -z "$return_output" ] || printf '%s\n' "$return_output" >&2
+    echo "warning: retained unsafe acquired worktree $WT because a non-forcing rollback refused it" >&2
+    return "$return_status"
   fi
   if [ -z "$WORKTREE_EXPECTED_TIP" ] \
     || ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-returnable "$WT" "${PROJ_ABS_REAL:-$PROJ_ABS}" "$WORKTREE_EXPECTED_TIP"; then
@@ -1529,7 +1537,8 @@ spawn_return_created_worktree() {
     echo "warning: retained acquired worktree $WT because post-cleanup repository safety could not be re-proven" >&2
     return 1
   fi
-  if return_output=$(fm_checkout_treehouse_return "$WT" "$CHECKOUT_LOCK_ROOT" "$PROJ_ABS" 2>&1); then
+  if return_output=$(fm_checkout_treehouse_return_safe \
+      "$WT" "$CHECKOUT_LOCK_ROOT" "$PROJ_ABS" "firstmate-$ID" 2>&1); then
     [ -z "$return_output" ] || printf '%s\n' "$return_output" >&2
     return 0
   else

@@ -18,6 +18,8 @@
 // default is $XDG_DATA_HOME/firstmate/report-stack; otherwise it is
 // ~/.local/share/firstmate/report-stack. FM_HOME, FM_STATE_OVERRIDE, and
 // FM_DATA_OVERRIDE select the task source like the rest of Firstmate.
+// FM_REPORT_LOCK_WAIT_MS may extend lock contention waits from the 60-second
+// default up to 15 minutes for explicit conservative maintenance flows.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -46,7 +48,12 @@ const metadataLimit = 1024 * 1024;
 const manifestLimit = 1024 * 1024;
 const transactionLimit = 64 * 1024;
 const lockControlLimit = 4 * 1024;
-const reportLockWaitMs = 60_000;
+const configuredReportLockWaitMs = Number.parseInt(process.env.FM_REPORT_LOCK_WAIT_MS || "60000", 10);
+const reportLockWaitMs = Number.isSafeInteger(configuredReportLockWaitMs)
+  && configuredReportLockWaitMs >= 1_000
+  && configuredReportLockWaitMs <= 900_000
+  ? configuredReportLockWaitMs
+  : 60_000;
 const reportLockStaleMs = 60_000;
 const visualEntryLimit = 512;
 const visualDepthLimit = 24;
