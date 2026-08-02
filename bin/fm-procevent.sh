@@ -157,25 +157,49 @@ publish_pending() {
   printf '%s\n' "$published"
 }
 
-ensure_runner_group() {  # <source-id>
-  local id=$1 pgid
+isolate_runner() {  # <wait|detach> <source-id>
+  local mode=$1 id=$2 program
+  program='my $mode = shift @ARGV;
+    defined(my $pid = fork) or exit 125;
+    if ($pid == 0) {
+      setpgrp(0, 0) or exit 125;
+      $ENV{FM_PROCEVENT_RUNNER_GROUP} = $$;
+      exec @ARGV;
+      exit 125;
+    }
+    exit 0 if $mode eq "detach";
+    waitpid($pid, 0) == $pid or exit 125;
+    my $status = $?;
+    exit(128 + ($status & 127)) if $status & 127;
+    exit($status >> 8);'
+  if [ "$mode" = wait ]; then
+    exec perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id"
+  fi
+  perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id" >/dev/null 2>&1 &
+}
+
+require_runner_group() {
+  local pgid
+  [ "${FM_PROCEVENT_RUNNER_GROUP:-}" = "$$" ] \
+    || die "runner process group was not isolated"
   pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') \
     || die "cannot inspect runner process group"
   [ -n "$pgid" ] || die "cannot inspect runner process group"
-  [ "$pgid" != "$$" ] || return 0
-  if command -v setsid >/dev/null 2>&1; then
-    exec setsid "$SCRIPT_DIR/fm-procevent.sh" start "$id"
-  fi
-  # shellcheck disable=SC2016  # single quotes are deliberate: perl expands its own vars.
-  exec perl -e 'setpgrp(0, 0); exec @ARGV' \
-    "$SCRIPT_DIR/fm-procevent.sh" start "$id"
-  die "cannot establish runner process group"
+  [ "$pgid" = "$$" ] || die "runner does not lead its process group"
+  unset FM_PROCEVENT_RUNNER_GROUP
+}
+
+cmd_start_public() {
+  local id=${1-}
+  [ "$#" -eq 1 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  isolate_runner wait "$id"
 }
 
 cmd_start() {
   local id=${1-} adapter out rc claimed bound_rc
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
-  ensure_runner_group "$id"
+  require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
     fm_procevent_source_lock_release "$id"
@@ -276,7 +300,7 @@ cmd_start() {
 # Start a runner outside the watcher cycle that noticed it was missing. The
 # public start boundary establishes its own process group before claiming.
 detach_runner() {  # <source-id>
-  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" start "$1" >/dev/null 2>&1 &
+  isolate_runner detach "$1"
 }
 
 cmd_reconcile() {
@@ -603,7 +627,8 @@ cmd_list() {
 
 case "${1-}" in
   register)  shift; cmd_register "$@" ;;
-  start)     shift; cmd_start "$@" ;;
+  start)     shift; cmd_start_public "$@" ;;
+  _start)    shift; cmd_start "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
   handled)   shift; cmd_handled "$@" ;;
   retire)    shift; cmd_retire "$@" ;;

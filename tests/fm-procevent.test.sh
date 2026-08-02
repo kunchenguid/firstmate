@@ -186,6 +186,52 @@ wait "$direct_runner" || fail "direct start failed after its source completed"
 assert_contains "$(cat "$TMP_ROOT/direct-start.out")" "captured:" "direct start captures its result"
 pass "public start owns the process group recorded by its claim"
 
+SHARED_TRIGGER="$TMP_ROOT/shared-trigger"
+SHARED_SIBLING="$TMP_ROOT/shared-sibling"
+SHARED_LAUNCHER="$TMP_ROOT/shared-launcher.pl"
+cat > "$SHARED_LAUNCHER" <<'PL'
+use strict;
+use warnings;
+my ($sibling_file, @command) = @ARGV;
+pipe(my $reader, my $writer) or exit 125;
+defined(my $runner = fork) or exit 125;
+if ($runner == 0) {
+  close $reader;
+  setpgrp(0, 0) or exit 125;
+  print {$writer} "ready\n";
+  close $writer;
+  exec @command;
+  exit 125;
+}
+close $writer;
+<$reader>;
+close $reader;
+defined(my $sibling = fork) or exit 125;
+if ($sibling == 0) {
+  setpgrp(0, $runner) or exit 125;
+  open(my $out, '>', $sibling_file) or exit 125;
+  print {$out} "$$\n";
+  close $out;
+  sleep 30;
+  exit 0;
+}
+waitpid($runner, 0);
+waitpid($sibling, 0);
+exit 0;
+PL
+pe_register "$HPG" lavish shared-src -- "$BLOCKER" "$SHARED_TRIGGER" "shared result" >/dev/null
+FM_HOME="$HPG" perl "$SHARED_LAUNCHER" "$SHARED_SIBLING" \
+  "$ROOT/bin/fm-procevent.sh" start shared-src > "$TMP_ROOT/shared-start.out" &
+shared_launcher=$!
+wait_for "$SHARED_SIBLING" || fail "shared caller group never started its unrelated sibling"
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/shared-src.claim" || fail "shared-group start never claimed its source"
+shared_sibling=$(cat "$SHARED_SIBLING")
+pe "$HPG" retire shared-src >/dev/null
+kill -0 "$shared_sibling" 2>/dev/null || fail "retirement signaled an unrelated caller-group process"
+kill "$shared_sibling" 2>/dev/null || true
+wait "$shared_launcher" || fail "shared caller-group fixture did not exit cleanly"
+pass "public start never claims an inherited caller process group"
+
 # --- an unhandled result remains eligible for re-announcement on restart ----
 # A result is durable but nothing has ever acknowledged handling it. Every
 # reconcile call - not just the first restart after a crash - must keep
