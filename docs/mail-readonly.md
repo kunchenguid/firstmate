@@ -5,7 +5,8 @@ It is an explicit manual tool, not an integration: nothing polls, nothing ingest
 Mail reaches you only when you run a command, and a message body reaches you only when you name that one message.
 
 The tool ships inert.
-Until a local `config/mail.json` exists under the effective Firstmate home, every command reports that mail access is inactive and contacts nothing.
+Until a local `config/mail.json` exists under the effective Firstmate home, `status` reports that mail access is inactive and every other command refuses with a pointer to the missing configuration.
+No command contacts anything in that state.
 
 ## What it can and cannot do
 
@@ -89,7 +90,7 @@ bin/fm-mail.py list                   # newest messages, metadata only
 bin/fm-mail.py list --unread          # unread only
 bin/fm-mail.py list --folder archive  # inbox, archive or junkemail
 bin/fm-mail.py show <ref>             # one message, plain text
-bin/fm-mail.py show <ref> --redacted  # one credential-shaped message, masked
+bin/fm-mail.py show <ref> --redacted  # one message, codes, links and tokens masked
 ```
 
 A listing prints the received time, sender, subject and flags.
@@ -117,6 +118,9 @@ Before printing a subject or a body, the tool checks it against a local heuristi
 When that fires, the body is withheld, the subject is printed masked, and the reasons are printed.
 `--redacted` prints the message with links, code-shaped numbers and token-shaped strings masked, subject included.
 There is no flag that prints a credential-shaped message or subject unmasked.
+
+`--redacted` masks whatever message you point it at, whether or not the classifier flagged it.
+That is deliberate: the flag is worth most on a message the heuristic missed, and over-masking a harmless message costs nothing but a re-read without the flag.
 
 Be honest with yourself about what this is: a guardrail, not a security boundary.
 

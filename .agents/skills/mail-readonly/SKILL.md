@@ -12,7 +12,8 @@ metadata:
 
 `bin/fm-mail.py` is the only mail surface, and its header plus [`docs/mail-readonly.md`](../../../docs/mail-readonly.md) own its commands, setup, revocation and honest limits.
 This skill owns how you behave around it.
-The tool is inert until the captain has created a local `config/mail.json`; an inactive report is a fact to relay, not a problem to fix.
+The tool is inert until the captain has created a local `config/mail.json`: `status` reports mail access as inactive, and every other command refuses with a pointer to that missing file.
+Either answer is a fact to relay, not a problem to fix.
 
 ## Read only when asked
 
