@@ -1671,10 +1671,24 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+if [ "$HARNESS" = codex ]; then
+  CODEX_HOOK_ROOT=$FM_ROOT
+  [ "$KIND" = secondmate ] && CODEX_HOOK_ROOT=$PROJ_ABS
+  CODEX_HOOK_SCOPE=$(cd "$WT" 2>/dev/null && pwd -P) || {
+    echo "error: could not canonicalize Codex hook scope $WT" >&2
+    exit 1
+  }
+  LAUNCH="FM_CODEX_HOOK_ROOT=$(shell_quote "$CODEX_HOOK_ROOT") $LAUNCH"
+  if [ "$KIND" != secondmate ]; then
+    LAUNCH="FM_ROOT_OVERRIDE=$(shell_quote "$CODEX_HOOK_SCOPE") $LAUNCH"
+  fi
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home $LAUNCH"
+  sq_root_override=
+  [ "$HARNESS" != codex ] || sq_root_override=$(shell_quote "$CODEX_HOOK_SCOPE")
+  LAUNCH="FM_ROOT_OVERRIDE=$sq_root_override FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home $LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
