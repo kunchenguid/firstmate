@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # fm-fleet-view.sh - narrow human side-panel over fm-fleet-snapshot.sh.
 #
-# The view is read-only and does not parse fleet files itself. Normal and watch
-# renders ask the canonical snapshot to skip live usage queries because usage is
-# not shown here; this keeps a few-second redraw cadence cheap. --json preserves
-# the canonical snapshot's complete default behavior.
+# The view is read-only and does not parse fleet files itself.
+# Every task is classified exclusively from reconciled current state: working,
+# waiting for captain action or merge, finished, failed, paused, or unknown.
+# Queued backlog records are shown separately as ready, dependency-blocked, or
+# captain-held; captain-held records appear under waiting rather than queued.
+# Watch mode uses only bash, jq, terminal control sequences, and sleep; a failed
+# snapshot or render prints an explicit degraded panel and retries next redraw.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,27 +98,60 @@ render_once() {
        | if $detail != "" then $detail else ($t.hints.last_event_text // "unknown") end)
       | sub("^[a-z-]+( \\[[^]]+\\])?:[[:space:]]*"; "")
       | if . == "" then "unknown" else . end;
-    def artifact($r): ($r.pr_url // "-");
+    def task_artifact($t):
+      ($t.pr.url // $t.backlog.pr_url // (if $t.paths.report.present then $t.paths.report.path else null end));
+    def waiting_on_merge($t):
+      ($t.current_state.state // "") == "done"
+      and ($t.backlog.state // "") == "in_flight"
+      and (($t.pr.url // $t.backlog.pr_url // null) != null);
 
     . as $snapshot
-    | ([.tasks[]?] | sort_by(.id)) as $working
+    | ([.tasks[]?] | sort_by(.id)) as $tasks
+    | ([$tasks[] | select((.current_state.state // "unknown") == "working")]) as $working
+    | ([$tasks[].id] | unique) as $current_task_ids
     | ([.backlog.records[]?
         | select(.state == "queued" and .structured == true
                  and ((.kind // "") == "captain" or (.hold_kind // "") == "captain"))]) as $captain_held
-    | (([.tasks[]? as $task
+    | ([.tasks[]? as $task
         | ($task.hints.open_decisions // [])[]?
-        | {id:($task.id // "unknown"),verb:(.verb // "needs-decision"),summary:(.summary // "reason unavailable")}]
+        | {id:($task.id // "unknown"),verb:(.verb // "needs-decision"),
+           summary:(.summary // "reason unavailable"),artifact:task_artifact($task)}]) as $decision_waiting
+    | ([$decision_waiting[].id] | unique) as $decision_ids
+    | (($decision_waiting
        + [$captain_held[]
           | {id:(.id // "unknown"),verb:"needs-decision",
-             summary:(.hold // .blocked_reason // .body_excerpt // .title // "reason unavailable")}])
+             summary:(.hold // .blocked_reason // .body_excerpt // .title // "reason unavailable"),artifact:null}]
+       + [$tasks[]
+          | select((.current_state.state // "unknown") == "parked"
+                   or (.current_state.state // "unknown") == "blocked"
+                   or waiting_on_merge(.))
+          | . as $task
+          | select(waiting_on_merge($task) or (($decision_ids | index($task.id)) == null))
+          | {id:(.id // "unknown"),verb:(if waiting_on_merge(.) then "merge" else (.current_state.state // "parked") end),
+             summary:((.current_state.detail // "") | if . == "" then "reason unavailable" else . end),
+             artifact:task_artifact(.)}])
        | sort_by([if .verb == "needs-decision" then 0 else 1 end, .id])) as $waiting
+    | ([$tasks[]
+        | select((.current_state.state // "unknown") == "done" and (waiting_on_merge(.) | not))
+        | {id:(.id // "unknown"),title:task_title(.),summary:task_step(.),artifact:task_artifact(.)}]) as $live_finished
     | ([.backlog.records[]?
-        | select(.state == "done" and .structured == true and .pr_url != null)
-        | {id,title,pr_url,completion}]
+        | select(.state == "done" and .structured == true
+                 and ((.id as $id | $current_task_ids | index($id)) == null))
+        | {id,title,summary:((.completion.verb // "done") + (if (.completion.date // "") == "" then "" else " " + .completion.date end)),
+           artifact:(.pr_url // .report_path // .local_note // null),completion}]
        + [(.secondmate_landed.records // [])[]?
-          | select(.pr_url != null)
-          | {id,title,pr_url,completion}]
-       | sort_by([(.completion.date // ""),(.id // "")]) | reverse) as $landed
+          | select((.id as $id | $current_task_ids | index($id)) == null)
+          | {id,title,summary:((.completion.verb // "done") + (if (.completion.date // "") == "" then "" else " " + .completion.date end)),
+             artifact:(.pr_url // .report_path // .local_note // null),completion}]
+       | sort_by([(.completion.date // ""),(.id // "")]) | reverse) as $history_finished
+    | (reduce ($live_finished + $history_finished)[] as $row
+         ([]; if ([.[].id] | index($row.id)) == null then . + [$row] else . end)) as $finished
+    | ([$tasks[] | select((.current_state.state // "unknown") == "failed")]) as $failed
+    | ([$tasks[] | select((.current_state.state // "unknown") == "paused")]) as $paused
+    | ([$tasks[]
+        | (.current_state.state // "unknown") as $state
+        | select((["working","parked","blocked","done","failed","paused"]
+                  | index($state)) == null)]) as $unknown
     | ([.backlog.records[]? | select(.state == "done" and .structured == true) | .id]) as $done_ids
     | ([.backlog.records[]?
         | select(.state == "queued" and .structured == true
@@ -140,23 +176,50 @@ render_once() {
        end),
       "",
       (if ($waiting | length) > 0 then "!" * $width else empty end),
-      ("WAITING ON THE CAPTAIN (\($waiting | length))" | clip($width)),
+      ("WAITING ON YOU (\($waiting | length))" | clip($width)),
       (if ($waiting | length) == 0 then
-         "  Nothing needs a captain decision."
+         "  Nothing needs your action."
        else
          $waiting[]
          | line("! "; .id),
-           line("  "; .summary)
+           line("  "; .summary),
+           (if .artifact == null then empty else line("  "; .artifact) end)
        end),
       (if ($waiting | length) > 0 then "!" * $width else empty end),
       "",
-      ("LANDED (showing \([($landed[:5])[]] | length) of \($landed | length))" | clip($width)),
-      (if ($landed | length) == 0 then
-         "  No recently merged work with a PR link."
+      ("FINISHED (showing \([($finished[:5])[]] | length) of \($finished | length))" | clip($width)),
+      (if ($finished | length) == 0 then
+         "  Nothing has finished successfully."
        else
-         $landed[:5][]
+         $finished[:5][]
          | line("• "; ((.id // "unknown") + " · " + (.title // "unknown"))),
-           line("  "; artifact(.))
+           line("  "; (.summary // "done")),
+           (if .artifact == null then empty else line("  "; .artifact) end)
+       end),
+      "",
+      ("FAILED (\($failed | length))" | clip($width)),
+      (if ($failed | length) == 0 then
+         "  No failed workers."
+       else
+         $failed[]
+         | line("• "; ((.id // "unknown") + " · " + task_title(.))),
+           line("  "; task_step(.))
+       end),
+      "",
+      (if ($paused | length) == 0 then empty else
+         ("PAUSED (\($paused | length))" | clip($width)),
+         ($paused[]
+          | line("• "; ((.id // "unknown") + " · " + task_title(.))),
+            line("  "; task_step(.))),
+         ""
+       end),
+      ("UNKNOWN (\($unknown | length))" | clip($width)),
+      (if ($unknown | length) == 0 then
+         "  No workers with unknown state."
+       else
+         $unknown[]
+         | line("• "; ((.id // "unknown") + " · " + task_title(.))),
+           line("  "; task_step(.))
        end),
       "",
       ("QUEUED \($queued | length) · READY \($ready | length) · BLOCKED \($blocked | length)" | clip($width)),

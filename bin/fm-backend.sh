@@ -352,14 +352,23 @@ fm_backend_of_meta() {  # <meta-file>
 }
 
 fm_backend_target_of_meta() {  # <meta-file>
-  local meta=$1 backend terminal window
+  local meta=$1 backend terminal window target bytes
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
     terminal=$(fm_meta_get "$meta" terminal)
-    [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
+    [ -n "$terminal" ] && target=$terminal
   fi
-  window=$(fm_meta_get "$meta" window)
-  [ -n "$window" ] && printf '%s' "$window"
+  if [ -z "${target:-}" ]; then
+    window=$(fm_meta_get "$meta" window)
+    target=$window
+  fi
+  [ -n "$target" ] || return 0
+  bytes=$(printf '%s' "$target" | LC_ALL=C wc -c | tr -d ' ')
+  if [ "$bytes" -gt 4096 ]; then
+    printf 'fm-backend: endpoint target metadata exceeds 4096 bytes: %s\n' "$meta" >&2
+    return 2
+  fi
+  printf '%s' "$target"
 }
 
 # fm_backend_validate_task_endpoint: validate a task cleanup record entirely
