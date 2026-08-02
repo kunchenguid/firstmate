@@ -867,6 +867,27 @@ test_apply_display_name_skips_when_agent_never_registers() {
   pass "fm_backend_herdr_apply_display_name: skips rename without failing when agent never registers"
 }
 
+test_apply_display_name_skips_tab_rename_when_projected() {
+  local dir log resp fb
+  dir="$TMP_ROOT/apply-display-projected"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # presentation-projected spawns pass an empty tab id (fm-spawn.sh clears
+  # HERDR_RENAME_TAB_ID when HERDR_PROJECTED=1) so the task's real tab, which
+  # belongs to the presentation host, is never touched.
+  printf '{"result":{"pane":{"pane_id":"w1:p9"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  # 3: agent rename (empty success); no tab rename call should be made.
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_DISPLAY_NAME_POLLS=2 FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name fmtest w1:p9 "" scout-terse-phase01' "$ROOT" \
+    || fail "apply_display_name should return 0 for a projected (empty-tab-id) task"
+  assert_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename'$'\x1f''w1:p9'$'\x1f''scout-terse-phase01' \
+    "apply_display_name did not agent-rename when tab id is empty"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''rename' \
+    "apply_display_name must not tab-rename a presentation-projected (empty tab id) task"
+  pass "fm_backend_herdr_apply_display_name: skips tab rename but still agent-renames when tab id is empty (projected)"
+}
+
 test_create_task_husk_replacement_creates_before_closing() {
   # Safety-critical ordering: the replacement tab must be created BEFORE the
   # husk tab is closed, never the reverse - closing a workspace's LAST
@@ -4080,6 +4101,7 @@ test_create_task_closes_and_replaces_renamed_display_husk
 test_list_live_includes_display_name_labels
 test_apply_display_name_renames_agent_and_tab
 test_apply_display_name_skips_when_agent_never_registers
+test_apply_display_name_skips_tab_rename_when_projected
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read
