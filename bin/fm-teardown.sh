@@ -1683,6 +1683,72 @@ print(
   printf '%s\n' "$summary"
 }
 
+validate_reap_ignored_worktree_paths() {
+  local output status
+  output=$(
+    set -o pipefail
+    git -C "$WT" ls-files --others --ignored --exclude-standard -z -- |
+      python3 -c '
+import os
+import sys
+import time
+
+worktree = sys.argv[1]
+entries = [
+    item.decode("utf-8", "surrogateescape").rstrip("/")
+    for item in sys.stdin.buffer.read().split(b"\0")
+    if item
+]
+generated = {
+    ".cache", ".mypy_cache", ".next", ".nuxt", ".parcel-cache",
+    ".pytest_cache", ".ruff_cache", "__pycache__", "build", "cache",
+    "caches", "coverage", "dist", "node_modules", "target",
+}
+work_roots = {"data", "docs"}
+work_words = ("draft", "note", "report", "skill")
+work_suffixes = (".md", ".markdown", ".rst", ".txt")
+recent_cutoff = time.time() - 24 * 60 * 60
+refused = []
+
+for entry in entries:
+    parts = tuple(part for part in entry.split("/") if part)
+    lowered = tuple(part.lower() for part in parts)
+    basename = lowered[-1] if lowered else ""
+    allowed_root = next((part for part in lowered if part in generated), None)
+    reason = None
+    if not parts or lowered[0] in work_roots or ".agents" in lowered and "skills" in lowered:
+        reason = "work-shaped"
+    elif any(word in basename for word in work_words):
+        reason = "work-shaped"
+    elif allowed_root is None:
+        reason = "ambiguous"
+    elif basename.endswith(work_suffixes):
+        try:
+            if os.stat(os.path.join(worktree, entry), follow_symlinks=False).st_mtime >= recent_cutoff:
+                reason = "recent-hand-edit-shaped"
+        except OSError:
+            reason = "uninspectable"
+    if reason:
+        refused.append((entry, reason))
+
+if refused:
+    print(f"REFUSED: dead-task reaping found {len(refused)} unsafe ignored path(s).")
+    for path, reason in refused[:10]:
+        print(f"ignored path refused: {path} ({reason})")
+    if len(refused) > 10:
+        print(f"ignored path refused: ... {len(refused) - 10} more")
+    raise SystemExit(1)
+' "$WT"
+  )
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    [ -z "$output" ] || printf '%s\n' "$output" >&2
+    [ "$status" -eq 1 ] || echo "REFUSED: cannot classify ignored files in worktree $WT." >&2
+    return 1
+  fi
+  summarize_ignored_worktree_paths
+}
+
 validate_worktree_teardown_safety_and_summarize_ignored() {
   validate_worktree_teardown_safety || return 1
   summarize_ignored_worktree_paths
@@ -4940,12 +5006,78 @@ validate_returned_worktree_bookkeeping_locked() {
 
 validate_reap_return_safety() {
   require_reap_endpoint_absent || return 1
+  validate_reap_open_pr_absent || return 1
   validate_reap_worktree_safety_and_summarize_ignored
+}
+
+validate_reap_open_pr_absent() {
+  local out status state branch recorded_ref count seen='|'
+  command -v gh-axi >/dev/null 2>&1 || {
+    echo "REFUSED: dead-task reaping cannot recheck open PRs under the checkout lock." >&2
+    return 1
+  }
+  if [ -n "$PR_URL" ]; then
+    if fm_run_bounded_capture --combine-stderr out 10 gh-axi pr view "$PR_URL"; then
+      status=0
+    else
+      status=$?
+    fi
+    [ "$status" -eq 0 ] && fm_process_tree_cleanup_verified || {
+      echo "REFUSED: dead-task reaping cannot prove recorded PR state under the checkout lock: $PR_URL" >&2
+      return 1
+    }
+    state=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*state:[[:space:]]*\([^[:space:]]*\).*/\1/p' | head -1)
+    case "$state" in
+      merged|closed) ;;
+      open)
+        echo "REFUSED: dead-task reaping found an open recorded PR under the checkout lock: $PR_URL" >&2
+        return 1
+        ;;
+      *)
+        echo "REFUSED: dead-task reaping cannot prove recorded PR state under the checkout lock: $PR_URL" >&2
+        return 1
+        ;;
+    esac
+  fi
+
+  recorded_ref=$(meta_value "$META" worktree_git_ref)
+  case "$recorded_ref" in refs/heads/*) recorded_ref=${recorded_ref#refs/heads/} ;; *) recorded_ref= ;; esac
+  for branch in "$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null)" "$recorded_ref"; do
+    [ -n "$branch" ] || continue
+    case "$seen" in *"|$branch|"*) continue ;; esac
+    seen="$seen$branch|"
+    if fm_run_bounded_capture --combine-stderr out 10 \
+        gh-axi pr list --state open --head "$branch" --limit 2 --fields url; then
+      status=0
+    else
+      status=$?
+    fi
+    [ "$status" -eq 0 ] && fm_process_tree_cleanup_verified || {
+      echo "REFUSED: dead-task reaping cannot prove branch PR state under the checkout lock: $branch" >&2
+      return 1
+    }
+    count=$(printf '%s\n' "$out" | sed -n 's/^count:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    case "$count" in
+      0) ;;
+      ''|*[!0-9]*)
+        echo "REFUSED: dead-task reaping cannot prove branch PR state under the checkout lock: $branch" >&2
+        return 1
+        ;;
+      *)
+        echo "REFUSED: dead-task reaping found an open PR under the checkout lock: branch=$branch" >&2
+        return 1
+        ;;
+    esac
+  done
+  [ "$seen" != '|' ] || {
+    echo "REFUSED: dead-task reaping cannot identify a branch for the final open-PR proof." >&2
+    return 1
+  }
 }
 
 validate_reap_worktree_safety_and_summarize_ignored() {
   validate_reap_worktree_safety || return 1
-  summarize_ignored_worktree_paths
+  validate_reap_ignored_worktree_paths
 }
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

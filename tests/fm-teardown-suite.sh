@@ -1588,6 +1588,108 @@ test_ignored_worktree_content_is_summarized_without_blocking() {
   pass "ignored content stays exempt and receives a collapsed summary"
 }
 
+prepare_reap_case() {
+  local case_dir=$1 ignore=$2
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" .gitignore "$ignore" "define ignored outputs"
+  add_fork_with_pushed_branch "$case_dir"
+  rm -f "$case_dir/fakebin/.tmux-live"
+}
+
+test_dead_reap_allows_generated_ignored_output_with_summary() {
+  local case_dir rc
+  case_dir=$(make_case reap-generated-ignored)
+  prepare_reap_case "$case_dir" $'build/\ncoverage/'
+  mkdir -p "$case_dir/wt/build/assets" "$case_dir/wt/coverage"
+  printf 'bundle\n' > "$case_dir/wt/build/assets/app.js"
+  printf 'coverage\n' > "$case_dir/wt/coverage/results.json"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reap should allow confidently generated ignored output"
+  assert_grep 'ignored worktree summary: count=2' "$case_dir/stdout" \
+    "successful dead reap omitted its ignored inventory summary"
+  pass "dead reap inventories and allows generated ignored output"
+}
+
+test_dead_reap_refuses_work_shaped_ignored_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-work-shaped-ignored)
+  prepare_reap_case "$case_dir" $'docs/\n'
+  mkdir -p "$case_dir/wt/docs"
+  printf 'draft\n' > "$case_dir/wt/docs/launch-draft.md"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "dead reap must refuse ignored work-shaped output"
+  assert_grep 'docs/launch-draft.md' "$case_dir/stderr" \
+    "work-shaped refusal omitted the exact ignored file"
+  pass "dead reap names refused ignored work"
+}
+
+test_dead_reap_refuses_ambiguous_ignored_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-ambiguous-ignored)
+  prepare_reap_case "$case_dir" $'mystery/'
+  mkdir -p "$case_dir/wt/mystery"
+  printf 'unknown\n' > "$case_dir/wt/mystery/payload.bin"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "dead reap must refuse ambiguous ignored output"
+  assert_grep 'mystery/payload.bin (ambiguous)' "$case_dir/stderr" \
+    "ambiguous refusal omitted the exact ignored file and reason"
+  pass "dead reap refuses ambiguous ignored output"
+}
+
+test_dead_reap_refuses_recent_hand_edit_shaped_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-recent-hand-edit)
+  prepare_reap_case "$case_dir" $'build/'
+  mkdir -p "$case_dir/wt/build"
+  printf 'manual recovery notes\n' > "$case_dir/wt/build/recovery.txt"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "dead reap must refuse recent hand-edit-shaped output"
+  assert_grep 'build/recovery.txt (recent-hand-edit-shaped)' "$case_dir/stderr" \
+    "recent hand-edit refusal omitted the exact ignored file"
+  pass "dead reap refuses recent hand-edit-shaped ignored output"
+}
+
+test_dead_reap_rechecks_open_pr_at_locked_return() {
+  local case_dir rc
+  case_dir=$(make_case reap-locked-open-pr)
+  prepare_reap_case "$case_dir" $'build/'
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' 'count: 1 (showing first 1)' \
+      'pull_requests[1]{url}:' \
+      '  https://github.com/Ruby-Labs/firstmate/pull/99'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "locked return must retain a branch with an open PR"
+  assert_grep 'found an open PR under the checkout lock' "$case_dir/stderr" \
+    "locked return did not surface its repeated open-PR proof"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "locked open-PR refusal cleared task metadata"
+  pass "dead reap repeats open-PR protection under the checkout lock"
+}
+
 test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
   local case_dir rc scratch_capture
   case_dir=$(make_case preserve-scratch)
@@ -5269,6 +5371,15 @@ if [ "${FM_TEST_FOCUSED:-}" = reclaim-regressions ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-reap-final-proofs ]; then
+  test_dead_reap_allows_generated_ignored_output_with_summary
+  test_dead_reap_refuses_work_shaped_ignored_output
+  test_dead_reap_refuses_ambiguous_ignored_output
+  test_dead_reap_refuses_recent_hand_edit_shaped_output
+  test_dead_reap_rechecks_open_pr_at_locked_return
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
   test_never_created_direct_spawn_endpoint_is_not_quiesced
   test_never_created_scout_without_report_cleans_bookkeeping
@@ -5446,6 +5557,11 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_already_returned_worktree_refuses_preservation_without_mutation
   test_watchman_cookies_do_not_block_teardown
   test_ignored_worktree_content_is_summarized_without_blocking
+  test_dead_reap_allows_generated_ignored_output_with_summary
+  test_dead_reap_refuses_work_shaped_ignored_output
+  test_dead_reap_refuses_ambiguous_ignored_output
+  test_dead_reap_refuses_recent_hand_edit_shaped_output
+  test_dead_reap_rechecks_open_pr_at_locked_return
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
   test_preserve_scratch_never_cleans_unlanded_commits
   test_preserve_scratch_refuses_tracked_drift_before_cleanup
