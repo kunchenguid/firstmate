@@ -79,7 +79,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 When `state`, `state/procevent`, or `state/procevent-inbox` is a symlink or not a directory, the affected `bin/fm-procevent.sh` commands refuse the home and `bin/fm-watch.sh` swallows that refusal, so the guard names the offending path.
 This is a report, never a block: it changes no exit status, and a home with no other supervision need still allows its turn to end.
 
-The guard writes one `WARNING: process-event state is not private to this home: ...` line to stderr on every run. That line is deliberately unlatched, because the passive adapters read it to drive their own latches. Each integration then surfaces it on the allow path through the one channel it owns, once per episode:
+The guard writes one `WARNING: process-event state is not private to this home: ...` line to stderr on every run. That line is deliberately unlatched, because the passive adapters read it to drive their own latches. Each integration then surfaces it on the allow path through the one channel it owns:
 
 - Claude also receives the same text as a stdout `systemMessage`, the only operator-visible channel a Stop hook has on an allow; the degraded budget-exhausted allow folds it into that single object rather than emitting a second one.
   A Stop hook is a fresh process per turn, so the episode latch is durable in `state/.turnend-claude-containment` rather than in memory. An episode is one session id plus one damaged path, so a restart, a different damaged path, or a repaired-then-damaged-again home announces again, and a payload carrying no session id is never suppressed. Repair deletes the record.
@@ -88,6 +88,8 @@ The guard writes one `WARNING: process-event state is not private to this home: 
 - OpenCode reports it through `client.tui.showToast` when the running client exposes that surface, latched the same way, and never as a forced prompt; a client without it falls back to the guard's stderr.
 - Grok's legacy fallback passes the line to its own stderr instead of burying it in the discarded resume buffer, and never resumes for a warning. The native path already returns the guard's stderr to the same Grok process.
 - Codex inherits the guard's stderr directly.
+
+The first three render their own notice, so each latches it to once per episode. The last two carry the unlatched stderr line itself, so it repeats once per run.
 
 Every harness sees the line when the guard also blocks, because the block writes the banner to the same stream.
 `bin/fm-guard.sh` remains the always-on channel: it prints the full banner with the repair on every run, and defers the repair in a read-only session.
