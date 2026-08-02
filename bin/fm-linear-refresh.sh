@@ -94,7 +94,7 @@ while :; do
   if ! fml_graphql 'query fmList($needle: String!, $after: String) {
     issues(filter: { description: { contains: $needle } }, first: 100, after: $after) {
       pageInfo { hasNextPage endCursor }
-      nodes { id identifier url title description state { name type } team { id key } }
+      nodes { id identifier url title description state { name type } team { id key } attachments { nodes { url } } }
     }
   }' "$vars" "$TMP/page.json"; then
     # Same fallback as the lookup path: the description filter is an
@@ -102,7 +102,7 @@ while :; do
     if ! fml_graphql 'query fmListAll($after: String) {
       issues(first: 100, after: $after, orderBy: updatedAt) {
         pageInfo { hasNextPage endCursor }
-        nodes { id identifier url title description state { name type } team { id key } }
+        nodes { id identifier url title description state { name type } team { id key } attachments { nodes { url } } }
       }
     }' "$vars" "$TMP/page.json"; then
       echo "linear: could not read the existing issues (Linear unreachable, unauthenticated, or too slow); refresh did not run" >&2
@@ -117,7 +117,7 @@ while :; do
     .data.issues.nodes[]
     | (.description | marker_id) as $id
     | select($id != "")
-    | [$id, .identifier, .id, .url, (.state.type // ""), (.team.id // ""), (.team.key // ""), .title, ((.description // "") | @base64)]
+    | [$id, .identifier, .id, .url, (.state.type // ""), (.team.id // ""), (.team.key // ""), .title, ((.description // "") | @base64), (([.attachments.nodes[]?.url] | join("\n")) | @base64)]
     | @tsv
   ' "$TMP/page.json" >> "$TMP/linear.tsv"
   [ "$(jq -r '.data.issues.pageInfo.hasNextPage' "$TMP/page.json")" = "true" ] || break
@@ -242,7 +242,7 @@ while IFS= read -r row; do
   compose_description "$id" "$blocked" "$body" "$link" "$fp" "$TMP/desc"
   desc=$(cat "$TMP/desc")
   existing=$(awk -F'\t' -v id="$id" '$1 == id {print; exit}' "$TMP/linear.tsv")
-  content_unchanged=
+  attachment_urls=
 
   if [ -z "$existing" ]; then
     if [ -z "$TEAM_ID" ]; then
@@ -253,25 +253,27 @@ while IFS= read -r row; do
     if [ -n "$DRY" ]; then
       report "create" "$id" "$title"
       created=$((created + 1))
-      continue
-    fi
-    vars=$(jq -cn --arg t "$TEAM_ID" --arg ti "$title" --arg d "$desc" '{t:$t, ti:$ti, d:$d}')
-    if fml_graphql 'mutation fmCreate($t: String!, $ti: String!, $d: String!) {
-      issueCreate(input: { teamId: $t, title: $ti, description: $d }) {
-        success issue { id identifier }
-      }
-    }' "$vars" "$TMP/created.json" \
-      && fml_mutation_succeeded "$TMP/created.json" issueCreate; then
-      new_ident=$(jq -r '.data.issueCreate.issue.identifier // ""' "$TMP/created.json")
-      new_id=$(jq -r '.data.issueCreate.issue.id // ""' "$TMP/created.json")
-      report "created" "${new_ident:-?}" "$id"
-      created=$((created + 1))
-      existing="$id	$new_ident	$new_id			$TEAM_ID	$TEAM_KEY"
+      existing="$id	$id	(dry-run)			$TEAM_ID	$TEAM_KEY"
       cur_state_type=""
     else
-      report "FAILED" "$id" "create rejected by Linear"
-      failed=$((failed + 1))
-      continue
+      vars=$(jq -cn --arg t "$TEAM_ID" --arg ti "$title" --arg d "$desc" '{t:$t, ti:$ti, d:$d}')
+      if fml_graphql 'mutation fmCreate($t: String!, $ti: String!, $d: String!) {
+        issueCreate(input: { teamId: $t, title: $ti, description: $d }) {
+          success issue { id identifier }
+        }
+      }' "$vars" "$TMP/created.json" \
+        && fml_mutation_succeeded "$TMP/created.json" issueCreate; then
+        new_ident=$(jq -r '.data.issueCreate.issue.identifier // ""' "$TMP/created.json")
+        new_id=$(jq -r '.data.issueCreate.issue.id // ""' "$TMP/created.json")
+        report "created" "${new_ident:-?}" "$id"
+        created=$((created + 1))
+        existing="$id	$new_ident	$new_id			$TEAM_ID	$TEAM_KEY"
+        cur_state_type=""
+      else
+        report "FAILED" "$id" "create rejected by Linear"
+        failed=$((failed + 1))
+        continue
+      fi
     fi
   else
     ident=$(printf '%s' "$existing" | cut -f2)
@@ -279,9 +281,9 @@ while IFS= read -r row; do
     cur_state_type=$(printf '%s' "$existing" | cut -f5)
     cur_title=$(printf '%s' "$existing" | cut -f8)
     cur_desc=$(printf '%s' "$existing" | cut -f9 | base64 -d 2>/dev/null || true)
+    attachment_urls=$(printf '%s' "$existing" | cut -f10 | base64 -d 2>/dev/null || true)
     if [ "$cur_title" = "$title" ] && case "$cur_desc" in *"firstmate-sync: $fp"*) true ;; *) false ;; esac; then
       unchanged=$((unchanged + 1))
-      content_unchanged=1
     elif [ -n "$DRY" ]; then
       report "update" "$ident" "$id"
       updated=$((updated + 1))
@@ -331,7 +333,7 @@ while IFS= read -r row; do
     fi
     case "$link" in
       http://*|https://*)
-        [ -z "$content_unchanged" ] || continue
+        printf '%s\n' "$attachment_urls" | grep -Fxq "$link" && continue
         if [ -n "$DRY" ]; then
           attached=$((attached + 1))
         else

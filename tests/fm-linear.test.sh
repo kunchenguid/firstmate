@@ -376,7 +376,8 @@ jq -s --slurpfile ids <(jq -cn '[{k:"010-known",i:"u1",d:"PSY-7"},{k:"011-shippe
         | {id:$m.i, identifier:$m.d, url:"l", title:$s.ti, description:$s.d,
            state:{name:(if $key == "011-shipped" then "Done" else "Backlog" end),
                   type:(if $key == "011-shipped" then "completed" else "backlog" end)},
-           team:{id:"team-uuid", key:"PSY"}} ]}}}' \
+           team:{id:"team-uuid", key:"PSY"},
+           attachments:{nodes:(if $key == "011-shipped" then [{url:"https://github.com/o/r/pull/38"}] else [] end)}} ]}}}' \
   <(grep -E '^fm(Update|Create)' "$FAKE_DIR/calls.log" | cut -f2 | jq -c '.') \
   > "$FAKE_DIR/fmList.json"
 : > "$FAKE_DIR/calls.log"
@@ -389,6 +390,43 @@ n=$(grep -c '^fmUpdate' "$FAKE_DIR/calls.log" || true)
 n=$(grep -c '^fmAttach\|^fmAttachCreate' "$FAKE_DIR/calls.log" || true)
 [ "$n" = 0 ] || fail "a converged refresh must not attach anything, got $n attachment calls"
 pass "refresh is convergent: a second run against its own result performs no mutations"
+
+jq '.data.issues.nodes |= map(if .identifier == "PSY-8" then .attachments.nodes = [] else . end)' \
+  "$FAKE_DIR/fmList.json" > "$HOME_DIR/list-without-attachment.json"
+mv "$HOME_DIR/list-without-attachment.json" "$FAKE_DIR/fmList.json"
+: > "$FAKE_DIR/calls.log"
+out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-linear-refresh.sh" 2>&1); rc=$?
+expect_code 0 "$rc" "attachment retry exits 0"
+assert_contains "$out" "unchanged 3" "matching fingerprints remain unchanged"
+assert_contains "$out" "PR links 1" "the missing PR attachment is reconciled"
+n=$(grep -c '^fmAttach' "$FAKE_DIR/calls.log" || true)
+[ "$n" = 1 ] || fail "expected exactly one attachment retry, got $n"
+n=$(grep -c '^fmUpdate' "$FAKE_DIR/calls.log" || true)
+[ "$n" = 0 ] || fail "an attachment retry must not rewrite issue content"
+pass "refresh retries a missing attachment after content has converged"
+
+new_home refreshdrydone
+printf 'LINEAR_API_KEY=lin_api_test\nLINEAR_TEAM_KEY=PSY\n' > "$HOME_DIR/.env"
+cat > "$HOME_DIR/data/backlog.md" <<'MD'
+# Backlog
+
+## Done
+- [x] 012-newly-done - Newly finished https://github.com/o/r/pull/41 (merged 2026-08-02)
+MD
+: > "$HOME_DIR/data/done-archive.md"
+jq -cn '{data:{issues:{pageInfo:{hasNextPage:false,endCursor:null},nodes:[]}}}' > "$FAKE_DIR/fmList.json"
+jq -cn '{data:{teams:{nodes:[{id:"team-uuid",key:"PSY",states:{nodes:[
+  {id:"s-done",name:"Done",type:"completed",position:3}]}}]}}}' > "$FAKE_DIR/fmTeam.json"
+out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-linear-refresh.sh" --dry-run 2>&1); rc=$?
+expect_code 0 "$rc" "new done dry run exits 0"
+assert_contains "$out" "create    012-newly-done" "dry run reports the create"
+assert_contains "$out" "->done" "dry run reports the Done transition"
+assert_contains "$out" "PR links 1" "dry run reports the PR attachment"
+[ ! -s "$FAKE_DIR/calls.log" ] || {
+  mutations=$(grep -c '^fmCreate\|^fmUpdate\|^fmState\|^fmAttach' "$FAKE_DIR/calls.log" || true)
+  [ "$mutations" = 0 ] || fail "dry run issued $mutations mutations"
+}
+pass "dry run plans create, Done transition, and PR attachment without mutations"
 
 # A successful HTTP/GraphQL exchange can still carry a rejected mutation.
 # That item is failed, while later items continue reconciling normally.
