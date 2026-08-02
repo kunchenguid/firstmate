@@ -37,6 +37,10 @@
 #                          FM_PERMISSION_STALL_ESCALATE_SECS as a possible macOS
 #                          permission/system-dialog block. Unless afk is active.
 #   check: <script>: <out> per-task check output, always actionable
+#                          A merged-PR check first attempts fail-closed automatic
+#                          teardown; its success or refusal is included here.
+#   auto-reap: <out>       stale crashed-spawn acquisition recovery made progress
+#                          or refused and retained state for operator inspection
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -658,6 +662,10 @@ run_check() {
   run_bounded "$CHECK_TIMEOUT" bash "$c" 2>/dev/null || true
 }
 
+run_auto_reap() {
+  "$FM_ROOT/bin/fm-auto-reap.sh" "$@" 2>&1
+}
+
 safe_touch_marker() {  # <path>
   local marker=$1
   if [ -L "$marker" ] || { [ -e "$marker" ] && [ ! -f "$marker" ]; }; then
@@ -971,11 +979,25 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if marker_due "$STATE/.last-check" "$CHECK_INTERVAL" "watcher check"; then
+    auto_reap_out=$(run_auto_reap maintenance || true)
+    if [ -n "$auto_reap_out" ]; then
+      reason="auto-reap: $auto_reap_out"
+      fm_wake_append check auto-reap "$reason" || exit 1
+      safe_touch_marker_or_log "$STATE/.last-check" "watcher check" || true
+      wake "$reason"
+    fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       out=$(run_check "$c")
       if [ -n "$out" ]; then
-        reason="check: $c: $out"
+        task=${c##*/}
+        task=${task%.check.sh}
+        if [ "$(printf '%s\n' "$out" | tail -1)" = merged ] && [ -f "$STATE/$task.meta" ]; then
+          auto_reap_out=$(run_auto_reap task "$task" pr-merged || true)
+          reason="check: $c: $out; $auto_reap_out"
+        else
+          reason="check: $c: $out"
+        fi
         fm_wake_append check "$c" "$reason" || exit 1
         safe_touch_marker_or_log "$STATE/.last-check" "watcher check" || true
         wake "$reason"
@@ -1001,6 +1023,24 @@ while :; do
 $pending
 EOF
     reason="signal:$files"
+    # A scout's terminal done event is its automatic reaping trigger. Ship work
+    # waits for the separate merged-PR or approved local-merge authority.
+    for f in $files; do
+      case "$f" in
+        "$STATE"/*.status)
+          task=${f##*/}
+          task=${task%.status}
+          if [ -f "$STATE/$task.meta" ] \
+            && [ "$(fm_meta_get "$STATE/$task.meta" kind)" = scout ] \
+            && [ "$(status_line_verb "$(last_status_line "$f")")" = "done" ]; then
+            auto_reap_out=$(run_auto_reap task "$task" scout-done || true)
+            reason="signal: $f; $auto_reap_out"
+            fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+            wake "$reason"
+          fi
+          ;;
+      esac
+    done
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;

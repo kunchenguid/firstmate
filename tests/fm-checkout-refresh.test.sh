@@ -9,6 +9,14 @@ set -u
 # shellcheck source=bin/fm-checkout-lock-lib.sh
 . "$ROOT/bin/fm-checkout-lock-lib.sh"
 
+# This suite captures and asserts expected nonzero statuses explicitly.
+# Individual tests may temporarily enable errexit, so restore the file-level
+# set -u baseline after every successful test before the next case starts.
+pass() {
+  printf 'ok - %s\n' "$1"
+  set +e
+}
+
 fm_git_identity fmtest fmtest@example.invalid
 
 TMP_ROOT=$(fm_test_tmproot fm-checkout-refresh-tests)
@@ -658,7 +666,6 @@ test_bootstrap_relays_hygiene_alerts() {
     FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_TREEHOUSE_ROOT="$TEST_HOME/.treehouse" \
     FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-
   assert_contains "$out" "FLEET_SYNC: $project: HYGIENE: 1 untracked skill-draft files" \
     "session-start bootstrap did not relay the unresolved hygiene alert"
 

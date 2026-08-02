@@ -30,12 +30,13 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-decision-pretool-check.sh` | Exact-identity gate that routes structured captain decisions to Lavish (docs/decision-pretool-check.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
-| `fm-spawn.sh`            | Spawn, native-resume, or provider-neutrally continue crewmates on the resolved account and runtime backend |
+| `fm-spawn.sh`            | Spawn, native-resume, or provider-neutrally continue crewmates while recording pre-metadata Treehouse acquisition ownership |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule through quota or the deferred legacy pool-summary branch |
 | `fm-account-directory.sh` | Select a direct Claude/Codex account directory and install its per-profile Herdr hook |
 | `fm-account-routing-lib.sh` | Own routing mode plus legacy Agent Fleet lease, exec, resume, and release recovery |
 | `fm-account-session-sync.sh` | Reconcile real Agent Fleet provider-session mappings into managed task metadata       |
 | `fm-account-continuation.sh` | Build a verified task-owned packet for fresh cross-profile continuation             |
+| `fm-treehouse-lib.sh`    | Prove exact Treehouse task leases and resolve one unique leased worktree             |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
@@ -47,13 +48,14 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `backends/cmux.sh`       | Experimental cmux session-provider adapter                                           |
 | `fm-config-push.sh`      | Push declared inheritable local config to live secondmate homes mid-session          |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`           |
-| `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
+| `fm-merge-local.sh`      | Fast-forward an approved `local-only` branch and immediately invoke terminal auto-reaping |
 | `fm-review-diff.sh`      | Review a crewmate branch or recorded PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with honest status reporting                |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |
+| `fm-auto-reap.sh`        | Reap proven terminal tasks and aged, owner-dead pre-metadata Treehouse acquisitions  |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and any backend terminal lifecycle                 |
 | `fm-supervisor-target-lib.sh` | Resolve the compatibility injection target and backend for the daemon and launcher |

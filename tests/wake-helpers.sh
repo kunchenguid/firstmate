@@ -15,9 +15,19 @@
 # at a fresh non-git dir to keep it inert across these suites - the same trick the
 # direct fm-guard.sh tests use. A per-call FM_ROOT_OVERRIDE still wins where a
 # suite sets its own (e.g. the watcher-lock guard-banner cases).
+FM_WAKE_TEST_ROOT_CREATED=0
 if [ -z "${FM_ROOT_OVERRIDE:-}" ]; then
   FM_ROOT_OVERRIDE="$(fm_test_tmproot fm-wake-tangle-root)"
   export FM_ROOT_OVERRIDE
+  FM_WAKE_TEST_ROOT_CREATED=1
+fi
+if [ "$FM_WAKE_TEST_ROOT_CREATED" = 1 ]; then
+  mkdir -p "$FM_ROOT_OVERRIDE/bin"
+  cat > "$FM_ROOT_OVERRIDE/bin/fm-auto-reap.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$FM_ROOT_OVERRIDE/bin/fm-auto-reap.sh"
 fi
 
 # Wedge-alarm notifier recorder (safety seam). The away-mode wedge alarm fires a

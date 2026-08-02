@@ -488,7 +488,12 @@ A ship task's path from `done` to landed on `main` is set by the project's `mode
 
 - **no-mistakes** - the stages below as written: no-mistakes validation pipeline -> PR -> captain merge.
 - **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal landed-work check.
-- **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff with `bin/fm-review-diff.sh <id>`, relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`, OR the work pushed to any remote (a fork counts - relevant for upstream-contribution PRs on a local-only-registered project).
+- **local-only** - no remote, no PR.
+  The crewmate stops at `done: ready in branch fm/<id>`.
+  Review the diff with `bin/fm-review-diff.sh <id>`, relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main`; it refuses anything but a clean fast-forward, and on success immediately invokes fail-closed auto-reaping.
+  If either the merge or automatic teardown refuses, inspect the retained state rather than weakening the safety check.
+  No `fm-pr-check`.
+  Teardown requires the branch already merged into local `main`, OR the work pushed to any remote; a fork counts, which is relevant for upstream-contribution PRs on a local-only-registered project.
 
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.
 Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
@@ -550,6 +555,11 @@ The helper defaults to `--squash`, accepts explicit merge-method flags such as `
 bin/fm-teardown.sh <id>
 ```
 
+The watcher normally invokes `bin/fm-auto-reap.sh` as soon as a terminal `done` task's recorded PR is provably merged.
+The approved local-only merge helper and completed-scout signal take the same automatic path.
+Auto-reaping cancels only an exactly attributed no-mistakes run, never guesses cross-branch process ownership, and then calls this ordinary teardown without `--force`.
+Persistent secondmates are excluded, and X-mode-linked tasks wait for their required final follow-up.
+An automatic refusal is an actionable wake and retains its metadata, worktree, and acquisition authority; after resolving the reported cause, retry with the ordinary command above.
 The script refuses if the worktree holds uncommitted changes or committed work that has not landed; treat a refusal as a stop-and-investigate, not an obstacle.
 Teardown validates that the recorded project and worktree are exact roots with the expected repository registration, quiesces every ordinary task endpoint, and then runs the final non-destructive safety checks before any Treehouse return.
 For a task whose metadata carries `report_required=1`, teardown also publishes the validated completion report before releasing the account lease or removing the worktree.
@@ -576,7 +586,9 @@ A scout task follows Intake, Spawn, and Supervise exactly as above - scaffold th
 
 - There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md`.
 - Relay the findings to the captain: plain chat for a focused answer, and a durable Lavish decision when multiple genuine choices need structured input.
-- Tear down immediately - no merge gate. For a post-cutover scout that ran, `bin/fm-teardown.sh` requires the report's completion sections and publishes it before removing the declared scratch worktree; a missing or incomplete report refuses teardown because the findings are the work product. A failed direct spawn whose endpoint was never created may clear its bookkeeping without a report because no scout ran.
+- The watcher automatically tears down on the terminal `done` signal - no merge gate.
+  For a post-cutover scout that ran, ordinary teardown still requires the report's completion sections and publishes it before removing the declared scratch worktree; a missing or incomplete report refuses auto-reaping because the findings are the work product.
+  A failed direct spawn whose endpoint was never created may clear its bookkeeping without a report because no scout ran.
 - Record it in Done with the report path instead of a PR link using `tasks-axi done` when the default tasks-axi backend is active and compatible, otherwise hand-edit `data/backlog.md` and keep Done to the 10 most recent, then re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
 
 When the captain invokes `/reports` or asks to browse, open, search, or summarize completed work, load the `reports` skill.

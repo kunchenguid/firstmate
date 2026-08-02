@@ -22,8 +22,8 @@ test_checked_in_plan_is_complete_balanced_and_deterministic() {
 
   out=$("$SHARDER" --check "$SHARD_COUNT") \
     || fail "checked-in behavior shard plan failed its coverage guard"
-  assert_contains "$out" "FM_BEHAVIOR_PLAN ok tests=88 shards=8" \
-    "coverage guard did not report the complete 88-test inventory"
+  assert_contains "$out" "FM_BEHAVIOR_PLAN ok tests=90 shards=8" \
+    "coverage guard did not report the complete 90-test inventory"
   "$SHARDER" --plan "$SHARD_COUNT" > "$plan_a"
   "$SHARDER" --plan "$SHARD_COUNT" > "$plan_b"
   cmp -s "$plan_a" "$plan_b" || fail "same durations produced different shard plans"
@@ -165,7 +165,7 @@ test_post_run_guard_requires_the_exact_executed_union() {
   write_complete_manifests "$plan" "$good"
   out=$("$SHARDER" --verify "$SHARD_COUNT" "$good") \
     || fail "post-run guard rejected the exact complete manifest union"
-  assert_contains "$out" "FM_BEHAVIOR_COMPLETENESS ok tests=88 shards=8" \
+  assert_contains "$out" "FM_BEHAVIOR_COMPLETENESS ok tests=90 shards=8" \
     "post-run guard did not report complete execution"
 
   cp -R "$good" "$missing"

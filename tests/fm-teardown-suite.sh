@@ -3653,19 +3653,22 @@ test_teardown_refuses_unsafe_tasktmp_metadata() {
   expect_code 1 "$rc" "unsafe tasktmp teardown exit"
   assert_present "$sentinel/marker" "teardown deleted a metadata-selected arbitrary directory"
   assert_present "$case_dir/state/task-x1.meta" "unsafe tasktmp refusal removed task metadata"
-  assert_grep 'unsafe task temp path' "$case_dir/stderr" "unsafe teardown tasktmp refusal was unclear"
+  assert_grep 'task temp ownership is missing, malformed, or ambiguous' "$case_dir/stderr" \
+    "unsafe teardown tasktmp refusal was unclear"
   pass "teardown only removes its exact task temp root"
 }
 
 test_teardown_removes_safe_tasktmp_and_accepts_absence() {
-  local case_dir tasktmp
-  tasktmp=/tmp/fm-task-x1
-  assert_absent "$tasktmp" "safe tasktmp fixture collided with an existing task temp root"
-  mkdir -p "$tasktmp/gotmp"
-  printf '%s\n' leftover > "$tasktmp/gotmp/build-artifact"
-
+  local case_dir tasktmp generation=generation-task-x1
   case_dir=$(make_case safe-tasktmp)
   write_meta "$case_dir" local-only ship
+  # shellcheck source=bin/fm-account-routing-lib.sh
+  . "$ROOT/bin/fm-account-routing-lib.sh"
+  tasktmp=$(fm_tasktmp_path task-x1 "$generation")
+  assert_absent "$tasktmp" "safe tasktmp fixture collided with an existing task temp root"
+  fm_tasktmp_create "$case_dir/state" "$ROOT" task-x1 "$generation" "$tasktmp" \
+    || fail "could not create exact owned task temp fixture"
+  printf '%s\n' leftover > "$tasktmp/gotmp/build-artifact"
   printf 'tasktmp=%s\n' "$tasktmp" >> "$case_dir/state/task-x1.meta"
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "teardown rejected its exact task temp root: $(cat "$case_dir/stderr")"

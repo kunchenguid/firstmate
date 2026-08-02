@@ -687,7 +687,9 @@ reconcile_failed_direct_recovery() {
     echo "error: retained direct recovery artifacts are missing or unsafe for $task" >&2
     return 1
   fi
-  if [ "$tasktmp" != "/tmp/fm-$task" ] || [ -z "$generation" ] || [ -z "$target" ]; then
+  if ! fm_tasktmp_owner_validate "$(fm_tasktmp_owner_record "$STATE" "$task" "$generation")" "$FM_HOME" "$task" "$generation" "$tasktmp" \
+    || ! fm_tasktmp_owner_validate "$tasktmp/.fm-tasktmp-owner" "$FM_HOME" "$task" "$generation" "$tasktmp" \
+    || [ -z "$target" ]; then
     fm_account_meta_lock_release "$lock" >/dev/null 2>&1 || true
     echo "error: retained direct recovery metadata is incomplete for $task" >&2
     return 1
@@ -949,10 +951,12 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     rollback_tab=$(fm_account_meta_value "$RESUME_META" zellij_tab_id)
     rollback_home=$(fm_account_meta_value "$RESUME_META" home)
     rollback_tasktmp=$(fm_account_meta_value "$RESUME_META" tasktmp)
+    rollback_generation=$(fm_account_meta_value "$RESUME_META" generation_id)
     rollback_backup=$(fm_account_meta_value "$RESUME_META" account_rollback_backup)
     fm_account_meta_lock_release "$rollback_meta_lock" || exit 1
     rollback_meta_lock=
-    if [ -n "$rollback_tasktmp" ] && [ "$rollback_tasktmp" != "/tmp/fm-$rollback_id" ]; then
+    if [ -n "$rollback_tasktmp" ] \
+      && [ "$(fm_tasktmp_path "$rollback_id" "$rollback_generation" 2>/dev/null)" != "$rollback_tasktmp" ]; then
       echo "error: unsafe task temp path in rollback metadata for $rollback_id: $rollback_tasktmp" >&2
       exit 1
     fi
@@ -977,8 +981,17 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     fi
     rollback_profile=$(fm_account_meta_value "$RESUME_META" account_profile)
     if [ -z "$rollback_profile" ] && [ "$rollback_kind" = secondmate ] && [ -z "$rollback_backup" ]; then
+      rollback_tasktmp_owner=$(fm_tasktmp_owner_record "$STATE" "$rollback_id" "$rollback_generation") || exit 1
+      if [ -e "$rollback_tasktmp_owner" ] || [ -L "$rollback_tasktmp_owner" ]; then
+        fm_tasktmp_remove_owned "$STATE" "$FM_HOME" "$rollback_id" "$rollback_generation" "$rollback_tasktmp" || {
+          echo "error: cleaned secondmate attempt retained ambiguous task temp ownership for $rollback_id" >&2
+          exit 1
+        }
+      elif [ -e "$rollback_tasktmp" ] || [ -L "$rollback_tasktmp" ]; then
+        echo "error: cleaned secondmate attempt retained an unowned task temp root for $rollback_id" >&2
+        exit 1
+      fi
       rm -f "$RESUME_META" "$STATE/$rollback_id.status" "$STATE/$rollback_id.turn-ended" "$STATE/$rollback_id.check.sh" "$STATE/$rollback_id.pi-ext.ts" "$STATE/$rollback_id.grok-turnend-token"
-      [ -z "$rollback_tasktmp" ] || rm -rf "$rollback_tasktmp"
     fi
     if [ -z "$rollback_profile" ]; then
       if [ -n "$rollback_backup" ]; then
@@ -1060,6 +1073,10 @@ T=
 WORKTREE_CREATED=0
 WORKTREE_RETAIN_ON_ABORT=0
 WORKTREE_EXPECTED_TIP=
+WORKTREE_ACQUIRE_RECORD=
+WORKTREE_ACQUIRE_OWNER_START=
+WORKTREE_ACQUIRE_ENDPOINT_PHASE=not-created
+WORKTREE_ACQUIRE_TASKTMP_PHASE=not-created
 META_INSTALLED=0
 META_BACKUP=
 EXISTING_ARTIFACT_BACKUP=
@@ -1091,8 +1108,13 @@ ORIGINAL_PI_EXT_PRESENT=-1
 ORIGINAL_GROK_TOKEN_PRESENT=-1
 ORIGINAL_TASK_TMP_PRESENT=-1
 
+spawn_test_lab_enabled() {
+  fm_account_test_lab_enabled \
+    || [ "${FM_ACCOUNT_DIRECTORY_TEST_LAB:-}" = firstmate-account-directory-test-lab-v1 ]
+}
+
 snapshot_existing_artifacts() {
-  local backup name source tasktmp="/tmp/fm-$ID"
+  local backup name source tasktmp=${TASK_TMP:-}
   backup=$(mktemp -d "$STATE/.$ID.artifacts.rollback.XXXXXX") || return 1
   for name in "$ID.status" "$ID.turn-ended" "$ID.check.sh" "$ID.pi-ext.ts" "$ID.grok-turnend-token"; do
     source="$STATE/$name"
@@ -1264,6 +1286,7 @@ persist_failed_account_rollback() {
       echo "mode=${MODE:-no-mistakes}"
       echo "yolo=${YOLO:-off}"
       echo "tasktmp=${TASK_TMP:-}"
+      echo "tasktmp_phase=${WORKTREE_ACQUIRE_TASKTMP_PHASE:-not-created}"
       echo "model=${MODEL:-default}"
       echo "effort=${EFFORT:-default}"
       echo "generation_id=${SPAWN_GENERATION_ID:-account:$ACCOUNT_TASK:${ACCOUNT_ATTEMPT:-legacy}}"
@@ -1347,9 +1370,10 @@ persist_failed_direct_recovery() {
     echo "kind=${KIND:-${RECORDED_KIND:-ship}}"
     echo "mode=${MODE:-${RECORDED_MODE:-no-mistakes}}"
     echo "yolo=${YOLO:-${RECORDED_YOLO:-off}}"
-    echo "tasktmp=${TASK_TMP:-${RECORDED_TASKTMP:-/tmp/fm-$ID}}"
-    echo "model=${MODEL:-default}"
-    echo "effort=${EFFORT:-default}"
+    echo "tasktmp=${TASK_TMP:-${RECORDED_TASKTMP:-}}"
+    echo "tasktmp_phase=${WORKTREE_ACQUIRE_TASKTMP_PHASE:-not-created}"
+    echo "model=${RECORDED_MODEL:-${MODEL:-default}}"
+    echo "effort=${RECORDED_EFFORT:-${EFFORT:-default}}"
     echo "generation_id=${RECORDED_GENERATION:-${SPAWN_GENERATION_ID:-}}"
     [ "${RECORDED_REPORT_REQUIRED_SET:-0}" != 1 ] || echo "report_required=${RECORDED_REPORT_REQUIRED:-}"
     [ -z "$account_home" ] || echo "account_home=$account_home"
@@ -1436,7 +1460,8 @@ persist_failed_direct_spawn() {  # <endpoint-created:0|1>
       echo "kind=${KIND:-ship}"
       echo "mode=$retained_mode"
       echo "yolo=$retained_yolo"
-      echo "tasktmp=${TASK_TMP:-/tmp/fm-$ID}"
+      echo "tasktmp=${TASK_TMP:-}"
+      echo "tasktmp_phase=${WORKTREE_ACQUIRE_TASKTMP_PHASE:-not-created}"
       echo "model=${MODEL:-default}"
       echo "effort=${EFFORT:-default}"
       echo "generation_id=${SPAWN_GENERATION_ID:-}"
@@ -1510,6 +1535,124 @@ cleanup_continuation_launch_transport() {
   CONTINUATION_PROMPT_CONTENT_ID=
 }
 
+create_worktree_acquisition_record() {
+  local record tmp start home_real
+  start=$(fm_account_process_start_time "$$") || {
+    echo "error: cannot record Treehouse acquisition owner for $ID" >&2
+    return 1
+  }
+  record="$STATE/.worktree-acquire-$ID.pending"
+  [ ! -e "$record" ] && [ ! -L "$record" ] || {
+    echo "error: stale or concurrent Treehouse acquisition record exists for $ID; let auto-reap reconcile it before retrying" >&2
+    return 1
+  }
+  tmp=$(mktemp "$STATE/.worktree-acquire-$ID.XXXXXX") || return 1
+  home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || { rm -f "$tmp"; return 1; }
+  {
+    printf '%s\n%s\n' "$$" "$start"
+    printf 'id=%s\n' "$ID"
+    printf 'project=%s\n' "$PROJ_ABS"
+    printf 'holder=firstmate-%s\n' "$ID"
+    printf 'home=%s\n' "$home_real"
+    printf 'kind=%s\nmode=%s\nyolo=%s\n' "$KIND" "$MODE" "$YOLO"
+    printf 'generation_id=%s\ntasktmp=%s\ntasktmp_phase=not-created\n' "$SPAWN_GENERATION_ID" "$TASK_TMP"
+    printf 'backend=%s\nendpoint_phase=not-created\nworktree=\n' "$BACKEND"
+  } > "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  if ! ln "$tmp" "$record" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "error: could not claim Treehouse acquisition record for $ID" >&2
+    return 1
+  fi
+  rm -f "$tmp"
+  WORKTREE_ACQUIRE_RECORD=$record
+  WORKTREE_ACQUIRE_OWNER_START=$start
+}
+
+record_acquired_worktree() {
+  local tmp
+  [ -n "$WORKTREE_ACQUIRE_RECORD" ] || return 1
+  [ "$(sed -n '1p' "$WORKTREE_ACQUIRE_RECORD" 2>/dev/null)" = "$$" ] \
+    && [ "$(sed -n '2p' "$WORKTREE_ACQUIRE_RECORD" 2>/dev/null)" = "$WORKTREE_ACQUIRE_OWNER_START" ] || {
+    echo "error: Treehouse acquisition ownership changed for $ID" >&2
+    return 1
+  }
+  tmp=$(mktemp "$STATE/.worktree-acquire-$ID.update.XXXXXX") || return 1
+  if ! sed '/^worktree=/d' "$WORKTREE_ACQUIRE_RECORD" > "$tmp" \
+    || ! printf 'worktree=%s\n' "$WT" >> "$tmp" \
+    || ! mv "$tmp" "$WORKTREE_ACQUIRE_RECORD"; then
+      rm -f "$tmp"
+      return 1
+  fi
+}
+
+persist_worktree_acquisition_phases() {
+  local tmp
+  [ -n "$WORKTREE_ACQUIRE_RECORD" ] || return 0
+  [ "$(sed -n '1p' "$WORKTREE_ACQUIRE_RECORD" 2>/dev/null)" = "$$" ] \
+    && [ "$(sed -n '2p' "$WORKTREE_ACQUIRE_RECORD" 2>/dev/null)" = "$WORKTREE_ACQUIRE_OWNER_START" ] || {
+    echo "error: Treehouse acquisition ownership changed for $ID" >&2
+    return 1
+  }
+  case "$WORKTREE_ACQUIRE_ENDPOINT_PHASE" in not-created|creating|created) ;; *) return 1 ;; esac
+  case "$WORKTREE_ACQUIRE_TASKTMP_PHASE" in not-created|created) ;; *) return 1 ;; esac
+  if [ "$WORKTREE_ACQUIRE_ENDPOINT_PHASE" = created ]; then
+    case "$BACKEND" in tmux|herdr|zellij|cmux) ;; *) return 1 ;; esac
+  fi
+  tmp=$(mktemp "$STATE/.worktree-acquire-$ID.phase.XXXXXX") || return 1
+  if ! awk '
+    !/^(backend|endpoint_phase|tasktmp_phase|window|tmux_window_id|tmux_session_target|herdr_session|herdr_workspace_id|herdr_tab_id|herdr_pane_id|zellij_session|zellij_tab_id|zellij_pane_id|cmux_workspace_id|cmux_surface_id)=/
+  ' "$WORKTREE_ACQUIRE_RECORD" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  {
+    printf 'backend=%s\n' "$BACKEND"
+    printf 'endpoint_phase=%s\n' "$WORKTREE_ACQUIRE_ENDPOINT_PHASE"
+    printf 'tasktmp_phase=%s\n' "$WORKTREE_ACQUIRE_TASKTMP_PHASE"
+    if [ "$WORKTREE_ACQUIRE_ENDPOINT_PHASE" = created ]; then
+      printf 'window=%s\n' "$T"
+      case "$BACKEND" in
+        tmux)
+          printf 'tmux_window_id=%s\n' "$WID"
+          printf 'tmux_session_target=%s\n' "$T"
+          ;;
+        herdr)
+          printf 'herdr_session=%s\n' "$HERDR_SES"
+          printf 'herdr_workspace_id=%s\n' "$HERDR_WORKSPACE_ID"
+          printf 'herdr_tab_id=%s\n' "$HERDR_TAB_ID"
+          printf 'herdr_pane_id=%s\n' "$HERDR_PANE_ID"
+          ;;
+        zellij)
+          printf 'zellij_session=%s\n' "$ZELLIJ_SES"
+          printf 'zellij_tab_id=%s\n' "$ZELLIJ_TAB_ID"
+          printf 'zellij_pane_id=%s\n' "$ZELLIJ_PANE_ID"
+          ;;
+        cmux)
+          printf 'cmux_workspace_id=%s\n' "$CMUX_WORKSPACE_ID"
+          printf 'cmux_surface_id=%s\n' "$CMUX_SURFACE_ID"
+          ;;
+      esac
+    fi
+  } >> "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  mv "$tmp" "$WORKTREE_ACQUIRE_RECORD" || { rm -f "$tmp"; return 1; }
+}
+
+clear_worktree_acquisition_record() {
+  [ -n "${WORKTREE_ACQUIRE_RECORD:-}" ] || return 0
+  if [ "$(sed -n '1p' "$WORKTREE_ACQUIRE_RECORD" 2>/dev/null)" = "$$" ] \
+    && [ "$(sed -n '2p' "$WORKTREE_ACQUIRE_RECORD" 2>/dev/null)" = "$WORKTREE_ACQUIRE_OWNER_START" ]; then
+    rm -f "$WORKTREE_ACQUIRE_RECORD"
+  fi
+  WORKTREE_ACQUIRE_RECORD=
+  WORKTREE_ACQUIRE_OWNER_START=
+}
+
 spawn_return_created_worktree() {
   local return_output return_status
   [ "$WORKTREE_CREATED" = 1 ] || return 0
@@ -1529,7 +1672,7 @@ spawn_return_created_worktree() {
     echo "warning: retained acquired worktree $WT because post-cleanup repository safety could not be re-proven" >&2
     return 1
   fi
-  if return_output=$(fm_checkout_treehouse_return "$WT" "$CHECKOUT_LOCK_ROOT" "$PROJ_ABS" 2>&1); then
+  if return_output=$(fm_checkout_treehouse_return "$WT" "$CHECKOUT_LOCK_ROOT" "${PROJ_ABS_REAL:-$PROJ_ABS}" 2>&1); then
     [ -z "$return_output" ] || printf '%s\n' "$return_output" >&2
     return 0
   else
@@ -1549,7 +1692,7 @@ spawn_restore_unmanaged_state_locked() {
   [ "${ACCOUNT_EFFECTIVE_MODE:-off}" != enforce ] || return 0
   if [ -n "$EXISTING_ARTIFACT_BACKUP" ]; then
     artifact_backup_name=${EXISTING_ARTIFACT_BACKUP##*/}
-    fm_account_restore_artifacts "$STATE" "$ID" "$artifact_backup_name" "/tmp/fm-$ID" 1 || return 1
+    fm_account_restore_artifacts "$STATE" "$ID" "$artifact_backup_name" "${TASK_TMP:-}" 1 || return 1
   fi
   if [ -n "$META_BACKUP" ]; then
     [ -f "$META_BACKUP" ] && [ -f "$meta" ] || return 1
@@ -1721,7 +1864,7 @@ spawn_abort_cleanup() {
     fi
     if [ -n "$rollback_lock" ]; then
       artifact_backup_name=${EXISTING_ARTIFACT_BACKUP##*/}
-      if fm_account_restore_artifacts "$STATE" "$ID" "$artifact_backup_name" "${TASK_TMP:-/tmp/fm-$ID}" 1; then
+      if fm_account_restore_artifacts "$STATE" "$ID" "$artifact_backup_name" "${TASK_TMP:-}" 1; then
         if [ "$META_INSTALLED" = 1 ] && [ -n "$META_BACKUP" ] && [ -f "$META_BACKUP" ]; then
           if fm_account_meta_merge_extensions "$STATE/$ID.meta" "$META_BACKUP" \
             && fm_account_safe_file_destination "$STATE/$ID.meta" \
@@ -1755,7 +1898,7 @@ spawn_abort_cleanup() {
     if [ -n "$rollback_lock" ] && [ "$worktree_clean" = 1 ]; then
       if [ -n "$META_BACKUP" ] && [ -f "$META_BACKUP" ]; then
         artifact_backup_name=${EXISTING_ARTIFACT_BACKUP##*/}
-        if fm_account_restore_artifacts "$STATE" "$ID" "$artifact_backup_name" "${TASK_TMP:-/tmp/fm-$ID}" 1 \
+        if fm_account_restore_artifacts "$STATE" "$ID" "$artifact_backup_name" "${TASK_TMP:-}" 1 \
           && fm_account_meta_merge_extensions "$STATE/$ID.meta" "$META_BACKUP" \
           && fm_account_safe_file_destination "$STATE/$ID.meta" \
           && mv "$META_BACKUP" "$STATE/$ID.meta"; then
@@ -1776,7 +1919,7 @@ spawn_abort_cleanup() {
         [ "$ORIGINAL_CHECK_PRESENT" != 0 ] || rm -f "$STATE/$ID.check.sh"
         [ "$ORIGINAL_PI_EXT_PRESENT" != 0 ] || rm -f "$STATE/$ID.pi-ext.ts"
         [ "$ORIGINAL_GROK_TOKEN_PRESENT" != 0 ] || rm -f "$STATE/$ID.grok-turnend-token"
-        [ "$ORIGINAL_TASK_TMP_PRESENT" != 0 ] || { [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"; }
+        [ "$ORIGINAL_TASK_TMP_PRESENT" != 0 ] || { [ -z "${TASK_TMP:-}" ] || fm_tasktmp_remove_owned "$STATE" "$FM_HOME" "$ID" "$SPAWN_GENERATION_ID" "$TASK_TMP"; }
       fi
     fi
     if [ "$worktree_clean" != 1 ]; then
@@ -1855,7 +1998,7 @@ spawn_abort_cleanup() {
         [ "$ORIGINAL_CHECK_PRESENT" != 0 ] || rm -f "$STATE/$ID.check.sh"
         [ "$ORIGINAL_PI_EXT_PRESENT" != 0 ] || rm -f "$STATE/$ID.pi-ext.ts"
         [ "$ORIGINAL_GROK_TOKEN_PRESENT" != 0 ] || rm -f "$STATE/$ID.grok-turnend-token"
-        [ "$ORIGINAL_TASK_TMP_PRESENT" != 0 ] || { [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"; }
+        [ "$ORIGINAL_TASK_TMP_PRESENT" != 0 ] || { [ -z "${TASK_TMP:-}" ] || fm_tasktmp_remove_owned "$STATE" "$FM_HOME" "$ID" "$SPAWN_GENERATION_ID" "$TASK_TMP"; }
       fi
       if [ "$account_clean" != 1 ] && [ -n "$rollback_lock" ]; then
         persist_failed_account_rollback || echo "warning: failed to persist Agent Fleet rollback state for ${ID:-unknown}" >&2
@@ -1875,6 +2018,14 @@ spawn_abort_cleanup() {
     fi
   fi
   [ -z "$rollback_lock" ] || fm_account_meta_lock_release "$rollback_lock" >/dev/null 2>&1 || true
+  if [ -n "${WORKTREE_ACQUIRE_RECORD:-}" ]; then
+    if [ -f "$STATE/${ID:-unknown}.meta" ] \
+      || { [ "$WORKTREE_CREATED" = 1 ] && [ "$worktree_clean" = 1 ]; }; then
+      clear_worktree_acquisition_record
+    else
+      echo "warning: retained Treehouse acquisition record for ${ID:-unknown}; auto-reap will reconcile any lease after owner death" >&2
+    fi
+  fi
   [ -z "$META_BACKUP" ] || [ -f "$META_BACKUP" ] || META_BACKUP=
   [ -z "$EXISTING_ARTIFACT_BACKUP" ] || [ -d "$EXISTING_ARTIFACT_BACKUP" ] || EXISTING_ARTIFACT_BACKUP=
   [ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true
@@ -2030,7 +2181,7 @@ if [ -e "$STATE/$ID.turn-ended" ] || [ -L "$STATE/$ID.turn-ended" ]; then ORIGIN
 if [ -e "$STATE/$ID.check.sh" ] || [ -L "$STATE/$ID.check.sh" ]; then ORIGINAL_CHECK_PRESENT=1; else ORIGINAL_CHECK_PRESENT=0; fi
 if [ -e "$STATE/$ID.pi-ext.ts" ] || [ -L "$STATE/$ID.pi-ext.ts" ]; then ORIGINAL_PI_EXT_PRESENT=1; else ORIGINAL_PI_EXT_PRESENT=0; fi
 if [ -e "$STATE/$ID.grok-turnend-token" ] || [ -L "$STATE/$ID.grok-turnend-token" ]; then ORIGINAL_GROK_TOKEN_PRESENT=1; else ORIGINAL_GROK_TOKEN_PRESENT=0; fi
-if [ -e "/tmp/fm-$ID" ] || [ -L "/tmp/fm-$ID" ]; then ORIGINAL_TASK_TMP_PRESENT=1; else ORIGINAL_TASK_TMP_PRESENT=0; fi
+if [ -n "${TASK_TMP:-}" ] && { [ -e "$TASK_TMP" ] || [ -L "$TASK_TMP" ]; }; then ORIGINAL_TASK_TMP_PRESENT=1; else ORIGINAL_TASK_TMP_PRESENT=0; fi
 
 if [ "$RECOVERY_ACCOUNT" = 1 ]; then
   RECORDED_KIND=$(fm_meta_get "$RESUME_META" kind)
@@ -2108,7 +2259,8 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     [ -n "$RECORDED_MODE" ] || { echo "error: direct account recovery metadata has no mode for $ID" >&2; exit 1; }
     [ -n "$RECORDED_YOLO" ] || { echo "error: direct account recovery metadata has no yolo setting for $ID" >&2; exit 1; }
     [ -n "$RECORDED_GENERATION" ] || { echo "error: direct account recovery metadata has no generation_id for $ID" >&2; exit 1; }
-    [ "$RECORDED_TASKTMP" = "/tmp/fm-$ID" ] || { echo "error: direct account recovery metadata has an invalid tasktmp for $ID" >&2; exit 1; }
+    [ "$(fm_tasktmp_path "$ID" "$RECORDED_GENERATION" 2>/dev/null)" = "$RECORDED_TASKTMP" ] \
+      || { echo "error: direct account recovery metadata has an invalid tasktmp for $ID" >&2; exit 1; }
     RECORDED_META_WORKTREE_GIT_REF=$RECORDED_WORKTREE_GIT_REF
     RECORDED_META_WORKTREE_GIT_HEAD=$RECORDED_WORKTREE_GIT_HEAD
     RECORDED_META_WORKTREE_GIT_SETUP_REF=$RECORDED_WORKTREE_GIT_SETUP_REF
@@ -2464,6 +2616,14 @@ elif [ "$ACCOUNT_EFFECTIVE_MODE" != off ]; then
 else
   SPAWN_GENERATION_ID="spawn:$(fm_account_attempt_id "$FM_HOME" "$ID")" || exit 1
 fi
+if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ] || [ "$RESUME_ACCOUNT" = 1 ]; then
+  TASK_TMP=$(fm_meta_get "$RESUME_META" tasktmp)
+else
+  TASK_TMP=$(fm_tasktmp_path "$ID" "$SPAWN_GENERATION_ID") || {
+    echo "error: cannot derive task temp root for $ID generation $SPAWN_GENERATION_ID" >&2
+    exit 1
+  }
+fi
 if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
   META_WRITE_LOCK=$(fm_account_meta_lock_acquire "$STATE" "$ID") || exit 1
   if [ "$RECOVERY_ACCOUNT" = 1 ]; then
@@ -2750,6 +2910,23 @@ else
   fi
 fi
 
+# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md
+# project management and task lifecycle). Resolve it before Treehouse
+# acquisition so the crash-recovery record carries exact teardown authority
+# even if spawn dies before endpoint creation or metadata installation.
+if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
+  MODE=$RECORDED_MODE
+  YOLO=$RECORDED_YOLO
+elif [ "$KIND" = secondmate ]; then
+  MODE=secondmate
+  YOLO=off
+else
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  read -r MODE YOLO <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+EOF
+fi
+
 if [ "$RECOVERY_ACCOUNT" = 1 ]; then
   RECORDED_TARGET=$(fm_backend_target_of_meta "$RESUME_META")
   RECOVERY_ENDPOINT_STATE=$(spawn_managed_endpoint_state "$BACKEND" "$RECORDED_TARGET" "fm-$ID" "$KIND" "$PROJ_ABS" "$(fm_meta_get "$RESUME_META" tmux_session_target)" 2>/dev/null)
@@ -2817,7 +2994,7 @@ if [ "$KIND" = secondmate ]; then
   fi
   if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
     if ! secondmate_home_supports_account_routing "$PROJ_ABS"; then
-      echo "error: refusing account-routed secondmate launch for $PROJ_ABS: the home lacks Agent Fleet routing support. Fast-forward or otherwise reconcile the home to this Firstmate revision, run bin/fm-config-push.sh, and retry." >&2
+      echo "error: refusing account-routed secondmate $ID launch for $PROJ_ABS: the home lacks Agent Fleet routing support. Fast-forward or otherwise reconcile the home to this Firstmate revision, run bin/fm-config-push.sh, and retry." >&2
       exit 1
     fi
   elif ! secondmate_home_supports_account_routing "$PROJ_ABS"; then
@@ -2959,6 +3136,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" 
     echo "error: refusing Treehouse acquisition because pool safety could not be inspected for $PROJ_ABS" >&2
     exit 1
   }
+  create_worktree_acquisition_record || exit 1
   acquire_status=0
   WT=$("$SCRIPT_DIR/fm-checkout-refresh.sh" acquire-worktree "$PROJ_ABS_REAL" "firstmate-$ID") || acquire_status=$?
   if [ "$acquire_status" -ne 0 ]; then
@@ -2975,6 +3153,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" 
   }
   WORKTREE_CREATED=1
   WORKTREE_RETAIN_ON_ABORT=1
+  record_acquired_worktree || exit 1
   validate_spawn_worktree "treehouse get --lease" "$PROJ_ABS"
   freshness_status=0
   "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$WT" "$PROJ_ABS_REAL" || freshness_status=$?
@@ -3097,13 +3276,29 @@ if [ "$DIRECT_ACCOUNT_ROUTING" = 1 ] && [ "$DIRECT_ACCOUNT_RECOVERY" = 0 ] && [ 
   }
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
+# Per-generation temp root with Go's build temp nested at gotmp/. Go won't
+# create GOTMPDIR, so create the exact owned root before it is used.
+# GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
+if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ] || [ "$RESUME_ACCOUNT" = 1 ]; then
+  if ! fm_tasktmp_owner_validate "$(fm_tasktmp_owner_record "$STATE" "$ID" "$SPAWN_GENERATION_ID")" "$FM_HOME" "$ID" "$SPAWN_GENERATION_ID" "$TASK_TMP" \
+    || ! fm_tasktmp_owner_validate "$TASK_TMP/.fm-tasktmp-owner" "$FM_HOME" "$ID" "$SPAWN_GENERATION_ID" "$TASK_TMP"; then
+    echo "error: account recovery task temp ownership is not exact for $ID" >&2
+    exit 1
+  fi
+else
+  if spawn_test_lab_enabled && [ "${FM_TEST_TASKTMP_CREATE_FAIL:-0}" = 1 ]; then
+    echo "error: test-only task temp creation failure for $ID" >&2
+    exit 1
+  fi
+  fm_tasktmp_create "$STATE" "$FM_HOME" "$ID" "$SPAWN_GENERATION_ID" "$TASK_TMP" \
+    || { echo "error: cannot create exact owned task temp root for $ID" >&2; exit 1; }
+fi
+WORKTREE_ACQUIRE_TASKTMP_PHASE=created
+persist_worktree_acquisition_phases || {
+  echo "error: cannot durably record task temp creation for $ID" >&2
+  exit 1
+}
 # herdr sets GOTMPDIR natively at agent start. Every other backend exports it into
 # the pane shell just before the launch line, further down. CREW_PATH rides the same
 # two channels for the same reason.
@@ -3217,23 +3412,6 @@ EOF
       exclude_path '.fm-grok-turnend'
       ;;
   esac
-fi
-
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
-# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
-# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
-# merge, so scout teardown ignores mode.
-if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
-  MODE=$RECORDED_MODE
-  YOLO=$RECORDED_YOLO
-elif [ "$KIND" = secondmate ]; then
-  MODE=secondmate
-  YOLO=off
-else
-  PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
 fi
 
 if [ "$ACCOUNT_EFFECTIVE_MODE" = observe ]; then
@@ -3411,9 +3589,13 @@ case "$BACKEND" in
     # WT_TARGET carries that stable id for spawn-time commands below; the
     # persisted window= handle stays $T (the name form), which is safe now that
     # rename is disabled.
+    WORKTREE_ACQUIRE_ENDPOINT_PHASE=creating
+    persist_worktree_acquisition_phases || exit 1
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_CWD") || exit 1
     ENDPOINT_CREATED=1
     WT_TARGET="$WID"
+    WORKTREE_ACQUIRE_ENDPOINT_PHASE=created
+    persist_worktree_acquisition_phases || exit 1
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -3454,6 +3636,8 @@ case "$BACKEND" in
     # effort flags, "$(cat <brief>)") stay byte-identical across backends and the
     # Agent Fleet enforced-mode command is preserved verbatim. What goes away is
     # typing that command into a composer and hoping it submits.
+    WORKTREE_ACQUIRE_ENDPOINT_PHASE=creating
+    persist_worktree_acquisition_phases || exit 1
     FM_BACKEND_HERDR_AGENT_ENV=(${HERDR_AGENT_ENV[@]+"${HERDR_AGENT_ENV[@]}"})
     HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID" \
       /bin/bash -lc "$LAUNCH") || exit 1
@@ -3466,9 +3650,13 @@ EOF
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     ENDPOINT_CREATED=1
+    WORKTREE_ACQUIRE_ENDPOINT_PHASE=created
+    persist_worktree_acquisition_phases || exit 1
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
+    WORKTREE_ACQUIRE_ENDPOINT_PHASE=creating
+    persist_worktree_acquisition_phases || exit 1
     ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_CWD") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
@@ -3479,9 +3667,13 @@ EOF
     fi
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ENDPOINT_CREATED=1
+    WORKTREE_ACQUIRE_ENDPOINT_PHASE=created
+    persist_worktree_acquisition_phases || exit 1
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
+    WORKTREE_ACQUIRE_ENDPOINT_PHASE=creating
+    persist_worktree_acquisition_phases || exit 1
     CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_CWD") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
@@ -3492,6 +3684,8 @@ EOF
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ENDPOINT_CREATED=1
+    WORKTREE_ACQUIRE_ENDPOINT_PHASE=created
+    persist_worktree_acquisition_phases || exit 1
     ;;
   orca)
     if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
@@ -3557,6 +3751,10 @@ EOF
     ENDPOINT_CREATED=1
     ;;
 esac
+if spawn_test_lab_enabled && [ "${FM_TEST_FAIL_AFTER_ENDPOINT:-0}" = 1 ]; then
+  echo "error: test-only failure after endpoint creation for $ID" >&2
+  exit 1
+fi
 if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
   persist_failed_account_rollback_short || exit 1
 fi
@@ -3675,6 +3873,7 @@ META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  echo "tasktmp_phase=$WORKTREE_ACQUIRE_TASKTMP_PHASE"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   echo "generation_id=$SPAWN_GENERATION_ID"
@@ -3763,6 +3962,7 @@ fi
 fm_account_safe_file_destination "$STATE/$ID.meta" || { echo "error: unsafe task metadata destination at $STATE/$ID.meta" >&2; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta"
 META_INSTALLED=1
+clear_worktree_acquisition_record
 [ -z "$META_WRITE_LOCK" ] || fm_account_meta_lock_release "$META_WRITE_LOCK"
 META_WRITE_LOCK=
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0

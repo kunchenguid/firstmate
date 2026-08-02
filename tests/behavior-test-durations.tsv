@@ -12,6 +12,8 @@
 16500	tests/fm-afk-launch.test.sh
 6900	tests/fm-afk-reap-wake-e2e.test.sh
 26565	tests/fm-arm-pretool-check.test.sh
+180	tests/fm-auto-reap-herdr-e2e.test.sh
+22300	tests/fm-auto-reap.test.sh
 5950	tests/fm-autocompact.test.sh
 20	tests/fm-backend-autodetect-smoke.test.sh
 20	tests/fm-backend-cmux-smoke.test.sh

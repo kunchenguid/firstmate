@@ -47,6 +47,9 @@ if [ "${1:-}" = --version ]; then
   exit 0
 fi
 if [ "${1:-}" = list-sessions ]; then
+  if [ "${FM_ZELLIJ_CLOSE_REMOVES_SESSION:-0}" = 1 ] && [ -f "$RESP/.closed" ]; then
+    exit 0
+  fi
   printf '%s\n' "${FM_ZELLIJ_SESSION_LIST:-}"
   exit 0
 fi
@@ -61,6 +64,9 @@ if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
+if [ "${FM_ZELLIJ_CLOSE_REMOVES_SESSION:-0}" = 1 ] && [ "${4:-}" = close-tab-by-id ]; then
+  : > "$RESP/.closed"
+fi
 exit 0
 SH
   chmod +x "$fb/zellij"
@@ -911,19 +917,21 @@ test_teardown_rejects_uninspectable_project_before_zellij_kill() {
   local dir state data config project fb out status
   dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"
   mkdir -p "$state" "$data/zghost" "$config" "$project" "$dir/responses"
+  git init -q "$project"
   printf 'report\n' > "$data/zghost/report.md"
   fm_write_meta "$state/zghost.meta" \
     "window=firstmate:7" \
     "backend=zellij" \
     "zellij_tab_id=3" \
     "worktree=$dir/missing-worktree" \
-    "project=$project" \
+    "project=$dir/missing-project" \
     "kind=scout"
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
+    FM_ZELLIJ_CLOSE_REMOVES_SESSION=1 \
     "$ROOT/bin/fm-teardown.sh" zghost 2>&1 )
   status=$?
   expect_code 1 "$status" "fm-teardown must reject an uninspectable project before Zellij cleanup: $out"
@@ -934,13 +942,30 @@ test_teardown_rejects_uninspectable_project_before_zellij_kill() {
   pass "fm-teardown.sh: rejects uninspectable project metadata before touching Zellij"
 }
 
-test_forced_secondmate_teardown_rejects_uninspectable_home_before_zellij_cleanup() {
-  local dir state data config home project fb out status child_title
+test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
+  local dir state data config home project child_worktree fixture_remote source_default_tip source_remote fb out status child_title
   dir="$TMP_ROOT/teardown-zellij-secondmate-child"; state="$dir/state"; data="$dir/data"; config="$dir/config"; home="$dir/secondmate-home"; project="$dir/project"
-  mkdir -p "$state" "$data" "$config" "$home/state" "$home/data" "$home/config" "$home/projects" "$project" "$dir/responses"
+  child_worktree="$dir/treehouse-pool/1/worktree"
+  mkdir -p "$state" "$data" "$config" "$project" "$dir/responses" "$dir/source-projects"
+  fixture_remote="$dir/source-remote.git"
+  git init -q --bare "$fixture_remote"
+  git -C "$fixture_remote" symbolic-ref HEAD refs/heads/main
+  source_default_tip=$(git -C "$ROOT" rev-parse refs/remotes/origin/main)
+  git -C "$ROOT" push -q "$fixture_remote" "$source_default_tip":refs/heads/main
+  git clone -q --no-local --depth 1 --single-branch --branch main "$fixture_remote" "$home"
+  source_remote=$(git -C "$ROOT" remote get-url origin)
+  git -C "$home" remote set-url origin "$source_remote"
+  git init -q "$project"
+  git -C "$project" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q --allow-empty -m initial
+  mkdir -p "$(dirname "$child_worktree")"
+  git -C "$project" worktree add -q -b childz "$child_worktree"
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"firstmate-childz"}]}\n' \
+    "$child_worktree" > "$dir/treehouse-pool/treehouse-state.json"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   printf 'smz\n' > "$home/.fm-secondmate-home"
-  printf '%s\n' "- smz - Zellij child cleanup (home: $home; scope: zellij cleanup; projects: none; added 2026-07-27)" \
-    > "$data/secondmates.md"
+  printf -- '- smz - zellij fixture (home: %s; scope: zellij fixture; projects: ; added 2026-07-27)\n' \
+    "$home" > "$data/secondmates.md"
   fm_write_meta "$state/smz.meta" \
     "window=firstmate:99" \
     "backend=zellij" \
@@ -953,7 +978,7 @@ test_forced_secondmate_teardown_rejects_uninspectable_home_before_zellij_cleanup
     "window=firstmate:7" \
     "backend=zellij" \
     "zellij_tab_id=4" \
-    "worktree=$dir/missing-child-worktree" \
+    "worktree=$child_worktree" \
     "project=$project" \
     "kind=scout"
   child_title=$(zellij_expected_scoped_title fm-childz "$home" "$home")
@@ -968,24 +993,39 @@ test_forced_secondmate_teardown_rejects_uninspectable_home_before_zellij_cleanup
 if [ "${1:-}" = list-sessions ]; then
   printf 'firstmate\n'
 elif [[ "$*" == *'action list-panes --json'* ]]; then
-  printf '[{"id":7,"tab_id":4,"is_plugin":false}]\n'
+  if [ -f "$FM_ZELLIJ_LOG.closed" ]; then
+    printf '[]\n'
+  else
+    printf '[{"id":7,"tab_id":4,"is_plugin":false}]\n'
+  fi
 elif [[ "$*" == *'action list-tabs --json'* ]]; then
-  printf '[{"tab_id":4,"name":"%s"}]\n' "$FM_ZELLIJ_CHILD_TITLE"
+  if [ -f "$FM_ZELLIJ_LOG.closed" ]; then
+    printf '[]\n'
+  else
+    printf '[{"tab_id":4,"name":"%s"}]\n' "$FM_ZELLIJ_CHILD_TITLE"
+  fi
+elif [[ "$*" == *'close-tab-by-id'* ]]; then
+  : > "$FM_ZELLIJ_LOG.closed"
 fi
 SH
   chmod +x "$dir/fakebin/zellij"
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+target=$(pwd -P)
+git -C "$FM_ZELLIJ_CHILD_PROJECT" worktree remove --force "$target"
+SH
+  chmod +x "$dir/fakebin/treehouse"
   fb="$dir/fakebin"
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ROOT_OVERRIDE="$ROOT" \
-    FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_CHILD_TITLE="$child_title" \
+    FM_PROJECTS_OVERRIDE="$dir/source-projects" \
+    FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_CHILD_TITLE="$child_title" FM_ZELLIJ_CHILD_PROJECT="$project" \
     "$ROOT/bin/fm-teardown.sh" smz --force 2>&1 )
   status=$?
-  expect_code 1 "$status" "fm-teardown must reject an uninspectable secondmate home before Zellij cleanup: $out"
-  assert_contains "$out" "secondmate project metadata is not an exact repository root" \
-    "fm-teardown did not explain the secondmate project-identity refusal"
-  [ ! -e "$dir/log" ] || [ ! -s "$dir/log" ] \
-    || fail "fm-teardown touched Zellij before validating secondmate project identity: $(cat "$dir/log")"
-  pass "fm-teardown.sh: rejects an uninspectable secondmate home before touching Zellij"
+  expect_code 0 "$status" "fm-teardown should force-retire a secondmate with a zellij child: $out"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''4' \
+    "forced secondmate teardown did not close a child zellij tab scoped to the child home"
+  pass "fm-teardown.sh: force cleanup kills zellij children using the child home tag"
 }
 
 # --- send_text_submit: delta-based verify-and-retry --------------------------

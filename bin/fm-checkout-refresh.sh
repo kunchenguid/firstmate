@@ -2018,8 +2018,8 @@ record_alert() {
 
 record_reinspection_failure() {
   local checkout=$1 key alert output
-  key=$(checkout_key "$checkout") || {
-    printf '%s: skipped: covered checkout lock identity cannot be resolved\n' "$checkout"
+  key=$(fm_checkout_hash_value "$checkout" 24) || {
+    printf '%s: skipped: covered checkout alert identity cannot be resolved\n' "$checkout"
     return 1
   }
   alert="$STATE_ROOT/$key.alert"

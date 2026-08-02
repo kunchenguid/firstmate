@@ -553,7 +553,7 @@ SH
 }
 
 test_enforced_recovery_sweep_installs_meta_with_inherited_lock() {
-  local w workspace primary_tip spawn_root fb tmuxfb fake_root fake_af log out meta account_task native_dir_file refreshed
+  local w workspace primary_tip spawn_root fb tmuxfb fake_root fake_af log out meta account_task generation task_tmp native_dir_file refreshed
   w=$(new_world sweep-enforced-inherited-lock)
   add_sm_home "$w" sm1 firstmate:fm-sm1 claude
   primary_tip=$(git -C "$ROOT" rev-parse HEAD)
@@ -567,6 +567,12 @@ test_enforced_recovery_sweep_installs_meta_with_inherited_lock() {
   workspace=$(cd "$w/sm1" && pwd -P)
   meta="$w/home/state/sm1.meta"
   account_task=fm-test-sm1-a1234
+  generation=account:$account_task:a1234
+  # shellcheck source=bin/fm-account-routing-lib.sh
+  . "$ROOT/bin/fm-account-routing-lib.sh"
+  task_tmp=$(fm_tasktmp_path sm1 "$generation")
+  fm_tasktmp_create "$w/home/state" "$w/home" sm1 "$generation" "$task_tmp" \
+    || fail "could not create exact task temp ownership for enforced recovery"
   mkdir -p "$w/home/data/sm1"
   printf -- '- sm1 - test secondmate (home: %s; scope: test; projects: ; added 2026-07-13)\n' \
     "$workspace" > "$w/home/data/secondmates.md"
@@ -575,13 +581,13 @@ worktree=$workspace
 project=$workspace
 mode=secondmate
 yolo=off
-tasktmp=/tmp/fm-sm1
+tasktmp=$task_tmp
 account_pool=claude-crew
 account_profile=claude-2
 account_task=$account_task
 account_attempt=a1234
 provider_session_id=sess-$account_task
-generation_id=account:$account_task:a1234
+generation_id=$generation
 EOF
   printf 'enforce\n' > "$w/home/config/account-routing-mode"
 
@@ -661,6 +667,8 @@ SH
   assert_no_grep '^account_rollback_cleanup=' "$meta" \
     "enforced secondmate recovery did not commit its metadata installation"
   assert_present "$refreshed" "enforced secondmate recovery never crossed its fresh SessionStart gate"
+  FM_HOME="$w/home" fm_tasktmp_remove_owned "$w/home/state" "$w/home" sm1 "$generation" "$task_tmp" \
+    || fail "could not clean exact task temp ownership after enforced recovery"
   pass "sweep: enforced secondmate recovery installs metadata under the inherited lifecycle lock"
 }
 

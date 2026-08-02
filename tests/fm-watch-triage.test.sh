@@ -1651,7 +1651,7 @@ test_afk_present_reverts_watcher_to_one_shot() {
 # must still hand off the plain window identity to the daemon, rather than running
 # the normal-mode pause re-surface and decorating the stale identity.
 test_afk_paused_changed_pane_hands_off_plain_stale() {
-  local dir state fakebin out drain_out capture_file statusf window key sig pid back
+  local dir state fakebin out drain_out capture_file statusf window key sig pid back i
   dir=$(make_case afk-paused-changed-pane); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-afk-held"
@@ -1664,6 +1664,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-held_status"
   date '+%s' > "$state/.afk"
+  touch "$state/.last-check" "$state/.last-account-session-sync" "$state/.last-report-retention"
   key=$(printf '%s' "$window" | tr '.:/' '___')
 
   # Deliberately do not seed .hash-*: this is the changed-pane path that used to
@@ -1673,6 +1674,12 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] || fail "AFK watcher did not enter its supervision loop"
   wait_for_exit "$pid" 40 || fail "AFK paused changed pane did not hand off a stale wake"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "AFK paused stale did not preserve its plain window identity: $(cat "$out")"
   grep -F "awaiting external" "$out" >/dev/null && fail "AFK watcher decorated a stale identity instead of handing it to the daemon"
@@ -1813,6 +1820,11 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = permission-prompts ]; then
   test_harness_permission_prompts_surface_immediately
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = afk-paused-handoff ]; then
+  test_afk_paused_changed_pane_hands_off_plain_stale
   exit 0
 fi
 

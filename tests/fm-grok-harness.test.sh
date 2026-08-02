@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-grok-harness)
 
 make_spawn_fakebin() {
@@ -16,6 +17,11 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_id}"*)
+    [ -f "${FM_FAKE_ENDPOINT_FILE:?}" ] || exit 1
+    printf '%%1\n'
+    exit 0
+    ;;
   *"#{pane_current_command}"*)
     [ -f "${FM_FAKE_ENDPOINT_FILE:?}" ] || exit 1
     printf 'grok\n'
@@ -36,12 +42,17 @@ case "${1:-}" in
     exit 0
     ;;
   list-windows)
-    [ -f "${FM_FAKE_ENDPOINT_FILE:?}" ] && printf 'fm-%s\n' "${FM_FAKE_TASK_ID:?}"
+    [ ! -f "${FM_FAKE_ENDPOINT_FILE:?}" ] \
+      || printf 'fm-%s\n' "${FM_FAKE_TASK_ID:?}"
     exit 0
     ;;
-  has-session|new-session|send-keys) exit 0 ;;
-  new-window) touch "${FM_FAKE_ENDPOINT_FILE:?}"; printf '@1\n'; exit 0 ;;
-  kill-window) rm "${FM_FAKE_ENDPOINT_FILE:?}"; exit 0 ;;
+  new-window)
+    : > "${FM_FAKE_ENDPOINT_FILE:?}"
+    printf '@1\n'
+    exit 0
+    ;;
+  kill-window) rm -f "${FM_FAKE_ENDPOINT_FILE:?}"; exit 0 ;;
+  has-session|new-session|send-keys|set-window-option) exit 0 ;;
 esac
 exit 0
 SH
@@ -54,6 +65,26 @@ case "${1:-}" in
     printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"firstmate-%s"}]}\n' \
       "${FM_FAKE_PANE_PATH:?}" "${FM_FAKE_TASK_ID:?}" > "${FM_FAKE_TREEHOUSE_STATE:?}"
     printf '%s\n' "$FM_FAKE_PANE_PATH"
+    exit 0
+    ;;
+  return)
+    target=${@: -1}
+    [ "$target" != . ] || target=$(pwd -P)
+    git -C "${FM_FAKE_TREEHOUSE_PROJECT:?}" worktree remove --force "$target"
+    status=$?
+    [ "$status" -eq 0 ] || exit "$status"
+    python3 - "${FM_FAKE_TREEHOUSE_STATE:?}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["worktrees"][0]["leased"] = False
+state["worktrees"][0]["lease_holder"] = None
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+PY
     exit 0
     ;;
 esac
@@ -94,8 +125,9 @@ run_grok_spawn() {
     FM_TREEHOUSE_ROOT="$home/treehouse-pools" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$home/checkout-refresh-state" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    FM_FAKE_TASK_ID="$id" FM_FAKE_TREEHOUSE_STATE="$home/treehouse-pools/project/treehouse-state.json" \
-    FM_FAKE_ENDPOINT_FILE="$home/state/.fake-endpoint" \
+    FM_FAKE_ENDPOINT_FILE="$home/state/$id.endpoint" FM_FAKE_TASK_ID="$id" \
+    FM_FAKE_TREEHOUSE_PROJECT="$proj" \
+    FM_FAKE_TREEHOUSE_STATE="$home/treehouse-pools/project/treehouse-state.json" \
     GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" grok 2>&1
 }
@@ -139,6 +171,36 @@ EOF
   pass "grok global hook requires a firstmate registry token"
 }
 
+test_grok_teardown_removes_pointer_and_token() {
+  local rec case_dir home proj wt fakebin grok_home id out status token
+  rec=$(make_spawn_case teardown)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
+  status=$?
+  expect_code 0 "$status" "grok spawn should succeed before teardown"
+  token=$(sed -n 's/^token=//p' "$wt/.fm-grok-turnend")
+  assert_present "$home/state/$id.endpoint" "fake tmux endpoint was not recorded"
+  printf '# Completion\n\n## Summary\n\nGrok lifecycle cleanup is ready.\n\n## What changed\n\nRecorded hook cleanup state.\n\n## Verification\n\nThe teardown assertions below verify cleanup.\n\n## Visual evidence\n\nNone.\n\n## Artifacts\n\nNone.\n\n## Follow-ups\n\nNone.\n' \
+    > "$home/data/$id/completion.md"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_TREEHOUSE_ROOT="$home/treehouse-pools" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$home/checkout-refresh-state" \
+    FM_REPORT_STACK_ROOT="$case_dir/report-stack" \
+    FM_FAKE_ENDPOINT_FILE="$home/state/$id.endpoint" FM_FAKE_TASK_ID="$id" \
+    GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
+    FM_FAKE_TREEHOUSE_PROJECT="$proj" \
+    FM_FAKE_TREEHOUSE_STATE="$home/treehouse-pools/project/treehouse-state.json" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 \
+    || fail "grok teardown failed"
+
+  assert_absent "$wt/.fm-grok-turnend" "grok pointer survived teardown"
+  assert_absent "$grok_home/hooks/fm-turn-end.d/$token" "grok auth token survived teardown"
+  assert_absent "$home/state/$id.grok-turnend-token" "grok state token survived teardown"
+  pass "grok teardown removes pointer and token state"
+}
 test_fm_lock_recognizes_grok_holder() {
   local home fakebin out
   home="$TMP_ROOT/lock-home"
@@ -161,4 +223,5 @@ SH
 }
 
 test_grok_hook_requires_registered_token
+test_grok_teardown_removes_pointer_and_token
 test_fm_lock_recognizes_grok_holder

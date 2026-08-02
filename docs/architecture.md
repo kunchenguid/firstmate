@@ -38,6 +38,15 @@ For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
 Optional X mode rides the same check path: the locked session-start bootstrap step drops a local `state/x-watch.check.sh` shim only after the user opts in with `FMX_PAIRING_TOKEN`, and non-X homes keep the default watcher behavior.
+The same supervision loop continuously reaps terminal task resources through `bin/fm-auto-reap.sh`.
+A merged PR check, an approved local-only merge, or a completed scout delegates to ordinary `bin/fm-teardown.sh`, so endpoint removal, report publication, dirty-worktree refusal, landed-work proof, and Treehouse return keep one fail-closed authority.
+Before that teardown, an exactly attributed active no-mistakes run is canceled by run ID; a cross-branch run whose exact ID is unavailable is retained rather than guessed.
+X-mode-linked tasks wait for their final follow-up, and persistent secondmates are never auto-reaped.
+Every spawn writes an owner-stamped Treehouse acquisition record before leasing a slot and removes it once task metadata takes authority.
+The watcher recovers a stranded pre-metadata lease only after the record exceeds `FM_AUTO_REAP_STALE_SECS` and the recorded PID plus process start time proves dead or reused, then installs cleanup metadata and runs the same ordinary teardown proof.
+An indeterminate owner, ambiguous lease, uncommitted worktree, unlanded commit, endpoint uncertainty, or teardown error stays on disk and produces an actionable `auto-reap:` wake.
+`state/.auto-reap.log` records successful reaping and the recovery cases that need a durable corruption or retention diagnostic.
+This Firstmate tooling change requires no web-app, API, or realtime deployment.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
@@ -193,6 +202,7 @@ The firstmate repo itself is the exception: its `.no-mistakes/` directory is loc
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
+Terminal auto-reaping invokes that exact teardown path without `--force`; it does not introduce a second or weaker landed-work definition.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
 ## Optional X mode
