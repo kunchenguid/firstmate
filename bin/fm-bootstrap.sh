@@ -856,7 +856,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # Deployment recovery only removes exact, receipt-bound local files and never
   # retries, unlocks, rolls back, or starts a remote deployment. Keep this at
   # the locked startup boundary so detect-only sessions do not mutate state.
-  if ! "$SCRIPT_DIR/fm-deploy.sh" recover-stale; then
+  if [ -x "$SCRIPT_DIR/fm-deploy.sh" ] && ! "$SCRIPT_DIR/fm-deploy.sh" recover-stale; then
     echo "DEPLOY_RECOVERY: deployment runtime material requires manual inspection"
   fi
   startup_memory_budget_setup

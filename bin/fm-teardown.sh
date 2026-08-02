@@ -1680,7 +1680,7 @@ fi
 # Deployment runtime material is receipt-owned and may never be swept by the
 # broad tasktmp removal below. Recover only this task first; an identity or live
 # remote-operation refusal preserves every task record for manual inspection.
-if ! "$FM_ROOT/bin/fm-deploy.sh" recover "$ID"; then
+if [ -x "$FM_ROOT/bin/fm-deploy.sh" ] && ! "$FM_ROOT/bin/fm-deploy.sh" recover "$ID"; then
   echo "error: deployment cleanup for $ID requires manual inspection; retaining task state" >&2
   exit 1
 fi
