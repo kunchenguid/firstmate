@@ -32,6 +32,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 MANAGED_TREEHOUSE_ROOT="$FM_HOME/.treehouse"
 TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
 TEARDOWN="${FM_TREEHOUSE_REAP_TEARDOWN:-$SCRIPT_DIR/fm-teardown.sh}"
+TEARDOWN_REAP_SAFETY_REFUSAL=75
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -463,7 +464,8 @@ EOF
   if [ "$status" -ne 0 ]; then
     echo "TREEHOUSE_REAP: retained task=$id reason=teardown-refused status=$status"
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    [ "$status" -eq 1 ] && return 0
+    [ "$status" -eq "$TEARDOWN_REAP_SAFETY_REFUSAL" ] && return 0
+    echo "TREEHOUSE_REAP: operational-error task=$id reason=teardown-failed status=$status" >&2
     return 1
   fi
   if [ "$lease_state" = returned ]; then

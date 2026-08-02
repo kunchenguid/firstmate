@@ -80,6 +80,8 @@
 #   It refuses a present or unknown endpoint, repeats that absence proof under
 #   the checkout lock, and uses non-forcing `treehouse return` after the ordinary
 #   identity, cleanliness, stash, and landed-work proofs pass.
+#   Classified safety refusals exit 75; operational failures retain their normal
+#   nonzero status so bin/fm-treehouse-reap.sh can distinguish the outcomes.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crewmate process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -163,6 +165,7 @@ shift
 FORCE=
 PRESERVE_SCRATCH=0
 REAP_DEAD=0
+TEARDOWN_REAP_SAFETY_REFUSAL=75
 for option in "$@"; do
   case "$option" in
     --force)
@@ -1374,9 +1377,14 @@ teardown_treehouse_return_locked() {
     echo "teardown: $label return aborted because Treehouse task ownership changed" >&2
     return 1
   }
-  if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
-    echo "teardown: $label return aborted because the final locked safety check failed" >&2
-    return 1
+  if [ -n "$post_cleanup_check" ]; then
+    if "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
+      :
+    else
+      return_status=$?
+      echo "teardown: $label return aborted because the final locked safety check failed" >&2
+      return "$return_status"
+    fi
   fi
   require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder" || {
     echo "teardown: $label return aborted because Treehouse task ownership changed during final safety checks" >&2
@@ -1426,9 +1434,14 @@ teardown_treehouse_return_locked() {
       echo "teardown: $label return aborted because Treehouse task ownership changed" >&2
       return 1
     fi
-    if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
-      echo "teardown: $label return aborted because the final locked safety check failed" >&2
-      return 1
+    if [ -n "$post_cleanup_check" ]; then
+      if "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
+        :
+      else
+        return_status=$?
+        echo "teardown: $label return aborted because the final locked safety check failed" >&2
+        return "$return_status"
+      fi
     fi
     if ! require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
       echo "teardown: $label return aborted because Treehouse task ownership changed during final safety checks" >&2
@@ -1469,9 +1482,12 @@ teardown_treehouse_return_locked() {
         return 1
       fi
       if [ -n "$post_cleanup_check" ]; then
-        if ! "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
+        if "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
+          :
+        else
+          return_status=$?
           echo "teardown: $label return aborted after stale-lock cleanup because safety checks failed" >&2
-          return 1
+          return "$return_status"
         fi
       fi
       if ! require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
@@ -4923,8 +4939,8 @@ if [ "$REAP_DEAD" -eq 1 ]; then
     echo "error: --reap-dead does not support Orca worktrees" >&2
     exit 2
   }
-  require_reap_endpoint_absent || exit 1
-  validate_teardown_target_identity || exit 1
+  require_reap_endpoint_absent || exit "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  validate_teardown_target_identity || exit "$TEARDOWN_REAP_SAFETY_REFUSAL"
   # Publication is non-destructive and owns a globally contended lock.
   # Join that queue before the slower landing proof, then still require every
   # ordinary and reaper-specific safety proof before releasing the lease.
@@ -4974,9 +4990,14 @@ if [ -d "$WT" ]; then
     safety_rc=$?
     if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
       cleanup_stale_lock_for_safety_check "$WT" || { post_quiescence_safety_refusal; exit 1; }
-      "$safety_command" || { post_quiescence_safety_refusal; exit 1; }
+      "$safety_command" || {
+        post_quiescence_safety_refusal
+        [ "$REAP_DEAD" -eq 1 ] && exit "$TEARDOWN_REAP_SAFETY_REFUSAL"
+        exit 1
+      }
     else
       post_quiescence_safety_refusal
+      [ "$REAP_DEAD" -eq 1 ] && exit "$TEARDOWN_REAP_SAFETY_REFUSAL"
       exit 1
     fi
   fi
@@ -4996,7 +5017,10 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
-[ "$KIND" = secondmate ] || validate_teardown_target_identity || exit 1
+if [ "$KIND" != secondmate ] && ! validate_teardown_target_identity; then
+  [ "$REAP_DEAD" -eq 1 ] && exit "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  exit 1
+fi
 
 remove_orca_worktree_locked() {
   local branch=HEAD boundary_token
@@ -5033,9 +5057,10 @@ validate_returned_worktree_bookkeeping_locked() {
 }
 
 validate_reap_return_safety() {
-  validate_reap_worktree_safety_and_summarize_ignored || return 1
-  require_reap_endpoint_absent || return 1
-  validate_reap_open_pr_absent
+  validate_reap_worktree_safety_and_summarize_ignored \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  require_reap_endpoint_absent || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  validate_reap_open_pr_absent || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
 }
 
 reap_github_repo_for_worktree() {
@@ -5155,10 +5180,17 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
       post_lock_cleanup_check=validate_worktree_teardown_safety_and_summarize_ignored
       treehouse_return_mode=--force
     fi
-    teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree "$treehouse_return_mode" || {
+    if teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree "$treehouse_return_mode"; then
+      :
+    else
+      treehouse_return_status=$?
       echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      if [ "$REAP_DEAD" -eq 1 ] \
+          && [ "$treehouse_return_status" -eq "$TEARDOWN_REAP_SAFETY_REFUSAL" ]; then
+        exit "$TEARDOWN_REAP_SAFETY_REFUSAL"
+      fi
       exit 1
-    }
+    fi
   fi
 fi
 
