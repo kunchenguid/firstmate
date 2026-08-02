@@ -458,6 +458,7 @@ test_watch_restart_attaches_to_healthy_peer() {
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' 'test-healthy-peer-cycle' > "$state/.watch.lock/cycle-id"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
@@ -638,8 +639,8 @@ SH
   grep -qF "check: $check_file: merged: https://example.test/pr/9" "$ownerout" \
     || fail "owning arm did not relay the wake reason: $(cat "$ownerout")"
   [ "$frc" -ne 0 ] && [ "$frc" -ne 124 ] || fail "second arm returned a clean empty completion (status $frc)"
-  grep -qF 'watcher: cycle-ended - the followed watcher cycle closed with no successor' "$followout" \
-    || fail "second arm did not emit the typed followed-cycle close: $(cat "$followout")"
+  grep -qF 'watcher: cycle-ended - the followed watcher cycle delivered an actionable wake' "$followout" \
+    || fail "second arm did not classify the durable wake from its followed cycle: $(cat "$followout")"
   ! grep -qF 'watcher: FAILED' "$followout" \
     || fail "second arm reported supervision down while the owning arm delivered a real wake"
   queued=$(grep -c "merged: https://example.test/pr/9" "$state/.wake-queue" 2>/dev/null || true)
@@ -800,6 +801,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' 'test-peer-startup-cycle' > "$state/.watch.lock/cycle-id"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
   armpid=$!
@@ -1083,6 +1085,247 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+cycle_has_wake() {  # <state> <cycle-id>
+  FM_STATE_OVERRIDE="$1" bash -c '. "$1"; fm_wake_cycle_has_records "$2"' _ "$LIB" "$2"
+}
+
+test_cycle_identity_covers_pre_health_enqueue() {
+  local dir state
+  dir=$(make_case cycle-pre-health)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append stale peer "stale: peer" generation-a' _ "$LIB" \
+    || fail "could not enqueue pre-health wake"
+  cycle_has_wake "$state" generation-a || fail "generation identity missed wake queued before health observation"
+  pass "cycle identity attributes a wake queued before arm health observation"
+}
+
+test_cycle_identity_rejects_generation_mixing() {
+  local dir state
+  dir=$(make_case cycle-generation-mixing)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append stale old "stale: old" generation-old; fm_wake_append stale new "stale: new" generation-new' _ "$LIB" \
+    || fail "could not enqueue mixed-generation wakes"
+  cycle_has_wake "$state" generation-new || fail "new generation wake was not found"
+  if cycle_has_wake "$state" generation-missing; then
+    fail "generation query attributed another generation's wake"
+  fi
+  pass "cycle identity never mixes lock-owner generations"
+}
+
+test_cycle_identity_checks_old_generation_before_handoff() {
+  local dir state peer identity armout armpid status i
+  dir=$(make_case cycle-handoff)
+  state="$dir/state"
+  armout="$dir/arm.out"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") \
+    || fail "could not identify handoff peer"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' generation-old > "$state/.watch.lock/cycle-id"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append check old "check: old" generation-old' _ "$LIB" \
+    || fail "could not enqueue old-generation wake"
+
+  FM_HOME="$dir" FM_ARM_ATTACH_POLL=0.05 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$peer" "$armout" || fail "arm did not attach before generation handoff"
+  printf '%s\n' generation-successor > "$state/.watch.lock/cycle-id"
+  touch "$state/.last-watcher-beat"
+  wait_for_exit "$armpid" 80
+  status=$?
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not stop on same-pid generation replacement"
+  grep -qF 'watcher: cycle-ended - the followed watcher cycle delivered an actionable wake' "$armout" \
+    || fail "arm adopted a same-pid successor before classifying the old cycle: $(cat "$armout")"
+  pass "arm classifies the old cycle before same-pid generation handoff"
+}
+
+test_cycle_identity_covers_stood_down_peer_delivery() {
+  local dir state peer identity armout armpid coordinator status i output
+  dir=$(make_case cycle-stood-down)
+  state="$dir/state"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") \
+    || fail "could not identify stood-down peer"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' peer-generation > "$state/.watch.lock/cycle-id"
+  printf '%s\n' not-yet-published > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append signal peer.status "signal: peer.status" peer-generation' _ "$LIB" \
+    || fail "could not enqueue peer wake"
+
+  (
+    i=0
+    while [ "$i" -lt 500 ]; do
+      for output in "$state"/.watch-arm-output.*; do
+        [ -f "$output" ] || continue
+        if grep -qF 'watcher: already running' "$output" 2>/dev/null; then
+          printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+          touch "$state/.last-watcher-beat"
+          exit 0
+        fi
+      done
+      sleep 0.01
+      i=$((i + 1))
+    done
+    exit 1
+  ) &
+  coordinator=$!
+  FM_HOME="$dir" FM_POLL=0.2 FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 80
+  status=$?
+  wait "$coordinator" || fail "stood-down peer did not become healthy after the child yielded"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "stood-down child path returned a clean or timed-out status"
+  grep -qF 'watcher: cycle-ended - the followed watcher cycle delivered an actionable wake' "$armout" \
+    || fail "stood-down child path did not classify the peer cycle: $(cat "$armout")"
+  pass "arm classifies peer delivery before its owned child stands down"
+}
+
+test_cycle_attribution_read_failure_is_distinct() {
+  local dir state cycle_rc pid_rc
+  dir=$(make_case cycle-attribution-read-failure)
+  state="$dir/state"
+  mkdir "$state/.wake-queue"
+  cycle_rc=0
+  pid_rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_cycle_has_records generation-unreadable' _ "$LIB" || cycle_rc=$?
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_watcher_pid_has_records 4242' _ "$LIB" || pid_rc=$?
+  [ "$cycle_rc" -eq 2 ] || fail "cycle lookup collapsed queue read failure to status $cycle_rc"
+  [ "$pid_rc" -eq 2 ] || fail "pid-prefix lookup collapsed queue read failure to status $pid_rc"
+  pass "cycle attribution distinguishes queue read failure from no match"
+}
+
+test_arm_startup_health_wait_is_bounded() {
+  local dir state fakebin armout started holder armpid status elapsed
+  dir=$(make_case arm-startup-health-bound)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  started="$dir/holder.started"
+  mark_pr_check_migration_complete "$state"
+  printf '%s\n' invalid-retirement > "$state/task.pr-poll-retirement"
+  chmod 0600 "$state/task.pr-poll-retirement"
+  touch "$state/.last-watcher-beat"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK" || exit 7
+    : > "$2"
+    sleep 6
+  ' _ "$LIB" "$started" &
+  holder=$!
+  while [ ! -e "$started" ]; do sleep 0.02; done
+
+  elapsed=$(date +%s)
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 40
+  status=$?
+  elapsed=$(( $(date +%s) - elapsed ))
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm hung behind startup recovery (status $status)"
+  [ "$elapsed" -lt 4 ] || fail "arm exceeded its bounded startup confirmation window (${elapsed}s)"
+  ! grep -qF 'watcher: started pid=' "$armout" || fail "arm accepted predecessor beacon health before startup recovery"
+  grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" \
+    || fail "arm did not report bounded startup failure: $(cat "$armout")"
+  pass "arm does not publish health before blocking startup recovery finishes"
+}
+
+test_cycle_attribution_lock_is_bounded() {
+  local dir state holder started elapsed rc
+  dir=$(make_case cycle-attribution-lock)
+  state="$dir/state"
+  started="$dir/holder.started"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK" || exit 7
+    : > "$2"
+    sleep 3
+  ' _ "$LIB" "$started" &
+  holder=$!
+  while [ ! -e "$started" ]; do sleep 0.02; done
+  elapsed=$(date +%s)
+  rc=0
+  FM_STATE_OVERRIDE="$state" FM_WAKE_CLASSIFY_LOCK_ATTEMPTS=1 FM_WAKE_CLASSIFY_LOCK_DELAY=0.01 \
+    bash -c '. "$1"; fm_wake_cycle_has_records generation-stalled' _ "$LIB" || rc=$?
+  elapsed=$(( $(date +%s) - elapsed ))
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 2 ] || fail "bounded attribution lock returned $rc instead of timeout"
+  [ "$elapsed" -lt 2 ] || fail "bounded attribution lock blocked startup for ${elapsed}s"
+  pass "cycle attribution lock timeout is bounded and non-hanging"
+}
+
+test_arm_attribution_lock_timeout_is_non_hanging() {
+  local dir state fakebin watchout armout started holder wpid armpid status elapsed i
+  dir=$(make_case arm-cycle-attribution-lock)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  watchout="$dir/watch.out"
+  armout="$dir/arm.out"
+  started="$dir/holder.started"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$watchout" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -s "$state/.watch.lock/cycle-id" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not start for attribution-lock test"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.05 FM_ARM_CONFIRM_TIMEOUT=1 FM_WAKE_CLASSIFY_LOCK_ATTEMPTS=1 FM_WAKE_CLASSIFY_LOCK_DELAY=0.01 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not attach before attribution-lock test"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK" || exit 7
+    : > "$2"
+    sleep 3
+  ' _ "$LIB" "$started" &
+  holder=$!
+  while [ ! -e "$started" ]; do sleep 0.02; done
+  elapsed=$(date +%s)
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  wait_for_exit "$armpid" 80
+  status=$?
+  elapsed=$(( $(date +%s) - elapsed ))
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm returned $status while its attribution lock was held"
+  [ "$elapsed" -lt 2 ] || fail "arm blocked for ${elapsed}s behind the attribution lock"
+  grep -qF 'watcher: FAILED - wake queue attribution lock was unavailable' "$armout" || fail "arm did not report its bounded attribution-lock failure"
+  pass "arm does not hang when startup attribution cannot lock the durable queue"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1112,3 +1355,11 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_cycle_identity_covers_pre_health_enqueue
+test_cycle_identity_rejects_generation_mixing
+test_cycle_identity_checks_old_generation_before_handoff
+test_cycle_identity_covers_stood_down_peer_delivery
+test_cycle_attribution_read_failure_is_distinct
+test_arm_startup_health_wait_is_bounded
+test_cycle_attribution_lock_is_bounded
+test_arm_attribution_lock_timeout_is_non_hanging

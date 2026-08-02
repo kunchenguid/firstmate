@@ -32,6 +32,9 @@
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - an OWNED child returned clean and empty
 #                                                          with no verified healthy successor
+#   watcher: cycle-ended - the followed watcher cycle delivered an actionable wake; drain the wake queue
+#                                                        - a FOLLOWED cycle wrote a matching durable row;
+#                                                          its reason went to the owning arm
 #   watcher: cycle-ended - the followed watcher cycle closed with no successor; drain the wake queue
 #                                                        - a FOLLOWED cycle closed; its reason, if
 #                                                          any, went to the owning arm and is in the
@@ -40,12 +43,12 @@
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. Both
-# terminal closes above are typed and nonzero, never a clean empty completion, but
-# only the OWNED one is a supervision failure: an arm that merely followed another
-# arm's cycle cannot see that cycle's reason line and must not report its ordinary
-# close as supervision going down. A live cycle already present means re-arm
-# attaches - do not start a second watcher.
+# reason; on attached it stays live across identity-matched successors. The owned
+# unexplained close and both followed-cycle closes above are typed and nonzero,
+# never a clean empty completion, but only the OWNED one is a supervision failure:
+# an arm that merely followed another arm's cycle cannot see that cycle's reason
+# line and must not report its ordinary close as supervision going down. A live
+# cycle already present means re-arm attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -118,16 +121,22 @@ lock_snapshot() {
 
 cycle_active=0
 cycle_watcher_pid=none
+cycle_wake_id=
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
 
-cycle_begin() {
+cycle_begin() {  # <watcher-pid> <origin> [cycle-id]
   cycle_watcher_pid=$1
   cycle_origin=$2
+  cycle_wake_id=${3:-}
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
   cycle_active=1
+}
+
+cycle_set_wake_id() {
+  cycle_wake_id=$1
 }
 
 cycle_refresh_lock_before() {
@@ -246,10 +255,13 @@ clear_stale_recorded_watcher_lock() {
 # single honesty gate: a dead pid, a reused pid, or a stale beacon all fail it, so
 # this script can never report a watcher that is not really there.
 HEALTHY_PID=
+HEALTHY_CYCLE_ID=
 healthy_watcher() {
   HEALTHY_PID=
+  HEALTHY_CYCLE_ID=
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 1
   HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
+  HEALTHY_CYCLE_ID=$FM_WATCHER_HEALTHY_CYCLE_ID
 }
 
 report_attached() {
@@ -301,8 +313,21 @@ require_session_owner() {  # <action-phrase>
 # arming a second cycle beside the harness's own arming owner. Report the honest
 # close instead, and keep it nonzero so no adapter can read it as a clean empty
 # completion.
+# Return success only when the durable queue proves this generation has not
+# delivered a wake. A timed-out queue lock is a typed failure, never a hang.
+followed_cycle_may_transition() {  # <cycle-id>
+  fm_wake_cycle_has_records "$1"
+  case $? in
+    1) return 0 ;;
+    0) echo "watcher: cycle-ended - the followed watcher cycle delivered an actionable wake; drain the wake queue"; return 1 ;;
+    *) echo "watcher: FAILED - wake queue attribution lock was unavailable"; return 1 ;;
+  esac
+}
+
 end_followed_cycle() {
-  echo "watcher: cycle-ended - the followed watcher cycle closed with no successor; drain the wake queue"
+  if followed_cycle_may_transition "$1"; then
+    echo "watcher: cycle-ended - the followed watcher cycle closed with no successor; drain the wake queue"
+  fi
   return 1
 }
 
@@ -311,35 +336,44 @@ end_followed_cycle() {
 # instead of returning a clean empty completion that an adapter could mistake for
 # a no-op.
 attach_and_wait() {
-  local attached_pid=$1
+  local attached_pid=$1 attached_cycle_id=$2
   while :; do
     if ! require_session_owner "detaching"; then
       cycle_log_append unknown unknown session-owner-fenced none
       return 1
     fi
     if healthy_watcher; then
-      if [ "$HEALTHY_PID" != "$attached_pid" ]; then
+      if [ "$HEALTHY_CYCLE_ID" != "$attached_cycle_id" ]; then
+        if ! require_session_owner "not attaching to successor"; then
+          cycle_log_append unknown unknown session-owner-fenced none
+          return 1
+        fi
+        followed_cycle_may_transition "$attached_cycle_id" || { cycle_log_append unknown unknown attached-cycle-ended wake-delivered; return 1; }
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
-        cycle_begin "$attached_pid" attached
+        attached_cycle_id=$HEALTHY_CYCLE_ID
+        cycle_begin "$attached_pid" attached "$attached_cycle_id"
         report_attached
       fi
       sleep "$ATTACH_POLL"
       continue
     fi
+    followed_cycle_may_transition "$attached_cycle_id" || { cycle_log_append unknown unknown attached-cycle-ended wake-delivered; return 1; }
     if wait_for_healthy_successor; then
       if ! require_session_owner "not attaching to successor"; then
         cycle_log_append unknown unknown session-owner-fenced none
         return 1
       fi
+      followed_cycle_may_transition "$attached_cycle_id" || { cycle_log_append unknown unknown attached-cycle-ended wake-delivered; return 1; }
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
-      cycle_begin "$attached_pid" attached
+      attached_cycle_id=$HEALTHY_CYCLE_ID
+      cycle_begin "$attached_pid" attached "$attached_cycle_id"
       report_attached
       continue
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
-    end_followed_cycle
+    end_followed_cycle "$attached_cycle_id"
     return 1
   done
 }
@@ -378,6 +412,14 @@ print_watch_output() {
   [ -s "$out" ] && cat "$out"
 }
 
+owned_cycle_has_wake() {
+  if [ -n "$cycle_wake_id" ]; then
+    fm_wake_cycle_has_records "$cycle_wake_id"
+    return $?
+  fi
+  fm_wake_watcher_pid_has_records "$cycle_watcher_pid"
+}
+
 mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
@@ -393,7 +435,10 @@ require_session_owner "not arming" || exit 1
 
 restart_watcher_if_owned() {
   local lock_pid i
-  fm_lock_acquire_wait "$SESSION_CLAIM_LOCK"
+  if ! fm_lock_acquire_bounded "$SESSION_CLAIM_LOCK"; then
+    echo "watcher: FAILED - session claim lock was unavailable"
+    return 1
+  fi
   SESSION_CLAIM_LOCK_HELD=1
   if ! require_session_owner "not restarting"; then
     release_session_claim_lock
@@ -429,9 +474,9 @@ fi
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  cycle_begin "$HEALTHY_PID" attached
+  cycle_begin "$HEALTHY_PID" attached "$HEALTHY_CYCLE_ID"
   report_attached
-  attach_and_wait "$HEALTHY_PID"
+  attach_and_wait "$HEALTHY_PID" "$HEALTHY_CYCLE_ID"
   exit $?
 fi
 
@@ -477,9 +522,23 @@ cycle_begin "$child" started
 child_done=0
 
 owned_child_finished() {
-  local rc=$1 signal reason_type status
+  local rc=$1 followed_cycle_id=${2:-} signal reason_type status attribution
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
+    owned_cycle_has_wake
+    attribution=$?
+    if [ "$attribution" -ne 0 ]; then
+      cycle_log_append "$rc" "$signal" wake-attribution-missing none
+      rm -f "$child_out" 2>/dev/null || true
+      child=
+      child_out=
+      if [ "$attribution" -eq 2 ]; then
+        echo "watcher: FAILED - wake queue attribution lock was unavailable"
+        return 1
+      fi
+      fail_unexplained_cycle
+      return 1
+    fi
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
     print_watch_output "$child_out"
@@ -490,6 +549,16 @@ owned_child_finished() {
   fi
 
   if [ "$rc" -eq 0 ]; then
+    if [ -n "$followed_cycle_id" ]; then
+      followed_cycle_may_transition "$followed_cycle_id" || {
+        cycle_log_append "$rc" "$signal" child-stood-down-wake-delivered none
+        print_watch_output "$child_out"
+        rm -f "$child_out" 2>/dev/null || true
+        child=
+        child_out=
+        return 1
+      }
+    fi
     if wait_for_healthy_successor; then
       if ! require_session_owner "not attaching to successor"; then
         cycle_log_append "$rc" "$signal" session-owner-fenced none
@@ -499,6 +568,16 @@ owned_child_finished() {
         child_out=
         return 1
       fi
+      if [ -n "$followed_cycle_id" ]; then
+        followed_cycle_may_transition "$followed_cycle_id" || {
+          cycle_log_append "$rc" "$signal" child-stood-down-wake-delivered none
+          print_watch_output "$child_out"
+          rm -f "$child_out" 2>/dev/null || true
+          child=
+          child_out=
+          return 1
+        }
+      fi
       cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
       print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true
@@ -506,8 +585,8 @@ owned_child_finished() {
       child_out=
       cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
       report_attached
-      cycle_begin "$HEALTHY_PID" attached
-      attach_and_wait "$HEALTHY_PID"
+      cycle_begin "$HEALTHY_PID" attached "$HEALTHY_CYCLE_ID"
+      attach_and_wait "$HEALTHY_PID" "$HEALTHY_CYCLE_ID"
       return $?
     fi
     cycle_log_append "$rc" "$signal" unexpected-clean-exit none
@@ -544,6 +623,7 @@ while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
       cycle_refresh_lock_before
+      cycle_set_wake_id "$HEALTHY_CYCLE_ID"
       cycle_mark_predecessor_successor "started:$child"
       echo "watcher: started pid=$child (beacon fresh)"
       wait "$child"
@@ -551,10 +631,18 @@ while :; do
       owned_child_finished "$rc"
       exit $?
     fi
+    # Another watcher won the singleton.  Its generation may already have
+    # delivered a wake before this child can be reaped, so consult that cycle's
+    # durable rows before entering the clean-child branch.
+    if ! followed_cycle_may_transition "$HEALTHY_CYCLE_ID"; then
+      cycle_log_append 0 none child-stood-down-wake-delivered none
+      cleanup_child
+      exit 1
+    fi
     # Another watcher won the singleton; our child stood down.
     wait "$child"
     rc=$?
-    owned_child_finished "$rc"
+    owned_child_finished "$rc" "$HEALTHY_CYCLE_ID"
     exit $?
   fi
   if [ "$child_done" -eq 0 ] && ! fm_pid_alive "$child"; then

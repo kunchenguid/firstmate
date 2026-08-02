@@ -40,7 +40,7 @@ test_concurrent_append_and_drain() {
   cat "$out1" "$out2" > "$all"
   count=$(awk 'NF { count++ } END { print count + 0 }' "$all")
   [ "$count" -eq 40 ] || fail "expected 40 drained records, got $count"
-  malformed=$(awk -F '\t' 'NF != 5 { bad++ } END { print bad + 0 }' "$all")
+  malformed=$(awk -F '\t' 'NF != 6 { bad++ } END { print bad + 0 }' "$all")
   [ "$malformed" -eq 0 ] || fail "drained records had malformed fields"
   unique=$(awk -F '\t' '{ keys[$4] = 1 } END { for (k in keys) count++; print count + 0 }' "$all")
   [ "$unique" -eq 40 ] || fail "expected 40 unique keys, got $unique"
@@ -276,7 +276,7 @@ SH
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_SWAP_PATH="$state/task.status" \
     FM_WAKE_ENRICH_SWAP_TARGET="$outside" FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
     || fail "structural enrichment drain failed"
-  awk -F '\t' 'NF == 5 { print }' "$out" > "$actual"
+  awk -F '\t' 'NF == 6 { print }' "$out" > "$actual"
   cmp -s "$expected" "$actual" || fail "enrichment changed or reordered an authoritative raw row"
 
   annotation_count=$(grep -c '^wake annotation:' "$out" || true)
@@ -327,7 +327,7 @@ SH
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_PERL_LOG="$fake_perl_log" \
     FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
     || fail "capped enrichment drain failed"
-  raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
+  raw_count=$(awk -F '\t' 'NF == 6 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
   grep '^wake annotation:.*\[truncated\]$' "$out" >/dev/null || fail "per-item/input truncation marker was not emitted"
   grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(global enrichment byte cap\)$' "$out" >/dev/null \
@@ -411,7 +411,7 @@ test_interruption_before_and_after_raw_commit() {
   set -e
   [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" || fail "restored pre-commit wake did not drain"
-  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
+  count=$(awk -F '\t' 'NF == 6 { count++ } END { print count + 0 }' "$replay_out")
   [ "$count" -eq 1 ] || fail "pre-commit interruption lost or duplicated the restored row"
 
   append_wake "$state" signal task.status "signal: task after commit" || fail "post-commit interruption wake append failed"
@@ -424,7 +424,7 @@ test_interruption_before_and_after_raw_commit() {
   wait "$pid"
   set -e
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$empty_out" || fail "drain after post-commit interruption failed"
-  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$after_out" "$empty_out")
+  count=$(awk -F '\t' 'NF == 6 { count++ } END { print count + 0 }' "$after_out" "$empty_out")
   [ "$count" -eq 1 ] || fail "post-commit interruption restored or duplicated the consumed row"
   pass "interruptions restore before commitment and never replay after raw commitment"
 }

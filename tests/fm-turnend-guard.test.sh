@@ -207,6 +207,7 @@ record_watcher_lock() {
   printf '%s\n' "$pid" > "$dir/state/.watch.lock/pid"
   printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
   printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
+  printf 'test-turnend-cycle:%s\n' "$pid" > "$dir/state/.watch.lock/cycle-id"
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
 }
 
