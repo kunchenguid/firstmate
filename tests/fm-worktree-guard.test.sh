@@ -251,6 +251,20 @@ proj=$(make_pool empty-pool 1)
 out=$(run_guard "$proj" '[]') || fail "(i2) guard refused an empty pool: $out"
 pass "(i2) an empty pool is safe: treehouse creates a fresh slot"
 
+for malformed in 'null' '""' '{}'; do
+  out=$(run_guard "$proj" "$malformed") && fail "(i2a) guard passed on malformed top-level JSON: $malformed"
+  assert_contains "$out" "output format may have changed" "(i2a) reports malformed top-level JSON"
+done
+pass "(i2a) non-array JSON payloads refuse instead of resembling an empty pool"
+
+out=$(run_guard "$proj" '[{"name":"1","path":"/tmp/slot"}]') \
+  && fail "(i2b) guard passed on an entry missing status"
+assert_contains "$out" "output format may have changed" "(i2b) reports a missing status field"
+out=$(run_guard "$proj" '[{"status":"available","path":"/tmp/slot"}]') \
+  && fail "(i2b) guard passed on an entry missing name"
+assert_contains "$out" "output format may have changed" "(i2b) reports a missing name field"
+pass "(i2b) entries missing required fields refuse instead of being skipped"
+
 # A relative slot path is refused from inside the row loop. This also pins that
 # the refusal actually leaves the function: were that loop ever run in a
 # subshell, the return would exit only the subshell and the guard would fall
@@ -264,9 +278,9 @@ pass "(i3) a non-absolute slot path refuses the spawn instead of being resolved 
 proj=$(make_pool empty-path 1)
 out=$(run_guard "$proj" '[{"name":"1","status":"available","path":null,"processes":[]}]') \
   && fail "(i4) guard passed on an empty slot path"
-assert_contains "$out" "non-absolute slot path ('')" "(i4) names the malformed empty path"
-assert_contains "$out" "Refusing rather than allocating blind" "(i4) fails closed"
-pass "(i4) an empty available-slot path refuses the spawn instead of being skipped"
+assert_contains "$out" "output format may have changed" "(i4) reports the malformed empty path"
+assert_contains "$out" "refusing rather than allocating blind" "(i4) fails closed"
+pass "(i4) an empty available-slot path fails schema validation instead of being skipped"
 
 # --- (j) missing jq fails closed --------------------------------------------
 

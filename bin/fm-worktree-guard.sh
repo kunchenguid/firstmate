@@ -263,11 +263,20 @@ cmd_check() {  # <project-dir>
     echo "       Refusing rather than allocating blind." >&2
     return 1
   fi
-  if ! total=$(printf '%s' "$raw" | jq -e 'length' 2>/dev/null); then
+  if ! printf '%s' "$raw" | jq -e '
+    type == "array" and
+    all(.[];
+      type == "object" and
+      (.name | type == "string" and length > 0) and
+      (.status | type == "string" and length > 0) and
+      (.path | type == "string" and length > 0)
+    )
+  ' >/dev/null 2>&1; then
     echo "error: worktree guard could not parse 'treehouse status --json' in $proj_real." >&2
     echo "       The output format may have changed; refusing rather than allocating blind." >&2
     return 1
   fi
+  total=$(printf '%s' "$raw" | jq -r 'length')
   # An empty pool is legitimately safe: treehouse creates a fresh slot.
   [ "$total" -eq 0 ] && return 0
   if ! rows=$(printf '%s' "$raw" | jq -r '.[] | select(.status == "available") | [.name, .path] | @tsv' 2>/dev/null); then
