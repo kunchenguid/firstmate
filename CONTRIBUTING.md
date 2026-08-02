@@ -10,6 +10,7 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
 A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
+The generated `## Pipeline` section must contain `Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)` exactly; prose that merely says the checks passed is not a substitute for that machine-verifiable marker.
 Dependency bots are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
 
 ## Workflow

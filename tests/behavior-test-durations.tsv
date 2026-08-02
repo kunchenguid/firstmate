@@ -92,4 +92,5 @@
 23744	tests/fm-x-mode.test.sh
 250	tests/lavish-repair.test.sh
 6200	tests/lavish.test.sh
+160	tests/no-mistakes-required.test.sh
 92	tests/operating-fundamentals.test.sh
