@@ -72,6 +72,18 @@ build_pair() {
   printf '%s\n' "$clone"
 }
 
+# build_pair_bare <home> <name>: like build_pair, but the clone has core.bare=true
+# set while a branch stays checked out - the pattern a harness uses to make its
+# main checkout double as a ref-only fetch target (e.g. Nice's
+# .claude/hooks/worktreeContext.sh). git refuses ordinary work-tree operations
+# (status, merge, checkout) against it; only ref-only updates are permitted.
+build_pair_bare() {
+  local home=$1 name=$2 clone
+  clone=$(build_pair "$home" "$name")
+  git -C "$clone" config core.bare true
+  printf '%s\n' "$clone"
+}
+
 # advance_origin <home> <name> <msg>: push one more commit to <name>'s origin via
 # its work repo, so the clone (until it fetches) is one commit behind origin/main.
 advance_origin() {
@@ -176,6 +188,31 @@ if [ "$is_fetch" = 1 ]; then
     exit 1
   fi
 fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+# git shim: reject a ref-only "fetch origin <branch>:<branch>" update (the form
+# advance_local_default uses for a bare-flagged clone) with a non-fast-forward
+# error, while delegating every other call - including the plain prune fetch -
+# to real git.
+git_bare_fetch_rejects() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+for a in "$@"; do
+  case "$a" in
+    *:*)
+      branch=${a%%:*}
+      branch2=${a#*:}
+      if [ -n "$branch" ] && [ "$branch" = "$branch2" ]; then
+        echo "! [rejected]        $branch -> $branch  (non-fast-forward)" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
 exec "$real" "$@"
 SH
   chmod +x "$1/git"
@@ -323,6 +360,58 @@ test_on_default_clean_behind_fast_forwards() {
   assert_not_contains "$out" "STUCK" "ordinary fast-forward is not flagged STUCK"
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] || fail "clone was not fast-forwarded"
   pass "on-default clean behind clone still fast-forwards"
+}
+
+test_bare_clone_behind_fast_forwards() {
+  local home fakebin clone out err
+  home=$(new_home)
+  fakebin="$home/fb-bare-behind"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_pair_bare "$home" bare-behind)
+  advance_origin "$home" bare-behind C1
+  out="$home/out-bare-behind"; err="$home/err-bare-behind"
+
+  set +e
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" bare-behind
+  set -e
+
+  assert_contains "$(cat "$out")" "bare-behind: synced" "bare clone still fast-forwards via ref-only update"
+  assert_no_grep "must be run in a work tree" "$err" "bare clone advance never hits the work-tree error"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "bare clone was not fast-forwarded"
+  pass "a core.bare=true clone still fast-forwards via a ref-only fetch"
+}
+
+test_bare_clone_already_current_unchanged() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair_bare "$home" bare-current)
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "bare-current: already current" "bare clone at HEAD reports unchanged, no work-tree probe needed"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "already-current bare clone was moved"
+  pass "an already-current bare clone is reported unchanged"
+}
+
+test_bare_clone_rejected_advance_reports_skip_untouched() {
+  local home fakebin clone out err before
+  home=$(new_home)
+  fakebin="$home/fb-bare-reject"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_pair_bare "$home" bare-reject)
+  advance_origin "$home" bare-reject C1
+  before=$(head_sha "$clone")
+  git_bare_fetch_rejects "$fakebin"
+  out="$home/out-bare-reject"; err="$home/err-bare-reject"
+
+  set +e
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" bare-reject
+  set -e
+
+  assert_contains "$(cat "$out")" "bare-reject: skipped: fast-forward failed" \
+    "a rejected bare ref-only advance reports a clear skip, not a silent success"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "bare clone advanced despite the rejected fetch"
+  pass "a bare clone whose ref-only advance is rejected reports a clear skip and is left untouched"
 }
 
 test_already_current_unchanged() {
@@ -610,6 +699,9 @@ test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
+test_bare_clone_behind_fast_forwards
+test_bare_clone_already_current_unchanged
+test_bare_clone_rejected_advance_reports_skip_untouched
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped

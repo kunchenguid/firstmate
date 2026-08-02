@@ -13,6 +13,11 @@
 # stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
+# A clone with core.bare=true set (a harness's main checkout deliberately
+# bare-flagged so it can serve as a ref-only fetch target while a branch stays
+# checked out, e.g. Nice's .claude/hooks/worktreeContext.sh) has no work tree to
+# run `git status`/`git merge` against, so it is advanced with a ref-only
+# `git fetch origin <branch>:<branch>` instead - see advance_local_default.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
@@ -210,6 +215,21 @@ fetch_with_packed_refs_lock_guard() {
   return "$rc"
 }
 
+# Fast-forward $DEFAULT to $BASE. An ordinary clone uses `git merge --ff-only`,
+# which needs a work tree to update. A clone with $bare=yes has no work tree to
+# merge into, so it advances the local ref directly with a ref-only
+# `git fetch origin <branch>:<branch>` - the same pattern that harness's own
+# tooling uses (see the bare-clone note near the top of this file). Git refuses
+# a non-fast-forward update here the same way --ff-only refuses one. Sets
+# ADVANCE_OUTPUT to the command's combined output; returns its exit status.
+advance_local_default() {
+  if [ "$bare" = yes ]; then
+    ADVANCE_OUTPUT=$(git -C "$PROJ" fetch origin --quiet "$DEFAULT:$DEFAULT" 2>&1)
+  else
+    ADVANCE_OUTPUT=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1)
+  fi
+}
+
 prune_gone_branches() {
   # Delete local branches whose upstream tracking branch is gone - the remote
   # branch was deleted, which in this fleet means its PR merged - as long as
@@ -312,6 +332,11 @@ sync_project() {
     return 0
   fi
 
+  bare=no
+  if [ "$(git -C "$PROJ" rev-parse --is-bare-repository 2>/dev/null)" = "true" ]; then
+    bare=yes
+  fi
+
   if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
     if [ -n "$FETCH_OUTPUT" ]; then
@@ -335,7 +360,12 @@ sync_project() {
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  # `git status` requires a work tree; a bare-flagged clone has none to inspect,
+  # so there is nothing to detect as dirty (matches that harness's own ref-only
+  # treatment of this checkout - see the bare-clone note near the top of this file).
+  if [ "$bare" = no ]; then
+    [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  fi
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
@@ -397,10 +427,10 @@ sync_project() {
     echo "$label: skipped: cannot read local $DEFAULT"
     return 0
   }
-  if ! merge_output=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
+  if ! advance_local_default; then
     reason="fast-forward failed"
-    if [ -n "$merge_output" ]; then
-      reason="$reason: $(first_line "$merge_output")"
+    if [ -n "$ADVANCE_OUTPUT" ]; then
+      reason="$reason: $(first_line "$ADVANCE_OUTPUT")"
     fi
     echo "$label: skipped: $reason"
     return 0
