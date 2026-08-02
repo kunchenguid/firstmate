@@ -68,7 +68,7 @@ make_spawn_case() {
 
 enable_dispatch_profile() {
   local home=$1
-  printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}' \
+  printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5.6-luna","effort":"xhigh"}}' \
     > "$home/config/crew-dispatch.json"
 }
 
@@ -329,7 +329,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not override the static harness with the resolved Luna max profile"
-  pass "active crew-dispatch profile allows explicit Luna max to override the static harness"
+  pass "active crew-dispatch profile allows explicit Luna max to override the standing Luna xhigh default"
 }
 
 test_active_dispatch_profile_allows_positional_harness() {
@@ -382,20 +382,20 @@ test_claude_threads_model_and_effort() {
   pass "claude receives --model and --effort profile flags"
 }
 
-test_codex_threads_model_and_effort() {
+test_codex_threads_luna_xhigh_effort() {
   local rec id out status launch
   id=profile-codex-z3
   rec=$(make_spawn_case profile-codex codex "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort high)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort xhigh)
   status=$?
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna xhigh
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread model and reasoning effort config"
-  pass "codex receives --model and model_reasoning_effort profile flags"
+  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"xhigh\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex Luna launch did not thread the standing xhigh reasoning effort config"
+  pass "codex receives the Luna model and standing model_reasoning_effort xhigh profile flags"
 }
 
 test_codex_threads_luna_max_effort() {
@@ -699,7 +699,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
-test_codex_threads_model_and_effort
+test_codex_threads_luna_xhigh_effort
 test_codex_threads_luna_max_effort
 test_spawn_rejects_unverified_ultra_effort
 test_grok_threads_model_and_reasoning_effort
