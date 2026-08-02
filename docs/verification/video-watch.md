@@ -36,7 +36,9 @@ Covered guarantees include:
 | public-source rejection | unsafe schemes, playlist URLs, credential- or signature-bearing query fields, metadata-expanded playlists, live streams, authenticated/private videos, and DRM metadata are refused |
 | fetch-target fidelity | the exact supplied public URL reaches `yt-dlp`, including identity-bearing query parameters, while the manifest description drops tracking fields and redacts every value that is not a known public identifier |
 | transient media bounds | a declared size above the byte ceiling is refused before any download command runs, the default ceiling clamps to free space instead of failing, raising it above the default requires proven free space, and values above 16 GiB are refused |
-| honest visual coverage | `media.visual_coverage` reports full, section, or none; focused runs request a bounded provider section, a section that the provider ignores is downgraded to full with a warning, and a refused acquisition still returns transcript, chapters, and a focused-pass recommendation |
+| honest visual coverage | `media.visual_coverage` reports full, section, or none; a section that the provider ignores is downgraded to full with a warning, and a refused acquisition still returns transcript, chapters, and a focused-pass recommendation |
+| cheaper bounded acquisition route | a focus range spanning most of the source takes the full download and says so in `media.acquisition_reason` and a warning, a small focus range still takes the bounded provider section, a declared size above the ceiling still forces the section as the only route, and the selected evidence range is identical either way |
+| trustworthy size estimates | the metadata call is scoped to the same format selector the download uses, so `media.declared_bytes` describes the bytes actually fetched; measured 0.34% and 0.17% off on the two acceptance sources |
 | section timestamp fidelity | frames extracted from a bounded section are seeked relative to the acquired media while manifest timestamps stay absolute |
 | local-file boundary | local mode accepts only an explicit ordinary video file and refuses symlinks, non-video extensions, empty files, and oversized files |
 | transcript-first planning | caption metadata causes caption retrieval before media download, and matching transcript terms narrow selected ranges before frame extraction |
@@ -67,7 +69,7 @@ FM_VIDEO_WATCH_REAL_SMOKE=1 bin/fm-video-watch.sh smoke \
 The acceptance record must retain only sanitized facts: schema, sanitized source identity, transcript provenance and language, selected range count, frame count, timestamp-alignment spot checks, warnings, and successful cleanup proof.
 Downloaded media, captions, frames, signed URLs, raw command output, and local temp paths must not be committed.
 
-Re-verified on 2026-08-02 on macOS with `yt-dlp` 2026.06.09 and FFmpeg/ffprobe 8.0.1, after the URL-identity, transient-media-ceiling, and whole-video extraction changes.
+Re-verified on 2026-08-02 on macOS with `yt-dlp` 2026.06.09 and FFmpeg/ffprobe 8.0.1, after the URL-identity, transient-media-ceiling, whole-video extraction, and acquisition-route changes.
 This record was produced by the exact `smoke` invocation above, so it reports `mode: real_public_smoke` and carries the `media:` block.
 
 ```text
@@ -79,20 +81,22 @@ title: L8 Principal's Agentic Engineering Setup (just copy him)
 duration_seconds: 3709.0 (1:01:49)
 transcript: captions:automatic, language en, selected_segment_count 214
 selected_ranges: 1, reason full_video, 0.0-3709.0
-media: acquired true, visual_coverage full, byte_ceiling 4294967296, declared_bytes 246117398, downloaded_bytes 164332937, acquired_range none
+media: acquired true, visual_coverage full, acquisition_reason no_focus_range_requested,
+       byte_ceiling 4294967296, declared_bytes 164619367, downloaded_bytes 164332937, acquired_range none
+declared-size accuracy: 164619367 estimated against 164332937 actual, 0.17% high
 frames: 36, reasons periodic_coverage and scene_or_slide_change
 first frame timestamp: 00:00
 last frame timestamp: 1:01:49 (3708.94s, inside the last decodable frame)
 token estimate: frame 43200, transcript 3996, total 47196
 warnings: transcript evidence was truncated to the bounded manifest budget; video is over 10 minutes, this is sparse sampled evidence, not every frame
-wall clock: 7m32s including download, caption retrieval, scene detection, and 36 extractions
+wall clock: 70s including download, caption retrieval, scene detection, and 36 extractions
 cleanup proof: cleanup by exact receipt reported removed=true and the owned directory was absent afterward
 ```
 
 ## Whole-video versus focused acceptance
 
-This pair is ordinary `prepare` evidence, not the opt-in smoke path.
-Both runs used `bin/fm-video-watch.sh prepare '<url>' --question 'Summarize the video'`, the second adding `--start 00:00 --end 09:19`.
+These three runs are ordinary `prepare` evidence, not the opt-in smoke path.
+All used `bin/fm-video-watch.sh prepare '<url>' --question 'Summarize the video'`, the second and third adding a focus range.
 
 ```text
 schema: fm.video-watch.manifest.v1
@@ -100,25 +104,37 @@ mode: prepare
 source: https://www.youtube.com/watch?v=9WOpQqSO5aA
 title: Real AI Agent Stack: Harness -> Loop -> Graph
 duration_seconds: 559.0 (09:19), chapters 8
-transcript: captions:automatic, language en, selected_segment_count 218 (both runs)
+transcript: captions:automatic, language en, selected_segment_count 218
+declared-size accuracy: 19939872 estimated against 20008710 actual, 0.34% low
 
 default whole-video run, no focus range:
   selected_ranges: 1, reason full_video, 0.0-559.0
-  media: acquired true, visual_coverage full, declared_bytes 31304766, downloaded_bytes 20008710
+  media: visual_coverage full, acquisition_reason no_focus_range_requested, downloaded_bytes 20008710
   frames: 20, first 00:00, last 09:18
   warnings: transcript evidence was truncated to the bounded manifest budget
-  wall clock: 26s
+  wall clock: 18s
   result: completed, this is the path that previously failed
 
-focused run, --start 00:00 --end 09:19 over the same source:
+wide focus range, --start 00:00 --end 09:19, the whole source:
   selected_ranges: 1, reason focused_range, 0.0-559.0
-  media: acquired true, visual_coverage section, acquired_range 0.0-559.0, downloaded_bytes 32510301
-  frames: 20, first 00:00, last 09:10, reasons include focused_range_start and focused_range_end
-  warnings: visual evidence covers only the requested section 00:00-09:19, not the whole video
-  wall clock: 5m22s, the provider section is re-encoded because cuts are forced to keyframes
-  result: completed, and its frame count and coverage match the whole-video run
+  media: visual_coverage full, acquisition_reason the_full_media_is_projected_cheaper_than_a_re_encoded_section,
+         downloaded_bytes 20008710, acquired_range none
+  frames: 20, first 00:00, last 09:18
+  warnings: the requested focus range covers enough of the source that downloading the whole media is
+            cheaper than a re-encoded provider section, the selected evidence range is unchanged
+  wall clock: 18s
+  result: completed; the same request cost 5m22s and 32510301 bytes before the route choice landed
 
-cleanup proof: both runs were removed by their exact receipts, each reporting removed=true
+narrow focus range, --start 02:00 --end 03:00, 11% of the source:
+  selected_ranges: 1, reason focused_range, 120.0-180.0
+  media: visual_coverage section, acquisition_reason a_bounded_section_is_projected_cheaper_than_the_full_media,
+         downloaded_bytes 3603554, acquired_range 120.0-180.0
+  frames: 18, first 02:00, last 03:00
+  warnings: visual evidence covers only the requested section 02:00-03:00, not the whole video
+  wall clock: 16s
+  result: completed; the bounded section still runs where it actually saves, 18% of the full download
+
+cleanup proof: every run was removed by its exact receipt, each reporting removed=true
 ```
 
 ## Whole-video extraction defect and correction
@@ -146,5 +162,20 @@ mocked suite with the strengthened stub ffmpeg, 120s fixture
 ```
 
 The correction is `tail_seek_limit`, which derives the last safely seekable timestamp from the probed duration and `avg_frame_rate` rather than from a fixed margin, so a low-frame-rate source is handled too. Whole-video coverage, the duration-aware frame budget, and truthful sampling language are unchanged. `tests/fm-video-watch.test.sh` now covers this two ways: the stub `ffmpeg` refuses a seek at or past the last frame, and a real-`ffmpeg` regression test runs the default whole-video path end to end over a synthesized clip.
+
+## Acquisition route choice
+
+A bounded provider section is re-encoded rather than stream-copied, because `--force-keyframes-at-cuts` is required for the cut to land where the caller asked.
+The earlier acceptance record measured that cost on a 559-second source: a section spanning the whole video cost 32510301 bytes and 5m22s against 20008710 bytes and 26s for the same video downloaded whole, so the mechanism meant to bound resources was inflating them.
+
+The route is now chosen from the projected byte cost rather than taken unconditionally:
+
+- the projected section cost is `span / duration * 1.7` of the full download, where `1.7` is the measured re-encode overhead above;
+- a section is requested when that projection lands at or under 75% of the full download, which works out to spans below roughly 44% of the source;
+- a declared size above the transient byte ceiling still forces the section, because it is then the only route to any visual evidence;
+- an unknown duration still honors the focus range, because nothing can be projected.
+
+The estimate is trustworthy because the metadata call now uses the same format selector as the download, so `declared_bytes` describes the bytes actually fetched instead of the best-quality formats.
+The focus range itself is never altered by this choice: `selected_ranges` is identical on both routes, and taking the full media only ever widens what was acquired, which `media.visual_coverage` and `media.acquisition_reason` both state.
 
 resolved: [key=01KZ1NPWRMTEZXYFDDXT1XT9N4] captain approved refreshed public proof and whole-video extraction correction

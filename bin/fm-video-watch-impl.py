@@ -43,6 +43,9 @@ MAX_COMMAND_SECONDS = 180
 SCENE_THRESHOLD = 0.28
 SCENE_TIMEOUT_FLOOR = 300
 SCENE_TIMEOUT_CEILING = 900
+MEDIA_FORMAT_SELECTOR = "bv*[height<=720]+ba/b[height<=720]/bv+ba/b"
+SECTION_REENCODE_BYTE_OVERHEAD = 1.7
+SECTION_MIN_SAVING = 0.75
 SECRET_QUERY_KEYS = {
     "access_token",
     "api_key",
@@ -375,15 +378,16 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
 
 
 def load_ytdlp_metadata(url: str) -> dict[str, Any]:
-    cmd = [
+    base = [
         "yt-dlp",
         "--dump-single-json",
         "--skip-download",
         "--no-playlist",
         "--no-warnings",
-        url,
     ]
-    result = run_quiet(cmd)
+    result = run_quiet(base + ["-f", MEDIA_FORMAT_SELECTOR, url])
+    if result.returncode != 0:
+        result = run_quiet(base + [url])
     if result.returncode != 0:
         raise WatchError("public video metadata was unavailable without login or was unsupported", 4)
     try:
@@ -680,6 +684,7 @@ class Media:
     section: tuple[float, float] | None = None
     offset_seconds: float = 0.0
     refusal: str | None = None
+    acquisition_reason: str = "no_focus_range_requested"
 
 
 def resolve_media_ceiling(requested: int | None, work: Path, warnings: list[str]) -> int:
@@ -716,6 +721,36 @@ def declared_media_bytes(metadata: dict[str, Any]) -> int | None:
     return None
 
 
+def projected_section_share(span: float, duration: float) -> float | None:
+    """Fraction of the full download a forced-keyframe section is projected to cost.
+
+    A bounded section is re-encoded rather than stream-copied, so it costs more
+    than its share of the timeline. The overhead constant is the measured ratio
+    from the acceptance record in docs/verification/video-watch.md.
+    """
+    if duration <= 0:
+        return None
+    return min(1.0, max(0.0, span) / duration) * SECTION_REENCODE_BYTE_OVERHEAD
+
+
+def choose_acquisition(
+    section: tuple[float, float] | None,
+    duration: float,
+    declared: int | None,
+    ceiling: int,
+) -> tuple[tuple[float, float] | None, str]:
+    if section is None:
+        return None, "no_focus_range_requested"
+    if declared is not None and declared > ceiling:
+        return section, "a_bounded_section_is_the_only_route_under_the_transient_byte_ceiling"
+    share = projected_section_share(section[1] - section[0], duration)
+    if share is None:
+        return section, "source_duration_unknown_so_the_focus_range_bounds_acquisition"
+    if share <= SECTION_MIN_SAVING:
+        return section, "a_bounded_section_is_projected_cheaper_than_the_full_media"
+    return None, "the_full_media_is_projected_cheaper_than_a_re_encoded_section"
+
+
 def purge_media(out_dir: Path) -> None:
     if out_dir.exists():
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -728,7 +763,7 @@ def run_ytdlp_download(
     cmd = [
         "yt-dlp",
         "-f",
-        "bv*[height<=720]+ba/b[height<=720]/bv+ba/b",
+        MEDIA_FORMAT_SELECTOR,
         "--merge-output-format",
         "mp4",
         "--no-playlist",
@@ -1083,14 +1118,17 @@ def build_manifest(args: argparse.Namespace, smoke_mode: bool = False) -> dict[s
                     warnings.append("caption metadata existed but caption retrieval produced no VTT file")
             else:
                 warnings.append("no compatible public captions were advertised; remote transcription is disabled in v1")
-            media = acquire_media(
-                fetch_source,
-                work,
-                ceiling,
-                declared_media_bytes(metadata),
-                requested_section(start, end, safe_float(metadata.get("duration"), 0.0)),
-                warnings,
-            )
+            meta_duration = safe_float(metadata.get("duration"), 0.0)
+            declared = declared_media_bytes(metadata)
+            wanted = requested_section(start, end, meta_duration)
+            section, acquisition_reason = choose_acquisition(wanted, meta_duration, declared, ceiling)
+            if wanted is not None and section is None:
+                warnings.append(
+                    "the requested focus range covers enough of the source that downloading the whole media "
+                    "is cheaper than a re-encoded provider section; the selected evidence range is unchanged"
+                )
+            media = acquire_media(fetch_source, work, ceiling, declared, section, warnings)
+            media.acquisition_reason = acquisition_reason
         else:
             local_path = validate_local(fetch_source, args.max_local_bytes)
             media_dir = work / "media"
@@ -1176,6 +1214,7 @@ def build_manifest(args: argparse.Namespace, smoke_mode: bool = False) -> dict[s
                 "byte_ceiling": media.byte_ceiling,
                 "declared_bytes": media.declared_bytes,
                 "downloaded_bytes": media.downloaded_bytes,
+                "acquisition_reason": media.acquisition_reason,
                 "acquired_range": (
                     {"start_seconds": round(media.section[0], 2), "end_seconds": round(media.section[1], 2)}
                     if media.coverage == "section" and media.section is not None
@@ -1254,8 +1293,9 @@ def parser() -> argparse.ArgumentParser:
             "URL is fetched exactly as given; only the manifest description redacts query values, and "
             "credential, signature, session, or token query fields are refused outright. Public media "
             "is bounded by a transient byte ceiling both before download and after acquisition, focused "
-            "runs request a bounded section when the provider supports one, and media.visual_coverage "
-            "reports whether the evidence is full, section-only, or absent. Missing dependencies "
+            "runs take whichever bounded route is projected cheaper because a provider section is "
+            "re-encoded rather than stream-copied, and media.visual_coverage plus media.acquisition_reason "
+            "report whether the evidence is full, section-only, or absent and why. Missing dependencies "
             "are reported; no installer is run. Remote transcription is disabled in v1."
         ),
     )

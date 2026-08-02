@@ -39,7 +39,7 @@ Do not run an installer, ask for an API key, inspect `~/.config/watch/.env`, use
 The script works transcript-first where public captions are feasible.
 It gathers safe metadata and captions before downloading media, selects transcript windows and ranges from the question when possible, combines scene or slide changes with bounded periodic coverage, and emits a manifest with frame paths, timestamps, reasons, transcript provenance, warnings, token estimates, and cleanup receipt.
 It fetches the captain's public URL exactly as supplied, so providers that encode the video identity in query parameters keep working; do not rewrite, shorten, or strip the URL before passing it.
-Transient media is bounded by a byte ceiling, and a focused run asks the provider for just that section when it can.
+Transient media is bounded by a byte ceiling, and a focused run asks the provider for just that section when that is the cheaper bounded route; a focus range covering most of the source takes the whole media instead, which never narrows the evidence.
 Remote transcription is disabled in v1; if public captions are absent or the local file has no transcript, answer from visual evidence only and say that audio transcript evidence was unavailable.
 
 ## Evidence reading

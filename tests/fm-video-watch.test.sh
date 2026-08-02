@@ -352,6 +352,33 @@ test_section_download_keeps_absolute_timestamps() {
   pass "bounded section downloads keep manifest timestamps absolute and coverage honest"
 }
 
+test_wide_focus_range_takes_the_cheaper_full_download() {
+  local dir="$TMP_ROOT/wide-focus" out err fakebin metadata commands receipt
+  mkdir -p "$dir"
+  out="$dir/out.json"
+  err="$dir/err"
+  metadata='{"id":"abc","title":"Wide focus","duration":120,"availability":"public","filesize_approx":20000000,"subtitles":{"en":[{"ext":"vtt"}]}}'
+  fakebin=$(make_fakebin "$dir")
+  : > "$dir/commands.log"
+  FM_FAKE_COMMAND_LOG="$dir/commands.log" FM_FAKE_YTDLP_METADATA="$metadata" PATH="$fakebin:$BASE_PATH" \
+    "$WATCH" prepare 'https://video.example/watch/one' --question 'read the text' \
+    --start 00:00 --end 02:00 > "$out" 2> "$err"
+  commands=$(cat "$dir/commands.log")
+  assert_not_contains "$commands" '--download-sections' "a whole-span focus range still paid for a re-encoded section"
+  [ "$(json_get "$out" "data['media']['visual_coverage']")" = 'full' ] || fail "the cheaper full route did not report full coverage"
+  [ "$(json_get "$out" "data['media']['acquisition_reason']")" = 'the_full_media_is_projected_cheaper_than_a_re_encoded_section' ] \
+    || fail "the acquisition route reason was not recorded"
+  [ "$(json_get "$out" "data['selected_ranges'][0]['reason']")" = 'focused_range' ] || fail "the focus range was lost by the full route"
+  [ "$(json_get "$out" "data['selected_ranges'][0]['end_seconds']")" = '120.0' ] || fail "the focus range span changed"
+  assert_contains "$(json_get "$out" "' '.join(data['warnings'])")" 'cheaper than a re-encoded provider section' \
+    "the route choice was not disclosed"
+  assert_contains "$(cat "$dir/commands.log")" '--dump-single-json' "metadata was not gathered before acquisition"
+  assert_contains "$commands" 'bv*[height<=720]' "the declared size was not scoped to the format actually downloaded"
+  receipt=$(json_get "$out" "data['cleanup_receipt']")
+  PATH="$(dirname "$REAL_PYTHON"):$BASE_PATH" "$WATCH" cleanup "$receipt" >/dev/null
+  pass "a focus range that covers most of the source takes the cheaper full download without losing the range"
+}
+
 test_media_ceiling_refuses_before_download() {
   local dir="$TMP_ROOT/ceiling" out err fakebin metadata receipt commands
   mkdir -p "$dir"
@@ -417,6 +444,16 @@ assert mod.tail_seek_limit(10.0, 25.0) == 9.5, mod.tail_seek_limit(10.0, 25.0)
 assert mod.tail_seek_limit(10.0, 1.0) == 8.0, mod.tail_seek_limit(10.0, 1.0)
 assert mod.tail_seek_limit(10.0, 0.0) == 9.0, mod.tail_seek_limit(10.0, 0.0)
 assert mod.tail_seek_limit(0.2, 25.0) == 0.0, mod.tail_seek_limit(0.2, 25.0)
+
+GiB = 1024 ** 3
+assert mod.choose_acquisition(None, 120.0, 1000, 4 * GiB)[0] is None
+assert mod.choose_acquisition((0.0, 10.0), 120.0, 20_000_000, 4 * GiB)[0] == (0.0, 10.0)
+assert mod.choose_acquisition((0.0, 120.0), 120.0, 20_000_000, 4 * GiB)[0] is None
+assert mod.choose_acquisition((0.0, 60.0), 120.0, 20_000_000, 4 * GiB)[0] is None
+assert mod.choose_acquisition((0.0, 30.0), 120.0, None, 4 * GiB)[0] == (0.0, 30.0)
+assert mod.choose_acquisition((0.0, 120.0), 0.0, None, 4 * GiB)[0] == (0.0, 120.0)
+assert mod.choose_acquisition((0.0, 120.0), 120.0, 9 * GiB, 4 * GiB)[0] == (0.0, 120.0)
+assert mod.projected_section_share(10.0, 0.0) is None
 
 assert mod.scene_timestamp_timeout(60.0) == 300, mod.scene_timestamp_timeout(60.0)
 assert mod.scene_timestamp_timeout(3709.0) == 900, mod.scene_timestamp_timeout(3709.0)
@@ -624,6 +661,7 @@ test_metadata_rejections
 test_prepare_transcript_first_and_manifest_contract
 test_focused_range_caps_and_language_choice
 test_section_download_keeps_absolute_timestamps
+test_wide_focus_range_takes_the_cheaper_full_download
 test_media_ceiling_refuses_before_download
 test_media_ceiling_override_requires_free_space
 test_local_file_refusals
