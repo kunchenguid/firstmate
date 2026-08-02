@@ -36,6 +36,7 @@ Hard rules, in priority order:
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
+   Before reporting a capability as delivered or marking a task done, check the claim against the merged code with `bin/fm-verify-delivered.sh`, whose header owns its modes and exact outcomes; only exit 0 may be read as delivered.
 
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
