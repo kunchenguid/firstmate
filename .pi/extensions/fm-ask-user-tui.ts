@@ -378,6 +378,8 @@ class AskUserQuestionsScreen implements Component, Focusable {
   private pageScroll = 0;
   private lastViewport = 1;
   private lastMaxScroll = 0;
+  private scrollToCursor = false;
+  private focusedLineRange: { start: number; end: number } | undefined;
   private cachedWidth: number | undefined;
   private cachedLines: string[] | undefined;
   private finished = false;
@@ -504,14 +506,14 @@ class AskUserQuestionsScreen implements Component, Focusable {
     if (matchesKey(data, Key.up)) {
       state.cursorIndex = (state.cursorIndex - 1 + items.length) % items.length;
       state.freeTextError = undefined;
-      this.pageScroll = 0;
+      this.scrollToCursor = true;
       this.refresh();
       return;
     }
     if (matchesKey(data, Key.down)) {
       state.cursorIndex = (state.cursorIndex + 1) % items.length;
       state.freeTextError = undefined;
-      this.pageScroll = 0;
+      this.scrollToCursor = true;
       this.refresh();
       return;
     }
@@ -536,6 +538,7 @@ class AskUserQuestionsScreen implements Component, Focusable {
 
     const header = this.renderHeader(renderWidth);
     const footer = this.renderFooter(renderWidth);
+    this.focusedLineRange = undefined;
     const body = this.showingReview ? this.renderReviewBody(renderWidth) : this.renderQuestionBody(renderWidth);
     const terminalRows = this.tui.terminal?.rows;
     const stdoutRows = process.stdout.rows;
@@ -548,7 +551,13 @@ class AskUserQuestionsScreen implements Component, Focusable {
     const viewport = Math.max(1, rows - header.length - footer.length);
     this.lastViewport = viewport;
     this.lastMaxScroll = Math.max(0, body.length - viewport);
-    this.pageScroll = Math.min(this.pageScroll, this.lastMaxScroll);
+    if (this.scrollToCursor && this.focusedLineRange) {
+      const { start, end } = this.focusedLineRange;
+      if (start < this.pageScroll) this.pageScroll = start;
+      else if (end > this.pageScroll + viewport) this.pageScroll = end - viewport;
+    }
+    this.scrollToCursor = false;
+    this.pageScroll = Math.max(0, Math.min(this.pageScroll, this.lastMaxScroll));
 
     const visibleBody = body.slice(this.pageScroll, this.pageScroll + viewport);
     if (this.lastMaxScroll > 0 && visibleBody.length > 0) {
@@ -852,6 +861,7 @@ class AskUserQuestionsScreen implements Component, Focusable {
     for (let index = 0; index < items.length; index += 1) {
       const item = items[index]!;
       const focused = index === state.cursorIndex && !this.freeTextMode;
+      const itemStart = lines.length;
       if (item.kind === "free-text") {
         const entered = state.freeText.trim().length > 0;
         const prefix = entered ? "✎ " : "✎ ";
@@ -861,6 +871,7 @@ class AskUserQuestionsScreen implements Component, Focusable {
           : this.theme.fg(entered ? "success" : "text", `  ${label}`);
         lines.push(...wrapToWidth(styled, width));
         lines.push(...wrapToWidth(this.theme.fg("muted", `    ${item.description}`), width));
+        if (focused) this.focusedLineRange = { start: itemStart, end: lines.length };
         continue;
       }
 
@@ -873,6 +884,7 @@ class AskUserQuestionsScreen implements Component, Focusable {
         : this.theme.fg(checked ? "success" : "text", `  ${label}`);
       lines.push(...wrapToWidth(styled, width));
       if (item.description) lines.push(...wrapToWidth(this.theme.fg("muted", `    ${item.description}`), width));
+      if (focused) this.focusedLineRange = { start: itemStart, end: lines.length };
     }
 
     if (this.freeTextMode) {
