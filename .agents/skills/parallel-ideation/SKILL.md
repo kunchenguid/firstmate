@@ -30,6 +30,7 @@ The cost is coordination, and this skill is that coordination written down.
 3. Resolve the harness per crew from what actually provides that skill.
    A skill delivered as a harness-specific plugin can only run on that harness, so the roster can force a harness pin that differs from this home's usual crewmate default.
    Perform that check against the skill's real delivery surface before spawn; do not assume a fixed harness name here.
+   Inside the routing precedence `AGENTS.md` section 4 owns, an explicit per-task captain override still wins, but a pin that delivery makes mandatory outranks a matching crew-dispatch profile's harness, because a profile harness that cannot run the assigned skill silently defeats the dispatch.
    Load `harness-adapters` before any spawn so the pin is applied through the ordinary dispatch path.
 4. Resolve the repository the crews will be spawned into before dispatch.
    A spawn allocates a worktree, so a subject with no repository yet must go through the `project-management` skill first rather than mid-run.
@@ -38,7 +39,7 @@ The cost is coordination, and this skill is that coordination written down.
 
 ## 2. Shared premise note
 
-1. Create `data/<run-id>/facts.md` yourself and remain its only writer.
+1. Create `data/<run-id>/facts.md` in the firstmate home yourself and remain its only writer.
    Crews never edit this file.
 2. Seed it with the raw subject paragraph from intake, plus any fact the captain has already confirmed at that moment.
 3. Every crew brief must instruct the crew to read this note before starting and again after each relayed answer.
@@ -52,7 +53,7 @@ The cost is coordination, and this skill is that coordination written down.
    Ordinary scout lifecycle, briefs, and isolation rules in `AGENTS.md` section 7 still apply; this skill only owns the parallel coordination on top of them.
 2. Each crew brief must:
    - name exactly one skill from the roster for that crew to run;
-   - point at the shared premise note path and require the re-read rule above;
+   - carry the absolute firstmate-home path to the shared premise note, never the relative `data/<run-id>/facts.md` form, because a crew reads it from an isolated project worktree where that relative path resolves to nothing or to an unrelated file, and require the re-read rule above;
    - carry the raw subject paragraph without firstmate rewriting it;
    - restate that crewmates never address the captain and that all captain communication flows through firstmate;
    - tell the crew how to raise a question: append a keyed `blocked:` line and stop, rather than guessing a product answer.
