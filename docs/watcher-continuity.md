@@ -8,6 +8,10 @@ Must-work continuity now lives above that process boundary instead of depending 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
 Each adapter starts the next arm before delivering the wake prompt, checks current session-lock ownership at launch, preserves one child or scheduled retry at a time, and applies bounded exponential retry after an unexpected or failed close.
 A failed follow-up never cancels continuity restoration.
+When Pi's retry budget for an unexpected or failed close is exhausted, the extension trips a re-arm breaker: it surfaces the typed failure and then refuses every later arm, because an arm that failed identically on every attempt is a permanent fault that retrying only loops the session on.
+Only the captain closes the breaker, with `/fm-watch-arm-pi reset` after fixing the reported cause; the `fm_watch_arm_pi` tool deliberately exposes no reset parameter, so an agent cannot clear it on the failure it just hit.
+A restoration that could not confirm a successor after an actionable close does not trip the breaker, because that path must stay supervised for the late close to land.
+The breaker is per generation, so an ordinary same-process session replacement starts with it closed.
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
@@ -42,6 +46,10 @@ An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 An attached arm follows verified identity-matched successors and reports the same typed failure if that chain ends without one.
 
+The arm layer captures the watcher child's stderr separately from its stdout, so wake detection and reason classification parse only stdout, and replays that stderr verbatim at every close including a signal-interrupted one.
+On a nonzero close, the generic `exited <rc> without an actionable reason` line is added only when neither stream carried a `watcher: FAILED` line.
+A watcher refusal that explains itself therefore reaches the caller with its own cause instead of being overwritten; `bin/fm-watch.sh` prefixes its blocked-PR-check-migration refusal with that marker for exactly this reason, so a permanent fault is reported once rather than read as a transient one and retried.
+
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
@@ -53,6 +61,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+It also proves that an exhausted retry budget suspends automatic re-arming, that the repair call the exhaustion wake prompts is refused instead of restarting the same failure, and that `/fm-watch-arm-pi reset` resumes supervision.
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, and `/fork`, same-instance shutdown-plus-start, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.

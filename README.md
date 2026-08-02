@@ -223,3 +223,5 @@ Contributions are welcome - see [CONTRIBUTING.md](CONTRIBUTING.md) for the workf
 ## License
 
 MIT - see [LICENSE](LICENSE).
+
+Some agent-only application-engineering skills are adapted from a third-party MIT project; their provenance and preserved notice are recorded in [`.agents/skills/agent-skills-source.md`](.agents/skills/agent-skills-source.md).
