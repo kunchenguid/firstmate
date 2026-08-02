@@ -178,6 +178,29 @@ n=$(grep -c 'pr edit' "$FAKE_DIR/gh.log")
 [ "$n" = 1 ] || fail "expected exactly one PR edit across two runs, found $n"
 pass "running the PR check twice adds the reference exactly once"
 
+# A body that merely MENTIONS the identifier is not linked: Linear needs a magic
+# word. Treating a bare mention as "already linked" would silently skip exactly
+# the PRs that discuss their own issue - this feature's own PR among them.
+new_home baremention
+printf 'LINEAR_API_KEY=lin_api_test\n' > "$HOME_DIR/.env"
+printf 'This PR is described in docs; see PSY-42 for background.\n' > "$FAKE_DIR/pr-body"
+issue_json PSY-42 '`firstmate: 010-basic-combat-damage`' > "$FAKE_DIR/fmFind.json"
+out=$(FM_HOME="$HOME_DIR" run_link 010-basic-combat-damage https://github.com/o/r/pull/1)
+assert_contains "$out" "linked PSY-42" "a bare mention must not be mistaken for an existing link"
+assert_grep "Part of PSY-42" "$FAKE_DIR/pr-body" "the reference is still appended over a bare mention"
+
+# A magic word already present IS a link, whoever wrote it, so leave it alone.
+printf 'Fixes PSY-42 in passing.\n' > "$FAKE_DIR/pr-body"
+out=$(FM_HOME="$HOME_DIR" run_link 010-basic-combat-damage https://github.com/o/r/pull/1)
+assert_contains "$out" "already referenced" "a magic word already in the body counts as linked"
+assert_no_grep "Part of PSY-42" "$FAKE_DIR/pr-body" "no second reference is appended"
+
+# The documented list form counts too.
+printf 'Fixes ENG-1, DES-5 and PSY-42 together.\n' > "$FAKE_DIR/pr-body"
+out=$(FM_HOME="$HOME_DIR" run_link 010-basic-combat-damage https://github.com/o/r/pull/1)
+assert_contains "$out" "already referenced" "a multi-issue magic-word list counts as linked"
+pass "only a magic word counts as an existing link; a bare mention does not"
+
 # --- 5. Linear unreachable never blocks anything ----------------------------
 
 new_home unreachable

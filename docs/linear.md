@@ -85,10 +85,20 @@ Part of PSY-42
   nothing is pushed.
 - **Idempotent.** A body already carrying the marker comment, or the identifier
   anywhere in it, is left alone. Running the PR check twice links exactly once.
+- **A bare mention is not a link.** Linear only links from a PR body when a
+  magic word precedes the ID, so an "already linked" check must look for a magic
+  word (or firstmate's marker), never for the identifier alone.
 - **A missing issue is the normal case.** Only queued items were ever mirrored,
   so most in-flight work has no issue. That is reported, not treated as an error.
 
 After valid arguments are supplied, every operational outcome prints one `linear: ...` line and exits 0.
+
+> **Prerequisite on the GitHub side.** Linear only links pull requests in
+> repositories covered by its GitHub integration. If firstmate's PRs are opened
+> against a repository outside the connected organisation, the reference is
+> written correctly and Linear ignores it. See `docs/linear-verification.md`
+> section 8. Refresh's PR link attachment goes through the Linear API directly
+> and is unaffected.
 
 ## Refreshing in place: `bin/fm-linear-refresh.sh`
 

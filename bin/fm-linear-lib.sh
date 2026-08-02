@@ -258,15 +258,29 @@ fml_find_issue() {
   printf '%s\n' "$rows" | head -n1
 }
 
-# fml_body_links <body-file> <identifier>: 0 when the PR body already carries the
-# reference. Two independent signals, either of which means "leave it alone":
-# firstmate's own marker comment, or the bare identifier anywhere in the body
-# (someone - the author, the pipeline, Linear itself - already linked it).
+# fml_body_links <body-file> <identifier>: 0 when the PR body already carries a
+# real reference. Two independent signals, either of which means "leave it
+# alone": firstmate's own marker comment, or a magic word followed by the
+# identifier (someone - the author, the pipeline - already linked it).
 # This is what makes running the PR check twice add the reference exactly once.
+#
+# A BARE mention of the identifier deliberately does NOT count. Linear only
+# links from a PR body when a magic word precedes the ID, so treating any
+# occurrence as "already linked" would silently skip a PR that merely discusses
+# the issue - which is exactly what this feature's own PR does, quoting its
+# issue id in prose. The list form ("Fixes ENG-1, DES-5 and ENG-2") and a
+# configured LINEAR_MAGIC_WORD are both recognised.
 fml_body_links() {
-  local body_file=$1 ident=$2
+  local body_file=$1 ident=$2 words
   grep -qF -- '<!-- firstmate:linear -->' "$body_file" 2>/dev/null && return 0
-  grep -qE -- "(^|[^A-Za-z0-9_-])${ident}([^A-Za-z0-9_-]|$)" "$body_file" 2>/dev/null && return 0
+  words='close[sd]?|closing|fix|fixe[sd]|fixing|resolve[sd]?|resolving'
+  words="$words|complete[sd]?|completing|implement|implements|implemented|implementing|linear issue"
+  words="$words|refs?|references|part of|related to|relates to|contributes to|towards?"
+  if [ -n "${FML_MAGIC:-}" ]; then
+    words="$words|$(printf '%s' "$FML_MAGIC" | sed 's/[][\.*^$(){}?+|/]/\\&/g')"
+  fi
+  grep -qiE -- "(^|[^A-Za-z0-9_-])(${words})[[:space:]]+([A-Za-z0-9_-]+[,[:space:]]+(and[[:space:]]+)?)*${ident}([^A-Za-z0-9_-]|$)" \
+    "$body_file" 2>/dev/null && return 0
   return 1
 }
 

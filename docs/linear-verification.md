@@ -147,3 +147,84 @@ ASCII diagrams, and aligned tables therefore cannot be reflowed or mangled.
 `LINEAR_BODY_STYLE=markdown` renders the body as Markdown instead.
 
 The exact empty-column TSV split that protects this rendering is covered by the regression test in `tests/fm-linear.test.sh`.
+
+## 7. Linking a real PR, end to end
+
+Run against this change's own pull request, whose task has a mirrored issue
+(PSY-50), using the shipped `bin/fm-linear-pr-link.sh`.
+
+```
+$ ./bin/fm-linear-pr-link.sh 061-linear-refresh-path https://github.com/<owner>/firstmate/pull/1539
+linear: linked PSY-50 (https://linear.app/psychogenesis/issue/PSY-50/...) - appended "Part of PSY-50" to the PR body
+
+bytes BEFORE=12212  AFTER=12256
+--- appended tail ---
+<!-- firstmate:linear -->
+Part of PSY-50
+
+--- strictly additive? ---
+YES: original body bytes identical and unmoved
+```
+
+Run again, unchanged input:
+
+```
+linear: PSY-50 already referenced in the PR body; left unchanged
+occurrences of 'Part of PSY-50' after two runs: 1
+body unchanged by run 2: YES
+```
+
+The reference is appended once, the pipeline's evidence record above it is
+untouched byte for byte, and a second run is a no-op.
+
+### The bare-mention trap this run exposed
+
+The first attempt did nothing, because the PR body already contained the string
+`PSY-50` in prose - this feature's own documentation quotes its issue id. The
+original "already linked" check treated any occurrence of the identifier as an
+existing link and skipped.
+
+That was wrong: Linear only links from a PR body when a **magic word** precedes
+the ID. A bare mention links nothing, so skipping on one silently produces the
+exact failure this change exists to prevent. `fml_body_links` now requires a
+documented magic word (including the list form and any configured
+`LINEAR_MAGIC_WORD`) or firstmate's own marker comment, and
+`tests/fm-linear.test.sh` pins all three cases.
+
+## 8. Open environment blocker: the integration does not cover the base repo
+
+The reference is written correctly, but Linear did not create the link, and it
+will not until someone changes the GitHub side.
+
+```
+$ # 2 minutes of polling after the body edit
+PSY-50 attachments: 0
+
+$ # any GitHub-sourced attachment anywhere in the workspace?
+(none)
+
+$ gh pr view .../pull/1539 --json headRepository,headRepositoryOwner,isCrossRepository
+pr base:  <upstream-owner>/firstmate
+head:     levelupself/firstmate
+cross-repo: true
+```
+
+Linear's GitHub integration is connected to the **`levelupself`** organisation.
+firstmate pushes its branch to the `levelupself` fork but opens the pull request
+against the **upstream** owner's repository, which is a different GitHub owner
+and is therefore not covered by the installed Linear GitHub App. No PR in this
+workspace has ever produced a GitHub attachment, which is consistent with that.
+
+This is an environment and permissions decision, not a code defect, and it is
+the captain's to make. Two ways forward:
+
+1. Install or extend the Linear GitHub App so it covers the repository the pull
+   requests are actually opened against, or
+2. change firstmate's PR target so pull requests are opened in the connected
+   `levelupself` organisation.
+
+Until one of those happens, the PR body carries a correct, harmless reference
+that Linear ignores. The board is not left blind in the meantime:
+`bin/fm-linear-refresh.sh` attaches a completed task's PR URL to its issue
+through the Linear API directly, which does not depend on the GitHub
+integration at all.
