@@ -32,7 +32,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 MANAGED_TREEHOUSE_ROOT="$FM_HOME/.treehouse"
 TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
 TEARDOWN="${FM_TREEHOUSE_REAP_TEARDOWN:-$SCRIPT_DIR/fm-teardown.sh}"
-TEARDOWN_REAP_SAFETY_REFUSAL=75
+TEARDOWN_REAP_SAFETY_REFUSAL=77
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"

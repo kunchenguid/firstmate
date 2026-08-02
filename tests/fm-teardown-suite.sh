@@ -1626,7 +1626,7 @@ test_dead_reap_refuses_work_shaped_ignored_output() {
   run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 75 "$rc" "dead reap must safely refuse ignored work-shaped output"
+  expect_code 77 "$rc" "dead reap must safely refuse ignored work-shaped output"
   assert_grep 'docs/launch-draft.md' "$case_dir/stderr" \
     "work-shaped refusal omitted the exact ignored file"
   pass "dead reap names refused ignored work"
@@ -1642,7 +1642,7 @@ test_dead_reap_refuses_ambiguous_ignored_output() {
   run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 75 "$rc" "dead reap must safely refuse ambiguous ignored output"
+  expect_code 77 "$rc" "dead reap must safely refuse ambiguous ignored output"
   assert_grep 'mystery/payload.bin (ambiguous)' "$case_dir/stderr" \
     "ambiguous refusal omitted the exact ignored file and reason"
   pass "dead reap refuses ambiguous ignored output"
@@ -1658,7 +1658,7 @@ test_dead_reap_refuses_recent_hand_edit_shaped_output() {
   run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 75 "$rc" "dead reap must safely refuse recent hand-edit-shaped output"
+  expect_code 77 "$rc" "dead reap must safely refuse recent hand-edit-shaped output"
   assert_grep 'build/manual-recovery.js (recent-ambiguous)' "$case_dir/stderr" \
     "recent hand-edit refusal omitted the exact ignored file"
   pass "dead reap refuses recent hand-edit-shaped ignored output"
@@ -1675,7 +1675,7 @@ test_dead_reap_refuses_old_ambiguous_output() {
   run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 75 "$rc" "dead reap must safely refuse old ambiguous ignored output"
+  expect_code 77 "$rc" "dead reap must safely refuse old ambiguous ignored output"
   assert_grep 'build/manual-recovery.js (ambiguous)' "$case_dir/stderr" \
     "old ambiguous refusal omitted the exact ignored file"
   pass "dead reap never ages ambiguous ignored output into safety"
@@ -1696,7 +1696,7 @@ test_dead_reap_protects_work_roots_before_dependencies() {
   run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 75 "$rc" "protected work roots must safely block dependency ownership"
+  expect_code 77 "$rc" "protected work roots must safely block dependency ownership"
   assert_grep 'docs/node_modules/recovery.md (work-shaped)' "$case_dir/stderr" \
     "docs dependency refusal omitted the exact ignored file"
   assert_grep 'data/.venv/operator-note (work-shaped)' "$case_dir/stderr" \
@@ -1750,7 +1750,7 @@ SH
   run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 75 "$rc" "locked return must classify an open PR as a safety refusal"
+  expect_code 77 "$rc" "locked return must classify an open PR as a safety refusal"
   assert_grep 'found an open PR under the checkout lock' "$case_dir/stderr" \
     "locked return did not surface its repeated open-PR proof"
   assert_present "$case_dir/state/task-x1.meta" \
@@ -1778,7 +1778,7 @@ SH
   run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 75 "$rc" "restored endpoint must return the safety-refusal status"
+  expect_code 77 "$rc" "restored endpoint must return the safety-refusal status"
   assert_grep 'found a live endpoint' "$case_dir/stderr" \
     "post-scan endpoint proof did not detect the restored endpoint"
   assert_present "$case_dir/state/task-x1.meta" \
@@ -1865,7 +1865,7 @@ test_treehouse_reaper_translates_only_safety_status() {
   prepare_reaper_execution_case "$case_dir"
   cat > "$case_dir/fake-teardown" <<'SH'
 #!/usr/bin/env bash
-exit 75
+exit 77
 SH
   chmod +x "$case_dir/fake-teardown"
   set +e
@@ -1875,7 +1875,7 @@ SH
   rc=$?
   set -e
   expect_code 0 "$rc" "dedicated teardown safety status should become success"
-  assert_grep 'retained task=task-x1 reason=teardown-refused status=75' \
+  assert_grep 'retained task=task-x1 reason=teardown-refused status=77' \
     "$case_dir/stdout" \
     "dedicated safety status omitted retained output"
   pass "reaper translates only the dedicated safety-refusal status"
@@ -1905,6 +1905,109 @@ SH
       "$cause failure was masked as safe retention"
   done
   pass "report and checkout-helper failures remain operational"
+}
+
+test_dead_reap_leaf_helper_failures_remain_operational() {
+  local case_dir rc
+  for helper in git python3; do
+    case_dir=$(make_case "reap-broken-$helper")
+    prepare_reap_case "$case_dir" $'build/'
+    cat > "$case_dir/fakebin/$helper" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    chmod +x "$case_dir/fakebin/$helper"
+    set +e
+    run_teardown "$case_dir" --reap-dead \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "broken $helper inspection must remain operational"
+  done
+  pass "broken git and python inspection remain operational"
+}
+
+test_dead_reap_authority_statuses_are_distinct() {
+  local case_dir rc state
+  case_dir=$(make_case reap-authority-mismatch-status)
+  prepare_reap_case "$case_dir" $'build/'
+  state="$TMP_ROOT/treehouse-state.json"
+  python3 - "$state" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    state = json.load(stream)
+state["worktrees"][0]["lease_holder"] = "firstmate-other"
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+PY
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "inspected authority mismatch must be a safety refusal"
+
+  case_dir=$(make_case reap-authority-unreadable-status)
+  prepare_reap_case "$case_dir" $'build/'
+  printf '{broken\n' > "$TMP_ROOT/treehouse-state.json"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unreadable authority state must remain operational"
+  pass "authority mismatch and inspection failure have distinct statuses"
+}
+
+install_lock_blocking_git() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' status --porcelain=v1 --untracked-files=all '*)
+    [ ! -e "$FM_FAKE_INDEX_LOCK" ] || exit 128
+    ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
+test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct() {
+  local case_dir lock rc
+  case_dir=$(make_case reap-live-lock-status)
+  prepare_reap_case "$case_dir" $'build/'
+  lock=$(git_index_lock_path "$case_dir/wt")
+  : > "$lock"
+  install_lock_blocking_git "$case_dir"
+  add_lsof_live_holder "$case_dir"
+  set +e
+  FM_FAKE_INDEX_LOCK="$lock" FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "live git lock must be a safety refusal"
+
+  case_dir=$(make_case reap-lock-cleanup-failure)
+  prepare_reap_case "$case_dir" $'build/'
+  lock=$(git_index_lock_path "$case_dir/wt")
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+  install_lock_blocking_git "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+[ "${2:-}" != "$FM_FAKE_INDEX_LOCK" ] || exit 1
+exec /bin/rm "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+  set +e
+  FM_FAKE_INDEX_LOCK="$lock" FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "git lock cleanup failure must remain operational"
+  pass "live lock refusal and cleanup failure have distinct statuses"
 }
 
 test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
@@ -5608,6 +5711,9 @@ if [ "${FM_TEST_FOCUSED:-}" = review-reaper-status ]; then
   test_treehouse_reaper_operational_failure_exits_nonzero
   test_treehouse_reaper_translates_only_safety_status
   test_treehouse_reaper_executable_failures_remain_nonzero
+  test_dead_reap_leaf_helper_failures_remain_operational
+  test_dead_reap_authority_statuses_are_distinct
+  test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct
   exit 0
 fi
 
@@ -5801,6 +5907,9 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_treehouse_reaper_operational_failure_exits_nonzero
   test_treehouse_reaper_translates_only_safety_status
   test_treehouse_reaper_executable_failures_remain_nonzero
+  test_dead_reap_leaf_helper_failures_remain_operational
+  test_dead_reap_authority_statuses_are_distinct
+  test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
   test_preserve_scratch_never_cleans_unlanded_commits
   test_preserve_scratch_refuses_tracked_drift_before_cleanup
