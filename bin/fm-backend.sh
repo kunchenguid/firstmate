@@ -605,6 +605,7 @@ fm_backend_source() {  # <name>
       ;;
     herdr)
       if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
+        [ -r "$FM_BACKEND_LIB_DIR/backends/herdr.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/herdr.sh" || return 1
         _FM_BACKEND_HERDR_SOURCED=1
