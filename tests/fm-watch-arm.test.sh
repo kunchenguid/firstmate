@@ -86,7 +86,7 @@ test_attached_arm_reports_the_delivered_wake() {
   grep -q '^signal:' "$armout" \
     || fail "attached arm did not report the durably recorded wake reason: $(cat "$armout")"
   expect_code 0 "$status" "an attached arm whose cycle delivered a wake must close successfully"
-  grep -q 'reason=attached-delivered-wake' "$state/.watch-cycle-exits.log" \
+  grep -q 'reason=recovered-actionable-signal' "$state/.watch-cycle-exits.log" \
     || fail "the delivered-wake close was not classified in the lifecycle ledger"
   pass "watch-arm: an attached arm reports the wake its cycle delivered instead of a false failure"
 }

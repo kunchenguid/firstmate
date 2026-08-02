@@ -335,7 +335,20 @@ attach_and_wait() {
       echo "$recovered"
       return 0
     fi
+    # A check-kind queue row cannot be trusted above (fm-procevent.sh shares
+    # that kind for unrelated process-event wakes), and the handling turn may
+    # have already drained a trustworthy row before this arm noticed the cycle
+    # ended. The watcher's own identity-bound terminal delivery record covers
+    # both: it is written only by this exact watcher's own wake() call and
+    # survives a queue drain (it is a separate log), so fall back to it before
+    # giving up.
+    if recovered=$(close_unobserved_cycle 2>/dev/null); then
+      cycle_log_append unknown unknown "recovered-$(classify_reason_line "$recovered")" none
+      echo "$recovered"
+      return 0
+    fi
     cycle_log_append unknown unknown attached-cycle-ended none
+    fail_unexplained_cycle
     return 1
   done
 }
@@ -387,6 +400,13 @@ watch_output_reason_type() {
 # row appended at or after <since_epoch> whose payload matches an actionable
 # reason shape, so an unrelated older queue entry or a genuine crash with no
 # fresh wake both correctly fall through to the FAILED path.
+#
+# The queue is home-wide and carries no producer identity, and its "check" kind
+# is shared with fm-procevent.sh's unrelated process-event wakes, so a "check:"
+# row cannot be safely attributed to this watcher's own cycle here. Only
+# signal/stale/heartbeat rows are exclusively watcher-produced; a check-kind
+# close still gets recovered, just via the identity-bound delivery log in
+# close_unobserved_cycle instead of this queue peek.
 queue_reason_since() {  # <since_epoch>
   local since=$1 epoch seq kind key payload best=''
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -394,8 +414,12 @@ queue_reason_since() {  # <since_epoch>
     while IFS=$'\t' read -r epoch seq kind key payload; do
       case "$epoch" in ''|*[!0-9]*) continue ;; esac
       [ "$epoch" -ge "$since" ] || continue
+      case "$kind" in
+        signal|stale|heartbeat) ;;
+        *) continue ;;
+      esac
       case "$payload" in
-        signal:*|stale:*|check:*|heartbeat|heartbeat:*) best=$payload ;;
+        signal:*|stale:*|heartbeat|heartbeat:*) best=$payload ;;
       esac
     done < "$FM_WAKE_QUEUE"
   fi
