@@ -11,7 +11,10 @@ metadata:
 
 # paired-review
 
-This skill is the single owner of the paired implement-and-check protocol.
+This skill is the single owner of the paired implement-and-check protocol, which is a universal way to execute an implementation task rather than one program's local procedure.
+Whichever firstmate owns the task dispatches and supervises the pair, so a standalone paired task runs entirely inside that firstmate, needing no persistent orchestrator to exist, be created, or be routed through.
+A program orchestrator reaches this same protocol for a program ticket under `program-orchestration` and dispatches it unchanged.
+
 It exists because firstmate supervises several threads at once, so relaying every exchange between the two workers makes firstmate the latency bottleneck and the pair stalls waiting for a firstmate turn.
 `AGENTS.md` section 1 keeps the narrowed communication rule always loaded, section 7 keeps the dispatch trigger, and section 13 keeps the load condition.
 
@@ -74,17 +77,15 @@ This is the same reason a two-axis code review runs its axes as independent para
 The navigator needs its own task id because spawn, worktree, state, and status are all per task id; `<task-id>-nav` is the conventional form.
 Record both sides under the same backlog work item rather than filing the navigator as a second work item.
 
-## Default routing
+## Routing
 
-These are defaults with their reasoning, not hard constraints, so a future dispatch can pick correctly when a task does not fit the usual shape.
-An explicit per-task captain choice always overrides both.
+**The navigator runs on the pi runtime with the model `cx/gpt-5.6-terra`, on every paired task.**
+An explicit per-task captain choice of another navigator runtime or model is the one thing that replaces it.
+One fixed model holds across tasks of very different difficulty because the navigator checks work against a scope and a set of rules that are already written down, rather than doing open-ended design.
 
-- **Navigator: the pi runtime with an explicitly named Codex/GPT-family model.**
-  The navigator checks work against a scope and a set of rules that are already written down, rather than doing open-ended design, so it does not need the strongest model.
-  Where a home carries a standing rule naming the exact model for an autonomously launched Codex/GPT-family worker on pi, follow that rule; this default is consistent with it rather than an exception to it.
-- **Driver: the claude runtime, on opus or sonnet chosen by the task's complexity.**
+**The driver runs on the claude runtime, on opus or sonnet chosen by the task's complexity.**
 
-Resolve both into concrete profiles through `AGENTS.md` section 4's routing precedence and `harness-adapters`; these defaults are the best-fit input to that resolution, never a bypass of it.
+`AGENTS.md` section 4's routing precedence and `harness-adapters` resolve both sides into concrete launch mechanics - flags, effort, and spawn validation - and carry the navigator pin through that resolution rather than substituting a best-fit alternative of their own.
 
 ## The scope and seam statement
 
@@ -220,8 +221,8 @@ The deciding reason is not obvious and is worth stating: the two sides of a pair
 A skill is a markdown instruction file, so reading it by path loses nothing except the slash-command shorthand.
 
 Known limitation, recorded with its reasoning rather than as a defect to fix: a handed-out review skill written to run its axes as parallel sub-agents degrades on any runtime where sub-agents are disabled, as pi is on this fleet by captain decision.
-That navigator runs the axes sequentially in one context and loses the isolation between them.
-It is an accepted trade for a navigator whose main job is checking work against an already-written scope; route one that genuinely needs the parallel form to a claude runtime instead.
+The navigator runs the axes sequentially in one context and loses the isolation between them.
+That is an accepted trade for a navigator whose main job is checking work against an already-written scope, and it is the captain's call to make if a task ever needs the parallel form badly enough to move the navigator off its pinned runtime.
 
 ## Firstmate's remaining role
 
