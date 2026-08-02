@@ -159,6 +159,7 @@ publish_pending() {
 
 isolate_runner() {  # <wait|detach> <source-id>
   local mode=$1 id=$2 program
+  # shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
   program='my $mode = shift @ARGV;
     defined(my $pid = fork) or exit 125;
     if ($pid == 0) {
