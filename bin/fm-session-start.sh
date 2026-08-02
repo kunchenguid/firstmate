@@ -392,8 +392,12 @@ done
 
 subsection "Browser custody (inspect-only)"
 if [ -x "$SCRIPT_DIR/fm-browser.sh" ]; then
-  BROWSER_OUT=$("$SCRIPT_DIR/fm-browser.sh" inspect --all --json 2>&1) || BROWSER_OUT=$?
-  printf '%s\n' "$BROWSER_OUT"
+  if BROWSER_OUT=$("$SCRIPT_DIR/fm-browser.sh" inspect --all --json 2>&1); then
+    printf '%s\n' "$BROWSER_OUT"
+  else
+    BROWSER_RC=$?
+    printf '(browser inspect failed, exit %s)\n%s\n' "$BROWSER_RC" "$BROWSER_OUT"
+  fi
 else
   printf '(browser owner unavailable)\n'
 fi

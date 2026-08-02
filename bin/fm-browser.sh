@@ -74,7 +74,8 @@ SCHEMA_PLAN = "fm-browser-plan.v1"
 SCHEMA_SESSION = "fm-browser-session.v1"
 SCHEMA_RECEIPT = "fm-browser-receipt.v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
-LIVE_STATES = {"creating", "visible-ready", "active", "paused", "closing", "closed", "cleaning", "crashed", "recovering", "incident", "quarantined"}
+PLAN_RECEIPT = re.compile(r"^sha256:[0-9a-f]{64}$")
+LIVE_STATES = {"creating", "visible-ready", "active", "paused", "closing", "closed", "cleaning", "crashed", "recovering", "incident"}
 SUPPORTED_MODE = "public_ephemeral"
 SUPPORTED_AUTH = "anonymous"
 ROOT = Path(os.environ["FM_ROOT"]).resolve()
@@ -201,8 +202,10 @@ def canonical_origin(url):
     return f"{parsed.scheme}://{parsed.hostname.rstrip('.').lower()}{port_part}", "ok"
 
 
-def plan_path(receipt):
-    return PLANS / (receipt.replace("sha256:", "") + ".json")
+def plan_path(receipt, as_json=False):
+    if not receipt or not PLAN_RECEIPT.match(receipt):
+        die("invalid plan receipt", "invalid-plan-receipt", 2, as_json=as_json)
+    return PLANS / (receipt[len("sha256:"):] + ".json")
 
 
 def session_path(handle):
@@ -307,7 +310,7 @@ def cmd_open(args):
     policy = load_policy(as_json=args.json)
     if not policy.get("enabled", False):
         die("browser capability disabled by config/browser-policy.json", "browser-disabled", as_json=args.json)
-    ppath = plan_path(args.plan)
+    ppath = plan_path(args.plan, as_json=args.json)
     if not ppath.exists():
         die("plan receipt not found", "plan-not-found", as_json=args.json)
     plan = load_json(ppath)
@@ -391,20 +394,23 @@ def cmd_request_action(args):
 
 
 def remove_profile(session):
-    profile_path = Path(session.get("profile", {}).get("path", ""))
-    if not profile_path:
-        return False
+    raw_path = session.get("profile", {}).get("path") or ""
+    if not raw_path:
+        return False, "missing-profile-path"
     try:
-        resolved_profile = profile_path.resolve()
+        resolved_profile = Path(raw_path).resolve()
         resolved_root = RUNTIME_ROOT.resolve()
     except OSError:
-        return False
+        return False, "unresolvable-profile-path"
     if resolved_profile == resolved_root or resolved_root not in resolved_profile.parents:
-        return False
+        return False, "profile-outside-runtime-root"
     if resolved_profile.exists():
-        shutil.rmtree(resolved_profile)
+        try:
+            shutil.rmtree(resolved_profile)
+        except OSError:
+            return False, "profile-removal-failed"
     session.setdefault("profile", {})["removed"] = True
-    return True
+    return True, "profile-removed"
 
 
 def cmd_close(args):
@@ -415,14 +421,14 @@ def cmd_close(args):
         print_obj(receipt, args.json)
         return
     session["state"] = "closing"
-    removed = remove_profile(session)
+    removed, cleanup_reason = remove_profile(session)
     session["state"] = "cleaned" if removed else "quarantined"
     post = ["engine-inactive", "endpoint-gone", "process-gone", "lease-removed"]
     post.append("profile-removed" if removed else "profile-quarantined")
-    receipt = append_receipt(session, "close", result="ok" if removed else "error", postconditions=post, reason=args.reason)
+    receipt = append_receipt(session, "close", result="ok" if removed else "error", postconditions=post, reason=args.reason, profileOutcome=cleanup_reason)
     save_session(session)
     if not removed:
-        die("profile cleanup postcondition failed; session quarantined", "cleanup-quarantined", as_json=args.json, handle=session["handle"])
+        die(f"profile cleanup postcondition failed ({cleanup_reason}); session quarantined", "cleanup-quarantined", as_json=args.json, handle=session["handle"], profileOutcome=cleanup_reason)
     print_obj(receipt, args.json)
 
 

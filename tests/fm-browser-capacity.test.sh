@@ -83,7 +83,41 @@ PY
   pass "expiry reports eligible sessions without closing them in alert-only core"
 }
 
+test_quarantined_session_does_not_hold_a_slot() {
+  local home="$TMP_ROOT/quarantine-home" runtime="$TMP_ROOT/quarantine-runtime" out handle session outside rc
+  setup_home "$home" 1
+  out=$(plan_and_open "$home" "$runtime" q1) || fail "first open failed"
+  handle=$(json_field "$out" handle)
+  session="$home/state/browser/v1/sessions/$handle.json"
+  outside="$TMP_ROOT/quarantine-outside"
+  mkdir -p "$outside"
+  python3 - "$session" "$outside" <<'PY'
+import json, sys
+path, outside = sys.argv[1], sys.argv[2]
+with open(path, encoding='utf-8') as fh:
+    obj = json.load(fh)
+obj['profile']['path'] = outside
+with open(path, 'w', encoding='utf-8') as fh:
+    json.dump(obj, fh, sort_keys=True, indent=2)
+    fh.write('\n')
+PY
+  set +e
+  FM_HOME="$home" FM_BROWSER_MOCK_ENGINE=1 FM_BROWSER_RUNTIME_OVERRIDE="$runtime" \
+    "$ROOT/bin/fm-browser.sh" close --handle "$handle" --json >/dev/null 2>&1
+  rc=$?
+  set -e 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "escaped profile close unexpectedly succeeded"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-browser.sh" status --handle "$handle" --json) || fail "status failed"
+  [ "$(json_field "$out" state)" = quarantined ] || fail "session did not enter quarantine"
+  plan_and_open "$home" "$runtime" q2 >/dev/null \
+    || fail "quarantined session permanently consumed the only capacity slot"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-browser.sh" inspect --all --json) || fail "inspect failed"
+  [ "$(json_field "$out" activeCount)" = 1 ] || fail "quarantined session still counted as active"
+  pass "quarantine records unproven cleanup without consuming engine capacity"
+}
+
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 test_capacity_refuses_second_active_session
 test_expiry_is_report_only
+test_quarantined_session_does_not_hold_a_slot

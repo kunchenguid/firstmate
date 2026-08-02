@@ -83,7 +83,36 @@ PY
   pass "cleanup refuses path escape and preserves ambiguous profile"
 }
 
+test_empty_profile_path_quarantines() {
+  local home="$TMP_ROOT/empty-home" runtime="$TMP_ROOT/runtime-empty" out handle session rc
+  setup_home "$home"
+  out=$(open_mock "$home" "$runtime" empty-task) || fail "open failed"
+  handle=$(json_field "$out" handle)
+  session="$home/state/browser/v1/sessions/$handle.json"
+  python3 - "$session" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding='utf-8') as fh:
+    obj = json.load(fh)
+obj['profile']['path'] = ''
+with open(path, 'w', encoding='utf-8') as fh:
+    json.dump(obj, fh, sort_keys=True, indent=2)
+    fh.write('\n')
+PY
+  set +e
+  out=$(FM_HOME="$home" FM_BROWSER_MOCK_ENGINE=1 FM_BROWSER_RUNTIME_OVERRIDE="$runtime" \
+    "$ROOT/bin/fm-browser.sh" close --handle "$handle" --json 2>/dev/null)
+  rc=$?
+  set -e 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "session with no recorded profile path unexpectedly reported clean"
+  [ "$(json_field "$out" code)" = cleanup-quarantined ] || fail "empty profile path did not quarantine"
+  [ "$(json_field "$out" profileOutcome)" = missing-profile-path ] || fail "quarantine reason was not reported"
+  case "$out" in *"$TMP_ROOT"*) fail "close output leaked a filesystem path" ;; esac
+  pass "a session without a recorded profile path quarantines instead of resolving to the working directory"
+}
+
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 test_profile_removed_on_clean_close
 test_profile_escape_quarantines
+test_empty_profile_path_quarantines

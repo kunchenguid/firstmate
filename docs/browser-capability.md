@@ -65,6 +65,8 @@ Private and local origins refuse before any engine execution.
 Write-capable actions refuse in v1.
 Typing requires `--value-file` so page text is not passed on the command line.
 A task with an unclean browser binding blocks task cleanup until `bin/fm-browser.sh close --handle <handle>` succeeds or the record is inspected and resolved.
+A quarantined session records unproven cleanup, so it keeps blocking that task's cleanup, but it does not hold an active session slot against `maxActiveSessions`.
+`open` accepts only a bare `sha256:<64 hex>` plan receipt as printed by `plan`.
 
 ## Future proof stages
 

@@ -31,26 +31,30 @@ PY
 }
 
 fm_browser_refuse_unclean_task() {
-  local home=$1 task=$2 binding state handle
+  local home=$1 task=$2 binding message
   binding=$(fm_browser_binding_file "$home" "$task") || return 0
   [ -f "$binding" ] || return 0
-  if fm_browser_task_cleaned "$home" "$task"; then
-    return 0
-  fi
-  state=$(python3 - "$binding" <<'PY'
+  message=$(python3 - "$binding" "$task" <<'PY'
 import json, sys
-with open(sys.argv[1], encoding='utf-8') as fh:
-    obj = json.load(fh)
-print(obj.get('state', 'unknown'))
-PY
+binding, task = sys.argv[1], sys.argv[2]
+try:
+    with open(binding, encoding='utf-8') as fh:
+        obj = json.load(fh)
+except Exception:
+    state, handle = 'unreadable', 'unknown'
+else:
+    if obj.get('cleaned') is True or obj.get('state') == 'cleaned':
+        raise SystemExit(0)
+    state = obj.get('state', 'unknown')
+    handle = obj.get('handle', 'unknown')
+print(
+    f'error: task {task} has an unclean browser binding {binding} (state: {state}); '
+    f'run bin/fm-browser.sh close --handle {handle} or inspect the browser record before cleanup'
 )
-  handle=$(python3 - "$binding" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as fh:
-    obj = json.load(fh)
-print(obj.get('handle', 'unknown'))
+raise SystemExit(1)
 PY
-)
-  printf 'error: task %s has an unclean browser binding %s (state: %s); run bin/fm-browser.sh close --handle %s or inspect the browser record before cleanup\n' "$task" "$binding" "$state" "$handle" >&2
+  ) && return 0
+  [ -n "$message" ] || message="error: task $task has an unclean browser binding $binding (state: unknown); run bin/fm-browser.sh close --handle unknown or inspect the browser record before cleanup"
+  printf '%s\n' "$message" >&2
   return 1
 }

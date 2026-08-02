@@ -93,8 +93,29 @@ test_mock_lifecycle() {
   pass "mock lifecycle records navigation, redaction, denied writes, and cleanup"
 }
 
+test_plan_receipt_must_be_a_digest() {
+  local home="$TMP_ROOT/receipt" out rc
+  setup_home "$home" true
+  set +e
+  out=$(FM_HOME="$home" FM_BROWSER_MOCK_ENGINE=1 "$ROOT/bin/fm-browser.sh" \
+    open --task t5 --plan '../../../../tmp/escape' --json 2>/dev/null)
+  rc=$?
+  set -e 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "traversing plan receipt unexpectedly accepted"
+  [ "$(json_field "$out" code)" = invalid-plan-receipt ] || fail "plan receipt was not validated before the path join"
+  set +e
+  out=$(FM_HOME="$home" FM_BROWSER_MOCK_ENGINE=1 "$ROOT/bin/fm-browser.sh" \
+    open --task t5 --plan 'sha256:sha256:deadbeef' --json 2>/dev/null)
+  rc=$?
+  set -e 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "malformed plan receipt unexpectedly accepted"
+  [ "$(json_field "$out" code)" = invalid-plan-receipt ] || fail "malformed receipt was not refused"
+  pass "open refuses plan receipts that are not a bare sha256 digest"
+}
+
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 test_disabled_capabilities_and_plan
 test_public_origin_refusals
 test_mock_lifecycle
+test_plan_receipt_must_be_a_digest
