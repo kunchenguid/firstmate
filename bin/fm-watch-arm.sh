@@ -40,7 +40,8 @@
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
 # reason; on attached it stays live across identity-matched successors. An
-# attached cycle that ends without a healthy successor is a typed nonzero failure,
+# attached cycle that ends without a healthy successor completes only when durable
+# actionable evidence explains the close; otherwise it is a typed nonzero failure,
 # never a clean empty completion. On FAILED it exits non-zero so the failure is
 # loud. A live cycle already present means re-arm attaches - do not start a second
 # watcher.
@@ -299,8 +300,9 @@ fail_unexplained_cycle() {
 }
 
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
-# to a verified successor. With no successor, fail loudly instead of returning a
-# clean empty completion that an adapter could mistake for a no-op.
+# to a verified successor. With no successor, accept a durably evidenced actionable
+# close or fail loudly instead of returning an empty completion that an adapter
+# could mistake for a no-op.
 attach_and_wait() {
   local attached_pid=$1
   while :; do

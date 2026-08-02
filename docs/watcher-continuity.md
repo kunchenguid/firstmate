@@ -29,7 +29,7 @@ Claude's Stop hook starts the successor arm at the next Stop after the handling 
 The durable wake queue preserves actionable events during the residual active-turn window, and the unchanged bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
 No PreToolUse hook denies fleet commands based on watcher status.
 The model no longer re-arms after ordinary wakes.
-Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
+Terminal arm-output classification (`started`, `attached`, `completed`, or `FAILED`) remains defense in depth for the manual recovery path.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
@@ -44,7 +44,7 @@ For `context-ceiling:`, the arm records the lifecycle reason as `actionable-cont
 A zero/empty child return rechecks the home lock and beacon and attaches to a verified healthy successor when one exists.
 An attached peer close with a newly durable wake or a matching actionable peer lifecycle record emits `watcher: completed - attached cycle ended after an actionable wake` and exits zero because the peer ended for an expected reason that this arm could not capture directly.
 Only a close with neither a successor nor actionable evidence emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
-An attached arm follows verified identity-matched successors and reports the same typed failure if that chain ends without one.
+An attached arm follows verified identity-matched successors and applies the same actionable-evidence-or-failure classification whenever that chain ends without one.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
