@@ -94,7 +94,7 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
 That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
-It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
+It intentionally runs the complete behavior-test inventory serially instead of reproducing the duration-balanced CI sharding owned by [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh) or delegating the test step to an agent.
 
 ## Captain preferences (data/captain.md)
 

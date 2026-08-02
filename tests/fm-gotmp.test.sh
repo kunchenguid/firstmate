@@ -7,7 +7,7 @@
 #
 # The fm-spawn side is verified both structurally (the source has the contract lines)
 # and behaviorally (the mkdir + meta-write pattern it uses).
-# Teardown cleanup is covered by tests/fm-teardown.test.sh's full lifecycle fixture.
+# Teardown cleanup is covered by tests/fm-teardown-suite.sh's full lifecycle fixture.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

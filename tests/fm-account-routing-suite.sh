@@ -5952,10 +5952,19 @@ run_isolated_test() {
   # a condition context suppresses errexit for the whole test body, so an
   # in-test `set -e` would be silently ignored.
   local status
+  FM_TEST_PART_SEQUENCE=$((FM_TEST_PART_SEQUENCE + 1))
+  if [ "$FM_TEST_PART_TOTAL" -gt 1 ] \
+    && [ $(((FM_TEST_PART_SEQUENCE - 1) % FM_TEST_PART_TOTAL + 1)) -ne "$FM_TEST_PART_INDEX" ]; then
+    return 0
+  fi
   ( "$@" )
   status=$?
   [ "$status" -eq 0 ] || exit "$status"
 }
+
+FM_TEST_PART_INDEX=${FM_TEST_PART_INDEX:-1}
+FM_TEST_PART_TOTAL=${FM_TEST_PART_TOTAL:-1}
+FM_TEST_PART_SEQUENCE=0
 
 if [ "${FM_TEST_FOCUSED:-}" = backlog-row-exemptions ]; then
   run_isolated_test test_resume_uses_sticky_recovery_and_preserves_mapping_on_failure
