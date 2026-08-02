@@ -11,6 +11,7 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (f) trusted host diff.external=/GIT_EXTERNAL_DIFF= viewer -> change detection and patch output are unaffected
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -133,6 +134,47 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
   pass "fm-review-diff fetches refs/pull/<n>/head when pr_head= is absent"
 }
 
+test_host_external_diff_cannot_replace_the_patch() {
+  local case_dir out
+  case_dir=$(make_case external-diff)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir"
+
+  # A host viewer (difftastic, delta, ...) must never stand in for the reviewed
+  # patch, and a viewer Git is told to trust must never answer the change
+  # predicate either: exiting 0 there makes the review print "no changes" and
+  # stop on a branch that did change. Config and environment are independent
+  # mechanisms - GIT_EXTERNAL_DIFF overrides diff.external, and
+  # diff.trustExitCode does not govern it - so both are exercised.
+  cat > "$case_dir/fake-ext-diff" <<'EXT'
+#!/usr/bin/env bash
+echo "EXTERNAL VIEWER OUTPUT"
+exit 0
+EXT
+  chmod +x "$case_dir/fake-ext-diff"
+  git -C "$case_dir/project" config diff.external "$case_dir/fake-ext-diff"
+  git -C "$case_dir/project" config diff.trustExitCode true
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  # Patch substitution is checked first so each failure names its own cause: a
+  # falsified predicate prints "no changes" with no viewer output at all.
+  assert_not_contains "$out" 'EXTERNAL VIEWER OUTPUT' \
+    "external-diff: trusted diff.external must not replace the patch"
+  assert_contains "$out" '+stale-local' \
+    "external-diff: trusted diff.external must not answer the change predicate"
+
+  out=$(GIT_EXTERNAL_DIFF="$case_dir/fake-ext-diff" \
+    GIT_EXTERNAL_DIFF_TRUST_EXIT_CODE=1 \
+    run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_not_contains "$out" 'EXTERNAL VIEWER OUTPUT' \
+    "external-diff: trusted GIT_EXTERNAL_DIFF must not replace the patch"
+  assert_contains "$out" '+stale-local' \
+    "external-diff: trusted GIT_EXTERNAL_DIFF must not answer the change predicate"
+  pass "fm-review-diff ignores trusted host external diff viewers"
+}
+
 test_no_pr_meta_uses_local_branch() {
   local case_dir out
   case_dir=$(make_case no-pr-meta)
@@ -174,3 +216,4 @@ test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_host_external_diff_cannot_replace_the_patch
