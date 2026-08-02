@@ -6,9 +6,10 @@
 #   . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # It provides the boilerplate every test file used to re-roll: ok/not-ok
-# reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
-# git identity and fixture builders, state/<id>.meta writers, and the common
-# string/exit-code/file assertions. It deliberately does NOT bundle the
+# reporters, a self-cleaning temp root, a reaper for background processes,
+# fakebin/PATH-shim helpers, deterministic git identity and fixture builders,
+# state/<id>.meta writers, and the common string/exit-code/file assertions.
+# It deliberately does NOT bundle the
 # behavior-specific fake tmux/treehouse/no-mistakes mocks: those encode terminal
 # and lifecycle assumptions that differ per suite and belong with the tests that
 # own them.
@@ -50,28 +51,148 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
-# --- self-cleaning temp root ------------------------------------------------
+# --- self-cleaning temp root and background-process reaper -------------------
 #
-# fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
-# call fm_test_cleanup from inside it so registered dirs are still removed.
+# fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal.
+# fm_test_reap <pid>... registers a background process for teardown.
+# Both are torn down by fm_test_cleanup, which the first registration installs on
+# EXIT and on the signals that stop a wedged suite. A test file that needs extra
+# teardown (e.g. killing a daemon) should define its own EXIT trap and call
+# fm_test_cleanup from inside it so registered dirs and processes are still torn
+# down.
 
 FM_TEST_CLEANUP_DIRS=()
+FM_TEST_CLEANUP_PIDS=()
+FM_TEST_CLEANUP_PID_IDENTITIES=()
+
+# Install fm_test_cleanup for every way a suite can end, once per shell.
+# A bare EXIT trap does not run for a signalled shell, and timeout(1) stops a
+# hung suite with TERM, so EXIT alone would let a wedged case orphan its
+# background processes.
+fm_test_install_cleanup_trap() {
+  [ -z "${FM_TEST_CLEANUP_TRAP_INSTALLED:-}" ] || return 0
+  FM_TEST_CLEANUP_TRAP_INSTALLED=1
+  trap fm_test_cleanup EXIT
+  trap 'fm_test_cleanup_on_signal 1' HUP
+  trap 'fm_test_cleanup_on_signal 2' INT
+  trap 'fm_test_cleanup_on_signal 15' TERM
+}
+
+# Tear down, then exit with the conventional 128+signo so the runner still sees
+# the suite as signalled. Clearing the EXIT trap keeps teardown from running
+# twice; fm_test_cleanup is idempotent regardless.
+fm_test_cleanup_on_signal() {  # <signal-number>
+  fm_test_cleanup
+  trap - EXIT
+  exit "$((128 + $1))"
+}
+
+# Read a process identity through the production primitive. It runs in a
+# throwaway bash rather than being sourced here: bin/fm-wake-lib.sh defines
+# every fm_ function and mkdirs its state dir at source time, and injecting
+# that into every shell that sources this harness could change unrelated
+# suites. Failure prints nothing and returns nonzero.
+fm_test_pid_identity() {  # <pid>
+  FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c '. "$1" && fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$1" 2>/dev/null
+}
+
+# fm_test_reap <pid> ...: register background processes for teardown on every
+# exit path - a clean pass, a fail() abort, or an abrupt signal. Register a pid
+# as soon as it is known, BEFORE the assertions that could abort: a case that
+# only kills on its happy path leaks on every other path. Each pid's identity
+# is recorded alongside it: the registry lives for the whole suite, so by
+# teardown a short-lived helper's pid can have been recycled to an unrelated
+# process, and a root is only killed when its identity still matches.
+fm_test_reap() {
+  local pid identity
+  fm_test_install_cleanup_trap
+  for pid in "$@"; do
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    identity=$(fm_test_pid_identity "$pid") || identity=
+    FM_TEST_CLEANUP_PIDS+=("$pid")
+    FM_TEST_CLEANUP_PID_IDENTITIES+=("$identity")
+  done
+}
+
+# Echo every given pid and its descendants, parents before children. A
+# registered process may have forked its own tracked child - bin/fm-watch-arm.sh
+# forks the watcher it supervises - and killing only the registered pid would
+# orphan that child. All roots share one process-table read so registering many
+# short-lived helpers stays cheap. Depth is bounded so a malformed process table
+# cannot loop forever.
+fm_test_process_tree() {  # <pid> ...
+  local rows generation next depth=0
+  [ "$#" -gt 0 ] || return 0
+  # A ps that cannot render the pid/ppid table (MSYS/Cygwin, some busybox
+  # builds) must not turn the reaper into a no-op: the identity-verified roots
+  # are still known good, so emit them even when their descendants cannot be
+  # discovered.
+  if ! rows=$(ps -axo pid=,ppid= 2>/dev/null); then
+    printf '%s\n' "$@"
+    return 0
+  fi
+  generation="$*"
+  while [ -n "$generation" ] && [ "$depth" -lt 8 ]; do
+    printf '%s\n' "$generation" | tr ' ' '\n' | grep -v '^$' || true
+    next=$(printf '%s\n' "$rows" | awk -v gen="$generation" '
+      BEGIN { n = split(gen, ids, " "); for (i = 1; i <= n; i += 1) parent[ids[i]] = 1 }
+      parent[$2] { printf "%s ", $1 }
+    ')
+    generation=${next% }
+    depth=$((depth + 1))
+  done
+}
+
+# Kill the given processes and every descendant they had at teardown time.
+# The snapshot is taken BEFORE the first kill because a dead parent's children
+# are reparented and can no longer be found by walking ppid. SIGKILL rather than
+# SIGTERM because the process this reaper exists for, bin/fm-watch-arm.sh,
+# deliberately launches a successor watcher when its child cycle ends: a
+# catchable signal would hand back a fresh process nothing ever recorded.
+fm_test_kill_tree() {  # <pid> ...
+  local p
+  while IFS= read -r p; do
+    case "$p" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    kill -KILL "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+  done <<<"$(fm_test_process_tree "$@")"
+}
 
 fm_test_cleanup() {
-  local d
+  local d i pid verified=()
+  # Processes first: a live child must not keep writing into a directory that is
+  # about to be removed. Never kill what cannot be proven ours: a registered
+  # root is killed only when its identity read now matches the one recorded at
+  # registration, so a recycled pid belonging to an unrelated process is
+  # skipped and never enumerated as a tree root. Descendants found under a
+  # verified root need no gate - they are that live process's current children.
+  if [ "${#FM_TEST_CLEANUP_PIDS[@]}" -gt 0 ]; then
+    for i in "${!FM_TEST_CLEANUP_PIDS[@]}"; do
+      pid=${FM_TEST_CLEANUP_PIDS[$i]}
+      [ -n "${FM_TEST_CLEANUP_PID_IDENTITIES[$i]:-}" ] || continue
+      [ "$(fm_test_pid_identity "$pid")" = "${FM_TEST_CLEANUP_PID_IDENTITIES[$i]}" ] || continue
+      verified+=("$pid")
+    done
+    if [ "${#verified[@]}" -gt 0 ]; then
+      fm_test_kill_tree "${verified[@]}"
+    fi
+  fi
+  FM_TEST_CLEANUP_PIDS=()
+  FM_TEST_CLEANUP_PID_IDENTITIES=()
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  FM_TEST_CLEANUP_DIRS=()
 }
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
+  fm_test_install_cleanup_trap
   FM_TEST_CLEANUP_DIRS+=("$root")
   printf '%s\n' "$root"
 }
