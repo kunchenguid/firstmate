@@ -6,6 +6,61 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Codex in-session reasoning effort
+
+Codex CLI 0.146.0 was verified on 2026-08-03 against the current [official model guidance](https://learn.chatgpt.com/docs/models.md) and [official CLI slash-command reference](https://learn.chatgpt.com/docs/developer-commands.md?surface=cli).
+The official guidance says an interactive CLI session can use `/model` to adjust reasoning effort, and the CLI reference lists `/model` as choosing the active model and effort when available.
+The installed `/keymap` UI exposed Chat Decrease Reasoning as `alt-,` and `shift-down`, and Chat Increase Reasoning as `alt-.` and `shift-up`.
+
+The interfaces considered were:
+
+| Interface | Installed and documented behavior | Operational conclusion |
+| --- | --- | --- |
+| `/model` | Public interactive model and effort chooser. | Supported for a human, but automation would have to traverse two menus whose layout is not a stable task interface. |
+| `/model gpt-5.6-sol high` | Parsed as an ordinary user prompt rather than a command with arguments, and the unchanged footer disproved the model's textual claim that effort changed. | Never use command arguments or transcript prose as confirmation. |
+| Reasoning keybindings | Public actions visible in `/keymap`, with one input per adjacent effort level. | Smallest stable interactive interface when each step is confirmed from the live footer. |
+| App-server `thread/settings/update` | `codex app-server generate-json-schema` describes `effort` as an override for subsequent turns. | Valid for an app-server-owned thread, but a normal pane TUI has no supported external attachment seam, so it is not an operational interface for existing crewmates. |
+| Quit and resume | Preserves a saved session but exits the process and reloads launch behavior. | Recovery fallback only. |
+
+### Herdr verification
+
+The primary experiment ran in a guarded `bin/fm-herdr-lab.sh` session with a scratch Git worktree and Codex launched at `gpt-5.6-sol high`.
+The default-session tripwire stayed intact, and teardown used the guarded named-lab path.
+The baseline recorded one Codex process, one Codex thread and rollout path, the scratch worktree, a remembered context token, and three completed SessionStart hooks.
+
+`/model` displayed the current model first and then Low, Medium, High, and Extra high effort choices.
+Selecting Medium changed the footer and persisted the thread effort without changing the thread id, rollout path, process id, process count, or worktree.
+The same process later reproduced the pre-switch context token, and the visible completed SessionStart-hook count stayed at three.
+
+Herdr 0.7.5 did not accept named `alt-.` or `shift-up` keys through `pane send-keys` and returned `invalid_key`.
+Sending literal `ESC .` through `pane send-text` changed Medium to High, and literal `ESC ,` changed High to Medium.
+A second guarded lab established the complete adjacent sequence `low <-> medium <-> high <-> xhigh` and confirmed that the boundary levels do not move farther.
+The public `bin/fm-codex-effort.sh` interface then changed a fresh isolated Herdr Codex from High to Medium and updated its private fixture metadata only after the footer showed Medium.
+
+### tmux verification
+
+The bounded reference-backend compatibility test used tmux 3.7b, one uniquely named detached session, and one scratch Git worktree.
+It did not change `config/backend`, inspect or migrate live tasks, or touch the preferred Herdr production path.
+Tmux `send-keys M-,` changed the live Codex footer from High to Medium.
+Before and after the input, the Codex thread id and rollout path matched, the foreground Codex process id matched, the session contained exactly one Codex process, the process cwd matched the scratch worktree, and the completed SessionStart-hook count remained three.
+The post-switch turn reproduced a context token created before the switch.
+The exact session was exited and killed after the bounded check.
+
+`bin/fm-codex-effort.sh` therefore uses literal `ESC .` and `ESC ,` on Herdr and semantic `M-.` and `M-,` keys on tmux.
+It supports only idle Codex tasks whose endpoint identity, live agent, current worktree, empty composer, and current model and effort footer are all verified.
+It checks each adjacent transition, revalidates the endpoint, and atomically updates only `effort=` after the final footer confirmation.
+Zellij, Orca, and cmux remain refused because their current backend adapters return `unverified` from the recovery-grade agent-state interface, even though they have generic input and capture primitives.
+This is an evidence gap rather than a claim that their terminal transports cannot carry the keys.
+Quit and resume are no longer required for routine effort changes on the verified Herdr and tmux paths.
+
+Behavior regression coverage is owned by:
+
+```sh
+tests/fm-codex-effort.test.sh
+```
+
+The suite covers successful adjacent switching on Herdr and tmux, session-identity preservation, metadata-after-footer ordering, invalid effort, wrong harness, busy and ambiguous state, swallowed input, changed UI, unsupported backends, and no false success.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
