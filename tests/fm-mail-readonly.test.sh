@@ -140,7 +140,18 @@ test_configuration_validation_refuses_unsafe_input() {
   expect_code 2 "$code" "a world-writable configuration"
   assert_contains "$out" "writable" "the permission refusal does not explain itself"
   chmod 600 "$dir/mail.json"
-  pass "configuration validation refuses bad ids, unpinned mailboxes, ambiguous authorities and writable files"
+
+  chmod 777 "$dir"
+  code=0
+  out=$(run_mail "$dir" status 2>&1) || code=$?
+  expect_code 2 "$code" "a world-writable configuration directory"
+  assert_contains "$out" "directory" "the directory permission refusal does not name the directory"
+  assert_contains "$out" "replace" "the directory permission refusal does not explain what it prevents"
+  chmod 700 "$dir"
+  code=0
+  out=$(run_mail "$dir" status 2>&1) || code=$?
+  expect_code 0 "$code" "a private configuration directory"
+  pass "configuration validation refuses bad ids, unpinned mailboxes, ambiguous authorities and writable files or directories"
 }
 
 test_status_reports_credential_presence_without_leaking_it() {
@@ -633,6 +644,73 @@ expect("[redacted-code]" in out and "[redacted-link]" in out,
 expect(fm.ENVELOPE_BEGIN in out, "the redacted rendering left the untrusted-data envelope off")
 expect("heuristic" in out or "heuristic" in err, "the classifier's limits are not stated where it fires")
 ok("mail that looks like it carries an authentication secret is withheld by default and aggressively redacted on request")
+
+# --- a code that lives in the subject line ----------------------------------
+
+SUBJECT_CODE = "483920 is your Apple ID verification code"
+_directory, transport = scenario("risky-subject", stored=REFRESH)
+wire_refresh(transport)
+wire_me(transport)
+transport.route(
+    "GET", fm.GRAPH_HOST, "/v1.0/me/mailFolders/inbox/messages", 200,
+    {"value": [{
+        "id": MESSAGE_ID,
+        "receivedDateTime": "2026-08-01T09:14:00Z",
+        "subject": SUBJECT_CODE,
+        "from": {"emailAddress": {"name": "Apple", "address": "noreply@example.invalid"}},
+        "isRead": False,
+    }]},
+)
+transport.route(
+    "GET", fm.GRAPH_HOST, "/v1.0/me/messages/" + urllib.parse.quote(MESSAGE_ID, safe=""), 200,
+    {"id": MESSAGE_ID, "subject": SUBJECT_CODE,
+     "body": {"contentType": "text", "content": "Enter it to finish signing in.\n"}},
+)
+code, out, err = run(["list"])
+expect(code == 0, "listing failed: %s%s" % (out, err))
+expect("483920" not in out, "a listing printed a one-time code that sat in the subject line")
+expect("[redacted-code]" in out, "the listing masked the subject without marking it")
+for label, argv in (
+    ("withheld by default", ["show", fm.message_ref(MESSAGE_ID)]),
+    ("redacted on request", ["show", fm.message_ref(MESSAGE_ID), "--redacted"]),
+):
+    code, out, err = run(argv)
+    expect(code == 0, "%s failed: %s%s" % (label, out, err))
+    expect("483920" not in out, "%s printed the code from the subject line" % label)
+    expect("[redacted-code]" in out, "%s masked the subject without marking it" % label)
+ok("a one-time code that sits in the subject line is masked in listings and in a shown message, not just in the body")
+
+# --- redaction covers every code shape it claims to --------------------------
+
+for value, label in (
+    ("4111111111111111", "a sixteen-digit run"),
+    ("12345678901234", "a fourteen-digit run"),
+    ("483920", "a six-digit run"),
+    ("ABCDEFGHIJKLMNOP", "a letter-only recovery code"),
+    ("1234 5678 9012", "a space-grouped code"),
+    ("123-456", "a hyphen-grouped code"),
+):
+    expect(value not in fm.redact("the value is " + value + " so use it"),
+           "redaction left %s in the output" % label)
+expect("[redacted-link]" in fm.redact("open https://example.invalid/x"), "a link was not masked")
+ok("redaction masks long digit runs, grouped codes and letter-only tokens, not only mixed alphanumeric ones")
+
+# --- the stored credential format bound -------------------------------------
+
+for credential, label in (
+    ("M.C5_BAY.0.U.AgAAA!*fake-vendor-shaped-value", "a vendor credential carrying ! and *"),
+    ("M.C5_BAY.0.U.fake-refresh-credential-value", "a plain vendor credential"),
+):
+    expect(fm.TOKEN_RE.match(credential), "the credential format check rejected %s" % label)
+for credential, label in (
+    ("short", "a value below the minimum length"),
+    ("M.C5_BAY.0.U.value with a space", "a value carrying whitespace"),
+    ("M.C5_BAY.0.U.value\nwith-a-newline", "a value carrying a newline"),
+    ("M.C5_BAY.0.U.value-with-nön-ascii", "a non-ASCII value"),
+    ("M.C5_BAY.0.U." + "x" * fm.MAX_TOKEN_CHARS, "an oversized value"),
+):
+    expect(not fm.TOKEN_RE.match(credential), "the credential format check accepted %s" % label)
+ok("the stored credential must be single-line printable ASCII without pinning the vendor's charset")
 
 for subject, body in (
     ("Passwort zuruecksetzen", "Klicken Sie hier, um Ihr Passwort zuruecksetzen zu lassen."),
