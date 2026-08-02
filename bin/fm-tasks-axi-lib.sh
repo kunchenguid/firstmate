@@ -12,74 +12,74 @@
 # back to manual mutation when the tool is not compatible.
 
 fm_tasks_axi_version_parts() {
-  local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" |
-    sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
-    head -1
+	local output
+	command -v tasks-axi >/dev/null 2>&1 || return 1
+	output=$(tasks-axi --version 2>/dev/null) || return 1
+	printf '%s\n' "$output" |
+		sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
+		head -1
 }
 
 fm_tasks_axi_compatible() {
-  local parts major minor patch rest
-  parts=$(fm_tasks_axi_version_parts) || return 1
-  [ -n "$parts" ] || return 1
-  major=${parts%% *}
-  rest=${parts#* }
-  minor=${rest%% *}
-  patch=${rest##* }
+	local parts major minor patch rest
+	parts=$(fm_tasks_axi_version_parts) || return 1
+	[ -n "$parts" ] || return 1
+	major=${parts%% *}
+	rest=${parts#* }
+	minor=${rest%% *}
+	patch=${rest##* }
 
-  if [ "$major" -gt 0 ] ||
-    { [ "$major" -eq 0 ] && [ "$minor" -gt 2 ]; } ||
-    { [ "$major" -eq 0 ] && [ "$minor" -eq 2 ] && [ "$patch" -ge 4 ]; }; then
-    fm_tasks_axi_update_has_archive_body \
-      && fm_tasks_axi_mv_has_multi_id \
-      && fm_tasks_axi_has_public_followup
-    return $?
-  fi
-  return 1
+	if [ "$major" -gt 0 ] ||
+		{ [ "$major" -eq 0 ] && [ "$minor" -gt 2 ]; } ||
+		{ [ "$major" -eq 0 ] && [ "$minor" -eq 2 ] && [ "$patch" -ge 4 ]; }; then
+		fm_tasks_axi_update_has_archive_body &&
+			fm_tasks_axi_mv_has_multi_id &&
+			fm_tasks_axi_has_public_followup
+		return $?
+	fi
+	return 1
 }
 
 fm_tasks_axi_update_has_archive_body() {
-  local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi update --help 2>&1) || return 1
-  printf '%s\n' "$output" | grep -F -- '--archive-body' >/dev/null
+	local output
+	command -v tasks-axi >/dev/null 2>&1 || return 1
+	output=$(tasks-axi update --help 2>&1) || return 1
+	printf '%s\n' "$output" | grep -F -- '--archive-body' >/dev/null
 }
 
 fm_tasks_axi_mv_has_multi_id() {
-  local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi mv --help 2>&1) || return 1
-  printf '%s\n' "$output" | grep -F -- '[<id>...]' >/dev/null
+	local output
+	command -v tasks-axi >/dev/null 2>&1 || return 1
+	output=$(tasks-axi mv --help 2>&1) || return 1
+	printf '%s\n' "$output" | grep -F -- '[<id>...]' >/dev/null
 }
 
 fm_tasks_axi_has_public_followup() {
-  local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi public-followup --help 2>&1) || return 1
-  printf '%s\n' "$output" | grep -F -- 'public-followup add' >/dev/null
+	local output
+	command -v tasks-axi >/dev/null 2>&1 || return 1
+	output=$(tasks-axi public-followup --help 2>&1) || return 1
+	printf '%s\n' "$output" | grep -F -- 'public-followup add' >/dev/null
 }
 
 fm_backlog_backend_value() {
-  local config_dir=$1 backend_file value
-  backend_file="$config_dir/backlog-backend"
-  if [ -f "$backend_file" ]; then
-    value=$(tr -d '[:space:]' < "$backend_file" 2>/dev/null || true)
-    [ -n "$value" ] || value=tasks-axi
-    printf '%s\n' "$value"
-    return 0
-  fi
-  printf '%s\n' tasks-axi
+	local config_dir=$1 backend_file value
+	backend_file="$config_dir/backlog-backend"
+	if [ -f "$backend_file" ]; then
+		value=$(tr -d '[:space:]' <"$backend_file" 2>/dev/null || true)
+		[ -n "$value" ] || value=tasks-axi
+		printf '%s\n' "$value"
+		return 0
+	fi
+	printf '%s\n' tasks-axi
 }
 
 fm_backlog_backend_manual() {
-  local config_dir=$1
-  [ "$(fm_backlog_backend_value "$config_dir")" = manual ]
+	local config_dir=$1
+	[ "$(fm_backlog_backend_value "$config_dir")" = manual ]
 }
 
 fm_tasks_axi_backend_available() {
-  local config_dir=$1
-  fm_backlog_backend_manual "$config_dir" && return 1
-  fm_tasks_axi_compatible
+	local config_dir=$1
+	fm_backlog_backend_manual "$config_dir" && return 1
+	fm_tasks_axi_compatible
 }
