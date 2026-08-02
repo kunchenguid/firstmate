@@ -1699,14 +1699,20 @@ entries = [
     for item in sys.stdin.buffer.read().split(b"\0")
     if item
 ]
-generated = {
+dependency_roots = {
+    ".bundle", ".pnpm", ".venv", "node_modules", "pods", "venv",
+}
+generated_roots = {
     ".cache", ".mypy_cache", ".next", ".nuxt", ".parcel-cache",
     ".pytest_cache", ".ruff_cache", "__pycache__", "build", "cache",
-    "caches", "coverage", "dist", "node_modules", "target",
+    "caches", "coverage", "dist", "target",
+}
+generated_path_parts = {"assets", "chunks", "generated", "static"}
+generated_names = {
+    ".coverage", "coverage-final.json", "lcov.info", "results.json",
 }
 work_roots = {"data", "docs"}
 work_words = ("draft", "note", "report", "skill")
-work_suffixes = (".md", ".markdown", ".rst", ".txt")
 recent_cutoff = time.time() - 24 * 60 * 60
 refused = []
 
@@ -1714,18 +1720,26 @@ for entry in entries:
     parts = tuple(part for part in entry.split("/") if part)
     lowered = tuple(part.lower() for part in parts)
     basename = lowered[-1] if lowered else ""
-    allowed_root = next((part for part in lowered if part in generated), None)
+    dependency_owned = any(part in dependency_roots for part in lowered)
+    generated_root = next((part for part in lowered if part in generated_roots), None)
+    generated_evidence = (
+        any(part in generated_path_parts for part in lowered[:-1])
+        or basename in generated_names
+        or basename.endswith((".map", ".pyc"))
+    )
     reason = None
+    if dependency_owned:
+        continue
     if not parts or lowered[0] in work_roots or ".agents" in lowered and "skills" in lowered:
         reason = "work-shaped"
     elif any(word in basename for word in work_words):
         reason = "work-shaped"
-    elif allowed_root is None:
+    elif generated_root is None:
         reason = "ambiguous"
-    elif basename.endswith(work_suffixes):
+    elif not generated_evidence:
         try:
             if os.stat(os.path.join(worktree, entry), follow_symlinks=False).st_mtime >= recent_cutoff:
-                reason = "recent-hand-edit-shaped"
+                reason = "recent-ambiguous"
         except OSError:
             reason = "uninspectable"
     if reason:
@@ -5010,14 +5024,36 @@ validate_reap_return_safety() {
   validate_reap_worktree_safety_and_summarize_ignored
 }
 
+reap_github_repo_for_worktree() {
+  local url rest owner repo
+  url=$(git -C "$WT" remote get-url origin 2>/dev/null) || return 1
+  case "$url" in
+    https://github.com/*) rest=${url#https://github.com/} ;;
+    git@github.com:*) rest=${url#git@github.com:} ;;
+    ssh://git@github.com/*) rest=${url#ssh://git@github.com/} ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%.git}
+  owner=${rest%%/*}
+  repo=${rest#*/}
+  [ -n "$owner" ] && [ -n "$repo" ] && [ "$repo" != "$rest" ] \
+    && [ "${repo#*/}" = "$repo" ] || return 1
+  printf '%s/%s' "$owner" "$repo"
+}
+
 validate_reap_open_pr_absent() {
-  local out status state branch recorded_ref count seen='|'
+  local out status state branch recorded_ref count repo seen='|'
   command -v gh-axi >/dev/null 2>&1 || {
     echo "REFUSED: dead-task reaping cannot recheck open PRs under the checkout lock." >&2
     return 1
   }
+  repo=$(reap_github_repo_for_worktree) || {
+    echo "REFUSED: dead-task reaping cannot resolve the worktree GitHub repository under the checkout lock." >&2
+    return 1
+  }
   if [ -n "$PR_URL" ]; then
-    if fm_run_bounded_capture --combine-stderr out 10 gh-axi pr view "$PR_URL"; then
+    if fm_run_bounded_capture --combine-stderr out 10 \
+        gh-axi pr view "$PR_URL" --repo "$repo"; then
       status=0
     else
       status=$?
@@ -5047,7 +5083,7 @@ validate_reap_open_pr_absent() {
     case "$seen" in *"|$branch|"*) continue ;; esac
     seen="$seen$branch|"
     if fm_run_bounded_capture --combine-stderr out 10 \
-        gh-axi pr list --state open --head "$branch" --limit 2 --fields url; then
+        gh-axi pr list --repo "$repo" --state open --head "$branch" --limit 2 --fields url; then
       status=0
     else
       status=$?

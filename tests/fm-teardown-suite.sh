@@ -1593,6 +1593,8 @@ prepare_reap_case() {
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" .gitignore "$ignore" "define ignored outputs"
   add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/project" remote set-url origin \
+    https://github.com/Ruby-Labs/firstmate.git
   rm -f "$case_dir/fakebin/.tmux-live"
 }
 
@@ -1650,15 +1652,33 @@ test_dead_reap_refuses_recent_hand_edit_shaped_output() {
   case_dir=$(make_case reap-recent-hand-edit)
   prepare_reap_case "$case_dir" $'build/'
   mkdir -p "$case_dir/wt/build"
-  printf 'manual recovery notes\n' > "$case_dir/wt/build/recovery.txt"
+  printf 'manual recovery code\n' > "$case_dir/wt/build/manual-recovery.js"
   set +e
   run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 1 "$rc" "dead reap must refuse recent hand-edit-shaped output"
-  assert_grep 'build/recovery.txt (recent-hand-edit-shaped)' "$case_dir/stderr" \
+  assert_grep 'build/manual-recovery.js (recent-ambiguous)' "$case_dir/stderr" \
     "recent hand-edit refusal omitted the exact ignored file"
   pass "dead reap refuses recent hand-edit-shaped ignored output"
+}
+
+test_dead_reap_allows_dependency_tree_contents() {
+  local case_dir rc
+  case_dir=$(make_case reap-dependency-ignored)
+  prepare_reap_case "$case_dir" $'node_modules/'
+  mkdir -p "$case_dir/wt/node_modules/report-skill"
+  printf 'dependency notice\n' > "$case_dir/wt/node_modules/report-skill/NOTICE.txt"
+  printf '{"name":"report-skill"}\n' \
+    > "$case_dir/wt/node_modules/report-skill/package.json"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reap should allow dependency-owned ignored contents"
+  assert_grep 'ignored worktree summary: count=1' "$case_dir/stdout" \
+    "dependency-owned successful reap omitted its ignored summary"
+  pass "dead reap allows structurally owned dependency output"
 }
 
 test_dead_reap_rechecks_open_pr_at_locked_return() {
@@ -1669,6 +1689,10 @@ test_dead_reap_rechecks_open_pr_at_locked_return() {
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
   "pr list")
+    case " $* " in
+      *' --repo Ruby-Labs/firstmate '*) ;;
+      *) exit 88 ;;
+    esac
     printf '%s\n' 'count: 1 (showing first 1)' \
       'pull_requests[1]{url}:' \
       '  https://github.com/Ruby-Labs/firstmate/pull/99'
@@ -5376,6 +5400,7 @@ if [ "${FM_TEST_FOCUSED:-}" = review-reap-final-proofs ]; then
   test_dead_reap_refuses_work_shaped_ignored_output
   test_dead_reap_refuses_ambiguous_ignored_output
   test_dead_reap_refuses_recent_hand_edit_shaped_output
+  test_dead_reap_allows_dependency_tree_contents
   test_dead_reap_rechecks_open_pr_at_locked_return
   exit 0
 fi
@@ -5561,6 +5586,7 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_dead_reap_refuses_work_shaped_ignored_output
   test_dead_reap_refuses_ambiguous_ignored_output
   test_dead_reap_refuses_recent_hand_edit_shaped_output
+  test_dead_reap_allows_dependency_tree_contents
   test_dead_reap_rechecks_open_pr_at_locked_return
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
   test_preserve_scratch_never_cleans_unlanded_commits
