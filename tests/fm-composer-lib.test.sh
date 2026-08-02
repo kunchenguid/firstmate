@@ -13,6 +13,10 @@
 #      agent composer either way, bordered or bare.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
+#   5. Non-ASCII blank PADDING (U+00A0 and friends, task composer-nbsp-fix) on an
+#      otherwise-blank row is normalized before the trims, so a harness-padded
+#      empty composer reads `empty` instead of a stable false `pending` - and
+#      never at the cost of hiding real typed text.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -114,6 +118,61 @@ test_idle_placeholder_case_mode_is_explicit() {
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
+# --- Non-ASCII blank padding (the NBSP wedge) -------------------------------
+# Task composer-nbsp-fix. Real Claude Code 2.1.220 pads its EMPTY composer row
+# with U+00A0: the captured row is exactly `\xe2\x9d\xaf\xc2\xa0` (`❯` + NBSP),
+# byte-verified on four separate live panes and reproduced against real claude
+# through tmux's independent reader. bash's [[:space:]] does not match U+00A0,
+# so every trim left it in place and this owner read a genuinely idle pane as
+# `pending` forever - and away-mode injection only ever proceeds on an
+# affirmative `empty`, so escalations sat undelivered for ~9.5h at a stretch,
+# three times. The literal byte pair below is the fixture that was missing:
+# before the fix it appeared nowhere under tests/, which is precisely why every
+# one of those wedges passed CI.
+
+test_nbsp_padded_blank_rows_are_empty() {
+  local out b
+  # The exact captured shape, bordered and bare.
+  out=$(classify 0 $'\xe2\x9d\xaf\xc2\xa0')
+  [ "$out" = empty ] \
+    || fail "the real-claude '❯'+NBSP idle row must read empty, got '$out' (regression: this read 'pending' forever and wedged away-mode delivery)"
+  out=$(classify 1 $'\xe2\x9d\xaf\xc2\xa0')
+  [ "$out" = empty ] || fail "a bordered '❯'+NBSP idle row must read empty, got '$out'"
+  out=$(classify 0 $'\xe2\x80\xba\xc2\xa0')
+  [ "$out" = empty ] || fail "a codex '›'+NBSP idle row must read empty, got '$out'"
+  # The other padding blanks a TUI can emit, mapped or dropped by the same owner.
+  for b in $'\xe2\x80\x87' $'\xe2\x80\xaf' $'\xe2\x80\x8b' $'\xef\xbb\xbf'; do
+    out=$(classify 0 "❯$b")
+    [ "$out" = empty ] || fail "a '❯' row padded with a non-ASCII blank must read empty, got '$out'"
+  done
+  # A row of padding alone, with no glyph left to strip.
+  out=$(classify 1 $'\xc2\xa0\xc2\xa0')
+  [ "$out" = empty ] || fail "a bordered row holding only NBSP padding must read empty, got '$out'"
+  # The plain-content path (a ghost strip that consumed everything).
+  out=$(classify 0 '' '' sensitive $'\xe2\x9d\xaf\xc2\xa0')
+  [ "$out" = empty ] || fail "a stripped '❯'+NBSP row must remain empty, got '$out'"
+  pass "fm_composer_classify_content: non-ASCII blank padding on an otherwise-blank row reads empty (real-claude '❯'+U+00A0)"
+}
+
+# The safety half: normalizing blanks must never make REAL typed text vanish.
+# Only characters that render as blank are touched, so any visible glyph
+# survives and the row stays non-empty.
+test_non_ascii_blanks_never_hide_real_text() {
+  local out
+  out=$(classify 0 $'\xe2\x9d\xaf\xc2\xa0land pr 1234 now')
+  [ "$out" = pending ] || fail "real text after '❯'+NBSP must read pending, got '$out'"
+  out=$(classify 1 $'\xc2\xa0deploy staging now')
+  [ "$out" = pending ] || fail "real text behind NBSP padding must read pending, got '$out'"
+  out=$(classify 0 $'\xe2\x9d\xaf fix\xc2\xa0findings 1 and 3')
+  [ "$out" = pending ] || fail "NBSP-joined real text must read pending, got '$out'"
+  # The dead-shell rule still holds when the shell prompt is NBSP-padded.
+  out=$(classify 0 $'$\xc2\xa0')
+  [ "$out" != empty ] || fail "a bare NBSP-padded shell prompt must never read empty, got '$out'"
+  out=$(classify 0 $'$\xc2\xa0rm -rf /')
+  [ "$out" != empty ] || fail "an NBSP-padded shell prompt with a command must never read empty, got '$out'"
+  pass "fm_composer_classify_content: blank normalization never turns real typed text (or a dead shell) into empty"
+}
+
 # --- Real text is pending ---------------------------------------------------
 
 test_real_text_is_pending() {
@@ -126,6 +185,8 @@ test_real_text_is_pending() {
 }
 
 test_bare_shell_glyphs_are_unknown
+test_nbsp_padded_blank_rows_are_empty
+test_non_ascii_blanks_never_hide_real_text
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
