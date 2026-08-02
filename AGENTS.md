@@ -258,10 +258,10 @@ Never both present a likely-enough solution and launch a parallel design exercis
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
-At every intake, and whenever long validation, infrastructure or platform work, an external wait, or a blocker appears, firstmate must identify independently valuable user-facing proof or delivery paths and dispatch each bounded path immediately when no concrete dependency prevents it, keeping parallel-first decomposition to bounded independent outcomes rather than launching redundant planners, duplicate implementations, competing product spines, or multiple architectures.
-Before serializing work, firstmate must name the concrete dependency requiring ordering; shared file overlap, preference for one product spine, or the existence of a longer integrated path alone is not a dependency.
+At every intake, and whenever long validation, infrastructure or platform work, an external wait, or a blocker appears, firstmate must identify independently valuable user-facing proof or delivery paths before serializing work, dispatch immediately every such path the captain or existing lifecycle authority already authorizes, and keep parallel-first decomposition to bounded independent outcomes rather than redundant planners, duplicate implementations, competing product spines, or multiple architectures.
+Identifying a path is never authorization to implement it, so an unauthorized path is raised for a decision rather than dispatched.
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
-Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
+Serialize only after naming a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing, preferring one product spine for bounded work already inside the selected spine, or the existence of a longer integrated path is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
