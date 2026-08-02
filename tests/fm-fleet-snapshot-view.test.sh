@@ -6,8 +6,10 @@ set -u
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# shellcheck disable=SC2153  # ROOT is assigned by tests/lib.sh.
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
+BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -18,10 +20,6 @@ make_fakebin() {  # <dir>
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 exit 0
-SH
-  cat > "$fb/codeburn" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' '{"overview":{"cost":0,"calls":0,"tokens":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}},"models":[]}'
 SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -56,7 +54,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/codeburn" "$fb/tmux"
+  chmod +x "$fb/no-mistakes" "$fb/tmux"
   printf '%s\n' "$fb"
 }
 
@@ -84,6 +82,9 @@ write_fixture() {  # <home>
 
 ## Queued
 - [ ] queued-task - Queued Task blocked-by: ship-task (repo: alpha) (kind: ship) (since 2026-07-08)
+- [ ] captain-one - First captain call (repo: alpha) (kind: captain) (hold: choose API A or B) (hold-kind: captain)
+- [ ] captain-two - Second captain call (repo: alpha) (kind: captain) (hold: approve the narrow rollout) (hold-kind: captain)
+- [ ] captain-three - Third captain call (repo: alpha) (kind: captain) (hold: choose the storage boundary) (hold-kind: captain)
 handoff note without canonical syntax
 
 ## Done
@@ -91,9 +92,6 @@ handoff note without canonical syntax
 EOF
   mkdir -p "$home/data/scout-task"
   printf '# Scout\n' > "$home/data/scout-task/report.md"
-  mkdir -p "$home/data/done-task"
-  printf '%s\n' '{"schema":"fm-task-usage.v1","id":"done-task","harness":"claude","configured_model":"sonnet","actual_models":["Sonnet 5"],"models":[],"tokens":{"input":4,"output":9,"cache_read":50,"cache_write":7},"cost_usd":1.5,"calls":3}' \
-    > "$home/data/done-task/usage.json"
   fm_write_meta "$home/state/ship-task.meta" \
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/alpha-worktree" \
@@ -128,7 +126,7 @@ EOF
     "mode=secondmate" \
     "home=$home/secondmate-home" \
     "projects=alpha, beta, gamma, "
-  printf 'working: watching delegated scope\n' > "$home/state/secondmate-task.status"
+  printf 'needs-decision [key=api]: choose the public API shape\n' > "$home/state/secondmate-task.status"
   fm_write_meta "$home/state/cmux-task.meta" \
     "backend=cmux" \
     "window=workspace:surface" \
@@ -154,7 +152,7 @@ test_empty_fleet_json() {
   ' >/dev/null \
     || fail "empty snapshot schema or absence markers wrong: $out"
   view=$(FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
+  assert_contains "$view" "No live workers." "empty fleet view should say no live workers"
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
@@ -195,14 +193,18 @@ test_fixture_snapshot_json() {
       and .current_state.state == "unknown"
   ' >/dev/null || fail "cmux missing-file row missing"
   printf '%s' "$out" | jq -e '
-    [.backlog.records[] | select(.state == "queued")] | length == 2
+    [.backlog.records[] | select(.state == "queued")] | length == 5
   ' >/dev/null || fail "queued canonical and unstructured backlog records missing"
   printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-one")
+    | .title == "First captain call"
+      and .kind == "captain"
+      and .hold == "choose API A or B"
+      and .hold_kind == "captain"
+  ' >/dev/null || fail "captain hold metadata did not parse into a clean decision row"
+  printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-task")
-    | .state == "done"
-      and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
-      and .usage.actual_models == ["Sonnet 5"]
-      and .usage.cost_usd == 1.5
+    | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
 }
@@ -561,38 +563,48 @@ EOF
       and .paths.report.present == true
   ' >/dev/null || fail "bold task did not join to override-backed backlog and report"
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$VIEW")
-  assert_contains "$view" "| bold-task | done / status-log | scout | alpha | tmux | present | $data/bold-task/report.md" \
-    "view should render bold in-flight row from snapshot"
-  assert_contains "$view" "| blocked-reason | Blocked Reason | beta | ship | queued-comma - waits on queued-comma | - |" \
-    "view should render blocked reason without title metadata"
-  assert_contains "$view" "| done-bracket-pr | Done Bracket PR | gamma | ship | - | https://github.com/kunchenguid/firstmate/pull/43 |" \
-    "view should render bracketed PR artifact outside the title"
-  assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
-    "view should render local-only done artifact outside the title"
+  assert_contains "$view" "• bold-task · Bold Task" \
+    "view should render the in-flight task from the snapshot"
+  assert_contains "$view" "QUEUED 3 · READY 2 · BLOCKED 1" \
+    "view should classify queued tasks by cleared blockers"
+  assert_contains "$view" "• blocked-reason ← queued-comma · waits on queued-comma" \
+    "view should render a blocked reason without title metadata"
+  assert_contains "$view" "https://github.com/kunchenguid/firstmate/pull/43" \
+    "view should render a landed PR artifact"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 
 test_view_renders_snapshot() {
-  local home fakebin view
+  local home fakebin view working_line waiting_line landed_line queued_line
   home=$(make_home view)
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| ship-task | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
-    "view should render ship row from snapshot"
-  assert_contains "$view" "| queued-task | Queued Task | alpha | ship | ship-task | -" \
-    "view should render queued backlog row"
-  assert_contains "$view" "| done-task | Done Task | alpha | ship | - | https://github.com/kunchenguid/firstmate/pull/7 |" \
-    "view should render done backlog row"
-  assert_contains "$view" "claude / Sonnet 5 - in 4, out 9, cache 50, write 7 - \$1.5 - 3 calls" \
-    "view should render durable task usage after teardown"
-  assert_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
-    "view should show secondmate send guidance"
-  assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
-    "view should show secondmate endpoint agent liveness"
+  working_line=$(printf '%s\n' "$view" | grep -n '^WORKING NOW' | cut -d: -f1)
+  waiting_line=$(printf '%s\n' "$view" | grep -n '^WAITING ON THE CAPTAIN' | cut -d: -f1)
+  landed_line=$(printf '%s\n' "$view" | grep -n '^LANDED' | cut -d: -f1)
+  queued_line=$(printf '%s\n' "$view" | grep -n '^QUEUED' | cut -d: -f1)
+  [ "$working_line" -lt "$waiting_line" ] && [ "$waiting_line" -lt "$landed_line" ] && [ "$landed_line" -lt "$queued_line" ] \
+    || fail "fleet view priority order is wrong: $view"
+  assert_contains "$view" "• ship-task · Ship Task" \
+    "view should render the live worker and task"
+  assert_contains "$view" "WAITING ON THE CAPTAIN (4)" \
+    "captain decisions should have a prominent dedicated section"
+  assert_contains "$view" "! secondmate-task" \
+    "live captain decisions should appear in the captain section"
+  assert_contains "$view" "  choose the public API shape" \
+    "live captain decisions should show their one-line reason"
+  assert_contains "$view" "! captain-one" \
+    "queued captain holds should move out of the queue"
+  assert_contains "$view" "  choose API A or B" \
+    "queued captain holds should show their one-line reason"
+  assert_contains "$view" "https://github.com/kunchenguid/firstmate/pull/7" \
+    "landed work should include its PR link"
+  assert_contains "$view" "QUEUED 1 · READY 0 · BLOCKED 1" \
+    "queue summary should distinguish dispatchable from blocked"
   assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
-  pass "fleet view renders the snapshot without secondmate peek guidance"
+  pass "fleet view renders the four prioritized side-panel sections"
 }
 
 test_view_renders_dead_secondmate_agent_status() {
@@ -609,11 +621,89 @@ test_view_renders_dead_secondmate_agent_status() {
   printf 'working: watching delegated scope\n' > "$home/state/dead-secondmate.status"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead |" \
-    "view should distinguish a present secondmate endpoint from a dead agent"
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
-    "view should show a recorded missing secondmate home path"
-  pass "fleet view renders secondmate agent liveness"
+  assert_contains "$view" "• dead-secondmate ·" \
+    "view should retain a degraded task row when current state is unknown"
+  assert_contains "$view" "unknown:" \
+    "view should label unavailable task state instead of crashing"
+  pass "fleet view degrades an unreadable worker row to unknown"
+}
+
+test_oversized_backlog_and_status_stream() {
+  local home fakebin json view bearings i bytes
+  home=$(make_home oversized)
+  printf '## Queued\n' > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 2200 ]; do
+    printf -- '- [ ] big-%04d - Synthetic task %04d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (repo: firstmate) (kind: ship)\n' \
+      "$i" "$i" >> "$home/data/backlog.md"
+    i=$((i + 1))
+  done
+  mkdir -p "$home/secondmate-home"
+  fm_write_meta "$home/state/large-status.meta" \
+    "window=firstmate:fm-large-status" \
+    "project=$home/secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/secondmate-home"
+  printf 'needs-decision [key=large]: ' > "$home/state/large-status.status"
+  i=1
+  while [ "$i" -le 2200 ]; do
+    printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >> "$home/state/large-status.status"
+    i=$((i + 1))
+  done
+  printf '\n' >> "$home/state/large-status.status"
+  fakebin=$(make_fakebin "$home")
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  bytes=$(printf '%s' "$json" | wc -c | tr -d ' ')
+  [ "$bytes" -gt 131072 ] || fail "synthetic snapshot did not cross the single-argument ceiling: $bytes bytes"
+  printf '%s' "$json" | jq -e '(.backlog.records | length) == 2200 and (.tasks | length) == 1' >/dev/null \
+    || fail "oversized snapshot lost backlog or task data"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" COLUMNS=60 "$VIEW")
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json)
+  assert_contains "$view" "WAITING ON THE CAPTAIN (1)" "oversized fleet view should still render"
+  printf '%s' "$bearings" | jq -e '.schema == "fm-bearings.v1" and (.gates | length) == 20' >/dev/null \
+    || fail "oversized bearings snapshot did not render its bounded projection"
+  pass "oversized backlog and status payloads stream through snapshot, fleet view, and bearings"
+}
+
+tree_manifest() {  # <home>
+  local home=$1 root
+  for root in "$home/data" "$home/state"; do
+    find "$root" -printf '%p|%y|%s|%T@\n'
+    find "$root" -type f -exec sha256sum {} \;
+  done | LC_ALL=C sort | sha256sum | cut -d' ' -f1
+}
+
+test_read_paths_do_not_mutate_fleet_state() {
+  local home fakebin before after
+  home=$(make_home read-only)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  before=$(tree_manifest "$home")
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json >/dev/null
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" >/dev/null
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" >/dev/null
+  after=$(tree_manifest "$home")
+  [ "$before" = "$after" ] || fail "snapshot, fleet view, or bearings modified data/ or state/"
+  pass "snapshot, fleet view, and bearings leave data/ and state/ byte-for-byte and metadata-identical"
+}
+
+test_watch_redraws_and_exits_cleanly() {
+  local home fakebin output rc redraws
+  home=$(make_home watch)
+  fakebin=$(make_fakebin "$home")
+  output="$home/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" COLUMNS=45 \
+    timeout --preserve-status --signal=INT 0.35 "$VIEW" --watch 0.1 > "$output"
+  rc=$?
+  expect_code 0 "$rc" "watch mode should exit cleanly on Ctrl-C"
+  redraws=$(LC_ALL=C grep -ao $'\033\[H\033\[2J' "$output" | wc -l | tr -d ' ')
+  [ "$redraws" -ge 2 ] || fail "watch mode did not redraw: $redraws renders"
+  LC_ALL=C grep -aF $'\033[0m' "$output" >/dev/null \
+    || fail "watch mode did not restore terminal attributes on exit"
+  pass "watch mode redraws in a narrow pane and exits cleanly on Ctrl-C"
 }
 
 # A still-open decision must survive a LATER, UNRELATED terminal event on the same
@@ -806,3 +896,6 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_oversized_backlog_and_status_stream
+test_read_paths_do_not_mutate_fleet_state
+test_watch_redraws_and_exits_cleanly

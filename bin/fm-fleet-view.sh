@@ -1,100 +1,189 @@
 #!/usr/bin/env bash
-# fm-fleet-view.sh - human renderer over fm-fleet-snapshot.sh.
+# fm-fleet-view.sh - narrow human side-panel over fm-fleet-snapshot.sh.
 #
-# This command intentionally does not parse fleet state itself.
-# It shells out to fm-fleet-snapshot.sh --json and renders that stable
-# structured contract for humans.
+# The view is read-only and does not parse fleet files itself. Normal and watch
+# renders ask the canonical snapshot to skip live usage queries because usage is
+# not shown here; this keeps a few-second redraw cadence cheap. --json preserves
+# the canonical snapshot's complete default behavior.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SNAPSHOT_CMD="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 
 usage() {
   cat <<'EOF'
-usage: fm-fleet-view.sh [--json]
+usage: fm-fleet-view.sh [--json] [--watch [interval]]
 
-Render a human fleet view from fm-fleet-snapshot.sh.
-Use --json to print the underlying snapshot.
+Render a narrow, prioritized fleet side panel from fm-fleet-snapshot.sh.
+Use --json to print the complete underlying snapshot.
+Use --watch to redraw every 5 seconds, or provide a positive interval in seconds.
 EOF
 }
 
-case "${1:-}" in
-  -h|--help) usage; exit 0 ;;
-  --json) "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json; exit $? ;;
-  "") ;;
-  *) usage >&2; exit 2 ;;
-esac
+FORMAT=panel
+WATCH=0
+INTERVAL=5
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json) FORMAT=json ;;
+    --watch)
+      WATCH=1
+      if [ $# -gt 1 ] && [[ $2 != -* ]]; then
+        shift
+        INTERVAL=$1
+      fi
+      ;;
+    --watch=*) WATCH=1; INTERVAL=${1#--watch=} ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [ "$FORMAT" = json ] && [ "$WATCH" = 1 ]; then
+  echo "fm-fleet-view: --json and --watch cannot be combined" >&2
+  exit 2
+fi
+if [ "$WATCH" = 1 ]; then
+  if ! [[ $INTERVAL =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ $INTERVAL =~ ^0+([.]0+)?$ ]]; then
+    echo "fm-fleet-view: watch interval must be a positive number" >&2
+    exit 2
+  fi
+fi
+
+if [ "$FORMAT" = json ]; then
+  "$SNAPSHOT_CMD" --json
+  exit $?
+fi
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 1; }
 
-SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
+terminal_width() {
+  local width=${COLUMNS:-}
+  case "$width" in
+    ''|*[!0-9]*)
+      width=
+      if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
+        width=$(tput cols 2>/dev/null || true)
+      fi
+      ;;
+  esac
+  case "$width" in ''|*[!0-9]*) width=60 ;; esac
+  [ "$width" -ge 20 ] || width=20
+  printf '%s\n' "$width"
+}
 
-printf '%s\n' "$SNAPSHOT" | jq -r '
-  def dash($v): if $v == null or $v == "" then "-" else $v end;
-  def endpoint_exists($t):
-    if $t.endpoint.exists == null then "unknown"
-    elif $t.endpoint.exists then "present"
-    else "absent" end;
-  def endpoint_of($t):
-    if $t.kind == "secondmate" then "\(endpoint_exists($t)) / \($t.endpoint.agent_alive)"
-    else endpoint_exists($t) end;
-  def artifact($t):
-    if $t.pr.url != null then $t.pr.url
-    elif $t.paths.report.present then $t.paths.report.path
-    else "-" end;
-  def path_of($t):
-    if $t.paths.home.present then $t.paths.home.path
-    elif $t.paths.home.path != null then $t.paths.home.path + " (absent)"
-    elif $t.paths.worktree.present then $t.paths.worktree.path
-    elif $t.paths.worktree.path != null then $t.paths.worktree.path + " (absent)"
-    else "-" end;
-  def action_of($t):
-    if $t.kind == "secondmate" then "\($t.actions.send) - \($t.actions.watch)"
-    else $t.actions.watch end;
-  def usage_of($u):
-    if $u == null then "-"
-    elif $u.status == "unavailable" then "\($u.harness // "unknown") / unavailable"
-    else "\($u.harness) / \(($u.actual_models // []) | if length == 0 then "-" else join(", ") end) - in \($u.tokens.input), out \($u.tokens.output), cache \($u.tokens.cache_read), write \($u.tokens.cache_write) - $\(($u.cost_usd * 10000 | round) / 10000) - \($u.calls) calls" end;
-  def task_row($t):
-    "| \($t.id) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) | \(usage_of($t.usage)) |";
-  def blocker($r):
-    if ($r.blocked_by // "") == "" then "-"
-    elif ($r.blocked_reason // "") == "" then $r.blocked_by
-    else "\($r.blocked_by) - \($r.blocked_reason)" end;
-  def backlog_row($r):
-    "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) | \(usage_of($r.usage)) |";
+render_once() {
+  local width snapshot
+  width=$(terminal_width)
+  if ! snapshot=$("$SNAPSHOT_CMD" --json); then
+    printf '%s\n' "FLEET VIEW DEGRADED" "Snapshot unavailable; retrying on the next redraw."
+    return 1
+  fi
 
-  "# Fleet View",
-  "",
-  "Schema: \(.schema)",
-  "Home: \(.fm_home)",
-  "",
-  "## Under Way",
-  (if (.tasks | length) == 0 then
-    "No live task metadata found."
-   else
-    "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel | Usage |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    (.tasks[] | task_row(.))
-   end),
-  "",
-  "## Queued",
-  (if ([.backlog.records[]? | select(.state == "queued")] | length) == 0 then
-    "No queued backlog records found."
-   else
-    "| ID | Title | Repo | Kind | Blocked By | Artifact | Usage |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
-    (.backlog.records[] | select(.state == "queued") | backlog_row(.))
-   end),
-  "",
-  "## Done",
-  (if ([.backlog.records[]? | select(.state == "done")] | length) == 0 then
-    "No done backlog records found."
-   else
-    "| ID | Title | Repo | Kind | Blocked By | Artifact | Usage |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
-    (.backlog.records[] | select(.state == "done") | backlog_row(.))
-   end),
-  "",
-  "## Secondmates",
-  .secondmate_guidance.note
-'
+  printf '%s\n' "$snapshot" | jq -r --argjson width "$width" '
+    def clean: tostring | gsub("[[:space:]]+"; " ");
+    def clip($n):
+      clean
+      | if length <= $n then .
+        elif $n <= 1 then .[:$n]
+        else .[:($n - 1)] + "…" end;
+    def line($prefix; $value): $prefix + ($value | clip(($width - ($prefix | length)) | if . < 1 then 1 else . end));
+    def task_title($t): ($t.backlog.title // $t.project // $t.id // "unknown");
+    def task_step($t):
+      (($t.current_state.detail // "") as $detail
+       | if $detail != "" then $detail else ($t.hints.last_event_text // "unknown") end)
+      | sub("^[a-z-]+( \\[[^]]+\\])?:[[:space:]]*"; "")
+      | if . == "" then "unknown" else . end;
+    def artifact($r): ($r.pr_url // "-");
+
+    . as $snapshot
+    | ([.tasks[]?] | sort_by(.id)) as $working
+    | ([.backlog.records[]?
+        | select(.state == "queued" and .structured == true
+                 and ((.kind // "") == "captain" or (.hold_kind // "") == "captain"))]) as $captain_held
+    | (([.tasks[]? as $task
+        | ($task.hints.open_decisions // [])[]?
+        | {id:($task.id // "unknown"),verb:(.verb // "needs-decision"),summary:(.summary // "reason unavailable")}]
+       + [$captain_held[]
+          | {id:(.id // "unknown"),verb:"needs-decision",
+             summary:(.hold // .blocked_reason // .body_excerpt // .title // "reason unavailable")}])
+       | sort_by([if .verb == "needs-decision" then 0 else 1 end, .id])) as $waiting
+    | ([.backlog.records[]?
+        | select(.state == "done" and .structured == true and .pr_url != null)
+        | {id,title,pr_url,completion}]
+       + [(.secondmate_landed.records // [])[]?
+          | select(.pr_url != null)
+          | {id,title,pr_url,completion}]
+       | sort_by([(.completion.date // ""),(.id // "")]) | reverse) as $landed
+    | ([.backlog.records[]? | select(.state == "done" and .structured == true) | .id]) as $done_ids
+    | ([.backlog.records[]?
+        | select(.state == "queued" and .structured == true
+                 and (((.kind // "") == "captain" or (.hold_kind // "") == "captain") | not))]) as $queued
+    | ([$queued[]
+        | .blocked_by as $blocker
+        | select(($blocker // "") == "" or (($done_ids | index($blocker)) != null))]) as $ready
+    | ([$queued[]
+        | .blocked_by as $blocker
+        | select(($blocker // "") != "" and (($done_ids | index($blocker)) == null))]) as $blocked
+    | ("=" * $width),
+      ("FIRSTMATE FLEET" | clip($width)),
+      ("=" * $width),
+      "",
+      ("WORKING NOW (\($working | length))" | clip($width)),
+      (if ($working | length) == 0 then
+         "  No live workers."
+       else
+         $working[]
+         | line("• "; ((.id // "unknown") + " · " + task_title(.))),
+           line("  "; ((.current_state.state // "unknown") + ": " + task_step(.)))
+       end),
+      "",
+      (if ($waiting | length) > 0 then "!" * $width else empty end),
+      ("WAITING ON THE CAPTAIN (\($waiting | length))" | clip($width)),
+      (if ($waiting | length) == 0 then
+         "  Nothing needs a captain decision."
+       else
+         $waiting[]
+         | line("! "; .id),
+           line("  "; .summary)
+       end),
+      (if ($waiting | length) > 0 then "!" * $width else empty end),
+      "",
+      ("LANDED (showing \([($landed[:5])[]] | length) of \($landed | length))" | clip($width)),
+      (if ($landed | length) == 0 then
+         "  No recently merged work with a PR link."
+       else
+         $landed[:5][]
+         | line("• "; ((.id // "unknown") + " · " + (.title // "unknown"))),
+           line("  "; artifact(.))
+       end),
+      "",
+      ("QUEUED \($queued | length) · READY \($ready | length) · BLOCKED \($blocked | length)" | clip($width)),
+      "Ready now:",
+      (if ($ready | length) == 0 then "  None." else $ready[] | line("• "; ((.id // "unknown") + " · " + (.title // "unknown"))) end),
+      "Still blocked:",
+      (if ($blocked | length) == 0 then
+         "  None."
+       else
+         $blocked[]
+         | line("• "; ((.id // "unknown") + " ← " + (.blocked_by // "unknown")
+                       + (if (.blocked_reason // "") == "" then "" else " · " + .blocked_reason end)))
+       end)
+  ' || {
+    echo "FLEET VIEW DEGRADED"
+    echo "Snapshot data could not be rendered; retrying on the next redraw."
+    return 1
+  }
+}
+
+if [ "$WATCH" = 1 ]; then
+  trap 'printf "\033[0m\n"; exit 0' INT TERM HUP
+  while :; do
+    printf '\033[H\033[2J'
+    render_once || true
+    sleep "$INTERVAL"
+  done
+fi
+
+render_once
