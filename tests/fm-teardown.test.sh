@@ -72,7 +72,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/config" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -493,6 +493,7 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-$case_dir/data}" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
@@ -1243,6 +1244,62 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_teardown_appends_attribution_after_legacy_rows() {
+  local case_dir file row task worktree harness model effort kind project started_at ended_at extra
+  case_dir=$(make_case attribution-legacy)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' \
+    'harness=codex' \
+    'model=gpt-test' \
+    'effort=high' \
+    'started_at=2026-08-01T12:34:56Z' >> "$case_dir/state/task-x1.meta"
+  file="$case_dir/data/cost-attribution.tsv"
+  printf '%s\n' \
+    $'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tcaptured' \
+    $'old-task\t/old/wt\tclaude\tdefault\txhigh\tship\t/old/project\t2026-07-31T00:00:00Z' > "$file"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "attribution-legacy: forced teardown failed"
+
+  sed -n '1p' "$file" | grep -qxF $'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tcaptured' \
+    || fail "attribution-legacy: legacy header was changed"
+  sed -n '2p' "$file" | grep -qxF $'old-task\t/old/wt\tclaude\tdefault\txhigh\tship\t/old/project\t2026-07-31T00:00:00Z' \
+    || fail "attribution-legacy: legacy row was changed"
+  assert_grep '# schema=firstmate-effort-attribution-v2' "$file" \
+    "attribution-legacy: v2 section marker was not appended"
+  row=$(tail -n 1 "$file")
+  IFS=$'\t' read -r task worktree harness model effort kind project started_at ended_at extra <<EOF
+$row
+EOF
+  [ "$task|$worktree|$harness|$model|$effort|$kind|$project|$started_at" = \
+    "task-x1|$case_dir/wt|codex|gpt-test|high|ship|$case_dir/project|2026-08-01T12:34:56Z" ] \
+    || fail "attribution-legacy: automatic row is incomplete: $row"
+  [ -z "$extra" ] || fail "attribution-legacy: automatic row has extra columns: $row"
+  printf '%s\n' "$ended_at" | grep -Eq \
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+    || fail "attribution-legacy: ended_at is not an exact UTC timestamp: $ended_at"
+  pass "teardown preserves legacy attribution rows and appends the durable v2 join"
+}
+
+test_attribution_failure_warns_but_teardown_completes() {
+  local case_dir bad_data rc=0
+  case_dir=$(make_case attribution-failure)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'started_at=2026-08-01T12:34:56Z' >> "$case_dir/state/task-x1.meta"
+  bad_data="$case_dir/not-a-directory"
+  : > "$bad_data"
+
+  FM_DATA_OVERRIDE="$bad_data" run_teardown "$case_dir" --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "attribution-failure: recording failure must not fail teardown"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "attribution-failure: metadata remained after best-effort recording failed"
+  assert_grep 'warning: could not append AI effort attribution for task task-x1; teardown will continue' \
+    "$case_dir/stderr" "attribution-failure: teardown did not disclose lost attribution"
+  pass "attribution recording failure warns without making teardown fragile"
+}
+
 test_teardown_missing_busy_sidecar_completes() {
   local case_dir gen rc
   case_dir=$(make_case missing-busy-sidecar)
@@ -1832,6 +1889,8 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_teardown_appends_attribution_after_legacy_rows
+test_attribution_failure_warns_but_teardown_completes
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes

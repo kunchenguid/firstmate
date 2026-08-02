@@ -52,6 +52,16 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# After every successful cleanup, immediately before volatile metadata removal,
+# teardown best-effort appends the task-to-AI join to
+# data/cost-attribution.tsv. New files and legacy files receive an appended
+# `# schema=firstmate-effort-attribution-v2` section whose tab-separated columns
+# are task, worktree, harness, model, effort, kind, project, started_at, and
+# ended_at. Existing hand-written rows remain byte-for-byte intact above that
+# section. Values escape backslash, tab, carriage return, and newline as `\\`,
+# `\t`, `\r`, and `\n`. New tasks carry an exact UTC spawn timestamp in metadata;
+# pre-existing metadata falls back to its filesystem birth time, then mtime.
+# Attribution failure warns but never changes teardown eligibility or completion.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -234,6 +244,65 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
+}
+
+attribution_escape() {
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//$'\t'/\\t}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\n'/\\n}
+  printf '%s' "$value"
+}
+
+attribution_legacy_started_at() {
+  local meta=$1 epoch
+  if [ "$(uname)" = Darwin ]; then
+    epoch=$(stat -f '%B' "$meta" 2>/dev/null || true)
+    case "$epoch" in ''|0|-*) epoch=$(stat -f '%m' "$meta" 2>/dev/null || true) ;; esac
+  else
+    epoch=$(stat -c '%W' "$meta" 2>/dev/null || true)
+    case "$epoch" in ''|0|-*) epoch=$(stat -c '%Y' "$meta" 2>/dev/null || true) ;; esac
+  fi
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$(uname)" = Darwin ]; then
+    date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ'
+  else
+    date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ'
+  fi
+}
+
+record_cost_attribution() {
+  local file marker started_at ended_at harness model effort
+  marker='# schema=firstmate-effort-attribution-v2'
+  file="$DATA/cost-attribution.tsv"
+  mkdir -p "$DATA" || return 1
+  started_at=$(meta_value "$META" started_at)
+  if [ -z "$started_at" ]; then
+    started_at=$(attribution_legacy_started_at "$META") || return 1
+  fi
+  ended_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 1
+  harness=$(meta_value "$META" harness)
+  model=$(meta_value "$META" model)
+  effort=$(meta_value "$META" effort)
+  [ -n "$model" ] || model=default
+  [ -n "$effort" ] || effort=default
+  {
+    if [ ! -s "$file" ] || ! grep -qxF "$marker" "$file"; then
+      printf '%s\n' "$marker"
+      printf 'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tstarted_at\tended_at\n'
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$(attribution_escape "$ID")" \
+      "$(attribution_escape "$WT")" \
+      "$(attribution_escape "$harness")" \
+      "$(attribution_escape "$model")" \
+      "$(attribution_escape "$effort")" \
+      "$(attribution_escape "$KIND")" \
+      "$(attribution_escape "$PROJ")" \
+      "$(attribution_escape "$started_at")" \
+      "$(attribution_escape "$ended_at")"
+  } >> "$file" || return 1
 }
 
 require_orca_worktree_id() {
@@ -1685,6 +1754,9 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+if ! record_cost_attribution; then
+  echo "warning: could not append AI effort attribution for task $ID; teardown will continue" >&2
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token"
