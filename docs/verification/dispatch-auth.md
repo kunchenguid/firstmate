@@ -114,6 +114,37 @@ No models matching "gpt-9.9-nonexistent"
 
 A listing that reaches the account and returns no row is the authoritative negative that does block a candidate.
 
+## Codex Luna launch profile
+
+Verified 2026-08-02 against codex-cli 0.146.0.
+The live Codex catalog is authoritative for the installed CLI's model and reasoning-effort surface, so no model-qualified execution smoke was necessary.
+
+```sh
+codex --version
+codex debug models | jq '.models[] | select(.slug == "gpt-5.6-luna") | {slug, description, default_reasoning_level, supported_reasoning_levels: [.supported_reasoning_levels[].effort], default_verbosity, context_window}'
+```
+
+```text
+codex-cli 0.146.0
+{
+  "slug": "gpt-5.6-luna",
+  "description": "Fast and affordable agentic coding model.",
+  "default_reasoning_level": "medium",
+  "supported_reasoning_levels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ],
+  "default_verbosity": "low",
+  "context_window": 272000
+}
+```
+
+This establishes that a concrete `harness=codex`, `model=gpt-5.6-luna`, `effort=max` dispatch tuple is supported by the current installed Codex surface.
+`bin/fm-spawn.sh` owns the exact conversion from that concrete profile to Codex launch arguments, and `tests/fm-spawn-dispatch-profile.test.sh` owns executable regression coverage for the emitted setting.
+
 ## Credential sources are independent per provider
 
 Verified 2026-07-30 against quota-axi 0.1.16.
