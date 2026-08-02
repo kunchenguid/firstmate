@@ -689,6 +689,56 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 }
 
 # Scout and secondmate paths still scaffold well-formed briefs.
+# A worker that does not know which branch it is standing on cannot tell that it
+# is reading the wrong code. Ship and scout briefs name the resolved base branch
+# when there is one, and keep the generic wording when there is not.
+test_base_branch_is_named_when_known() {
+  local home id brief
+  home="$TMP_ROOT/base-branch-home"
+  write_registry "$home"
+
+  id="brief-base-named-a5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR --base-branch develop >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "at a detached HEAD on a clean \`develop\`, this project's current base branch." "$brief" \
+    "ship brief did not name the base branch the worker is standing on"
+
+  id="brief-base-named-scout-a5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --scout --base-branch develop >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "at a detached HEAD on a clean \`develop\`, this project's current base branch." "$brief" \
+    "scout brief did not name the base branch the worker is standing on"
+
+  id="brief-base-unknown-a5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "at a detached HEAD on a clean default branch." "$brief" \
+    "brief lost the generic wording when no base branch could be resolved"
+  pass "fm-brief.sh: the base branch is named when known and generic otherwise"
+}
+
+test_base_branch_flag_rejects_bad_usage() {
+  local home out status
+  home="$TMP_ROOT/base-branch-usage-home"
+  write_registry "$home"
+
+  set +e
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-usage-a6 direct-proj --base-branch 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "--base-branch without a value should refuse"
+  assert_contains "$out" "--base-branch requires a value" "refusal did not explain the missing value"
+
+  set +e
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-usage-a7 --secondmate alpha --base-branch develop 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "--base-branch on a secondmate charter should refuse"
+  assert_contains "$out" "--base-branch applies only to crewmate ship or scout briefs" \
+    "refusal did not explain that charters have no base branch"
+  pass "fm-brief.sh: --base-branch refuses a missing value and a secondmate charter"
+}
+
 test_scout_and_secondmate_scaffold() {
   local brief
   FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-q6 alpha --scout >/dev/null 2>&1 \
@@ -727,4 +777,6 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_base_branch_is_named_when_known
+test_base_branch_flag_rejects_bad_usage
 test_scout_and_secondmate_scaffold

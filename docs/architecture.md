@@ -136,6 +136,10 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
+A pooled worktree starts on whatever commit the pool happened to warm itself from, and a clone's record of its remote's default branch is written once at clone time and never refreshed.
+So `fm-spawn.sh` places every ship and scout worktree on the project's base branch resolved by `fm-base-branch.sh`, which reads the remote's own current default at spawn time rather than the clone's cached copy of it, and honors a `base=<branch>` registry override for the rare project whose development branch is not its remote default.
+Resolution runs before any endpoint exists, so a base branch the remote does not have refuses the spawn instead of starting a worker on code nobody works on; the branch used and where it came from are recorded as `base_branch=` and `base_branch_source=`.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.

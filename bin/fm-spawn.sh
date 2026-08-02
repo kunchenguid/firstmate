@@ -109,6 +109,14 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A ship/scout task worktree is then placed on the project's base branch resolved
+#   by bin/fm-base-branch.sh - the remote's OWN current default branch, or a
+#   base=<branch> override declared in the project registry - fetched from the
+#   remote rather than taken from whatever the local clone last cached. That
+#   resolution runs BEFORE any endpoint is created, so a declared branch missing
+#   from the remote refuses the spawn instead of quietly starting a worker on the
+#   wrong code. The resolved branch and its source are recorded in the task's meta
+#   as base_branch=/base_branch_source= and printed on the success line.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -133,7 +141,8 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path> [base=<branch>(<source>)]
+# base= is present for every ship/scout spawn that resolved one.
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -1147,6 +1156,53 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+# Base branch: the branch a ship or scout worker actually stands on.
+# bin/fm-base-branch.sh reads it from the REMOTE's current state, never from the
+# clone's cached refs/remotes/<remote>/HEAD, which goes stale the moment a project
+# changes its default branch and then silently hands every worker the wrong code.
+# Resolved HERE, before any backend endpoint exists, so a project that names a
+# branch its remote does not have refuses to launch instead of stranding a pane.
+PROJ_NAME=
+BASE_BRANCH=
+BASE_BRANCH_SOURCE=none
+BASE_BRANCH_REMOTE=
+if [ "$KIND" != secondmate ]; then
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  base_line=$("$FM_ROOT/bin/fm-base-branch.sh" "$PROJ_ABS" --name "$PROJ_NAME") || exit 1
+  read -r BASE_BRANCH BASE_BRANCH_SOURCE BASE_BRANCH_REMOTE <<EOF
+$base_line
+EOF
+fi
+
+# Place the acquired worktree on that base. Every backend converges here, so the
+# worker's starting point no longer depends on whichever commit the worktree pool
+# happened to warm itself from.
+place_worker_on_base() {
+  local target
+  case "$BASE_BRANCH_SOURCE" in
+    none) return 0 ;;
+    local-default)
+      # No remote exists, so the clone's own branch tip is all there is to use.
+      target="refs/heads/$BASE_BRANCH"
+      ;;
+    *)
+      # Fetch the branch itself rather than reusing anything already in the clone:
+      # a clone that has not been fetched recently is precisely the stale local
+      # state this whole path exists to stop trusting.
+      if ! git -C "$WT" fetch --quiet --no-tags "$BASE_BRANCH_REMOTE" \
+          "+refs/heads/$BASE_BRANCH:refs/remotes/$BASE_BRANCH_REMOTE/$BASE_BRANCH"; then
+        echo "error: could not fetch $BASE_BRANCH_REMOTE/$BASE_BRANCH for $PROJ_NAME; refusing to launch $ID on stale local state" >&2
+        exit 1
+      fi
+      target=FETCH_HEAD
+      ;;
+  esac
+  if ! git -C "$WT" checkout --quiet --detach "$target"; then
+    echo "error: could not place the task worktree for $ID on $PROJ_NAME's base branch $BASE_BRANCH ($BASE_BRANCH_SOURCE); inspect $WT" >&2
+    exit 1
+  fi
+}
+
 real_path_or_raw() {  # <path>
   local path=$1 real
   if real=$(cd "$path" 2>/dev/null && pwd -P); then
@@ -1480,6 +1536,7 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    place_worker_on_base
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -1627,6 +1684,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  place_worker_on_base
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -1901,6 +1959,14 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # Which branch this worker was actually placed on, and where that came from, so
+  # a worker reading the wrong code is visible in the record instead of having to
+  # be inferred from a report that says something impossible. Absent means no base
+  # branch was resolvable and the worktree was left exactly where it was.
+  if [ "$BASE_BRANCH_SOURCE" != none ]; then
+    echo "base_branch=$BASE_BRANCH"
+    echo "base_branch_source=$BASE_BRANCH_SOURCE"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2011,4 +2077,6 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+SPAWNED_BASE=
+[ "$BASE_BRANCH_SOURCE" = none ] || SPAWNED_BASE=" base=$BASE_BRANCH($BASE_BRANCH_SOURCE)"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWNED_BASE"

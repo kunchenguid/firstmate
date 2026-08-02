@@ -6,9 +6,16 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--base-branch <branch>]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--base-branch <branch>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --base-branch <branch> names the branch the worktree will be standing on, so
+#   the worker knows what it is reading before it branches. Without the flag the
+#   scaffold asks bin/fm-base-branch.sh for the project's current base branch and
+#   falls back to the generic "clean default branch" wording if that cannot be
+#   resolved here. Naming it is best-effort on purpose: bin/fm-spawn.sh is the
+#   authority that both resolves and enforces the base branch, and a brief must
+#   never fail to scaffold because a remote was briefly unreachable.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -101,11 +108,17 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+if [ -n "${FM_PROJECTS_OVERRIDE:-}" ]; then
+  PROJECTS=$(resolve_directory_input FM_PROJECTS_OVERRIDE "$FM_PROJECTS_OVERRIDE") || exit 1
+else
+  PROJECTS="$FM_HOME/projects"
+fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+BASE_BRANCH=
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +128,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      base-branch) BASE_BRANCH=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -131,6 +145,7 @@ for a in "$@"; do
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
     --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's approval posture" >&2; exit 1 ;;
+    --base-branch) want_value=base-branch ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -158,6 +173,11 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+if [ "$KIND" = secondmate ] && [ -n "$BASE_BRANCH" ]; then
+  echo "error: --base-branch applies only to crewmate ship or scout briefs" >&2
   exit 1
 fi
 
@@ -265,6 +285,31 @@ fi
 
 REPO=${POS[1]}
 
+# Name the branch the worker will be standing on. Best-effort: bin/fm-spawn.sh is
+# the authority that resolves and enforces it, so an unresolvable base here only
+# costs the brief its specificity, never the scaffold.
+if [ -z "$BASE_BRANCH" ]; then
+  BASE_PROJECT_DIR=
+  if [ -d "$PROJECTS/$REPO" ]; then
+    BASE_PROJECT_DIR="$PROJECTS/$REPO"
+  elif [ -d "$REPO" ]; then
+    BASE_PROJECT_DIR="$REPO"
+  fi
+  if [ -n "$BASE_PROJECT_DIR" ]; then
+    base_line=$("$FM_ROOT/bin/fm-base-branch.sh" "$BASE_PROJECT_DIR" 2>/dev/null || true)
+    [ -n "$base_line" ] || base_line='- none -'
+    read -r base_name base_source _ <<EOF
+$base_line
+EOF
+    [ "$base_source" = none ] || BASE_BRANCH=$base_name
+  fi
+fi
+if [ -n "$BASE_BRANCH" ]; then
+  SETUP_BASE="a clean \`$BASE_BRANCH\`, this project's current base branch"
+else
+  SETUP_BASE="a clean default branch"
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -307,7 +352,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, at a detached HEAD on $SETUP_BASE.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -416,7 +461,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, at a detached HEAD on $SETUP_BASE.
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.

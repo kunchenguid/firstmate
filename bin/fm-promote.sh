@@ -3,9 +3,13 @@
 # worktree, and loaded context; only the contract changes. Flips kind= to ship in
 # state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
 # again. After promoting, send the crewmate its ship instructions via fm-send.sh
-# (inventory scratch state, reset to a clean default-branch base, carry over only
-# intended fix changes, create branch fm/<task-id>, implement, then report done
-# according to this task's delivery mode).
+# (inventory scratch state, reset to a clean base, carry over only intended fix
+# changes, create branch fm/<task-id>, implement, then report done according to
+# this task's delivery mode).
+# The suggested instructions name the exact base branch the task was spawned on,
+# read from base_branch= in the task's meta (bin/fm-base-branch.sh resolved it at
+# spawn time). A promoted worker must rebase onto the branch its project actually
+# develops on, which is not necessarily the branch its clone calls the default.
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
@@ -83,6 +87,13 @@ grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
 } >> "$TMP"
 mv "$TMP" "$META"
 
+BASE=$(grep '^base_branch=' "$META" 2>/dev/null | cut -d= -f2- | head -n1 || true)
+if [ -n "$BASE" ]; then
+  BASE_PHRASE="reset to a clean base on $BASE, the branch this task was spawned on"
+else
+  BASE_PHRASE="reset to a clean default-branch base"
+fi
+
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; $BASE_PHRASE; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
