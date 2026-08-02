@@ -283,6 +283,45 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
   pass "fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon"
 }
 
+# A Codex checkpoint owns the watcher only for the lifetime of its foreground
+# command. This is the real lifecycle boundary: the guard must allow a Stop
+# while the checkpoint holds its lock, then block after the bounded checkpoint
+# exits. A recently completed checkpoint is deliberately not health evidence.
+test_codex_checkpoint_health_ends_when_foreground_command_returns() {
+  local dir checkpoint_pid attempt live_out live_status after_out after_status checkpoint_status
+  dir="$TMP_ROOT/hook-codex-checkpoint"
+  git clone -q "$ROOT" "$dir" || fail "could not create isolated Codex checkpoint fixture"
+  dir=$(cd "$dir" && pwd -P)
+  mkdir -p "$dir/state" "$dir/config"
+  : > "$dir/state/task1.meta"
+
+  FM_HOME="$dir" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    "$dir/bin/fm-watch-checkpoint.sh" --seconds 3 >"$dir/checkpoint.out" 2>"$dir/checkpoint.err" &
+  checkpoint_pid=$!
+  for attempt in $(seq 1 30); do
+    [ -s "$dir/state/.watch.lock/pid" ] && [ -e "$dir/state/.last-watcher-beat" ] && break
+    sleep 0.1
+  done
+  [ -s "$dir/state/.watch.lock/pid" ] && [ -e "$dir/state/.last-watcher-beat" ] || {
+    kill "$checkpoint_pid" 2>/dev/null || true
+    wait "$checkpoint_pid" 2>/dev/null || true
+    fail "foreground checkpoint never became watcher-healthy"
+  }
+
+  live_out=$(run_hook "$dir" false); live_status=$?
+  expect_code 0 "$live_status" "active Codex checkpoint must make the guard allow Stop"
+  [ -z "$live_out" ] || fail "active Codex checkpoint produced guard output: $live_out"
+
+  wait "$checkpoint_pid"; checkpoint_status=$?
+  expect_code 124 "$checkpoint_status" "quiet Codex checkpoint must reach its bounded timeout"
+  assert_absent "$dir/state/.watch.lock/pid" "checkpoint timeout left a watcher lock behind"
+
+  after_out=$(run_hook "$dir" false); after_status=$?
+  expect_code 2 "$after_status" "completed checkpoint must not let an in-flight primary Stop blind"
+  assert_contains "$after_out" "TURN WOULD END BLIND" "post-checkpoint guard must explain the missing live watcher"
+  pass "fm-turnend-guard: Codex checkpoint is healthy only while its foreground command is live"
+}
+
 test_hook_blocks_with_live_lock_and_stale_beacon() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-stale")
@@ -1135,6 +1174,7 @@ test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
+test_codex_checkpoint_health_ends_when_foreground_command_returns
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
