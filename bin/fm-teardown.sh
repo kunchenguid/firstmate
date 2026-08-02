@@ -368,6 +368,9 @@ remove_pr_poll_artifacts() {
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.check-trust" || return 1
   if fm_task_id_path_safe "$id"; then
+    # The watcher's conflict-episode marker belongs to the poll it dedupes, so
+    # it retires with the other poll artifacts rather than outliving the task.
+    rm -f "$state_dir/.pr-dirty-$id" || return 1
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
       for artifact in "$quarantine/$id."*; do

@@ -41,6 +41,12 @@
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: <script>: dirty <head> <url>
+#                          a monitored pull request the forge reports as
+#                          conflicting, carrying its URL so the worker can be
+#                          steered to rebase; one wake per conflict episode,
+#                          keyed by head commit and re-surfaced no more often
+#                          than PR_DIRTY_RESURFACE_SECS
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -153,6 +159,17 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# A monitored pull request the forge reports as conflicting wakes once per
+# conflict episode, keyed by the head commit the poll reports alongside it, so
+# an unrebased conflict does not re-wake every CHECK_INTERVAL. Poll silence is
+# ambiguous - clean, unknown, closed, and every error all look the same - so it
+# can never clear that key; a changed head can, because it means the branch
+# moved and the pull request went conflicting again from a new commit. The key
+# is recorded only after the wake is durably enqueued, so a failed enqueue or a
+# watcher killed mid-cycle re-surfaces that conflict rather than swallowing it.
+# A conflict nobody has touched still re-surfaces every PR_DIRTY_RESURFACE_SECS,
+# finite so a forgotten conflict cannot rot invisibly.
+PR_DIRTY_RESURFACE_SECS=${FM_PR_DIRTY_RESURFACE_SECS:-3600}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -535,6 +552,33 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+# Decide whether a validated PR poll's conflict result is a new episode worth
+# waking for. Returns 0 to wake and 1 to stay silent. The head commit reported
+# with the conflict is the episode key: an unchanged key inside the resurface
+# window is the same unrebased conflict already reported. Pure read - the
+# episode is recorded by pr_dirty_mark_surfaced only after the wake is durably
+# enqueued, so a watcher that dies mid-cycle never swallows a conflict.
+pr_dirty_wake_due() {  # <task-id> <head-token>
+  local id=$1 token=$2 marker
+  marker="$STATE/.pr-dirty-$id"
+  if [ "$(cat "$marker" 2>/dev/null)" = "$token" ] \
+    && [ "$(age_of "$marker")" -lt "$PR_DIRTY_RESURFACE_SECS" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# Record a conflict episode after its wake has been enqueued, so the same
+# unrebased conflict is not re-surfaced next sweep. A marker that cannot be
+# written only means the conflict surfaces again later - a duplicate wake, never
+# a swallowed one - so this reports and continues.
+pr_dirty_mark_surfaced() {  # <task-id> <head-token>
+  local id=$1 token=$2
+  printf '%s\n' "$token" > "$STATE/.pr-dirty-$id" 2>/dev/null \
+    || triage_log "could not record the conflict episode for $id; it may surface again"
+  return 0
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark every current captain-relevant status as surfaced. Called after the
@@ -739,6 +783,7 @@ while :; do
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
+      pr_dirty_token=
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
@@ -773,8 +818,19 @@ while :; do
       fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
+        # A conflicting pull request repeats for as long as it stays unrebased,
+        # so it is deduped by conflict episode before it may wake, and its wake
+        # carries the pull request URL the validated snapshot already supplied
+        # so the worker can be steered to rebase without a lookup first.
+        if [ "$is_pr_poll" -eq 1 ] && [ "${out#dirty }" != "$out" ]; then
+          pr_dirty_wake_due "$id" "${out#dirty }" || continue
+          pr_dirty_token=${out#dirty }
+          reason="check: $c: $out $url"
+        fi
         fm_wake_append check "$c" "$reason" || exit 1
+        [ -z "$pr_dirty_token" ] || pr_dirty_mark_surfaced "$id" "$pr_dirty_token"
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+          rm -f "$STATE/.pr-dirty-$id"
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
               || triage_log "merged PR poll retirement remains recoverable for $id"
