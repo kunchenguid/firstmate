@@ -26,14 +26,27 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
-      - name: Verify no-mistakes signature in PR body
+      - name: Verify private-fork target or no-mistakes signature
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_BASE_PRIVATE: ${{ github.event.pull_request.base.repo.private }}
+          PR_BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          PR_HEAD_PRIVATE: ${{ github.event.pull_request.head.repo.private }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
+          private_repo='vaskarvelas/firstmate-private'
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+          if [ "${PR_BASE_REPO:-}" != "$private_repo" ] || [ "${PR_BASE_PRIVATE:-}" != true ]; then
+            echo "::error::PRs must target the private $private_repo repository; upstream and other targets are forbidden." >&2
+            exit 1
+          fi
+          if [ "${PR_HEAD_REPO:-}" = "$private_repo" ] && [ "${PR_HEAD_PRIVATE:-}" = true ]; then
+            echo "Direct PR permitted inside private repository $private_repo."
+            exit 0
+          fi
           if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
             exit 0
@@ -41,7 +54,7 @@ jobs:
           {
             echo "::error::This PR was not raised through no-mistakes."
             echo
-            echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
+            echo "External-head contributions to this private repository must use 'git push no-mistakes'."
             echo "That pipeline runs the required review/test/lint/CI steps and writes a"
             echo "deterministic '## Pipeline' section into the PR body containing:"
             echo
