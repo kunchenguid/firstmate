@@ -509,7 +509,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
 }
 
 test_spawn_writes_orca_metadata_and_launches_harness() {
-  local proj wt data state config id out log
+  local proj wt data state config id out log proj_real wt_real
   id="orcaspawnz1"
   proj="$TMP_ROOT/spawn-project"
   wt="$TMP_ROOT/spawn-wt"
@@ -518,7 +518,12 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   config="$TMP_ROOT/spawn-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
-  printf 'brief\n' > "$data/$id/brief.md"
+  cat > "$data/$id/brief.md" <<'EOF'
+brief
+
+- your isolated task worktree: {FM_WORKTREE}
+- the primary checkout: {FM_PRIMARY_CHECKOUT}
+EOF
   touch "$state/.last-watcher-beat"
   orca_case spawn
   log="$LOG"
@@ -541,6 +546,16 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "terminal=term-spawn" "$state/$id.meta" "meta missing terminal handle"
   assert_grep "orca_worktree_id=wt-spawn" "$state/$id.meta" "meta missing Orca worktree id"
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
+  proj_real=$(cd "$proj" && pwd -P)
+  wt_real=$(cd "$wt" && pwd -P)
+  assert_grep "- your isolated task worktree: $wt_real" "$data/$id/brief.md" \
+    "Orca spawn did not fill the verified physical worktree into the brief"
+  assert_grep "- the primary checkout: $proj_real" "$data/$id/brief.md" \
+    "Orca spawn did not fill the physical primary checkout into the brief"
+  assert_no_grep "{FM_WORKTREE}" "$data/$id/brief.md" \
+    "Orca spawn left the worktree isolation placeholder unfilled"
+  assert_no_grep "{FM_PRIMARY_CHECKOUT}" "$data/$id/brief.md" \
+    "Orca spawn left the primary-checkout isolation placeholder unfilled"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
