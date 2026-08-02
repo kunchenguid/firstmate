@@ -141,7 +141,7 @@ run_bootstrap_without_jq() {  # <home>
     printf '%s\n' '  builtin command "$@"'
     printf '%s\n' '}'
   } > "$bash_env"
-  BASH_ENV="$bash_env" FM_HOME="$home" FM_OPS_INBOX_STATE_DIR="$home/ops" \
+  BASH_ENV="$bash_env" FM_HOME="$home" \
     FM_BOOTSTRAP_VERBOSE_FACTS=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null \
     | grep -E 'MISSING: jq|OPS_INBOX|operational alert watch' || true
 }
@@ -169,8 +169,8 @@ test_quiet_backlog_is_silent() {
   local home out
   home=$(make_home quiet)
   configure "$home"
-  alert "$home" q1 600 backup-verify
-  alert "$home" q2 600 routine-scheduler
+  alert "$home" q1 600 source-alpha
+  alert "$home" q2 600 source-beta
   receipt "$home" 2 60
   out=$(run_poll "$home")
   [ -z "$out" ] || fail "a small, fresh, reviewed-recently backlog must not wake firstmate (got: $out)"
@@ -182,21 +182,21 @@ test_age_threshold_wakes_with_digest() {
   local home out
   home=$(make_home age)
   configure "$home"
-  alert "$home" a1 32400 backup-verify          # 9h old, past the 6h default
-  alert "$home" a2 600 backup-verify
-  alert "$home" a3 600 routine-scheduler
-  alert "$home" a4 600 acked-class
-  alert "$home" a5 600 warning-class warning
+  alert "$home" a1 32400 source-alpha          # 9h old, past the 6h default
+  alert "$home" a2 600 source-alpha
+  alert "$home" a3 600 source-beta
+  alert "$home" a4 600 source-acked
+  alert "$home" a5 600 source-warning warning
   ack_alert "$home" a4
   receipt "$home" 3 60
   out=$(run_poll "$home")
   assert_contains "$out" "ops-inbox:" "an aged critical backlog must wake firstmate"
   assert_contains "$out" "3 unacked critical alerts" "the digest must carry the unacked count"
   assert_contains "$out" "oldest 9h" "the digest must carry the oldest alert age"
-  assert_contains "$out" "top: backup-verify 2" "the digest must rank the busiest alert class first"
-  assert_contains "$out" "routine-scheduler 1" "the digest must name the other classes"
-  assert_not_contains "$out" "acked-class" "an acknowledged alert must not reach the digest"
-  assert_not_contains "$out" "warning-class" "a non-critical alert must not reach the digest"
+  assert_contains "$out" "top: source-alpha 2" "the digest must rank the busiest alert class first"
+  assert_contains "$out" "source-beta 1" "the digest must name the other classes"
+  assert_not_contains "$out" "source-acked" "an acknowledged alert must not reach the digest"
+  assert_not_contains "$out" "source-warning" "a non-critical alert must not reach the digest"
   [ "$(printf '%s' "$out" | wc -l | tr -d ' ')" = 0 ] \
     || fail "the wake must be exactly one line"
   assert_present "$home/state/.ops-inbox-wake" "a wake must be recorded for dedupe"
@@ -209,7 +209,7 @@ test_count_threshold_wakes_when_all_alerts_are_new() {
   configure "$home"
   i=0
   while [ "$i" -lt 30 ]; do
-    alert "$home" "c$i" 60 flood
+    alert "$home" "c$i" 60 source-volume
     i=$((i + 1))
   done
   receipt "$home" 30 60
@@ -222,7 +222,7 @@ test_stale_receipt_is_itself_wake_worthy() {
   local home out
   home=$(make_home stale-receipt)
   configure "$home"
-  alert "$home" s1 600 backup-verify
+  alert "$home" s1 600 source-alpha
   receipt "$home" 1 21600                       # 6h old, past the 3h default
   out=$(run_poll "$home")
   assert_contains "$out" "alert receipt stale 6h" "a stale receipt must wake even when the backlog itself is small"
@@ -234,7 +234,7 @@ test_missing_receipt_is_wake_worthy() {
   local home out
   home=$(make_home missing-receipt)
   configure "$home"
-  alert "$home" m1 600 backup-verify
+  alert "$home" m1 600 source-alpha
   out=$(run_poll "$home")
   assert_contains "$out" "alert receipt missing" "a missing receipt must wake firstmate"
   pass "a missing review receipt wakes firstmate on its own"
@@ -244,7 +244,7 @@ test_fresh_receipt_count_is_authoritative() {
   local home out
   home=$(make_home receipt-count)
   configure "$home"
-  alert "$home" r1 32400 backup-verify
+  alert "$home" r1 32400 source-alpha
   receipt "$home" 41 60
   out=$(run_poll "$home")
   assert_contains "$out" "41 unacked critical alerts" "a fresh receipt's own count must be reported"
@@ -255,7 +255,7 @@ test_leading_zero_config_number_is_canonicalized() {
   local home out
   home=$(make_home leading-zero-config)
   configure "$home" '"receipt_stale_hours": "08"'
-  alert "$home" lzc1 600 backup-verify
+  alert "$home" lzc1 600 source-alpha
   receipt "$home" 1 32400
   out=$(run_poll "$home")
   assert_contains "$out" "alert receipt stale 9h" \
@@ -267,9 +267,9 @@ test_leading_zero_receipt_count_is_canonicalized() {
   local home out
   home=$(make_home leading-zero-receipt)
   configure "$home" '"count": 0, "growth": 1'
-  alert "$home" lzr1 600 backup-verify
+  alert "$home" lzr1 600 source-alpha
   receipt "$home" '"08"' 60
-  printf '%s\n%s\n%s\n%s\n%s\n' fm-ops-inbox-wake-v1 "$NOW" 7 fresh backup-verify \
+  printf '%s\n%s\n%s\n%s\n%s\n' fm-ops-inbox-wake-v1 "$NOW" 7 fresh source-alpha \
     > "$home/state/.ops-inbox-wake"
   out=$(run_poll "$home")
   assert_contains "$out" "8 unacked critical alerts" \
@@ -281,10 +281,10 @@ test_leading_zero_sidecar_numbers_are_canonicalized() {
   local home out stale_epoch
   home=$(make_home leading-zero-sidecar)
   configure "$home"
-  alert "$home" lzs1 32400 backup-verify
+  alert "$home" lzs1 32400 source-alpha
   receipt "$home" 8 60
   stale_epoch=$((NOW - 90000))
-  printf '%s\n%s\n%s\n%s\n%s\n' fm-ops-inbox-wake-v1 "000$stale_epoch" 00000008 fresh backup-verify \
+  printf '%s\n%s\n%s\n%s\n%s\n' fm-ops-inbox-wake-v1 "000$stale_epoch" 00000008 fresh source-alpha \
     > "$home/state/.ops-inbox-wake"
   out=$(run_poll "$home")
   assert_contains "$out" "ops-inbox:" \
@@ -296,7 +296,7 @@ test_corrupt_recent_receipt_is_unreadable() {
   local home out
   home=$(make_home corrupt-receipt)
   configure "$home"
-  alert "$home" cr1 600 backup-verify
+  alert "$home" cr1 600 source-alpha
   printf 'not json\n' > "$home/ops/ops-inbox-receipt.json"
   touch -t "$(receipt_stamp 60)" "$home/ops/ops-inbox-receipt.json"
   out=$(run_poll "$home")
@@ -325,7 +325,7 @@ test_malformed_timestamp_fails_closed() {
   local home out
   home=$(make_home malformed-timestamp)
   configure "$home"
-  printf '{"id":"bad-ts","ts":"!","source":"routine-scheduler","severity":"critical","message":"bad timestamp","ack":false}\n' \
+  printf '{"id":"bad-ts","ts":"!","source":"source-beta","severity":"critical","message":"bad timestamp","ack":false}\n' \
     >> "$home/ops/ops-inbox.jsonl"
   receipt "$home" 1 60
   out=$(run_poll "$home")
@@ -338,7 +338,7 @@ test_calendar_invalid_timestamp_fails_closed() {
   local home out
   home=$(make_home calendar-invalid-timestamp)
   configure "$home"
-  printf '{"id":"bad-calendar","ts":"2026-00-00T00:00:00Z","source":"routine-scheduler","severity":"critical","message":"bad timestamp","ack":false}\n' \
+  printf '{"id":"bad-calendar","ts":"2026-00-00T00:00:00Z","source":"source-beta","severity":"critical","message":"bad timestamp","ack":false}\n' \
     >> "$home/ops/ops-inbox.jsonl"
   receipt "$home" 1 60
   out=$(run_poll "$home")
@@ -351,7 +351,7 @@ test_torn_trailing_spool_write_is_tolerated() {
   local home out
   home=$(make_home torn-spool)
   configure "$home"
-  alert "$home" complete 32400 backup-verify
+  alert "$home" complete 32400 source-alpha
   printf '{"id":"torn"' >> "$home/ops/ops-inbox.jsonl"
   receipt "$home" 1 60
   out=$(run_poll "$home")
@@ -366,7 +366,7 @@ test_torn_trailing_spool_write_does_not_trigger_cap() {
   local home out
   home=$(make_home torn-at-cap)
   configure "$home" '"max_lines": 1'
-  alert "$home" complete-at-cap 600 backup-verify
+  alert "$home" complete-at-cap 600 source-alpha
   printf '{"id":"still-being-written"' >> "$home/ops/ops-inbox.jsonl"
   receipt "$home" 1 60
   out=$(run_poll "$home")
@@ -378,7 +378,7 @@ test_valid_unterminated_final_record_is_scanned() {
   local home out
   home=$(make_home valid-unterminated)
   configure "$home"
-  printf '{"id":"final","ts":"%s","source":"backup-verify","severity":"critical","message":"complete","ack":false}' \
+  printf '{"id":"final","ts":"%s","source":"source-alpha","severity":"critical","message":"complete","ack":false}' \
     "$(iso_at 32400)" >> "$home/ops/ops-inbox.jsonl"
   receipt "$home" 1 60
   out=$(run_poll "$home")
@@ -395,8 +395,8 @@ test_acknowledged_garbage_timestamp_is_ignored() {
   local home out
   home=$(make_home acked-garbage-timestamp)
   configure "$home"
-  alert "$home" quiet 600 backup-verify
-  printf '{"id":"acked-bad","ts":"!","source":"routine-scheduler","severity":"critical","message":"bad timestamp","ack":false}\n' \
+  alert "$home" quiet 600 source-alpha
+  printf '{"id":"acked-bad","ts":"!","source":"source-beta","severity":"critical","message":"bad timestamp","ack":false}\n' \
     >> "$home/ops/ops-inbox.jsonl"
   ack_alert "$home" acked-bad
   receipt "$home" 1 60
@@ -409,7 +409,7 @@ test_standing_backlog_does_not_rewake_every_poll() {
   local home first second
   home=$(make_home dedupe)
   configure "$home"
-  alert "$home" d1 32400 backup-verify
+  alert "$home" d1 32400 source-alpha
   receipt "$home" 1 60
   first=$(run_poll "$home")
   assert_contains "$first" "ops-inbox:" "the first sight of a backlog must wake"
@@ -422,16 +422,16 @@ test_material_growth_wakes_again() {
   local home out i
   home=$(make_home growth)
   configure "$home" '"growth": 5'
-  alert "$home" g0 32400 backup-verify
+  alert "$home" g0 32400 source-alpha
   receipt "$home" 1 60
   run_poll "$home" >/dev/null
-  alert "$home" g1 600 backup-verify
+  alert "$home" g1 600 source-alpha
   receipt "$home" 2 60
   out=$(run_poll "$home")
   [ -z "$out" ] || fail "one extra alert is not material growth (got: $out)"
   i=0
   while [ "$i" -lt 5 ]; do
-    alert "$home" "gg$i" 600 backup-verify
+    alert "$home" "gg$i" 600 source-alpha
     i=$((i + 1))
   done
   receipt "$home" 7 60
@@ -444,13 +444,13 @@ test_new_alert_class_wakes_again() {
   local home out
   home=$(make_home new-class)
   configure "$home"
-  alert "$home" n1 32400 backup-verify
+  alert "$home" n1 32400 source-alpha
   receipt "$home" 1 60
   run_poll "$home" >/dev/null
-  alert "$home" n2 600 disk-pressure
+  alert "$home" n2 600 source-gamma
   receipt "$home" 2 60
   out=$(run_poll "$home")
-  assert_contains "$out" "disk-pressure" "a newly failing alert class must wake again immediately"
+  assert_contains "$out" "source-gamma" "a newly failing alert class must wake again immediately"
   pass "a new alert class wakes again without waiting for the re-remind interval"
 }
 
@@ -458,13 +458,13 @@ test_reremind_interval_wakes_again() {
   local home out stale_epoch
   home=$(make_home reremind)
   configure "$home" '"remind_hours": 1'
-  alert "$home" rr1 32400 backup-verify
+  alert "$home" rr1 32400 source-alpha
   receipt "$home" 1 60
   run_poll "$home" >/dev/null
   out=$(run_poll "$home")
   [ -z "$out" ] || fail "the same backlog must stay quiet inside the re-remind interval (got: $out)"
   stale_epoch=$((NOW - 7200))
-  printf '%s\n%s\n%s\n%s\n%s\n' fm-ops-inbox-wake-v1 "$stale_epoch" 1 fresh backup-verify \
+  printf '%s\n%s\n%s\n%s\n%s\n' fm-ops-inbox-wake-v1 "$stale_epoch" 1 fresh source-alpha \
     > "$home/state/.ops-inbox-wake"
   out=$(run_poll "$home")
   assert_contains "$out" "ops-inbox:" "an unreviewed backlog must be raised again once the re-remind interval passes"
@@ -475,7 +475,7 @@ test_cleared_backlog_resets_dedupe() {
   local home out
   home=$(make_home cleared)
   configure "$home"
-  alert "$home" x1 32400 backup-verify
+  alert "$home" x1 32400 source-alpha
   receipt "$home" 1 60
   run_poll "$home" >/dev/null
   assert_present "$home/state/.ops-inbox-wake" "the first wake must be recorded"
@@ -484,7 +484,7 @@ test_cleared_backlog_resets_dedupe() {
   out=$(run_poll "$home")
   [ -z "$out" ] || fail "a cleared backlog must be silent (got: $out)"
   assert_absent "$home/state/.ops-inbox-wake" "a cleared backlog must drop its dedupe record"
-  alert "$home" x2 32400 backup-verify
+  alert "$home" x2 32400 source-alpha
   receipt "$home" 1 60
   out=$(run_poll "$home")
   assert_contains "$out" "ops-inbox:" "a fresh backlog after a cleared one must wake immediately"
@@ -539,7 +539,7 @@ test_recognized_null_configuration_keeps_default() {
   local home out
   home=$(make_home recognized-null-config)
   configure "$home" '"count": null'
-  alert "$home" null-default 600 backup-verify
+  alert "$home" null-default 600 source-alpha
   receipt "$home" 1 60
   out=$(run_poll "$home")
   [ -z "$out" ] || fail "a recognized null setting must retain its quiet default (got: $out)"
@@ -599,7 +599,7 @@ test_explicit_disable_wins() {
   local home out
   home=$(make_home disabled)
   configure "$home" '"enabled": false'
-  alert "$home" o1 32400 backup-verify
+  alert "$home" o1 32400 source-alpha
   out=$(run_poll "$home")
   [ -z "$out" ] || fail "an explicitly disabled watch must stay silent (got: $out)"
   pass "an explicitly disabled alert watch stays silent"
@@ -627,35 +627,24 @@ test_missing_jq_with_configuration_fails_closed() {
   pass "a configured watch without jq wakes fail-closed"
 }
 
-test_missing_jq_after_default_configuration_fails_closed() {
-  local home out fault_path
-  home=$(make_home default-missing-jq)
-  alert "$home" jq1 600 backup-verify
-  fault_path=$(make_path_without_jq default-missing-jq)
-  out=$(PATH="$fault_path" FM_HOME="$home" FM_OPS_INBOX_STATE_DIR="$home/ops" \
-    "$fault_path/bash" "$POLL" 2>/dev/null)
-  assert_contains "$out" "jq is not installed" \
-    "an auto-armed default watch without jq must emit the dedicated failure wake"
-  pass "an auto-armed watch without jq wakes fail-closed"
-}
-
 test_bootstrap_missing_jq_reports_alert_watch_outage() {
   local home out
   home=$(make_home bootstrap-missing-jq)
-  alert "$home" bootstrap-jq1 600 backup-verify
+  configure "$home"
+  alert "$home" bootstrap-jq1 600 source-alpha
   out=$(run_bootstrap_without_jq "$home")
   assert_contains "$out" "MISSING: jq" \
     "bootstrap must retain the jq installation diagnostic"
-  assert_contains "$out" "OPS_INBOX: the operational alert watch cannot read the inbox until jq is installed; install jq, then rerun bootstrap" \
-    "bootstrap must classify the missing-jq alert-watch outage with remediation"
-  pass "bootstrap classifies a missing-jq alert-watch outage"
+  assert_contains "$out" "OPS_INBOX: jq is required to read config/ops-inbox.json; fix config/ops-inbox.json, then rerun bootstrap" \
+    "bootstrap must classify an unreadable private alert-watch configuration"
+  pass "bootstrap classifies a missing-jq private alert-watch configuration"
 }
 
 test_current_time_failure_fails_closed() {
   local home out fault_path
   home=$(make_home current-time-failure)
   configure "$home"
-  alert "$home" time1 600 backup-verify
+  alert "$home" time1 600 source-alpha
   receipt "$home" 1 60
   fault_path=$(make_fault_path current-time-failure date 1)
   out=$(run_poll_with_path "$home" "$fault_path")
@@ -677,7 +666,7 @@ test_old_spool_alert_wakes_when_receipt_count_is_zero() {
   local home out
   home=$(make_home zero-receipt-old-alert)
   configure "$home"
-  alert "$home" receipt-zero-old 32400 backup-verify
+  alert "$home" receipt-zero-old 32400 source-alpha
   receipt "$home" 0 60
   out=$(run_poll "$home")
   assert_contains "$out" "oldest 9h" \
@@ -689,7 +678,7 @@ test_bounded_sample_failure_fails_closed() {
   local home out fault_path
   home=$(make_home sample-failure)
   configure "$home"
-  alert "$home" sample1 600 backup-verify
+  alert "$home" sample1 600 source-alpha
   receipt "$home" 1 60
   fault_path=$(make_fault_path sample-failure head 1)
   out=$(run_poll_with_path "$home" "$fault_path")
@@ -702,7 +691,7 @@ test_acknowledgement_parse_failure_fails_closed() {
   local home out
   home=$(make_home acknowledgement-parse-failure)
   configure "$home"
-  alert "$home" ack-parse1 600 backup-verify
+  alert "$home" ack-parse1 600 source-alpha
   printf '{"event_id":"broken"\n' > "$home/ops/ops-inbox-acks.jsonl"
   receipt "$home" 1 60
   out=$(run_poll "$home")
@@ -715,7 +704,7 @@ test_spool_tail_failure_fails_closed() {
   local home out fault_path
   home=$(make_home spool-tail-failure)
   configure "$home"
-  alert "$home" tail1 600 backup-verify
+  alert "$home" tail1 600 source-alpha
   receipt "$home" 1 60
   fault_path=$(make_fault_path spool-tail-failure tail 1)
   out=$(run_poll_with_path "$home" "$fault_path")
@@ -728,7 +717,7 @@ test_acknowledgement_filter_failure_fails_closed() {
   local home out fault_path
   home=$(make_home acknowledgement-filter-failure)
   configure "$home"
-  alert "$home" awk1 600 backup-verify
+  alert "$home" awk1 600 source-alpha
   receipt "$home" 1 60
   fault_path=$(make_fault_path acknowledgement-filter-failure awk 1)
   out=$(run_poll_with_path "$home" "$fault_path")
@@ -741,7 +730,7 @@ test_scan_summary_failure_fails_closed() {
   local home out fault_path
   home=$(make_home scan-summary-failure)
   configure "$home"
-  alert "$home" sort1 600 backup-verify
+  alert "$home" sort1 600 source-alpha
   receipt "$home" 1 60
   fault_path=$(make_fault_path scan-summary-failure sort 1)
   out=$(run_poll_with_path "$home" "$fault_path")
@@ -754,7 +743,7 @@ test_oldest_epoch_conversion_failure_fails_closed() {
   local home out fault_path
   home=$(make_home epoch-conversion-failure)
   configure "$home"
-  alert "$home" epoch1 600 backup-verify
+  alert "$home" epoch1 600 source-alpha
   receipt "$home" 1 60
   fault_path=$(make_fault_path epoch-conversion-failure date 2)
   out=$(run_poll_with_path "$home" "$fault_path")
@@ -767,7 +756,7 @@ test_dedupe_clear_failure_fails_closed() {
   local home out
   home=$(make_home dedupe-clear-failure)
   configure "$home"
-  alert "$home" clear1 600 backup-verify
+  alert "$home" clear1 600 source-alpha
   receipt "$home" 1 60
   mkdir "$home/state/.ops-inbox-wake"
   out=$(run_poll "$home")
@@ -780,7 +769,7 @@ test_bootstrap_arms_registers_and_is_idempotent() {
   local home out sum1 sum2
   home=$(make_home arm)
   configure "$home"
-  alert "$home" b1 600 backup-verify
+  alert "$home" b1 600 source-alpha
   out=$(run_bootstrap "$home")
   assert_contains "$out" "operational alert watch armed" "bootstrap must report the watch it armed"
   assert_present "$home/state/ops-watch.check.sh" "bootstrap must drop the standing check"
@@ -800,7 +789,7 @@ test_bootstrap_disarms_when_the_inbox_goes_away() {
   local home out
   home=$(make_home disarm)
   configure "$home"
-  alert "$home" b2 600 backup-verify
+  alert "$home" b2 600 source-alpha
   run_bootstrap "$home" >/dev/null
   assert_present "$home/state/ops-watch.check.sh" "the watch must be armed before the disarm case"
   rm -f "$home/ops/ops-inbox.jsonl"
@@ -815,7 +804,7 @@ test_bootstrap_refuses_to_take_a_live_task_id() {
   local home out
   home=$(make_home reserved)
   configure "$home"
-  alert "$home" b3 600 backup-verify
+  alert "$home" b3 600 source-alpha
   fm_write_meta "$home/state/ops-watch.meta" "window=firstmate:fm-ops-watch" "harness=echo"
   out=$(run_bootstrap "$home")
   assert_contains "$out" "OPS_INBOX: task id ops-watch is in use" "bootstrap must refuse to collide with live work"
@@ -866,7 +855,7 @@ test_armed_watch_needs_supervision() {
   local home needed desc
   home=$(make_home supervision)
   configure "$home"
-  alert "$home" b4 600 backup-verify
+  alert "$home" b4 600 source-alpha
   needed=$(
     # shellcheck source=bin/fm-supervision-lib.sh
     . "$ROOT/bin/fm-supervision-lib.sh"
@@ -897,7 +886,7 @@ test_read_cap_is_reported_not_hidden() {
   configure "$home" '"max_lines": 5'
   i=0
   while [ "$i" -lt 8 ]; do
-    alert "$home" "cap$i" 600 flood
+    alert "$home" "cap$i" 600 source-volume
     i=$((i + 1))
   done
   receipt "$home" 8 60
@@ -913,7 +902,7 @@ test_secondmate_home_does_not_auto_arm() {
   local home out
   home=$(make_home secondmate-auto)
   configure "$home"
-  alert "$home" sm1 32400 backup-verify
+  alert "$home" sm1 32400 source-alpha
   printf '%s\n' alpha > "$home/.fm-secondmate-home"
   out=$(run_poll "$home")
   [ -z "$out" ] || fail "one machine has one alert inbox, so a secondmate home must not raise it too (got: $out)"
@@ -931,8 +920,8 @@ test_watcher_dispatches_the_registered_check() {
   local home status wake drained
   home=$(make_home watcher)
   configure "$home"
-  alert "$home" w1 32400 backup-verify
-  alert "$home" w2 600 routine-scheduler
+  alert "$home" w1 32400 source-alpha
+  alert "$home" w2 600 source-beta
   receipt "$home" 2 60
   seed_migration_markers "$home"
   run_bootstrap "$home" >/dev/null
@@ -1002,7 +991,6 @@ test_zero_read_cap_is_reported
 test_explicit_disable_wins
 test_explicit_enable_without_spool_fails_closed
 test_missing_jq_with_configuration_fails_closed
-test_missing_jq_after_default_configuration_fails_closed
 test_bootstrap_missing_jq_reports_alert_watch_outage
 test_current_time_failure_fails_closed
 test_inert_watch_does_not_require_current_time

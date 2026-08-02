@@ -1,6 +1,6 @@
 # Operational alert inbox wake
 
-Some machines run an operations runtime that records critical alerts - dead-man timers, tripwires, backup and service health checks - into a durable inbox instead of a chat transport.
+Some machines run an operations runtime that records critical alerts into a durable inbox instead of a chat transport.
 An inbox nobody reads disarms every one of those checks silently, because each check still "fires" and still records its alert while no one is told.
 This watch closes that gap by turning an unreviewed critical backlog into an ordinary Firstmate wake, so a stalled alert queue reaches the first mate the same way a crew signal or a merged pull request does.
 
@@ -16,7 +16,7 @@ The invariant behind every exit is that the poll may stay silent only after it h
 
 | Surface and exit | Disposition | Contract |
 |---|---|---|
-| `fm_ops_inbox_config_load`: the optional config is absent. | `SILENT-BY-DESIGN` | Defaults are resolved and evaluation continues without output. |
+| `fm_ops_inbox_config_load`: the optional config is absent. | `SILENT-BY-DESIGN` | The optional watch is disabled and evaluation stops without output. |
 | `fm_ops_inbox_config_load`: the config is not an ordinary file or is a symlink. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake because no configured threshold can be trusted. |
 | `fm_ops_inbox_config_load`: the config exists but `jq` is unavailable. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake. |
 | `fm_ops_inbox_config_load`: the config is unreadable, invalid JSON, or not an object. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake. |
@@ -25,6 +25,7 @@ The invariant behind every exit is that the poll may stay silent only after it h
 | `fm_ops_inbox_config_load`: `enabled` has an invalid value. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake. |
 | `fm_ops_inbox_config_load`: a path setting is empty or non-string, or any string setting contains a code point below 32. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake instead of resolving an unintended inbox path or accepting an injected setting. |
 | `fm_ops_inbox_config_load`: a numeric setting is empty, negative, fractional, non-numeric, outside the supported arithmetic range, or a zero `max_lines`. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake. |
+| `fm_ops_inbox_config_load`: an enabled or auto config omits `state_dir` and any of the three explicit paths. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake because no inbox can be determined safely. |
 | `fm_ops_inbox_config_load`: all settings are valid, with recognized null values omitted. | `SILENT-BY-DESIGN` | Defaults survive null values and evaluation continues without output. |
 | `fm_ops_inbox_watch_expected`: `enabled` is explicitly true. | `SILENT-BY-DESIGN` | Evaluation continues even when the spool is absent, so the scan can fail closed. |
 | `fm_ops_inbox_watch_expected`: `enabled` is explicitly false. | `SILENT-BY-DESIGN` | The poll exits without reading or waking. |
@@ -60,7 +61,7 @@ The invariant behind every exit is that the poll may stay silent only after it h
 | Poll: configuration loading fails. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake and exits successfully for the watcher. |
 | Poll: an active or malformed watch cannot read the current time as epoch seconds. | `FAILS-CLOSED-AND-WAKES` | The poll emits a direct one-line watch failure because age, receipt staleness, and dedupe cannot be evaluated. |
 | Poll: the watch is disabled or auto mode has no owned spool. | `SILENT-BY-DESIGN` | The poll exits with no output. |
-| Poll: `jq` is unavailable after default configuration resolution. | `FAILS-CLOSED-AND-WAKES` | The poll emits the dedicated missing-`jq` wake. |
+| Poll: `jq` is unavailable after active configuration resolution. | `FAILS-CLOSED-AND-WAKES` | The poll emits the dedicated missing-`jq` wake. |
 | Poll: the receipt is missing, stale, or unreadable. | `WAKES` | The receipt state is included in the digest after a successful scan. |
 | Poll: scanning or oldest-timestamp conversion fails. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake. |
 | Poll: the fresh receipt and scan establish that no wake threshold is met. | `SILENT-BY-DESIGN` | The poll clears prior dedupe state and exits with no output. |
@@ -83,7 +84,7 @@ The watch reads three paths and writes to none of them:
 An alert counts as unacked exactly when the spool's own reader counts it: `severity` is `critical`, the inline `ack` flag is `false`, and no acknowledgement entry names its `id`.
 Firstmate never acknowledges, rotates, or edits these files; acknowledging remains the operations runtime's own command.
 
-`<state_dir>` defaults to `$HOME/.openclaw/state` and is overridable per home; see [Configuration](#configuration).
+`<state_dir>` is selected by the home's private configuration; see [Configuration](#configuration).
 
 ## When it wakes
 
@@ -101,11 +102,11 @@ The oldest age and the alert classes always come from the spool, since the recei
 The wake is one compact digest line, enough to triage without reading the whole inbox:
 
 ```
-ops-inbox: 621 unacked critical alerts, oldest 13d, top: routine-scheduler 154, pipeline-verifier 96, scheduled-work-inventory 60
+ops-inbox: 621 unacked critical alerts, oldest 13d, top: source-beta 154, source-delta 96, source-epsilon 60
 ```
 
 ```
-ops-inbox: alert receipt stale 9h; 3 unacked critical alerts, oldest 8h, top: backup-verify 3
+ops-inbox: alert receipt stale 9h; 3 unacked critical alerts, oldest 8h, top: source-alpha 3
 ```
 
 Alert class is the spool's `source` field, sanitized and length-capped so a hostile or malformed alert cannot forge extra fields, split the line, or corrupt the durable wake record.
@@ -114,7 +115,7 @@ The read itself is bounded: the check samples at most `max_lines + 1` spool line
 Exceeding that cap is reported without claiming the exact spool length, because a capped read understates both the total and the oldest age:
 
 ```
-ops-inbox: inbox past its 20000-line read cap, so the total and oldest age below are understated; 20000 unacked critical alerts, oldest 6d, top: routine-scheduler 5104
+ops-inbox: inbox past its 20000-line read cap, so the total and oldest age below are understated; 20000 unacked critical alerts, oldest 6d, top: source-beta 5104
 ```
 
 A valid final JSON record is included even without a trailing newline, while a malformed non-terminated fragment is ignored as an append in progress.
@@ -140,7 +141,8 @@ The watch is the reserved standing check `state/ops-watch.check.sh`, registered 
 That shim only exports the home and runs `bin/fm-ops-inbox-poll.sh`; the watcher runs the registered bytes and turns any output into one `check:` wake.
 Arming is a session-start bootstrap sweep, so it converges on its own rather than depending on anyone remembering to arm it.
 
-By default a home arms the watch only when the configured alert spool actually exists, so a machine with no operations runtime writes nothing and prints nothing.
+Without private configuration a home leaves the watch disabled, so a machine with no selected operations runtime writes nothing and prints nothing.
+With `enabled: auto`, a home arms the watch only when its configured alert spool actually exists.
 Secondmate homes never auto-arm, because the primary home owns the one machine-wide inbox, but an explicit `enabled: true` still arms a secondmate home.
 The local config is not inherited into secondmate homes.
 In auto mode, bootstrap disarms it again when the inbox goes away.
@@ -152,13 +154,15 @@ A standing poll only ever reaches the first mate through a live watcher, so a ho
 
 ## Configuration
 
-Local, gitignored `config/ops-inbox.json` under the effective home overrides the defaults.
-Every key is optional, and an unrecognized key is refused rather than ignored, so a mistyped threshold can never read as a configured one.
+Local, gitignored `config/ops-inbox.json` under the effective home opts into the watch and holds its source paths and thresholds.
+Its absence disables the watch.
+The threshold keys are optional, but an active config must provide `state_dir` or all three explicit paths.
+An unrecognized key is refused rather than ignored, so a mistyped threshold can never read as a configured one.
 
 ```json
 {
   "enabled": "auto",
-  "state_dir": "/absolute/path/to/.openclaw/state",
+  "state_dir": "/absolute/path/to/operations-state",
   "age_hours": 6,
   "count": 25,
   "remind_hours": 24,
@@ -168,20 +172,9 @@ Every key is optional, and an unrecognized key is refused rather than ignored, s
 }
 ```
 
-- `enabled` is `auto` (default: arm only when the spool exists), `true` (always arm, and treat a missing spool or receipt as an alerting failure), or `false` (never arm).
-- `state_dir` selects the watched directory; `spool`, `acks`, and `receipt` override those three paths individually.
+- `enabled` is `auto` (the default when this config exists: arm only when the spool exists), `true` (always arm, and treat a missing spool or receipt as an alerting failure), or `false` (never arm).
+- `state_dir` selects the watched directory; `spool`, `acks`, and `receipt` override those three paths individually. An active config must provide `state_dir` or all three explicit paths.
 - `remind_hours: 0` disables re-reminding, and `receipt_stale_hours: 0` disables the staleness condition.
 - `max_lines` bounds how many recent spool and acknowledgement lines one check reads (default 20000).
-- `FM_OPS_INBOX_STATE_DIR` overrides the default watched directory for tests and specialized setups; an explicit config value always wins over it.
 
 `docs/configuration.md` owns where this file sits among the other local operating choices, and `bin/fm-ops-inbox-lib.sh`'s header owns the exact resolution mechanics.
-
-## Two paths named "ops-inbox"
-
-The JSONL spool above is the alert inbox this watch reads.
-A second, unrelated path shares the name: some operations routines drop plain-text `.event` files into `<firstmate-home>/ops-inbox/<source>/`, a spool with no severity field, no acknowledgement model, and no reader on the Firstmate side.
-
-Those two are not two views of one inbox; they are one watched inbox and one unread drop directory.
-Firstmate treats the JSONL spool plus its receipt as the single alert surface, and gitignores the drop directory so its machine-local files can never be committed into this shared repo.
-Converging the routines that write `.event` files onto the JSONL spool belongs to the operations repository that owns those routines, not here: an alert only reaches this watch once its producer records it in the spool.
-Until that convergence lands, an alert written only as an `.event` file is not covered by this watch.
