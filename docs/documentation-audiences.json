@@ -26,6 +26,7 @@
   "readmeSetupTargets": [
     "docs/configuration.md",
     "docs/wedge-alarm.md",
+    "docs/mail-readonly.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
     "docs/zellij-backend.md",
@@ -152,6 +153,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/mail-readonly/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -257,6 +262,10 @@
     },
     {
       "path": "docs/herdr-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/mail-readonly.md",
       "audience": "operator-current"
     },
     {
