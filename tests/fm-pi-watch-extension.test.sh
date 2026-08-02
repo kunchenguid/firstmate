@@ -5,6 +5,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Every case supplies its own scratch home and root. Do not let a supervising
+# firstmate process redirect the plugin back into the live fleet's state.
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE
+
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 # Node 24 warns when these test-only dynamic imports load tracked ESM plugins
