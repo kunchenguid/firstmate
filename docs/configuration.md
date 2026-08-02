@@ -13,6 +13,8 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
 `state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
+Browser custody adds gitignored metadata under `state/browser/v1/`, sanitized browser receipts under `data/browser/v1/receipts/`, and cookie-free runtime material under the platform cache root selected by `bin/fm-browser.sh`.
+Cookie-bearing profiles must never live under `data/`, `state/`, `config/`, or a project worktree.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
@@ -22,6 +24,16 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
+## Browser policy (config/browser-policy.json)
+
+`config/browser-policy.json` is an optional local, gitignored policy file for `bin/fm-browser.sh`.
+Absent means the browser capability is disabled.
+The current disabled core accepts only schema `fm-browser-policy.v1`, boolean `enabled`, positive integer `maxActiveSessions`, optional anonymous timeout fields, `defaultExpiry`, and `allowedAuthClasses` equal to `["anonymous"]` when present.
+Setting `enabled` to true does not authorize real browser launch in this core; it permits only mocked lifecycle tests until `docs/verification/browser-capability.md` records a supported real mode.
+The file is inherited into secondmate homes under the primary-authoritative local-material contract.
+It must never contain credentials, cookies, profile paths, personal browser identifiers, private URLs, CDP endpoints, account identifiers, or permanent site authentication material.
+The command header for `bin/fm-browser.sh` owns exact command syntax, state paths, receipt fields, and runtime-root override behavior.
 
 ## Pi Calm preference (config/calm)
 

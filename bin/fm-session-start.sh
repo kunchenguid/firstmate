@@ -40,7 +40,8 @@
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       a bounded inspect-only browser-custody summary, state/.afk,
+#                       and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
@@ -388,6 +389,14 @@ for status in "$STATE"/*.status; do
   print_status_tail "$status"
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
+
+subsection "Browser custody (inspect-only)"
+if [ -x "$SCRIPT_DIR/fm-browser.sh" ]; then
+  BROWSER_OUT=$("$SCRIPT_DIR/fm-browser.sh" inspect --all --json 2>&1) || BROWSER_OUT=$?
+  printf '%s\n' "$BROWSER_OUT"
+else
+  printf '(browser owner unavailable)\n'
+fi
 
 subsection "AFK"
 if [ -e "$STATE/.afk" ]; then

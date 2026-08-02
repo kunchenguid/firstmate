@@ -104,6 +104,13 @@ Each record is bound to an incarnation token minted when the task's wiring is ar
 Three rendered-text readers deliberately remain outside this contract because they answer delivery questions: the submit acknowledgement and away-mode supervisor-pane busy guard in `bin/fm-tmux-lib.sh`, and the secondmate delivery-confirmation observation in `bin/fm-pending-reply-lib.sh`.
 All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
 
+## Browser custody
+
+Browser custody is owned by [`bin/fm-browser.sh`](../bin/fm-browser.sh), with intake and authority owned by the agent-only `browser-capability` skill.
+The current implementation is disabled by default and supports only public-ephemeral planning plus mocked lifecycle tests.
+Maintainer architecture is in [`browser-architecture.md`](browser-architecture.md), operator behavior is in [`browser-capability.md`](browser-capability.md), and active evidence is in [`verification/browser-capability.md`](verification/browser-capability.md).
+The browser owner is not a runtime backend: it binds browser state to existing task and project records while terminal endpoints remain owned by the runtime backend below.
+
 ## Runtime session backends
 
 The runtime backend is the session-provider layer below firstmate's scripts.

@@ -25,6 +25,7 @@
   ],
   "readmeSetupTargets": [
     "docs/configuration.md",
+    "docs/browser-capability.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -124,6 +125,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/browser-capability/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -202,6 +207,14 @@
     {
       "path": "docs/arm-pretool-check.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/browser-architecture.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/browser-capability.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/calm-mode-feasibility.md",
@@ -306,6 +319,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/browser-capability.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

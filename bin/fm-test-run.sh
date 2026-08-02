@@ -118,6 +118,7 @@ now_ms() {
 family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
+    fm-browser.test.sh|fm-browser-cleanup.test.sh|fm-browser-integration.test.sh|fm-browser-capacity.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
@@ -156,7 +157,7 @@ family_for_basename() {
     fm-update.test.sh)
       printf '%s\n' session-bootstrap
       ;;
-    fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-afk-pi-herdr-return-e2e.test.sh|fm-browser-real-smoke.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh)
@@ -651,6 +652,11 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
+    bin/fm-browser.sh|bin/fm-browser-lib.sh|bin/browser-engines/*|native/fm-window-helper/*)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
+      printf '%s\n' pr-forge
+      ;;
     bin/fm-secondmate*|bin/fm-home-seed.sh|bin/fm-backlog-handoff.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
@@ -691,6 +697,9 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
+    .agents/skills/browser-capability/SKILL.md)
+      printf '%s\n' pure-contract-unit
+      ;;
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
@@ -699,7 +708,8 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       ;;
     docs/fm-test-portable-shards.md|docs/fm-test-isolation-proof.md|\
-    docs/fm-test-isolation-proof.json)
+    docs/fm-test-isolation-proof.json|docs/browser-architecture.md|\
+    docs/browser-capability.md|docs/verification/browser-capability.md)
       printf '%s\n' pure-contract-unit
       ;;
     .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\

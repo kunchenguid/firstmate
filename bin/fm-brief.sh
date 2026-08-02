@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--browser]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -23,6 +23,9 @@
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
+#   --browser adds the guarded browser-capability scaffold. It requires the
+#   worker to load browser-capability and to route browser mechanics through
+#   bin/fm-browser.sh, never raw browser tools or profiles.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
@@ -93,6 +96,7 @@ else
 fi
 KIND=ship
 HERDR_LAB=0
+BROWSER=0
 NO_PROJECTS=0
 POS=()
 for a in "$@"; do
@@ -100,6 +104,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --browser) BROWSER=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     *) POS+=("$a") ;;
   esac
@@ -108,6 +113,10 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+if [ "$KIND" = secondmate ] && [ "$BROWSER" -eq 1 ]; then
+  echo "error: --browser applies only to crewmate ship or scout briefs" >&2
   exit 1
 fi
 
@@ -247,6 +256,18 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+if [ "$BROWSER" -eq 1 ]; then
+  IFS= read -r -d '' BROWSER_SECTION <<'EOF' || true
+# Browser capability - HARD SAFETY CONTRACT
+Load `browser-capability` before any browser intake, browser action, manual browser interaction, browser recovery, browser handoff, or browser cleanup.
+All browser mechanics must go through `bin/fm-browser.sh`; do not launch a browser directly, call raw `agent-browser`, call raw `chrome-devtools-axi` for owned browser work, attach to Chrome, inspect profiles/tabs/cookies/history/passwords, use personal profiles, import/export state, or browse private/local/admin origins unless this brief explicitly authorizes that exact mode.
+The current shipped core is disabled by default and supports public-ephemeral planning and mocked lifecycle tests unless the brief and verified docs explicitly say a later mode is enabled.
+EOF
+else
+  BROWSER_SECTION=
+fi
+BROWSER_SECTION=${BROWSER_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -255,6 +276,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$BROWSER_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -364,6 +387,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$BROWSER_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

@@ -10,6 +10,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "BROWSER: invalid config/browser-policy.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
@@ -496,12 +497,12 @@ secondmate_liveness_sweep() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
+    tmux|node|git|gh|curl|jq|orca|zellij|python3) echo "brew install $1  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
-    tasks-axi|quota-axi) echo "npm install -g $1" ;;
+    tasks-axi|quota-axi|agent-browser) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
 }
@@ -721,6 +722,50 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+browser_policy_validate() {
+  local file err enabled
+  file="$CONFIG/browser-policy.json"
+  [ -f "$file" ] || return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "MISSING: python3 (install: $(install_cmd python3))"
+    return 0
+  fi
+  err=$(python3 - "$file" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as fh:
+        obj = json.load(fh)
+except Exception as exc:
+    print(f"malformed JSON: {exc}")
+    raise SystemExit(0)
+if obj.get('schema') != 'fm-browser-policy.v1':
+    print('schema must be fm-browser-policy.v1')
+elif not isinstance(obj.get('enabled', False), bool):
+    print('enabled must be boolean')
+elif not isinstance(obj.get('maxActiveSessions', 1), int) or obj.get('maxActiveSessions', 1) < 1:
+    print('maxActiveSessions must be a positive integer')
+elif 'allowedAuthClasses' in obj and obj.get('allowedAuthClasses') != ['anonymous']:
+    print('only anonymous auth may be configured in the disabled v1 core')
+PY
+)
+  if [ -n "$err" ]; then
+    echo "BROWSER: invalid config/browser-policy.json - $err"
+    return 0
+  fi
+  enabled=$(python3 - "$file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as fh:
+    print('1' if json.load(fh).get('enabled', False) else '0')
+PY
+)
+  if [ "$enabled" = 1 ] && ! command -v agent-browser >/dev/null 2>&1; then
+    echo "MISSING: agent-browser (install: $(install_cmd agent-browser))"
+  fi
+  if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+    echo "BOOTSTRAP_INFO: browser policy config/browser-policy.json present (enabled=$enabled)"
+  fi
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -900,6 +945,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != 
   echo "BOOTSTRAP_INFO: crew harness override active: $crew"
 fi
 crew_dispatch_validate
+browser_policy_validate
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
