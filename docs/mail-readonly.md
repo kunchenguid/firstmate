@@ -21,7 +21,7 @@ If that reach is not acceptable for a mailbox, do not connect that mailbox.
 ## Requirements
 
 - macOS, because the refresh credential is stored in the login Keychain through `/usr/bin/security`.
-- `python3` from the system, which is already required by the rest of the toolbelt.
+- `python3` from the system; it is not part of the universal toolchain in [`configuration.md`](configuration.md#toolchain), so bootstrap neither checks for it nor installs it.
 - A personal Microsoft account (Outlook.com, Hotmail, Live).
 
 No third-party package, SDK or mail client is installed or used.
@@ -59,9 +59,8 @@ Only `consumers` or an explicit tenant GUID is accepted; the ambiguous `common` 
 `account` is a pin, not a filter.
 Every read first asks Microsoft which mailbox the credential belongs to and refuses to continue when it is not the pinned one.
 
-Keep the file private: `chmod 600 config/mail.json`.
-The tool refuses a group- or world-writable configuration, because a writable configuration could redirect the sign-in authority.
-It refuses a group- or world-writable `config/` directory for the same reason: anyone who can write the directory can replace the file inside it.
+Keep the file and the directory around it private: `chmod 600 config/mail.json` and `chmod 700 config/`.
+The tool refuses to read the configuration while either one is group- or world-writable.
 
 This configuration is per-home and deliberately not part of the inherited local material a primary home pushes to secondmates.
 [`configuration.md`](configuration.md) owns the schema; this page owns the procedure.
