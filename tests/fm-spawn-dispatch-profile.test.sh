@@ -414,6 +414,22 @@ test_codex_threads_luna_max_effort() {
   pass "codex receives the Luna model and model_reasoning_effort max profile flags"
 }
 
+test_codex_rejects_max_for_unsupported_model() {
+  local rec id out status
+  id=profile-codex-max-unsupported-z4b
+  rec=$(make_spawn_case profile-codex-max-unsupported codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5.5 --effort max)
+  status=$?
+  expect_code 1 "$status" "codex spawn should reject max for gpt-5.5"
+  assert_contains "$out" "codex effort 'max' requires model 'gpt-5.6-luna'" \
+    "codex spawn did not explain the model-qualified max requirement"
+  assert_absent "$HOME_DIR/state/$id.meta" "unsupported Codex max should be rejected before meta is written"
+  pass "codex rejects max when the selected model does not support it"
+}
+
 test_spawn_rejects_unverified_ultra_effort() {
   local rec id out status
   id=profile-ultra-z4b
@@ -701,6 +717,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_luna_xhigh_effort
 test_codex_threads_luna_max_effort
+test_codex_rejects_max_for_unsupported_model
 test_spawn_rejects_unverified_ultra_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

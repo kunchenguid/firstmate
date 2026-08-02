@@ -735,11 +735,14 @@ crew_dispatch_validate() {
   fi
   err=$(jq -r '
     def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi"] | index($h);
-    def effort_ok($h; $e):
+    def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "codex" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "codex" then
+        if $e == "max" then $m == "gpt-5.6-luna"
+        else (["low","medium","high","xhigh"] | index($e))
+        end
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "opencode" or $h == "kimi" then false
@@ -758,10 +761,10 @@ crew_dispatch_validate() {
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
     def bad_efforts:
       configured_profiles
-      | map({h: .harness, e: .effort})
+      | map({h: .harness, m: .model, e: .effort})
       | map(select(.e != null))
       | map(select((.h | type) == "string" and verified(.h)))
-      | map(select(. as $p | effort_ok($p.h; $p.e) | not))
+      | map(select(. as $p | effort_ok($p.h; $p.m; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
     if type != "object" then "top-level value must be an object"
