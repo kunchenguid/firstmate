@@ -72,7 +72,8 @@ SH
 run_context() {  # <fakebin> <home> <capture> <args...>
   local fakebin=$1 home=$2 capture=$3
   shift 3
-  env PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONTEXT_CAPTURE="$capture" \
+  env PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_CONTEXT_CAPTURE="$capture" \
     "$CONTEXT" "$@"
 }
 
@@ -81,6 +82,7 @@ run_send() {  # <fakebin> <home> <capture> <log> <args...>
   shift 4
   : > "$log"
   env PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
     FM_CONTEXT_CAPTURE="$capture" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" "$@"
 }
