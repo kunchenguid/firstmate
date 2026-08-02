@@ -242,7 +242,7 @@ test_cursor_spawn_writes_turnend_hook_and_meta() {
 }
 
 test_cursor_teardown_removes_our_hook() {
-  local id rec out rc
+  local id rec out rc excl
   id=cursor-teardown-b2
   rec=$(make_cursor_case teardown "$id")
   read_cursor_record "$rec"
@@ -250,10 +250,63 @@ test_cursor_teardown_removes_our_hook() {
   rc=$?
   [ "$rc" -eq 0 ] || fail "cursor spawn failed before teardown: $out"
   [ -f "$WT_DIR/.cursor/hooks.json" ] || fail "precondition: hooks.json should exist after spawn"
+  excl=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
   run_cursor_teardown "$HOME_DIR" "$FAKEBIN_DIR" "$id" >/dev/null 2>&1 || fail "cursor teardown failed"
   assert_absent "$WT_DIR/.cursor/hooks.json" "our cursor hooks.json survived teardown"
   assert_absent "$WT_DIR/.cursor/fm-turn-end.sh" "cursor turn-end script survived teardown"
-  pass "fm-teardown: the firstmate cursor turn-end hook is removed from a pooled worktree"
+  # info/exclude is clone-wide and never pruned by git, so a leftover entry would
+  # permanently untrack a project's own .cursor/hooks.json.
+  ! grep -qxF '.cursor/hooks.json' "$excl" \
+    || fail "the clone-wide .cursor/hooks.json exclude entry outlived the last cursor task"
+  ! grep -qxF '.cursor/fm-turn-end.sh' "$excl" \
+    || fail "the clone-wide .cursor/fm-turn-end.sh exclude entry outlived the last cursor task"
+  pass "fm-teardown: the firstmate cursor turn-end hook and its clone-wide excludes are released"
+}
+
+test_cursor_spawn_reclaims_its_own_stale_hook() {
+  local id rec out rc stale
+  id=cursor-reclaim-d4
+  rec=$(make_cursor_case reclaim "$id")
+  read_cursor_record "$rec"
+  # Exactly what a teardown that never ran would leave behind in a pooled worktree.
+  stale="$WT_DIR/.cursor/fm-turn-end.sh"
+  mkdir -p "$WT_DIR/.cursor"
+  printf '#!/usr/bin/env bash\ntouch %s\n' "'$HOME_DIR/state/cursor-dead-task.turn-ended'" > "$stale"
+  chmod +x "$stale"
+  printf '{"version":1,"hooks":{"stop":[{"command":"%s"}]}}\n' "$stale" > "$WT_DIR/.cursor/hooks.json"
+  out=$(run_cursor_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "cursor spawn failed over a stale firstmate hook: $out"
+  case "$out" in
+    *"already has .cursor/hooks.json"*) fail "spawn treated its own stale hook as a foreign project hook" ;;
+  esac
+  grep -qE "touch '.*/state/$id\.turn-ended'" "$stale" \
+    || fail "the stale turn-end script still signals the dead task"
+  grep -qF "$stale" "$WT_DIR/.cursor/hooks.json" \
+    || fail "hooks.json was not rewritten to point at the reinstalled script"
+  pass "fm-spawn: a firstmate hook left in a pooled worktree is reclaimed, never left signalling a dead task"
+}
+
+test_cursor_spawn_and_teardown_preserve_tracked_hook() {
+  local id rec out rc tracked
+  id=cursor-tracked-e5
+  rec=$(make_cursor_case tracked "$id")
+  read_cursor_record "$rec"
+  # A project that tracks its own hook file, even one naming a path like ours.
+  mkdir -p "$WT_DIR/.cursor"
+  printf '{"version":1,"hooks":{"stop":[{"command":".cursor/fm-turn-end.sh"}]}}\n' > "$WT_DIR/.cursor/hooks.json"
+  git -C "$WT_DIR" add .cursor/hooks.json
+  git -C "$WT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'track project cursor hook'
+  tracked=$(cat "$WT_DIR/.cursor/hooks.json")
+  out=$(run_cursor_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "cursor spawn failed with a tracked hook: $out"
+  assert_contains "$out" "already has .cursor/hooks.json" "spawn did not warn about the tracked hook"
+  [ "$(cat "$WT_DIR/.cursor/hooks.json")" = "$tracked" ] || fail "spawn overwrote a git-tracked .cursor/hooks.json"
+  run_cursor_teardown "$HOME_DIR" "$FAKEBIN_DIR" "$id" >/dev/null 2>&1 || fail "cursor teardown failed"
+  [ "$(cat "$WT_DIR/.cursor/hooks.json")" = "$tracked" ] || fail "teardown removed a git-tracked .cursor/hooks.json"
+  pass "cursor: a git-tracked project .cursor/hooks.json is never overwritten by spawn or removed by teardown"
 }
 
 test_cursor_spawn_and_teardown_preserve_foreign_hook() {
@@ -282,4 +335,6 @@ test_cursor_busy_signature_is_scoped
 test_cursor_supervision_protocol_renders
 test_cursor_spawn_writes_turnend_hook_and_meta
 test_cursor_teardown_removes_our_hook
+test_cursor_spawn_reclaims_its_own_stale_hook
 test_cursor_spawn_and_teardown_preserve_foreign_hook
+test_cursor_spawn_and_teardown_preserve_tracked_hook

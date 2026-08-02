@@ -164,10 +164,7 @@ ordinary_wake_line() {
     claude)
       printf '%s\n' '- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
-    codex)
-      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
-      ;;
-    cursor)
+    codex|cursor)
       printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
       ;;
     pi|pi-signed)

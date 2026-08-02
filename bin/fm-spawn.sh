@@ -195,6 +195,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-cursor-hook-lib.sh
+. "$SCRIPT_DIR/fm-cursor-hook-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1885,19 +1887,20 @@ EOF
       # Cursor fires a per-turn `stop` hook while interactive (verified,
       # cursor-agent 2026.07.23). Cursor discovers hooks ONLY at the project git
       # root's .cursor/hooks.json and exposes no --hooks-file override, so the
-      # per-task turn-end hook lives at the worktree root. It is installed ONLY
-      # when the worktree has no .cursor/hooks.json already: adding a task hook to
-      # a tracked file would dirty tracked state and block teardown, and a
-      # pre-existing untracked project hook must not be clobbered, so a worktree
-      # that already has one (e.g. a firstmate-repo task that tracks it) falls
-      # back to the brief's sparse status appends instead (the verified
-      # tracked-file rule).
+      # per-task turn-end hook lives at the worktree root. A pre-existing hook is
+      # left alone unless fm_cursor_hook_is_ours (bin/fm-cursor-hook-lib.sh)
+      # accepts it: adding a task hook to a tracked file would dirty tracked state
+      # and block teardown, and an untracked project hook must not be clobbered,
+      # so those fall back to the brief's sparse status appends instead (the
+      # verified tracked-file rule). A firstmate hook left in a pooled worktree by
+      # an earlier task IS ours, and is rewritten for this task rather than left
+      # signalling the dead task's marker.
       # The untracked hook file and script are git-excluded and discarded with the
       # pooled worktree, like the other harnesses' worktree hook files. Cursor
       # execs the hook `command` as an executable path (its probe hooks were
       # executable script paths), so the command is the absolute script path and
       # the marker path is embedded single-quoted inside that script.
-      if [ -e "$WT/.cursor/hooks.json" ]; then
+      if [ -e "$WT/.cursor/hooks.json" ] && ! fm_cursor_hook_is_ours "$WT"; then
         echo "warning: $WT already has .cursor/hooks.json; relying on the brief's status appends for turn-end (leaving the existing hook file untouched)" >&2
       else
         mkdir -p "$WT/.cursor"

@@ -112,6 +112,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-cursor-hook-lib.sh
+. "$SCRIPT_DIR/fm-cursor-hook-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -499,14 +501,16 @@ retire_busy_state() {
 # Remove the firstmate cursor turn-end hook from a pooled worktree before return,
 # so a reused worktree cannot fire a stale signal. The script is firstmate-owned
 # (fm-turn-end.sh), so it is always removed; the generic .cursor/hooks.json is
-# removed ONLY when it references our script, never a project's own hook file.
+# removed ONLY when fm_cursor_hook_is_ours accepts it, never a project's own or
+# git-tracked hook file. The clone-wide exclude entries go with the last hook.
 remove_cursor_worktree_hook() {
   local wt=$1
   [ -n "$wt" ] || return 0
-  if grep -qF '.cursor/fm-turn-end.sh' "$wt/.cursor/hooks.json" 2>/dev/null; then
+  if fm_cursor_hook_is_ours "$wt"; then
     rm -f "$wt/.cursor/hooks.json"
   fi
   rm -f "$wt/.cursor/fm-turn-end.sh"
+  fm_cursor_hook_release_exclude "$wt"
 }
 
 validate_pr_poll_cleanup() {
@@ -1635,6 +1639,7 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        remove_cursor_worktree_hook "$child_wt"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -1642,6 +1647,7 @@ cleanup_firstmate_home_children() {
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+      remove_cursor_worktree_hook "$child_wt"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
