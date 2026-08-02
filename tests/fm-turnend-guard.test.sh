@@ -702,6 +702,30 @@ EOF
   pass "fm-turnend-guard-grok: legacy environment loop guard prevents a nested resume loop"
 }
 
+# The legacy path redirects the shared guard's stderr into the resume prompt, so
+# an allow would swallow the containment warning entirely. It must reach Grok's
+# own stderr instead, and must never buy that visibility with a forced resume.
+test_grok_adapter_surfaces_containment_warning_on_allow() {
+  local dir outside fakebin log out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-adapter-containment")
+  outside="$TMP_ROOT/grok-adapter-containment-outside"
+  mkdir -p "$outside"
+  : > "$outside/foreign.source"
+  ln -s "$outside" "$dir/state/procevent"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-adapter-containment-bin")
+  log="$TMP_ROOT/grok-adapter-containment.log"
+  printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
+  chmod +x "$fakebin/grok"
+  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' \
+    | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "damaged process-event state alone must not block the grok adapter"
+  assert_contains "$out" "process-event state is not private to this home" \
+    "the legacy grok adapter swallowed the containment warning on an allow"
+  assert_contains "$out" "$dir/state/procevent" "the grok adapter must name the offending path"
+  [ ! -e "$log" ] || fail "the grok adapter forced a resume for a non-blocking warning"
+  pass "fm-turnend-guard-grok: an allow surfaces the containment warning without forcing a resume"
+}
+
 test_grok_adapter_native_false_blocks_without_resume() {
   local dir fakebin log out status
   dir=$(make_primary_dir "$TMP_ROOT/grok-native-false")
@@ -923,6 +947,74 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
+# The plugin discards the guard's stderr on every non-blocking exit, so the
+# containment warning about unserviceable process-event state reaches an
+# operator only if the plugin surfaces it through its own report-only channel -
+# never by forcing a prompt this warning must not force.
+test_opencode_plugin_surfaces_containment_warning_on_allow() {
+  local parent worktree_dir out status
+  parent="$TMP_ROOT/opencode-containment-parent"
+  git init -q "$parent"
+  worktree_dir="$parent/nested/opencode-containment-worktree"
+  mkdir -p "$worktree_dir/bin"
+  cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'WARNING: process-event state is not private to this home: /fake/state/procevent-inbox is a symlink or not a directory.\n' >&2
+exit 0
+EOF
+  chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" \
+    WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const toasts = [];
+let prompts = 0;
+const client = {
+  tui: {
+    showToast: async (request) => {
+      toasts.push(JSON.stringify(request));
+    },
+  },
+  session: {
+    promptAsync: async () => {
+      prompts += 1;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryTurnendGuard({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const idle = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+await hooks.event(idle);
+await hooks.event(idle);
+if (prompts !== 0) {
+  console.error(`a non-blocking warning forced ${prompts} prompt(s)`);
+  process.exit(1);
+}
+if (toasts.length !== 1) {
+  console.error(`expected one containment report per episode, got ${toasts.length}`);
+  process.exit(1);
+}
+if (!toasts[0].includes("process-event state is not private to this home")) {
+  console.error(`containment report lost its text: ${toasts[0]}`);
+  process.exit(1);
+}
+if (!toasts[0].includes("/fake/state/procevent-inbox")) {
+  console.error(`containment report omitted the path: ${toasts[0]}`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode plugin must report unserviceable process-event state on an allow"
+  [ -z "$out" ] || fail "OpenCode plugin containment test printed output: $out"
+  pass ".opencode primary plugin: an allow reports unserviceable process-event state without a prompt"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -1039,6 +1131,67 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
+# Same containment contract on Pi: the extension only reads the guard's stderr
+# to build a blocking follow-up, so an allow must still surface the warning -
+# as a displayed custom message, not as a forced follow-up turn.
+test_pi_extension_surfaces_containment_warning_on_allow() {
+  local repo home ext out status
+  repo="$TMP_ROOT/pi-containment-root"
+  home="$TMP_ROOT/pi-containment-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'WARNING: process-event state is not private to this home: /fake/state/procevent is a symlink or not a directory.\n' >&2
+exit 0
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const messages = [];
+let prompts = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  sendMessage(message) {
+    messages.push(message);
+  },
+  async sendUserMessage() {
+    prompts += 1;
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const settled = handlers.get("agent_settled");
+if (!settled) throw new Error("agent_settled handler was not registered");
+await settled({ type: "agent_settled" }, {});
+await settled({ type: "agent_settled" }, {});
+if (prompts !== 0) throw new Error(`a non-blocking warning forced ${prompts} follow-up(s)`);
+if (messages.length !== 1) throw new Error(`expected one containment notice per episode, got ${messages.length}`);
+const [notice] = messages;
+if (notice.customType !== "firstmate-turnend-containment") throw new Error(`untyped containment notice: ${notice.customType}`);
+if (notice.display !== true) throw new Error("containment notice was not displayed to the operator");
+if (!notice.content.includes("process-event state is not private to this home")) throw new Error(`containment notice lost its text: ${notice.content}`);
+if (!notice.content.includes("/fake/state/procevent")) throw new Error(`containment notice omitted the path: ${notice.content}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension must report unserviceable process-event state on an allow"
+  [ -z "$out" ] || fail "Pi containment test printed output: $out"
+  pass ".pi primary extension: an allow reports unserviceable process-event state without a follow-up"
+}
+
 # --- --claude cooperative mode -----------------------------------------------
 # In --claude mode the guard ignores stop_hook_active (Claude marks every stop
 # after ANY stop-hook continuation true, including asyncRewake rewake turns) and
@@ -1129,6 +1282,51 @@ test_hook_claude_mode_block_budget_then_degraded_allow() {
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "--claude budget must reset after the degraded allow so the next chain re-engages"
   pass "fm-turnend-guard --claude: re-block budget stays below the 8-block cap and resets after degraded allow"
+}
+
+# A Claude Stop hook that exits 0 has exactly one operator-visible channel: the
+# stdout systemMessage. Damaged process-event state never blocks on its own, so
+# without that channel the warning reaches nobody.
+test_hook_claude_mode_reports_unsafe_state_on_allow() {
+  local dir outside out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-unsafe")
+  outside="$TMP_ROOT/hook-claude-unsafe-outside"
+  mkdir -p "$outside"
+  : > "$outside/foreign.source"
+  ln -s "$outside" "$dir/state/procevent"
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "damaged process-event state alone must not block a --claude stop"
+  assert_contains "$out" '"systemMessage"' \
+    "--claude allow must surface the containment notice as a systemMessage"
+  printf '%s\n' "$out" | grep '^{' \
+    | jq -e --arg path "$dir/state/procevent" \
+      '.systemMessage | test("process-event state is not private") and contains($path)' >/dev/null \
+    || fail "--claude containment notice is not a well-formed systemMessage naming the path: $out"
+  pass "fm-turnend-guard --claude: an allow still reports unserviceable process-event state"
+}
+
+# The degraded allow already owns stdout, so the containment notice must fold
+# into that one object rather than emitting a second, unparseable one.
+test_hook_claude_mode_degraded_allow_folds_containment_notice() {
+  local dir outside out status i json_lines
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget-unsafe")
+  : > "$dir/state/task1.meta"
+  outside="$TMP_ROOT/hook-claude-budget-unsafe-outside"
+  mkdir -p "$outside"
+  ln -s "$outside" "$dir/state/procevent-inbox"
+  for i in 1 2 3; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+    expect_code 2 "$status" "--claude block $i must exit 2 within the budget"
+  done
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "--claude must allow degraded once the consecutive-block budget is exhausted"
+  json_lines=$(printf '%s\n' "$out" | grep -c '^{' || true)
+  [ "$json_lines" -eq 1 ] || fail "--claude degraded allow printed $json_lines stdout JSON objects: $out"
+  printf '%s\n' "$out" | grep '^{' \
+    | jq -e --arg path "$dir/state/procevent-inbox" \
+      '.systemMessage | contains("block budget exhausted") and contains($path)' >/dev/null \
+    || fail "--claude degraded allow dropped the budget or containment notice: $out"
+  pass "fm-turnend-guard --claude: degraded allow carries both notices in one systemMessage"
 }
 
 test_hook_claude_mode_allow_resets_budget() {
@@ -1237,6 +1435,7 @@ test_hook_silent_without_stdin
 test_hook_runs_fast
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
+test_grok_adapter_surfaces_containment_warning_on_allow
 test_grok_adapter_native_false_blocks_without_resume
 test_grok_adapter_native_true_allows_without_resume
 test_grok_adapter_snake_case_native_and_camel_precedence
@@ -1245,14 +1444,18 @@ test_grok_adapter_missing_jq_and_no_supervision_allow
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
+test_opencode_plugin_surfaces_containment_warning_on_allow
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_pi_extension_surfaces_containment_warning_on_allow
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_block_budget_then_degraded_allow
+test_hook_claude_mode_reports_unsafe_state_on_allow
+test_hook_claude_mode_degraded_allow_folds_containment_notice
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary

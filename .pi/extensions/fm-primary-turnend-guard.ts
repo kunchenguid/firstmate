@@ -7,6 +7,20 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 let guardFollowupActive = false;
+// The guard warns about process-event state no fm-procevent.sh command can
+// service and still allows the turn, so that line only reaches an operator if
+// this adapter surfaces it on the non-blocking path too. Latched by text so a
+// standing repair is announced once per episode, not once per turn.
+let reportedContainmentWarning = "";
+
+const CONTAINMENT_WARNING_PREFIX = "WARNING: process-event state is not private to this home:";
+
+function containmentWarning(stderr: string): string {
+  const line = stderr
+    .split("\n")
+    .find((candidate) => candidate.startsWith(CONTAINMENT_WARNING_PREFIX));
+  return line ? line.trim() : "";
+}
 
 type LockOwnership = "owned" | "missing" | "other";
 
@@ -142,6 +156,22 @@ export default function (pi: ExtensionAPI) {
     }
 
     const result = await runGuard();
+    const warning = containmentWarning(result.stderr);
+    if (warning && warning !== reportedContainmentWarning) {
+      reportedContainmentWarning = warning;
+      try {
+        pi.sendMessage({
+          customType: "firstmate-turnend-containment",
+          content: warning,
+          display: true,
+          details: { kind: "process-event-containment" },
+        });
+      } catch {
+        reportedContainmentWarning = "";
+      }
+    } else if (!warning) {
+      reportedContainmentWarning = "";
+    }
     if (result.code !== 2) return;
 
     guardFollowupActive = true;

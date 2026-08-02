@@ -63,7 +63,10 @@
 # about the source side of the handoff.
 # Public commands refuse symlinked or non-directory state/procevent leaves, and
 # refuse a symlinked per-source record, rather than reading or writing
-# process-event data outside the effective home.
+# process-event data outside the effective home. Each command is held to the
+# leaves it can actually touch, so `retire` and `sweep-home` - which only reach
+# the registry and the machine-wide claim root - stay usable when the inbox
+# alone is damaged, and teardown is never stranded by damage it does not touch.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,8 +88,14 @@ die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 require_state_paths_safe() {
-  fm_procevent_state_paths_safe "$STATE" \
-    || die "process-event state paths must be private ordinary directories"
+  local scope=${1-all} unsafe
+  [ -n "$STATE" ] || die "process-event state paths must be private ordinary directories"
+  case "$scope" in
+    registry) unsafe=$(fm_procevent_unsafe_state_path "$STATE" "$STATE/procevent") || return 0 ;;
+    *) unsafe=$(fm_procevent_unsafe_state_path \
+      "$STATE" "$STATE/procevent" "$STATE/procevent-inbox") || return 0 ;;
+  esac
+  die "process-event state paths must be private ordinary directories: $unsafe"
 }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
@@ -728,8 +737,14 @@ case "$CMD" in
 esac
 
 # One boundary for every command that touches process-event state, so no future
-# command can route past this containment check.
-require_state_paths_safe
+# command can route past this containment check. Each command is held to exactly
+# the leaves it can read or write: retirement and the bounded home sweep only
+# touch the registry and the machine-wide claim root, so a damaged inbox must not
+# refuse them and strand a home that teardown is trying to clean up.
+case "$CMD" in
+  retire|sweep-home) require_state_paths_safe registry ;;
+  *) require_state_paths_safe all ;;
+esac
 shift
 
 case "$CMD" in

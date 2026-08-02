@@ -133,14 +133,35 @@ budget_reset() {
   rm -f "$BUDGET_FILE" 2>/dev/null || true
 }
 
+# A systemMessage is the one operator-visible channel a Claude Stop hook has on
+# an allow, so emit at most one and never alongside a second stdout object.
+SYSTEM_MESSAGE_EMITTED=0
+emit_system_message() {
+  [ "$SYSTEM_MESSAGE_EMITTED" -eq 0 ] || return 0
+  SYSTEM_MESSAGE_EMITTED=1
+  printf '%s' "$1" | jq -Rsc '{systemMessage: .}' 2>/dev/null || SYSTEM_MESSAGE_EMITTED=0
+}
+
 fm_supervision_status "$STATE" "$GRACE"
-# Stderr only, never stdout: --claude mode owns stdout for its systemMessage
-# JSON. This never blocks on its own; it just refuses to let a home that no
-# process-event command can service end its turns with no signal at all.
+# This never blocks on its own; it just refuses to let a home that no
+# process-event command can service end its turns with no signal at all. The
+# line rides stderr, which every harness surfaces when the guard blocks and the
+# pi, OpenCode, and legacy-Grok adapters surface on an allow; --claude mode owns
+# stdout, so it repeats the same text there as a systemMessage before allowing.
+PROCEVENT_WARNING=
 if [ "$FM_SUP_PROCEVENT_UNSAFE" = true ]; then
-  printf 'WARNING: process-event state is not private to this home: %s is a symlink or not a directory. Every bin/fm-procevent.sh command refuses this home until it is an ordinary directory.\n' \
-    "$FM_SUP_PROCEVENT_UNSAFE_PATH" >&2
+  PROCEVENT_WARNING="process-event state is not private to this home: $FM_SUP_PROCEVENT_UNSAFE_PATH is a symlink or not a directory. Every bin/fm-procevent.sh command that reaches that path refuses this home until it is an ordinary directory, so registered sources cannot be started, reconciled, or published."
+  printf 'WARNING: %s\n' "$PROCEVENT_WARNING" >&2
 fi
+# Every allow path must carry the containment notice on the one channel Claude
+# reads, so no exit-0 route can drop it.
+allow_notice() {
+  [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  [ -n "$PROCEVENT_WARNING" ] || return 0
+  emit_system_message "firstmate turn-end guard: $PROCEVENT_WARNING"
+}
+trap 'rc=$?; [ "$rc" -ne 0 ] || allow_notice' EXIT
+
 if [ "$FM_SUP_NEEDED" = false ]; then
   budget_reset
   exit 0
@@ -236,7 +257,9 @@ if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"firstmate turn-end guard: %s with no live watcher and no Stop auto-arm claim; block budget exhausted, allowing this stop. Repair supervision (bin/fm-watch-arm.sh as a Claude Code background task) or investigate why bin/fm-claude-stop-autoarm.sh is not claiming this home."}\n' "$NEED_DESC"
+  DEGRADED_MSG="firstmate turn-end guard: $NEED_DESC with no live watcher and no Stop auto-arm claim; block budget exhausted, allowing this stop. Repair supervision (bin/fm-watch-arm.sh as a Claude Code background task) or investigate why bin/fm-claude-stop-autoarm.sh is not claiming this home."
+  [ -z "$PROCEVENT_WARNING" ] || DEGRADED_MSG="$DEGRADED_MSG Also: $PROCEVENT_WARNING"
+  emit_system_message "$DEGRADED_MSG"
   exit 0
 fi
 printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$COUNT" > "$BUDGET_FILE" 2>/dev/null || true

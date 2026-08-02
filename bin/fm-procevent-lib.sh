@@ -38,17 +38,29 @@ fm_procevent_claim_root() {
 fm_procevent_registry_dir() { printf '%s\n' "$1/procevent"; }
 fm_procevent_inbox_dir()    { printf '%s\n' "$1/procevent-inbox"; }
 
-# The process-event registry and inbox are private state directories. Refuse
-# symlinked or non-directory leaves before any public command reads or writes
-# through them, while allowing the ordinary absent-on-first-use state.
-fm_procevent_state_paths_safe() {
-  local state=${1-} path
-  [ -n "$state" ] || return 1
-  for path in "$state" "$state/procevent" "$state/procevent-inbox"; do
-    [ -L "$path" ] && return 1
-    [ -e "$path" ] && [ ! -d "$path" ] && return 1
+# Print the first path that is a symlink or an existing non-directory, and
+# succeed; fail when every path is an ordinary directory or absent. Callers pass
+# only the leaves they can actually read or write, so containment never refuses a
+# command over damage it cannot reach.
+fm_procevent_unsafe_state_path() {
+  local path
+  for path in "$@"; do
+    if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+      printf '%s\n' "$path"
+      return 0
+    fi
   done
-  return 0
+  return 1
+}
+
+# The process-event registry and inbox are private state directories. Refuse
+# symlinked or non-directory leaves before any read or write that can reach the
+# inbox, while allowing the ordinary absent-on-first-use state.
+fm_procevent_state_paths_safe() {
+  local state=${1-}
+  [ -n "$state" ] || return 1
+  ! fm_procevent_unsafe_state_path \
+    "$state" "$state/procevent" "$state/procevent-inbox" >/dev/null
 }
 
 # A source id names a private file and a bounded wake slug, so it is held to the

@@ -26,7 +26,7 @@ That check keeps crewmate and scout linked worktrees inert because their git dir
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
-The default cross-harness mode exits silently with no work in flight, except that a guarded home whose process-event state no command can service has that path named on stderr, a warning that never blocks on its own; [`configuration.md`](configuration.md#process-to-event-sources-stateprocevent) owns the containment contract.
+The default cross-harness mode exits silently with no work in flight, except for the unserviceable-process-event-state warning below, which never blocks on its own.
 Claude's `--claude` mode also treats `state/x-watch.check.sh` as supervision need, so X-mode relay polling remains guarded without an in-flight task.
 Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even when a watcher pid is live.
@@ -73,12 +73,30 @@ Grok's project hook requires the checkout to be trusted with `/hooks-trust` or l
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
 
+## Unserviceable process-event state
+
+[`configuration.md`](configuration.md#process-to-event-sources-stateprocevent) owns the containment contract; this section owns only how the turn-end guard reports it.
+When `state`, `state/procevent`, or `state/procevent-inbox` is a symlink or not a directory, the affected `bin/fm-procevent.sh` commands refuse the home and `bin/fm-watch.sh` swallows that refusal, so the guard names the offending path.
+This is a report, never a block: it changes no exit status, and a home with no other supervision need still allows its turn to end.
+
+The guard writes one `WARNING: process-event state is not private to this home: ...` line to stderr, and each integration surfaces it on the allow path through the one channel it owns:
+
+- Claude also receives the same text as a stdout `systemMessage`, the only operator-visible channel a Stop hook has on an allow; the degraded budget-exhausted allow folds it into that single object rather than emitting a second one.
+- Pi reports it as a displayed `pi.sendMessage` custom message, latched to one notice per episode, and never as a forced follow-up.
+- OpenCode reports it through `client.tui.showToast` when the running client exposes that surface, latched the same way, and never as a forced prompt; a client without it falls back to the guard's stderr.
+- Grok's legacy fallback passes the line to its own stderr instead of burying it in the discarded resume buffer, and never resumes for a warning. The native path already returns the guard's stderr to the same Grok process.
+- Codex inherits the guard's stderr directly.
+
+Every harness sees the line when the guard also blocks, because the block writes the banner to the same stream.
+`bin/fm-guard.sh` remains the always-on channel: it prints the full banner with the repair on every run, and defers the repair in a read-only session.
+
 ## Compatibility limits
 
 - Child crewmate and scout worktrees are outside scope.
 - A valid secondmate home is in scope; an idle secondmate endpoint with no X-mode relay poll remains healthy because it has no supervision need.
 - The direct-blocking and bounded passive-follow-up split is limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
+- The OpenCode containment report is probed, not assumed: a client without `tui.showToast` leaves that warning on the guard's stderr, where `bin/fm-guard.sh` still reports it on the next run.
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
 - Kimi has no project-level hook configuration and remains outside the primary guard integrations above.
 - Captain-approved Kimi crew wake support uses `bin/fm-kimi-turnend-hook.sh` to edit only one marker-delimited Firstmate region in that global config and install a silent always-zero hook.
@@ -90,7 +108,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, unserviceable process-event state reported without silencing an in-home source, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-turnend-guard.test.sh` covers the predicate, unserviceable process-event state reported without silencing an in-home source and surfaced on the allow path by the Claude `systemMessage`, the Pi custom message, the OpenCode toast, and the legacy Grok adapter without any forced continuation, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.

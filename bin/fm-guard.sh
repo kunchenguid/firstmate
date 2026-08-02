@@ -152,16 +152,16 @@ watcher_fresh=$FM_SUP_WATCHER_FRESH
 beacon_desc=$FM_SUP_BEACON_DESC
 
 # A symlinked or non-directory process-event path makes every fm-procevent.sh
-# command refuse this home, and bin/fm-watch.sh swallows that refusal, so say it
-# here before any supervision-need shortcut can exit silently.
+# command that reaches it refuse this home, and bin/fm-watch.sh swallows that
+# refusal, so say it here before any supervision-need shortcut can exit silently.
 if [ "$FM_SUP_PROCEVENT_UNSAFE" = true ]; then
   prule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$prule"
     printf '●  PROCESS-EVENT STATE IS NOT PRIVATE TO THIS HOME\n'
     printf "●  '%s' is a symlink or not a directory.\n" "$FM_SUP_PROCEVENT_UNSAFE_PATH"
-    printf '●  Every bin/fm-procevent.sh command refuses this home until that path is an ordinary directory,\n'
-    printf '●  so registered sources cannot be started, reconciled, published, or retired.\n'
+    printf '●  Every bin/fm-procevent.sh command that reaches that path refuses this home until it is an\n'
+    printf '●  ordinary directory, so registered sources cannot be started, reconciled, or published.\n'
     if [ "$READ_ONLY" -eq 1 ]; then
       printf '●  This read-only session should report the damage, not repair it.\n'
     else

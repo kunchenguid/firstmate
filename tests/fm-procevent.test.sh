@@ -184,6 +184,43 @@ assert_contains "$sup" "unsafe=$HINBOX/state/procevent-inbox" \
   "a damaged inbox was not reported as unsafe process-event state"
 pass "process-event registry and inbox refuse symlink escapes"
 
+# Retirement and the bounded home sweep only reach the registry and the
+# machine-wide claim root, so a damaged inbox must not refuse them: teardown
+# runs `sweep-home` at its deletion boundary and would otherwise strand an
+# otherwise-clean home forever on damage the sweep never touches.
+pe "$HINBOX" retire symlinked-inbox >/dev/null \
+  || fail "retire refused a home over inbox damage it never touches"
+assert_absent "$HINBOX/state/procevent/symlinked-inbox.source" \
+  "retire left the registration behind"
+# Teardown's case is a home that already holds real registrations when the inbox
+# is damaged, so register before planting the damage back.
+rm "$HINBOX/state/procevent-inbox"
+pe_register "$HINBOX" lavish inbox-sweep -- /bin/echo escaped >/dev/null
+ln -s "$HINBOX_OUTSIDE" "$HINBOX/state/procevent-inbox"
+pe "$HINBOX" sweep-home --preflight >/dev/null \
+  || fail "sweep preflight refused a home over inbox damage it never touches"
+sweep_out=$(pe "$HINBOX" sweep-home 2>&1) \
+  || fail "sweep-home refused a home over inbox damage it never touches: $sweep_out"
+assert_contains "$sweep_out" "swept: attempted=1" "the bounded sweep did not retire the registration"
+[ -z "$(ls -A "$HINBOX_OUTSIDE")" ] \
+  || fail "a registry-scoped command wrote through the symlinked inbox: $(ls -A "$HINBOX_OUTSIDE")"
+
+# Narrowing the leaves never narrows the containment: the same commands still
+# refuse a symlinked registry, which is exactly where they read and write.
+sweep_status=0
+sweep_out=$(pe "$HBOUND" sweep-home 2>&1) || sweep_status=$?
+[ "$sweep_status" -ne 0 ] || fail "sweep-home accepted a symlinked process-event registry"
+assert_contains "$sweep_out" "private ordinary directories" \
+  "symlinked registry refusal was not actionable for sweep-home"
+retire_status=0
+retire_out=$(pe "$HBOUND" retire foreign 2>&1) || retire_status=$?
+[ "$retire_status" -ne 0 ] || fail "retire accepted a symlinked process-event registry"
+assert_contains "$retire_out" "private ordinary directories" \
+  "symlinked registry refusal was not actionable for retire"
+[ "$(ls -A "$HBOUND_OUTSIDE")" = "foreign.source" ] \
+  || fail "a registry-scoped command changed state behind a symlinked registry: $(ls -A "$HBOUND_OUTSIDE")"
+pass "retirement and the bounded sweep are scoped to the leaves they touch"
+
 # The state directory itself is the outermost leaf the runner refuses, so
 # supervision must not count a source reached entirely through a symlinked state.
 HSTATE="$TMP_ROOT/hstate"; mkdir -p "$HSTATE"
@@ -200,6 +237,13 @@ state_out=$(pe "$HSTATE" list 2>&1) || state_status=$?
 [ "$state_status" -ne 0 ] || fail "a public command accepted a symlinked state directory"
 assert_contains "$state_out" "private ordinary directories" \
   "symlinked state refusal was not actionable"
+state_sweep_status=0
+state_sweep_out=$(pe "$HSTATE" sweep-home 2>&1) || state_sweep_status=$?
+[ "$state_sweep_status" -ne 0 ] || fail "sweep-home accepted a symlinked state directory"
+assert_contains "$state_sweep_out" "private ordinary directories" \
+  "symlinked state refusal was not actionable for sweep-home"
+[ -e "$HSTATE_OUTSIDE/procevent/foreign.source" ] \
+  || fail "sweep-home retired a registration behind a symlinked state directory"
 pass "a symlinked state directory is neither supervised nor served"
 
 # The per-source runner record is written after the claim is taken, so it needs

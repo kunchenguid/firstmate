@@ -70,7 +70,14 @@ trap 'rm -f "$ERR"' EXIT
 
 printf '%s' "$PAYLOAD" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
-[ "$RC" -eq 2 ] || exit 0
+if [ "$RC" -ne 2 ]; then
+  # This path captures the guard's stderr for the resume prompt, so an allow
+  # would otherwise swallow the containment warning about process-event state no
+  # fm-procevent.sh command can service. Pass that one line through instead of
+  # forcing a resume the warning must never force.
+  grep '^WARNING: process-event state is not private to this home:' "$ERR" >&2 || true
+  exit 0
+fi
 
 REASON=$(cat "$ERR" 2>/dev/null || true)
 [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'

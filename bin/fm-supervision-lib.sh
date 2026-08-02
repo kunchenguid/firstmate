@@ -48,8 +48,11 @@ fm_sup_first_unsafe_path() {
 #                         external process, not a task, so it has no metadata)
 #   FM_SUP_PROCEVENT_UNSAFE      true/false - state, state/procevent, or
 #                         state/procevent-inbox is a symlink or a non-directory,
-#                         so every process-event command refuses this home until
-#                         an operator repairs it. Reported separately from the
+#                         so every process-event command that reaches that path
+#                         refuses this home until an operator repairs it. The
+#                         path is reported whichever leaf is damaged, because a
+#                         home that can still be swept is not a home that can
+#                         still serve its sources. Reported separately from the
 #                         source count so a damaged home is loud rather than
 #                         silent, and so an in-home source behind a damaged inbox
 #                         still counts as this home's wait.

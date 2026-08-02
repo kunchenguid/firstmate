@@ -4,8 +4,38 @@ import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
+const CONTAINMENT_WARNING_PREFIX = "WARNING: process-event state is not private to this home:";
 
 let skipNextIdle = false;
+// The guard warns about process-event state no fm-procevent.sh command can
+// service and still allows the turn, so that line only reaches an operator if
+// this adapter surfaces it on the non-blocking path too. Latched by text so a
+// standing repair is announced once per episode, not once per turn.
+let reportedContainmentWarning = "";
+
+function containmentWarning(stderr) {
+  const line = String(stderr ?? "")
+    .split("\n")
+    .find((candidate) => candidate.startsWith(CONTAINMENT_WARNING_PREFIX));
+  return line ? line.trim() : "";
+}
+
+// A toast is the only OpenCode surface that reports without consuming a turn.
+// It is probed, never assumed: a client without it degrades to the guard's
+// stderr rather than forcing a prompt this warning must never force.
+async function reportContainment(client, warning) {
+  if (!warning) {
+    reportedContainmentWarning = "";
+    return;
+  }
+  if (warning === reportedContainmentWarning) return;
+  reportedContainmentWarning = warning;
+  try {
+    await client?.tui?.showToast?.({ body: { message: warning, variant: "warning" } });
+  } catch {
+    reportedContainmentWarning = "";
+  }
+}
 
 function runProcess(command, args, input = "") {
   return new Promise((resolve) => {
@@ -72,6 +102,7 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
       if (await letWatchArmRun(sessionID, client)) return;
 
       const result = await runGuard(root);
+      await reportContainment(client, containmentWarning(result.stderr));
       if (result.code !== 2) return;
 
       try {
