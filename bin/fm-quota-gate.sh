@@ -7,7 +7,9 @@
 # "model:*" window (a named-model-specific bound, e.g. "model:fable") is
 # ignored - this gate is about the account's overall headroom, not one
 # model's bound. The result is the MINIMUM percentRemaining across just
-# those two windows.
+# those two windows, floored to an integer (quota-axi's percentRemaining
+# is not guaranteed to be a whole number; flooring never reports more
+# headroom than is actually available).
 #
 # Thresholds (env-overridable):
 #   FM_QUOTA_SONNET_ONLY_PCT  default 40
@@ -17,6 +19,12 @@
 #   remaining <= FM_QUOTA_PAUSE_PCT        -> pause
 #   remaining <= FM_QUOTA_SONNET_ONLY_PCT  -> sonnet-only
 #   otherwise                              -> ok
+#
+# This script only reports the quota level; it does not know or check any
+# model. The caller (bin/fm-spawn.sh) enforces "sonnet-only" by matching an
+# explicitly requested --model against opus/fable - a spawn left to a
+# harness's own implicit default model is not evaluated, so pass --model
+# explicitly to get sonnet-only protection.
 #
 # Output contract: exactly one line on stdout, "<level> remaining=<N>", e.g.
 # "ok remaining=87", "sonnet-only remaining=31", "pause remaining=12".
@@ -60,7 +68,7 @@ MIN_REMAINING=$(printf '%s' "$RAW" | jq -r '
   [ .providers[]? | select(.provider == "claude") | .windows[]?
     | select(.id == "five_hour" or .id == "seven_day")
     | select(.percentRemaining != null) | .percentRemaining ]
-  | if length == 0 then "" else min end
+  | if length == 0 then "" else min | floor end
 ' 2>/dev/null) || fail_open "quota-axi --json output could not be parsed"
 
 case "$MIN_REMAINING" in
