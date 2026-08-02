@@ -642,8 +642,10 @@ fi
 # Claude-provider quota gate (bin/fm-quota-gate.sh owns the check and its
 # thresholds/exit-code contract). Crewmate and scout spawns only - a
 # secondmate is a persistent supervisor that must stay recoverable even at
-# low quota, so it is exempt. MODEL is fully resolved by this point for
-# every kind.
+# low quota, so it is exempt. MODEL holds the caller's explicit --model when
+# given, or stays empty when the spawn will use the harness's own default;
+# the sonnet-only check below only inspects an explicit request and cannot
+# see a harness's implicit default.
 if [ "$KIND" != secondmate ]; then
   QUOTA_LINE=$("$SCRIPT_DIR/fm-quota-gate.sh") || true
   QUOTA_STATUS=${QUOTA_LINE%% *}
