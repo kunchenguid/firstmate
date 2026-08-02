@@ -596,8 +596,9 @@ pane_is_busy() {  # <target> [backend]
 # every verdict except exact empty as unsafe. inject_msg reads the full verdict
 # directly and applies the same positive-proof boundary.
 pane_input_pending() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux}
-  [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
+  local target=$1 backend=${2:-tmux} composer_bare_prompt_ok=
+  [ "$(fm_daemon_primary_harness)" = agy ] && composer_bare_prompt_ok=agy
+  [ "$(FM_COMPOSER_BARE_PROMPT_OK="$composer_bare_prompt_ok" fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
 }
 
 task_window_backend() {  # <window> <state>

@@ -254,6 +254,12 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pane_busy pi-signed pi-signed || fail "pi-signed should share Pi's exact Working footer"
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy grok grok || fail "Grok cancel footer should be busy"
+  printf '⠋ Working... esc to cancel\n' > "$composer"
+  pane_busy agy agy || fail "agy escape-to-cancel footer should be busy"
+  printf '⠋ Working... esc to cancel\n' > "$composer"
+  pane_busy cross codex && fail "agy footer must not classify a Codex pane busy"
+  printf 'esc to interrupt\n' > "$composer"
+  pane_busy cross agy && fail "agy must ignore Claude/Codex interrupt footers"
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
 }
 

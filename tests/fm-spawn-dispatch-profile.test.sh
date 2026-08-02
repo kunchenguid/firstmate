@@ -26,6 +26,10 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
+  capture-pane)
+    printf '%s\n' "${FM_FAKE_CAPTURE_TEXT:-}"
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -42,7 +46,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi-signed
+  fm_fake_exit0 "$fakebin" treehouse pi-signed agy
   printf '%s\n' "$fakebin"
 }
 
@@ -92,6 +96,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_AGY_LAUNCH_POLLS="${FM_TEST_AGY_LAUNCH_POLLS:-1}" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -482,6 +487,68 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_agy_threads_model_and_ignores_effort_axis() {
+  local rec id out status launch
+  id=profile-agy-z7b
+  rec=$(make_spawn_case profile-agy agy "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-oss-120b-medium --effort high)
+  status=$?
+  expect_code 0 "$status" "agy spawn with model and ignored effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" agy gpt-oss-120b-medium high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "agy --dangerously-skip-permissions --model 'gpt-oss-120b-medium' -i" \
+    "agy launch did not thread the model into the interactive prompt path"
+  assert_not_contains "$launch" "--effort" "agy launch must not pass a separate effort flag"
+  assert_not_contains "$launch" "__TURNEND__" "agy launch must not carry a turn-end placeholder"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "agy spawn must not arm a busy record with no hook to clear it"
+  pass "agy receives --model, uses -i, and omits the unsupported effort axis"
+}
+
+test_agy_missing_binary_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=profile-agy-missing-z7c
+  rec=$(make_spawn_case profile-agy-missing agy "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/agy"
+  : > "$LAUNCH_LOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a missing agy executable should refuse the spawn"
+  assert_contains "$out" "agy executable not found on PATH" \
+    "missing agy refusal did not name the actionable requirement"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing agy refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing agy refusal typed a launch command"
+  pass "agy refuses safely and actionably when the selected executable is unavailable"
+}
+
+test_agy_quota_refusal_fails_loudly() {
+  local rec id out status
+  id=profile-agy-quota-z7d
+  rec=$(make_spawn_case profile-agy-quota agy "$id")
+  read_case_record "$rec"
+  export FM_TEST_AGY_LAUNCH_POLLS=1
+  export FM_FAKE_CAPTURE_TEXT='Individual quota reached. Try again in 168h.'
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gemini-3.6-flash-high)
+  status=$?
+  unset FM_TEST_AGY_LAUNCH_POLLS FM_FAKE_CAPTURE_TEXT
+  expect_code 1 "$status" "agy quota exhaustion should fail the spawn"
+  assert_contains "$out" "agy account quota reached during launch" \
+    "agy quota refusal was not surfaced as an actionable spawn error"
+  assert_grep 'failed: agy account quota reached during launch' "$HOME_DIR/state/$id.status" \
+    "agy quota refusal did not append a failed status"
+  pass "agy launch quota errors are converted into loud spawn failure"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -684,6 +751,9 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_agy_threads_model_and_ignores_effort_axis
+test_agy_missing_binary_refuses_before_endpoint_or_metadata
+test_agy_quota_refusal_fails_loudly
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata

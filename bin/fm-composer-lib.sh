@@ -197,7 +197,14 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     '>'|'$'|'%'|'#')
       # Shell prompt glyph: empty ONLY inside a composer box (the harness's own
       # prompt). Bare, it is a dead-shell prompt - never a safe injection target.
-      if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
+      # agy is the verified exception: its live idle composer is an unbordered
+      # bare `>` row. Callers must opt in with FM_COMPOSER_BARE_PROMPT_OK=agy
+      # from recorded harness metadata; never enable this globally.
+      if [ "$bordered" = 1 ] || { [ "$content" = '>' ] && [ "${FM_COMPOSER_BARE_PROMPT_OK:-}" = agy ]; }; then
+        printf 'empty'
+      else
+        printf 'unknown'
+      fi
       return 0 ;;
   esac
   # Nothing on the row = empty composer.

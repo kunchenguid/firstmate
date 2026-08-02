@@ -82,6 +82,17 @@ test_agent_glyphs_are_empty_bordered_and_bare() {
   pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex) read empty bordered or bare"
 }
 
+test_agy_bare_prompt_opt_in() {
+  local out
+  out=$(classify 0 '>')
+  [ "$out" = unknown ] || fail "bare > without agy opt-in must remain unknown, got '$out'"
+  out=$(FM_COMPOSER_BARE_PROMPT_OK=agy classify 0 '>')
+  [ "$out" = empty ] || fail "agy bare > opt-in should read empty, got '$out'"
+  out=$(FM_COMPOSER_BARE_PROMPT_OK=agy classify 0 '$')
+  [ "$out" = unknown ] || fail "agy opt-in must not bless another shell glyph, got '$out'"
+  pass "fm_composer_classify_content: agy's bare > composer is opt-in only"
+}
+
 # --- Empty content and idle placeholder -------------------------------------
 
 test_empty_content_is_empty() {
@@ -130,6 +141,7 @@ test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
+test_agy_bare_prompt_opt_in
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit

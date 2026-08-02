@@ -52,7 +52,7 @@ set -u
 # ambient CLAUDECODE=1, the pi-signed ancestry case resolves "claude". Drop the
 # ambient markers so what this suite asserts does not depend on which harness it
 # was launched from; every case states the marker it means to test.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT ANTIGRAVITY_AGENT
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -196,6 +196,46 @@ SH
   fi
 
   pass "pi-signed identity: authoritative launch selection distinguishes shared wrapper ancestry"
+}
+
+test_agy_detection_and_session_lock_identity() {
+  local dir fakebin got
+  dir="$TMP_ROOT/agy-identity"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  100:comm=) printf '%s\n' '/opt/homebrew/bin/agy' ;;
+  100:args=) printf '%s\n' 'agy --model gpt-oss-120b-medium' ;;
+  100:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 100 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(env -u CLAUDECODE -u GROK_AGENT -u PI_CODING_AGENT ANTIGRAVITY_AGENT=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = agy ] || fail "Antigravity env marker resolved '$got', expected agy"
+  got=$(env -u CLAUDECODE -u GROK_AGENT -u PI_CODING_AGENT -u ANTIGRAVITY_AGENT PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = agy ] || fail "agy ancestry resolved '$got', expected agy"
+  got=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+  [ "$got" = 100 ] || fail "session-lock ancestry selected '$got', expected agy pid 100"
+  PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 100' "$ROOT" \
+    || fail "session-lock liveness rejected agy holder"
+
+  pass "agy identity: env marker, process ancestry, and session-lock liveness classify Antigravity CLI"
 }
 
 test_dash_leading_process_names_are_basename_operands() {
@@ -2311,6 +2351,7 @@ SH
 test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
+test_agy_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_spawn_split_and_inherit

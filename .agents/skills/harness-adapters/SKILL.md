@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -58,6 +58,7 @@ The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, a
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
+agy is outside the primary turn-end guard scope and has no verified crew turn-end signal.
 The exact hook files, commands, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
@@ -127,6 +128,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| agy | `--model <model>` | none | Verified 2026-08-02 on Antigravity CLI 1.1.9. Reasoning effort is part of the model name, so firstmate omits the separate `--effort` flag. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -144,6 +146,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| agy | Run `agy models`, which lists the models available to the current Antigravity CLI installation and account. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -163,6 +166,7 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- agy: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 
 ## Submission acknowledgement hazards
 
@@ -397,3 +401,32 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
+
+## agy (VERIFIED 2026-08-02, Antigravity CLI 1.1.9)
+
+Antigravity CLI (`agy`) launches as a supervised interactive TUI with `-i` / `--prompt-interactive`.
+Launch with `agy --dangerously-skip-permissions --model <model> -i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"`.
+Do not use `--print`, `--prompt`, or `-p` for crewmate launch because those are one-shot surfaces and exit.
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `agy` from `PATH`; spawning refuses before launch when absent. |
+| Busy state | Rendered pane-state fallback isolated to `harness=agy`: the footer shows `esc to cancel` while a turn runs. Idle shows a bare `>` composer with no `esc to cancel`. |
+| Exit command | `Ctrl+D` once asks for confirmation with `press ctrl+d again to exit`; a second `Ctrl+D` exits cleanly back to the shell and prints `Resume with -c (or command below): agy --conversation=<id>`. |
+| Interrupt | Single Escape is the visible cancel affordance while a turn runs. |
+| Skill invocation | No separate verified skill invocation beyond normal command behavior; use natural language if uncertain. |
+| Autonomy | `--dangerously-skip-permissions`, observed to bypass tool permission prompts for unattended work. |
+| Trust dialog | First launch per worktree may ask "Do you trust the contents of this project?" and defaults to "Yes, I trust this folder"; Enter accepts it. |
+| Environment marker | `ANTIGRAVITY_AGENT=1`, observed in child/tool process environments. |
+| Composer | Idle is an unbordered bare `>` row. Firstmate treats that as empty only when the recorded target harness is `agy`; a generic bare shell `>` remains unknown. |
+| Models | `gemini-3.6-flash-{high,medium,low}`, `gemini-3.5-flash-{high,medium,low}`, `gemini-3.1-pro-{high,low}`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, and `gpt-oss-120b-medium`. |
+| Effort | Reasoning effort is baked into the model name, so firstmate records any requested effort in task metadata but emits no separate `--effort` flag. |
+
+### Limits
+
+agy emits no verified Firstmate turn-end signal.
+There is no verified hook surface equivalent to the claude, codex, grok, or kimi turn-end paths, so supervision is pane state plus status appends only.
+
+Account quota is a real operational ceiling.
+On 2026-08-02 the Gemini model group hit `Individual quota reached` with a roughly 168 hour reset after a single afternoon fan-out, while the Claude and GPT group still worked.
+`fm-spawn.sh` scans the launch pane for that quota refusal and fails the spawn loudly instead of reporting success on a wedged pane.

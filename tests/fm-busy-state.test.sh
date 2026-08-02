@@ -231,6 +231,20 @@ Ctrl+c:cancel'
   pass "converted adapters never classify busy from rendered footer text"
 }
 
+test_agy_rendered_tail_fallback_is_isolated() {
+  local state out
+  state=$(new_state_dir agy-regex)
+  out=$(fm_busy_classify tmux w1 agy t1 "$state" '⠋ Working... esc to cancel')
+  [ "$out" = "busy agy-regex" ] || fail "agy busy footer must classify busy agy-regex, got '$out'"
+  out=$(fm_busy_classify tmux w1 agy t1 "$state" 'ready'$'\n''> ')
+  [ "$out" = "idle agy-regex" ] || fail "agy idle pane must classify idle agy-regex, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'esc to cancel')
+  [ "$out" = "idle grok-regex" ] || fail "agy footer leaked into Grok fallback, got '$out'"
+  out=$(fm_busy_classify tmux w1 codex t1 "$state" 'esc to cancel')
+  [ "$out" = "unknown codex-unverified" ] || fail "agy footer leaked into Codex, got '$out'"
+  pass "agy rendered-tail fallback is scoped to harness=agy"
+}
+
 test_grok_regex_isolated() {
   local state out
   state=$(new_state_dir grok-arm)
@@ -368,6 +382,7 @@ test_missing_record_unknown_not_idle
 test_malformed_record_unknown
 test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
+test_agy_rendered_tail_fallback_is_isolated
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate

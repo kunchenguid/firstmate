@@ -28,7 +28,7 @@ zsh
 ```
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
-Claude, Codex, OpenCode, and Grok were observed under their own process names.
+Claude, Codex, OpenCode, Grok, and agy were observed under their own process names.
 Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
@@ -72,6 +72,33 @@ The exact wrapper ancestry was `pi-signed` parent to Pi engine child, and the pl
 That shared plain-Pi path is retained as disconfirming evidence against using ancestry as runtime-selection authority.
 Firstmate therefore sets the exact `FM_PI_HARNESS` selection marker on both worker launch paths, while an unmarked Pi-family process remains `pi`.
 Both recorded runtime identities now classify the exact `pi-launcher` foreground command as `alive`.
+
+Antigravity CLI was verified on 2026-08-02 with `agy` 1.1.9.
+
+```sh
+agy --version
+agy --help
+agy models
+agy --dangerously-skip-permissions --model gpt-oss-120b-medium --print-timeout 2m --output-format text -p 'Run exactly this shell command and print its stdout only: env | sort | grep -E "^(AGY|ANTIGRAVITY|GOOGLE|GEMINI|AGENT|CODE|CLI|FM_|PWD=|SHELL=|PATH=)"'
+```
+
+Observed bounded output:
+
+```text
+1.1.9
+--prompt-interactive            Run an initial prompt interactively and continue the session
+gemini-3.6-flash-high
+gpt-oss-120b-medium
+ANTIGRAVITY_AGENT=1
+ANTIGRAVITY_AGENTAPI_EXE=/opt/homebrew/bin/agy
+ANTIGRAVITY_LS_VERSION=cli-1.1.9
+```
+
+The env-marker probe ran from a real agy tool process and establishes `ANTIGRAVITY_AGENT=1` as the harness marker.
+The same help/model-list evidence establishes the `--model` flag, `--prompt-interactive` / `-i` launch surface, model list, and the presence of a standalone `--effort` flag that Firstmate deliberately omits because the verified model names already encode effort.
+The first end-to-end Firstmate adapter proof used `bin/fm-spawn.sh agy-proof-v1 ... --harness agy --model gpt-oss-120b-medium` on 2026-08-02.
+It accepted the first-launch trust dialog with one Enter, delivered the launch brief, appended `working:` and `done:` to `state/agy-proof-v1.status`, and exited cleanly back to `zsh` after two `Ctrl+D` keypresses.
+The first `Ctrl+D` showed `press ctrl+d again to exit`, and the second printed `Resume with -c (or command below): agy --conversation=<id>`.
 
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
