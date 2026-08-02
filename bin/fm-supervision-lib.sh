@@ -45,10 +45,16 @@ fm_supervision_status() {
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
   FM_SUP_SOURCES=0
-  for source in "$state"/procevent/*.source; do
-    [ -e "$source" ] || continue
-    FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
-  done
+  # A damaged process-event registry must not make this home supervise files
+  # reached through a symlink outside its private state. The runner refuses the
+  # same shape before any public lifecycle operation, so the predicate stays
+  # aligned and reports no external source as this home's wait.
+  if [ -d "$state/procevent" ] && [ ! -L "$state/procevent" ]; then
+    for source in "$state"/procevent/*.source; do
+      [ -e "$source" ] || continue
+      FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
+    done
+  fi
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
     || [ -f "$state/x-watch.check.sh" ] \
     || [ "$FM_SUP_SOURCES" -gt 0 ]; then

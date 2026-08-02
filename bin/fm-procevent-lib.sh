@@ -38,6 +38,19 @@ fm_procevent_claim_root() {
 fm_procevent_registry_dir() { printf '%s\n' "$1/procevent"; }
 fm_procevent_inbox_dir()    { printf '%s\n' "$1/procevent-inbox"; }
 
+# The process-event registry and inbox are private state directories. Refuse
+# symlinked or non-directory leaves before any public command reads or writes
+# through them, while allowing the ordinary absent-on-first-use state.
+fm_procevent_state_paths_safe() {
+  local state=${1-} path
+  [ -n "$state" ] || return 1
+  for path in "$state" "$state/procevent" "$state/procevent-inbox"; do
+    [ -L "$path" ] && return 1
+    [ -e "$path" ] && [ ! -d "$path" ] && return 1
+  done
+  return 0
+}
+
 # A source id names a private file and a bounded wake slug, so it is held to the
 # same path-safe shape as a task id. Adapters derive it from canonical source
 # identity, never from a caller-supplied display string.
@@ -288,6 +301,7 @@ fm_procevent_claim_release_locked() {
 # before it returns successfully.
 fm_procevent_capture() {
   local state=$1 id=$2 adapter=$3 src=$4 inbox seq dest tmp adapter_dest adapter_tmp
+  fm_procevent_state_paths_safe "$state" || return 1
   fm_procevent_source_id_valid "$id" || return 1
   fm_procevent_adapter_valid "$adapter" || return 1
   inbox=$(fm_procevent_inbox_dir "$state")
@@ -315,6 +329,7 @@ fm_procevent_capture() {
 # instead of silently losing the result.
 fm_procevent_pending() {
   local state=$1 inbox result base seq
+  fm_procevent_state_paths_safe "$state" || return 1
   inbox=$(fm_procevent_inbox_dir "$state")
   [ -d "$inbox" ] || return 0
   for result in "$inbox"/*.result; do
@@ -363,6 +378,7 @@ fm_procevent_is_handled() {
 # not repeat a paired effect), 2 = error.
 fm_procevent_mark_handled() {
   local state=$1 id=$2 seq=$3 inbox result adapter_file marker tmp
+  fm_procevent_state_paths_safe "$state" || return 2
   fm_procevent_source_id_valid "$id" || return 2
   case "$seq" in ''|*[!0-9]*) return 2 ;; esac
   inbox=$(fm_procevent_inbox_dir "$state")

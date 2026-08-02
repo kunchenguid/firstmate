@@ -138,6 +138,35 @@ sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
   '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$IDLE/state")
 assert_contains "$sup" no "an unconfigured home does not need supervision"
 
+# --- process-event state stays inside the home ------------------------------
+HBOUND="$TMP_ROOT/hbound"; new_home "$HBOUND"
+HBOUND_OUTSIDE="$TMP_ROOT/hbound-outside"; mkdir -p "$HBOUND_OUTSIDE"
+printf 'adapter=lavish\nargc=1\nargv:\n/bin/echo\n' > "$HBOUND_OUTSIDE/foreign.source"
+ln -s "$HBOUND_OUTSIDE" "$HBOUND/state/procevent"
+sup=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$HBOUND/state")
+assert_contains "$sup" no \
+  "supervision counted a source reached through a symlinked registry"
+bound_status=0
+bound_out=$(pe_register "$HBOUND" lavish symlinked-state -- /bin/echo escaped 2>&1) || bound_status=$?
+[ "$bound_status" -ne 0 ] || fail "registration accepted a symlinked process-event registry"
+assert_contains "$bound_out" "private ordinary directories" \
+  "symlinked process-event registry refusal was not actionable"
+assert_absent "$HBOUND_OUTSIDE/symlinked-state.source" \
+  "registration wrote through a symlinked process-event registry"
+
+HINBOX="$TMP_ROOT/hinbox"; new_home "$HINBOX"
+pe_register "$HINBOX" lavish symlinked-inbox -- /bin/echo escaped >/dev/null
+HINBOX_OUTSIDE="$TMP_ROOT/hinbox-outside"; mkdir -p "$HINBOX_OUTSIDE"
+ln -s "$HINBOX_OUTSIDE" "$HINBOX/state/procevent-inbox"
+inbox_status=0
+inbox_out=$(pe "$HINBOX" start symlinked-inbox 2>&1) || inbox_status=$?
+[ "$inbox_status" -ne 0 ] || fail "start accepted a symlinked process-event inbox"
+assert_contains "$inbox_out" "private ordinary directories" \
+  "symlinked process-event inbox refusal was not actionable"
+assert_absent "$HINBOX_OUTSIDE/symlinked-inbox.1.result" \
+  "capture wrote through a symlinked process-event inbox"
+pass "process-event registry and inbox refuse symlink escapes"
+
 # --- a blocking source completes into exactly one normalized event ----------
 H1="$TMP_ROOT/h1"; new_home "$H1"
 TRIG="$TMP_ROOT/trigger-one"

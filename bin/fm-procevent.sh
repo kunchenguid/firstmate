@@ -61,6 +61,8 @@
 # Durability boundary: see bin/fm-procevent-lib.sh. This runner proves capture
 # before publication and bounded re-announcement until handled, and nothing
 # about the source side of the handoff.
+# Public commands refuse symlinked or non-directory state/procevent leaves rather
+# than reading or writing process-event data outside the effective home.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,6 +82,11 @@ MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+
+require_state_paths_safe() {
+  fm_procevent_state_paths_safe "$STATE" \
+    || die "process-event state paths must be private ordinary directories"
+}
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -122,6 +129,7 @@ read_argv() {  # <source-id>
 
 cmd_register() {
   local adapter=${1-} id=${2-} sep=${3-}
+  require_state_paths_safe
   shift 3 2>/dev/null || usage
   fm_procevent_adapter_valid "$adapter" || die "adapter name must be lowercase alphanumeric or dash: $adapter"
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
@@ -213,6 +221,7 @@ require_runner_group() {
 
 cmd_start_public() {
   local id=${1-}
+  require_state_paths_safe
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   isolate_runner wait "$id"
@@ -220,6 +229,7 @@ cmd_start_public() {
 
 cmd_start() {
   local id=${1-} adapter out rc claimed bound_rc
+  require_state_paths_safe
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
@@ -377,6 +387,7 @@ detach_runner() {  # <source-id>
 
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
+  require_state_paths_safe
   published=$(publish_pending)
 
   # Stop a runner this home owns whose source is no longer registered. Without
@@ -536,6 +547,7 @@ stop_runner_pid() {  # <pid> <identity>
 # paired external effect at most once.
 cmd_handled() {
   local id=${1-} seq=${2-} status
+  require_state_paths_safe
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
@@ -551,6 +563,7 @@ cmd_handled() {
 
 cmd_retire() {
   local id=${1-} owner='' pid='' token='' identity='' stop_state
+  require_state_paths_safe
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ -e "$(fm_procevent_claim_path "$id")" ]; then
@@ -627,6 +640,7 @@ sweep_source_preflight() {
 
 cmd_sweep_home() {
   local preflight_only=${1-} path id owner attempted=0 failed=0
+  require_state_paths_safe
   [ -z "$preflight_only" ] || [ "$preflight_only" = --preflight ] || usage
   SWEEP_IDS=$'\n'
   for path in "$REG"/*.source; do
@@ -692,6 +706,7 @@ cmd_sweep_home() {
 
 cmd_list() {
   local rec id adapter owner pending
+  require_state_paths_safe
   if ! fm_procevent_any_registered "$STATE"; then
     printf 'no sources registered\n'
     return 0
