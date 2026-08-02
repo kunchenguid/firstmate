@@ -183,7 +183,7 @@ promotion_range_refs() {
 }
 
 open_promotion_pr() {
-  local base_ref head_ref
+  local base_ref head_ref kind
   local count base_sha head_sha title body_file rc
   IFS=$'\t' read -r base_ref head_ref < <(promotion_range_refs)
   count=$(fm_proplane_promote_pr_range_count "$GIT_ROOT" "$base_ref" "$head_ref")
@@ -198,8 +198,16 @@ open_promotion_pr() {
   # The PR is opened from prakrit because integrate/* is never pushed to GitHub,
   # so the body is told both refs and reconciles them: the promoted range stays
   # authoritative, and any commit the rendered diff misses or adds is named.
+  #
+  # A dry run is previewing, not recording: it has not built the integrate branch
+  # this run would promote, so it says what it does not know instead of asserting
+  # it, and reconciles nothing, which also keeps the dry run off the network.
+  kind=record
+  if [ "$DRY_RUN" -eq 1 ]; then
+    kind=preview
+  fi
   fm_proplane_promote_pr_body "$GIT_ROOT" "$base_ref" "$head_ref" \
-    "$SECURITY_REVIEW_STATUS" "$SECURITY_REVIEW_REPORT" "$VALIDATION_STATUS" origin/prakrit >"$body_file"
+    "$SECURITY_REVIEW_STATUS" "$SECURITY_REVIEW_REPORT" "$VALIDATION_STATUS" origin/prakrit "$kind" >"$body_file"
   echo "== promotion record PR (prakrit → main) =="
   fm_proplane_promote_pr_sync "$GIT_ROOT" main prakrit "$title" "$body_file" "$DRY_RUN"
   rc=$?

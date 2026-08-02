@@ -22,6 +22,8 @@
 #   (s) the body reconciles the promoted range against the diff GitHub renders
 #   (t) end to end: a plain --dry-run runs no gate and still previews the record
 #   (u) the reset guard refuses when it cannot read a worktree's state
+#   (v) the reconciliation reads the head branch as GitHub has it, not a stale ref
+#   (w) a head branch that cannot be read is recorded as unavailable, not guessed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -231,12 +233,30 @@ assert_contains "$diverged" 'pushed to prakrit after the cut' \
   'the body lists the head-branch commit this promotion does not land'
 assert_contains "$diverged" 'does NOT close as merged' 'the body stops claiming a close it will not get'
 assert_contains "$diverged" 'authoritative' 'the promoted range is stated as the authority'
+# The integration merge is in the promoted range and not on prakrit, so a count
+# that included merges would print a number the bullet list below it contradicts.
+assert_contains "$diverged" 'does not show them (1):' 'the count describes the same set as the list'
+assert_contains "$diverged" 'did not land them (1):' 'the unlanded count describes its own list'
 pass 'the body reconciles the promoted range against the diff GitHub renders'
+
+# A count and the bullet list under it must describe the same set, or a section
+# whose whole purpose is saying what is missing disagrees with itself.
+for section in 'does not show them' 'did not land them'; do
+  stated=$(printf '%s\n' "$diverged" | sed -n "s/.*$section (\([0-9][0-9]*\)):.*/\1/p")
+  listed=$(printf '%s\n' "$diverged" | awk -v s="$section" '
+    index($0, s) { on = 1; next }
+    on && /^- / { n++ }
+    on && /^$/ && n { on = 0 }
+    END { print n + 0 }')
+  [ "$stated" = "$listed" ] ||
+    fail "the '$section' count ($stated) must match its listing ($listed)"
+done
+pass 'each reconciliation count matches the commits actually listed under it'
 
 # When the head branch and the promoted range agree, the record says so, and the
 # close-as-merged claim is the accurate one to make.
 aligned=$(fm_proplane_promote_pr_body "$case_a/repo" origin/main origin/prakrit passed '' passed origin/prakrit)
-assert_contains "$aligned" 'matches the promoted range exactly' 'an aligned head is recorded as aligned'
+assert_contains "$aligned" 'the same non-merge commits as the promoted range' 'an aligned head is recorded as aligned'
 assert_contains "$aligned" 'which closes this PR as merged' 'an aligned record states the close it does get'
 assert_not_contains "$aligned" 'NOT promoted' 'nothing is reported as unlanded when nothing is'
 pass 'a head branch matching the promoted range is recorded as the promotion itself'
@@ -248,6 +268,64 @@ assert_contains "$unknown_head" 'closes this PR as merged once' 'an unreconciled
 assert_not_contains "$unknown_head" 'right after opening this PR, which closes' \
   'an unreconciled record never asserts the close unconditionally'
 pass 'a record with no head ref to reconcile states the condition, not the outcome'
+
+# --- (v) the reconciliation reads the head branch as GitHub has it -------------
+#
+# GitHub renders the PR from the REMOTE branch, and the record is opened long
+# after this run's first fetch: the security review and the no-mistakes gates run
+# in between. A sandbox that promotes into prakrit from another clone in that
+# window never moves this repo's tracking ref, so answering from that ref would
+# report a clean reconciliation and an unconditional close for a PR that will not
+# close at all.
+
+case_v="$TMP_ROOT/v"
+mkdir -p "$case_v"
+make_repo "$case_v/repo"
+git -C "$case_v/repo" checkout -q -B integrate/prakrit-to-main origin/main
+git -C "$case_v/repo" merge -q --no-edit origin/prakrit -m 'integrate(prakrit): test fixture'
+git -C "$case_v/repo" checkout -q main
+git clone -q "$case_v/repo.origin" "$case_v/other"
+git -C "$case_v/other" checkout -q -b prakrit origin/prakrit
+printf 'elsewhere\n' > "$case_v/other/elsewhere.txt"
+git -C "$case_v/other" add elsewhere.txt
+git -C "$case_v/other" commit -qm 'feat: promoted into prakrit from another clone'
+git -C "$case_v/other" push -q origin prakrit
+[ "$(git -C "$case_v/repo" rev-parse refs/remotes/origin/prakrit)" \
+  != "$(git -C "$case_v/other" rev-parse HEAD)" ] ||
+  fail 'the fixture must leave this repo tracking a stale prakrit'
+
+fresh=$(fm_proplane_promote_pr_body "$case_v/repo" origin/main integrate/prakrit-to-main \
+  passed '' passed origin/prakrit)
+assert_contains "$fresh" 'promoted into prakrit from another clone' \
+  'the reconciliation reads prakrit as GitHub has it, not the stale tracking ref'
+assert_contains "$fresh" 'does NOT close as merged' \
+  'a record read from a stale ref must not claim a close it will not get'
+pass 'the reconciliation refetches the head branch instead of trusting a stale ref'
+
+# --- (w) a head branch that cannot be read is recorded as unavailable ----------
+#
+# Falling back to the stale ref would answer with a number that might be wrong,
+# which is the failure this refetch exists to prevent.
+
+case_w="$TMP_ROOT/w"
+mkdir -p "$case_w"
+make_repo "$case_w/repo"
+git -C "$case_w/repo" checkout -q -B integrate/prakrit-to-main origin/main
+git -C "$case_w/repo" merge -q --no-edit origin/prakrit -m 'integrate(prakrit): test fixture'
+git -C "$case_w/repo" checkout -q main
+git -C "$case_w/repo" remote set-url origin "file://$case_w/no-such-origin"
+set +e
+unavailable=$(fm_proplane_promote_pr_body "$case_w/repo" origin/main integrate/prakrit-to-main \
+  passed '' passed origin/prakrit 2>/dev/null)
+rc=$?
+set -e
+expect_code 0 "$rc" 'an unreadable head branch must not fail the record'
+assert_contains "$unavailable" 'could not be read from' 'the record says the head branch could not be read'
+assert_contains "$unavailable" 'still states exactly what lands' 'the promoted range stays authoritative'
+assert_not_contains "$unavailable" 'Promoted but NOT on' 'no reconciliation is answered from a stale ref'
+assert_contains "$unavailable" 'closes this PR as merged once' 'the close is stated as a condition'
+assert_not_contains "$unavailable" 'which closes this PR as merged' 'no close is asserted without a readable head'
+pass 'a head branch that cannot be refetched is recorded as unavailable, never guessed'
 
 [ "$(fm_proplane_promote_pr_range_count "$case_a/repo" origin/main origin/prakrit)" = 1 ] ||
   fail 'range count should be 1'
@@ -699,6 +777,27 @@ assert_contains "$out" 'NOT RUN' 'the previewed record says the gates did not ru
 [ "$(origin_sha "$case_t" main)" = "$main_sha_before" ] || fail 'a plain dry run must not move origin/main'
 pass 'a plain --dry-run runs no security review and still previews the promotion record'
 
+# A dry run has not built the integrate branch this run would promote, so it must
+# say what it does not know rather than reporting a leftover branch as the record.
+assert_contains "$out" 'This is a preview, not a record' 'the dry run marks its output as a preview'
+assert_contains "$out" 'not known yet' 'the preview does not invent the tip main lands on'
+assert_not_contains "$out" 'which closes this PR as merged' 'the preview asserts no close it cannot know'
+assert_not_contains "$out" 'the same non-merge commits as the promoted range' \
+  'the preview claims no alignment it cannot know'
+pass 'a dry-run record is presented as a preview, not as facts about the promotion'
+
+# The preview reconciles nothing, so it needs no network: an unreachable origin
+# cannot change what it prints, which is what keeps a dry run inert.
+git -C "$case_t/repo" remote set-url origin "file://$case_t/no-such-origin"
+set +e
+offline=$(run_promotion "$case_t" --dry-run)
+rc=$?
+set -e
+expect_code 0 "$rc" 'a dry run must not need the network'
+assert_contains "$offline" 'This is a preview, not a record' 'the offline dry run still previews the record'
+assert_not_contains "$offline" 'could not refresh' 'a dry run never tries to refresh the head branch'
+pass 'a dry run previews the record without touching the network'
+
 # A dry run before any integrate branch exists is the common case (nothing has
 # been promoted yet), and it must preview cleanly rather than die resolving a ref
 # that a real run would have created.
@@ -748,6 +847,21 @@ assert_contains "$out" 'origin/main..origin/prakrit' 'the ladder dry run shows t
 [ ! -s "$case_j/gh.log" ] || fail 'the ladder dry run must not call gh-axi'
 [ "$(origin_sha "$case_j" main)" = "$main_sha_before" ] || fail 'the ladder dry run must not move origin/main'
 pass 'the full ladder dry run previews the promotion record PR without opening it'
+
+# At preview time the integrate branch does not exist, so the ladder preview knows
+# neither the tip main lands on nor how prakrit compares to it. Reporting
+# origin/prakrit as both would print three sentences that are normally false: the
+# real promotion lands an integrate tip carrying the integration merge and the
+# validation's own commits.
+assert_contains "$out" 'This is a preview, not a record' 'the ladder preview says it is a preview'
+assert_contains "$out" 'not known yet' 'the ladder preview does not invent the tip main lands on'
+assert_contains "$out" 'integrate/prakrit-to-main' 'the preview names where the real record comes from'
+assert_contains "$out" 'no-mistakes validation itself makes' \
+  'the preview says the real record can carry commits the validation adds'
+assert_not_contains "$out" 'which closes this PR as merged' 'the preview asserts no close it cannot know'
+assert_not_contains "$out" 'the same non-merge commits as the promoted range' \
+  'the preview claims no alignment it cannot know'
+pass 'the ladder dry run preview asserts no tip and no alignment it cannot know'
 
 # --- (u) the reset guard refuses when it cannot read a worktree's state --------
 #

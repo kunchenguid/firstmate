@@ -20,6 +20,11 @@
 # exact tip main is fast-forwarded to, and lists the commits on either side of the
 # disagreement. A reader must never be misled about what landed.
 #
+# That comparison is made against a freshly fetched prakrit, never the local
+# remote-tracking ref: the record is opened long after this run's first fetch,
+# and a sandbox that promotes into prakrit in between would otherwise be invisible
+# to a reconciliation that claims to describe what GitHub shows.
+#
 # Sourced by bin/fm-proplane-promote-prakrit-to-main.sh (opens the PR) and
 # bin/fm-proplane-promote-full.sh (--dry-run preview). GitHub access goes
 # through gh-axi, per AGENTS.md.
@@ -29,13 +34,17 @@
 #     Commits in <base_ref>..<head_ref>, or 0 when the range cannot be read.
 #   fm_proplane_promote_pr_title <base_sha> <head_sha>
 #     One-line PR title naming the promoted range.
-#   fm_proplane_promote_pr_body <git_root> <base_ref> <head_ref> <security_status> <security_report> <validation_status> [pr_head_ref]
+#   fm_proplane_promote_pr_body <git_root> <base_ref> <head_ref> <security_status> <security_report> <validation_status> [pr_head_ref] [kind]
 #     Markdown body: promoted commit range, the exact tip main is fast-forwarded
 #     to, security-review outcome, validation outcome. <security_report> may be
 #     empty when no report path was printed. <pr_head_ref> is the local ref for
-#     the branch the PR is opened FROM (origin/prakrit); when it is given and
-#     resolvable, the body reconciles the promoted range against the diff GitHub
-#     actually renders. See "record versus rendered diff" below.
+#     the branch the PR is opened FROM (origin/prakrit); when it is given, the
+#     body reconciles the promoted range against the diff GitHub actually
+#     renders. See "record versus rendered diff" below.
+#     <kind> is `record` (default) or `preview`. A preview runs before the
+#     integrate branch exists, so it knows neither the tip main lands on nor how
+#     the head branch compares to it, and says so instead of guessing. A preview
+#     reconciles nothing and therefore makes no network call at all.
 #   fm_proplane_promote_pr_sync <git_root> <base> <head> <title> <body_file> <dry_run>
 #     Idempotent publish: updates the open <head> -> <base> PR when one exists
 #     AND its title marks it as a promotion record, otherwise creates one. Sets
@@ -76,16 +85,51 @@ FM_PROPLANE_PROMOTE_PR_OPENED=0
 FM_PROPLANE_PROMOTE_PR_NUMBER=''
 FM_PROPLANE_PROMOTE_PR_URL=''
 
-# Bounded gh-axi call. Prefers timeout, falls back to gtimeout, and runs the
+# Bounded network call. Prefers timeout, falls back to gtimeout, and runs the
 # call bare when neither is installed rather than refusing to record anything.
-fm_proplane_promote_pr_gh() {
+fm_proplane_promote_pr_bounded() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$FM_PROPLANE_PR_GH_TIMEOUT" gh-axi "$@"
+    timeout "$FM_PROPLANE_PR_GH_TIMEOUT" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$FM_PROPLANE_PR_GH_TIMEOUT" gh-axi "$@"
+    gtimeout "$FM_PROPLANE_PR_GH_TIMEOUT" "$@"
   else
-    gh-axi "$@"
+    "$@"
   fi
+}
+
+fm_proplane_promote_pr_gh() {
+  fm_proplane_promote_pr_bounded gh-axi "$@"
+}
+
+# Refresh the PR's head branch from origin. The reconciliation describes the diff
+# GitHub renders, which is the REMOTE branch: the record is opened minutes to
+# hours after this run's first fetch, and another sandbox can promote into
+# prakrit in that window, so the local remote-tracking ref is not evidence of
+# what the PR will show. Read-only against origin, bounded like every other
+# network call here, and it moves no local branch. Non-zero means the head could
+# not be read, which the body reports rather than answering from a stale ref.
+fm_proplane_promote_pr_refresh_head() {
+  local git_root=$1 pr_head_ref=$2 branch out
+  [ -n "$pr_head_ref" ] || return 1
+  case "$pr_head_ref" in
+    origin/*) branch=${pr_head_ref#origin/} ;;
+    # A ref that is not remote-tracking cannot go stale behind us, so it is used
+    # as given rather than invented a remote branch name for.
+    *) git -C "$git_root" rev-parse --verify --quiet "$pr_head_ref" >/dev/null 2>&1 || return 1
+       return 0
+       ;;
+  esac
+  out=$(fm_proplane_promote_pr_bounded git -C "$git_root" fetch --quiet origin \
+    "+refs/heads/$branch:refs/remotes/origin/$branch" 2>&1) || {
+    echo "proplane-promote-pr: could not refresh $pr_head_ref from origin, so the record will state that its reconciliation is unavailable" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  }
+  git -C "$git_root" rev-parse --verify --quiet "$pr_head_ref" >/dev/null 2>&1 || {
+    echo "proplane-promote-pr: $pr_head_ref is unreadable even after refreshing from origin" >&2
+    return 1
+  }
+  return 0
 }
 
 # The record is published to GitHub, so it carries the report's sha-keyed
@@ -136,15 +180,13 @@ fm_proplane_promote_pr_commit_listing() {
 
 fm_proplane_promote_pr_body() {
   local git_root=$1 base_ref=$2 head_ref=$3
-  local security_status=$4 security_report=$5 validation_status=$6 pr_head_ref=${7:-}
-  local base_sha head_sha head_tip count log report_line
+  local security_status=$4 security_report=$5 validation_status=$6
+  local pr_head_ref=${7:-} kind=${8:-record}
+  local base_sha head_sha head_tip tip_line count log report_line
   local pr_head_label diff_section lands_section
   local unshown_count unlanded_count unshown_log unlanded_log
   base_sha=$(fm_proplane_promote_pr_short_sha "$git_root" "$base_ref")
   head_sha=$(fm_proplane_promote_pr_short_sha "$git_root" "$head_ref")
-  # The full sha of the tip main is fast-forwarded to: the record has to name
-  # what landed exactly, not a ref name that keeps moving after the promotion.
-  head_tip=$(git -C "$git_root" rev-parse "$head_ref" 2>/dev/null) || head_tip=unknown
   count=$(fm_proplane_promote_pr_range_count "$git_root" "$base_ref" "$head_ref")
   log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
     '- (no non-merge commits in this range)' "$base_ref..$head_ref")
@@ -154,52 +196,87 @@ fm_proplane_promote_pr_body() {
 - report: \`$security_report\`"
   fi
 
-  # Without a resolvable PR head there is nothing to reconcile the range against,
-  # so the closing line states the condition instead of asserting the outcome.
   diff_section=""
-  lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
+  if [ "$kind" = preview ]; then
+    # A preview runs before the integrate branch is built, so the tip main lands
+    # on does not exist yet and neither does the comparison against it. Saying so
+    # is the honest answer; synthesising a tip from origin/prakrit would print
+    # three sentences that are normally false for the run being previewed.
+    tip_line="- \`main\` is fast-forwarded to: not known yet, this preview runs before the integrate branch is built"
+    diff_section="## This is a preview, not a record
+
+This is the promotion record a real promote would open, built from \`$base_ref..$head_ref\` as they stand right now.
+The real promotion validates on \`integrate/prakrit-to-main\` and records that branch's tip, which normally also carries the integration merge and any commits the no-mistakes validation itself makes, so both the range and the tip can differ by the time the real record is written.
+No pull request is opened, updated, or read by this preview, and nothing here is compared against the branch GitHub would render.
+
+"
+    lands_section="The ladder fast-forwards \`main\` to the recorded integrate tip right after opening the real record.
+GitHub closes that PR as merged once \`main\` contains its head branch."
+  else
+    # The full sha of the tip main is fast-forwarded to: the record has to name
+    # what landed exactly, not a ref name that keeps moving after the promotion.
+    head_tip=$(git -C "$git_root" rev-parse "$head_ref" 2>/dev/null) || head_tip=unknown
+    tip_line="- \`main\` is fast-forwarded to: \`$head_tip\`"
+    # Without a readable PR head there is nothing to reconcile the range against,
+    # so the closing line states the condition instead of asserting the outcome.
+    lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
 GitHub closes this PR as merged once \`main\` contains this PR's head branch."
 
-  if [ -n "$pr_head_ref" ] && git -C "$git_root" rev-parse --verify --quiet "$pr_head_ref" >/dev/null 2>&1; then
-    pr_head_label=${pr_head_ref#origin/}
-    unshown_count=$(git -C "$git_root" rev-list --count "$base_ref..$head_ref" --not "$pr_head_ref" 2>/dev/null) || unshown_count=0
-    unlanded_count=$(git -C "$git_root" rev-list --count "$pr_head_ref" --not "$head_ref" 2>/dev/null) || unlanded_count=0
-    diff_section="## Record versus this PR's diff
+    if [ -n "$pr_head_ref" ]; then
+      pr_head_label=${pr_head_ref#origin/}
+      diff_section="## Record versus this PR's diff
 
 This PR's head is \`$pr_head_label\`, but the promoted range above is built on \`$head_ref\`, which the keeper-branch rule never pushes to GitHub.
 The promoted range above is authoritative for what lands on \`main\`; the diff GitHub renders here is \`$pr_head_label\` and can differ from it.
 "
-    if [ "${unshown_count:-0}" -gt 0 ]; then
-      unshown_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
-        '- (merge commits only)' "$base_ref..$head_ref" --not "$pr_head_ref")
-      diff_section="$diff_section
+      if ! fm_proplane_promote_pr_refresh_head "$git_root" "$pr_head_ref"; then
+        diff_section="$diff_section
+\`$pr_head_label\` could not be read from \`origin\` when this record was written, so this record cannot say which promoted commits its diff omits, nor which commits its diff shows that this promotion did not land.
+The promoted range above still states exactly what lands on \`main\`.
+
+"
+      else
+        # Counted with --no-merges because the listings below are: a section whose
+        # whole purpose is saying what is missing must not disagree with itself
+        # about how many things are missing.
+        unshown_count=$(git -C "$git_root" rev-list --count --no-merges "$base_ref..$head_ref" --not "$pr_head_ref" 2>/dev/null) || unshown_count=0
+        unlanded_count=$(git -C "$git_root" rev-list --count --no-merges "$pr_head_ref" --not "$head_ref" 2>/dev/null) || unlanded_count=0
+        if [ "${unshown_count:-0}" -gt 0 ]; then
+          unshown_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
+            '- (none)' "$base_ref..$head_ref" --not "$pr_head_ref")
+          diff_section="$diff_section
 Promoted but NOT on \`$pr_head_label\`, so this PR's diff does not show them ($unshown_count):
 
 $unshown_log
 "
-    fi
-    if [ "${unlanded_count:-0}" -gt 0 ]; then
-      unlanded_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
-        '- (merge commits only)' "$pr_head_ref" --not "$head_ref")
-      diff_section="$diff_section
+        fi
+        if [ "${unlanded_count:-0}" -gt 0 ]; then
+          unlanded_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
+            '- (none)' "$pr_head_ref" --not "$head_ref")
+          diff_section="$diff_section
 On \`$pr_head_label\` but NOT promoted, so this PR's diff shows them even though this promotion did not land them ($unlanded_count):
 
 $unlanded_log
 "
-    fi
-    if [ "${unshown_count:-0}" -eq 0 ] && [ "${unlanded_count:-0}" -eq 0 ]; then
-      diff_section="$diff_section
-\`$pr_head_label\` matches the promoted range exactly, so this PR's diff is the promotion.
+        fi
+        if [ "${unshown_count:-0}" -eq 0 ] && [ "${unlanded_count:-0}" -eq 0 ]; then
+          diff_section="$diff_section
+\`$pr_head_label\` carries the same non-merge commits as the promoted range, so this PR's diff is the promotion.
 "
-    fi
-    diff_section="$diff_section
+        fi
+        diff_section="$diff_section
 "
-    if [ "${unlanded_count:-0}" -eq 0 ]; then
-      lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR, which closes this PR as merged: \`main\` then contains \`$pr_head_label\`."
-    else
-      lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
-This PR does NOT close as merged, because \`$pr_head_label\` carries $unlanded_count commit(s) this promotion does not deliver, so \`main\` does not contain \`$pr_head_label\` after the fast-forward.
-It stays open until a later promotion records the range that catches those commits up; \`main\` carries the promoted range above either way."
+        # Whether GitHub closes the PR is an ancestry question, not a commit-count
+        # one, so it is answered by ancestry: a merge commit on either side moves
+        # no file yet still decides this.
+        if git -C "$git_root" merge-base --is-ancestor "$pr_head_ref" "$head_ref" 2>/dev/null; then
+          lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR, which closes this PR as merged: \`main\` then contains \`$pr_head_label\`."
+        else
+          lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
+This PR does NOT close as merged, because \`main\` does not contain \`$pr_head_label\` after that fast-forward: \`$pr_head_label\` carries work this promotion does not deliver.
+It stays open until a later promotion records the range that catches that work up; \`main\` carries the promoted range above either way."
+        fi
+      fi
     fi
   fi
 
@@ -210,7 +287,7 @@ Promotion record for the PropPlane keeper ladder: \`prakrit\` -> \`main\`.
 
 - range: \`$base_ref..$head_ref\` (\`$base_sha..$head_sha\`)
 - commits: $count
-- \`main\` is fast-forwarded to: \`$head_tip\`
+$tip_line
 
 $log
 

@@ -112,6 +112,11 @@ push_agent_branch() {
 # Preview the promotion record PR the prakrit → main step will open. The range
 # shown is the pre-promotion origin/main..origin/prakrit, since a dry run never
 # merges the agent branch into prakrit; the real PR records the merged range.
+#
+# Rendered as a preview rather than a record: at this point the integrate branch
+# does not exist, so the tip main will land on and the comparison against the
+# branch GitHub renders are both unknowable here, and the body says so instead of
+# reporting origin/prakrit as if it were the promotion.
 preview_promotion_pr() {
   local base_ref=origin/main head_ref=origin/prakrit
   local base_sha head_sha title body_file pending
@@ -121,7 +126,7 @@ preview_promotion_pr() {
   title=$(fm_proplane_promote_pr_title "$base_sha" "$head_sha")
   body_file=$(mktemp)
   fm_proplane_promote_pr_body "$GIT_ROOT" "$base_ref" "$head_ref" \
-    "$pending" "" "$pending" origin/prakrit >"$body_file"
+    "$pending" "" "$pending" "" preview >"$body_file"
   fm_proplane_promote_pr_sync "$GIT_ROOT" main prakrit "$title" "$body_file" 1 || true
   rm -f "$body_file"
 }
