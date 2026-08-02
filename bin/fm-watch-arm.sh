@@ -32,15 +32,20 @@
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
+#   watcher: cycle delivered <N> wake(s) already drained  - the cycle did deliver a wake, and a
+#                                                          handling turn consumed it before this arm
+#                                                          could read it back
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. An
-# attached cycle that ends without a healthy successor is a typed nonzero failure,
-# never a clean empty completion. On FAILED it exits non-zero so the failure is
-# loud. A live cycle already present means re-arm attaches - do not start a second
-# watcher.
+# reason; on attached it stays live across identity-matched successors. A cycle
+# that ends with no reason line and no healthy successor is resolved against the
+# durable wake queue: a cycle the queue proves delivered a wake reports that wake
+# and exits 0, and only a cycle that delivered nothing is the typed nonzero
+# failure. Neither is ever a clean empty completion. On FAILED it exits non-zero
+# so the failure is loud. A live cycle already present means re-arm attaches - do
+# not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -99,16 +104,36 @@ lock_snapshot() {
   printf 'pid:%s|identity:%s' "$(cycle_clean_field "${pid:-none}")" "$(cycle_clean_field "${identity:-none}")"
 }
 
+# The watcher prints its one reason line to its OWN stdout, so only the arm that
+# forked it can read that line back. The durable wake queue is the record both
+# arms share: bin/fm-watch.sh appends every wake there BEFORE printing it, and
+# state/.wake-queue.seq only ever advances - a drain moves the queue file aside
+# but never rewinds the counter. A cycle that ends after the counter passed the
+# watermark taken when the cycle began therefore delivered a real supervision
+# event, whatever this arm could observe on its own pipe.
+WAKE_SEQ="$STATE/.wake-queue.seq"
+
+wake_seq_snapshot() {
+  local seq
+  seq=$(cat "$WAKE_SEQ" 2>/dev/null || true)
+  case "$seq" in
+    ''|*[!0-9]*) seq=0 ;;
+  esac
+  printf '%s' "$seq"
+}
+
 cycle_active=0
 cycle_watcher_pid=none
 cycle_origin=unknown
 cycle_started_at=0
+cycle_wake_seq=0
 cycle_lock_before='pid:none|identity:none'
 
 cycle_begin() {
   cycle_watcher_pid=$1
   cycle_origin=$2
   cycle_started_at=$(date +%s)
+  cycle_wake_seq=$(wake_seq_snapshot)
   cycle_lock_before=$(lock_snapshot)
   cycle_active=1
 }
@@ -261,9 +286,49 @@ fail_unexplained_cycle() {
   return 1
 }
 
+# Reason lines still queued from records newer than sequence watermark $1,
+# deduplicated by wake kind and key and bounded like the harness wake banners.
+queued_reasons_after() {
+  awk -F '\t' -v since="$1" '
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 + 0 > since + 0 && !seen[$3 SUBSEP $4]++ {
+      print $5
+      if (++shown >= 8) exit
+    }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null || true
+}
+
+# Close a cycle whose reason line this arm could not read, using the durable
+# queue as the shared record of what the cycle actually did. An arm that ATTACHED
+# to a cycle holds no handle on the watcher's stdout and can only observe a
+# released lock, so calling that close unexplained reported a completely
+# successful cycle as a failure - a false alarm that costs a manual re-arm on
+# every harness whose protocol reads that line. Only a cycle the queue shows
+# delivered nothing is a genuine failure.
+close_unobserved_cycle() {  # <wake-sequence-watermark>
+  local since=$1 now reasons
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  now=$(wake_seq_snapshot)
+  reasons=$(queued_reasons_after "$since")
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  if [ "$now" -le "$since" ]; then
+    fail_unexplained_cycle
+    return 1
+  fi
+  if [ -n "$reasons" ]; then
+    printf '%s\n' "$reasons"
+    return 0
+  fi
+  # A handling turn drained the records while this arm was still confirming the
+  # close, so it already holds them. Report the delivery rather than inventing a
+  # reason line that would send the model chasing a second copy of a handled wake.
+  echo "watcher: cycle delivered $((now - since)) wake(s) already drained"
+  return 0
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
-# to a verified successor. With no successor, fail loudly instead of returning a
-# clean empty completion that an adapter could mistake for a no-op.
+# to a verified successor. With no successor, report the wake that cycle durably
+# delivered, or fail loudly - never a clean empty completion that an adapter could
+# mistake for a no-op.
 attach_and_wait() {
   local attached_pid=$1
   while :; do
@@ -284,8 +349,11 @@ attach_and_wait() {
       report_attached
       continue
     fi
+    if close_unobserved_cycle "$cycle_wake_seq"; then
+      cycle_log_append unknown unknown attached-delivered-wake none
+      return 0
+    fi
     cycle_log_append unknown unknown attached-cycle-ended none
-    fail_unexplained_cycle
     return 1
   done
 }
@@ -430,12 +498,15 @@ owned_child_finished() {
       attach_and_wait "$HEALTHY_PID"
       return $?
     fi
-    cycle_log_append "$rc" "$signal" unexpected-clean-exit none
     print_watch_output "$child_out"
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
-    fail_unexplained_cycle
+    if close_unobserved_cycle "$cycle_wake_seq"; then
+      cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
+      return 0
+    fi
+    cycle_log_append "$rc" "$signal" unexpected-clean-exit none
     return 1
   fi
 
