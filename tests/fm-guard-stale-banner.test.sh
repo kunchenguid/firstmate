@@ -67,6 +67,23 @@ test_first_stale_call_prints_full_banner() {
   pass "fm-guard stale banner: first stale call prints the full actionable banner"
 }
 
+test_trello_only_home_prints_full_banner_and_cadence_repair() {
+  local dir home out
+  dir=$(make_guard_case trello-only-stale)
+  home=$(case_home "$dir")
+  rm -f "$home/state/task.meta"
+  : > "$home/state/trello-watch.check.sh"
+  : > "$home/config/trello-mode.env"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "Trello-only home did not print the stale watcher banner"
+  assert_contains "$out" "Configured control-plane polling needs supervision" \
+    "Trello-only banner did not identify the supervision need"
+  assert_contains "$out" "source '$home/config/trello-mode.env' first" \
+    "Trello-only repair did not source the configured cadence"
+  pass "fm-guard stale banner: Trello-only homes remain eligible for supervision"
+}
+
 test_repeated_same_episode_prints_reminder_only() {
   local dir out1 out2 marker lines
   dir=$(make_guard_case repeated-stale)
@@ -241,6 +258,7 @@ test_read_only_never_mutates_stale_banner_state_files() {
 }
 
 test_first_stale_call_prints_full_banner
+test_trello_only_home_prints_full_banner_and_cadence_repair
 test_repeated_same_episode_prints_reminder_only
 test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner

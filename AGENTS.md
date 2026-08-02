@@ -75,6 +75,7 @@ config/herdr-presentation-spaces  optional presence flag for Herdr's default-off
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/trello-mode.env  generated Trello watcher cadence; LOCAL, gitignored; source before X mode when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
@@ -109,9 +110,12 @@ state/               volatile runtime signals; gitignored
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   public-followup/   generated private transport for promised public replies: commitment registrations, typed terminal-result inbox, accepted/rejected ledgers (section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
+  .trello-seen-<cardid>  generated Trello per-card idempotency marker: dateLastActivity, list id, go-label state, comment count (section 15; docs/trello-control-plane.md)
+  .trello-paused     generated Trello global hibernate flag; present = the poll no-ops (section 15)
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
+  .trello-sync.lock  Trello poll sweep and board mutation cross-process synchronization lock (section 15)
   .claude-autoarm.lock .claude-autoarm-epoch .turnend-claude-blocks   Claude Stop auto-arm single-flight, epoch, and guard-budget records; never touch
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
@@ -488,7 +492,7 @@ It performs guarded fast-forward updates of firstmate and registered secondmate 
 
 These skills are not captain-invocable; load them only at their precise triggers.
 
-- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
+- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `NUDGE_SECONDMATES:`, `FMX:`, or `TRELLO:`); silence and `BOOTSTRAP_INFO:` need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding, regardless of the project's `yolo` posture.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi output.
@@ -502,6 +506,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `process-event-sources` - load before arming a long-polling source, and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
+- `trello` - load on a `trello-inbox`, `trello-ready`, `trello-nudge`, `trello-hold`, or `trello-mode-error` `check:` wake, and when mirroring task state onto the board or handling pause/start; relevant only when the Trello control plane is on (section 15).
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 
@@ -518,6 +523,27 @@ For every X-linked terminal outcome, load that owner and use the promised-final 
 A promised final public reply is durable state, never conversation memory.
 Load `fmx-respond` before promising one, on a `public-followup ...` check wake, and whenever the session-start digest lists a public commitment awaiting delivery.
 Only the home holding the relay consent and thread binding ever posts it, so never ask a secondmate or crewmate to find the thread or send the reply, and never recover a terminal result by reading a `done:` sentence.
+
+## 15. Trello control plane
+
+The Trello control plane turns a Trello board into both a visual dashboard of the fleet and a two-way command surface the captain drives.
+It ships inside this repo for every user but is **inert until opted in**, so a user who never enables it sees zero behavior change.
+
+**Activation is config presence, not a command.**
+The plane is off unless this home's gitignored `config/trello.env` supplies all three of `TRELLO_API_KEY`, `TRELLO_TOKEN`, and `TRELLO_BOARD_SHORTLINK` (copy `docs/examples/trello.env`; never commit a real token).
+Bootstrap wires the board poll automatically and purely additively from that presence, exactly like X mode; `docs/trello-control-plane.md` owns the full contract - activation, bootstrap artifacts, lanes, poll mechanics, and pause/hibernate - and `docs/configuration.md` "Trello control plane" has the env-var reference.
+The control plane is a reason to keep the watcher armed even with no fleet work, so a Trello-only user is still served.
+Every watcher arm and repair path sources the generated `config/trello-mode.env`; when X mode is also active, X cadence is sourced second and remains authoritative.
+
+**Ownership model (the conflict-avoidance rule that must survive here).**
+The captain owns exactly two moves: creating a card in 📥 Inbox (a new task request) and moving a card to 🟢 Ready / Go, or adding a `go` label, plus a comment (a decision given).
+Firstmate owns every other lane and drives cards through them, and NEVER places a card into Inbox or Ready, so any card there is unambiguously captain-driven.
+Captain-owned Ready and fresh `go` commands outrank any current or stale task binding; bindings classify only In Progress and Needs Input activity.
+On pickup, immediately move the card to 🔨 In Progress and comment "picked up - working".
+
+**Handling.**
+On a `trello-inbox`, `trello-ready`, `trello-nudge`, `trello-hold`, or `trello-mode-error` `check:` wake, load `/trello` (section 13).
+It owns the pickup rule, the per-trigger handler contract, the outbound mirror via `bin/fm-trello.sh`, and pause/start in full.
 
 ## Captain instruction precedence
 

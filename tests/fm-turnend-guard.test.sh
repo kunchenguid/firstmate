@@ -98,6 +98,16 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+test_predicate_trello_mode_needs_supervision() {
+  local state="$TMP_ROOT/pred-trello-mode/state"
+  mkdir -p "$state"
+  : > "$state/trello-watch.check.sh"
+  fm_supervision_needed "$state" 300 || fail "Trello board poll did not register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "Trello board poll must not count as an in-flight task"
+  [ "$FM_SUP_NEEDED" = true ] || fail "Trello board poll must set FM_SUP_NEEDED"
+  pass "fm_supervision_needed: Trello-only homes need supervision with no ordinary task"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -338,6 +348,20 @@ test_hook_x_mode_reason_sources_cadence() {
   expect_code 2 "$status" "hook must block when in-flight X-mode work has no live watcher"
   assert_contains "$out" "source '$home/config/x-mode.env' first" "block reason must source the effective X-mode cadence"
   pass "fm-turnend-guard: X-mode repair reason sources the cadence config"
+}
+
+test_hook_trello_only_reason_sources_cadence() {
+  local dir home out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-trello-mode")
+  home=$(cd "$dir" && pwd)
+  mkdir -p "$dir/config"
+  : > "$dir/config/trello-mode.env"
+  : > "$dir/state/trello-watch.check.sh"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when Trello-only polling has no live watcher"
+  assert_contains "$out" "Configured control-plane polling needs supervision" "Trello-only block must name the polling need"
+  assert_contains "$out" "source '$home/config/trello-mode.env' first" "Trello-only repair reason must source its cadence"
+  pass "fm-turnend-guard: Trello-only homes block blind stops and source the 60s cadence"
 }
 
 test_hook_ignores_repo_state_when_fm_home_set() {
@@ -995,7 +1019,7 @@ test_hook_claude_mode_reblocks_x_mode_without_tasks() {
   : > "$dir/state/x-watch.check.sh"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
   expect_code 2 "$status" "--claude mode must re-block an X-mode-only stop when no auto-arm claims recovery"
-  assert_contains "$out" "X-mode relay polling needs supervision" "--claude X-mode re-block must name the active supervision need"
+  assert_contains "$out" "Configured control-plane polling needs supervision" "--claude X-mode re-block must name the active supervision need"
   [ -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude X-mode re-block must consume the shared block budget"
   pass "fm-turnend-guard --claude: X-mode-only homes re-block when auto-arm recovery is absent"
 }
@@ -1130,6 +1154,7 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_trello_mode_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
@@ -1139,6 +1164,7 @@ test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
+test_hook_trello_only_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry

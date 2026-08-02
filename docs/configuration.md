@@ -452,6 +452,16 @@ The published `lavish-axi poll` clears feedback destructively before returning i
 Never describe this path as at-least-once, no-loss, or lossless.
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
+## Trello control plane
+
+The Trello control plane makes a board both a fleet dashboard and a two-way command surface, opt-in via a non-empty, complete `config/trello.env`.
+`docs/trello-control-plane.md` is the single owner of the full contract - activation, bootstrap artifacts, lanes, the ownership model, poll triggers and idempotency, pause/hibernate, and webhooks-as-a-future-enhancement.
+Like X mode it is purely additive: bootstrap drops and trust-registers `state/trello-watch.check.sh` (a check shim running `bin/fm-trello-poll.sh`) and writes `config/trello-mode.env` (`FM_CHECK_INTERVAL=60`, once per minute) when the config is present, and removes those artifacts when it is absent or incomplete, without touching any watcher-backbone file.
+Watcher startup, guard repair, session-start, and native harness arm paths source the generated cadence file.
+Trello-only configured homes remain supervision-eligible with no ordinary task metadata.
+When X mode is also active, its cadence file is sourced after Trello's so the faster X cadence wins.
+`api.trello.com` is an external host, reached only when the config is present; credentials are passed as query params through a `0600` `-K` curl config file so they never appear in argv.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -503,6 +513,15 @@ FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
+TRELLO_API_KEY=         # Trello control-plane API key; part of the config/trello.env opt-in gate
+TRELLO_TOKEN=           # Trello user token authorizing the key to read/write the board
+TRELLO_BOARD_SHORTLINK= # the board short link (from its URL); lane list ids are resolved dynamically
+TRELLO_API_BASE=https://api.trello.com   # optional Trello API base override, mainly for a local mock
+FM_TRELLO_ENV_FILE=     # optional alternate config file for direct Trello client calls; bootstrap still checks config/trello.env
+FM_TRELLO_TIMEOUT=10    # seconds allowed per Trello REST call
+FM_TRELLO_CURL_RETRIES=2   # bounded retries for a transient trello_curl transport failure (connect refused, DNS blip, cold-connection timeout) before deferring silently
+FM_TRELLO_CURL_RETRY_SLEEP=1   # seconds slept between trello_curl transport-failure retries
+FM_TRELLO_NO_ARM=       # when set, fm-trello.sh start skips arming the watcher (used by tests)
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for the Stop auto-arm's claim, health, or fresh rewake epoch before re-blocking
