@@ -9,7 +9,8 @@
 # "watcher: FAILED - cycle ended without an actionable reason" on every harness
 # whose protocol reads that line. These are real-process tests: a real
 # bin/fm-watch.sh holds the singleton, a real bin/fm-watch-arm.sh attaches to it,
-# and a real status change drives a real wake through the durable queue.
+# and a real status change drives a real wake through the watcher-bound delivery
+# record and durable queue.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -90,7 +91,7 @@ test_attached_arm_reports_the_delivered_wake() {
   pass "watch-arm: an attached arm reports the wake its cycle delivered instead of a false failure"
 }
 
-test_attached_arm_reports_a_wake_already_drained() {
+test_attached_arm_reports_the_delivered_wake_after_drain() {
   local dir state fakebin out armout status
   dir=$(make_case attached-drained-wake)
   state="$dir/state"
@@ -105,7 +106,8 @@ test_attached_arm_reports_a_wake_already_drained() {
   printf 'done: fixture finished\n' > "$state/demo.status"
   wait_for_exit "$SEED_PID" 120
   # The handling turn consumes the records before the attached arm closes: the
-  # queue is empty again, and only the sequence counter still proves delivery.
+  # queue is empty again, while the watcher's identity-bound terminal record
+  # still proves which cycle delivered the reason.
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain failed"
   [ ! -s "$state/.wake-queue" ] || fail "drain left records behind"
 
@@ -113,8 +115,8 @@ test_attached_arm_reports_a_wake_already_drained() {
   status=$?
   ! grep -qF 'watcher: FAILED' "$armout" \
     || fail "attached arm reported an already-handled wake as a failed cycle: $(cat "$armout")"
-  grep -q 'wake(s) already drained' "$armout" \
-    || fail "attached arm did not report the drained delivery: $(cat "$armout")"
+  grep -q '^signal:' "$armout" \
+    || fail "attached arm did not report the delivered reason after the queue drain: $(cat "$armout")"
   expect_code 0 "$status" "an attached arm whose wake was already drained must close successfully"
   pass "watch-arm: a delivered wake consumed by the handling turn still closes the attached arm cleanly"
 }
@@ -126,12 +128,13 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   armout="$dir/arm.out"
-  # A wake that predates the attach must never be mistaken for this cycle's own.
-  # The watcher does not react to queue records, so nothing else changes here.
-  append_wake "$state" signal older.status "signal: $state/older.status"
   start_seed_watcher "$state" "$fakebin" "$out"
   start_attached_arm "$state" "$fakebin" "$armout" 1
 
+  # A process-event producer advances the same home-wide queue while the
+  # observed watcher remains uninvolved, so only watcher-bound evidence can
+  # distinguish this from a delivered watcher cycle.
+  append_wake "$state" check process-event "check: process-event result captured: fixture"
   kill "$SEED_PID" 2>/dev/null || true
   wait "$SEED_PID" 2>/dev/null || true
   wait_for_exit "$ARM_PID" 120
@@ -144,5 +147,5 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
 }
 
 test_attached_arm_reports_the_delivered_wake
-test_attached_arm_reports_a_wake_already_drained
+test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
