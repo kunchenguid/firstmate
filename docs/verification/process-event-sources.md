@@ -110,7 +110,8 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | bounded output | output beyond `FM_PROCEVENT_MAX_OUTPUT_BYTES` is drained while only the bound is staged, then truncated and captured |
 | silent failure handling | a nonzero exit with no output publishes nothing and leaves the source registered for retry |
 | inertness | a home with no registered source generates no state, starts no process, and does not need supervision |
-| private state containment | every public command refuses a symlinked or non-directory `state`, `state/procevent`, or `state/procevent-inbox` and a symlinked per-source runner record before it reads or writes, a refused start releases the source for retry, and supervision counts no source reached through any of those shapes, so a home that no command can service is never pinned in an unsatisfiable supervision need |
+| private state containment | every public command refuses a symlinked or non-directory `state`, `state/procevent`, or `state/procevent-inbox` and a symlinked per-source runner record before it reads or writes, and a refused start releases the source for retry |
+| damaged state is loud, never silent | supervision counts only sources this home physically holds, so a source reached through a symlinked `state` or `state/procevent` is never its wait, while a source that genuinely lives in the home still counts even when a sibling leaf is damaged; the unserviceable path is reported separately by `fm-guard.sh` and `bin/fm-turnend-guard.sh` as a named, actionable diagnostic, so a home no command can service never goes quiet |
 
 ## Runner lifetime and cleanup
 

@@ -139,13 +139,25 @@ sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
 assert_contains "$sup" no "an unconfigured home does not need supervision"
 
 # --- process-event state stays inside the home ------------------------------
+# Prints the supervision verdict as one line: whether the home needs a watcher,
+# how many sources it holds itself, and which process-event path (if any) no
+# command can service.
+sup_probe() {  # <state-dir>
+  bash -c '. "$1/bin/fm-supervision-lib.sh"
+    fm_supervision_status "$2"
+    printf "needed=%s sources=%s unsafe=%s\n" \
+      "$FM_SUP_NEEDED" "$FM_SUP_SOURCES" "$FM_SUP_PROCEVENT_UNSAFE_PATH"' _ "$ROOT" "$1"
+}
+
 HBOUND="$TMP_ROOT/hbound"; new_home "$HBOUND"
 HBOUND_OUTSIDE="$TMP_ROOT/hbound-outside"; mkdir -p "$HBOUND_OUTSIDE"
 printf 'adapter=lavish\nargc=1\nargv:\n/bin/echo\n' > "$HBOUND_OUTSIDE/foreign.source"
 ln -s "$HBOUND_OUTSIDE" "$HBOUND/state/procevent"
-sup=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$HBOUND/state")
-assert_contains "$sup" no \
+sup=$(sup_probe "$HBOUND/state")
+assert_contains "$sup" "sources=0" \
   "supervision counted a source reached through a symlinked registry"
+assert_contains "$sup" "unsafe=$HBOUND/state/procevent" \
+  "a symlinked registry was not reported as unsafe process-event state"
 bound_status=0
 bound_out=$(pe_register "$HBOUND" lavish symlinked-state -- /bin/echo escaped 2>&1) || bound_status=$?
 [ "$bound_status" -ne 0 ] || fail "registration accepted a symlinked process-event registry"
@@ -165,9 +177,11 @@ assert_contains "$inbox_out" "private ordinary directories" \
   "symlinked process-event inbox refusal was not actionable"
 assert_absent "$HINBOX_OUTSIDE/symlinked-inbox.1.result" \
   "capture wrote through a symlinked process-event inbox"
-sup=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$HINBOX/state")
-assert_contains "$sup" no \
-  "supervision waited on a source no command can service through a symlinked inbox"
+sup=$(sup_probe "$HINBOX/state")
+assert_contains "$sup" "needed=true sources=1" \
+  "a damaged inbox silenced a source this home genuinely holds"
+assert_contains "$sup" "unsafe=$HINBOX/state/procevent-inbox" \
+  "a damaged inbox was not reported as unsafe process-event state"
 pass "process-event registry and inbox refuse symlink escapes"
 
 # The state directory itself is the outermost leaf the runner refuses, so
@@ -176,9 +190,11 @@ HSTATE="$TMP_ROOT/hstate"; mkdir -p "$HSTATE"
 HSTATE_OUTSIDE="$TMP_ROOT/hstate-outside"; mkdir -p "$HSTATE_OUTSIDE/procevent"
 printf 'adapter=lavish\nargc=1\nargv:\n/bin/echo\n' > "$HSTATE_OUTSIDE/procevent/foreign.source"
 ln -s "$HSTATE_OUTSIDE" "$HSTATE/state"
-sup=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$HSTATE/state")
-assert_contains "$sup" no \
+sup=$(sup_probe "$HSTATE/state")
+assert_contains "$sup" "needed=false sources=0" \
   "supervision counted a source reached through a symlinked state directory"
+assert_contains "$sup" "unsafe=$HSTATE/state" \
+  "a symlinked state directory was not reported as unsafe process-event state"
 state_status=0
 state_out=$(pe "$HSTATE" list 2>&1) || state_status=$?
 [ "$state_status" -ne 0 ] || fail "a public command accepted a symlinked state directory"

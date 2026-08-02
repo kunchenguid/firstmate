@@ -98,6 +98,48 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+# A source that genuinely lives in this home stays this home's wait even when a
+# sibling process-event leaf is damaged, so the home is loud, not silenced.
+test_predicate_damaged_inbox_keeps_in_home_source() {
+  local state="$TMP_ROOT/pred-bad-inbox/state" outside="$TMP_ROOT/pred-bad-inbox-outside"
+  mkdir -p "$state/procevent" "$outside"
+  : > "$state/procevent/in-home.source"
+  ln -s "$outside" "$state/procevent-inbox"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_SOURCES" -eq 1 ] || fail "a damaged inbox must not drop an in-home source, got $FM_SUP_SOURCES"
+  [ "$FM_SUP_NEEDED" = true ] || fail "an in-home source behind a damaged inbox must still need supervision"
+  [ "$FM_SUP_PROCEVENT_UNSAFE" = true ] || fail "a symlinked inbox must be reported as unsafe process-event state"
+  [ "$FM_SUP_PROCEVENT_UNSAFE_PATH" = "$state/procevent-inbox" ] \
+    || fail "unsafe path must name the inbox, got $FM_SUP_PROCEVENT_UNSAFE_PATH"
+  pass "fm_supervision_status: a damaged inbox is reported without silencing an in-home source"
+}
+
+# A source reached only through a symlinked registry or state is not in this
+# home, so it is never counted - but the damage is still reported.
+test_predicate_symlinked_registry_is_reported_not_counted() {
+  local state="$TMP_ROOT/pred-bad-registry/state" outside="$TMP_ROOT/pred-bad-registry-outside"
+  mkdir -p "$state" "$outside"
+  : > "$outside/foreign.source"
+  ln -s "$outside" "$state/procevent"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_SOURCES" -eq 0 ] || fail "a source behind a symlinked registry must not be this home's wait"
+  [ "$FM_SUP_PROCEVENT_UNSAFE" = true ] || fail "a symlinked registry must be reported as unsafe process-event state"
+  [ "$FM_SUP_PROCEVENT_UNSAFE_PATH" = "$state/procevent" ] \
+    || fail "unsafe path must name the registry, got $FM_SUP_PROCEVENT_UNSAFE_PATH"
+  pass "fm_supervision_status: a symlinked registry is reported and never counted"
+}
+
+test_predicate_ordinary_home_is_not_unsafe() {
+  local state="$TMP_ROOT/pred-clean-procevent/state"
+  mkdir -p "$state/procevent" "$state/procevent-inbox"
+  : > "$state/procevent/clean.source"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_PROCEVENT_UNSAFE" = false ] || fail "ordinary directories must not be reported as unsafe"
+  [ -z "$FM_SUP_PROCEVENT_UNSAFE_PATH" ] || fail "an unsafe path was reported for an ordinary home"
+  [ "$FM_SUP_SOURCES" -eq 1 ] || fail "expected one registered process-event source"
+  pass "fm_supervision_status: ordinary process-event directories report no damage"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -247,6 +289,40 @@ test_hook_blocks_source_only_home() {
   expect_code 2 "$status" "non-Claude hook must block when a source-only home has no watcher"
   assert_contains "$out" "1 process-event source(s) registered" "block reason must identify the source-only supervision need"
   pass "fm-turnend-guard: non-Claude path blocks a source-only home"
+}
+
+# bin/fm-watch.sh swallows the runner's refusal, so the turn-end guard is the
+# operator's only automatic signal that a home can service no source at all.
+test_hook_reports_unsafe_procevent_state() {
+  local dir outside out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-unsafe-procevent")
+  outside="$TMP_ROOT/hook-unsafe-procevent-outside"
+  mkdir -p "$dir/state/procevent" "$outside"
+  : > "$dir/state/procevent/in-home.source"
+  ln -s "$outside" "$dir/state/procevent-inbox"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "an in-home source behind a damaged inbox must still block"
+  assert_contains "$out" "process-event state is not private to this home" \
+    "hook must report unsafe process-event state"
+  assert_contains "$out" "$dir/state/procevent-inbox" "hook must name the unsafe path"
+  assert_contains "$out" "1 process-event source(s) registered" \
+    "a damaged inbox must not silence the in-home source count"
+  pass "fm-turnend-guard: unsafe process-event state is reported, not silenced"
+}
+
+test_hook_reports_unsafe_state_with_no_other_need() {
+  local dir outside out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-unsafe-registry")
+  outside="$TMP_ROOT/hook-unsafe-registry-outside"
+  mkdir -p "$outside"
+  : > "$outside/foreign.source"
+  ln -s "$outside" "$dir/state/procevent"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "unsafe process-event state alone must not block the turn"
+  assert_contains "$out" "process-event state is not private to this home" \
+    "a home with no other supervision need must still report the damage"
+  assert_contains "$out" "$dir/state/procevent" "hook must name the unsafe path"
+  pass "fm-turnend-guard: damaged state with no other need warns without blocking"
 }
 
 test_hook_blocks_when_dead_lock_has_fresh_beacon() {
@@ -1130,9 +1206,14 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_damaged_inbox_keeps_in_home_source
+test_predicate_symlinked_registry_is_reported_not_counted
+test_predicate_ordinary_home_is_not_unsafe
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
+test_hook_reports_unsafe_procevent_state
+test_hook_reports_unsafe_state_with_no_other_need
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon

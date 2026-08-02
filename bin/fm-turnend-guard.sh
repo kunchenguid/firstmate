@@ -134,6 +134,13 @@ budget_reset() {
 }
 
 fm_supervision_status "$STATE" "$GRACE"
+# Stderr only, never stdout: --claude mode owns stdout for its systemMessage
+# JSON. This never blocks on its own; it just refuses to let a home that no
+# process-event command can service end its turns with no signal at all.
+if [ "$FM_SUP_PROCEVENT_UNSAFE" = true ]; then
+  printf 'WARNING: process-event state is not private to this home: %s is a symlink or not a directory. Every bin/fm-procevent.sh command refuses this home until it is an ordinary directory.\n' \
+    "$FM_SUP_PROCEVENT_UNSAFE_PATH" >&2
+fi
 if [ "$FM_SUP_NEEDED" = false ]; then
   budget_reset
   exit 0

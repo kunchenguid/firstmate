@@ -20,30 +20,40 @@ fm_sup_stat_mtime() {
   fi
 }
 
-# A damaged process-event state must not make this home supervise files reached
-# through a symlink outside its private state. This mirrors
-# fm_procevent_state_paths_safe in bin/fm-procevent-lib.sh exactly, including the
-# inbox leaf: every public process-event command refuses that shape, so counting
-# a source behind it would pin the home in a supervision need that no reconcile
-# could ever satisfy. It is duplicated rather than sourced because callers copy
-# and source this predicate on its own.
-fm_sup_procevent_state_safe() {
-  local state=${1-} path
-  [ -n "$state" ] || return 1
-  for path in "$state" "$state/procevent" "$state/procevent-inbox"; do
-    [ -L "$path" ] && return 1
-    [ -e "$path" ] && [ ! -d "$path" ] && return 1
+# Print the first path that is a symlink or an existing non-directory, and
+# succeed; fail when every path is an ordinary directory or absent. This is the
+# shape bin/fm-procevent-lib.sh refuses (fm_procevent_state_paths_safe), spelled
+# out here rather than sourced because callers copy and source this predicate on
+# its own.
+fm_sup_first_unsafe_path() {
+  local path
+  for path in "$@"; do
+    if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+      printf '%s\n' "$path"
+      return 0
+    fi
   done
-  return 0
+  return 1
 }
 
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
-#   FM_SUP_SOURCES        count of registered process-to-event sources
+#   FM_SUP_SOURCES        count of registered process-to-event sources that this
+#                         home actually holds - a source reached through a
+#                         symlinked state or registry lives outside the home and
+#                         is never this home's wait
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata)
+#   FM_SUP_PROCEVENT_UNSAFE      true/false - state, state/procevent, or
+#                         state/procevent-inbox is a symlink or a non-directory,
+#                         so every process-event command refuses this home until
+#                         an operator repairs it. Reported separately from the
+#                         source count so a damaged home is loud rather than
+#                         silent, and so an in-home source behind a damaged inbox
+#                         still counts as this home's wait.
+#   FM_SUP_PROCEVENT_UNSAFE_PATH the first such path, for an actionable banner
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -62,11 +72,22 @@ fm_supervision_status() {
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
   FM_SUP_SOURCES=0
-  if fm_sup_procevent_state_safe "$state" && [ -d "$state/procevent" ]; then
-    for source in "$state"/procevent/*.source; do
-      [ -e "$source" ] || continue
-      FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
-    done
+  # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
+  FM_SUP_PROCEVENT_UNSAFE=false
+  # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
+  FM_SUP_PROCEVENT_UNSAFE_PATH=
+  if [ -n "$state" ]; then
+    # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
+    FM_SUP_PROCEVENT_UNSAFE_PATH=$(fm_sup_first_unsafe_path \
+      "$state" "$state/procevent" "$state/procevent-inbox") \
+      && FM_SUP_PROCEVENT_UNSAFE=true
+    if [ -d "$state/procevent" ] \
+      && ! fm_sup_first_unsafe_path "$state" "$state/procevent" >/dev/null; then
+      for source in "$state"/procevent/*.source; do
+        [ -e "$source" ] || continue
+        FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
+      done
+    fi
   fi
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
     || [ -f "$state/x-watch.check.sh" ] \

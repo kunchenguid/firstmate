@@ -150,6 +150,28 @@ sources=$FM_SUP_SOURCES
 needed=$FM_SUP_NEEDED
 watcher_fresh=$FM_SUP_WATCHER_FRESH
 beacon_desc=$FM_SUP_BEACON_DESC
+
+# A symlinked or non-directory process-event path makes every fm-procevent.sh
+# command refuse this home, and bin/fm-watch.sh swallows that refusal, so say it
+# here before any supervision-need shortcut can exit silently.
+if [ "$FM_SUP_PROCEVENT_UNSAFE" = true ]; then
+  prule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$prule"
+    printf '●  PROCESS-EVENT STATE IS NOT PRIVATE TO THIS HOME\n'
+    printf "●  '%s' is a symlink or not a directory.\n" "$FM_SUP_PROCEVENT_UNSAFE_PATH"
+    printf '●  Every bin/fm-procevent.sh command refuses this home until that path is an ordinary directory,\n'
+    printf '●  so registered sources cannot be started, reconciled, published, or retired.\n'
+    if [ "$READ_ONLY" -eq 1 ]; then
+      printf '●  This read-only session should report the damage, not repair it.\n'
+    else
+      printf '●  Inspect it with: ls -ld %s\n' "$FM_SUP_PROCEVENT_UNSAFE_PATH"
+      printf '●  Replace it with a private directory (mode 0700) owned by this home, then re-run reconcile.\n'
+    fi
+    printf '●%s\n' "$prule"
+  } >&2
+fi
+
 if [ "$needed" = false ]; then
   # Leave the unhealthy state (no work riding on the watcher): clear so a later
   # in-flight + stale combination is a fresh episode even if the beacon is still
