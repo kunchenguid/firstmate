@@ -491,10 +491,11 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
-    agy) printf '%s' 'agy --dangerously-skip-permissions --prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    agy) printf '%s' 'agy --dangerously-skip-permissions --prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"; res=$?; "$FM_ROOT/bin/fm-busy-event.sh" apply "'"$STATE"'" "'"$ID"'" idle --current-gen --source agy-cli --event done; [ $res -eq 0 ] && printf "done\n" >> "'"$STATE/$ID.status"'" || printf "failed\n" >> "'"$STATE/$ID.status"'"' ;;
     *) return 1 ;;
   esac
 }
+
 
 
 case "$ARG3" in
