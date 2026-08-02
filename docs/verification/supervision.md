@@ -152,6 +152,17 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_GROK_STOP_LIVE_E2E=1 FM_GROK_NATIVE_BIN="$native_grok" FM_GROK_LEGACY_BIN="$pre_native_grok" tests/fm-grok-stop-live-e2e.test.sh
 ```
 
+The Codex checkpoint-owner regression was reverified hermetically on 2026-07-27 in the Codex CLI 0.145.0 environment:
+
+```sh
+tests/fm-watch-checkpoint.test.sh
+tests/fm-turnend-guard.test.sh
+```
+
+The hermetic incident sequence created in-flight work, started a real bounded checkpoint, waited for its identity-matched lock and fresh beacon, invoked the Codex Stop predicate, and observed exit 2 with the bounded-owner reason.
+The same checkpoint suite completed two consecutive quiet boundaries, released and reacquired the singleton lock each time, then surfaced a registered check through the durable wake queue.
+The durable-owner guard case remained silent, and the existing `stop_hook_active=true` case still allowed the second Stop attempt.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
@@ -168,7 +179,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
-| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
+| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper; deterministic owner tests cover the Stop boundary and repeated quiet cycles. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
@@ -196,6 +207,7 @@ tests/fm-watcher-lock.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
+tests/fm-watch-checkpoint.test.sh
 ```
 
 ## Wedge-alarm channels
