@@ -29,6 +29,8 @@ The durable wake queue preserves actionable events during the residual active-tu
 During that active-turn window, Claude's Bash `PreToolUse` integration runs `bin/fm-continuity-pretool-check.sh` before fleet commands.
 When real task records exist but no identity-matched watcher holds the active home's lock with a fresh beacon, it denies executed `bin/fm-*.sh` commands except wake drain, manual arm recovery, and ordinary literal fail-closed cleanup.
 It denies forced cleanup and cleanup with shell-expanded arguments.
+The main home and each marked secondmate home enforce that boundary only for their own fleet.
+Linked child worktrees and commands that name another home's absolute fleet-script path remain outside it.
 Malformed or opaque shell input and missing parsing dependencies remain silent fail-open compatibility paths rather than becoming a blanket shell block.
 The model no longer re-arms after ordinary wakes.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
