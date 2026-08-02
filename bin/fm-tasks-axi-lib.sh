@@ -2,10 +2,10 @@
 # Shared tasks-axi backend selection and compatibility probe for bootstrap,
 # teardown, and secondmate backlog handoff.
 # Usage: . bin/fm-tasks-axi-lib.sh
-# Compatible means tasks-axi --version reports 0.1.1 or newer,
+# Compatible means tasks-axi --version reports 0.2.4 or newer,
 # `tasks-axi update --help` exposes --archive-body for recoverable note rewrites,
-# and `tasks-axi mv --help` exposes [<id>...] for atomic multi-ID moves required
-# by secondmate handoffs (introduced in tasks-axi 0.2.2).
+# `tasks-axi mv --help` exposes [<id>...] for atomic multi-ID handoff moves, and
+# `tasks-axi public-followup --help` exposes the promised-reply state machine.
 # `config/backlog-backend=manual` opts out of tasks-axi for routine firstmate
 # backlog mutations, but validated secondmate handoffs always use `tasks-axi mv`.
 # Absent or any other value keeps the default tasks-axi backend path, falling
@@ -30,9 +30,11 @@ fm_tasks_axi_compatible() {
   patch=${rest##* }
 
   if [ "$major" -gt 0 ] ||
-    { [ "$major" -eq 0 ] && [ "$minor" -gt 1 ]; } ||
-    { [ "$major" -eq 0 ] && [ "$minor" -eq 1 ] && [ "$patch" -ge 1 ]; }; then
-    fm_tasks_axi_update_has_archive_body && fm_tasks_axi_mv_has_multi_id
+    { [ "$major" -eq 0 ] && [ "$minor" -gt 2 ]; } ||
+    { [ "$major" -eq 0 ] && [ "$minor" -eq 2 ] && [ "$patch" -ge 4 ]; }; then
+    fm_tasks_axi_update_has_archive_body \
+      && fm_tasks_axi_mv_has_multi_id \
+      && fm_tasks_axi_has_public_followup
     return $?
   fi
   return 1
@@ -50,6 +52,13 @@ fm_tasks_axi_mv_has_multi_id() {
   command -v tasks-axi >/dev/null 2>&1 || return 1
   output=$(tasks-axi mv --help 2>&1) || return 1
   printf '%s\n' "$output" | grep -F -- '[<id>...]' >/dev/null
+}
+
+fm_tasks_axi_has_public_followup() {
+  local output
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  output=$(tasks-axi public-followup --help 2>&1) || return 1
+  printf '%s\n' "$output" | grep -F -- 'public-followup add' >/dev/null
 }
 
 fm_backlog_backend_value() {

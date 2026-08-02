@@ -24,7 +24,7 @@ COMMAND=
 COMMAND_SET=0
 
 usage() {
-  cat <<'EOF'
+	cat <<'EOF'
 Usage: fm-continuity-pretool-check.sh [--command <shell-command>]
 
 Reads Claude PreToolUse JSON from stdin unless --command is supplied.
@@ -34,35 +34,38 @@ EOF
 }
 
 while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --command)
-      [ "$#" -gt 1 ] || { echo "error: --command requires a value" >&2; exit 2; }
-      COMMAND=$2
-      COMMAND_SET=1
-      shift 2
-      ;;
-    --command=*)
-      COMMAND=${1#--command=}
-      COMMAND_SET=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "error: unknown argument: $1" >&2
-      usage >&2
-      exit 2
-      ;;
-  esac
+	case "$1" in
+	--command)
+		[ "$#" -gt 1 ] || {
+			echo "error: --command requires a value" >&2
+			exit 2
+		}
+		COMMAND=$2
+		COMMAND_SET=1
+		shift 2
+		;;
+	--command=*)
+		COMMAND=${1#--command=}
+		COMMAND_SET=1
+		shift
+		;;
+	-h | --help)
+		usage
+		exit 0
+		;;
+	*)
+		echo "error: unknown argument: $1" >&2
+		usage >&2
+		exit 2
+		;;
+	esac
 done
 
 if [ "$COMMAND_SET" -eq 0 ]; then
-  PAYLOAD=$(cat 2>/dev/null || true)
-  [ -n "$PAYLOAD" ] || exit 0
-  command -v jq >/dev/null 2>&1 || exit 0
-  COMMAND=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
+	PAYLOAD=$(cat 2>/dev/null || true)
+	[ -n "$PAYLOAD" ] || exit 0
+	command -v jq >/dev/null 2>&1 || exit 0
+	COMMAND=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 fi
 [ -n "$COMMAND" ] || exit 0
 
@@ -84,15 +87,15 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 fm_supervision_status "$STATE" "${FM_GUARD_GRACE:-300}"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
 if fm_watcher_healthy "$STATE" "$WATCH" "${FM_GUARD_GRACE:-300}" "$FM_HOME"; then
-  exit 0
+	exit 0
 fi
 
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 CLASSIFICATION=$(node "$POLICY" --command "$COMMAND" --root "$FM_ROOT" 2>/dev/null) || exit 0
 case "$CLASSIFICATION" in
-  deny*) ;;
-  *) exit 0 ;;
+deny*) ;;
+*) exit 0 ;;
 esac
 
 TAB=$(printf '\t')
@@ -102,12 +105,12 @@ BLOCKED_SCRIPT=${REST%%"$TAB"*}
 REASON_CODE=${REST#*"$TAB"}
 [ "$REASON_CODE" != "$REST" ] || REASON_CODE=""
 case "$REASON_CODE" in
-  unsafe-teardown)
-    REASON="[watcher-continuity] tasks are in flight and no identity-matched healthy watcher holds this home lock; during recovery only ordinary literal bin/fm-teardown.sh is allowed, so drop --force and shell-expanded arguments and retry the literal invocation (blocked: $BLOCKED_SCRIPT)"
-    ;;
-  *)
-    REASON="[watcher-continuity] tasks are in flight and no identity-matched healthy watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use ordinary literal bin/fm-teardown.sh for completed tasks when needed, then run bin/fm-watch-arm.sh as its own Claude Code background task before retrying other fleet commands (blocked: $BLOCKED_SCRIPT)"
-    ;;
+unsafe-teardown)
+	REASON="[watcher-continuity] tasks are in flight and no identity-matched healthy watcher holds this home lock; during recovery only ordinary literal bin/fm-teardown.sh is allowed, so drop --force and shell-expanded arguments and retry the literal invocation (blocked: $BLOCKED_SCRIPT)"
+	;;
+*)
+	REASON="[watcher-continuity] tasks are in flight and no identity-matched healthy watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use ordinary literal bin/fm-teardown.sh for completed tasks when needed, then run bin/fm-watch-arm.sh as its own Claude Code background task before retrying other fleet commands (blocked: $BLOCKED_SCRIPT)"
+	;;
 esac
 ESCAPED=$(printf '%s' "$REASON" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' ')
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2

@@ -11,9 +11,8 @@ KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
-PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
-BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
   [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
@@ -128,6 +127,7 @@ SH
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
+  ln -s "$PYTHON_BIN" "$fakebin/python3"
   printf '%s\n' "$fakebin"
 }
 
@@ -442,6 +442,9 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rec=$(make_spawn_case fallback "$id")
   read_spawn_record "$rec"
   rm "$FAKEBIN_DIR/kimi"
+  # Keep a host-installed Kimi beside the required Python interpreter from
+  # masking the HOME fallback branch this fixture owns.
+  : > "$FAKEBIN_DIR/kimi"
   fallback="$HOME_DIR/.kimi-code/bin/kimi"
   mkdir -p "$(dirname "$fallback")"
   fm_fake_exit0 "$(dirname "$fallback")" kimi
@@ -460,6 +463,7 @@ test_kimi_missing_binary_refuses_before_pane_creation() {
   rec=$(make_spawn_case missing "$id")
   read_spawn_record "$rec"
   rm "$FAKEBIN_DIR/kimi"
+  : > "$FAKEBIN_DIR/kimi"
   fallback="$HOME_DIR/.kimi-code/bin/kimi"
   rc=0
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
