@@ -121,10 +121,12 @@ phase_spawn() {
   assert_grep 'kind=secondmate' "$meta" "spawn meta did not record kind=secondmate"
   assert_grep "home=$SUB_ABS" "$meta" "spawn meta did not record the subhome"
   assert_grep 'projects=alpha, beta, gamma' "$meta" "spawn meta did not record the project list"
-  # Launch ran in the subhome, with the persistent charter and cleared overrides,
-  # and never ran a project-style treehouse get.
+  # Launch ran in the subhome, with the persistent charter, the Codex hook scope
+  # bound to that home, every other operational override cleared, and no
+  # project-style treehouse get.
   assert_grep "FM_HOME='$SUB_ABS'" "$LOG" "secondmate launch did not set FM_HOME to the subhome"
-  assert_grep 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$LOG" "launch did not clear operational overrides"
+  assert_grep "FM_ROOT_OVERRIDE='$SUB_ABS' FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=" "$LOG" \
+    "Codex secondmate launch did not bind only its root scope override"
   assert_grep 'FM_CONFIG_OVERRIDE=' "$LOG" "launch did not clear the config override"
   assert_grep "$SUB_ABS/data/charter.md" "$LOG" "launch did not use the persistent charter"
   assert_no_grep 'notify=' "$LOG" "secondmate codex launch included the parent turn-end notify hook"
