@@ -67,6 +67,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | result identity and ordering | each wake names the committed sequence to read, and pending sequences 1, 2, and 10 publish in numeric order |
 | one owner per canonical source | a second home's `start` for the same source id reports `already owned` and publishes nothing |
 | canonical physical identity | a final-component symlink and its target produce the same Lavish source id |
+| isolated public start boundary | direct `start` establishes a new runner-led process group before claiming the source, so retirement cannot signal an unrelated process inherited from the caller's group |
 | stale reclaim without displacement | concurrent contenders replacing one stale claim start exactly one runner, and cross-home replacement removes the old generation's staging file from its recorded state directory |
 | crashed leader with a live owned group | `SIGKILL` on only the runner leader leaves its blocking child group alive; reconcile then stops that surviving group before any replacement starts, never leaves two source processes running for one canonical source, and a generation with no leader and no surviving group is still reclaimed |
 | PID-reuse safety | retirement refuses to signal a live PID whose identity differs from the claim, and a reused PID never reaches the group-stop path because its leader is alive |
@@ -104,9 +105,10 @@ This was found by four orphaned runners, elapsed 6-13 minutes, left by a suite w
 
 ## Portability finding
 
-`setsid` is **not present on macOS**, so it cannot be used to detach a runner.
-`reconcile` uses `perl -e 'setpgrp(0, 0); exec @ARGV'` as the portable equivalent, the same fallback shape `bin/fm-watch.sh` already uses for bounded check execution.
-Without this, reconcile would silently fail to start any runner on macOS.
+`setsid` is **not present on macOS**, so it cannot establish the runner's process group.
+Both direct `start` and `reconcile` use a Perl launcher that forks the runner, calls `setpgrp(0, 0)` in that child, marks the expected group leader, and then executes the private start path.
+The private path verifies that the runner PID is also its process-group id before it records a claim, so neither entry point can inherit and claim the caller's process group.
+Without this launcher, reconcile would silently fail to start a runner on macOS and direct start could make retirement signal unrelated caller-group processes.
 
 ## Scope
 
