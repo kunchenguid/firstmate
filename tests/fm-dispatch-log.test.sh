@@ -79,6 +79,18 @@ test_summary_group_by_other_fields() {
   pass "summary --group-by supports harness, kind, repo, and effort"
 }
 
+test_group_by_repo_buckets_blank_value_as_unknown() {
+  local home out
+  home=$(make_home blank-repo)
+  write_log "$home" \
+    "$(spawn_line a1 2026-07-01T10:00:00Z claude sonnet high ship /x/foo no-mistakes tmux off)" \
+    "$(spawn_line a2 2026-07-02T10:00:00Z claude sonnet high secondmate "" no-mistakes tmux off)"
+  out=$(run "$home" summary --group-by repo)
+  assert_contains "$out" "/x/foo: 1" "a real repo path must still be counted under its own key"
+  assert_contains "$out" "unknown: 1" "a blank repo (e.g. a secondmate spawn) must bucket as unknown"
+  pass "summary --group-by repo buckets a blank value as unknown rather than a literal empty key"
+}
+
 test_teardown_events_are_join_only_and_never_counted() {
   local home out
   home=$(make_home teardown-events)
@@ -255,6 +267,35 @@ test_spawn_append_block_produces_the_documented_json_shape() {
   pass "the real fm-spawn.sh append block produces the documented spawn JSON shape"
 }
 
+test_spawn_append_block_blanks_repo_for_secondmate_kind() {
+  local home block out
+  home=$(make_home spawn-append-secondmate)
+  block=$(extract_block "$ROOT/bin/fm-spawn.sh")
+  [ -n "$block" ] || fail "could not locate the dispatch-log append block in bin/fm-spawn.sh"
+  # PROJ_ABS is a secondmate's firstmate home for kind=secondmate, not a repo;
+  # the append block must leave repo blank rather than logging the home path.
+  # shellcheck disable=SC2034,SC2329
+  out=$(
+    set -eu
+    json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+    DATA="$home/data"
+    ID="spawn-secondmate-shape"
+    HARNESS="claude"
+    MODEL="default"
+    EFFORT="default"
+    KIND="secondmate"
+    PROJ_ABS="/home/sctru/.claude/secondmates/some-secondmate"
+    MODE="secondmate"
+    BACKEND="tmux"
+    YOLO="off"
+    eval "$block"
+    cat "$DATA/dispatch-log.jsonl"
+  )
+  printf '%s' "$out" | jq -e '.repo == ""' >/dev/null \
+    || fail "a kind=secondmate spawn must record a blank repo, not its firstmate home path: $out"
+  pass "the real fm-spawn.sh append block blanks repo for a kind=secondmate spawn"
+}
+
 test_spawn_append_block_is_non_fatal_when_data_is_unwritable() {
   local home block rc parent out_file
   home=$(make_home spawn-nonfatal)
@@ -309,6 +350,7 @@ test_teardown_append_block_produces_the_documented_json_shape() {
 
 test_summary_groups_by_model_default_and_prints_total
 test_summary_group_by_other_fields
+test_group_by_repo_buckets_blank_value_as_unknown
 test_teardown_events_are_join_only_and_never_counted
 test_since_until_date_filtering_is_inclusive
 test_date_filter_with_no_matches_is_a_definitive_zero_not_blank
@@ -321,6 +363,7 @@ test_unknown_flag_errors
 test_bad_group_by_value_errors
 test_bad_date_format_errors
 test_spawn_append_block_produces_the_documented_json_shape
+test_spawn_append_block_blanks_repo_for_secondmate_kind
 test_spawn_append_block_is_non_fatal_when_data_is_unwritable
 test_teardown_append_block_produces_the_documented_json_shape
 

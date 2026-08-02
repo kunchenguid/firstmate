@@ -3152,6 +3152,13 @@ SPAWN_META_LOCK_HELD=0
 # otherwise-successful spawn.
 {
   mkdir -p "$DATA" 2>/dev/null
+  # A secondmate dispatch's PROJ_ABS is its firstmate home, not a project
+  # repo (see meta's own home= vs project= split above); leave repo blank
+  # rather than mislabeling a home path as a repo.
+  DISPATCH_LOG_REPO=$PROJ_ABS
+  if [ "$KIND" = secondmate ]; then
+    DISPATCH_LOG_REPO=
+  fi
   printf '{"event":"spawn","ts":"%s","id":"%s","harness":"%s","model":"%s","effort":"%s","kind":"%s","repo":"%s","mode":"%s","backend":"%s","yolo":"%s"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(json_escape "$ID")" \
@@ -3159,7 +3166,7 @@ SPAWN_META_LOCK_HELD=0
     "$(json_escape "${MODEL:-default}")" \
     "$(json_escape "${EFFORT:-default}")" \
     "$(json_escape "$KIND")" \
-    "$(json_escape "$PROJ_ABS")" \
+    "$(json_escape "$DISPATCH_LOG_REPO")" \
     "$(json_escape "$MODE")" \
     "$(json_escape "$BACKEND")" \
     "$(json_escape "$YOLO")" \

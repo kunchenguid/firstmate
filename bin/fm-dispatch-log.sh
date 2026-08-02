@@ -17,6 +17,9 @@
 #              "repo":"...","mode":"...","backend":"...","yolo":"..."}
 #             Appended by bin/fm-spawn.sh right after it writes state/<id>.meta,
 #             reusing that same already-resolved variables (never recomputed).
+#             repo is blank for a kind=secondmate spawn: its resolved path is
+#             the secondmate's firstmate home, not a project repo, so it is
+#             left empty rather than mislabeled - grouped as "unknown" below.
 #   teardown: {"event":"teardown","ts":"<ISO8601 UTC>","id":"<task id>"}
 #             Appended by bin/fm-teardown.sh right before it deletes
 #             state/<id>.meta. Deliberately minimal: id is the join key back to
@@ -35,12 +38,13 @@
 #                                    [--group-by model|harness|kind|repo|effort]
 #   Filters spawn events (teardown events are join-only and never counted) by
 #   ts date (UTC) when --since/--until are given (inclusive on both ends),
-#   groups by the chosen field (default: model), and prints one
-#   "<value>: <count>" line per group - sorted by count descending, then value
-#   ascending - followed by a "total: <N>" line. A malformed JSON line is
-#   skipped rather than aborting the read. Exit 2 on a bad subcommand, flag, or
-#   value; exit 1 if the log exists but cannot be read, or jq is missing;
-#   exit 0 otherwise, including the empty-log and no-match cases.
+#   groups by the chosen field (default: model; a blank or missing value on
+#   that field buckets as "unknown"), and prints one "<value>: <count>" line
+#   per group - sorted by count descending, then value ascending - followed by
+#   a "total: <N>" line. A malformed JSON line is skipped rather than aborting
+#   the read. Exit 2 on a bad subcommand, flag, or value; exit 1 if the log
+#   exists but cannot be read, or jq is missing; exit 0 otherwise, including
+#   the empty-log and no-match cases.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +54,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 LOG="$DATA/dispatch-log.jsonl"
 
 usage() {
-  sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -129,6 +133,7 @@ fi
 
 RESULT=$(jq -R -s \
   --arg since "$SINCE" --arg until "$UNTIL" --arg group "$GROUP_BY" '
+  def bucket: if ((.[$group] // "") == "") then "unknown" else .[$group] end;
   split("\n")
   | map(select(length > 0))
   | map(try fromjson catch empty)
@@ -137,8 +142,8 @@ RESULT=$(jq -R -s \
       ($since == "" or ((.ts // "")[0:10] >= $since))
       and ($until == "" or ((.ts // "")[0:10] <= $until))
     ))
-  | (group_by(.[$group] // "unknown")
-     | map({key: (.[0][$group] // "unknown"), count: length})
+  | (group_by(bucket)
+     | map({key: (.[0] | bucket), count: length})
      | sort_by(-.count, .key)) as $groups
   | {groups: $groups, total: ($groups | map(.count) | add // 0)}
 ' "$LOG") || { echo "error: failed to parse dispatch log $LOG" >&2; exit 1; }
