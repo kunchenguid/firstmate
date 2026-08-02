@@ -807,6 +807,8 @@ test_crew_dispatch_validation() {
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
 codex luna xhigh single-object default is accepted^{"default":{"harness":"codex","model":"gpt-5.6-luna","effort":"xhigh"}}^empty^
+codex luna max single-object default is flagged^{"default":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+codex luna max default array entry is flagged^{"default":[{"harness":"claude","effort":"high"},{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported codex max for gpt-5.5 is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported codex max without model is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported codex ultra effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:ultra

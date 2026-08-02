@@ -22,6 +22,7 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   Model-qualified incompatibilities are rejected before launch and metadata.
 #   For codex, low through xhigh map to model_reasoning_effort, and max is accepted
 #   only with model gpt-5.6-luna.
 #   --backend <name> is the explicit runtime session-provider backend for this

@@ -735,12 +735,12 @@ crew_dispatch_validate() {
   fi
   err=$(jq -r '
     def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi"] | index($h);
-    def effort_ok($h; $m; $e):
+    def effort_ok($is_default; $h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "codex" then
-        if $e == "max" then $m == "gpt-5.6-luna"
+        if $e == "max" then ($is_default | not) and $m == "gpt-5.6-luna"
         else (["low","medium","high","xhigh"] | index($e))
         end
       elif $h == "grok" then (["low","medium","high"] | index($e))
@@ -754,17 +754,17 @@ crew_dispatch_validate() {
       else []
       end;
     def configured_profiles:
-      ([(.rules // [])[]? | profiles(.use?)[]?]
-        + (if has("default") then [profiles(.default)[]?] else [] end));
+      ([(.rules // [])[]? | profiles(.use?)[]? | {profile: ., is_default: false}]
+        + (if has("default") then [profiles(.default)[]? | {profile: ., is_default: true}] else [] end));
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
     def bad_efforts:
       configured_profiles
-      | map({h: .harness, m: .model, e: .effort})
+      | map({h: .profile.harness, m: .profile.model, e: .profile.effort, is_default: .is_default})
       | map(select(.e != null))
       | map(select((.h | type) == "string" and verified(.h)))
-      | map(select(. as $p | effort_ok($p.h; $p.m; $p.e) | not))
+      | map(select(. as $p | effort_ok($p.is_default; $p.h; $p.m; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
     if type != "object" then "top-level value must be an object"
@@ -786,7 +786,7 @@ crew_dispatch_validate() {
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then "default profile model and effort must be non-empty strings when present"
     else
       (configured_profiles
-        | map(.harness)
+        | map(.profile.harness)
         | map(select(. != null))
         | map(select(. as $h | verified($h) | not))
         | unique) as $bad_harnesses
