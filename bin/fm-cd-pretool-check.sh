@@ -139,7 +139,7 @@ GIT_DIR=$(git -C "$FM_ROOT" rev-parse --git-dir 2>/dev/null) || exit 0
 GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || exit 0
 [ "$GIT_DIR" = "$GIT_COMMON_DIR" ] || exit 0
 
-POLICY="$FM_ROOT/bin/fm-cd-command-policy.mjs"
+POLICY="$SCRIPT_DIR/fm-cd-command-policy.mjs"
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 

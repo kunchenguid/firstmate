@@ -314,7 +314,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout() {
 }
 
 test_active_dispatch_profile_allows_explicit_harness() {
-  local rec id out status launch
+  local rec id out status launch wt_real
   id=profile-explicit-z13
   rec=$(make_spawn_case profile-explicit claude "$id")
   read_case_record "$rec"
@@ -327,8 +327,13 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
+  wt_real=$(cd "$WT_DIR" && pwd -P)
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
+  assert_contains "$launch" "FM_CODEX_HOOK_ROOT='$ROOT'" \
+    "codex crewmate launch did not anchor hooks to the tracked parent code root"
+  assert_contains "$launch" "FM_ROOT_OVERRIDE='$wt_real'" \
+    "codex crewmate launch did not bind hook scope to its canonical worktree"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
@@ -656,13 +661,14 @@ test_non_claude_harness_ignores_config_dir() {
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
-  local rec id sm out status
+  local rec id sm sm_real out status
   id=profile-secondmate-z16
   rec=$(make_spawn_case profile-secondmate codex "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
+  sm_real=$(cd "$sm" && pwd -P)
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
@@ -670,6 +676,10 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  assert_contains "$(cat "$LAUNCH_LOG")" "FM_CODEX_HOOK_ROOT='$sm_real'" \
+    "codex secondmate launch did not anchor hooks to the secondmate tracked code root"
+  assert_contains "$(cat "$LAUNCH_LOG")" "FM_ROOT_OVERRIDE='$sm_real'" \
+    "codex secondmate launch did not bind hook scope to its canonical home"
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
