@@ -499,17 +499,19 @@ retire_busy_state() {
 }
 
 # Remove the firstmate cursor turn-end hook from a pooled worktree before return,
-# so a reused worktree cannot fire a stale signal. The script is firstmate-owned
-# (fm-turn-end.sh), so it is always removed; the generic .cursor/hooks.json is
-# removed ONLY when fm_cursor_hook_is_ours accepts it, never a project's own or
-# git-tracked hook file. The clone-wide exclude entries go with the last hook.
+# so a reused worktree cannot fire a stale signal. Both files are removed ONLY
+# when the shared ownership tests accept them, never a project's own or
+# git-tracked hook file. Firstmate's clone-wide exclude block goes with the last
+# hook of the clone.
 remove_cursor_worktree_hook() {
   local wt=$1
   [ -n "$wt" ] || return 0
   if fm_cursor_hook_is_ours "$wt"; then
     rm -f "$wt/.cursor/hooks.json"
   fi
-  rm -f "$wt/.cursor/fm-turn-end.sh"
+  if fm_cursor_hook_script_is_ours "$wt"; then
+    rm -f "$wt/.cursor/fm-turn-end.sh"
+  fi
   fm_cursor_hook_release_exclude "$wt"
 }
 

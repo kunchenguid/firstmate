@@ -263,6 +263,26 @@ test_cursor_teardown_removes_our_hook() {
   pass "fm-teardown: the firstmate cursor turn-end hook and its clone-wide excludes are released"
 }
 
+test_cursor_exclude_release_keeps_developer_entries() {
+  local id rec out rc excl
+  id=cursor-devexcl-f6
+  rec=$(make_cursor_case devexcl "$id")
+  read_cursor_record "$rec"
+  # A developer keeping their own local Cursor hooks out of git, by hand.
+  excl=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
+  mkdir -p "$(dirname "$excl")"
+  printf '.cursor/hooks.json\n' >> "$excl"
+  out=$(run_cursor_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "cursor spawn failed: $out"
+  run_cursor_teardown "$HOME_DIR" "$FAKEBIN_DIR" "$id" >/dev/null 2>&1 || fail "cursor teardown failed"
+  grep -qxF '.cursor/hooks.json' "$excl" \
+    || fail "teardown removed a developer-owned exclude entry firstmate never wrote"
+  ! grep -qF 'firstmate cursor turn-end hook' "$excl" \
+    || fail "firstmate's own exclude block outlived the last cursor task"
+  pass "fm-teardown: only firstmate's self-identifying exclude block is released, never a developer's line"
+}
+
 test_cursor_spawn_reclaims_its_own_stale_hook() {
   local id rec out rc stale
   id=cursor-reclaim-d4
@@ -292,10 +312,12 @@ test_cursor_spawn_and_teardown_preserve_tracked_hook() {
   id=cursor-tracked-e5
   rec=$(make_cursor_case tracked "$id")
   read_cursor_record "$rec"
-  # A project that tracks its own hook file, even one naming a path like ours.
+  # A project that tracks its own hook file and the script it names.
   mkdir -p "$WT_DIR/.cursor"
   printf '{"version":1,"hooks":{"stop":[{"command":".cursor/fm-turn-end.sh"}]}}\n' > "$WT_DIR/.cursor/hooks.json"
-  git -C "$WT_DIR" add .cursor/hooks.json
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$WT_DIR/.cursor/fm-turn-end.sh"
+  chmod +x "$WT_DIR/.cursor/fm-turn-end.sh"
+  git -C "$WT_DIR" add .cursor/hooks.json .cursor/fm-turn-end.sh
   git -C "$WT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit -qm 'track project cursor hook'
   tracked=$(cat "$WT_DIR/.cursor/hooks.json")
@@ -306,7 +328,10 @@ test_cursor_spawn_and_teardown_preserve_tracked_hook() {
   [ "$(cat "$WT_DIR/.cursor/hooks.json")" = "$tracked" ] || fail "spawn overwrote a git-tracked .cursor/hooks.json"
   run_cursor_teardown "$HOME_DIR" "$FAKEBIN_DIR" "$id" >/dev/null 2>&1 || fail "cursor teardown failed"
   [ "$(cat "$WT_DIR/.cursor/hooks.json")" = "$tracked" ] || fail "teardown removed a git-tracked .cursor/hooks.json"
-  pass "cursor: a git-tracked project .cursor/hooks.json is never overwritten by spawn or removed by teardown"
+  # Deleting a tracked file here would leave ' D .cursor/fm-turn-end.sh', which
+  # teardown's own dirty guard refuses.
+  [ -f "$WT_DIR/.cursor/fm-turn-end.sh" ] || fail "teardown removed a git-tracked .cursor/fm-turn-end.sh"
+  pass "cursor: git-tracked project cursor hook files are never overwritten by spawn or removed by teardown"
 }
 
 test_cursor_spawn_and_teardown_preserve_foreign_hook() {
@@ -335,6 +360,7 @@ test_cursor_busy_signature_is_scoped
 test_cursor_supervision_protocol_renders
 test_cursor_spawn_writes_turnend_hook_and_meta
 test_cursor_teardown_removes_our_hook
+test_cursor_exclude_release_keeps_developer_entries
 test_cursor_spawn_reclaims_its_own_stale_hook
 test_cursor_spawn_and_teardown_preserve_foreign_hook
 test_cursor_spawn_and_teardown_preserve_tracked_hook

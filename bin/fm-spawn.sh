@@ -1660,10 +1660,8 @@ STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
-  EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
-  [ -n "$EXCL" ] || return 0
-  mkdir -p "$(dirname "$EXCL")"
-  grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
+  EXCL=$(fm_git_exclude_file "$WT") || return 0
+  fm_git_exclude_add "$EXCL" "$rel"
 }
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
@@ -1914,8 +1912,7 @@ EOF
         chmod +x "$WT/.cursor/fm-turn-end.sh"
         cursor_hook_command=$(json_escape "$WT/.cursor/fm-turn-end.sh")
         printf '{"version":1,"hooks":{"stop":[{"command":"%s"}]}}\n' "$cursor_hook_command" > "$WT/.cursor/hooks.json"
-        exclude_path '.cursor/hooks.json'
-        exclude_path '.cursor/fm-turn-end.sh'
+        fm_cursor_hook_claim_exclude "$WT"
       fi
       ;;
   esac
