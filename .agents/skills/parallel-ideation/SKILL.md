@@ -87,13 +87,16 @@ The cost is coordination, and this skill is that coordination written down.
    - the raw subject statement used for the run;
    - a short map of which rostered skill each crew ran;
    - the shared findings where the crews agreed, attributed only when attribution still matters;
-   - an explicit contradictions section for every material point where the crews disagreed, with each position attributed to the crew that held it.
+   - an explicit contradictions section for every material point where the crews disagreed, with each position attributed to the crew that held it;
+   - a record of the seats pass below: which seats ran, and any seat that came back as a hole.
 4. Do not average, blend, or silently drop a minority position.
    Preserving the contradiction is the deliverable's main value, because agreement between the crews was already cheap to obtain.
 5. After the synthesis is written and before the run is closed, load `seats` and run a readonly inspection of the synthesis document together with the crew reports it was built from.
    This skill owns only when the inspection happens, what it is pointed at, and what is done with what comes back; `seats` owns how seats are chosen, dispatched, and ranked.
+   If `seats` cannot run in this home, stop and report that to the captain as a blocker on the run rather than closing a synthesis the captain asked to have verified.
 6. Choose seats for the question actually in front of this run, not from a fixed list in this skill.
    The `seats` starting points for deciding a design are a useful pointer when the synthesis is design-shaped; do not freeze that or any other roster into this skill.
+   `seats` owns a mandatory single approval pause where the captain confirms the chosen seats, so the close of this run carries one captain approval point outside the stage 4 batching contract.
 7. Seats are readonly for this use.
    Firstmate remains the only writer of the synthesis, and seats return findings only.
 8. Rank what comes back under the ranking rules `seats` owns, then fold surviving findings into the synthesis yourself.
@@ -106,7 +109,7 @@ The cost is coordination, and this skill is that coordination written down.
 12. Cleanup happens only after every report exists, the synthesis is written, and the seats pass has finished.
     The seats pass runs before scout worktrees are discarded, so a finding that requires re-reading a crew's scratch state can still be answered.
     Tear down scout worktrees only through the ordinary landed-report and unresolved-decision completion path; never force discard without explicit authority.
-13. This seats pass is a deliberate bounded exception to firstmate's usual rule that delegated work goes through `bin/fm-spawn.sh`: `seats` launches its own readonly workers through its own scripts, it writes nothing, and it is not a precedent for routing other work around the ordinary spawn and supervision path.
+13. This seats pass is a deliberate bounded exception to firstmate's usual rule that delegated work goes through `bin/fm-spawn.sh`: `seats` launches its own readonly workers through its own scripts, those workers never write the synthesis document and never write any crew worktree, and it is not a precedent for routing other work around the ordinary spawn and supervision path.
 
 ## Out of scope
 
