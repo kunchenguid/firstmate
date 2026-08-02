@@ -232,7 +232,36 @@ Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watc
 
 `tests/fm-session-owner-fence.test.sh` verifies direct watcher and arm refusal under a foreign live owner, serialized restart isolation, process-identity reuse rejection, attached-successor rechecks, cross-harness handoff, dead-owner recovery, and the away-mode exemption.
 
-Deterministic entry points:
+### Single arming owner
+
+Verified on 2026-08-02 with Claude Code 2.1.220 and ShellCheck 0.11.0, against isolated home state under `/tmp`; no live home, watcher, or fleet record was used.
+
+The mid-turn pull-based guard must name the arming owner rather than ask a Claude primary for a manual arm, because a second arm becomes a second relay:
+
+```sh
+mkdir -p /tmp/fmverify/state /tmp/fmverify/config /tmp/fmverify/root
+: > /tmp/fmverify/state/task.meta
+CLAUDECODE=1 PI_CODING_AGENT= GROK_AGENT= FM_ROOT_OVERRIDE=/tmp/fmverify/root \
+  FM_HOME=/tmp/fmverify FM_GUARD_GRACE=1 bin/fm-guard.sh
+```
+
+Observed final banner line, with no `bin/fm-watch-arm.sh` anywhere in the output:
+
+```text
+●  watcher supervision is parked until this turn ends; the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) starts the next cycle then - do not arm one yourself.
+```
+
+The turn-end guard is the one caller that has established the owner absent, and it still gets the manual-recovery instruction:
+
+```sh
+bin/fm-supervision-instructions.sh --harness claude --owner-absent 1 --repair-line
+```
+
+```text
+repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task, never shell &.
+```
+
+Deterministic entry points, all passing at this revision:
 
 ```sh
 tests/fm-pi-watch-extension.test.sh
@@ -242,6 +271,7 @@ tests/fm-watcher-lock.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
+tests/fm-supervision-instructions.test.sh
 ```
 
 ## Pure Kun presentation parity

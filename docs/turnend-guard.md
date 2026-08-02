@@ -72,6 +72,8 @@ Grok's project hook requires the checkout to be trusted with `/hooks-trust` or l
 
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
+This guard is the only caller that passes `--owner-absent 1`, because it is the only one that first establishes both a missing watcher and, in `--claude` mode, a missing auto-arm claim.
+A pull-based mid-turn caller establishes neither, so on a harness whose arming owner runs at the turn boundary it gets the parked-cycle line instead of a manual-arm instruction; [`watcher-continuity.md`](watcher-continuity.md) owns why a second arming owner is the failure mode being avoided.
 
 ## Compatibility limits
 

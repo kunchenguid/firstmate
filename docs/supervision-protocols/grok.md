@@ -12,8 +12,9 @@ When this session owns supervision and away mode is not active:
 5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
 6. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
+   `watcher: cycle-ended ...` is a followed-cycle close instead: drain, then take the ordinary re-arm path if supervision is still needed.
 7. After a successful start or attach status, end the turn.
-   The background arm remains the live wait until it returns an actionable wake or failure.
+   The background arm remains the live wait until it returns an actionable wake, a followed-cycle close, or a failure.
 8. Waiting is silent.
 9. Never use shell `&` for firstmate supervision.
 10. Never bundle the arm onto another command.
@@ -28,7 +29,7 @@ When you see a background-task-completed system reminder for the arm:
 5. Do not invent a wake from an attach-status line alone.
    Drain the queue and act only on real wake records or a real watcher reason line.
    Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
-   See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract.
+   See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and terminal-close contract.
 
 The primary project Stop hook runs `bin/fm-turnend-guard-grok.sh` as a backstop, not the normal wake path.
 [`turnend-guard.md`](../turnend-guard.md) owns its running-payload capability selection between native same-process blocking and the pre-native bounded resume fallback.

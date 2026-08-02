@@ -956,12 +956,24 @@ test_bootstrap_opt_out_cleanup() {
   assert_present "$home/config/x-mode.env" "opt-in must create the cadence config"
   # Opt out: empty the token, re-run bootstrap -> artifacts removed + one off line.
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
-  out=$(CLAUDECODE=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  # Bootstrap is a mid-turn caller, so it never establishes that the harness's
+  # arming owner is absent. On Claude that owner is the Stop hook, which picks up
+  # the restored default cadence at the next turn end, so the rendered line names
+  # that owner instead of asking for a second arm.
+  out=$(CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "FMX: X mode off" "opt-out must announce X mode off when it removed artifacts"
-  assert_contains "$out" "Claude Code background task" "opt-out remediation must use the harness-aware repair renderer"
-  assert_not_contains "$out" "bin/fm-watch-arm.sh --restart" "opt-out remediation must not hardcode a background-arm restart"
+  assert_contains "$out" "bin/fm-claude-stop-autoarm.sh" "opt-out remediation must use the harness-aware repair renderer"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "opt-out remediation must not ask a Claude primary for a second arming owner"
   assert_absent "$home/state/x-watch.check.sh" "opt-out must remove the shim"
   assert_absent "$home/config/x-mode.env" "opt-out must remove the cadence config"
+  # Re-opt-in then out under a harness that owns its own arming, so this still
+  # proves the line tracks the harness rather than being one hardcoded constant.
+  printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
+  FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
+  out=$(CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "Grok tracked background task" "opt-out remediation must render the model-owned arming harness's own repair command"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh --restart" "opt-out remediation must not hardcode a background-arm restart"
   # Steady-state off: another run with nothing to remove is silent.
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_not_contains "$out" "FMX:" "steady-state off must be silent"

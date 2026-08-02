@@ -111,9 +111,11 @@ test_guard_warnings() {
   # The guard's two operator-visible states, with resilient substrings instead of
   # four copy-coupled tests:
   #   (1) watcher DOWN + queued wakes: a prominent no-watcher banner leads (alarm
-  #       title, in-flight count, beacon age, fix command), the queued-wakes
-  #       warning follows it, and the guidance is repair-after-drain (never the
-  #       old conflicting "restart NOW first").
+  #       title, in-flight count, beacon age, harness-aware instruction), the
+  #       queued-wakes warning follows it, and the guidance comes after the drain
+  #       (never the old conflicting "restart NOW first"). This guard is
+  #       pull-based and mid-turn, so on a Claude primary it must name the
+  #       Stop-owned arming owner instead of asking for a second arm.
   #   (2) a fresh watcher and an empty queue: total silence.
   local dir state err first banner_line queue_line
   dir=$(make_case guard)
@@ -138,23 +140,28 @@ test_guard_warnings() {
   grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
   grep -F 'guarded operation WILL still run' "$err" >/dev/null || fail "guard banner missing generic continuation wording"
   ! grep -F 'requested message WILL still be sent' "$err" >/dev/null || fail "shared guard used send-specific continuation wording"
-  grep -F 'repair missing watcher supervision' "$err" >/dev/null || fail "guard banner missing the harness-aware fix command"
+  grep -F 'the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) starts the next cycle then' "$err" >/dev/null || fail "guard banner missing the harness-aware arming-owner instruction"
+  ! grep -F 'bin/fm-watch-arm.sh' "$err" >/dev/null || fail "mid-turn guard asked a Claude primary to start a second arming owner"
   grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about pending queue"
-  grep -F 'After draining queued wakes, repair missing watcher supervision' "$err" >/dev/null || fail "guard did not order supervision repair after drain"
+  grep -F 'After draining queued wakes, watcher supervision is parked' "$err" >/dev/null || fail "guard did not order the arming-owner instruction after drain"
   ! grep -F 'Restart it NOW, before anything else' "$err" >/dev/null || fail "guard still gave conflicting restart-first instruction"
   ! grep -F 'as the harness-tracked background task' "$err" >/dev/null || fail "guard still printed the old universal background-task repair text"
   banner_line=$(grep -n 'WATCHER DOWN' "$err" | head -1 | cut -d: -f1)
   queue_line=$(grep -n 'queued wakes pending - drain them' "$err" | head -1 | cut -d: -f1)
   [ "$banner_line" -lt "$queue_line" ] || fail "queued-wakes warning printed before the no-watcher banner"
 
+  # X mode still prefixes the cadence source onto a repair line that really does
+  # name a command. Grok's primary owns its own arming in every context, so it is
+  # the harness that keeps proving the prefix.
   dir=$(make_case guard-xmode)
   state="$dir/state"
   err="$dir/guard.err"
   mkdir -p "$dir/config"
   printf 'project=x\n' > "$state/task.meta"
   : > "$dir/config/x-mode.env"
-  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT=1 FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
+  grep -F 'repair missing watcher supervision' "$err" >/dev/null || fail "guard dropped the repair command for a model-owned arming harness"
 
   # (2) fresh watcher, empty queue -> silence.
   dir=$(make_case guard-fresh)
@@ -469,7 +476,8 @@ test_watch_restart_attaches_to_healthy_peer() {
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "restart arm did not fail after its attached peer ended without a successor (status $status)"
-  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$out" || fail "restart arm did not surface the attached cycle end"
+  grep -qF 'watcher: cycle-ended - the followed watcher cycle closed with no successor' "$out" || fail "restart arm did not surface the attached cycle end"
+  ! grep -qF 'watcher: FAILED' "$out" || fail "restart arm called a followed cycle close a supervision failure"
   pass "watch restart attaches to a verified healthy peer and later surfaces a successor gap"
 }
 
@@ -571,8 +579,72 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after seed died (status $status)"
-  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "attached arm did not emit the typed cycle-end failure"
-  pass "arm attaches to a live fresh watcher and fails loudly when that cycle has no successor"
+  grep -qF 'watcher: cycle-ended - the followed watcher cycle closed with no successor' "$armout" || fail "attached arm did not emit the typed followed-cycle close"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "attached arm called a followed cycle close a supervision failure"
+  pass "arm attaches to a live fresh watcher and reports a typed nonzero close when that cycle has no successor"
+}
+
+test_second_arm_does_not_alarm_when_the_owned_cycle_delivers_a_wake() {
+  # The previously-false-alarming sequence: one home, two arms, one watcher, and
+  # a real wake. The owning arm relays the reason; the second arm only followed
+  # that cycle, so its close must be the typed followed-cycle line rather than a
+  # supervision-down alarm that would push the model into arming yet another
+  # cycle beside the harness's own arming owner.
+  local dir state fakebin ownerout followout check_file owner follower i orc frc queued
+  dir=$(make_case two-arms-one-wake)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ownerout="$dir/owner.out"
+  followout="$dir/follower.out"
+  check_file="$state/task.check.sh"
+  mark_pr_check_migration_complete "$state"
+  cat > "$check_file" <<'SH'
+#!/usr/bin/env bash
+[ -e "${FM_STATE_OVERRIDE}/fire" ] || exit 0
+printf 'merged: https://example.test/pr/9\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register the two-arm wake check"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=5 "$WATCH_ARM" > "$ownerout" &
+  owner=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'watcher: started pid=' "$ownerout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$ownerout" || fail "owning arm never started a watcher: $(cat "$ownerout")"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=2 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$followout" &
+  follower=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'watcher: attached pid=' "$followout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: attached pid=' "$followout" || fail "second arm never attached: $(cat "$followout")"
+  ! grep -qF 'watcher: started' "$followout" || fail "second arm started a competing watcher"
+
+  touch "$state/fire"
+  wait_for_exit "$owner" 200
+  orc=$?
+  wait_for_exit "$follower" 200
+  frc=$?
+
+  [ "$orc" -eq 0 ] || fail "owning arm did not return the wake cleanly (status $orc): $(cat "$ownerout")"
+  grep -qF "check: $check_file: merged: https://example.test/pr/9" "$ownerout" \
+    || fail "owning arm did not relay the wake reason: $(cat "$ownerout")"
+  [ "$frc" -ne 0 ] && [ "$frc" -ne 124 ] || fail "second arm returned a clean empty completion (status $frc)"
+  grep -qF 'watcher: cycle-ended - the followed watcher cycle closed with no successor' "$followout" \
+    || fail "second arm did not emit the typed followed-cycle close: $(cat "$followout")"
+  ! grep -qF 'watcher: FAILED' "$followout" \
+    || fail "second arm reported supervision down while the owning arm delivered a real wake"
+  queued=$(grep -c "merged: https://example.test/pr/9" "$state/.wake-queue" 2>/dev/null || true)
+  [ "$queued" = 1 ] || fail "expected exactly one queued wake record for the shared cycle, got ${queued:-0}"
+  pass "a second arm follows the owned cycle's wake without a false supervision-down alarm"
 }
 
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
@@ -759,7 +831,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after peer died (status $status): $(cat "$armout")"
-  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "peer-attached arm did not emit the typed cycle-end failure"
+  grep -qF 'watcher: cycle-ended - the followed watcher cycle closed with no successor' "$armout" || fail "peer-attached arm did not emit the typed followed-cycle close"
   pass "arm attaches to a peer watcher after child stands down and surfaces a missing successor"
 }
 
@@ -1031,6 +1103,7 @@ test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
+test_second_arm_does_not_alarm_when_the_owned_cycle_delivers_a_wake
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output

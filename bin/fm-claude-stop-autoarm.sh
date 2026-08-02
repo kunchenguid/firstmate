@@ -30,10 +30,15 @@
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
 #   - Translation: while supervision is still needed and AFK remains inactive,
-#     an actionable arm close (signal:/stale:/check:/heartbeat) or a typed
-#     watcher: FAILED prints one rewake banner to stderr and exits 2, which
-#     wakes Claude even while idle ("Stop hook feedback"). A clean close with
-#     no actionable reason and no remaining need exits 0 silently.
+#     an actionable arm close (signal:/stale:/check:/heartbeat), a followed-cycle
+#     close (watcher: cycle-ended), or a typed watcher: FAILED prints one rewake
+#     banner to stderr and exits 2, which wakes Claude even while idle ("Stop
+#     hook feedback"). A clean close with no actionable reason and no remaining
+#     need exits 0 silently. Only watcher: FAILED gets the supervision-is-down
+#     alarm: a followed cycle is one this hook attached to rather than forked, so
+#     its wake reason reached the OWNING arm and lives in the durable queue here,
+#     and calling that close a failure both alarmed falsely and pushed the model
+#     into arming a second cycle beside this owner.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim and
 # outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
@@ -158,13 +163,21 @@ fi
 
 ACTIONABLE=0
 FAILED=0
+# A followed cycle is a cycle this arm attached to rather than forked, so its
+# reason line went to the owning arm and only the durable queue carries it here.
+# That close is a handling event, not supervision going down, and translating it
+# as a failure is what produced the false alarms.
+CYCLE_ENDED=0
 if [ -n "$OUT" ]; then
   grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" 2>/dev/null && ACTIONABLE=1
   grep -q '^watcher: FAILED' "$OUT" 2>/dev/null && FAILED=1
+  grep -q '^watcher: cycle-ended' "$OUT" 2>/dev/null && CYCLE_ENDED=1
 fi
-[ "$RC" -ne 0 ] && FAILED=1
+if [ "$RC" -ne 0 ] && [ "$CYCLE_ENDED" -eq 0 ]; then
+  FAILED=1
+fi
 
-if [ "$ACTIONABLE" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
+if [ "$ACTIONABLE" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ "$CYCLE_ENDED" -eq 0 ]; then
   write_epoch clean
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
@@ -184,6 +197,12 @@ if [ "$FAILED" -eq 1 ]; then
     printf 'firstmate watcher cycle FAILED - supervision is down while this home still needs it.\n'
     [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
     printf 'Run bin/fm-wake-drain.sh first. Then repair supervision with bin/fm-watch-arm.sh as its own Claude Code background task (never shell &). If the failure repeats, treat it as a blocker and report it instead of ending blind.\n'
+  } >&2
+elif [ "$ACTIONABLE" -eq 0 ]; then
+  {
+    printf 'firstmate watcher cycle closed - it was followed rather than owned, so drain to see what it recorded.\n'
+    [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+    printf 'Run bin/fm-wake-drain.sh first and handle anything it returns. This Stop hook owns watcher continuity: when this turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh yourself.\n'
   } >&2
 else
   {

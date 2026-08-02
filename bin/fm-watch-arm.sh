@@ -30,17 +30,22 @@
 #                                                          this arm attaches and follows it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
-#                                                        - a clean cycle ended with no wake and no
-#                                                          verified healthy successor
+#                                                        - an OWNED child returned clean and empty
+#                                                          with no verified healthy successor
+#   watcher: cycle-ended - the followed watcher cycle closed with no successor; drain the wake queue
+#                                                        - a FOLLOWED cycle closed; its reason, if
+#                                                          any, went to the owning arm and is in the
+#                                                          durable wake queue here
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. An
-# attached cycle that ends without a healthy successor is a typed nonzero failure,
-# never a clean empty completion. On FAILED it exits non-zero so the failure is
-# loud. A live cycle already present means re-arm attaches - do not start a second
-# watcher.
+# reason; on attached it stays live across identity-matched successors. Both
+# terminal closes above are typed and nonzero, never a clean empty completion, but
+# only the OWNED one is a supervision failure: an arm that merely followed another
+# arm's cycle cannot see that cycle's reason line and must not report its ordinary
+# close as supervision going down. A live cycle already present means re-arm
+# attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -268,6 +273,9 @@ wait_for_healthy_successor() {
   done
 }
 
+# An OWNED child that returns clean and empty is a genuine supervision failure:
+# this arm forked it, so any actionable reason would have reached this arm's own
+# view of its stdout.
 fail_unexplained_cycle() {
   echo "watcher: FAILED - cycle ended without an actionable reason"
   return 1
@@ -278,15 +286,30 @@ fail_unexplained_cycle() {
 # start, restart, or stay attached to supervision here. This is what stops an
 # orphaned arm from a previous harness session retaining or reacquiring the
 # watcher singleton after another live harness session takes over the home.
+# A fenced arm IS a genuine supervision failure for this home, so it keeps the
+# FAILED wording rather than the followed-cycle close below.
 require_session_owner() {  # <action-phrase>
   fm_session_owner_fence "$STATE" && return 0
   echo "watcher: FAILED - session-owner fence: home session lock is held by live harness pid $FM_SESSION_OWNER_FOREIGN_PID outside this process's session; $1"
   return 1
 }
 
+# A FOLLOWED cycle is a different fact. This arm never owned the watcher child,
+# so the reason line went to the OWNING arm's stdout and reaches this arm only
+# through the durable wake queue. Reporting that close as a supervision failure
+# was a false alarm on every wake-delivering cycle, and it pushed the model into
+# arming a second cycle beside the harness's own arming owner. Report the honest
+# close instead, and keep it nonzero so no adapter can read it as a clean empty
+# completion.
+end_followed_cycle() {
+  echo "watcher: cycle-ended - the followed watcher cycle closed with no successor; drain the wake queue"
+  return 1
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
-# to a verified successor. With no successor, fail loudly instead of returning a
-# clean empty completion that an adapter could mistake for a no-op.
+# to a verified successor. With no successor, report the followed close loudly
+# instead of returning a clean empty completion that an adapter could mistake for
+# a no-op.
 attach_and_wait() {
   local attached_pid=$1
   while :; do
@@ -316,7 +339,7 @@ attach_and_wait() {
       continue
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
-    fail_unexplained_cycle
+    end_followed_cycle
     return 1
   done
 }

@@ -49,9 +49,14 @@ test_repair_lines() {
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --repair-line)
   assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "codex repair line did not use checkpoint helper and env override"
 
-  out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
+  out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --owner-absent 1 --repair-line)
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
   assert_contains "$out" "Claude Code background task" "claude repair line missing background-task mechanism"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
+  assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing from the parked claude line"
+  assert_contains "$out" "watcher supervision is parked until this turn ends" "claude mid-turn line did not name the parked state"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude mid-turn line asked the model to start a second arming owner"
 
   : > "$home/config/x-mode.env"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)
@@ -90,9 +95,12 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$ordinary" "bin/fm-claude-stop-autoarm.sh" "claude ordinary-wake line lost the auto-arm script name"
   assert_contains "$ordinary" "do not arm another cycle" "claude ordinary-wake line does not forbid a model re-arm"
   assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "claude ordinary-wake line incorrectly calls the manual arm"
-  out=$("$RENDER" --harness claude --repair-line)
+  out=$("$RENDER" --harness claude --owner-absent 1 --repair-line)
   assert_contains "$out" "Claude Code background task" "claude recovery line lost its tracked background repair"
   assert_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line lost the arm command"
+  out=$("$RENDER" --harness claude --repair-line)
+  assert_contains "$out" "bin/fm-claude-stop-autoarm.sh" "claude mid-turn line did not name the arming owner"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude mid-turn line still demanded a second arming owner"
 
   out=$("$RENDER" --harness grok)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')

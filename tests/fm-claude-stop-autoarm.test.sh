@@ -106,6 +106,15 @@ printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
 exit 0
 SH
       ;;
+    followed-cycle-ended)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+printf 'watcher: cycle-ended - the followed watcher cycle closed with no successor; drain the wake queue\n'
+exit 1
+SH
+      ;;
     slow-actionable)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -327,6 +336,27 @@ test_failed_close_rewakes_with_failure_banner() {
   pass "auto-arm: watcher: FAILED translates to an exit-2 alarm rewake"
 }
 
+test_followed_cycle_close_rewakes_without_the_failure_alarm() {
+  # The arm attached to a cycle another arm owned, so that cycle's reason went to
+  # the owner and only the durable queue carries it here. This hook must send the
+  # model to the drain, not raise a supervision-down alarm that would have it
+  # start a competing arming owner.
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/followed-cycle")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" followed-cycle-ended
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a followed-cycle close must still rewake so the queue is drained"
+  assert_contains "$out" "firstmate watcher cycle closed" "followed-cycle rewake must carry its own banner"
+  assert_contains "$out" "watcher: cycle-ended" "followed-cycle rewake must carry the arm's typed close"
+  assert_contains "$out" "bin/fm-wake-drain.sh" "followed-cycle rewake must direct the drain-first protocol"
+  assert_contains "$out" "do NOT run bin/fm-watch-arm.sh" "followed-cycle rewake must forbid a second arming owner"
+  assert_not_contains "$out" "watcher cycle FAILED" "followed-cycle close must not raise the supervision-down alarm"
+  assert_not_contains "$out" "repair supervision" "followed-cycle close must not demand a manual repair"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: a followed-cycle close rewakes for a drain instead of alarming"
+}
+
 test_clean_close_exits_silently() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/clean")
@@ -426,6 +456,7 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_failed_close_rewakes_with_failure_banner
+test_followed_cycle_close_rewakes_without_the_failure_alarm
 test_clean_close_exits_silently
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
