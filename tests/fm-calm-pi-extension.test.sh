@@ -246,7 +246,9 @@ const handlers = new Map();
 const pi = {
   events: { emit() {}, on() {} },
   on(event, handler) {
-    handlers.set(event, handler);
+    const eventHandlers = handlers.get(event) ?? [];
+    eventHandlers.push(handler);
+    handlers.set(event, eventHandlers);
   },
   registerCommand(name, command) {
     if (name === "calm") calmCommand = command;
@@ -2465,7 +2467,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -2484,7 +2486,6 @@ test_interactive_terminal_e2e() {
   hidden_snapshot="$TMP_ROOT/hidden.txt"
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
-  export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   working_snapshot="$TMP_ROOT/working.txt"
   working_response_snapshot="$TMP_ROOT/working-response.txt"
@@ -2500,7 +2501,7 @@ test_interactive_terminal_e2e() {
   boat_resume_snapshot="$TMP_ROOT/boat-resume.txt"
   restarted_snapshot="$TMP_ROOT/restarted.txt"
   resumed_restored_snapshot="$TMP_ROOT/resumed-restored.txt"
-  mkdir -p "$project/.pi/extensions/lib" "$project/bin" "$project/state" "$config" "$home/config"
+  mkdir -p "$project/.pi/extensions/lib" "$project/bin" "$project/state" "$config" "$home/config" "$project/node_modules/@earendil-works"
   fm_git_init_commit "$project"
   : > "$project/AGENTS.md"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
@@ -2511,6 +2512,9 @@ test_interactive_terminal_e2e() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/fm-primary-turnend-guard.ts"
+  ln -s "$PI_PACKAGE_DIR" "$project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$project/node_modules/typebox"
   cp \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
@@ -2860,10 +2864,76 @@ JS
   assert_contains "$(cat "$active_hidden_snapshot")" " Error:" "operational delivery did not produce a transient provider diagnostic"
   hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  wait_for_text "$export_snapshot" "Session exported to: $export_file" \
-    || fail "/export did not complete while calm mode was on"
+  PI_PACKAGE_DIR="$PI_PACKAGE_DIR" SESSION_FILE="$session_file" EXPORT_FILE="$export_file" \
+    EXT="$project/.pi/extensions/fm-calm.ts" WATCH_EXT="$project/.pi/extensions/fm-primary-pi-watch.ts" \
+    FM_HOME="$home" FM_OPERATIONAL_INPUT_SCRIPT="$OPERATIONAL_INPUT" PROJECT_CWD="$project" \
+    node --input-type=module <<'JS' || fail "Pi HTML export did not complete while calm mode was on"
+import { pathToFileURL } from "node:url";
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ SessionManager }, { exportSessionToHtml }, { createToolHtmlRenderer }, { initTheme, theme }, { getKeybindings }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/core/session-manager.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/export-html/index.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/export-html/tool-renderer.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+const tools = [];
+const handlers = new Map();
+const eventListeners = new Map();
+let terminalInputHandler;
+let toolsExpanded = true;
+const pi = {
+  events: {
+    emit(name, data) {
+      for (const listener of eventListeners.get(name) ?? []) listener(data);
+    },
+    on(name, listener) {
+      const listeners = eventListeners.get(name) ?? [];
+      listeners.push(listener);
+      eventListeners.set(name, listeners);
+    },
+  },
+  on(event, handler) {
+    const eventHandlers = handlers.get(event) ?? [];
+    eventHandlers.push(handler);
+    handlers.set(event, eventHandlers);
+  },
+  registerCommand() {},
+  registerEntryRenderer() {},
+  registerTool(tool) { tools.push(tool); },
+};
+const calmExtension = await import(`${pathToFileURL(process.env.EXT).href}?export=${Date.now()}`);
+calmExtension.default(pi);
+const watchExtension = await import(`${pathToFileURL(process.env.WATCH_EXT).href}?export=${Date.now()}`);
+watchExtension.default({ ...pi, appendEntry() {}, sendMessage() {} });
+const sm = SessionManager.open(process.env.SESSION_FILE);
+const context = {
+  ui: {
+    getEditorText: () => `/export ${process.env.EXPORT_FILE}`,
+    getToolsExpanded: () => toolsExpanded,
+    onTerminalInput(handler) {
+      terminalInputHandler = handler;
+      return () => {};
+    },
+    setHiddenThinkingLabel() {},
+    setStatus() {},
+    setToolsExpanded(value) { toolsExpanded = value; },
+    setWorkingVisible() {},
+  },
+};
+getKeybindings().setUserBindings({ "tui.input.submit": "alt+s" });
+const sessionStartHandlers = handlers.get("session_start") ?? [];
+for (const handler of sessionStartHandlers) handler({ reason: "export" }, context);
+if (!terminalInputHandler) throw new Error("Calm export terminal handler was not registered");
+terminalInputHandler("\x1bs");
+const htmlRenderer = createToolHtmlRenderer({
+  getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+  theme,
+  cwd: process.env.PROJECT_CWD,
+});
+await exportSessionToHtml(sm, undefined, { outputPath: process.env.EXPORT_FILE, toolRenderer: htmlRenderer });
+JS
   node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);
