@@ -612,6 +612,37 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_ship_and_scout_discover_agentic_engineering_cycle() {
+  local home ship scout help
+  home="$TMP_ROOT/agentic-engineering-cycle-home"
+  mkdir -p "$home/data"
+
+  help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "agentic-engineering-cycle" \
+    "fm-brief.sh --help did not advertise the conditional engineering-cycle pointer"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-cycle-ship sample >/dev/null 2>&1
+  ship="$home/data/sample-cycle-ship/brief.md"
+  assert_grep "$ROOT/.agents/skills/agentic-engineering-cycle/SKILL.md" "$ship" \
+    "ship brief did not expose the conditional engineering-cycle owner"
+  # shellcheck disable=SC2016 # The generated Markdown must retain literal backticks.
+  assert_grep 'numbered `1.1`, `1.2`, or later choice in this brief or report' "$ship" \
+    "ship brief did not route numbered decisions to the shared template"
+  assert_grep 'does not grant new dispatch, credential, browser-mutation, delivery, or merge authority' "$ship" \
+    "ship brief broadened authority through the engineering-cycle pointer"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-cycle-scout sample --scout >/dev/null 2>&1
+  scout="$home/data/sample-cycle-scout/brief.md"
+  assert_grep "$ROOT/.agents/skills/agentic-engineering-cycle/SKILL.md" "$scout" \
+    "scout brief did not expose the conditional engineering-cycle owner"
+  # shellcheck disable=SC2016 # The generated Markdown must retain literal backticks.
+  assert_grep 'numbered `1.1`, `1.2`, or later choice in this brief or report' "$scout" \
+    "scout report guidance did not route numbered decisions to the shared template"
+  pass "fm-brief.sh: ship and scout briefs discover the agentic engineering cycle"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -648,4 +679,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_ship_and_scout_discover_agentic_engineering_cycle
 test_scout_and_secondmate_scaffold

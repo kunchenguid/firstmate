@@ -44,6 +44,8 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout briefs carry a conditional pointer to agentic-engineering-cycle
+# for substantial intake-to-E2E work and its single-owned numbered-decision template.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -247,12 +249,22 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+IFS= read -r -d '' ENGINEERING_CYCLE_SECTION <<EOF || true
+# Agentic engineering cycle
+When this task spans requirement normalization, bounded research, a prototype or executable contract, layered implementation, or end-to-end proof, read and follow \`$FM_ROOT/.agents/skills/agentic-engineering-cycle/SKILL.md\`.
+Use that skill's single decision template for every numbered \`1.1\`, \`1.2\`, or later choice in this brief or report; do not duplicate the template here.
+The skill organizes work already authorized by this brief and does not grant new dispatch, credential, browser-mutation, delivery, or merge authority.
+EOF
+ENGINEERING_CYCLE_SECTION=${ENGINEERING_CYCLE_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
 {TASK}
+
+$ENGINEERING_CYCLE_SECTION
 
 $HERDR_SECTION
 
@@ -362,6 +374,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$ENGINEERING_CYCLE_SECTION
 
 $HERDR_SECTION
 

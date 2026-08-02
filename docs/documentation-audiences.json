@@ -104,6 +104,10 @@
   ],
   "surfaces": [
     {
+      "path": ".agents/skills/agentic-engineering-cycle/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -309,6 +313,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/agentic-engineering-cycle.md",
       "audience": "maintainer-verification"
     },
     {
