@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
+# A validated registration also keeps an otherwise-idle home supervision-eligible
+# (docs/watcher-continuity.md "Eligibility").
 # Usage: fm-check-register.sh <id>
 set -u
 
