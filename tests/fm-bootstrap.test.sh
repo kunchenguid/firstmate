@@ -425,9 +425,13 @@ make_fixture_skills() {
 # seatbelt denies process inspection, so harness identity resolves through the
 # thread marker rather than ancestry. Each case owns its own user home, CODEX_HOME
 # and repository checkout, because those roots are exactly what is being counted.
+# Trailing arguments are the case's own harness marker ASSIGNMENTS (a non-Codex
+# case passes its own); every -u stays ahead of the first assignment because env
+# stops parsing options there and would otherwise run `-u` as the command.
 run_codex_skill_budget_case() {
   local case_dir=$1 userhome=$2 repo=$3 fakebin
   shift 3
+  [ $# -gt 0 ] || set -- CODEX_CI=1 CODEX_THREAD_ID=019fbddb-b27d-7b23-86d2-7dc3bbaba31f
   mkdir -p "$case_dir/home" "$userhome" "$repo/.agents/skills"
   fakebin=$(make_fake_toolchain "$case_dir")
   cat > "$fakebin/ps" <<'SH'
@@ -437,14 +441,16 @@ exit 1
 SH
   chmod +x "$fakebin/ps"
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CODEX_CI -u CODEX_THREAD_ID \
     PATH="$fakebin:$BASE_PATH" HOME="$userhome" CODEX_HOME="$case_dir/codexhome" \
     FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
-    CODEX_CI=1 CODEX_THREAD_ID=019fbddb-b27d-7b23-86d2-7dc3bbaba31f \
     "$@" "$ROOT/bin/fm-bootstrap.sh"
 }
 
 test_codex_skill_budget_reports_machine_global_surface() {
-  local case_dir userhome repo out
+  # Every silent case checks bootstrap's exit status too: silence only proves the
+  # diagnostic held back if bootstrap actually ran to completion.
+  local case_dir userhome repo out status
 
   # Codex discovers skills under ~/.agents/skills and $CODEX_HOME/skills, scanning
   # each recursively through symlinks. A symlinked collection is how a large global
@@ -478,7 +484,8 @@ test_codex_skill_budget_reports_machine_global_surface() {
   mkdir -p "$userhome/.agents/skills" "$case_dir/codexhome/skills/.system"
   make_fixture_skills "$repo/.agents/skills" repo 3
   make_fixture_skills "$case_dir/codexhome/skills/.system" system 9
-  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo")
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo"); status=$?
+  expect_code 0 "$status" "bootstrap did not run on the hidden-skills case"
   assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
     "Codex's own bundled hidden skills were blamed on the captain"
 
@@ -490,7 +497,8 @@ test_codex_skill_budget_reports_machine_global_surface() {
   mkdir -p "$userhome/.agents/skills"
   make_fixture_skills "$repo/.agents/skills" repo 3
   make_fixture_skills "$userhome/.agents/skills" global 3
-  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo")
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo"); status=$?
+  expect_code 0 "$status" "bootstrap did not run on the small-global-set case"
   assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
     "a global skill set no larger than this repository's was reported anyway"
 
@@ -501,8 +509,8 @@ test_codex_skill_budget_reports_machine_global_surface() {
   mkdir -p "$userhome/.agents/skills"
   make_fixture_skills "$repo/.agents/skills" repo 3
   make_fixture_skills "$userhome/.agents/skills" global 9
-  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo" \
-    -u CODEX_CI -u CODEX_THREAD_ID CLAUDECODE=1)
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo" CLAUDECODE=1); status=$?
+  expect_code 0 "$status" "bootstrap did not run on the Claude case"
   assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
     "a Claude session was told about Codex's skill budget"
 
@@ -515,7 +523,8 @@ test_codex_skill_budget_reports_machine_global_surface() {
   : > "$case_dir/home/.fm-secondmate-home"
   make_fixture_skills "$repo/.agents/skills" repo 3
   make_fixture_skills "$userhome/.agents/skills" global 9
-  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo")
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo"); status=$?
+  expect_code 0 "$status" "bootstrap did not run on the secondmate-home case"
   assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
     "a secondmate home reported machine-global skills it cannot scope"
 
