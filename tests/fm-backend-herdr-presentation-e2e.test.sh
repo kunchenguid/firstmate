@@ -411,11 +411,16 @@ teardown_task() {  # <id> <home>
 }
 
 normalize_meta() {  # <meta>
+  # The worktree owner pid and identity name whichever process occupies the
+  # slot for that run, so they legitimately differ between two spawns exactly
+  # as the Herdr container ids do.
   sed -E \
     -e 's|^window=.*$|window=<herdr-container-id>|' \
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
+    -e 's|^worktree_owner_pid=.*$|worktree_owner_pid=<per-run>|' \
+    -e 's|^worktree_owner_identity=.*$|worktree_owner_identity=<per-run>|' \
     "$1"
 }
 

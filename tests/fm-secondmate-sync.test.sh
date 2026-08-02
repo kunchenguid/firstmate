@@ -323,6 +323,17 @@ SH
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'Usage: treehouse get [--lease]'
 fi
+# bin/fm-worktree-guard.sh probes `status --help` for --json, then reads the
+# format that probe selected. An empty pool is "[]" in the machine format and
+# nothing at all in the human-readable one.
+if [ "${1:-}" = status ] && [ "${2:-}" = --help ]; then
+  printf 'Usage:\n  treehouse status [flags]\n\nFlags:\n  -h, --help   help for status\n      --json   Print pool status as JSON\n'
+  exit 0
+fi
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  echo '[]'
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"

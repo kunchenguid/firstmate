@@ -221,6 +221,35 @@ SH
   done
 }
 
+# fm_fake_treehouse <fakebin>: a treehouse stub that answers `status` with an
+# empty pool and exits 0 for everything else.
+#
+# `status` cannot be a silent exit-0 like the other stubs: bin/fm-worktree-guard.sh
+# runs before `treehouse get` and refuses a pool it cannot read, so a silent stub
+# fails the spawn for the wrong reason. It must answer all three shapes the guard
+# uses, because the guard probes capability from `status --help` (the --json flag
+# does not exist before treehouse v2.1.0) and then reads whichever format that
+# probe selected. An empty pool prints "[]" in the machine format and nothing at
+# all in the human-readable one. Suites that need populated slots should install
+# their own fake instead of using this one.
+fm_fake_treehouse() {
+  local fakebin=$1
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ] && [ "${2:-}" = --help ]; then
+  printf 'Usage:\n  treehouse status [flags]\n\nFlags:\n  -h, --help   help for status\n      --json   Print pool status as JSON\n'
+  exit 0
+fi
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  echo '[]'
+  exit 0
+fi
+[ "${1:-}" = status ] && exit 0
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

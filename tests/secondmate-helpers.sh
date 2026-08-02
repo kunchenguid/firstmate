@@ -54,6 +54,18 @@ SH
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
 case "${1:-}" in
+  status)
+    # bin/fm-worktree-guard.sh probes `status --help` for --json, then reads the
+    # format that probe selected. An empty pool is "[]" in the machine format
+    # and nothing at all in the human-readable one.
+    case "${2:-}" in
+      --help)
+        printf 'Usage:\n  treehouse status [flags]\n\nFlags:\n  -h, --help   help for status\n      --json   Print pool status as JSON\n'
+        ;;
+      --json) echo '[]' ;;
+    esac
+    exit 0
+    ;;
   get)
     # Durable lease: print only the worktree path to stdout (banners to stderr),
     # and record the lease holder so tests can assert it is set and later cleared.

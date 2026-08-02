@@ -804,6 +804,17 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# Pool-allocation safety, BEFORE any endpoint exists. `treehouse get` resets a
+# slot as part of acquiring it, so the only place this can be checked is ahead
+# of the allocation - by the time the pane's cwd reveals the worktree, an
+# unlanded branch has already been detached. Running it here (rather than beside
+# the `treehouse get` send below) also means a refusal never leaves an orphan
+# window behind. Secondmate spawns own their home, and Orca owns its own
+# worktree, so neither goes through the treehouse pool.
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  "$FM_ROOT/bin/fm-worktree-guard.sh" check "$PROJ_ABS_REAL" || exit 1
+fi
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1543,6 +1554,15 @@ META_WINDOW=$T
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
+  # Durable ownership for bin/fm-worktree-guard.sh: a process IDENTITY, not a
+  # bare pid, because a reboot reissues pid numbers and a recorded pre-reboot
+  # pid then resolves to an unrelated live process. Empty fields read as
+  # UNRESOLVED at check time, never as a released slot. Only the treehouse pool
+  # path records this: a secondmate owns its home and Orca owns its own
+  # worktree, so neither is allocated from a shared pool.
+  if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+    "$FM_ROOT/bin/fm-worktree-guard.sh" owner-fields "$WT" 2>/dev/null || true
+  fi
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"

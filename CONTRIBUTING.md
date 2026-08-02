@@ -47,6 +47,10 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Test scripts and helpers in `tests/` are plain bash too.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, and pinned shellcheck version), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
   It pins one exact shellcheck version and refuses to run under any other; print it with `bin/fm-lint.sh --required-version` and install that build locally.
+- Treehouse has no such local/CI equivalence, so a locally green suite does not prove CI green.
+  CI installs the version pinned in `bin/fm-install-treehouse.sh`, while a developer machine runs whatever `treehouse` is on its `PATH`, and nothing reconciles the two.
+  That gap is not hypothetical: a change verified locally against a newer Treehouse failed CI because the pinned build lacked the flag it used.
+  When a change touches spawn worktree acquisition, run the affected suites against the pinned build too - `bin/fm-install-treehouse.sh <dir>` installs it beside your own without replacing it, and prefixing `PATH` with that directory reruns any suite under it.
 - Changes to harness adapters (detection in `bin/fm-harness.sh`, verified launch commands in `bin/fm-launch-lib.sh`, remaining launch and hook mechanics in `bin/fm-spawn.sh`, semantic busy sources and trust gates in `bin/fm-busy-lib.sh`, delivery-only rendered guards in `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - Changes to runtime session backends (`bin/fm-backend.sh`, `bin/backends/`, and the scripts that dispatch through them) keep current setup and limits in the relevant backend guide and active empirical evidence in [`docs/verification/runtime-backends.md`](docs/verification/runtime-backends.md).
 - [`docs/documentation-audiences.md`](docs/documentation-audiences.md) and its machine-consumed inventory own prose classification; run `bin/fm-doc-audience-check.sh` after documentation changes.

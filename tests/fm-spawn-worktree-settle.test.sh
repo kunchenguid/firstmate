@@ -54,7 +54,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -117,6 +117,13 @@ test_single_stale_first_read_is_not_accepted() {
     "meta did not record the settled worktree"
   assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
     "meta wrongly recorded the transient stale path as the worktree"
+  # Durable ownership for bin/fm-worktree-guard.sh. The keys must always be
+  # written so a later check can tell "no occupant was resolvable" (empty, which
+  # reads unresolved) apart from a meta that predates the field entirely.
+  assert_grep "worktree_owner_pid=" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the worktree owner pid field"
+  assert_grep "worktree_owner_identity=" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the worktree owner identity field"
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
 
