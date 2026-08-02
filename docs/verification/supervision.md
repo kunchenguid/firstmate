@@ -36,6 +36,14 @@ Skill-budget reproduction was bounded to repository-controlled inputs.
 `codex -C "$PWD" debug prompt-input` with a throwaway `CODEX_HOME` and no user plugins showed no 2% warning for Firstmate project skills alone, so the observed Ponytail-enabled user path is an independent budget contributor rather than a proven sole cause.
 Firstmate's controllable mitigation is to keep every internal skill discoverable while shortening only frontmatter descriptions to exact triggers.
 
+The remaining external contributor was then measured rather than assumed, on 2026-08-02 with codex-cli 0.146.0.
+`codex debug prompt-input` was rendered twice with a throwaway `CODEX_HOME`: once with a throwaway `HOME` holding one seeded skill under `~/.agents/skills` and one under `$CODEX_HOME/skills`, which proved both roots reach the prompt, and once with the captain's real `HOME` outside any project, which rendered 78 skill entries - 73 from `~/.agents/skills` and 5 from Codex's own bundled `$CODEX_HOME/skills/.system` set.
+Diffing those 73 rendered entries against the files on disk fixed the scan rule exactly: the root is walked recursively, symlinks are followed, and hidden directories are skipped.
+All 486 unrendered `SKILL.md` files under `~/.agents/skills` sat below a hidden path component, and the 73 rendered ones were exactly the rest.
+By that rule the captain's machine-global roots hold 74 skill-definition paths, 73 of them distinct files, against this repository's 19 - plus the skills of the nine enabled Codex plugins that `codex plugin list` reports and that live in Codex's private cache layout.
+The bundled `.system` set does spend the same budget, but it is Codex's own and not the captain's to remove, so the same hidden-directory skip keeps it out of the reported count.
+That external surface is the cause this branch must not fix for the captain, so `bin/fm-bootstrap.sh` reports it as a read-only `CODEX_SKILL_BUDGET` line on a Codex primary home whenever the machine-global count exceeds this repository's own, and `docs/configuration.md` "Codex skill budget" owns the scoping options.
+
 Codex command shape:
 
 ```sh

@@ -410,6 +410,118 @@ test_gh_auth_diagnostics_distinguish_codex_sandbox() {
   pass "bootstrap distinguishes missing GitHub auth from Codex sandbox validation limits"
 }
 
+# Write <count> discoverable skill definitions under <dir>, named <prefix>N.
+make_fixture_skills() {
+  local dir=$1 prefix=$2 count=$3 i=1
+  while [ "$i" -le "$count" ]; do
+    mkdir -p "$dir/$prefix$i"
+    printf -- '---\nname: %s%s\ndescription: fixture skill %s%s.\n---\n\nbody\n' \
+      "$prefix" "$i" "$prefix" "$i" > "$dir/$prefix$i/SKILL.md"
+    i=$((i + 1))
+  done
+}
+
+# Run bin/fm-bootstrap.sh as the captain's real Codex shape: a Codex thread whose
+# seatbelt denies process inspection, so harness identity resolves through the
+# thread marker rather than ancestry. Each case owns its own user home, CODEX_HOME
+# and repository checkout, because those roots are exactly what is being counted.
+run_codex_skill_budget_case() {
+  local case_dir=$1 userhome=$2 repo=$3 fakebin
+  shift 3
+  mkdir -p "$case_dir/home" "$userhome" "$repo/.agents/skills"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '/bin/ps: Operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" HOME="$userhome" CODEX_HOME="$case_dir/codexhome" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    CODEX_CI=1 CODEX_THREAD_ID=019fbddb-b27d-7b23-86d2-7dc3bbaba31f \
+    "$@" "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_codex_skill_budget_reports_machine_global_surface() {
+  local case_dir userhome repo out
+
+  # Codex discovers skills under ~/.agents/skills and $CODEX_HOME/skills, scanning
+  # each recursively through symlinks. A symlinked collection is how a large global
+  # set actually arrives, so its nested skills have to count.
+  case_dir="$TMP_ROOT/codex-skills-global"
+  userhome="$case_dir/userhome"
+  repo="$case_dir/repo"
+  mkdir -p "$userhome/.agents/skills" "$case_dir/codexhome/skills" "$case_dir/collection"
+  make_fixture_skills "$repo/.agents/skills" repo 3
+  make_fixture_skills "$userhome/.agents/skills" global 2
+  make_fixture_skills "$case_dir/collection" bundled 2
+  ln -s "$case_dir/collection" "$userhome/.agents/skills/bundle"
+  make_fixture_skills "$case_dir/codexhome/skills" codexhome 2
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo")
+  assert_contains "$out" "CODEX_SKILL_BUDGET: 6 machine-global skills (" \
+    "bootstrap did not count the machine-global skill surface Codex loads"
+  assert_contains "$out" "$userhome/.agents/skills: 4" \
+    "bootstrap did not follow a symlinked global skill collection"
+  assert_contains "$out" "$case_dir/codexhome/skills: 2" \
+    "bootstrap ignored the CODEX_HOME skill root"
+  assert_contains "$out" "load on top of this repository's 3" \
+    "bootstrap did not report this repository's own skill count for comparison"
+  assert_contains "$out" '2% skills context budget' \
+    "the reported cause did not name Codex's skill budget"
+
+  # Codex's own bundled set lives in a hidden directory under $CODEX_HOME/skills
+  # and is not the captain's to remove, so it must not be reported as their doing.
+  case_dir="$TMP_ROOT/codex-skills-hidden"
+  userhome="$case_dir/userhome"
+  repo="$case_dir/repo"
+  mkdir -p "$userhome/.agents/skills" "$case_dir/codexhome/skills/.system"
+  make_fixture_skills "$repo/.agents/skills" repo 3
+  make_fixture_skills "$case_dir/codexhome/skills/.system" system 9
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo")
+  assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
+    "Codex's own bundled hidden skills were blamed on the captain"
+
+  # A global set no larger than this repository's own cannot be the remaining
+  # cause, so reporting it would be noise.
+  case_dir="$TMP_ROOT/codex-skills-small"
+  userhome="$case_dir/userhome"
+  repo="$case_dir/repo"
+  mkdir -p "$userhome/.agents/skills"
+  make_fixture_skills "$repo/.agents/skills" repo 3
+  make_fixture_skills "$userhome/.agents/skills" global 3
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo")
+  assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
+    "a global skill set no larger than this repository's was reported anyway"
+
+  # The budget is Codex's; every other harness must stay silent about it.
+  case_dir="$TMP_ROOT/codex-skills-claude"
+  userhome="$case_dir/userhome"
+  repo="$case_dir/repo"
+  mkdir -p "$userhome/.agents/skills"
+  make_fixture_skills "$repo/.agents/skills" repo 3
+  make_fixture_skills "$userhome/.agents/skills" global 9
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo" \
+    -u CODEX_CI -u CODEX_THREAD_ID CLAUDECODE=1)
+  assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
+    "a Claude session was told about Codex's skill budget"
+
+  # Only the captain can scope machine-global skills, so a secondmate home never
+  # repeats a report it must not act on.
+  case_dir="$TMP_ROOT/codex-skills-secondmate"
+  userhome="$case_dir/userhome"
+  repo="$case_dir/repo"
+  mkdir -p "$userhome/.agents/skills" "$case_dir/home"
+  : > "$case_dir/home/.fm-secondmate-home"
+  make_fixture_skills "$repo/.agents/skills" repo 3
+  make_fixture_skills "$userhome/.agents/skills" global 9
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo")
+  assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
+    "a secondmate home reported machine-global skills it cannot scope"
+
+  pass "bootstrap reports the machine-global skill surface behind Codex's 2% budget"
+}
+
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
   missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
@@ -949,6 +1061,7 @@ ROWS
 
 test_bootstrap_reporting
 test_gh_auth_diagnostics_distinguish_codex_sandbox
+test_codex_skill_budget_reports_machine_global_surface
 test_no_mistakes_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
