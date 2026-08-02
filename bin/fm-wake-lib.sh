@@ -126,8 +126,27 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/role" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
+}
+
+fm_lock_set_role() {
+  local lockdir=$1 role=$2 current pid back
+  case "$role" in
+    autoarm|terminal-check) : ;;
+    *) return 1 ;;
+  esac
+  current=${BASHPID:-$$}
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$pid" = "$current" ] || return 1
+  printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
+  back=$(cat "$lockdir/role" 2>/dev/null || true)
+  [ "$back" = "$role" ]
+}
+
+fm_lock_role() {
+  cat "$1/role" 2>/dev/null
 }
 
 fm_lock_abs_path() {
@@ -409,6 +428,43 @@ fm_lock_release() {
   [ "$pid" = "$current" ] || return 0
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
+}
+
+fm_failure_episode_reset() {
+  local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
+  lock="$state/.turnend-claude-blocks.lock"
+  case "$mode" in
+    acquire)
+      fm_lock_try_acquire "$lock" || return 1
+      acquired=1
+      ;;
+    held)
+      current=${BASHPID:-$$}
+      pid=$(cat "$lock/pid" 2>/dev/null || true)
+      [ "$pid" = "$current" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  for path in \
+    "$state/.turnend-claude-blocks" \
+    "$state/.claude-autoarm-failure-notified" \
+    "$state/.claude-autoarm-failure-alarmed"
+  do
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+      [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+      return 1
+    fi
+  done
+  if ! rm -f \
+    "$state/.turnend-claude-blocks" \
+    "$state/.claude-autoarm-failure-notified" \
+    "$state/.claude-autoarm-failure-alarmed" \
+    2>/dev/null; then
+    [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+    return 1
+  fi
+  [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+  return 0
 }
 
 fm_wake_clean_field() {

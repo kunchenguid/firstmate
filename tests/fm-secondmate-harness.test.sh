@@ -904,6 +904,18 @@ new_world() {
   printf '%s\n' "$w"
 }
 
+record_live_watcher_fixture() {
+  local home=$1 identity
+  identity=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pid_identity "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$$") || fail "could not identify the live watcher fixture"
+  mkdir "$home/state/.watch.lock"
+  printf '%s\n' "$$" > "$home/state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$home/state/.watch.lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
+  touch "$home/state/.last-watcher-beat"
+}
+
 # A live secondmate home as a DETACHED worktree of the primary at <commit>, with
 # its seed marker and a live kind=secondmate meta.
 add_sm_worktree() {
@@ -1308,6 +1320,7 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
+  record_live_watcher_fixture "$w/home"
   err="$w/config-push-basic.err"
   log="$w/config-push-basic.tmux.log"
   out=$(run_config_push "$w" "$log" 2>"$err"); status=$?
@@ -1492,6 +1505,7 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
     printf '%s\n' "shared secret preference body that must never appear in a config reread"
   } > "$w/home/data/captain-shared.md"
 
+  record_live_watcher_fixture "$w/home"
   log="$w/config-reread-per-home.tmux.log"
   err="$w/config-reread-per-home.err"
   out=$(run_config_push "$w" "$log" 2>"$err"); status=$?
