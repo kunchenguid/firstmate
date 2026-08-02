@@ -242,30 +242,6 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
-### No-mistakes attach projection
-
-The Firstmate-owned monitor's synthetic contract coverage was verified on 2026-07-31.
-The fixture models Herdr and no-mistakes response shapes but does not launch either runtime, so it does not establish version-specific runtime compatibility.
-`tests/fm-no-mistakes-ready.test.sh` is the complete self-cleaning fixture: it creates the temporary task repository and metadata, exact AXI status fixture, executable attach fixture, and Herdr API fixture without external setup variables.
-The Herdr fixture refuses create, focus restoration, close, and post-close gone confirmation unless the session/socket-wide presentation lock is held.
-It reports an exact attach process plus a second foreground process to prove that ambiguous topology preserves the pane and journal instead of authorizing retirement.
-
-```sh
-NM_OUT=$(bin/fm-test-run.sh tests/fm-no-mistakes-ready.test.sh)
-NM_STATUS=$?
-printf '%s\n' "$NM_OUT" | sed -n '/^ok - /p'
-test "$NM_STATUS" -eq 0
-```
-
-Exact filtered output:
-
-```text
-ok - fm-no-mistakes-ready: help renders the full mechanics header
-ok - fm-no-mistakes-ready: readiness binds Firstmate-reviewed evidence bytes
-ok - fm-no-mistakes-ready: Herdr recovery requires Firstmate and exact attach topology
-ok - fm-no-mistakes-ready: monitor IDs are rejected before lock-path authority
-```
-
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

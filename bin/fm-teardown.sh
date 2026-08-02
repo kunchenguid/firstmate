@@ -45,11 +45,6 @@
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
-# A task carrying state/<id>.no-mistakes-monitor is reconciled before any
-# destructive teardown step.
-# Teardown proceeds only after the exact terminal attach surface is confirmed
-# retired; an active, unreadable, focused, repurposed, or unconfirmed monitor
-# preserves its journal and refuses cleanup, even with --force.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, locks each
@@ -459,18 +454,6 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
-NO_MISTAKES_MONITOR_JOURNAL="$STATE/$ID.no-mistakes-monitor"
-if [ -e "$NO_MISTAKES_MONITOR_JOURNAL" ] || [ -L "$NO_MISTAKES_MONITOR_JOURNAL" ]; then
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      "$SCRIPT_DIR/fm-no-mistakes-ready.sh" monitor-reconcile "$ID"; then
-    echo "REFUSED: no-mistakes monitor reconciliation failed for task $ID; preserving task state." >&2
-    exit 1
-  fi
-  if [ -e "$NO_MISTAKES_MONITOR_JOURNAL" ] || [ -L "$NO_MISTAKES_MONITOR_JOURNAL" ]; then
-    echo "REFUSED: no-mistakes monitor for task $ID is still active or not safely retired; preserving task state." >&2
-    exit 1
-  fi
-fi
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main

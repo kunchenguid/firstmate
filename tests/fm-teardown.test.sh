@@ -2591,33 +2591,6 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
-test_no_mistakes_monitor_blocks_teardown_until_reconciled() {
-  local case_dir rc
-  case_dir=$(make_case no-mistakes-monitor-guard)
-  write_meta "$case_dir" local-only ship
-  cat > "$case_dir/state/task-x1.no-mistakes-monitor" <<'EOF'
-version=0
-task=task-x1
-run=RUNAMBIG1
-submitted_head=0123456789abcdef
-session=test
-workspace=w1
-EOF
-
-  set +e
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 1 "$rc" "monitor-guard: teardown must refuse an unreconciled attach surface"
-  assert_grep "no-mistakes monitor reconciliation failed" "$case_dir/stderr" \
-    "monitor-guard: teardown did not explain its monitor refusal"
-  [ -f "$case_dir/state/task-x1.meta" ] || fail "monitor-guard: teardown removed task metadata"
-  [ -d "$case_dir/wt" ] || fail "monitor-guard: teardown returned the worktree"
-  [ -f "$case_dir/state/task-x1.no-mistakes-monitor" ] || fail "monitor-guard: teardown discarded the monitor journal"
-  pass "teardown preserves task state until the no-mistakes presentation monitor is safely reconciled"
-}
-
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present

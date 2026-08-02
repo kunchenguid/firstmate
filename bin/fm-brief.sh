@@ -386,10 +386,7 @@ EOF
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then load its \`no-mistakes-readiness\` skill and return the task to you for the durable implementation-readiness preflight.
-Do not invoke no-mistakes until that Firstmate-owned preflight reports \`READY\` for your current implementation commit.
-If it reports \`NOT_READY\`, keep the work in this implementation session, correct it, commit it, and repeat the preflight instead of asking the pipeline to finish the feature.
-After \`READY\`, Firstmate will instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -431,7 +428,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it except through the Firstmate-owned readiness helper when the \`no-mistakes-readiness\` skill instructs you to write this task's private evidence record.
+2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
