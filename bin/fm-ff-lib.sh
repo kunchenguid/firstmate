@@ -25,6 +25,8 @@
 # shared default branch or any other worktree's checkout.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -229,20 +231,6 @@ dirty_status() {
   else
     git -C "$dir" status --porcelain 2>/dev/null | head -1
   fi
-}
-
-secondmate_registry_field() {
-  local reg=$1 id=$2 key=$3 line value
-  [ -f "$reg" ] || return 1
-  line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
-  [ -n "$line" ] || return 1
-  case "$key" in
-    home) value=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//') ;;
-    projects) value=$(printf '%s\n' "$line" | sed -n 's/.*; projects:[[:space:]]*\([^;)]*\); added .*/\1/p' | sed 's/[[:space:]]*$//') ;;
-    *) return 1 ;;
-  esac
-  [ -n "$value" ] || return 1
-  printf '%s\n' "$value"
 }
 
 # List this home's LIVE secondmate direct reports from state/<id>.meta records.

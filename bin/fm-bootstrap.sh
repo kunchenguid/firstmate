@@ -8,6 +8,7 @@
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
+#                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
@@ -64,7 +65,16 @@
 #          with update --archive-body and mv [<id>...]); an installed but
 #          incompatible build reports MISSING like no-mistakes. A compatible
 #          tasks-axi default backend is silent. quota-axi is required for the
-#          agent-owned dispatch-profile array procedure in AGENTS.md section 4.
+#          agent-owned dispatch-profile array procedure in AGENTS.md section 4
+#          and .agents/skills/quota-array-dispatch/SKILL.md, and is also version
+#          gated by fm-quota-axi-lib.sh, which owns that floor and its rationale.
+#          An older build reports MISSING like no-mistakes rather than passing
+#          silently while emitting auth semantics dispatch cannot scope.
+#          On a primary home, the locked mutable path materializes the visible
+#          default config/startup-memory-budget=7500 when absent. It never
+#          guesses at malformed or unsafe existing files, and secondmate homes
+#          await the primary-authoritative inherited value instead of creating
+#          their own.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -101,12 +111,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -447,7 +461,7 @@ secondmate_liveness_sweep() {
     [ -n "$target" ] || target="$window"
     agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
     case "$harness" in
-      claude|codex|opencode|pi|grok) ;;
+      claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
       *)
         case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
         ;;
@@ -532,31 +546,31 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-NO_MISTAKES_MIN_MAJOR=1
-NO_MISTAKES_MIN_MINOR=31
-NO_MISTAKES_MIN_PATCH=2
+NO_MISTAKES_MIN=1.31.2
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
-no_mistakes_version_parts() {
-  local output
-  command -v no-mistakes >/dev/null 2>&1 || return 1
-  output=$(no-mistakes --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1
-}
-
-no_mistakes_compatible() {
-  local parts major minor patch extra
-  parts=$(no_mistakes_version_parts) || return 1
+# Shared semantic-version floor for the tool gates below. A version string that
+# cannot be parsed into exactly one major.minor.patch triple is incompatible,
+# never assumed current, so a development or vendored build cannot pass a floor
+# it was never checked against.
+tool_version_at_least() {  # <tool> <min-version>
+  local tool=$1 min=$2 output parts major minor patch extra
+  local min_major min_minor min_patch min_extra
+  command -v "$tool" >/dev/null 2>&1 || return 1
+  output=$("$tool" --version 2>/dev/null) || return 1
+  parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
   IFS=' ' read -r major minor patch extra <<< "$parts"
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  [ "$major" -gt "$NO_MISTAKES_MIN_MAJOR" ] && return 0
-  [ "$major" -eq "$NO_MISTAKES_MIN_MAJOR" ] || return 1
-  [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
-  [ "$minor" -eq "$NO_MISTAKES_MIN_MINOR" ] || return 1
-  [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
+  IFS='.' read -r min_major min_minor min_patch min_extra <<< "$min"
+  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
+  [ "$major" -gt "$min_major" ] && return 0
+  [ "$major" -eq "$min_major" ] || return 1
+  [ "$minor" -gt "$min_minor" ] && return 0
+  [ "$minor" -eq "$min_minor" ] || return 1
+  [ "$patch" -ge "$min_patch" ]
 }
 
 x_mode_write_if_changed() {
@@ -630,7 +644,7 @@ x_mode_remove_artifact() {
 # applying a cadence transition to a running watcher is the caller's job via
 # the emitted harness-aware supervision repair instruction.
 x_mode_setup() {
-  local env_file token shim cadence shim_body cadence_body tool missing
+  local env_file token shim cadence shim_body cadence_body tool missing shim_home
   env_file="$FM_HOME/.env"
   shim="$STATE/x-watch.check.sh"
   cadence="$CONFIG/x-mode.env"
@@ -693,9 +707,16 @@ x_mode_setup() {
 
   mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
 
-  shim_body=$(fmx_poll_shim_content "$FM_HOME" "$FM_ROOT")
+  case "$FM_HOME" in
+    /*) shim_home=$FM_HOME ;;
+    *)
+      shim_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) \
+        || { fmx_arm_failed; return 0; }
+      ;;
+  esac
+  shim_body=$(fmx_poll_shim_content "$shim_home" "$FM_ROOT")
   x_mode_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
-  fmx_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT" \
+  fmx_poll_shim_valid "$shim" "$shim_home" "$FM_ROOT" \
     || { fmx_arm_failed; return 0; }
 
   cadence_body=$(cat <<'EOF'
@@ -724,15 +745,15 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","grok"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
       elif $h == "grok" then (["low","medium","high"] | index($e))
-      elif $h == "pi" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "opencode" then false
+      elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "opencode" or $h == "kimi" then false
       else true
       end;
     def profiles($value):
@@ -808,6 +829,18 @@ crew_dispatch_validate() {
   fi
 }
 
+startup_memory_budget_setup() {
+  # Primary bootstrap owns default publication. A secondmate is deliberately
+  # passive here because its setting must converge from the primary through the
+  # inherited-local-material contract rather than becoming a local authority.
+  if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+    return 0
+  fi
+  if ! fm_startup_memory_budget_materialize "$CONFIG"; then
+    echo "STARTUP_MEMORY_BUDGET: invalid config/$FM_STARTUP_MEMORY_BUDGET_FILE - $FM_STARTUP_MEMORY_BUDGET_ERROR"
+  fi
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -830,6 +863,7 @@ fi
 # runnable. Detect-only sessions never touch state.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
+  startup_memory_budget_setup
 fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
@@ -849,8 +883,11 @@ if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
+if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+fi
+if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
+  echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"

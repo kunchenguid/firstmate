@@ -77,7 +77,7 @@ There is a narrow visible race between those calls that no current Zellij flag c
 Literal send uses bracketed paste followed by a separate explicit Enter.
 The adapter supports `Enter`, `Esc`, and the one-argument key expression `Ctrl c` through the shared key vocabulary.
 Zellij exposes no cursor-row, ANSI composer style, or native agent-state signal, so submit acknowledgement remains content-delta based.
-This can distinguish no change from a changed screen but is less precise than tmux's cursor row or Herdr's native state plus structural classifier.
+This can distinguish no change from a changed screen but is less precise than tmux's structural box reader or Herdr's native state plus structural classifier.
 
 Viewport capture has no line-bound option.
 Routine reads use `dump-screen` and larger peeks use `dump-screen --full`, followed by local trimming.
@@ -91,7 +91,8 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 
 - Zellij is experimental and explicit-only.
 - All homes share one session and tab bar; scoped titles prevent cross-home identity collisions but do not create per-home visual containers.
-- There is no native busy or push-event signal, so supervision uses capture/hash and busy-regex polling.
+- There is no native busy or push-event signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
+  Grok alone retains its isolated rendered-tail fallback.
 - There is no verified agent-process liveness signal, so a dead Zellij secondmate is reported inconclusive rather than auto-respawned.
 - New-tab focus restoration has a narrow visible race.
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.

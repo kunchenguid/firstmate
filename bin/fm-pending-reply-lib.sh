@@ -573,8 +573,24 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
   [ "$age" -ge "$grace" ]
 }
 
-fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label]
-  local backend=$1 target=$2 expected_label=${3-} native tail40
+# fm_pending_reply_backend_observation: one busy/idle observation of a
+# SECONDMATE endpoint, without ever reading its conversation.
+#
+# Deliberately NOT the semantic busy-state contract (bin/fm-busy-lib.sh).
+# That contract covers ordinary task workers, whose turn lifecycle firstmate
+# wires at spawn; a secondmate has no such wiring because an idle secondmate
+# pane is healthy and it runs no supervised turn sequence of its own. This
+# observation exists only to notice a busy-then-idle transition around one
+# delivered request, so it is a delivery-confirmation signal in the same
+# category as the submit acknowledgement in bin/fm-tmux-lib.sh - never task
+# state, and never a source consumers can confuse with semantic state.
+#
+# It stays harness-scoped (fm_busy_lines_match with the recorded harness, no
+# global OR of every vendor signature), so one harness's output cannot make
+# another read busy, and a weak rendered idle degrades to `fallback-idle`,
+# which the caller accepts as idle only after its grace window.
+fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness]
+  local backend=$1 target=$2 expected_label=${3-} harness=${4-} native tail40
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')
   case "$native" in
     busy|idle) printf '%s' "$native"; return 0 ;;
@@ -582,7 +598,7 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label]
   tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
+    | fm_busy_lines_match "$harness"; then
     printf 'busy'
   else
     printf 'fallback-idle'
@@ -925,7 +941,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home
+  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness
   local observation observation_task found i
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
@@ -986,10 +1002,12 @@ fm_pending_reply_tick() {  # <state-dir>
     target=
     busy=unknown
     sm_home=
+    harness=
     if [ -f "$meta" ]; then
       backend=$(fm_backend_of_meta "$meta")
       target=$(fm_backend_target_of_meta "$meta")
       sm_home=$(fm_meta_get "$meta" home)
+      harness=$(fm_meta_get "$meta" harness)
       if [ -n "$target" ]; then
         label="fm-$task_id"
         observation=
@@ -1002,7 +1020,7 @@ fm_pending_reply_tick() {  # <state-dir>
           break
         done
         if [ "$found" = 0 ]; then
-          observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label")
+          observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           observation_tasks+=("$task_id")
           observation_values+=("$observation")
         fi

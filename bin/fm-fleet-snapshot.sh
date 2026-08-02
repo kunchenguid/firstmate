@@ -839,7 +839,7 @@ BASH
         | select(startswith("- "))
         | (capture("^- (?<id>[^[:space:]]+)")?) as $id
         | select($id != null)
-        | (capture("\\(home:[[:space:]]*(?<home>[^;)]*);")?) as $home
+        | (capture("^.*\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?) as $home
         | {id:$id.id,home:($home.home // null),registered:true,
            registry_error:(if $home == null or ($home.home | length) == 0 then "registry entry has no home" else null end)} ]
       | group_by(.id)

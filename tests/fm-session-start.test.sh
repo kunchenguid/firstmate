@@ -314,6 +314,9 @@ SH
 
 make_fake_herdr_secondmate_recovery() {
   local fakebin=$1
+  # The recovery kill now requires the shared named-session lock and an exact
+  # focus snapshot. Keep a focused sibling tab so this test's husk close is
+  # provably non-workspace-emptying and never needs to signal a fake shell pid.
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -327,16 +330,19 @@ case "${1:-} ${2:-}" in
   "status --json")
     printf '%s\n' '{"client":{"protocol":14,"version":"test"},"server":{"running":true}}'
     ;;
+  "session list")
+    printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s.sock"}]}\n' "$state"
+    ;;
   "workspace list")
-    printf '{"result":{"workspaces":[{"workspace_id":"ws1","label":"2ndmate-%s"}]}}\n' "$mate_id"
+    printf '{"result":{"workspaces":[{"workspace_id":"ws1","label":"2ndmate-%s","focused":true,"active_tab_id":"t-focus"}]}}\n' "$mate_id"
     ;;
   "tab list")
     if [ -e "$spawned" ]; then
-      printf '{"result":{"tabs":[{"tab_id":"t-new","workspace_id":"ws1","label":"fm-%s"}]}}\n' "$mate_id"
+      printf '{"result":{"tabs":[{"tab_id":"t-focus","workspace_id":"ws1","label":"captain","focused":true},{"tab_id":"t-new","workspace_id":"ws1","label":"fm-%s","focused":false}]}}\n' "$mate_id"
     elif [ -e "$killed" ]; then
-      printf '%s\n' '{"result":{"tabs":[]}}'
+      printf '%s\n' '{"result":{"tabs":[{"tab_id":"t-focus","workspace_id":"ws1","label":"captain","focused":true}]}}'
     else
-      printf '{"result":{"tabs":[{"tab_id":"t-old","workspace_id":"ws1","label":"fm-%s"}]}}\n' "$mate_id"
+      printf '{"result":{"tabs":[{"tab_id":"t-focus","workspace_id":"ws1","label":"captain","focused":true},{"tab_id":"t-old","workspace_id":"ws1","label":"fm-%s","focused":false}]}}\n' "$mate_id"
     fi
     ;;
   "tab create")
@@ -355,9 +361,9 @@ case "${1:-} ${2:-}" in
   "pane get")
     pane=${3:-}
     if [ "$pane" = p-new ] && [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new","tab_id":"t-new","workspace_id":"ws1"}}}'
     elif [ "$pane" = p-old ] && [ ! -e "$killed" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old","tab_id":"t-old","workspace_id":"ws1"}}}'
     else
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
@@ -406,15 +412,22 @@ SH
 # run_session_start <home> <root> <path>
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT (pi), GROK_AGENT (grok).
+# Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
+# (Pi family), GROK_AGENT (grok).
 # codex and opencode have no env markers (ancestry only). Without this, a local
 # claude/pi/grok session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.
 run_session_start() {
-  local home=$1 root=$2 path=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
-    "$SESSION_START"
+  local home=$1 root=$2 path=$3 pi_harness=${4:-}
+  if [ -n "$pi_harness" ]; then
+    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      "$SESSION_START"
+  else
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      "$SESSION_START"
+  fi
 }
 
 # prepare_session_start_secondmate <name>: a throwaway main home and Pi
@@ -453,7 +466,7 @@ EOF
 
 run_session_start_secondmate() {
   local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 spawned=$6 mode=$7
-  FM_BACKEND=tmux FM_FAKE_TMUX_MODE="$mode" FM_FAKE_TMUX_LOG="$log" \
+  TMUX='' FM_BACKEND=tmux FM_FAKE_TMUX_MODE="$mode" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_SPAWNED="$spawned" FM_FAKE_SECOND_MATE_HOME="$mate" \
     FM_FAKE_SECOND_MATE_ID="$SESSION_START_SECOND_MATE_ID" \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
@@ -959,7 +972,7 @@ EOF
   out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" shell)
 
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful bare-shell recovery should stay non-actionable"
-  assert_contains "$(cat "$log")" "kill-window -t firstmate:fm-$SESSION_START_SECOND_MATE_ID" \
+  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-$SESSION_START_SECOND_MATE_ID" \
     "the proven bare-shell path did not remove its existing dead endpoint"
   assert_contains "$(cat "$log")" "new-window" "the proven bare-shell path did not relaunch"
   assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
@@ -1252,6 +1265,29 @@ EOF
   pass "session start emits exactly one detected harness block and reports Pi extension load state"
 }
 
+test_pi_signed_primary_uses_pi_extensions_without_identity_normalization() {
+  local rec root home fakebin out
+  rec=$(new_world pi-signed-supervision-block)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi-signed
+
+  out=$(FM_FAKE_HARNESS=pi-signed run_session_start "$home" "$root" "$fakebin:$BASE_PATH" pi-signed)
+
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: pi-signed" \
+    "session start normalized a pi-signed primary to pi"
+  assert_contains "$out" "Mode: Pi extension background wake." \
+    "pi-signed primary did not reuse Pi's supervision protocol"
+  assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" \
+    "pi-signed primary skipped Pi extension validation"
+  assert_contains "$out" "restart pi-signed so $root/.pi/extensions/fm-primary-turnend-guard.ts and $root/.pi/extensions/fm-primary-pi-watch.ts auto-load" \
+    "pi-signed extension diagnostic did not preserve the executable identity"
+
+  pass "session start preserves pi-signed primary identity while applying Pi extension guarantees"
+}
+
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -1379,6 +1415,7 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
+test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker

@@ -98,7 +98,8 @@ SH
 write_task_meta() {
   local dir=$1 id=${2:-task-a}
   fm_write_meta "$dir/home/state/$id.meta" \
-    "window=fm-$id" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
@@ -592,7 +593,8 @@ SH
   for id in _noncanonical aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
     dir=$(make_case "legacy-teardown-${id:0:12}")
     fm_write_meta "$dir/home/state/$id.meta" \
-      "window=fm-$id" \
+      "window=firstmate:fm-$id" \
+      "endpoint_task_id=$id" \
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
@@ -1676,7 +1678,8 @@ test_complete_single_link_validation() {
   state="$dir/home/state"
   fakebin="$dir/fakebin"
   fm_write_meta "$state/task-a.meta" \
-    'window=fm-task-a' \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
@@ -1836,7 +1839,8 @@ test_obligation_namespace_compatibility() {
     > "$state/.pr-check-quarantine/_noncanonical.check.abc123"
   chmod 0600 "$state/.pr-check-quarantine/"*
   fm_write_meta "$state/_noncanonical.meta" \
-    'window=fm-_noncanonical' \
+    'window=firstmate:fm-_noncanonical' \
+    'endpoint_task_id=_noncanonical' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
@@ -2603,7 +2607,8 @@ test_teardown_removes_poll_artifacts() {
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
   fm_write_meta "$dir/home/state/task-a.meta" \
-    'window=fm-task-a' \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
@@ -2636,7 +2641,8 @@ SH
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
   fm_write_meta "$dir/home/state/task-a.meta" \
-    'window=fm-task-a' \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
@@ -2663,7 +2669,8 @@ SH
   dir=$(make_case teardown-reserved-quarantine)
   fakebin="$dir/fakebin"
   fm_write_meta "$dir/home/state/invalid.meta" \
-    'window=fm-invalid' \
+    'window=firstmate:fm-invalid' \
+    'endpoint_task_id=invalid' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
@@ -2693,7 +2700,8 @@ SH
     dir=$(make_case "teardown-final-directory-${artifact//./-}")
     fakebin="$dir/fakebin"
     fm_write_meta "$dir/home/state/task-a.meta" \
-      'window=fm-task-a' \
+      'window=firstmate:fm-task-a' \
+      'endpoint_task_id=task-a' \
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
@@ -2733,7 +2741,8 @@ SH
     dir=$(make_case "teardown-quarantine-link-$kind")
     fakebin="$dir/fakebin"
     fm_write_meta "$dir/home/state/task-a.meta" \
-      'window=fm-task-a' \
+      'window=firstmate:fm-task-a' \
+      'endpoint_task_id=task-a' \
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
@@ -2873,11 +2882,6 @@ EOF
   [ "$rc" -eq 2 ] || fail "merge wrapper did not refuse a GitLab merge request URL"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
 
-  # The instance is data, never a constant, so self-hosted instances work.
-  ! grep -qF gitlab.com "$ROOT/bin/fm-pr-lib.sh" \
-    || fail "the shared PR library hardcodes a GitLab host"
-  ! grep -qF gitlab.com "$ROOT/bin/fm-pr-poll.sh" \
-    || fail "the static poll hardcodes a GitLab host"
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 

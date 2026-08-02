@@ -117,10 +117,22 @@ fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
 }
 
-# fm_backend_tmux_kill: remove the task's window, best-effort. Mirrors
-# fm-teardown.sh's `tmux kill-window -t "$T" 2>/dev/null || true`.
+# fm_backend_tmux_kill: remove one explicitly named task window, best-effort.
+# Empty, omitted, and malformed targets return nonzero before invoking tmux so
+# tmux can never interpret an empty target as the caller's current window.
 fm_backend_tmux_kill() {  # <target>
-  tmux kill-window -t "$1" 2>/dev/null || true
+  local target=${1:-} session window
+  case "$target" in
+    *:*)
+      session=${target%%:*}
+      window=${target#*:}
+      ;;
+    *) return 1 ;;
+  esac
+  case "$session:$window" in
+    :*|*:|*:*:*) return 1 ;;
+  esac
+  tmux kill-window -t "=$session:=$window" 2>/dev/null || true
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
@@ -181,7 +193,7 @@ fm_backend_tmux_agent_state() {  # <target>
   }
   comm=${comm#-}
   case "$comm" in
-    *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     '') printf 'unreadable' ;;
     *) printf 'ambiguous' ;;

@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# Real-Herdr regression for the projected-cleanup focus flash (upstream
+# ogulcancelik/herdr#1621 family, live on 0.7.5 stable).
+# Part A reproduces the OLD path: an explicit last-pane close that empties a
+# non-focused workspace steals the focused workspace.
+# Part B proves the mitigation: the focus-safe emptying-close plan
+# (repositioning move plus pane-death removal) removes the doomed workspace
+# with no focus change and no corrective tab focus at all.
+# On a future release whose explicit close preserves focus, Part A records
+# that and Part B keeps outcome-only assertions, so no version is guessed.
+# Every CLI operation is routed through one guarded named non-default lab, and
+# lab teardown verifies that the default fleet session is byte-identical.
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+pass() { printf 'ok - %s\n' "$1"; }
+
+command -v herdr >/dev/null 2>&1 || { echo 'skip: herdr not found'; exit 0; }
+command -v jq >/dev/null 2>&1 || { echo 'skip: jq not found'; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo 'skip: python3 not found'; exit 0; }
+[ -x "$HERDR_LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $HERDR_LAB_HELPER"; exit 0; }
+
+HERDR_ORIGINAL_PATH=$PATH
+TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-focus-flash-e2e.XXXXXX")
+FAKEBIN="$TMP_ROOT/fakebin"
+mkdir -p "$FAKEBIN"
+
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-focus-flash-regression-r1)
+export HERDR_LAB_HELPER HERDR_LAB_SESSION HERDR_ORIGINAL_PATH
+B_SAMPLER_PID=
+B_SAMPLER_STOP=
+cleanup() {
+  local status=$?
+  if [ -n "$B_SAMPLER_STOP" ]; then
+    : > "$B_SAMPLER_STOP"
+  fi
+  if [ -n "$B_SAMPLER_PID" ]; then
+    wait "$B_SAMPLER_PID" 2>/dev/null || true
+  fi
+  env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=1
+  rm -rf "$TMP_ROOT"
+  exit "$status"
+}
+trap cleanup EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+
+# Keep the lab helper as the only CLI transport. Production adapter calls have
+# already appended the exact session; this shim strips that pair, refuses every
+# other caller-supplied session, and delegates the command to helper run.
+cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+args=("$@")
+last=$((${#args[@]} - 1))
+flag=$((last - 1))
+if [ "${#args[@]}" -ge 2 ] \
+  && [ "${args[$flag]}" = --session ] \
+  && [ "${args[$last]}" = "$HERDR_LAB_SESSION" ]; then
+  unset "args[$last]" "args[$flag]"
+fi
+set -- "${args[@]}"
+for arg in "$@"; do
+  case "$arg" in --session|--session=*) exit 9 ;; esac
+done
+exec env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"
+SH
+chmod +x "$FAKEBIN/herdr"
+
+lab() { env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
+mkws() {  # <label> -> "<workspace_id> <tab_id> <pane_id>"
+  lab workspace create --cwd "$ROOT" --label "$1" --no-focus \
+    | jq -er '"\(.result.workspace.workspace_id) \(.result.tab.tab_id) \(.result.root_pane.pane_id)"'
+}
+focus_snapshot() {
+  local list workspace tab tabs
+  list=$(lab workspace list) || return 1
+  workspace=$(printf '%s' "$list" | jq -er '[.result.workspaces[] | select(.focused == true)] | select(length == 1) | .[0].workspace_id') || return 1
+  tab=$(printf '%s' "$list" | jq -er --arg workspace "$workspace" '[.result.workspaces[] | select(.workspace_id == $workspace)] | select(length == 1) | .[0].active_tab_id') || return 1
+  tabs=$(lab tab list --workspace "$workspace") || return 1
+  printf '%s' "$tabs" | jq -e --arg tab "$tab" '([.result.tabs[] | select(.focused == true)] | length) == 1 and ([.result.tabs[] | select(.focused == true)][0].tab_id == $tab)' >/dev/null || return 1
+  printf '%s\t%s' "$workspace" "$tab"
+}
+ws_order() { lab workspace list | jq -er '[.result.workspaces[].workspace_id] | join(",")'; }
+wait_ws_gone() {  # <workspace_id>
+  local i=0
+  while [ "$i" -lt 80 ]; do
+    lab workspace get "$1" >/dev/null 2>&1 || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# --- Part A: the OLD path (plain explicit close) steals focus on 0.7.5 -----
+# The spacer keeps the focused anchor away from the doomed workspace's right
+# neighbor, where the 0.7.5 explicit close would land by coincidence.
+read -r A_DOOMED_WS _ A_DOOMED_PANE <<<"$(mkws flash-a-doomed)" || fail 'could not create the Part A doomed workspace'
+read -r _ _ _ <<<"$(mkws flash-a-spacer)" || fail 'could not create the Part A spacer workspace'
+read -r A_ANCHOR_WS A_ANCHOR_TAB _ <<<"$(mkws flash-a-anchor)" || fail 'could not create the Part A anchor workspace'
+read -r _ _ _ <<<"$(mkws flash-a-tail)" || fail 'could not create the Part A tail workspace'
+lab tab focus "$A_ANCHOR_TAB" >/dev/null || fail 'could not focus the Part A anchor'
+A_BEFORE=$(focus_snapshot) || fail 'could not capture the Part A pre-close focus'
+[ "$A_BEFORE" = "$(printf '%s\t%s' "$A_ANCHOR_WS" "$A_ANCHOR_TAB")" ] \
+  || fail 'Part A anchor focus does not match the intended workspace and tab'
+lab pane close "$A_DOOMED_PANE" >/dev/null || fail 'Part A explicit close failed'
+wait_ws_gone "$A_DOOMED_WS" || fail 'Part A doomed workspace survived the explicit close'
+A_AFTER=$(focus_snapshot) || fail 'could not capture the Part A post-close focus'
+STEAL_LIVE=0
+if [ "$A_AFTER" != "$A_BEFORE" ]; then
+  STEAL_LIVE=1
+  pass "old path: the explicit last-pane close of a non-focused workspace stole focus ($A_BEFORE -> $A_AFTER)"
+  lab tab focus "$A_ANCHOR_TAB" >/dev/null || fail 'could not restore the Part A anchor focus'
+else
+  pass 'old path note: this Herdr release preserves focus across the explicit close; continuing with outcome-only assertions'
+fi
+
+# --- Part B: the mitigation in the dangerous geometry ----------------------
+# The doomed workspace sits BEFORE the focused anchor and the anchor is not
+# last, the exact shape where an unrepositioned pane death also steals focus.
+read -r B_DOOMED_WS _ B_DOOMED_PANE <<<"$(mkws flash-b-doomed)" || fail 'could not create the Part B doomed workspace'
+read -r B_ANCHOR_WS B_ANCHOR_TAB _ <<<"$(mkws flash-b-anchor)" || fail 'could not create the Part B anchor workspace'
+read -r _ _ _ <<<"$(mkws flash-b-tail)" || fail 'could not create the Part B tail workspace'
+lab tab focus "$B_ANCHOR_TAB" >/dev/null || fail 'could not focus the Part B anchor'
+B_BEFORE=$(focus_snapshot) || fail 'could not capture the Part B pre-close focus'
+[ "$B_BEFORE" = "$(printf '%s\t%s' "$B_ANCHOR_WS" "$B_ANCHOR_TAB")" ] \
+  || fail 'Part B anchor focus does not match the intended workspace and tab'
+B_SURVIVOR_ORDER=$(ws_order | tr ',' '\n' | grep -v "^$B_DOOMED_WS\$" | paste -sd, -) \
+  || fail 'could not capture the Part B survivor order'
+
+CALL_LOG="$TMP_ROOT/call.log"
+B_FOCUS_SAMPLES="$TMP_ROOT/focus.samples"
+B_OPERATION_ACTIVE="$TMP_ROOT/operation.active"
+B_SAMPLER_READY="$TMP_ROOT/sampler.ready"
+B_SAMPLER_STOP="$TMP_ROOT/sampler.stop"
+: > "$CALL_LOG"
+: > "$B_FOCUS_SAMPLES"
+(
+  : > "$B_SAMPLER_READY"
+  while [ ! -e "$B_SAMPLER_STOP" ]; do
+    if [ -e "$B_OPERATION_ACTIVE" ]; then
+      if B_SAMPLE=$(focus_snapshot); then
+        printf '%s\n' "$B_SAMPLE" >> "$B_FOCUS_SAMPLES"
+      else
+        printf '%s\n' UNREADABLE >> "$B_FOCUS_SAMPLES"
+      fi
+    fi
+  done
+) &
+B_SAMPLER_PID=$!
+B_READY_ATTEMPT=0
+while [ ! -e "$B_SAMPLER_READY" ] && [ "$B_READY_ATTEMPT" -lt 100 ]; do
+  sleep 0.01
+  B_READY_ATTEMPT=$((B_READY_ATTEMPT + 1))
+done
+[ -e "$B_SAMPLER_READY" ] || fail 'the Part B focus sampler did not start'
+: > "$B_OPERATION_ACTIVE"
+B_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_FLASH_CALL_LOG="$CALL_LOG" bash -c '
+  . "$1/bin/backends/herdr.sh"
+  fm_backend_herdr_cli() {
+    local session=$1
+    shift
+    printf "%s\n" "$*" >> "$FM_FLASH_CALL_LOG"
+    HERDR_SESSION="$session" herdr "$@" --session "$session"
+  }
+  fm_backend_herdr_projection_close_pane_focus_preserving "$2" "$3"
+' _ "$ROOT" "$HERDR_LAB_SESSION" "$B_DOOMED_PANE" 2>&1)
+B_STATUS=$?
+rm -f "$B_OPERATION_ACTIVE"
+: > "$B_SAMPLER_STOP"
+wait "$B_SAMPLER_PID" 2>/dev/null || true
+B_SAMPLER_PID=
+[ "$B_STATUS" -eq 0 ] || fail "the production focus-preserving close failed (status $B_STATUS): $B_OUT"
+[ -s "$B_FOCUS_SAMPLES" ] || fail 'the Part B sampler captured no focus sample during the production close'
+B_WRONG_SAMPLE=$(grep -Fvx -- "$B_BEFORE" "$B_FOCUS_SAMPLES" | head -1)
+if [ -n "$B_WRONG_SAMPLE" ]; then
+  fail "the mitigation exposed a wrong or unreadable in-operation focus sample ($B_BEFORE -> $B_WRONG_SAMPLE)"
+fi
+wait_ws_gone "$B_DOOMED_WS" || fail 'the mitigation left the doomed workspace behind'
+if lab pane get "$B_DOOMED_PANE" >/dev/null 2>&1; then
+  fail 'the mitigation left the doomed pane behind'
+fi
+B_AFTER=$(focus_snapshot) || fail 'could not capture the Part B post-close focus'
+[ "$B_AFTER" = "$B_BEFORE" ] \
+  || fail "the mitigation changed the exact focused workspace or tab ($B_BEFORE -> $B_AFTER)"
+[ "$(ws_order)" = "$B_SURVIVOR_ORDER" ] \
+  || fail "the mitigation left a lasting workspace order change ($B_SURVIVOR_ORDER -> $(ws_order))"
+grep -q '^pane process-info' "$CALL_LOG" || fail 'the idle-shell proof never ran'
+pass 'mitigation: every in-operation sample preserved exact focus while the doomed workspace was removed'
+
+if [ "$STEAL_LIVE" = 1 ]; then
+  grep -q '^tab focus' "$CALL_LOG" \
+    && fail 'the corrective tab focus fired, so a wrong-focus interval existed on the defective release'
+  grep -q '^pane close' "$CALL_LOG" \
+    && fail 'the focus-unsafe explicit close was used on the defective release'
+  pass 'mitigation: no explicit close and no corrective focus were needed on the defective release'
+fi
+
+STATUS=$(lab status --json) || fail 'could not read final named-lab version evidence'
+printf 'evidence: herdr=%s protocol=%s steal_live=%s default-session-tripwire=armed\n' \
+  "$(printf '%s' "$STATUS" | jq -r '.client.version')" \
+  "$(printf '%s' "$STATUS" | jq -r '.client.protocol')" \
+  "$STEAL_LIVE"

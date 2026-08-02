@@ -156,7 +156,19 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/parallel-ideation/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/process-event-sources/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/quota-array-dispatch/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -336,11 +348,27 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/harness-builds.md",
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/process-event-sources.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/public-followup.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/stow-memory.md",
       "audience": "maintainer-verification"
     },
     {

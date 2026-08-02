@@ -70,6 +70,54 @@ unit_clear_stale() {
   rm -rf "$st"
 }
 
+unit_relative_paths_are_absolute_before_daemon_launch() {
+  local root home state out status linked_home
+  root=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-relative-home.XXXXXX")
+  mkdir -p "$root/home/state" "$root/cdpath/home/state"
+  home=$(cd "$root/home" && pwd -P)
+  state="$home/state"
+  out=$(
+    cd "$root" || exit 1
+    CDPATH="$root/cdpath" FM_HOME=home FM_STATE_OVERRIDE=home/state \
+      bash -c '. "$1"; printf "%s\n%s\n" "$FM_HOME" "$FM_AFK_LAUNCH_STATE"' _ "$LAUNCH"
+  )
+  if [ "$out" = "$home"$'\n'"$state" ]; then
+    pass "launcher paths: relative home and state ignore CDPATH before daemon command construction"
+  else
+    fail "launcher paths: relative home or state remained cwd-dependent ($out)"
+  fi
+  linked_home="$root/home-link"
+  ln -s "$root/home" "$linked_home"
+  out=$(FM_HOME="$linked_home" FM_STATE_OVERRIDE="$linked_home/state" \
+    bash -c '. "$1"; printf "%s\n%s\n" "$FM_HOME" "$FM_AFK_LAUNCH_STATE"' _ "$LAUNCH")
+  if [ "$out" = "$linked_home"$'\n'"$linked_home/state" ]; then
+    pass "launcher paths: absolute symlink spellings are preserved"
+  else
+    fail "launcher paths: absolute symlink spelling changed ($out)"
+  fi
+  out=$(
+    cd "$root" || exit 1
+    FM_HOME=missing-home "$LAUNCH" help 2>&1
+  )
+  status=$?
+  if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -F "FM_HOME directory cannot be resolved: missing-home" >/dev/null; then
+    pass "launcher paths: unresolved relative FM_HOME fails loudly"
+  else
+    fail "launcher paths: unresolved relative FM_HOME did not name the bad input ($out)"
+  fi
+  out=$(
+    cd "$root" || exit 1
+    FM_HOME=home FM_STATE_OVERRIDE=missing-state "$LAUNCH" help 2>&1
+  )
+  status=$?
+  if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -F "FM_STATE_OVERRIDE directory cannot be resolved: missing-state" >/dev/null; then
+    pass "launcher paths: unresolved relative FM_STATE_OVERRIDE fails loudly"
+  else
+    fail "launcher paths: unresolved relative FM_STATE_OVERRIDE did not name the bad input ($out)"
+  fi
+  rm -rf "$root"
+}
+
 # ---------------------------------------------------------------------------
 # UNIT 2: a FRESH entry clears; a REFRESH (daemon already alive) preserves the
 # current session's buffered escalations.
@@ -248,12 +296,23 @@ unit_signal_exits_with_lock_cleanup() {
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
   child=$!
-  for _ in $(seq 1 40); do
-    [ -d "$st/state/.afk-launch.lock" ] && break
+  # Signal only once the lifecycle actually holds its lock. Killing before the
+  # lock exists tests nothing, and on a loaded machine it used to race: the
+  # lock could be created just after the kill and outlive the process.
+  local locked=0 _
+  for _ in $(seq 1 100); do
+    if [ -d "$st/state/.afk-launch.lock" ]; then locked=1; break; fi
     sleep 0.05
   done
+  [ "$locked" = 1 ] || fail "launcher signal: lifecycle never acquired its lock to interrupt"
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
+  # The signal handler releases the lock as it exits; give that removal a
+  # bounded settle rather than sampling the instant `wait` returns.
+  for _ in $(seq 1 100); do
+    [ -e "$st/state/.afk-launch.lock" ] || break
+    sleep 0.05
+  done
   if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ]; then
     pass "launcher signal: TERM exits and releases the lifecycle lock"
   else
@@ -861,6 +920,7 @@ e2e_tmux() {
 }
 
 unit_clear_stale
+unit_relative_paths_are_absolute_before_daemon_launch
 unit_fresh_vs_refresh
 unit_stop_ordering
 unit_stop_rejects_reused_pid

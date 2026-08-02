@@ -97,7 +97,7 @@ SH
 test_tmux_agent_state_classifies() {
   local fb out
 
-  for harness in claude codex opencode grok; do
+  for harness in claude codex opencode grok kimi pi pi-signed pi-launcher Pi; do
     fb=$(make_probe_tmux "$TMP_ROOT/tmux-$harness" "$harness")
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win' "$ROOT")
     [ "$out" = alive ] || fail "a live $harness foreground process should classify as alive, got '$out'"
@@ -206,7 +206,7 @@ test_agent_state_dispatcher_and_compatibility() {
 make_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi pi-signed
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -349,7 +349,7 @@ test_sweep_respawns_confirmed_dead_secondmate() {
 
   assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
     "a successfully respawned secondmate should be handled silently"
-  assert_contains "$(cat "$log")" "kill-window -t firstmate:fm-sm1" \
+  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" \
     "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
@@ -389,6 +389,25 @@ test_sweep_respawns_authoritatively_missing_pi_secondmate() {
   assert_contains "$(cat "$log")" "new-window" "an authoritatively missing Pi secondmate should be relaunched"
   assert_not_contains "$(cat "$log")" "kill-window" "an absent window should not need a destructive pre-kill"
   pass "sweep: an authoritatively missing Pi secondmate window is relaunched"
+}
+
+test_sweep_respawns_authoritatively_missing_pi_signed_secondmate() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-missing-pi-signed)
+  printf '%s\n' pi-signed > "$w/home/config/secondmate-harness"
+  add_sm_home "$w" sm1 firstmate:fm-sm1 pi-signed
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+
+  assert_not_contains "$out" "unverified for recovery" \
+    "a recorded pi-signed secondmate should be verified for recovery"
+  assert_contains "$(cat "$log")" "new-window" \
+    "an authoritatively missing pi-signed secondmate should be relaunched"
+  assert_not_contains "$(cat "$log")" "kill-window" \
+    "an absent pi-signed window should not need a destructive pre-kill"
+  pass "sweep: an authoritatively missing pi-signed secondmate window is relaunched"
 }
 
 test_sweep_never_acts_on_ambiguous_existing_process() {
@@ -514,6 +533,7 @@ test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
+test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure

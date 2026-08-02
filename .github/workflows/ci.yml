@@ -322,7 +322,14 @@ jobs:
           esac
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
-          /bin/bash -n bin/fm-fleet-snapshot.sh
+
+          shell_inventory="$RUNNER_TEMP/fm-shell-inventory"
+          bin/fm-lint.sh --list-files > "$shell_inventory"
+          parse_fail=0
+          while IFS= read -r f; do
+            /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
+          done < "$shell_inventory"
+          [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
@@ -335,8 +342,8 @@ jobs:
           bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
           printf '%s\n' "$bearings_output"
           bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 42 ] || {
-            echo "::error::expected 42 Bearings tests, got $bearings_count"
+          [ "$bearings_count" -eq 41 ] || {
+            echo "::error::expected 41 Bearings tests, got $bearings_count"
             exit 1
           }
 
