@@ -1699,8 +1699,12 @@ spawn_send_key "$T" Enter
 # the spawn. Secondmates are out of scope. Ownership stays on recorded pane/tab
 # ids in meta (docs/herdr-backend.md).
 if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ] && [ -n "${HERDR_DISPLAY_NAME:-}" ]; then
+  HERDR_RENAME_TAB_ID=$HERDR_TAB_ID
+  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+    HERDR_RENAME_TAB_ID=
+  fi
   fm_backend_herdr_apply_display_name \
-    "$HERDR_SES" "$HERDR_PANE_ID" "$HERDR_TAB_ID" "$HERDR_DISPLAY_NAME" || true
+    "$HERDR_SES" "$HERDR_PANE_ID" "$HERDR_RENAME_TAB_ID" "$HERDR_DISPLAY_NAME" || true
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
