@@ -45,7 +45,9 @@
 # `fold` is the first-class alternative to a second decision: it appends this
 # pass's finding to an existing open hold's body and records the fold in the new
 # origin's metadata, so the origin still satisfies the completion gate without
-# creating a duplicate captain decision.
+# creating a duplicate captain decision. It refuses up front, before touching the
+# target, when the origin has no metadata to record the fold in, so a reported
+# fold always satisfies `complete --folded`.
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -69,14 +71,16 @@
 # marked Done. A failure before the final step leaves the captain hold open.
 #
 # The completion and teardown gates accept a decision as durably resolved when it
-# is closed and carries a decision record, whatever wrote that record, and when
-# Done retention has rotated it into data/done-archive.md. A decision closed with
-# no record at all is still refused, because that is the loss the gate exists to
-# prevent; the gate checks that an answer survives, not that this script formatted
-# it.
+# is closed and carries a decision record, whatever wrote that record, including
+# once Done retention has rotated it into data/done-archive.md. A decision closed
+# with no record at all is still refused, because that is the loss the gate exists
+# to prevent; the gate checks that an answer survives, not that this script
+# formatted it. The archived shape is held to the same record test as the live
+# one, so retention can never turn a refused closure into an accepted one.
 #
-# Environment: FM_DECISION_AGING_DAYS (default 3) sets the ageing threshold and
-# FM_DECISION_NOW (YYYY-MM-DD) pins today's date for tests.
+# Environment: FM_DECISION_AGING_DAYS (default 3) is the one ageing threshold,
+# shared with bin/fm-fleet-snapshot.sh so the CLI listing and the fleet view can
+# never disagree; FM_DECISION_NOW (YYYY-MM-DD) pins today's date for tests.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -363,20 +367,58 @@ verify_hold_resolved() {  # <hold-id>
   return 1
 }
 
-# True when the backlog's Done retention has rotated <hold-id> into the archive.
-# The archived row is durable proof the decision was closed, so retention alone
-# must never make a reviewed inventory unverifiable.
-archived_done_record() {  # <hold-id>
+# The single record test every closed captain decision passes, whether its body
+# came from the live backlog or from the Done archive.
+#
+# A decision closed outside this script - because firstmate decided it, or
+# because an earlier captain answer already settled it - is durably resolved when
+# its body carries a decision record. The gate exists to stop a decision
+# vanishing unanswered, not to insist on this script's own formatting. A body
+# still carrying the untouched registration record says in its own words that no
+# answer was ever written, so that closure is refused.
+closed_body_has_record() {  # <body>
+  local body=$1
+  case "$body" in
+    *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
+  esac
+  case "$body" in
+    ''|'""'|'"-"') return 1 ;;
+    *"State: awaiting captain decision."*) return 1 ;;
+  esac
+  return 0
+}
+
+# The body of <hold-id>'s archived row, once the backlog's Done retention has
+# rotated it into data/done-archive.md; exit 1 when no such row exists. The
+# archive preserves the entry's indented body lines verbatim, so the archived
+# shape is held to the same record test as the live one and retention can neither
+# make a reviewed inventory unverifiable nor launder a recordless closure.
+archived_done_body() {  # <hold-id>
   local archive="$DATA/done-archive.md"
   [ -f "$archive" ] || return 1
-  grep -F -- "- [x] $1 - " "$archive" >/dev/null && return 0
-  grep -F -- "- [X] $1 - " "$archive" >/dev/null
+  awk -v id="$1" '
+    BEGIN { want = "- [x] " id " - "; wantu = "- [X] " id " - " }
+    index($0, want) == 1 || index($0, wantu) == 1 {
+      found = 1; inbody = 1; body = ""; pending = ""; next
+    }
+    inbody && /^  / {
+      body = body pending substr($0, 3) "\n"; pending = ""; next
+    }
+    inbody && /^[[:space:]]*$/ { pending = pending "\n"; next }
+    inbody { inbody = 0; pending = "" }
+    END { if (!found) exit 1; printf "%s", body }
+  ' "$archive"
 }
 
 verify_hold_durable() {  # <hold-id>
   local id=$1 show state held kind hold_kind body
   if ! show=$(task_show "$id"); then
-    archived_done_record "$id" && return 0
+    if body=$(archived_done_body "$id"); then
+      if closed_body_has_record "$body"; then
+        return 0
+      fi
+      fail "captain decision $id was archived with no decision record; record the answer in its body"
+    fi
     fail "captain decision $id is absent from $FM_HOME/data/backlog.md and its Done archive"
   fi
   state=$(show_field "$show" state)
@@ -388,20 +430,9 @@ verify_hold_durable() {  # <hold-id>
     return 0
   fi
   if [ "$state" = "done" ] && [ "$kind" = captain ]; then
-    case "$body" in
-      *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
-    esac
-    # A decision closed outside this script - because firstmate decided it, or
-    # because an earlier captain answer already settled it - is durably resolved
-    # when its body carries a decision record. The gate exists to stop a decision
-    # vanishing unanswered, not to insist on this script's own formatting.
-    # A body still carrying the untouched registration record says in its own
-    # words that no answer was ever written, so that closure is still refused.
-    case "$body" in
-      ''|'""'|'"-"') : ;;
-      *"State: awaiting captain decision."*) : ;;
-      *) return 0 ;;
-    esac
+    if closed_body_has_record "$body"; then
+      return 0
+    fi
     fail "captain decision $id was closed with no decision record; record the answer in its body"
   fi
   fail "captain decision $id is neither actively held nor durably resolved"
@@ -557,6 +588,12 @@ command_fold() {
   case "$into" in
     "$origin"-decision-*) fail "$into already belongs to $origin; use its own decision key instead" ;;
   esac
+  # A fold only means something once it is recorded in the origin's metadata,
+  # which is what lets `complete --folded` accept the origin. Without that file
+  # the fold cannot be recorded, so refuse before touching the target rather than
+  # reporting a success the completion gate will later reject.
+  meta="$STATE/$origin.meta"
+  [ -f "$meta" ] || fail "origin $origin has no runtime metadata at $meta, so the fold cannot be recorded; fold from the home that owns $origin"
   ( verify_hold_active "$into" ) >/dev/null 2>&1 \
     || fail "fold target $into is not an open captain decision; a resolved decision needs a new decision key"
 
@@ -573,12 +610,9 @@ command_fold() {
       ;;
   esac
 
-  meta="$STATE/$origin.meta"
-  if [ -f "$meta" ]; then
-    previous=$(meta_value "$meta" decision_folds)
-    folds=$(sorted_key_union "$previous" "$into")
-    [ "$previous" = "$folds" ] || printf 'decision_folds=%s\n' "$folds" >> "$meta"
-  fi
+  previous=$(meta_value "$meta" decision_folds)
+  folds=$(sorted_key_union "$previous" "$into")
+  [ "$previous" = "$folds" ] || printf 'decision_folds=%s\n' "$folds" >> "$meta"
   printf 'folded: %s -> %s\n' "$origin" "$into"
 }
 

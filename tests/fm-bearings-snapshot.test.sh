@@ -966,13 +966,24 @@ EOF
       and (.decisions_open[0].id == "sample-stalled-decision")
   ' >/dev/null || fail "an ageing decision must carry its age and lead the section: $json"
 
-  # Under the bounded cap, the ageing decision must still be the one shown.
-  for i in $(seq 1 30); do
-    printf -- '- [ ] sample-noise-%s - Noise %s (repo: sample) (kind: captain) (since 2026-08-02) (hold: raised today) (hold-kind: captain)\n' \
-      "$i" "$i" >> "$home/data/backlog.md"
-  done
+  # Under the bounded cap, the ageing decision must still be the one shown. The
+  # filler rows have to land in Queued: a Done row is not captain-actionable, so
+  # appending them past the `## Done` heading would leave the cap unexercised.
+  {
+    printf '## In flight\n\n## Queued\n'
+    printf -- '- [ ] sample-stalled-decision - Stalled question (repo: sample) (kind: captain) (since 2026-07-26) (hold: waiting on the captain) (hold-kind: captain)\n'
+    printf -- '- [ ] sample-fresh-decision - Fresh question (repo: sample) (kind: captain) (since 2026-08-02) (hold: raised today) (hold-kind: captain)\n'
+    for i in $(seq 1 30); do
+      printf -- '- [ ] sample-noise-%s - Noise %s (repo: sample) (kind: captain) (since 2026-08-02) (hold: raised today) (hold-kind: captain)\n' \
+        "$i" "$i"
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
   json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-02T12:00:00Z \
     FM_SNAPSHOT_NOW=2026-08-02T12:00:00Z NET_LOG="$home/net.log" "$BEARINGS" --json)
+  printf '%s' "$json" | jq -e --argjson cap "${FM_BEARINGS_DECISIONS:-20}" '
+    (.decisions_open | length) == $cap and $cap < 32
+  ' >/dev/null || fail "the filler decisions must actually exceed the bounded cap: $json"
   printf '%s' "$json" | jq -e '
     .decisions_open | any(.[]; .id == "sample-stalled-decision" and .aging == true)
   ' >/dev/null || fail "the ageing decision must survive the bounded cap: $json"

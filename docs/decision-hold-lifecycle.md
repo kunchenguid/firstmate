@@ -22,6 +22,7 @@ The `open` subcommand prints the same listing on demand, with `--aging-only` for
 The `fold` subcommand is the alternative path when the finding belongs to a decision that is already open.
 It appends `Also raised by <origin>: <note>` to the target's body through `tasks-axi update --body-file`, skipping the write when the same marker is already present, and unions the target identity into the origin's `decision_folds=` metadata.
 It refuses a target that is not an actively held captain decision and refuses an origin folding into its own decision namespace.
+It also refuses, before writing anything to the target, an origin with no `state/<origin>.meta` to record the fold in, because a fold that cannot be recorded would report success and then be rejected by `complete --folded`.
 Reading the target body decodes the JSON string literal tasks-axi emits, so `jq` is required for `fold` and `resolve`.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
@@ -54,11 +55,14 @@ Rejecting either strands the finished investigation that found the decision, whi
 
 The gate is not weakened, because each accepted shape still requires durable evidence that the decision was answered.
 A closed decision whose body is empty, or whose body still carries the untouched registration record saying `State: awaiting captain decision.`, is refused: it says in its own words that no answer was ever written down, which is exactly the loss this gate exists to prevent.
+The archive preserves an entry's indented body lines verbatim, so the fourth shape reads them and applies that same record test through one shared predicate.
+Retention therefore only changes where a decision's record lives, never whether the gate accepts it: a recordless closure that is refused in the live backlog stays refused after it rotates into the archive.
 `--decided-by firstmate` records a firstmate-decided closure honestly rather than attributing it to the captain.
 
 ## Ageing
 
-Every captain-actionable backlog row carries `waiting_days`, the whole days since its `since` date, and `decision_aging`, true once that reaches `FM_SNAPSHOT_DECISION_AGING_DAYS` (default 3).
+Every captain-actionable backlog row carries `waiting_days`, the whole days since its `since` date, and `decision_aging`, true once that reaches `FM_DECISION_AGING_DAYS` (default 3).
+That is one variable for one policy: `bin/fm-fleet-snapshot.sh` and `bin/fm-decision-hold.sh` read the same name, so the fleet view and `open --aging-only` cannot disagree about which decisions are ageing.
 Both are computed in `bin/fm-fleet-snapshot.sh` from the existing `since` metadata that `tasks-axi add` already writes, so every decision registered before this behavior existed reports its age with no migration and no schema change.
 `bin/fm-bearings-snapshot.sh` carries `since`, `waiting_days`, and `aging` into `decisions_open` and orders it ageing-first then oldest-first, so an ageing decision leads the section and cannot be truncated away by the bounded cap.
 The threshold is three days because that is the shortest span that always covers a full working day plus a weekend edge, so it cannot fire on a decision the captain has simply not reached yet, while still surfacing a stalled decision long before the week-long silences it exists to prevent.

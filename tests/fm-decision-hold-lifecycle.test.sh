@@ -729,7 +729,54 @@ test_externally_closed_decisions_are_durably_resolved() {
   fi
   assert_grep "no decision record" "$home/norec.err" \
     "the refusal must name the missing record rather than the formatting"
+
+  # Ordinary Done retention must not launder that refusal into an acceptance: the
+  # archive keeps the untouched registration body, so the archived shape is held
+  # to the same record test as the live one.
+  tasks_in "$home" prune --keep 0 >/dev/null 2>&1 || true
+  if ! grep -F -- "- [x] $hold - " "$home/data/backlog.md" >/dev/null 2>&1; then
+    assert_grep "State: awaiting captain decision." "$home/data/done-archive.md" \
+      "the archive must preserve the untouched registration body"
+    if run_decisions "$home" complete "$origin" already-answered no-record \
+      > "$home/archived-norec.out" 2> "$home/archived-norec.err"; then
+      fail "retention turned a refused recordless closure into an accepted one"
+    fi
+    assert_grep "no decision record" "$home/archived-norec.err" \
+      "the archived refusal must name the missing record too"
+  fi
   pass "externally closed and archived decisions are durably resolved, recordless closure is not"
+}
+
+# A fold that cannot be recorded must not report success: the origin would then
+# fail `complete --folded` and could attest `--none` over a live decision.
+test_unrecordable_fold_refuses_rather_than_reporting_success() {
+  local home origin other hold show
+  home=$(make_home unrecordable-fold)
+  origin=sample-owning-review
+  other=sample-later-review
+  mkdir -p "$home/data/$origin" "$home/data/$other"
+  printf '# owning\n' > "$home/data/$origin/report.md"
+  printf '# later\n' > "$home/data/$other/report.md"
+  write_origin_meta "$home" "$origin"
+
+  hold=$(run_decisions "$home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain scope call" --repo sample) \
+    || fail "could not register the decision to fold into"
+
+  # The later review is known only by its report - the post-teardown shape - so no
+  # state/<origin>.meta exists to record the fold in.
+  [ ! -f "$home/state/$other.meta" ] || fail "fixture must have no runtime metadata"
+  if run_decisions "$home" fold "$other" --into "$hold" --note "the same scope question" \
+    > "$home/fold.out" 2> "$home/fold.err"; then
+    fail "fold reported success while it could not record the fold: $(cat "$home/fold.out")"
+  fi
+  assert_grep "no runtime metadata" "$home/fold.err" \
+    "the refusal must name the missing origin metadata"
+  show=$(tasks_in "$home" show "$hold" --full)
+  case "$show" in
+    *"Also raised by $other"*) fail "a refused fold still mutated the target body" ;;
+  esac
+  pass "a fold that cannot be recorded refuses instead of reporting success"
 }
 
 # A question that turns out to be firstmate's own call must be closable as such,
@@ -763,6 +810,7 @@ test_firstmate_decided_closure_is_first_class() {
 
 test_uninventoried_report_decision_refuses_completion
 test_externally_closed_decisions_are_durably_resolved
+test_unrecordable_fold_refuses_rather_than_reporting_success
 test_firstmate_decided_closure_is_first_class
 test_second_pass_cannot_silently_duplicate_an_open_decision
 test_answer_is_recorded_without_inventing_dependent_work

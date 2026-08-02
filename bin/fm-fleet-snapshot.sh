@@ -22,8 +22,9 @@
 #     resolves only when its structured record is Done, and missing ids stay open.
 #     Every captain-actionable row also carries waiting_days, the whole days since
 #     its `since` date, and decision_aging, true once that reaches
-#     FM_SNAPSHOT_DECISION_AGING_DAYS (default 3), so an open decision's age is
-#     visible in the fleet view without anyone remembering to look for it.
+#     FM_DECISION_AGING_DAYS (default 3), the same threshold
+#     bin/fm-decision-hold.sh applies, so an open decision's age is visible in the
+#     fleet view without anyone remembering to look for it.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
@@ -102,9 +103,11 @@ FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
 # ageing. Three days is the shortest span that cannot fire on a decision the
 # captain simply has not reached yet - it always covers at least one full working
 # day plus a weekend edge - while still surfacing a stalled decision long before
-# the week-long silences this threshold exists to prevent.
-FM_SNAPSHOT_DECISION_AGING_DAYS=${FM_SNAPSHOT_DECISION_AGING_DAYS:-3}
-case "$FM_SNAPSHOT_DECISION_AGING_DAYS" in ''|*[!0-9]*) FM_SNAPSHOT_DECISION_AGING_DAYS=3 ;; esac
+# the week-long silences this threshold exists to prevent. It is one variable,
+# shared with bin/fm-decision-hold.sh, so the fleet view and the `open
+# --aging-only` listing cannot disagree about which decisions are ageing.
+FM_DECISION_AGING_DAYS=${FM_DECISION_AGING_DAYS:-3}
+case "$FM_DECISION_AGING_DAYS" in ''|*[!0-9]*) FM_DECISION_AGING_DAYS=3 ;; esac
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -268,7 +271,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" \
     --argjson now_epoch "$SNAPSHOT_EPOCH" \
-    --argjson aging_days "$FM_SNAPSHOT_DECISION_AGING_DAYS" '
+    --argjson aging_days "$FM_DECISION_AGING_DAYS" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def section_state:
       if . == "In flight" then "in_flight"
