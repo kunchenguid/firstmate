@@ -16,6 +16,7 @@ Load this before any browser intake, browser action, manual browser interaction,
 `bin/fm-browser.sh` is the sole public lifecycle, state, cleanup, and receipt owner for Firstmate browser sessions.
 Do not launch a browser directly, attach to Chrome directly, inspect a browser profile, read cookies or storage, use a vendor browser extension, run raw CDP, or call `agent-browser` or `chrome-devtools-axi` directly for a Firstmate-owned browser task.
 Use this skill to decide whether a browser workflow is allowed, then use `fm-browser.sh` for mechanics.
+When briefing a crewmate for browser work, scaffold with `bin/fm-brief.sh --browser` so the guarded contract comes from the scaffold instead of being written by hand.
 
 ## Current supported scope
 
