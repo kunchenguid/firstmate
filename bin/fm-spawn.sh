@@ -1859,7 +1859,18 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
 # an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+# A pooled spawn whose ACCOUNT declares CLAUDE_CONFIG_DIR is the exception: that
+# account's store is the whole point of the pool, so firstmate's own value is not
+# forwarded on top of it.
+pool_sets_claude_config_dir=0
+if [ "$POOL" -eq 1 ]; then
+  for pool_assignment in ${POOL_ENV_ASSIGNMENTS[@]+"${POOL_ENV_ASSIGNMENTS[@]}"}; do
+    [ "${pool_assignment%%=*}" = CLAUDE_CONFIG_DIR ] || continue
+    pool_sets_claude_config_dir=1
+    break
+  done
+fi
+if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$pool_sets_claude_config_dir" -eq 0 ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then

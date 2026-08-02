@@ -110,10 +110,12 @@ test_absent_config_is_byte_identical() {
   read_case_record "$rec_a"
   out_a=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id_a" "$PROJ_DIR")
   expect_code 0 $? "plain spawn should succeed: $out_a"
-  # Normalize only the two things that legitimately differ between two runs: the
-  # task id and the per-case directory name. Everything else must match exactly.
+  # Normalize only the three things that legitimately differ between two runs: the
+  # task id, the per-case directory name, and the busy-state generation token
+  # (timestamp.pid.random, fresh per spawn). The KEY is kept so a meta that loses
+  # busy_gen entirely still fails. Everything else must match exactly.
   launch_a=$(sed "s/$id_a/TASKID/g; s|pool-off-plain|CASE|g" "$LAUNCH_LOG")
-  meta_a=$(sed "s/$id_a/TASKID/g; s|pool-off-plain|CASE|g" "$HOME_DIR/state/$id_a.meta")
+  meta_a=$(sed "s/$id_a/TASKID/g; s|pool-off-plain|CASE|g; s/^busy_gen=.*/busy_gen=GEN/" "$HOME_DIR/state/$id_a.meta")
 
   rec_b=$(make_spawn_case pool-off-flag "$id_b")
   read_case_record "$rec_b"
@@ -121,7 +123,7 @@ test_absent_config_is_byte_identical() {
   out_b=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id_b" "$PROJ_DIR" --pool)
   expect_code 0 $? "--pool with no config should still succeed: $out_b"
   launch_b=$(sed "s/$id_b/TASKID/g; s|pool-off-flag|CASE|g" "$LAUNCH_LOG")
-  meta_b=$(sed "s/$id_b/TASKID/g; s|pool-off-flag|CASE|g" "$HOME_DIR/state/$id_b.meta")
+  meta_b=$(sed "s/$id_b/TASKID/g; s|pool-off-flag|CASE|g; s/^busy_gen=.*/busy_gen=GEN/" "$HOME_DIR/state/$id_b.meta")
 
   [ "$launch_a" = "$launch_b" ] \
     || fail "--pool with no config changed the launch command"$'\n'"plain: $launch_a"$'\n'"pool:  $launch_b"

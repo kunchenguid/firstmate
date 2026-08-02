@@ -230,21 +230,23 @@ test_cursor_refuses_without_a_key() {
 }
 
 test_cursor_busy_signature_is_recognized() {
-  # The watcher and the tmux library must agree, or a busy cursor pane reads idle
-  # and gets reported stale mid-turn.
+  # Recorded task state comes from the semantic contract in bin/fm-busy-lib.sh,
+  # which keeps an unverified harness at unknown rather than guessing from text.
+  # The rendered signature here is the DELIVERY guard: without it, fm-send would
+  # type into a mid-turn cursor pane instead of waiting for the composer.
   local busy_line
   busy_line=' → Add a follow-up                                            ctrl+c to stop'
   # shellcheck source=bin/fm-tmux-lib.sh
   . "$ROOT/bin/fm-tmux-lib.sh"
   printf '%s\n' "$busy_line" | grep -qiE "$FM_TMUX_BUSY_REGEX_DEFAULT" \
     || fail "the tmux busy regex should match cursor's mid-turn hint"
-  grep -q 'ctrl\\+c to stop' "$ROOT/bin/fm-watch.sh" \
-    || fail "fm-watch.sh's busy regex should carry cursor's signature too"
+  printf '%s\n' "$busy_line" | fm_busy_lines_match cursor \
+    || fail "cursor's own registered signature should match its mid-turn hint"
   # An idle cursor pane must NOT read busy.
   printf '%s\n' '  → Add a follow-up                                            Run Everything' \
     | grep -qiE "$FM_TMUX_BUSY_REGEX_DEFAULT" \
     && fail "an idle cursor pane must not match the busy regex"
-  pass "cursor's busy signature is recognized by both the watcher and the tmux library"
+  pass "cursor's busy signature is recognized by the tmux delivery guard"
 }
 
 test_cursor_launch_command
