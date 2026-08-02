@@ -80,7 +80,7 @@ This is why `jq` is required on the crewmate spawn path and its absence is a ref
 
 Before this guard, `bin/fm-spawn.sh` never ran `treehouse` itself: it sent the literal text `treehouse get` into the task pane, so only the pane's shell needed it on `PATH`.
 The guard runs `treehouse status --json` from fm-spawn's own process before allocating, so `treehouse` and `jq` must both resolve there.
-Neither being resolvable is a refusal with the missing dependency named, not a silent pass.
+Either one not being resolvable is a refusal with the missing dependency named, not a silent pass.
 
 ## Ownership is a process identity, not a pid
 
