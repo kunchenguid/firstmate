@@ -1624,6 +1624,12 @@ META_WINDOW=$T
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    # Human-readable agents-sidebar / tab display name (not ownership authority).
+    # Computed for ship/scout only; secondmates keep the default Herdr names.
+    if [ "$KIND" != secondmate ]; then
+      HERDR_DISPLAY_NAME=$(fm_backend_herdr_display_name "$ID" "$KIND")
+      [ -n "$HERDR_DISPLAY_NAME" ] && echo "herdr_display_name=$HERDR_DISPLAY_NAME"
+    fi
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
@@ -1688,6 +1694,14 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+# Best-effort Herdr agents-sidebar (and tab) rename after the harness has been
+# launched. Wait until the pane registers an agent; rename failures never fail
+# the spawn. Secondmates are out of scope. Ownership stays on recorded pane/tab
+# ids in meta (docs/herdr-backend.md).
+if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ] && [ -n "${HERDR_DISPLAY_NAME:-}" ]; then
+  fm_backend_herdr_apply_display_name \
+    "$HERDR_SES" "$HERDR_PANE_ID" "$HERDR_TAB_ID" "$HERDR_DISPLAY_NAME" || true
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
