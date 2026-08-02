@@ -1,6 +1,9 @@
+// Watcher eligibility is delegated to bin/fm-supervision-lib.sh so every
+// primary adapter applies the same validated custom-check trust boundary.
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
@@ -13,6 +16,7 @@ const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 
 const REARM_RETRY_BASE_MS = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const REARM_RETRY_MAX_MS = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const REARM_RETRY_LIMIT = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+const SUPERVISION_LIB = fileURLToPath(new URL("../../bin/fm-supervision-lib.sh", import.meta.url));
 
 let child = null;
 let armStatus = "idle";
@@ -100,14 +104,16 @@ async function isPrimaryRoot(root, home) {
   return gitDir.stdout.trim() === commonDir.stdout.trim();
 }
 
-function shouldArm(paths) {
+async function shouldArm(paths) {
   if (existsSync(`${paths.state}/.afk`)) return false;
-  if (existsSync(`${paths.config}/x-mode.env`)) return true;
-  try {
-    return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
-  } catch {
-    return false;
-  }
+  const result = await runProcess("bash", [
+    "-c",
+    '. "$1"; fm_supervision_needed "$2"',
+    "_",
+    SUPERVISION_LIB,
+    paths.state,
+  ]);
+  return result.code === 0;
 }
 
 async function sessionOwnsLock(paths) {
@@ -383,7 +389,7 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
-  if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
+  if (!(await shouldArm(paths))) return { status: "not-needed", armChild: null };
   return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
 }
 

@@ -11,6 +11,8 @@
 # although its initial no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
+# A validated registered custom check is also a supervision-eligibility reason,
+# so an otherwise-idle watcher stays alive until its FM_CHECK_INTERVAL sweep.
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
@@ -794,7 +796,7 @@ while :; do
   # published while this watcher was between cycles.
   procevent_surface_queued
 
-  # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
+  # Slow registered checks (for example a custom support poll or merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
   # after the signal scan would be starved whenever a chatty sibling crewmate

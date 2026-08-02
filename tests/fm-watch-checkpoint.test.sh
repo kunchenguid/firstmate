@@ -47,7 +47,7 @@ test_signal_passes_through_and_exits_zero() {
 }
 
 test_registered_check_uses_preserved_watcher_environment() {
-  local home out err status
+  local home out err status drained
   home=$(make_home check-env)
   out="$home/out.txt"
   err="$home/err.txt"
@@ -66,7 +66,11 @@ SH
   expect_code 0 "$status" "check checkpoint exit"
   assert_contains "$(cat "$out")" "check:" "check wake was not passed through"
   assert_contains "$(cat "$out")" "FM_CHECK_INTERVAL=1" "watcher environment was not preserved"
-  pass "checkpoint preserves watcher environment for registered custom checks"
+  [ ! -e "$home/state/task.meta" ] || fail "idle custom-check fixture unexpectedly had task metadata"
+  [ ! -e "$home/state/x-watch.check.sh" ] || fail "idle custom-check fixture unexpectedly had X mode"
+  drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" $'\tcheck\t'"$home/state/env-check.check.sh"$'\t' "custom-check wake was not queued durably"
+  pass "idle watcher sweeps a registered custom check within FM_CHECK_INTERVAL and queues its output durably"
 }
 
 test_existing_singleton_watcher_is_not_success() {

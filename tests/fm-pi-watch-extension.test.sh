@@ -1205,7 +1205,10 @@ test_opencode_primary_watch_plugin_uses_effective_state_home() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
-  : > "$home/state/task.meta"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "ready\\n"' > "$home/state/support-inbox.check.sh"
+  chmod 0700 "$home/state/support-inbox.check.sh"
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-check-register.sh" support-inbox >/dev/null \
+    || fail "could not register OpenCode custom-check fixture"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'home=%s root=%s\n' "${FM_HOME:-}" "${FM_ROOT_OVERRIDE:-}" >> "${FM_ARM_LOG:?}"
@@ -1243,7 +1246,7 @@ EOF
   status=$?
   expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"
   [ -z "$out" ] || fail "OpenCode effective-state test printed output: $out"
-  pass "OpenCode watcher plugin uses the effective FM_HOME state"
+  pass "OpenCode watcher plugin uses shared custom-check eligibility in the effective FM_HOME state"
 }
 
 test_opencode_primary_watch_plugin_sources_effective_config() {
@@ -1256,6 +1259,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
+  : > "$home/state/x-watch.check.sh"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'poll=%s\n' "${FM_POLL:-missing}" >> "${FM_ARM_LOG:?}"

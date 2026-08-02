@@ -5,14 +5,14 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if a task is in flight (a state/<id>.meta exists) or X-mode relay
-# polling is active (state/x-watch.check.sh exists) and supervision is not
-# healthy, prints a loud, clearly delimited banner so the agent cannot skim past
-# it in the tool output of whatever it was doing - the one channel every harness
-# has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
-# bin/fm-wake-lib.sh): under the Claude Stop auto-arm model the watcher runs only
-# between turns, so mid-turn a fresh beacon with no live watcher is healthy and
-# only a stale beacon (beyond FM_GUARD_GRACE) is a genuine lapse; under every
+# Then, if the shared supervision predicate says this home needs a watcher and
+# supervision is not healthy, prints a loud, clearly delimited banner so the agent
+# cannot skim past it in the tool output of whatever it was doing - the one channel
+# every harness has. Supervision health is MODEL-AWARE
+# (fm_watcher_supervision_verdict in bin/fm-wake-lib.sh): under the Claude Stop
+# auto-arm model the watcher runs only between turns, so mid-turn a fresh beacon
+# with no live watcher is healthy and only a stale beacon (beyond
+# FM_GUARD_GRACE) is a genuine lapse; under every
 # persistent-watcher harness a live identity-matched watcher with a fresh beacon
 # is required. The banner names the true failing condition (a missing live
 # watcher process vs a genuinely stale beacon). The full banner is emitted once
@@ -144,12 +144,13 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute supervision need and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Act when work, an event
-# source, or an X-mode relay poll needs supervision.
+# Compute supervision-need counts and watcher-beacon freshness via the shared
+# grace-based predicate (bin/fm-supervision-lib.sh), so the banner can say what
+# is riding on an absent watcher.
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 sources=$FM_SUP_SOURCES
+checks=$FM_SUP_CHECKS
 needed=$FM_SUP_NEEDED
 beacon_desc=$FM_SUP_BEACON_DESC
 fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME"
@@ -165,7 +166,7 @@ fi
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
-# No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
+# No fresh watcher with supervision need is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
 # calls in the same episode get a one-line reminder only.
 if [ "$watcher_healthy" = false ]; then
@@ -201,6 +202,8 @@ if [ "$watcher_healthy" = false ]; then
       fi
       if [ "$in_flight" -gt 0 ]; then
         printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
+      elif [ "$checks" -gt 0 ]; then
+        printf '●  %s registered custom check(s), but %s.\n' "$checks" "$watcher_cause"
       elif [ "$sources" -gt 0 ]; then
         printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
       else

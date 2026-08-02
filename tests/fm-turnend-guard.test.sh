@@ -98,6 +98,30 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+test_predicate_only_accepts_validated_custom_checks() {
+  local state="$TMP_ROOT/pred-custom-check/state"
+  mkdir -p "$state"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "ready\\n"' > "$state/support-inbox.check.sh"
+  chmod 0700 "$state/support-inbox.check.sh"
+
+  if fm_supervision_needed "$state" 300; then
+    fail "unregistered custom check registered as supervision need"
+  fi
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "unregistered custom check was counted"
+
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" support-inbox >/dev/null \
+    || fail "could not register supervision predicate fixture"
+  fm_supervision_needed "$state" 300 || fail "validated registered custom check did not register as supervision need"
+  [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected one validated custom check"
+
+  printf '%s\n' 'printf "tampered\\n"' >> "$state/support-inbox.check.sh"
+  if fm_supervision_needed "$state" 300; then
+    fail "tampered custom check remained a supervision need"
+  fi
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "tampered custom check was counted"
+  pass "fm_supervision_needed: only validated registered custom checks keep an idle home eligible"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -114,6 +138,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/fm-pr-lib.sh"
+  cp "$ROOT/bin/fm-check-lib.sh" "$dir/bin/fm-check-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
@@ -247,6 +273,19 @@ test_hook_blocks_source_only_home() {
   expect_code 2 "$status" "non-Claude hook must block when a source-only home has no watcher"
   assert_contains "$out" "1 process-event source(s) registered" "block reason must identify the source-only supervision need"
   pass "fm-turnend-guard: non-Claude path blocks a source-only home"
+}
+
+test_hook_blocks_custom_check_only_home() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-custom-check-only")
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "ready\\n"' > "$dir/state/support-inbox.check.sh"
+  chmod 0700 "$dir/state/support-inbox.check.sh"
+  FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-check-register.sh" support-inbox >/dev/null \
+    || fail "could not register custom-check-only guard fixture"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "non-Claude hook must block when a custom-check-only home has no watcher"
+  assert_contains "$out" "1 registered custom check(s)" "block reason must identify the custom-check-only supervision need"
+  pass "fm-turnend-guard: non-Claude path blocks a validated custom-check-only home"
 }
 
 test_hook_blocks_when_dead_lock_has_fresh_beacon() {
@@ -1542,9 +1581,11 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_only_accepts_validated_custom_checks
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
+test_hook_blocks_custom_check_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_non_claude_health_ignores_claude_budget_contention

@@ -216,6 +216,34 @@ fm-claude-stop-autoarm: ok
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
 No credential material was copied into a fixture.
 
+The registered-custom-check eligibility regression was verified on 2026-08-02 with ShellCheck 0.11.0.
+The compatibility review found that Claude and OpenCode make an idle arm decision and now share `bin/fm-supervision-lib.sh`; Pi and pi-signed retain their extension-owned cycle after the required first call; Codex retains bounded checkpoints; Grok retains tracked background supervision under the shared documented need; and Kimi remains outside the supported primary integrations.
+The tmux, Herdr, Zellij, Orca, and cmux runtime backends do not own home-level arm eligibility, so their worker inspection and wait surfaces were unaffected.
+
+```sh
+tests/fm-claude-stop-autoarm.test.sh
+tests/fm-turnend-guard.test.sh
+tests/fm-watch-checkpoint.test.sh
+tests/fm-pi-watch-extension.test.sh
+tests/fm-procevent.test.sh
+tests/fm-backend.test.sh
+bin/fm-lint.sh
+```
+
+Observed acceptance output:
+
+```text
+ok - auto-arm: validated registered custom check arms the cycle with no task metadata or X mode
+ok - auto-arm: unregistered custom check does not arm an otherwise-idle home
+ok - auto-arm: tampered custom check does not create an arm-forever loop
+ok - fm_supervision_needed: only validated registered custom checks keep an idle home eligible
+ok - idle watcher sweeps a registered custom check within FM_CHECK_INTERVAL and queues its output durably
+ok - OpenCode watcher plugin uses shared custom-check eligibility in the effective FM_HOME state
+all procevent tests passed
+ok - fm_backend_validate: implemented adapters accepted, unknown and blocked codex-app backends refused loudly
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+```
+
 ```text
 Claude Code 2.1.219
 codex-cli 0.144.4

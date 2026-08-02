@@ -29,6 +29,8 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/fm-pr-lib.sh"
+  cp "$ROOT/bin/fm-check-lib.sh" "$dir/bin/fm-check-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
@@ -326,6 +328,49 @@ test_inert_when_fleet_idle() {
   pass "auto-arm: inert with nothing in flight and no X-mode need"
 }
 
+test_arms_for_registered_custom_check_without_inflight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/custom-check")
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "support-ready\\n"' > "$dir/state/support-inbox.check.sh"
+  chmod 0700 "$dir/state/support-inbox.check.sh"
+  FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-check-register.sh" support-inbox >/dev/null \
+    || fail "could not register custom-check auto-arm fixture"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a validated registered custom check must keep Stop auto-arm active without tasks"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm for a validated registered custom check"
+  pass "auto-arm: validated registered custom check arms the cycle with no task metadata or X mode"
+}
+
+test_inert_for_unregistered_custom_check_without_inflight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/unregistered-custom-check")
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "unregistered\\n"' > "$dir/state/support-inbox.check.sh"
+  chmod 0700 "$dir/state/support-inbox.check.sh"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "an unregistered custom check must not keep Stop auto-arm active"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed solely for an unregistered custom check"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "unregistered custom check wrote an auto-arm epoch"
+  pass "auto-arm: unregistered custom check does not arm an otherwise-idle home"
+}
+
+test_inert_for_tampered_custom_check_without_inflight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/tampered-custom-check")
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "trusted\\n"' > "$dir/state/support-inbox.check.sh"
+  chmod 0700 "$dir/state/support-inbox.check.sh"
+  FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-check-register.sh" support-inbox >/dev/null \
+    || fail "could not register tampered custom-check fixture"
+  printf '%s\n' 'printf "tampered\\n"' >> "$dir/state/support-inbox.check.sh"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a tampered custom check must not keep Stop auto-arm active"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed solely for a tampered custom check"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "tampered custom check wrote an auto-arm epoch"
+  pass "auto-arm: tampered custom check does not create an arm-forever loop"
+}
+
 # --- the armed cycle ----------------------------------------------------------
 
 test_actionable_close_rewakes_with_reason() {
@@ -583,6 +628,9 @@ test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
+test_arms_for_registered_custom_check_without_inflight
+test_inert_for_unregistered_custom_check_without_inflight
+test_inert_for_tampered_custom_check_without_inflight
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner

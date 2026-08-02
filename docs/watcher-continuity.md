@@ -3,6 +3,17 @@
 The watcher remains intentionally one-shot: one actionable reason closes one watcher cycle.
 Must-work continuity now lives above that process boundary instead of depending on the model remembering a re-arm step.
 
+## Eligibility
+
+`bin/fm-supervision-lib.sh` is the single owner of whether a home needs watcher supervision.
+A home is eligible when it has at least one in-flight `state/*.meta` record, an X-mode relay poll, a registered process-to-event source, or a custom `state/<id>.check.sh` that passes `fm_custom_check_registered` against its private `state/<id>.check-trust` binding.
+An unregistered, malformed, non-private, symlinked, hard-linked, or byte-tampered custom check does not make an otherwise-idle home eligible.
+The Claude Stop auto-arm, the shared turn-end and warning guards, and OpenCode's idle arm callback all delegate to this predicate.
+Pi and pi-signed keep the extension-owned cycle launched by their required first-cycle call, Codex keeps taking bounded foreground checkpoints, and Grok keeps its tracked background cycle while this shared need remains.
+Runtime backends do not change eligibility because the watcher is scoped to home state and backend selection only affects recorded worker inspection and event waiting.
+Once armed for a validated custom check, `bin/fm-watch.sh` remains alive on an otherwise-idle fleet and evaluates the check on the `FM_CHECK_INTERVAL` cadence, which defaults to 300 seconds.
+If that check emits output, the watcher appends a durable `check` wake before closing the one-shot cycle.
+
 ## Ownership
 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
@@ -10,7 +21,7 @@ Each adapter starts the next arm before delivering the wake prompt, checks curre
 A failed follow-up never cancels continuity restoration.
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
-The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
+The hook fires on every Stop, and an eligible primary under the shared predicate above admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
@@ -64,7 +75,8 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, and `/fork`, same-instance shutdown-plus-start, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
-`tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
+`tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, validated, unregistered, and tampered custom-check eligibility, unchanged AFK boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
+`tests/fm-watch-checkpoint.test.sh` proves an otherwise-idle watcher sweeps a registered custom check within the configured cadence and durably queues emitted output.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset.
 

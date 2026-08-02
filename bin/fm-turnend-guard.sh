@@ -17,6 +17,8 @@
 # bounded resume fallback for payloads from pre-native processes.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
+# Supervision eligibility is owned by bin/fm-supervision-lib.sh, including
+# validated registered custom checks that need an otherwise-idle watcher.
 #
 # Ships with TRACKED harness hook files at the repo root, so this file is
 # checked out into every worktree of this repo: the primary checkout, every
@@ -166,6 +168,8 @@ block_stop() {
     printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
     if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
       printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+    elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
+      printf '●  %s registered custom check(s), but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_CHECKS" "$FM_SUP_BEACON_DESC"
     elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
       printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
     else
@@ -364,6 +368,8 @@ terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
     NEED_DESC="$FM_SUP_IN_FLIGHT task(s) in flight"
+  elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
+    NEED_DESC="$FM_SUP_CHECKS registered custom check(s)"
   elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
     NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
   else
