@@ -65,6 +65,18 @@ test_takes_minimum_of_the_two_general_windows() {
   pass "fm-quota-gate: takes the minimum percentRemaining across five_hour and seven_day"
 }
 
+test_floors_fractional_percent_remaining() {
+  local fb out rc
+  # 40.9 must floor to 40 (at-or-below the default sonnet-only threshold of
+  # 40), not round to 41 (which would wrongly read as "ok") and not be
+  # rejected as non-numeric (quota-axi's real output is rarely a whole number).
+  fb=$(make_quota_fakebin "$(fm_test_tmproot quota-fractional)" 40.9 97.3)
+  out=$(run_gate "$fb"); rc=$?
+  expect_code 1 "$rc" "fractional: exit code"
+  assert_contains "$out" "sonnet-only remaining=40" "fractional: floors 40.9 down to 40, not rounds to 41"
+  pass "fm-quota-gate: floors a fractional percentRemaining instead of rounding or rejecting it"
+}
+
 test_model_scoped_window_is_ignored() {
   local fb out
   # model:fable is deep in pause territory, but the two GENERAL windows are
@@ -346,6 +358,7 @@ SH
 
 test_ok_above_both_thresholds
 test_takes_minimum_of_the_two_general_windows
+test_floors_fractional_percent_remaining
 test_model_scoped_window_is_ignored
 test_sonnet_only_band
 test_pause_band
