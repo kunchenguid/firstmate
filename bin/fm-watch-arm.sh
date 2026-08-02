@@ -30,17 +30,22 @@
 #                                                          this arm attaches and follows it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
-#                                                        - a clean cycle ended with no wake and no
-#                                                          verified healthy successor
+#                                                        - a clean cycle ended with no wake, no
+#                                                          verified healthy successor, and no
+#                                                          remaining takeover attempt
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. An
-# attached cycle that ends without a healthy successor is a typed nonzero failure,
-# never a clean empty completion. On FAILED it exits non-zero so the failure is
-# loud. A live cycle already present means re-arm attaches - do not start a second
-# watcher.
+# reason; on attached it stays live across identity-matched successors. Only the
+# arm that forked the watcher holds its stdout, so an ATTACHED arm can never read
+# the wake reason of the cycle it follows: a healthy close and a death look
+# identical to it. Both call for the same repair, so when a followed cycle ends
+# with no verified successor this arm takes the singleton itself, up to
+# FM_ARM_TAKEOVER_MAX attempts, and only then returns the typed nonzero failure.
+# It never returns a clean empty completion that an adapter could mistake for a
+# no-op. On FAILED it exits non-zero so the failure is loud. A live cycle already
+# present means re-arm attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -63,6 +68,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
+# Resolved once so an attached arm's in-place re-arm survives any caller cwd.
+ARM_SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
@@ -77,6 +84,13 @@ esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
+# How many times an attached arm may take the singleton over after the cycle it
+# follows ends with no verified successor. Bounded so a home that cannot hold a
+# watcher still reaches the loud typed failure instead of flapping forever.
+TAKEOVER_MAX=${FM_ARM_TAKEOVER_MAX:-3}
+TAKEOVER_DEPTH=${FM_ARM_TAKEOVER_DEPTH:-0}
+case "$TAKEOVER_MAX" in ''|*[!0-9]*) TAKEOVER_MAX=3 ;; esac
+case "$TAKEOVER_DEPTH" in ''|*[!0-9]*) TAKEOVER_DEPTH=0 ;; esac
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
@@ -262,8 +276,9 @@ fail_unexplained_cycle() {
 }
 
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
-# to a verified successor. With no successor, fail loudly instead of returning a
-# clean empty completion that an adapter could mistake for a no-op.
+# to a verified successor. With no successor, take the singleton over in place,
+# then fail loudly once the bounded attempts are spent - never return a clean
+# empty completion that an adapter could mistake for a no-op.
 attach_and_wait() {
   local attached_pid=$1
   while :; do
@@ -283,6 +298,17 @@ attach_and_wait() {
       cycle_begin "$attached_pid" attached
       report_attached
       continue
+    fi
+    # The wake reason of the cycle we followed went to the arm that forked that
+    # watcher, so a healthy wake close and a death are indistinguishable here.
+    # Repair is right for both: re-enter arm mode in place. exec keeps this pid,
+    # which is the identity the harness tracks and notifies on, and the depth
+    # counter rides the exec so a home that cannot hold a watcher still reaches
+    # the typed failure instead of flapping.
+    if [ "$TAKEOVER_DEPTH" -lt "$TAKEOVER_MAX" ]; then
+      cycle_log_append unknown unknown attached-cycle-ended takeover
+      trap - HUP TERM INT
+      FM_ARM_TAKEOVER_DEPTH=$((TAKEOVER_DEPTH + 1)) exec "$ARM_SELF" --arm
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
     fail_unexplained_cycle

@@ -453,7 +453,9 @@ test_watch_restart_attaches_to_healthy_peer() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
+  # FM_ARM_TAKEOVER_MAX=0 spends the takeover budget up front, so the successor
+  # gap below still exercises the loud typed failure rather than a takeover.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_TAKEOVER_MAX=0 "$WATCH_ARM" --restart > "$out" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -533,8 +535,8 @@ test_arm_self_eviction_is_loud_without_successor() {
   pass "arm turns clean self-eviction without a successor into a typed failure"
 }
 
-test_arm_attaches_and_waits_for_live_fresh_watcher() {
-  local dir state fakebin out armout i wpid armpid status
+test_arm_attaches_then_takes_over_without_successor() {
+  local dir state fakebin out armout i wpid armpid status takeover_pid
   dir=$(make_case arm-attach)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -552,7 +554,9 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
   # Arming must attach to the existing watcher, NOT start a second one, and NOT
   # exit while the seed still holds the healthy lock.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  # The watcher tuning also reaches the one this arm may take over below, so keep
+  # its poll short enough to honor TERM promptly at cleanup.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -565,14 +569,104 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm reported FAILED for a healthy watcher"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "arm disturbed the healthy watcher's lock"
   is_live_non_zombie "$armpid" || fail "arm exited while the seed watcher was still healthy"
-  # After the seed dies without a successor, the attached arm must fail loudly.
+  # The attached arm never held the seed's stdout, so a healthy wake close and a
+  # death look identical to it. With no successor it must take the singleton over
+  # in place, keeping its own pid, instead of reporting a failure.
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "attached arm did not take the singleton over: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "attached arm alarmed instead of taking over: $(cat "$armout")"
+  takeover_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  { [ -n "$takeover_pid" ] && [ "$takeover_pid" != "$wpid" ]; } || fail "takeover published no new watcher in the lock (got '$takeover_pid')"
+  grep -qF "watcher: started pid=$takeover_pid" "$armout" || fail "takeover reported a watcher other than the lock holder"
+  is_live_non_zombie "$armpid" || fail "arm exited instead of owning the cycle it took over"
+  grep -q "reason=attached-cycle-ended" "$state/.watch-cycle-exits.log" || fail "takeover cycle was not classified in the lifecycle ledger"
+  grep -q "successor=takeover" "$state/.watch-cycle-exits.log" || fail "lifecycle ledger did not record the takeover disposition"
+  kill "$armpid" 2>/dev/null || true
   wait_for_exit "$armpid" 80
   status=$?
-  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after seed died (status $status)"
-  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "attached arm did not emit the typed cycle-end failure"
-  pass "arm attaches to a live fresh watcher and fails loudly when that cycle has no successor"
+  [ "$status" -ne 124 ] || fail "arm did not exit after TERM"
+  kill "$takeover_pid" 2>/dev/null || true
+  pass "attached arm takes the singleton over when the cycle it follows ends without a successor"
+}
+
+# The reported false alarm, end to end: two arms follow one watcher, and only the
+# arm that forked it can read its wake reason. The attached arm must not turn
+# that healthy close into a supervision failure.
+test_two_arms_share_one_wake_without_a_false_failure() {
+  local dir state fakebin arma armb check_file i wpid apid bpid astatus takeover_pid
+  dir=$(make_case two-arms-one-wake)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  arma="$dir/arm-a.out"
+  armb="$dir/arm-b.out"
+  check_file="$state/task.check.sh"
+  mark_pr_check_migration_complete "$state"
+  # Byte-static check that stays silent until the test releases the wake, so the
+  # second arm can attach before the cycle ends.
+  cat > "$check_file" <<SH
+#!/usr/bin/env bash
+[ -e '$dir/release' ] || exit 0
+printf 'merged: https://example.test/pr/9\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register the gated wake check"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$arma" &
+  apid=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF 'watcher: started pid=' "$arma" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$arma" || fail "first arm did not start a watcher: $(cat "$arma")"
+  wpid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armb" &
+  bpid=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armb" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armb" || fail "second arm did not attach to the live watcher: $(cat "$armb")"
+  ! grep -qF 'watcher: FAILED' "$armb" || fail "second arm failed while the watcher was healthy: $(cat "$armb")"
+
+  # One real wake. The owning arm consumes the reason, and the attached arm sees
+  # only the lock holder disappear.
+  touch "$dir/release"
+  wait_for_exit "$apid" 200
+  astatus=$?
+  [ "$astatus" -eq 0 ] || fail "owning arm did not return the wake cleanly (status $astatus): $(cat "$arma")"
+  grep -F "check: $check_file: merged: https://example.test/pr/9" "$arma" >/dev/null \
+    || fail "owning arm did not propagate the wake reason: $(cat "$arma")"
+  # Close the wake so the taken-over watcher settles instead of firing again.
+  rm -f "$dir/release"
+
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qF 'watcher: started pid=' "$armb" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! grep -qF 'watcher: FAILED' "$armb" || fail "attached arm raised a false failure for a healthy wake: $(cat "$armb")"
+  grep -qF 'watcher: started pid=' "$armb" || fail "attached arm neither failed nor took the singleton over: $(cat "$armb")"
+  takeover_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  { [ -n "$takeover_pid" ] && [ "$takeover_pid" != "$wpid" ]; } || fail "takeover published no new watcher (got '$takeover_pid')"
+  is_live_non_zombie "$takeover_pid" || fail "takeover watcher is not live"
+  kill "$bpid" 2>/dev/null || true
+  wait_for_exit "$bpid" 80 >/dev/null 2>&1 || true
+  kill "$takeover_pid" 2>/dev/null || true
+  pass "two arms on one watcher deliver one wake with no false failure"
 }
 
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
@@ -729,7 +823,9 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  # FM_ARM_TAKEOVER_MAX=0 keeps this fixture on the loud typed-failure path, so
+  # it still tests the successor handshake rather than a takeover.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_ATTACH_POLL=0.1 FM_ARM_TAKEOVER_MAX=0 "$WATCH_ARM" > "$armout" &
   armpid=$!
   # Synchronize on the owned child declining the live peer lock before making
   # the peer healthy. Sleeping for the same one-second budget as the arm made
@@ -1030,7 +1126,8 @@ test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
-test_arm_attaches_and_waits_for_live_fresh_watcher
+test_arm_attaches_then_takes_over_without_successor
+test_two_arms_share_one_wake_without_a_false_failure
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
