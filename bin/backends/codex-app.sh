@@ -108,6 +108,7 @@ fm_backend_codex_app_server_ensure() {
 
   codex_bin=$(fm_backend_codex_app_codex_bin)
   if command -v setsid >/dev/null 2>&1; then
+    # shellcheck disable=SC2016  # $$ belongs to the inner sh process.
     setsid -f sh -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' \
       sh "$FM_BACKEND_CODEX_APP_RUNTIME/app-server.child" \
       "$codex_bin" app-server --listen "unix://$FM_BACKEND_CODEX_APP_SOCKET" \

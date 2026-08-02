@@ -263,6 +263,7 @@ test_codex_unverified_gate() {
 test_codex_app_native_lifecycle() {
   local state out
   state=$(new_state_dir codex-app-native)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
   fm_backend_busy_state() { printf '%s' "$FM_TEST_CODEX_APP_STATE"; }
   FM_TEST_CODEX_APP_STATE=busy
   out=$(fm_busy_classify codex-app thread-1 codex t1 "$state")
