@@ -295,6 +295,47 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_ship_implementation_habits_are_scoped_and_preserve_safety_contracts() {
+  local home ship scout secondmate herdr_ship herdr_scout habit
+  home="$TMP_ROOT/implementation-habits-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" habits-ship sample >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" habits-scout sample --scout >/dev/null 2>&1
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=sample \
+    "$ROOT/bin/fm-brief.sh" habits-secondmate --secondmate --no-projects >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" habits-herdr-ship sample --herdr-lab >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" habits-herdr-scout sample --scout --herdr-lab >/dev/null 2>&1
+
+  ship="$home/data/habits-ship/brief.md"
+  scout="$home/data/habits-scout/brief.md"
+  secondmate="$home/data/habits-secondmate/brief.md"
+  herdr_ship="$home/data/habits-herdr-ship/brief.md"
+  herdr_scout="$home/data/habits-herdr-scout/brief.md"
+
+  # shellcheck disable=SC2016 # Backticks in the generated brief must remain literal.
+  for habit in \
+    'if `graphify-out/graph.json` exists, consult it for callers, importers, and blast radius' \
+    "treat the project's delivery mode - not passing local tests - as the definition of done" \
+    'When work is test-shaped, retain failing-test-first evidence'; do
+    assert_grep "$habit" "$ship" "ship brief missing implementation habit: $habit"
+    assert_grep "$habit" "$herdr_ship" "Herdr ship brief missing implementation habit: $habit"
+    assert_no_grep "$habit" "$scout" "scout brief received a ship-only implementation habit: $habit"
+    assert_no_grep "$habit" "$secondmate" "secondmate charter received a crewmate implementation habit: $habit"
+    assert_no_grep "$habit" "$herdr_scout" "Herdr scout brief received a ship-only implementation habit: $habit"
+  done
+
+  assert_grep '**Verify isolation before anything else.**' "$ship" \
+    "ship implementation habits changed the worktree-isolation assertion"
+  assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$ship" \
+    "ship implementation habits changed the status protocol"
+  assert_grep 'The task is complete only when committed on your branch.' "$ship" \
+    "ship implementation habits changed the delivery-mode commit gate"
+  assert_grep 'done: PR {url} checks green' "$ship" \
+    "ship implementation habits changed the delivery-mode completion gate"
+  pass "fm-brief.sh: ship habits are scoped and preserve existing safety contracts"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -639,6 +680,7 @@ test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_implementation_habits_are_scoped_and_preserve_safety_contracts
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

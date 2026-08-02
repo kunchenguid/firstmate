@@ -399,6 +399,11 @@ $RULE1
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
+# Implementation habits
+- Before editing source, if \`graphify-out/graph.json\` exists, consult it for callers, importers, and blast radius; do not rebuild or refresh it unless explicitly asked.
+- Never claim unverified success: preserve failure evidence and stop, and treat the project's delivery mode - not passing local tests - as the definition of done.
+- When work is test-shaped, retain failing-test-first evidence: the failing test, smallest passing change, behaviour-preserving cleanup, and final passing command.
+
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 Record only project knowledge useful to almost every future session.
