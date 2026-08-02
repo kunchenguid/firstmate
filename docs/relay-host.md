@@ -293,17 +293,22 @@ The reverse leaves the caller with a 401, because revoking the key already dropp
 - Repeated pairing accumulates superseded but narrow grants on the host, three after this run.
   They are all bound to `fm-relay-verbs`, so they are not an exposure, and they age out with the 24-hour session expiry.
   Clearing one is `bifrost setting grant revoke <id>` on the host.
+- The host record's `path` must reach `tasks-axi`, or **every** remote scout teardown refuses and no amount of correct work on the control side helps.
+  `fm-teardown.sh` calls `bin/fm-decision-hold.sh` for the unresolved-decision gate, that script requires a compatible `tasks-axi`, and the verb runs with only the `PATH` from `<control-root>/config`.
+  Measured 2026-08-02: with `tasks-axi` installed under a host's nvm directory and that directory absent from `path`, teardown returned `ERR teardownrefused` plus `fm-decision-hold: compatible tasks-axi is required`, and an already-recorded `complete --none` attestation changed nothing because the gate could not read it.
+  Adding the directory to `path` and redeploying made the identical command succeed.
+  Pinning an nvm version directory there is itself brittle: the host's next node upgrade moves it and breaks this again.
 - `bin/fm-relay-host.sh spawn` does not update the host's backlog, and host teardown prints a `NOT_FOUND` backlog error when the control machine owns the row.
   Teardown itself still completes.
 - The control side records `host=` in the task metadata but no fleet identifier.
-  Cross-machine task discovery belongs to a later phase and nothing here reads it, so nothing was pre-built for it.
+  Cross-machine task discovery has since shipped and works off `host=` plus the peer's own inventory rather than a recorded fleet id, so the field is still absent; [`helm.md`](helm.md) owns that discovery contract.
+- After a handover the machine that gave the helm away keeps its `host=<peer>` mirror records.
+  `handover` stands down their monitors, `task-list` excludes them so they cannot propagate back, and `adopt` reports them as already known - but they stay on disk and still read as tasks that machine is holding.
 
 ## Not verified
 
 - The reverse direction as a task host, at the time this was written.
   It has since been built and partly measured: see [`docs/relay-gui-host.md`](relay-gui-host.md), which owns the desktop-session requirement, the checks a host with a screen runs before it claims, and its own list of what is still unverified.
-- Control-plane handover between machines.
-  Out of scope by decision; the intended mechanism is an explicit human handover, not automatic arbitration.
 - Relay session-token lifetime.
   Both ends read `Authorized: true` throughout and the host's login survived across days, but nothing here waited for one to expire.
 - Whether the relay is reachable from outside the corporate network.
