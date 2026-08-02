@@ -137,13 +137,16 @@ gh_auth_config_present() {
 # sandbox denies exactly that (`CODEX_SANDBOX_NETWORK_DISABLED=1`), so present
 # credential material can be unvalidatable there. The network denial is the
 # cause, not one platform's sandbox implementation, so any non-empty
-# CODEX_SANDBOX counts too rather than only the macOS `seatbelt` label.
+# CODEX_SANDBOX counts too rather than only the macOS `seatbelt` label - but
+# only while the sandbox has not reported its network state. A sandbox that
+# explicitly reports its network AVAILABLE ran a real, reachable check, so its
+# failure is a genuine auth gap that must still request an interactive login.
 codex_sandbox_blocks_auth_check() {
   case "${CODEX_SANDBOX_NETWORK_DISABLED:-}" in
-    '' | 0 | false) ;;
+    0 | false) return 1 ;;
+    '') [ -n "${CODEX_SANDBOX:-}" ]; return ;;
     *) return 0 ;;
   esac
-  [ -n "${CODEX_SANDBOX:-}" ]
 }
 
 gh_auth_diagnostic() {

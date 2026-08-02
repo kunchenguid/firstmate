@@ -266,10 +266,17 @@ EOF
 # Codex session keeps proving exclusive ownership between session starts. A
 # numeric owner proves liveness through its own process and needs no lease, so
 # this is a no-op there, as it is for any session that does not own the lock.
+# Ownership is proven through fm_session_lock_owned_by_self, the same
+# ancestry-first resolution acquisition uses: CODEX_CI and CODEX_THREAD_ID are
+# inherited by markerless child harnesses launched from a Codex primary, and a
+# child that runs a guarded command must not renew a lease fm-lock.sh would
+# refuse to grant it. A Codex primary whose `ps` becomes available mid-session
+# therefore stops renewing, which is correct - a codex-thread lock exists only
+# because `ps` was denied when it was acquired.
 fm_session_lock_refresh_self() {
   local state=${1:-} lock_identity
   lock_identity=$(cat "$state/.lock" 2>/dev/null) || return 0
   fm_codex_thread_lock_valid "$lock_identity" || return 0
-  [ "$(fm_codex_thread_identity 2>/dev/null)" = "$lock_identity" ] || return 0
+  fm_session_lock_owned_by_self "$state" || return 0
   touch "$state/.lock" 2>/dev/null || true
 }

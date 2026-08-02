@@ -382,7 +382,7 @@ SH
 # while an expired lease still reclaims and the owner's own guarded commands
 # keep renewing it.
 test_concurrent_codex_threads_are_mutually_exclusive() {
-  local dir denied_ps a b c home out status lock
+  local dir denied_ps child_ps a b c home out status lock before after
   dir="$TMP_ROOT/codex-thread-concurrent"
   a=019fbddb-b27d-7b23-86d2-7dc3bbaba30a
   b=019fbddb-b27d-7b23-86d2-7dc3bbaba30b
@@ -398,6 +398,32 @@ printf '%s\n' '/bin/ps: Operation not permitted' >&2
 exit 1
 SH
   chmod +x "$denied_ps/ps"
+
+  # A markerless child harness launched from the owning Codex primary: it
+  # inherits CODEX_CI/CODEX_THREAD_ID, and only process ancestry tells it apart
+  # from the owner.
+  child_ps=$(fm_fakebin "$dir/child")
+  cat > "$child_ps/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '%s\n' '/opt/test/bin/opencode' ;;
+  4242:args=) printf '%s\n' 'opencode' ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' '/bin/zsh' ;;
+  *:args=) printf '%s\n' 'zsh' ;;
+  *:ppid=) printf '%s\n' 4242 ;;
+esac
+SH
+  chmod +x "$child_ps/ps"
 
   out=$(CODEX_CI=1 CODEX_THREAD_ID="$a" PATH="$denied_ps:$BASE_PATH" \
     FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
@@ -432,6 +458,18 @@ SH
   expect_code 1 "$status" "a renewed lease must still refuse another live Codex thread: $out"
   [ "$(cat "$lock")" = "codex-thread:$a" ] \
     || fail "a renewed lease lost the lock to another thread: $(cat "$lock")"
+
+  # A markerless child harness that inherited the owner's thread markers must
+  # not renew a lease fm-lock.sh would refuse to grant it: once the primary is
+  # gone, an inherited-marker renewer would keep the home's lock alive forever.
+  touch -t 200001010000 "$lock"
+  before=$(date -r "$lock" +%s 2>/dev/null || stat -c %Y "$lock")
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    CODEX_CI=1 CODEX_THREAD_ID="$a" PATH="$child_ps:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1 || true
+  after=$(date -r "$lock" +%s 2>/dev/null || stat -c %Y "$lock")
+  [ "$before" = "$after" ] \
+    || fail "a child harness that only inherited the owner's Codex markers renewed its lease"
 
   # A non-owner's guarded command must never renew someone else's lease.
   touch -t 200001010000 "$lock"

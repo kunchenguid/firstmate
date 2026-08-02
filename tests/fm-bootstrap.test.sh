@@ -380,6 +380,16 @@ test_gh_auth_diagnostics_distinguish_codex_sandbox() {
   [ "$out" = "NEEDS_GH_AUTH" ] \
     || fail "a network-enabled session should request login, got: $out"
 
+  # An explicit network-available report outranks the sandbox label: the check
+  # was reachable, so its failure is a real revoked-credential gap.
+  case_dir="$TMP_ROOT/gh-sandboxed-network-enabled"
+  mkdir -p "$case_dir/userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/userhome/.config/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" \
+    CODEX_SANDBOX=seatbelt CODEX_SANDBOX_NETWORK_DISABLED=0)
+  [ "$out" = "NEEDS_GH_AUTH" ] \
+    || fail "a Codex sandbox reporting its network available should request login, got: $out"
+
   case_dir="$TMP_ROOT/gh-missing"
   out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" CODEX_SANDBOX=seatbelt)
   [ "$out" = "NEEDS_GH_AUTH" ] || fail "missing credentials should request login, got: $out"
