@@ -12,17 +12,18 @@
 #
 # CONTRACT: this NEVER fails a PR check. Every path - unconfigured, unreachable,
 # unauthenticated, slow, no mirrored issue, gh refusing the edit - prints one line
-# saying what did happen and exits 0. A mirrored issue is the exception, not the
-# rule: only queued items were ever mirrored, so "no mirrored issue" is the
-# normal case and is reported, not treated as an error.
+# saying what did happen and exits 0. "No mirrored issue" can occur before the
+# first refresh or for work added since the latest refresh, and is reported, not
+# treated as an error.
 #
 # The body edit is strictly additive: the existing body is copied byte-for-byte
 # and the reference block appended after it, then the result is checked to still
 # start with the original bytes before it is pushed. The pipeline's evidence
 # record in the PR body is never rewritten, truncated, or reordered.
 #
-# Idempotent: a body that already carries firstmate's marker comment or the issue
-# identifier is left alone, so running the PR check twice links exactly once.
+# Idempotent: a body that already carries firstmate's marker comment or a magic
+# word followed by the issue identifier is left alone, so running the PR check
+# twice links exactly once. A bare identifier mention is not a Linear link.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

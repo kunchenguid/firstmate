@@ -276,10 +276,6 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/task-usage.md",
-      "audience": "operator-current"
-    },
-    {
       "path": "docs/sessionstart-nudge.md",
       "audience": "operator-current"
     },
