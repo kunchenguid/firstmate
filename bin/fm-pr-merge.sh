@@ -11,7 +11,8 @@
 # recording the PR or arming its poll, then a final authoritative read runs after
 # fm-pr-check.sh and immediately before the verification metadata write and
 # merge. Each `gh pr view` call reads the head, mergeability, review decision,
-# and check rollup together, so every refusal names the exact head it evaluated.
+# and check rollup together, so every state-based refusal names the exact head it
+# evaluated once GitHub has supplied a readable head.
 # The merge is refused when:
 #   * no check runs exist on that head - an empty rollup is never read as green,
 #     which is the whole point of this guard: a cross-repo fork PR held at
