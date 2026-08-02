@@ -1289,7 +1289,7 @@ test_attribution_failure_warns_but_teardown_completes() {
   bad_data="$case_dir/not-a-directory"
   : > "$bad_data"
 
-  FM_DATA_OVERRIDE="$bad_data" run_teardown "$case_dir" --force \
+  ( FM_DATA_OVERRIDE="$bad_data" run_teardown "$case_dir" --force ) \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "attribution-failure: recording failure must not fail teardown"
@@ -1298,6 +1298,40 @@ test_attribution_failure_warns_but_teardown_completes() {
   assert_grep 'warning: could not append AI effort attribution for task task-x1; teardown will continue' \
     "$case_dir/stderr" "attribution-failure: teardown did not disclose lost attribution"
   pass "attribution recording failure warns without making teardown fragile"
+}
+
+test_attribution_reuses_one_schema_section_across_teardowns() {
+  local shared file first second
+  shared="$TMP_ROOT/attribution-shared-data"
+  mkdir -p "$shared"
+  file="$shared/cost-attribution.tsv"
+  printf '%s' $'old-task\t/old/wt\tclaude\tdefault\txhigh\tship\t/old/project' > "$file"
+
+  first=$(make_case attribution-shared-first)
+  write_meta "$first" local-only ship
+  printf '%s\n' 'started_at=2026-08-01T01:00:00Z' >> "$first/state/task-x1.meta"
+  ( FM_DATA_OVERRIDE="$shared" run_teardown "$first" --force ) \
+    > "$first/stdout" 2> "$first/stderr" \
+    || fail "attribution-shared: first forced teardown failed"
+
+  second=$(make_case attribution-shared-second)
+  write_meta "$second" local-only ship
+  printf '%s\n' 'started_at=2026-08-01T02:00:00Z' >> "$second/state/task-x1.meta"
+  ( FM_DATA_OVERRIDE="$shared" run_teardown "$second" --force ) \
+    > "$second/stdout" 2> "$second/stderr" \
+    || fail "attribution-shared: second forced teardown failed"
+
+  sed -n '1p' "$file" | grep -qxF $'old-task\t/old/wt\tclaude\tdefault\txhigh\tship\t/old/project' \
+    || fail "attribution-shared: legacy row without a trailing newline was rewritten"
+  sed -n '2p' "$file" | grep -qxF '# schema=firstmate-effort-attribution-v2' \
+    || fail "attribution-shared: the schema marker is not its own line"
+  [ "$(grep -cxF '# schema=firstmate-effort-attribution-v2' "$file")" = 1 ] \
+    || fail "attribution-shared: a second teardown appended a duplicate schema section"
+  [ "$(grep -c "	$first/wt	" "$file")" = 1 ] \
+    || fail "attribution-shared: the first teardown's row is missing"
+  [ "$(grep -c "	$second/wt	" "$file")" = 1 ] \
+    || fail "attribution-shared: the second teardown's row is missing"
+  pass "attribution closes an unterminated legacy row and keeps one schema section"
 }
 
 test_teardown_missing_busy_sidecar_completes() {
@@ -1683,6 +1717,83 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   pass "forced secondmate teardown retains Herdr child identity until exact pane disappearance"
 }
 
+test_forced_secondmate_records_child_attribution_before_discard() {
+  local case_dir home file row task worktree harness model effort kind project started_at ended_at extra
+  case_dir=$(make_case attribution-secondmate-child)
+  write_meta "$case_dir" local-only secondmate
+  printf '%s\n' 'started_at=2026-08-01T03:00:00Z' >> "$case_dir/state/task-x1.meta"
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/child-tmux.meta" \
+    "window=firstmate:fm-child-tmux" \
+    "endpoint_task_id=child-tmux" \
+    "worktree=$home/child-wt" \
+    "project=$case_dir/project" \
+    "harness=codex" \
+    "model=gpt-test" \
+    "effort=high" \
+    "kind=ship" \
+    "mode=local-only" \
+    "started_at=2026-08-01T04:00:00Z"
+  : > "$home/state/child-tmux.status"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "attribution-secondmate-child: forced secondmate teardown failed"
+
+  assert_absent "$home/state/child-tmux.meta" \
+    "attribution-secondmate-child: forced retirement kept the child metadata"
+  file="$case_dir/data/cost-attribution.tsv"
+  row=$(grep '^child-tmux	' "$file") \
+    || fail "attribution-secondmate-child: the discarded child left no attribution row"
+  IFS=$'\t' read -r task worktree harness model effort kind project started_at ended_at extra <<EOF
+$row
+EOF
+  [ "$task|$worktree|$harness|$model|$effort|$kind|$project|$started_at" = \
+    "child-tmux|$home/child-wt|codex|gpt-test|high|ship|$case_dir/project|2026-08-01T04:00:00Z" ] \
+    || fail "attribution-secondmate-child: the child row is incomplete: $row"
+  [ -z "$extra" ] || fail "attribution-secondmate-child: the child row has extra columns: $row"
+  printf '%s\n' "$ended_at" | grep -Eq \
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+    || fail "attribution-secondmate-child: ended_at is not an exact UTC timestamp: $ended_at"
+  grep -q '^task-x1	' "$file" \
+    || fail "attribution-secondmate-child: the retired secondmate's own row is missing"
+  pass "forced secondmate retirement records every discarded child's AI effort join"
+}
+
+test_forced_secondmate_child_attribution_failure_still_retires() {
+  local case_dir home bad_data rc=0
+  case_dir=$(make_case attribution-secondmate-child-failure)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/child-tmux.meta" \
+    "window=firstmate:fm-child-tmux" \
+    "endpoint_task_id=child-tmux" \
+    "worktree=$home/child-wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "started_at=2026-08-01T04:00:00Z"
+  bad_data="$case_dir/not-a-directory"
+  : > "$bad_data"
+
+  ( FM_DATA_OVERRIDE="$bad_data" run_teardown "$case_dir" --force ) \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" \
+    "attribution-secondmate-child-failure: recording failure must not block retirement"
+  assert_absent "$home/state/child-tmux.meta" \
+    "attribution-secondmate-child-failure: retirement stalled on a best-effort record"
+  assert_grep 'warning: could not append AI effort attribution for child task child-tmux; retirement will continue' \
+    "$case_dir/stderr" \
+    "attribution-secondmate-child-failure: retirement did not disclose the lost child join"
+  pass "forced retirement proceeds and says so when a child attribution record fails"
+}
+
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -1891,6 +2002,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_appends_attribution_after_legacy_rows
 test_attribution_failure_warns_but_teardown_completes
+test_attribution_reuses_one_schema_section_across_teardowns
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
@@ -1898,6 +2010,8 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
+test_forced_secondmate_records_child_attribution_before_discard
+test_forced_secondmate_child_attribution_failure_still_retires
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed

@@ -59,9 +59,15 @@
 # are task, worktree, harness, model, effort, kind, project, started_at, and
 # ended_at. Existing hand-written rows remain byte-for-byte intact above that
 # section. Values escape backslash, tab, carriage return, and newline as `\\`,
-# `\t`, `\r`, and `\n`. New tasks carry an exact UTC spawn timestamp in metadata;
-# pre-existing metadata falls back to its filesystem birth time, then mtime.
-# Attribution failure warns but never changes teardown eligibility or completion.
+# `\t`, `\r`, and `\n`. A legacy file whose last line has no trailing newline is
+# closed with one first, so no hand-written row is ever joined or rewritten, and
+# each task contributes its marker, header, and row as a single append so
+# concurrent teardowns cannot interleave. Forced secondmate retirement records
+# the same row for every child task it discards, into the surviving parent
+# home's data/, because those children never get their own teardown run. New
+# tasks carry an exact UTC spawn timestamp in metadata; pre-existing metadata
+# falls back to its filesystem birth time, then mtime. Attribution failure warns
+# but never changes teardown eligibility, retirement, or completion.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -273,36 +279,41 @@ attribution_legacy_started_at() {
 }
 
 record_cost_attribution() {
-  local file marker started_at ended_at harness model effort
+  local data=$1 meta=$2 id=$3 wt=$4 kind=$5 proj=$6
+  local file marker started_at ended_at harness model effort payload row
   marker='# schema=firstmate-effort-attribution-v2'
-  file="$DATA/cost-attribution.tsv"
-  mkdir -p "$DATA" || return 1
-  started_at=$(meta_value "$META" started_at)
+  file="$data/cost-attribution.tsv"
+  mkdir -p "$data" || return 1
+  started_at=$(meta_value "$meta" started_at)
   if [ -z "$started_at" ]; then
-    started_at=$(attribution_legacy_started_at "$META") || return 1
+    started_at=$(attribution_legacy_started_at "$meta") || return 1
   fi
   ended_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 1
-  harness=$(meta_value "$META" harness)
-  model=$(meta_value "$META" model)
-  effort=$(meta_value "$META" effort)
+  harness=$(meta_value "$meta" harness)
+  model=$(meta_value "$meta" model)
+  effort=$(meta_value "$meta" effort)
   [ -n "$model" ] || model=default
   [ -n "$effort" ] || effort=default
-  {
-    if [ ! -s "$file" ] || ! grep -qxF "$marker" "$file"; then
-      printf '%s\n' "$marker"
-      printf 'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tstarted_at\tended_at\n'
-    fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$(attribution_escape "$ID")" \
-      "$(attribution_escape "$WT")" \
-      "$(attribution_escape "$harness")" \
-      "$(attribution_escape "$model")" \
-      "$(attribution_escape "$effort")" \
-      "$(attribution_escape "$KIND")" \
-      "$(attribution_escape "$PROJ")" \
-      "$(attribution_escape "$started_at")" \
-      "$(attribution_escape "$ended_at")"
-  } >> "$file" || return 1
+  payload=
+  if [ -s "$file" ] && [ -n "$(tail -c 1 "$file" 2>/dev/null || true)" ]; then
+    payload=$'\n'
+  fi
+  if [ ! -s "$file" ] || ! grep -qxF "$marker" "$file"; then
+    payload+="$marker"$'\n'
+    payload+=$'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tstarted_at\tended_at\n'
+  fi
+  printf -v row '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(attribution_escape "$id")" \
+    "$(attribution_escape "$wt")" \
+    "$(attribution_escape "$harness")" \
+    "$(attribution_escape "$model")" \
+    "$(attribution_escape "$effort")" \
+    "$(attribution_escape "$kind")" \
+    "$(attribution_escape "$proj")" \
+    "$(attribution_escape "$started_at")" \
+    "$(attribution_escape "$ended_at")"
+  payload+=$row
+  printf '%s' "$payload" >> "$file" || return 1
 }
 
 require_orca_worktree_id() {
@@ -1507,6 +1518,9 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
+    if ! record_cost_attribution "$DATA" "$child_meta" "$child_id" "$child_wt" "$child_kind" "$child_proj"; then
+      echo "warning: could not append AI effort attribution for child task $child_id; retirement will continue" >&2
+    fi
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token"
@@ -1754,7 +1768,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-if ! record_cost_attribution; then
+if ! record_cost_attribution "$DATA" "$META" "$ID" "$WT" "$KIND" "$PROJ"; then
   echo "warning: could not append AI effort attribution for task $ID; teardown will continue" >&2
 fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
