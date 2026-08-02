@@ -9,7 +9,7 @@
 # This file is sourced by scripts and has no side effects on source.
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|jcode|^pi$|^pi-signed$'
 
 # Walk the current process ancestry (up to 16 hops) and print a harness pid.
 # For every harness except Claude, the first match wins (innermost pid), which

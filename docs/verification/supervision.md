@@ -73,6 +73,15 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
+| jcode | v0.64.2 | Process lifecycle (`jcode run` wrapper) | The spawn seed `busy source=fm-spawn`, then on process exit the task-local wrapper (`$TASK_TMP/jcode-run.sh`, EXIT trap, no `exec`) wrote `idle source=jcode-process event=process-exit` and touched the turn-end marker. Live in a real tmux window (2026-08-02): classified `busy fm-spawn` during the run and `idle jcode-process` after exit, with a stale-gen apply refused by the writer. |
+
+The jcode live pass (2026-08-02) mirrored `fm_backend_tmux_create_task`'s stable-window-id targeting and ran the exact wrapper shape `fm-spawn` writes:
+
+```sh
+jcode --no-update --quiet run --model glm-5.2-nvidia-only --cwd <worktree> '<brief>'
+```
+
+Observed: exit 0 with the model's reply plus `[Tokens] upload/download/cache_*` accounting, `--json` records `session_id` and token usage, `--resume <session_id>` continues a session, and the wrapper's EXIT trap fires for normal exit, error exit (bad model), and SIGTERM mid-run. A SIGKILL can run no trap; the endpoint-gone classifier covers it per the dead-endpoint precedence rule.
 
 Codex was probed two ways, both refused:
 

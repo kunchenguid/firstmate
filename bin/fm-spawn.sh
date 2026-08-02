@@ -70,7 +70,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|jcode)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -425,7 +425,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|jcode)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -491,6 +491,18 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # jcode runs as a headless single-shot process: `jcode run` takes the brief
+    # as a positional argument, runs to completion, and exits - so the pane's
+    # process lifecycle IS the turn lifecycle (process-alive = busy, process-exit
+    # = turn-end). No TUI, no pane scraping, no composer, no ghost/placeholder
+    # text, no turn-end hook: process death is the only event the watcher needs.
+    # --no-update keeps a crewmate from auto-upgrading jcode mid-fleet;
+    # --quiet keeps the pane clean for the post-exit cleanup hook. The brief is
+    # opinput-encoded the same way as the other single-argument adapters so the
+    # same shell-injection-safe handoff applies. The worktree isolation comes
+    # from --cwd <worktree> (jcode's native per-session cwd), set by the wrapping
+    # spawn path that cds into the worktree before launching, just like kimi.
+    jcode) printf '%s' '__JCODEBIN__ --no-update --quiet run __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -599,11 +611,40 @@ resolve_kimi_binary() {
   return 1
 }
 
+# Resolve the jcode binary to an absolute path. The official installer
+# (https://jcode.sh/install) installs to $HOME/.local/bin/jcode by default and
+# symlinks it to $HOME/.jcode/builds/stable/jcode, so either path resolves here
+# the same way PATH resolution already would. Refuse rather than fall back when
+# neither exists, matching resolve_kimi_binary's contract.
+resolve_jcode_binary() {
+  local candidate dir fallback
+  candidate=$(command -v jcode 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  fallback="${HOME:-}/.local/bin/jcode"
+  if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  echo "error: jcode executable not found; searched PATH for 'jcode' and fallback '$fallback'" >&2
+  return 1
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|jcode)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -646,7 +687,11 @@ effort_flag_for_harness() {
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
+    # task metadata but never reaches the launch command. jcode likewise accepts
+    # --model but exposes no reasoning-effort flag for the `jcode run` path
+    # (jcode's effort is selected per-provider-profile in ~/.jcode/config.toml,
+    # outside firstmate's launch command), so the requested axis stays in task
+    # metadata and never reaches the launch command.
   esac
 }
 
@@ -660,6 +705,14 @@ case "$LAUNCH" in
         exit 1
       }
     fi
+    ;;
+  *__JCODEBIN__*)
+    JCODE_BIN=$(resolve_jcode_binary) || exit 1
+    LAUNCH=${LAUNCH//__JCODEBIN__/$(shell_quote "$JCODE_BIN")}
+    # jcode's turn-end signal is process-exit, not a Stop hook, so there is no
+    # global hook installer to run here. The post-exit cleanup hook (written by
+    # the busy-wiring block below) touches state/<id>.turn-ended when the
+    # process dies, exactly like a Stop hook would.
     ;;
 esac
 
@@ -1382,7 +1435,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|jcode*)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -1581,6 +1634,37 @@ EOF
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
+      ;;
+    jcode*)
+      # jcode's busy-state wiring is the process-death handler, not a hook:
+      # `jcode run` is single-shot, so when the launched process exits the
+      # turn is over. We write a tiny wrapper into the task temp root that
+      # runs the brief, then on ANY exit path (normal completion, error,
+      # interrupt kill) records idle/jcode-process and touches the turn-ended
+      # NOTIFICATION so the watcher wakes. The wrapper is written 0700 into
+      # TASK_TMP (outside the worktree, same rationale as the other harnesses'
+      # hook files staying out of git). The gen pins the record to this task's
+      # armed incarnation, exactly like every other semantic writer.
+      #
+      # NOTE the deliberate no-exec shape: `exec "$@"` would replace this shell
+      # with the jcode process, which never runs the EXIT trap. Running jcode
+      # as a child and exiting with its status makes bash fire the EXIT trap on
+      # normal exit, error exit, and SIGINT/SIGTERM-driven exit. A SIGKILL can
+      # never run any trap (kernel-enforced); the endpoint-gone classifier
+      # covers that case, per fm-busy-lib's dead-endpoint precedence rule.
+      JCODE_WRAPPER="$TASK_TMP/jcode-run.sh"
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source jcode-process"
+      {
+        printf '#!/usr/bin/env bash\n'
+        printf 'set +e\n'
+        printf 'trap '\''%s idle %s --event process-exit 2>/dev/null || true; touch %s 2>/dev/null || true'\'' EXIT\n' \
+          "$busy_cmd_prefix" "$busy_suffix" "$(shell_quote "$TURNEND")"
+        printf '"$@"\n'
+        printf 'exit $?\n'
+      } > "$JCODE_WRAPPER"
+      chmod 0700 "$JCODE_WRAPPER"
+      LAUNCH="$JCODE_WRAPPER $LAUNCH"
       ;;
   esac
 fi

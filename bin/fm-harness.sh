@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|jcode|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -31,10 +31,10 @@ detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
   # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # and kimi are markerless, so a foreign marker retained in a terminal
+  # kimi, and jcode are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
-  # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
+  # CLAUDECODE inheritance into a kimi or jcode child was observed; it was not.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -53,6 +53,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      *jcode*) echo jcode; return ;;
       kimi) echo kimi; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;

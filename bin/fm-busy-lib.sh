@@ -34,6 +34,8 @@
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
+#   jcode-process    jcode headless `jcode run` process lifecycle (process-alive
+#                    = busy, process-exit = idle), gated by fm_busy_jcode_verified
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
 #   fm-interrupt     a firstmate-controlled interruption of the worker
@@ -94,6 +96,29 @@ FM_BUSY_KIMI_VERIFIED_VERSIONS=""
 
 fm_busy_kimi_verified() {
   [ -n "$FM_BUSY_KIMI_VERIFIED_VERSIONS" ]
+}
+
+# Standalone-Jcode verification gate. Empty means no installed jcode version
+# has passed live verification, so every standalone jcode task classifies
+# unknown jcode-unverified and fm-spawn wires no jcode busy events.
+#
+# Source: the jcode process lifecycle itself. jcode crewmates run as headless
+# single-shot `jcode run --cwd <worktree> --no-update "<brief>"` processes:
+# process-alive IS busy, process-exit IS turn-end (the post-exit cleanup hook
+# writes the idle record). No TUI, no pane scraping, no ghost/placeholder
+# hazard. This is the most direct semantic source of any verified adapter.
+#
+# V0.64.2 is verified at install time: a `jcode run --json` round-trip returns
+# exit 0 with the model's text and token usage, and `--ndjson` streams the
+# start/text_delta/message_end/tokens/done events. To open the gate after an
+# upstream regression, live-verify the same round-trip plus the process-exit
+# cleanup hook on a firstmate-launched worker, record the version and observed
+# output in docs/verification/supervision.md, and add the verified version
+# string(s) here in the same change that lands the wiring.
+FM_BUSY_JCODE_VERIFIED_VERSIONS="v0.64.2"
+
+fm_busy_jcode_verified() {
+  [ -n "$FM_BUSY_JCODE_VERIFIED_VERSIONS" ]
 }
 
 # fm_busy_codex_appserver_observable: capability/version negotiation for the
@@ -176,6 +201,10 @@ fm_busy_sources_for_harness() {  # <harness>
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
+      ;;
+    jcode*)
+      fm_busy_jcode_verified || { printf ''; return 0; }
+      adapter='jcode-process'
       ;;
     *) printf ''; return 0 ;;
   esac
@@ -274,6 +303,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     codex*)
       if ! fm_busy_codex_semantic_source; then
         printf 'unknown codex-unverified'
+        return 0
+      fi
+      ;;
+    jcode*)
+      if ! fm_busy_jcode_verified; then
+        printf 'unknown jcode-unverified'
         return 0
       fi
       ;;

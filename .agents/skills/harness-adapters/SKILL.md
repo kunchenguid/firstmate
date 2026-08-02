@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and jcode.
 user-invocable: false
 metadata:
   internal: true
@@ -127,6 +127,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| jcode | `--model <model>` | none | Verified 2026-08-02 on jcode v0.64.2. `jcode run` accepts `--model`; there is no reasoning-effort flag for the headless path (effort is chosen per-provider-profile in `~/.jcode/config.toml`). |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -144,6 +145,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| jcode | Run `jcode provider current` for the resolved provider/model; `jcode provider list` for all configured providers; `jcode auth status` for per-provider credential readiness. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -163,6 +165,7 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- jcode: no separate documented skill-invocation surface for the headless `jcode run` path; use natural language if a skill command is needed.
 
 ## Submission acknowledgement hazards
 
@@ -397,3 +400,28 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
+
+## jcode (VERIFIED 2026-08-02, jcode v0.64.2)
+
+J-Code (`jcode`) runs as a **headless single-shot process** when launched as a crewmate: `jcode run --cwd <worktree> --no-update --quiet "<brief>"` runs the brief to completion and exits. There is no TUI, no composer, no pane-scraping requirement, no ghost/placeholder text, and no trust dialog. The **process lifecycle IS the turn lifecycle**: process-alive = busy, process-exit = turn-end. This is the most direct semantic busy source of any verified adapter and needs no hook installer at all.
+
+`fm-spawn.sh` wraps every jcode launch in a task-local process-death handler (`$TASK_TMP/jcode-run.sh`) that fires `idle/jcode-process` and touches `state/<id>.turn-ended` on normal exit, error exit, and SIGINT/SIGTERM-driven exit via an EXIT trap, so the watcher never sees a stale busy record. The wrapper deliberately does NOT `exec` the jcode process (exec would skip the EXIT trap); jcode runs as a child and the wrapper exits with its status. A SIGKILL can never run any trap — the endpoint-gone classifier covers that case per `fm-busy-lib.sh`'s dead-endpoint precedence rule. The wrapper is 0700 in the task temp root, outside the worktree, and is removed by teardown.
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `jcode` from `PATH`, then fallback `$HOME/.local/bin/jcode` (the official installer's default destination; the real binary lives at `$HOME/.jcode/builds/stable/jcode` behind a symlink); spawning refuses if neither exists. |
+| Launch | Headless `jcode --no-update --quiet run --model <model> --cwd <worktree> "<brief-arg>"`, launched inside the treehouse worktree pane exactly like every other adapter. `--no-update` prevents a crewmate from auto-upgrading jcode mid-fleet (jcode auto-updates release builds by default); `--quiet` keeps the pane clean for the process-death handler. |
+| Models | `jcode provider current` shows the resolved provider/model; models come from `~/.jcode/config.toml` provider profiles (e.g. an `openai-compatible` profile pointing at a gateway like OmniRoute). `jcode provider list` lists all providers. |
+| Busy state | Semantic source `jcode-process`: the launched `jcode run` process is alive = busy, exited = idle. The busy contract is gated by `fm_busy_jcode_verified` (currently `v0.64.2`); an unverified version classifies `unknown jcode-unverified`, never idle. |
+| Exit command | Not applicable - the process exits on its own when the task completes. |
+| Interrupt | Kill the process (the wrapper's EXIT trap records idle + touches turn-ended). No Escape/Ctrl+C composer semantics exist. |
+| Skill invocation | No documented slash surface for the headless path; use natural language if a skill command is needed. |
+| Autonomy | Always autonomous: `jcode run` has no permission system to approve or skip. |
+| Trust dialog | None. |
+| Env marker | None (jcode sets no child-process env marker); detection relies on process ancestry command name `jcode`. |
+| Effort | No reasoning-effort flag exists for the headless path; requested effort stays in task metadata and never reaches the launch command. |
+| Resume | `jcode run --resume <session-id> "<message>"` resumes a prior session; `jcode run --json` prints the session id. Session persistence and compaction run automatically per cwd. |
+
+`jcode run` preserves jcode's flagship features through the headless path: `--ndjson` streams token-efficient structured events (`start`, `text_delta`, `message_end`, `tokens` with input/output/cache-read counts, `done`), `--json` returns the final text plus token usage for the watcher, session compaction runs automatically (verified in jcode logs: `seed_compaction_from_session`), and `jcode memory list/search/export/import/stats` expose long-term codebase memory from the same `~/.jcode` store.
+
+There is no turn-end hook to install, no global config file to edit, and no per-worktree token pointer: the only wiring is the spawn-time process-death wrapper, so teardown removes nothing extra beyond the task temp root. Because jcode is not a Herdr-native agent, a herdr backend reports a jcode pane through its generic agent classifier; tmux is the verified backend for jcode crews, where the tmux liveness classifier matches `*jcode*` as `alive`.
