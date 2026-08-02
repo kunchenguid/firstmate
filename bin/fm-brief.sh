@@ -60,6 +60,14 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Every scaffold carries a verification-discipline section: witness a negative
+# control fail before trusting success reported only by absence, and wait on
+# completion artifacts rather than process names.
+# Ship scaffolds additionally carry branch conflict resolution: rebase and
+# resolve branch/base conflicts autonomously at any file count when intent is
+# clear, escalating only genuinely ambiguous intent to firstmate. In
+# no-mistakes mode that delegated rebase is the stated exception to the
+# do-not-commit-while-a-run-is-active rule.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -159,6 +167,21 @@ CONTEXT_SECTION=${CONTEXT_SECTION%$'\n'}
 # path, a crewmate or scout identifies itself before acting on anything unmarked.
 FROMFIRST_MARKER_FACT="a leading \`$FM_FROMFIRST_LABEL\` label followed by an invisible system separator; that separator is untypable, so a human never produces it"
 
+IFS= read -r -d '' VERIFICATION_DISCIPLINE <<'EOF' || true
+# Verification discipline
+- Before trusting success reported only by absence - an empty violations log, no output, or no failures - run a negative control and watch it fail, then run the real check.
+- Wait on completion artifacts, never process names.
+  At collection time, report a missing expected artifact as failure, not as a job still running.
+EOF
+VERIFICATION_DISCIPLINE=${VERIFICATION_DISCIPLINE%$'\n'}
+
+IFS= read -r -d '' BRANCH_CONFLICT_RESOLUTION <<'EOF' || true
+# Branch conflict resolution
+Rebase and resolve branch/base conflicts yourself whenever intent is clear, at any file count: keep the base wherever this branch made no deliberate change, reapply this branch's contributions on top, and preserve every prior pipeline fix commit through the rebase.
+Escalate only genuinely ambiguous intent to firstmate, never the captain.
+EOF
+BRANCH_CONFLICT_RESOLUTION=${BRANCH_CONFLICT_RESOLUTION%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -201,6 +224,8 @@ You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
 In Claude Code, the bottom \`CTX\` row is host-computed context pressure; when it shows \`COMPACT NOW: /compact\` at 70 percent used or higher, run \`/compact\` before continuing instead of relying on a self-estimate.
+
+$VERIFICATION_DISCIPLINE
 
 # Requests from the main firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.
@@ -336,6 +361,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 $WHO_IS_SPEAKING
 
+$VERIFICATION_DISCIPLINE
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -391,6 +418,7 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+The one exception is a rebase the pipeline hands back to you: resolve and commit it under \`# Branch conflict resolution\` above, then return to driving the gates.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
@@ -453,6 +481,10 @@ $RULE1
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 $WHO_IS_SPEAKING
+
+$BRANCH_CONFLICT_RESOLUTION
+
+$VERIFICATION_DISCIPLINE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

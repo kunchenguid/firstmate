@@ -174,6 +174,10 @@ test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
+  assert_contains "$help" "verification-discipline section" \
+    "fm-brief.sh --help does not document the generated verification-discipline section"
+  assert_contains "$help" "Ship scaffolds additionally carry branch conflict resolution" \
+    "fm-brief.sh --help does not document the ship-only branch conflict resolution section"
   pass "fm-brief.sh: --help renders the complete header"
 }
 
@@ -708,6 +712,66 @@ test_secondmate_charter_keeps_its_own_marker_consequence() {
   pass "fm-brief: the charter shares the marker fact but keeps its own consequence"
 }
 
+# The standing worker rules are captain-approved contract text, and the brief is
+# the only place the worker reads them. Pin the variant split directly: every
+# scaffold carries verification discipline, only ship scaffolds carry branch
+# conflict resolution, and the no-mistakes DOD keeps the delegated-rebase
+# carve-out that reconciles that rule with its no-commit-during-a-run line.
+test_standing_worker_rules_by_variant() {
+  local home id brief
+  home="$TMP_ROOT/standing-rules-home"
+  write_registry "$home"
+
+  for id_proj in "standing-nomistakes:no-registry-proj" "standing-directpr:direct-proj" "standing-localonly:local-proj"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Branch conflict resolution" "$brief" \
+      "$id: ship brief lost the branch conflict resolution section"
+    assert_grep "Rebase and resolve branch/base conflicts yourself whenever intent is clear, at any file count" "$brief" \
+      "$id: ship brief lost autonomous conflict resolution at any file count"
+    assert_grep "preserve every prior pipeline fix commit through the rebase" "$brief" \
+      "$id: ship brief lost prior-fix-commit preservation"
+    assert_grep "Escalate only genuinely ambiguous intent to firstmate, never the captain." "$brief" \
+      "$id: ship brief lost the firstmate-only escalation target"
+    assert_grep "# Verification discipline" "$brief" \
+      "$id: ship brief lost the verification discipline section"
+  done
+
+  brief="$home/data/standing-nomistakes/brief.md"
+  assert_grep "The one exception is a rebase the pipeline hands back to you" "$brief" \
+    "no-mistakes DOD lost the delegated-rebase carve-out from the no-commit-during-a-run rule"
+  brief="$home/data/standing-directpr/brief.md"
+  assert_no_grep "The one exception is a rebase the pipeline hands back to you" "$brief" \
+    "direct-PR brief carries a pipeline carve-out for a path with no pipeline"
+
+  id="standing-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "# Verification discipline" "$brief" "scout brief lost the verification discipline section"
+  assert_no_grep "# Branch conflict resolution" "$brief" \
+    "scout brief carries branch conflict resolution though it ships no branch"
+
+  id="standing-secondmate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "# Verification discipline" "$brief" "secondmate charter lost the verification discipline section"
+  assert_no_grep "# Branch conflict resolution" "$brief" \
+    "secondmate charter carries branch conflict resolution though it ships no branch"
+
+  for id in standing-nomistakes standing-scout standing-secondmate; do
+    brief="$home/data/$id/brief.md"
+    assert_grep "run a negative control and watch it fail, then run the real check" "$brief" \
+      "$id: verification discipline lost the witnessed negative control"
+    assert_grep "Wait on completion artifacts, never process names." "$brief" \
+      "$id: verification discipline lost the artifact-over-process-name rule"
+    assert_grep "report a missing expected artifact as failure" "$brief" \
+      "$id: verification discipline lost missing-artifact-is-failure at collection"
+  done
+  pass "fm-brief.sh: standing worker rules render per variant with the delegated-rebase carve-out"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -728,3 +792,4 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_context_pressure_contract_reaches_every_agent_kind
 test_scout_and_secondmate_scaffold
+test_standing_worker_rules_by_variant
