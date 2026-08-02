@@ -67,6 +67,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+TREEHOUSE_REAPER="$ROOT/bin/fm-treehouse-reap.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 # shellcheck source=bin/fm-checkout-lock-lib.sh disable=SC1091
 . "$ROOT/bin/fm-checkout-lock-lib.sh"
@@ -1783,6 +1784,57 @@ SH
   assert_present "$case_dir/state/task-x1.meta" \
     "restored-endpoint refusal cleared task metadata"
   pass "dead reap repeats endpoint proof after slow local scans"
+}
+
+run_treehouse_reaper() {
+  local case_dir=$1
+  shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/home" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TREEHOUSE_ROOT="$case_dir/home/.treehouse" \
+  HOME="$case_dir/home" \
+    "$TREEHOUSE_REAPER" "$@"
+}
+
+test_treehouse_reaper_safe_refusals_exit_success() {
+  local case_dir explicit_rc auto_rc
+  case_dir=$(make_case reaper-safe-refusal-status)
+  mkdir -p "$case_dir/home"
+  set +e
+  run_treehouse_reaper "$case_dir" reap missing-task \
+    > "$case_dir/explicit-stdout" 2> "$case_dir/explicit-stderr"
+  explicit_rc=$?
+  fm_write_meta "$case_dir/state/safe-scout.meta" 'kind=scout'
+  run_treehouse_reaper "$case_dir" reap --auto \
+    > "$case_dir/auto-stdout" 2> "$case_dir/auto-stderr"
+  auto_rc=$?
+  set -e
+  expect_code 0 "$explicit_rc" "explicit metadata safety refusal should succeed"
+  expect_code 0 "$auto_rc" "automatic unsupported-kind safety refusal should succeed"
+  assert_grep 'retained task=missing-task reason=metadata-unavailable' \
+    "$case_dir/explicit-stdout" \
+    "explicit safe refusal omitted its retained reason"
+  assert_grep 'retained task=safe-scout reason=unsupported-kind kind=scout' \
+    "$case_dir/auto-stdout" \
+    "automatic safe refusal omitted its retained reason"
+  pass "explicit and automatic safety refusals exit successfully"
+}
+
+test_treehouse_reaper_operational_failure_exits_nonzero() {
+  local case_dir rc
+  case_dir=$(make_case reaper-operational-failure-status)
+  mkdir -p "$case_dir/home"
+  set +e
+  FM_TREEHOUSE_REAP_TEARDOWN="$case_dir/missing-teardown" \
+    run_treehouse_reaper "$case_dir" reap missing-task \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "missing teardown machinery should fail operationally"
+  assert_grep 'operational-error reason=teardown-unavailable' "$case_dir/stderr" \
+    "operational failure was not classified explicitly"
+  pass "reaper operational failures remain nonzero"
 }
 
 test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
@@ -5479,6 +5531,12 @@ if [ "${FM_TEST_FOCUSED:-}" = review-reap-final-proofs ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-reaper-status ]; then
+  test_treehouse_reaper_safe_refusals_exit_success
+  test_treehouse_reaper_operational_failure_exits_nonzero
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
   test_never_created_direct_spawn_endpoint_is_not_quiesced
   test_never_created_scout_without_report_cleans_bookkeeping
@@ -5665,6 +5723,8 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_dead_reap_allows_dependency_tree_contents
   test_dead_reap_rechecks_open_pr_at_locked_return
   test_dead_reap_rechecks_endpoint_after_local_proofs
+  test_treehouse_reaper_safe_refusals_exit_success
+  test_treehouse_reaper_operational_failure_exits_nonzero
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
   test_preserve_scratch_never_cleans_unlanded_commits
   test_preserve_scratch_refuses_tracked_drift_before_cleanup

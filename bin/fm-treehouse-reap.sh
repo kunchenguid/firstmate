@@ -31,6 +31,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 MANAGED_TREEHOUSE_ROOT="$FM_HOME/.treehouse"
 TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
+TEARDOWN="${FM_TREEHOUSE_REAP_TEARDOWN:-$SCRIPT_DIR/fm-teardown.sh}"
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -374,20 +375,17 @@ reap_one() {
   local report_wait_seconds report_wait_ms
   task_id_valid "$id" || {
     echo "TREEHOUSE_REAP: retained task=$id reason=invalid-task-id"
-    return 1
+    return 2
   }
   meta="$STATE/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || {
     echo "TREEHOUSE_REAP: retained task=$id reason=metadata-unavailable"
-    return 1
+    return 0
   }
   kind=$(meta_value "$meta" kind)
   [ -n "$kind" ] || kind=ship
   if [ "$kind" != ship ]; then
-    if [ "$explicit" -eq 1 ]; then
-      echo "TREEHOUSE_REAP: retained task=$id reason=unsupported-kind kind=$kind"
-      return 1
-    fi
+    echo "TREEHOUSE_REAP: retained task=$id reason=unsupported-kind kind=$kind"
     return 0
   fi
   if [ "$explicit" -ne 1 ] && ! task_is_terminal "$id" "$meta"; then
@@ -396,11 +394,11 @@ reap_one() {
   worktree=$(meta_value "$meta" worktree)
   [ -n "$worktree" ] && [ -d "$worktree" ] || {
     echo "TREEHOUSE_REAP: retained task=$id reason=worktree-unavailable"
-    return 1
+    return 0
   }
   record=$(lease_record_for_worktree "$worktree") || {
     echo "TREEHOUSE_REAP: retained task=$id reason=exact-lease-unprovable"
-    return 1
+    return 0
   }
   IFS=$'\t' read -r state_path pool holder lease_state <<EOF
 $record
@@ -410,13 +408,13 @@ EOF
     leased)
       [ "$holder" = "firstmate-$id" ] || {
         echo "TREEHOUSE_REAP: retained task=$id reason=lease-holder-mismatch holder=$holder"
-        return 1
+        return 0
       }
       ;;
     returned) ;;
     *)
       echo "TREEHOUSE_REAP: retained task=$id reason=exact-lease-unprovable"
-      return 1
+      return 0
       ;;
   esac
   pr=$(meta_value "$meta" pr)
@@ -426,11 +424,11 @@ EOF
       merged|closed) ;;
       open)
         echo "TREEHOUSE_REAP: retained task=$id reason=open-pr pr=$pr"
-        return 1
+        return 0
         ;;
       *)
         echo "TREEHOUSE_REAP: retained task=$id reason=pr-state-unprovable pr=$pr"
-        return 1
+        return 0
         ;;
     esac
   fi
@@ -442,11 +440,11 @@ EOF
     none) ;;
     open)
       echo "TREEHOUSE_REAP: retained task=$id reason=open-pr branch=$branch_name pr=$branch_url"
-      return 1
+      return 0
       ;;
     *)
       echo "TREEHOUSE_REAP: retained task=$id reason=branch-pr-state-unprovable"
-      return 1
+      return 0
       ;;
   esac
   report_wait_seconds=${FM_TREEHOUSE_REAP_REPORT_WAIT_SECONDS:-600}
@@ -457,7 +455,7 @@ EOF
   report_wait_ms=$((report_wait_seconds * 1000))
   if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       FM_REPORT_LOCK_WAIT_MS="$report_wait_ms" \
-      "$SCRIPT_DIR/fm-teardown.sh" "$id" --reap-dead 2>&1); then
+      "$TEARDOWN" "$id" --reap-dead 2>&1); then
     status=0
   else
     status=$?
@@ -465,6 +463,7 @@ EOF
   if [ "$status" -ne 0 ]; then
     echo "TREEHOUSE_REAP: retained task=$id reason=teardown-refused status=$status"
     [ -z "$out" ] || printf '%s\n' "$out" >&2
+    [ "$status" -eq 1 ] && return 0
     return 1
   fi
   if [ "$lease_state" = returned ]; then
@@ -477,7 +476,11 @@ EOF
 
 reap() {
   local explicit=1 failed=0 meta id
-  fm_refuse_if_gate_agent
+  fm_refuse_if_gate_agent || return $?
+  [ -x "$TEARDOWN" ] || {
+    echo "TREEHOUSE_REAP: operational-error reason=teardown-unavailable path=$TEARDOWN" >&2
+    return 1
+  }
   if [ "${1:-}" = --auto ]; then
     [ "$#" -eq 1 ] || { usage; return 2; }
     explicit=0
