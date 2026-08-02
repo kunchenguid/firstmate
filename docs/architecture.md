@@ -85,6 +85,7 @@ The tmux submit core treats a busy pane plus retries-exhausted plus composer-sti
 An idle pane keeps the `pending` verdict as a genuine swallow.
 The same OpenCode busy-queue case is a known gap on the herdr adapter and is recorded in `docs/herdr-backend.md` rather than patched here.
 Composer classification has one shared owner, `bin/fm-composer-lib.sh`: tmux, herdr, Zellij, Orca, and cmux contribute only a screen capture plus declarative styled, cursor, identity, and row capabilities, while the shared classifier owns every shape and the `empty`/`pending`/`pending-unproven`/`unknown` verdict.
+That owner maps every non-ASCII Unicode whitespace code point onto an ASCII space before it trims and judges, so an empty composer row a harness padded with U+00A0 reads `empty` instead of a locale-dependent false `pending`, while any row holding a visible glyph stays non-empty.
 `fm-spawn.sh` also routes Kimi launch readiness through that classifier instead of carrying another shape copy.
 The daemon injects only into an affirmatively `empty` composer, so every other or future verdict defers; positive container proof is required, and a blank unidentified row or bare dead-shell prompt cannot receive an escalation.
 The current operator boundary is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
