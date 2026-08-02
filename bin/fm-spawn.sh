@@ -1040,13 +1040,19 @@ case "$BACKEND" in
           case "$HERDR_RECLAIM_STATUS" in
             0)
               HERDR_PROJECTED=1
-              HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
+              # HERDR_TASK_* name the WORKER pane this spawn creates. Never
+              # store them in HERDR_WORKSPACE_ID/HERDR_TAB_ID/HERDR_PANE_ID:
+              # those are herdr's injected own-process identity, and the
+              # sourced backend reads them as "the pane THIS process runs in"
+              # (fm_backend_herdr_own_pane_socket_check), so shadowing them
+              # makes every later send/read refuse as an unverifiable pane.
+              HERDR_TASK_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
               HERDR_SEEDED_DEFAULT_TAB_ID=""
-              HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-              HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+              HERDR_TASK_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+              HERDR_TASK_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
               HERDR_PROJECTION_ABORT_CLEANUP=1
               HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-              HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+              HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_TASK_PANE_ID
               HERDR_PROJECTION_ABORT_SEEDED_PANE=""
               ;;
             2)
@@ -1096,25 +1102,25 @@ case "$BACKEND" in
             fi
             HERDR_PROJECTED=1
             HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
-            HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+            HERDR_TASK_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
             HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
-            HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-            HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+            HERDR_TASK_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+            HERDR_TASK_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
             HERDR_PROJECTION_ABORT_CLEANUP=1
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_TASK_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
             fm_backend_herdr_projection_order_best_effort \
-              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
+              "$HERDR_SES" "$HERDR_TASK_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
             if [ -n "$HERDR_HOME_ID" ] \
                && fm_backend_herdr_projection_live_binding_matches \
-                 "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
-                 "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
+                 "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_TASK_WORKSPACE_ID" \
+                 "$HERDR_TASK_TAB_ID" "$HERDR_TASK_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
                  "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" \
                && fm_backend_herdr_projection_journal_bind \
                  "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
-                 "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+                 "$HERDR_TASK_WORKSPACE_ID" "$HERDR_TASK_TAB_ID" "$HERDR_TASK_PANE_ID" \
                  "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
               :
             else
@@ -1137,17 +1143,17 @@ case "$BACKEND" in
       CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
-      HERDR_WORKSPACE_ID=${CONTAINER#*:}
+      HERDR_TASK_WORKSPACE_ID=${CONTAINER#*:}
       HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+      read -r HERDR_TASK_TAB_ID HERDR_TASK_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
     fi
-    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+    if [ -z "$HERDR_TASK_TAB_ID" ] || [ -z "$HERDR_TASK_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
     fi
-    T="$HERDR_SES:$HERDR_PANE_ID"
+    T="$HERDR_SES:$HERDR_TASK_PANE_ID"
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -1621,9 +1627,9 @@ META_WINDOW=$T
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
-    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
-    echo "herdr_tab_id=$HERDR_TAB_ID"
-    echo "herdr_pane_id=$HERDR_PANE_ID"
+    echo "herdr_workspace_id=$HERDR_TASK_WORKSPACE_ID"
+    echo "herdr_tab_id=$HERDR_TASK_TAB_ID"
+    echo "herdr_pane_id=$HERDR_TASK_PANE_ID"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
