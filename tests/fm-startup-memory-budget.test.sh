@@ -42,9 +42,10 @@ SH
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
-  --version:*) printf '%s\n' '0.2.3' ;;
+  --version:*) printf '%s\n' '0.2.4' ;;
   update:--help) printf '%s\n' '--archive-body' ;;
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
+  public-followup:--help) printf '%s\n' 'usage: tasks-axi public-followup add <id>' ;;
 esac
 SH
   cat > "$fakebin/tmux" <<'SH'

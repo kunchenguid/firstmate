@@ -232,9 +232,10 @@ SH
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "--version ") printf '%s\n' '0.1.1' ;;
+  "--version ") printf '%s\n' '0.2.4' ;;
   "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
   "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+  "public-followup --help") printf '%s\n' 'usage: tasks-axi public-followup add <id>' ;;
 esac
 exit 0
 SH

@@ -95,7 +95,7 @@ log=${FM_FAKE_TASKS_AXI_LOG:-}
 [ -n "$log" ] && printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
   --version|-v|-V)
-    printf '%s\n' '0.2.3'
+    printf '%s\n' '0.2.4'
     exit 0
     ;;
   update)
@@ -107,6 +107,12 @@ case "${1:-}" in
   mv)
     if [ "${2:-}" = --help ]; then
       printf '%s\n' 'usage: tasks-axi mv <dest> [<id>...]'
+      exit 0
+    fi
+    ;;
+  public-followup)
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' 'usage: tasks-axi public-followup add <id>'
       exit 0
     fi
     ;;
