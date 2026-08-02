@@ -41,6 +41,8 @@ FREE_SPACE_MARGIN_BYTES = 512 * 1024 * 1024
 MAX_TRANSCRIPT_CHARS = 16_000
 MAX_COMMAND_SECONDS = 180
 SCENE_THRESHOLD = 0.28
+SCENE_TIMEOUT_FLOOR = 300
+SCENE_TIMEOUT_CEILING = 900
 SECRET_QUERY_KEYS = {
     "access_token",
     "api_key",
@@ -845,6 +847,14 @@ def confirm_section_media(media: Media, probed_duration: float, warnings: list[s
     return media
 
 
+def scene_timestamp_timeout(span: float) -> int:
+    return int(min(SCENE_TIMEOUT_CEILING, max(SCENE_TIMEOUT_FLOOR, span + 120)))
+
+
+def scene_timeout(selected: Range) -> int:
+    return scene_timestamp_timeout(max(0.0, selected.end - selected.start))
+
+
 def scene_timestamps(video: Path, ranges: list[Range], offset: float = 0.0) -> tuple[list[float], list[str]]:
     warnings: list[str] = []
     timestamps: list[float] = []
@@ -867,7 +877,11 @@ def scene_timestamps(video: Path, ranges: list[Range], offset: float = 0.0) -> t
             "null",
             "-",
         ]
-        result = run_quiet(cmd, timeout=300)
+        try:
+            result = run_quiet(cmd, timeout=scene_timeout(selected))
+        except WatchError:
+            warnings.append("scene-change detection did not finish for at least one selected range; periodic coverage was still used")
+            continue
         if result.returncode != 0:
             warnings.append("scene-change detection failed for at least one selected range; periodic coverage was still used")
             continue

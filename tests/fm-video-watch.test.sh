@@ -92,6 +92,22 @@ if [ "${FM_FAKE_FFMPEG_EXTRACT_FAIL:-0}" = 1 ]; then
   printf 'extract failed with secret %s\n' "${FM_FAKE_SECRET:-SECRET_SHOULD_NOT_LEAK}" >&2
   exit 1
 fi
+# Real ffmpeg exits non-zero and writes nothing when -ss lands at or past the
+# last decodable frame, so the stub must refuse it too.
+seek=
+prev=
+for arg in "$@"; do
+  if [ "$prev" = -ss ]; then
+    seek=$arg
+  fi
+  prev=$arg
+done
+if [ -n "$seek" ]; then
+  awk -v ss="$seek" -v dur="${FM_FAKE_MEDIA_DURATION:-120}" 'BEGIN { exit (ss > dur - 0.04) ? 0 : 1 }' && {
+    printf 'Output file does not contain any stream\n' >&2
+    exit 234
+  }
+fi
 out=${@: -1}
 mkdir -p "$(dirname "$out")"
 printf 'jpg\n' > "$out"
@@ -120,6 +136,18 @@ payload = receipt.split('.', 1)[1]
 payload += '=' * (-len(payload) % 4)
 print(json.loads(base64.urlsafe_b64decode(payload))['root'])
 PY
+}
+
+# A refused or failed prepare deliberately retains its owned evidence directory
+# behind the receipt it prints on stderr. Tests must hand that receipt back so a
+# suite run leaves nothing in the system temp directory.
+cleanup_retained() {
+  local err=$1 receipt
+  [ -f "$err" ] || return 0
+  receipt=$(grep -o 'fmvw1\.[A-Za-z0-9_-]*' "$err" | head -1)
+  [ -n "$receipt" ] || return 0
+  PATH="$(dirname "$REAL_PYTHON"):$BASE_PATH" "$WATCH" cleanup "$receipt" >/dev/null 2>&1
+  printf '%s\n' "$receipt"
 }
 
 mutate_receipt_nonce() {
@@ -235,6 +263,7 @@ test_metadata_rejections() {
     rc=$?
     set +e
     expect_code 4 "$rc" "metadata rejection for $case"
+    cleanup_retained "$dir/err" >/dev/null
   done
   pass "playlist, live, authenticated, and DRM metadata are rejected"
 }
@@ -304,7 +333,7 @@ test_section_download_keeps_absolute_timestamps() {
   err="$dir/err"
   fakebin=$(make_fakebin "$dir")
   : > "$dir/commands.log"
-  FM_FAKE_COMMAND_LOG="$dir/commands.log" \
+  FM_FAKE_COMMAND_LOG="$dir/commands.log" FM_FAKE_MEDIA_DURATION=10 \
     FM_FAKE_FFPROBE_JSON='{"format":{"duration":"10.0","size":"1000"},"streams":[{"codec_type":"video","width":1280,"height":720,"codec_name":"h264"}]}' \
     PATH="$fakebin:$BASE_PATH" "$WATCH" prepare 'https://video.example/watch/one' --question 'read the text' \
     --start 00:10 --end 00:20 --max-frames 6 > "$out" 2> "$err"
@@ -363,6 +392,7 @@ test_media_ceiling_override_requires_free_space() {
   expect_code 2 "$rc" "a media ceiling above the 16 GiB hard cap is refused"
   output=$(cat "$dir/out" "$dir/err")
   assert_contains "$output" 'hard cap for transient public media' "hard-cap refusal did not name the bound"
+  cleanup_retained "$dir/err" >/dev/null
 
   "$REAL_PYTHON" - "$ROOT/bin/fm-video-watch-impl.py" <<'PY' || fail "free-space preflight does not gate only the override"
 import importlib.util, shutil, sys, tempfile
@@ -387,6 +417,19 @@ assert mod.tail_seek_limit(10.0, 25.0) == 9.5, mod.tail_seek_limit(10.0, 25.0)
 assert mod.tail_seek_limit(10.0, 1.0) == 8.0, mod.tail_seek_limit(10.0, 1.0)
 assert mod.tail_seek_limit(10.0, 0.0) == 9.0, mod.tail_seek_limit(10.0, 0.0)
 assert mod.tail_seek_limit(0.2, 25.0) == 0.0, mod.tail_seek_limit(0.2, 25.0)
+
+assert mod.scene_timestamp_timeout(60.0) == 300, mod.scene_timestamp_timeout(60.0)
+assert mod.scene_timestamp_timeout(3709.0) == 900, mod.scene_timestamp_timeout(3709.0)
+
+
+def _refuse(*_a, **_k):
+    raise mod.WatchError("command timed out after 300s: ffmpeg", 5)
+
+
+mod.run_quiet = _refuse
+scenes, scene_warnings = mod.scene_timestamps(Path("missing.mp4"), [mod.Range(0.0, 3709.0, "full_video")])
+assert scenes == [], scenes
+assert scene_warnings and "periodic coverage was still used" in scene_warnings[0], scene_warnings
 
 try:
     mod.resolve_media_ceiling(8 * 1024 * 1024 * 1024, work, [])
@@ -413,17 +456,20 @@ test_local_file_refusals() {
   rc=$?
   set +e
   expect_code 4 "$rc" "local symlink is refused"
+  cleanup_retained "$dir/link.err" >/dev/null
   set +e
   FM_FAKE_COMMAND_LOG="$dir/commands.log" PATH="$fakebin:$BASE_PATH" "$WATCH" prepare "$file" --max-local-bytes 2 --question 'what happens?' > "$dir/size.out" 2> "$dir/size.err"
   rc=$?
   set +e
   expect_code 4 "$rc" "oversized local file is refused"
+  cleanup_retained "$dir/size.err" >/dev/null
   printf 'video\n' > "$dir/video.txt"
   set +e
   FM_FAKE_COMMAND_LOG="$dir/commands.log" PATH="$fakebin:$BASE_PATH" "$WATCH" prepare "$dir/video.txt" --question 'what happens?' > "$dir/type.out" 2> "$dir/type.err"
   rc=$?
   set +e
   expect_code 4 "$rc" "unsupported local extension is refused"
+  cleanup_retained "$dir/type.err" >/dev/null
   out="$dir/local-success.json"
   FM_FAKE_COMMAND_LOG="$dir/commands.log" PATH="$fakebin:$BASE_PATH" "$WATCH" prepare "$file" --question 'what happens?' > "$out" 2> "$dir/local-success.err"
   [ "$(json_get "$out" "data['source']['kind']")" = 'local_file' ] || fail "local success did not record local source kind"
@@ -436,7 +482,7 @@ test_local_file_refusals() {
 }
 
 test_malformed_metadata_and_failure_receipt_are_safe() {
-  local dir="$TMP_ROOT/malformed" fakebin rc output
+  local dir="$TMP_ROOT/malformed" fakebin rc output receipt
   mkdir -p "$dir"
   fakebin=$(make_fakebin "$dir")
   : > "$dir/commands.log"
@@ -448,6 +494,7 @@ test_malformed_metadata_and_failure_receipt_are_safe() {
   expect_code 5 "$rc" "malformed yt-dlp metadata is refused"
   output=$(cat "$dir/out" "$dir/err")
   assert_not_contains "$output" 'SECRET_SHOULD_NOT_LEAK' "malformed metadata diagnostic leaked URL canary"
+  cleanup_retained "$dir/err" >/dev/null
 
   dir="$TMP_ROOT/extract-fail"
   mkdir -p "$dir"
@@ -462,7 +509,10 @@ test_malformed_metadata_and_failure_receipt_are_safe() {
   output=$(cat "$dir/out" "$dir/err")
   assert_contains "$output" 'evidence retained for cleanup with receipt fmvw1.' "failure did not provide cleanup receipt"
   assert_not_contains "$output" 'SECRET_SHOULD_NOT_LEAK' "failure diagnostic leaked raw command canary"
-  pass "malformed metadata and extraction failures stay value-safe"
+  receipt=$(cleanup_retained "$dir/err")
+  [ -n "$receipt" ] || fail "the retained failure directory exposed no usable receipt"
+  [ ! -e "$(receipt_root "$receipt")" ] || fail "the retained failure directory survived its own receipt"
+  pass "malformed metadata and extraction failures stay value-safe and clean up by their retained receipt"
 }
 
 test_cleanup_receipt_mismatch_and_symlink_marker_resistance() {
@@ -505,6 +555,53 @@ test_cleanup_receipt_mismatch_and_symlink_marker_resistance() {
   pass "cleanup requires matching receipt and resists symlink marker replacement"
 }
 
+test_default_whole_video_completes_on_real_media() {
+  local dir="$TMP_ROOT/whole-video" bin out err rc receipt root duration
+  local real_ffmpeg real_ffprobe
+  real_ffmpeg=$(command -v ffmpeg 2>/dev/null)
+  real_ffprobe=$(command -v ffprobe 2>/dev/null)
+  if [ -z "$real_ffmpeg" ] || [ -z "$real_ffprobe" ]; then
+    pass "default whole-video extraction on real media (skipped: ffmpeg and ffprobe are not installed)"
+    return 0
+  fi
+  mkdir -p "$dir"
+  bin="$dir/realbin"
+  mkdir -p "$bin"
+  ln -sf "$real_ffmpeg" "$bin/ffmpeg"
+  ln -sf "$real_ffprobe" "$bin/ffprobe"
+  ln -sf "$REAL_PYTHON" "$bin/python3"
+  duration=6
+  PATH="$bin:$BASE_PATH" ffmpeg -hide_banner -loglevel error \
+    -f lavfi -i "testsrc=duration=$duration:size=160x120:rate=10" \
+    -c:v libx264 -preset ultrafast -pix_fmt yuv420p "$dir/clip.mp4" 2> "$dir/gen.err" \
+    || fail "could not synthesize the regression clip"
+  out="$dir/out.json"
+  err="$dir/err"
+  set +e
+  PATH="$bin:$BASE_PATH" "$WATCH" prepare "$dir/clip.mp4" --question 'what is shown' \
+    --max-frames 8 --resolution 128 > "$out" 2> "$err"
+  rc=$?
+  set +e
+  expect_code 0 "$rc" "the default whole-video path completes without a focus range"
+  receipt=$("$REAL_PYTHON" - "$out" "$duration" <<'PY'
+import json, os, sys
+data = json.load(open(sys.argv[1], encoding='utf-8'))
+duration = float(sys.argv[2])
+assert data['selected_ranges'][0]['reason'] == 'full_video', data['selected_ranges']
+assert data['media']['visual_coverage'] == 'full', data['media']
+assert len(data['frames']) >= 3, len(data['frames'])
+assert data['frames'][-1]['timestamp_seconds'] < duration, data['frames'][-1]
+for frame in data['frames']:
+    assert os.path.getsize(frame['path']) > 0, frame['path']
+print(data['cleanup_receipt'])
+PY
+  ) || fail "the whole-video manifest did not extract every planned frame inside the media"
+  root=$(receipt_root "$receipt")
+  PATH="$bin:$BASE_PATH" "$WATCH" cleanup "$receipt" >/dev/null
+  [ ! -e "$root" ] || fail "whole-video cleanup did not remove the owned directory"
+  pass "the default whole-video path extracts every planned frame from real media and cleans up exactly"
+}
+
 test_real_smoke_requires_two_opt_ins() {
   local dir="$TMP_ROOT/smoke" fakebin rc
   mkdir -p "$dir"
@@ -532,4 +629,5 @@ test_media_ceiling_override_requires_free_space
 test_local_file_refusals
 test_malformed_metadata_and_failure_receipt_are_safe
 test_cleanup_receipt_mismatch_and_symlink_marker_resistance
+test_default_whole_video_completes_on_real_media
 test_real_smoke_requires_two_opt_ins
