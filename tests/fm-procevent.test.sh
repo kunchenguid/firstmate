@@ -384,6 +384,62 @@ assert_present "$HOPEN/state/procevent/open-src.source" "a source with no termin
 pe_adapter "$HOPEN" retire open-src >/dev/null
 pass "a source stays armed unless its own adapter classifies the result terminal"
 
+HREPLACE="$TMP_ROOT/hreplace"; new_home "$HREPLACE"
+PE_TRACKED+=("$HREPLACE|replace-src")
+OLD_TRIGGER="$TMP_ROOT/replace-old-trigger"
+pe_adapter "$HREPLACE" register endnow replace-src -- "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
+pe_adapter "$HREPLACE" start replace-src > "$TMP_ROOT/replace-old.out" 2>&1 &
+replace_old_pid=$!
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/replace-src.claim" || fail "the old registration was never claimed"
+pe_adapter "$HREPLACE" register openended replace-src -- /bin/echo "replacement payload" >/dev/null
+touch "$OLD_TRIGGER"
+wait "$replace_old_pid" || fail "the old terminal runner failed"
+assert_contains "$(cat "$TMP_ROOT/replace-old.out")" "cannot retire terminal source" \
+  "an old runner refuses to retire a replacement registration"
+assert_present "$HREPLACE/state/procevent/replace-src.source" \
+  "a replacement registration survives the old runner's terminal result"
+assert_contains "$(cat "$HREPLACE/state/procevent/replace-src.source")" "adapter=openended" \
+  "the surviving registration is the replacement generation"
+out=$(pe_adapter "$HREPLACE" start replace-src)
+assert_contains "$out" "captured:" "the replacement registration remains independently runnable"
+[ "$(count_results "$HREPLACE" replace-src)" = 2 ] \
+  || fail "the replacement generation did not capture its own result"
+pe_adapter "$HREPLACE" retire replace-src >/dev/null
+pass "terminal retirement preserves and releases a concurrently replaced registration"
+
+HRETFAIL="$TMP_ROOT/hretfail"; new_home "$HRETFAIL"
+PE_TRACKED+=("$HRETFAIL|retire-fail-src")
+FAIL_RM_BIN=$(fm_fakebin "$TMP_ROOT/retire-fail-bin")
+REAL_RM=$(command -v rm)
+export REAL_RM
+cat > "$FAIL_RM_BIN/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */retire-fail-src.source) exit 1 ;; esac
+done
+exec "$REAL_RM" "$@"
+SH
+chmod +x "$FAIL_RM_BIN/rm"
+pe_adapter "$HRETFAIL" register endnow retire-fail-src -- /bin/echo "one terminal payload" >/dev/null
+out=$(PATH="$FAIL_RM_BIN:$PATH" pe_adapter "$HRETFAIL" start retire-fail-src 2>&1)
+assert_contains "$out" "cannot retire terminal source" "a failed registration removal is reported"
+assert_present "$HRETFAIL/state/procevent/retire-fail-src.source" \
+  "failed retirement preserves the exact registration"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
+  "failed retirement preserves its terminal ownership claim"
+out=$(PATH="$FAIL_RM_BIN:$PATH" pe_adapter "$HRETFAIL" reconcile)
+assert_contains "$out" "started=0" "failed terminal retirement never restarts the poll"
+[ "$(count_results "$HRETFAIL" retire-fail-src)" = 1 ] \
+  || fail "failed retirement allowed recurring terminal capture"
+pe_adapter "$HRETFAIL" reconcile >/dev/null
+assert_absent "$HRETFAIL/state/procevent/retire-fail-src.source" \
+  "repeated retirement removes the same registration once removal recovers"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
+  "the claim releases only after that registration is removed"
+[ "$(count_results "$HRETFAIL" retire-fail-src)" = 1 ] \
+  || fail "retirement recovery reran the terminal source"
+pass "failed terminal retirement is fail-closed and idempotently recoverable"
+
 # --- end-user-aligned regression: one Send & End, one captured result -------
 # The dogfood defect: a real armed Lavish source received one human `Send & End`
 # action, and the runner captured four results - the human's real feedback, then

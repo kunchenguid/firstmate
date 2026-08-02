@@ -1529,6 +1529,122 @@ test_procevent_surfaced_result_does_not_rewake() {
   pass "a process-event wake is delivered once: no duplicate wake while queued, and none once handled"
 }
 
+test_procevent_marker_keys_are_injective() {
+  local dir state out pid marker_count
+  dir=$(make_case procevent-marker-identity); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:a.b:1" "check: procevent fixture a.b 1"
+  append_wake "$state" check "procevent:a_b:1" "check: procevent fixture a_b 1"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "colliding-looking process-event keys were not surfaced"
+  grep -F "procevent:a.b:1" "$out" >/dev/null || fail "the dotted queue key was suppressed"
+  grep -F "procevent:a_b:1" "$out" >/dev/null || fail "the underscored queue key was suppressed"
+  marker_count=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | awk 'END { print NR + 0 }')
+  [ "$marker_count" = 2 ] || fail "distinct queue keys produced $marker_count seen markers"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "marker identity fixture drain failed"
+  pass "complete process-event queue keys map to distinct seen markers"
+}
+
+install_marker_mv_fault() {  # <dir>
+  local dir=$1
+  REAL_MV=$(command -v mv)
+  export REAL_MV
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+dest=${!#}
+case "$dest" in
+  */.seen-procevent-*)
+    case "${FM_MARKER_MV_MODE:-}" in
+      pause)
+        printf '1\n' > "$FM_MARKER_MV_READY"
+        while [ ! -e "$FM_MARKER_MV_RELEASE" ]; do sleep 0.02; done
+        ;;
+      kill-before) kill -KILL "$PPID"; exit 1 ;;
+      kill-after) "$REAL_MV" "$@" || exit; kill -KILL "$PPID"; exit 1 ;;
+    esac
+    ;;
+esac
+exec "$REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+}
+
+test_procevent_surface_serializes_with_drain() {
+  local dir state out drain_out ready release pid drain_pid
+  dir=$(make_case procevent-drain-race); state="$dir/state"; out="$dir/watch.out"
+  drain_out="$dir/drain.out"; ready="$dir/marker-ready"; release="$dir/marker-release"
+  append_wake "$state" check "procevent:drain-race:1" "check: procevent fixture drain-race 1"
+  install_marker_mv_fault "$dir"
+  FM_MARKER_MV_MODE=pause FM_MARKER_MV_READY="$ready" FM_MARKER_MV_RELEASE="$release" \
+    procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_numeric_file "$ready" 100 || fail "the watcher never reached its marker commit boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" &
+  drain_pid=$!
+  wait_live "$drain_pid" 10 || fail "a concurrent drain split the surfacing transition"
+  [ -s "$state/.wake-queue" ] || fail "the concurrent drain consumed the record before marker commit"
+  touch "$release"
+  wait "$pid" || fail "the paused watcher did not finish surfacing"
+  wait "$drain_pid" || fail "the concurrent drain failed after surfacing committed"
+  grep -F "procevent:drain-race:1" "$drain_out" >/dev/null \
+    || fail "the serialized drain lost the process-event record"
+  pass "queue revalidation, proactive output, and marker commit serialize with drain"
+}
+
+test_procevent_surface_crash_boundaries() {
+  local dir state out fifo pid reader marker exit_status
+  dir=$(make_case procevent-output-fail); state="$dir/state"; out="$dir/watch.out"; fifo="$dir/output.fifo"
+  append_wake "$state" check "procevent:output-fail:1" "check: procevent fixture output-fail 1"
+  mkfifo "$fifo"
+  sh -c ': < "$1"' _ "$fifo" & reader=$!
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$fifo" &
+  pid=$!
+  wait "$reader" || true
+  wait_for_exit "$pid" 100
+  exit_status=$?
+  [ "$exit_status" -ne 124 ] || fail "the watcher survived a failed actionable output write"
+  marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
+  [ -z "$marker" ] || fail "failed output committed a suppression marker"
+  [ -s "$state/.wake-queue" ] || fail "failed output consumed the durable queue record"
+  procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || fail "the record was not replayable after output failure"
+  grep -F "procevent:output-fail:1" "$out" >/dev/null || fail "output failure lost proactive replay"
+
+  dir=$(make_case procevent-before-marker); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:before-marker:1" "check: procevent fixture before-marker 1"
+  install_marker_mv_fault "$dir"
+  FM_MARKER_MV_MODE=kill-before procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100
+  exit_status=$?
+  [ "$exit_status" -ne 124 ] || fail "the watcher survived the injected pre-marker crash"
+  grep -F "procevent:before-marker:1" "$out" >/dev/null || fail "the pre-marker crash happened before output"
+  marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
+  [ -z "$marker" ] || fail "a pre-marker crash committed suppression"
+  procevent_watch_bg "$dir" "$out.replay"; pid=$!
+  wait_for_exit "$pid" 100 || fail "a pre-marker crash was not replayable"
+
+  dir=$(make_case procevent-after-marker); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:after-marker:1" "check: procevent fixture after-marker 1"
+  install_marker_mv_fault "$dir"
+  FM_MARKER_MV_MODE=kill-after procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100
+  exit_status=$?
+  [ "$exit_status" -ne 124 ] || fail "the watcher survived the injected post-marker crash"
+  grep -F "procevent:after-marker:1" "$out" >/dev/null || fail "the post-marker crash lost actionable output"
+  marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
+  [ -n "$marker" ] || fail "the post-marker crash did not reach marker commit"
+  : > "$out.replay"
+  procevent_watch_bg "$dir" "$out.replay"; pid=$!
+  if ! wait_live "$pid" 40; then
+    fail "a delivered and durably marked record woke again: $(cat "$out.replay")"
+  fi
+  reap "$pid"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "post-marker fixture drain failed"
+  pass "surfacing failures replay before marker commit and suppress only after delivered output"
+}
+
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
 test_heartbeat_no_change_absorbed() {
@@ -1696,6 +1812,9 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_surfaced_result_does_not_rewake
+test_procevent_marker_keys_are_injective
+test_procevent_surface_serializes_with_drain
+test_procevent_surface_crash_boundaries
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing

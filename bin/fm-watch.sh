@@ -470,23 +470,39 @@ scan_signals() {
 # and re-announcement, drain-time deduplication, and the handled acknowledgement
 # keep their existing owners untouched.
 procevent_surfaced_marker() {  # <queue-key>
-  printf '%s/.seen-%s' "$STATE" "$(printf '%s' "$1" | tr ':.' '__')"
+  printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
 }
 
 procevent_surface_queued() {
-  local key surfaced='' reason
+  local key surfaced='' reason marker tmp status=0
   [ -s "$FM_WAKE_QUEUE" ] || return 0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   while IFS= read -r key; do
     case "$key" in procevent:*) ;; *) continue ;; esac
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     surfaced="$surfaced $key"
-  done < <(fm_wake_queued_keys check)
-  [ -n "$surfaced" ] || return 0
-  for key in $surfaced; do
-    : > "$(procevent_surfaced_marker "$key")"
-  done
+  done < <(fm_wake_queued_keys_locked check)
+  if [ -z "$surfaced" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
   reason="check: process-event result captured:$surfaced"
-  wake "$reason"
+  printf '0\n' > "$STATE/.heartbeat-streak"
+  if ! printf '%s\n' "$reason"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  fi
+  for key in $surfaced; do
+    marker=$(procevent_surfaced_marker "$key")
+    tmp=$(umask 077; mktemp "$STATE/.seen-procevent.XXXXXX") || { status=1; continue; }
+    if ! mv -f -- "$tmp" "$marker"; then
+      rm -f -- "$tmp"
+      status=1
+    fi
+  done
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  [ "$status" -eq 0 ] || return 1
+  exit 0
 }
 
 run_check_process() {

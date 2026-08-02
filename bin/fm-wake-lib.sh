@@ -418,9 +418,14 @@ fm_wake_queued_keys() {
     *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_wake_queued_keys_locked "$kind"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
+fm_wake_queued_keys_locked() {
+  local kind=$1
   awk -F '\t' -v kind="$kind" 'NF >= 5 && $3 == kind && !seen[$4]++ { print $4 }' \
     "$FM_WAKE_QUEUE" 2>/dev/null || true
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
 fm_wake_restore_queue() {

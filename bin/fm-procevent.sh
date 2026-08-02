@@ -251,10 +251,19 @@ cmd_start() {
   CLAIM_HOME=$FM_HOME
   CLAIM_PID=$$
   CLAIM_TOKEN=$FM_PROCEVENT_CLAIM_TOKEN
+  CLAIM_REG_IDENTITY=$FM_PROCEVENT_CLAIM_REG_IDENTITY
   STAGED_OUTPUT=
   release_start_claim() {
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
     fm_procevent_source_lock_acquire "$CLAIM_ID" 2>/dev/null || return 0
+    if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
+      && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
+      && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
+      && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ] \
+      && [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ]; then
+      fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
+      return 0
+    fi
     fm_procevent_claim_release_locked "$CLAIM_ID" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" 2>/dev/null || true
     fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
   }
@@ -337,14 +346,22 @@ cmd_start() {
 # mid-exit), and a generation this runner no longer owns is never unregistered.
 # The EXIT trap's own release then no-ops, because the generation is already gone.
 retire_owned_terminal_source() {  # <source-id>
-  local id=$1 status=0
+  local id=$1 status=0 registration current_identity
+  registration=$(source_file "$id")
   fm_procevent_source_lock_acquire "$id" || return 1
   if fm_procevent_claim_load_locked "$id" 2>/dev/null \
     && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
     && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
-    && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ]; then
-    rm -f -- "$(source_file "$id")" || status=1
-    fm_procevent_claim_release_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
+    && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ] \
+    && [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" = "$CLAIM_REG_IDENTITY" ] \
+    && current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) \
+    && [ "$current_identity" = "$CLAIM_REG_IDENTITY" ] \
+    && fm_procevent_claim_mark_terminal_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN"; then
+    if rm -f -- "$registration" && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
+      fm_procevent_claim_release_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
+    else
+      status=1
+    fi
   else
     status=1
   fi
@@ -418,6 +435,19 @@ cmd_reconcile() {
           detach_runner "$id"
           started=$((started + 1))
           continue
+        elif [ "$claim_state" -eq 4 ]; then
+          owner=$FM_PROCEVENT_CLAIM_HOME
+          pid=$FM_PROCEVENT_CLAIM_PID
+          token=$FM_PROCEVENT_CLAIM_TOKEN
+          if [ "$owner" = "$FM_HOME" ] \
+            && rm -f -- "$(source_file "$id")" \
+            && [ ! -e "$(source_file "$id")" ] \
+            && [ ! -L "$(source_file "$id")" ] \
+            && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+            stopped=$((stopped + 1))
+          else
+            uncertain=$((uncertain + 1))
+          fi
         elif [ "$claim_state" -eq 3 ]; then
           # The leader crashed but its owned group is still consuming the
           # source. Never start a replacement alongside it: stop that group and
