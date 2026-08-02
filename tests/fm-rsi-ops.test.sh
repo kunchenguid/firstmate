@@ -99,6 +99,27 @@ test_classifier_rejects_case_variants_and_sensitive_paths() {
   pass "fm-rsi-classify-diff: rejects behavior and sensitive path variants"
 }
 
+test_classifier_rejects_mdx_and_all_script_tag_forms() {
+  local base candidate output
+  base=$(git -C "$REPO" rev-parse HEAD)
+  printf 'export const enabled = true\n\n# Executable MDX\n' > "$REPO/page.mdx"
+  printf '.. raw:: html\n\n   <script src="app.js"></script>\n' > "$REPO/guide.rst"
+  printf '<svg><script href="app.js"/></svg>\n' > "$REPO/icon.svg"
+  printf '<main><script src="app.js">\n' > "$REPO/fragment.html"
+  candidate=$(commit_fixture executable-markup)
+  output=$("$ROOT/bin/fm-rsi-classify-diff.sh" "$REPO" "$base" "$candidate")
+  [ "$(printf '%s' "$output" | jq -r .lane)" = full ] || fail "executable markup diff was not full: $output"
+  printf '%s' "$output" | jq -e '.reasons | index("behavior_file:page.mdx") != null' >/dev/null \
+    || fail "executable MDX classification omitted evidence: $output"
+  printf '%s' "$output" | jq -e '.reasons | index("script_touch:guide.rst") != null' >/dev/null \
+    || fail "raw RST script classification omitted evidence: $output"
+  printf '%s' "$output" | jq -e '.reasons | index("script_touch:icon.svg") != null' >/dev/null \
+    || fail "self-closing SVG script classification omitted evidence: $output"
+  printf '%s' "$output" | jq -e '.reasons | index("script_touch:fragment.html") != null' >/dev/null \
+    || fail "unmatched HTML script classification omitted evidence: $output"
+  pass "fm-rsi-classify-diff: rejects MDX and every script tag form"
+}
+
 test_classifier_preserves_unusual_paths() {
   local base candidate output path
   path='café.js'
@@ -211,12 +232,29 @@ test_ledger() {
   pass "fm-rsi-ledger-append: appends one firstmate-observed failed event"
 }
 
+test_ledger_validates_full_sha_lengths() {
+  local home ledger candidate_sha64 output status
+  home="$TMP_ROOT/ledger-sha-validation"
+  ledger="$home/data/rsi-events.jsonl"
+  status=0
+  FM_HOME="$home" "$ROOT/bin/fm-rsi-ledger-append.sh" rsi-job bcs 01234567890123456789012345678901234567890 failed fail evidence://gate \
+    > "$TMP_ROOT/ledger-invalid-sha.out" 2> "$TMP_ROOT/ledger-invalid-sha.err" || status=$?
+  [ "$status" -eq 2 ] || fail "invalid ledger SHA length was accepted (exit $status)"
+  [ ! -e "$ledger" ] || fail "invalid ledger SHA created or changed the append-only ledger"
+  candidate_sha64=0123456789012345678901234567890123456789012345678901234567890123
+  output=$(FM_HOME="$home" "$ROOT/bin/fm-rsi-ledger-append.sh" rsi-job bcs "$candidate_sha64" failed fail evidence://gate)
+  [ "$(printf '%s' "$output" | jq -r .candidate_sha)" = "$candidate_sha64" ] || fail "64-character ledger SHA was not preserved"
+  pass "fm-rsi-ledger-append: accepts only exact full SHA lengths"
+}
+
 test_classifier
 test_classifier_rejects_non_additive_tests
 test_classifier_allows_additive_tests
 test_classifier_rejects_case_variants_and_sensitive_paths
+test_classifier_rejects_mdx_and_all_script_tag_forms
 test_classifier_preserves_unusual_paths
 test_classifier_freezes_moving_refs
 test_canary
 test_canary_validates_candidate_binding_and_regex
 test_ledger
+test_ledger_validates_full_sha_lengths

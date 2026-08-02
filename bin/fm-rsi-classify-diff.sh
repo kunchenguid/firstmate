@@ -52,8 +52,8 @@ add_reason() {
   full=1
 }
 
-html_scripts() {
-  perl -0777 -MDigest::SHA=sha256_hex -ne 'while (/<script\b[^>]*>.*?<\/script\s*>/gis) { print sha256_hex($&), "\n" }'
+script_fingerprints() {
+  perl -0777 -MDigest::SHA=sha256_hex -ne 'while (/<script\b[^>]*>.*?<\/script\s*>|<script\b[^>]*\/\s*>|<script\b[^>]*>.*\z|<\/script\s*>/gis) { print sha256_hex($&), "\n" }'
 }
 
 file_at_ref() {
@@ -67,12 +67,22 @@ is_test_path() {
   esac
 }
 
-is_fast_content_path() {
+is_fast_markup_path() {
   case "$1" in
-    *.css|*.scss|*.sass|*.less|*.styl|*.html|*.htm|*.xhtml|*.svg|\
+    *.html|*.htm|*.xhtml|*.svg|*.md|*.rst) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_fast_content_path() {
+  if is_fast_markup_path "$1"; then
+    return 0
+  fi
+  case "$1" in
+    *.css|*.scss|*.sass|*.less|*.styl|\
     *.png|*.jpg|*.jpeg|*.gif|*.webp|*.avif|*.ico|\
     *.woff|*.woff2|*.ttf|*.otf|*.eot|\
-    *.md|*.mdx|*.rst|*.txt) return 0 ;;
+    *.txt) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -101,15 +111,13 @@ for file in "${files[@]}"; do
     add_reason "behavior_file:$file"
   fi
 
-  case "$file" in
-    *.html|*.htm|*.xhtml|*.svg|*.md|*.mdx)
-      base_scripts=$(file_at_ref "$base" "$file" | html_scripts)
-      candidate_scripts=$(file_at_ref "$candidate" "$file" | html_scripts)
-      if [ "$base_scripts" != "$candidate_scripts" ]; then
-        add_reason "script_touch:$file"
-      fi
-      ;;
-  esac
+  if is_fast_markup_path "$file"; then
+    base_scripts=$(file_at_ref "$base" "$file" | script_fingerprints)
+    candidate_scripts=$(file_at_ref "$candidate" "$file" | script_fingerprints)
+    if [ "$base_scripts" != "$candidate_scripts" ]; then
+      add_reason "script_touch:$file"
+    fi
+  fi
 done
 
 if [ "$full" -eq 1 ]; then

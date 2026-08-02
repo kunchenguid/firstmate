@@ -37,10 +37,10 @@ case "$candidate_sha" in
     case "$candidate_sha" in
       *[!0123456789abcdef]*) printf 'fm-rsi-ledger-append: candidate SHA must be lowercase hexadecimal or -\n' >&2; exit 2 ;;
     esac
-    [ "${#candidate_sha}" -ge 40 ] && [ "${#candidate_sha}" -le 64 ] || {
-      printf 'fm-rsi-ledger-append: candidate SHA must be 40 to 64 characters or -\n' >&2
-      exit 2
-    }
+    case "${#candidate_sha}" in
+      40|64) ;;
+      *) printf 'fm-rsi-ledger-append: candidate SHA must be exactly 40 or 64 characters or -\n' >&2; exit 2 ;;
+    esac
     ;;
 esac
 case "$kind" in
