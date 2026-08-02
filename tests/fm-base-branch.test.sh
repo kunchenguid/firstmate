@@ -310,26 +310,77 @@ test_unresponsive_remote_is_bounded_and_refuses() {
   pass "an unresponsive remote is bounded and refuses loudly instead of hanging the spawn"
 }
 
-# A repository that configures remotes but not the one being resolved against is a
-# misconfiguration, not a remote-less project. Falling through to the local path
-# would read the cached refs/remotes/origin/HEAD this script exists to distrust and
-# report it as authoritative.
-test_misconfigured_remote_name_refuses() {
+# One remote is unambiguous whatever it is named, so a clone made with
+# `git clone -o upstream` resolves against upstream and spawns normally. It must
+# never fall through to the local path, which would read the very cached ref this
+# script exists to distrust and report it as authoritative.
+test_sole_non_origin_remote_resolves_against_it() {
   local rec out status
-  rec=$(make_case misconfigured-remote)
+  rec=$(make_case sole-non-origin)
   read_case "$rec"
+  git -C "$PROJ" remote rename origin upstream
 
   set +e
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_BASE_BRANCH_REMOTE=upstrem "$RESOLVE" "$PROJ" 2>&1)
+  out=$(resolve "$PROJ")
   status=$?
   set -e
-  [ "$status" -ne 0 ] || fail "a remote name the repository does not configure must refuse"
+  [ "$status" -eq 0 ] || fail "a sole non-origin remote must not refuse, got: $out"
+  [ "$out" = "develop remote-default upstream" ] \
+    || fail "expected the sole remote to be used and named, got: $out"
+
+  # A requested remote the repository does not configure is the same situation:
+  # one remote, no ambiguity, nothing to refuse.
+  set +e
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_BASE_BRANCH_REMOTE=origin "$RESOLVE" "$PROJ" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 0 ] || fail "an absent requested remote must not refuse a sole remote, got: $out"
+  [ "$out" = "develop remote-default upstream" ] \
+    || fail "a requested remote that is absent must still use the sole remote, got: $out"
+  pass "a sole non-origin remote is resolved against and reported, not refused"
+}
+
+# Several remotes with none of them the requested one is the one genuinely
+# ambiguous shape: nothing in the repository says which remote the project's
+# branches come from, so guessing one would be exactly the silent wrong-code
+# outcome this script exists to prevent.
+test_several_remotes_without_the_requested_one_refuse() {
+  local rec out status
+  rec=$(make_case several-remotes)
+  read_case "$rec"
+  git -C "$PROJ" remote rename origin upstream
+  git -C "$PROJ" remote add fork "$BARE"
+
+  set +e
+  out=$(resolve "$PROJ")
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "several remotes with no requested one among them must refuse"
   assert_contains "$out" 'project "project"' "refusal did not name the project"
-  assert_contains "$out" "upstrem" "refusal did not name the missing remote"
-  assert_contains "$out" "origin" "refusal did not name the remotes the repository does configure"
-  assert_not_contains "$out" "local-default" "a misconfigured remote must not resolve from the local cache"
-  pass "a remote name the repository does not configure refuses instead of silently resolving locally"
+  assert_contains "$out" "upstream" "refusal did not list every remote found"
+  assert_contains "$out" "fork" "refusal did not list every remote found"
+  assert_not_contains "$out" "remote-default" "an ambiguous remote set must not resolve anyway"
+  assert_not_contains "$out" "local-default" "an ambiguous remote set must not fall back to the local path"
+  pass "several remotes with none of them the requested one refuse, naming the project and every remote"
+}
+
+# The requested remote still wins whenever it is configured, however many others
+# sit beside it.
+test_requested_remote_wins_over_other_remotes() {
+  local rec out status
+  rec=$(make_case requested-wins)
+  read_case "$rec"
+  git -C "$PROJ" remote add fork "$BARE"
+
+  set +e
+  out=$(resolve "$PROJ")
+  status=$?
+  set -e
+  [ "$status" -eq 0 ] || fail "a configured requested remote must not refuse, got: $out"
+  [ "$out" = "develop remote-default origin" ] \
+    || fail "expected the requested remote to win over the others, got: $out"
+  pass "the requested remote is used whenever it is configured, whatever else is"
 }
 
 # The bounded runner must never report a command that did not complete as success.
@@ -361,14 +412,17 @@ test_bounded_run_reports_signal_deaths_as_failure() {
   pass "a bounded command killed by a signal is reported as a failure, not as success"
 }
 
-# The deadline itself, on every branch, with no remote involved at all.
+# The deadline itself, on every branch, with no remote involved at all. Callers
+# assert the lib's own canonical status rather than any one watchdog's, because
+# which watchdog ran is the lib's business and no caller's.
 test_bounded_run_deadline_is_hard_on_every_branch() {
-  local status out
+  local status out deadline
+  deadline=$( . "$ROOT/bin/fm-git-net-lib.sh"; printf '%s\n' "$FM_GIT_NET_DEADLINE" )
   set +e
   ( . "$ROOT/bin/fm-git-net-lib.sh"; FM_GIT_NET_TIMEOUT=1 fm_git_net_run sleep 30 )
   status=$?
   set -e
-  [ "$status" -eq 124 ] || fail "the deadline must report 124, got: $status"
+  [ "$status" -eq "$deadline" ] || fail "the deadline must report $deadline, got: $status"
 
   # A command that ignores SIGTERM must still be killed at the deadline rather
   # than left to hang past it.
@@ -384,14 +438,52 @@ test_bounded_run_deadline_is_hard_on_every_branch() {
     FM_GIT_NET_TIMEOUT=1 FM_GIT_NET_FORCE_FALLBACK=1 fm_git_net_run sleep 30 )
   status=$?
   set -e
-  [ "$status" -eq 124 ] || fail "the perl watchdog must report the deadline as 124, got: $status"
+  [ "$status" -eq "$deadline" ] \
+    || fail "the perl watchdog must report the deadline as $deadline, got: $status"
 
-  out=$( . "$ROOT/bin/fm-git-net-lib.sh"; FM_GIT_NET_TIMEOUT=1 fm_git_net_reason 124 )
+  out=$( . "$ROOT/bin/fm-git-net-lib.sh"; FM_GIT_NET_TIMEOUT=1 fm_git_net_reason "$deadline" )
   assert_contains "$out" "did not answer within 1s" "the deadline reason did not name the bound"
   out=$( . "$ROOT/bin/fm-git-net-lib.sh"; fm_git_net_reason 125 )
   assert_not_contains "$out" "could not start" \
     "GNU timeout's own 125 must not be reported as a missing watchdog"
   pass "the deadline is hard on every watchdog branch and each refusal reason is distinct"
+}
+
+# A binary named `timeout` on PATH says nothing about whether it speaks the
+# escalating invocation the lib needs. A busybox build rejects it, and selecting it
+# on presence alone would refuse every ship and scout spawn while the perl watchdog
+# that does work sits unreached. Nothing here touches the network.
+test_bounded_run_skips_a_watchdog_that_rejects_the_invocation() {
+  local dir fakebin status started elapsed deadline
+  deadline=$( . "$ROOT/bin/fm-git-net-lib.sh"; printf '%s\n' "$FM_GIT_NET_DEADLINE" )
+  dir="$TMP_ROOT/incompatible-timeout"
+  mkdir -p "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+# A busybox-shaped timeout: no -k, so the escalating invocation is a usage error.
+case "${1:-}" in
+  -k) echo "timeout: unrecognized option: k" >&2; exit 1 ;;
+esac
+exec sleep "$@"
+SH
+  chmod +x "$fakebin/timeout"
+
+  set +e
+  elapsed=$(
+    started=$SECONDS
+    PATH="$fakebin:$PATH"
+    . "$ROOT/bin/fm-git-net-lib.sh"
+    FM_GIT_NET_TIMEOUT=1 fm_git_net_run sleep 30
+    printf '%s %s\n' "$?" "$((SECONDS - started))"
+  )
+  set -e
+  status=${elapsed%% *}
+  elapsed=${elapsed##* }
+  [ "$status" -eq "$deadline" ] \
+    || fail "a watchdog that rejects the invocation must be skipped, got status: $status"
+  [ "$elapsed" -lt 30 ] || fail "the call was not bounded after falling through (took ${elapsed}s)"
+  pass "a watchdog that cannot run the invocation is skipped for one that can"
 }
 
 # The registry name is the clone's basename by default and --name overrides it,
@@ -425,9 +517,12 @@ test_no_remote_uses_the_local_default
 test_no_remote_declared_override_reports_no_remote
 test_no_remote_stranded_on_a_feature_branch_still_resolves_the_default
 test_no_resolvable_default_reports_none
-test_misconfigured_remote_name_refuses
+test_sole_non_origin_remote_resolves_against_it
+test_several_remotes_without_the_requested_one_refuse
+test_requested_remote_wins_over_other_remotes
 test_bounded_run_reports_signal_deaths_as_failure
 test_bounded_run_deadline_is_hard_on_every_branch
+test_bounded_run_skips_a_watchdog_that_rejects_the_invocation
 test_name_override_selects_the_registry_entry
 
 echo "# all fm-base-branch tests passed"

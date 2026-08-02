@@ -22,10 +22,20 @@
 # instruction from anyone, and propagating it to every worker cut from that clone
 # is the same wrong-code failure this script exists to prevent.
 #
-# A repository that configures remotes but not THIS one is a misconfiguration, not
-# a remote-less project: it is a hard error, because falling through to the local
-# path there would read the very cached refs/remotes/origin/HEAD this script
-# exists to distrust and report it as authoritative.
+# WHICH REMOTE gets resolved against, in order:
+#   1. the requested remote (FM_BASE_BRANCH_REMOTE, default origin) when the
+#      repository configures it;
+#   2. otherwise the repository's SOLE remote, whatever it is named - one remote
+#      is unambiguous, so a clone made with `git clone -o upstream` resolves
+#      against upstream and spawns normally;
+#   3. otherwise, with SEVERAL remotes and none of them the requested one, a hard
+#      error naming the project and every remote found, because nothing in the
+#      repository says which of them the project's branches come from;
+#   4. otherwise, with NO remote at all, the local path below.
+# The third output field names the remote actually resolved, so the caller fetches
+# from that same one. Whichever remote it is, the base branch still comes from that
+# remote's own current state and never from a cached ref.
+#
 # For source=none the branch and remote fields are "-", so the line always has
 # three fields and a caller can `read -r branch source remote` unconditionally.
 # The remote field is "-" whenever no remote is configured at all, including the
@@ -62,7 +72,7 @@
 # Usage: fm-base-branch.sh <project-dir> [--name <project-name>]
 #   <project-dir>    the project's primary clone (its basename is the registry
 #                    name unless --name overrides it)
-#   FM_BASE_BRANCH_REMOTE  remote to resolve against (default: origin)
+#   FM_BASE_BRANCH_REMOTE  remote to prefer (default: origin; see the order above)
 #   FM_GIT_NET_TIMEOUT     seconds allowed per remote read (default: 20)
 set -eu
 
@@ -81,7 +91,8 @@ case "${1:-}" in
 esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-REMOTE=${FM_BASE_BRANCH_REMOTE:-origin}
+REQUESTED_REMOTE=${FM_BASE_BRANCH_REMOTE:-origin}
+REMOTE=
 
 PROJ_DIR=
 NAME=
@@ -122,17 +133,25 @@ DECLARED=$("$FM_ROOT/bin/fm-project-mode.sh" --base "$NAME") || exit 1
 # launch instead of failing it.
 export GIT_TERMINAL_PROMPT=0
 
-if ! git -C "$PROJ_ABS" remote get-url "$REMOTE" >/dev/null 2>&1; then
-  CONFIGURED_REMOTES=$(git -C "$PROJ_ABS" remote 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
-  if [ -n "$CONFIGURED_REMOTES" ]; then
-    echo "error: project \"$NAME\" has no \"$REMOTE\" remote to resolve its base branch from; $PROJ_ABS configures: $CONFIGURED_REMOTES. Point FM_BASE_BRANCH_REMOTE at one of those rather than resolving from the clone's cached state" >&2
+if git -C "$PROJ_ABS" remote get-url "$REQUESTED_REMOTE" >/dev/null 2>&1; then
+  REMOTE=$REQUESTED_REMOTE
+else
+  CONFIGURED_REMOTES=$(git -C "$PROJ_ABS" remote 2>/dev/null || true)
+  REMOTE_COUNT=$(printf '%s\n' "$CONFIGURED_REMOTES" | grep -c . || true)
+  if [ "$REMOTE_COUNT" -eq 1 ]; then
+    REMOTE=$(printf '%s\n' "$CONFIGURED_REMOTES" | head -n 1)
+  elif [ "$REMOTE_COUNT" -gt 1 ]; then
+    echo "error: project \"$NAME\" configures no \"$REQUESTED_REMOTE\" remote, and $PROJ_ABS has several remotes, so nothing says which one its branches come from: $(printf '%s\n' "$CONFIGURED_REMOTES" | tr '\n' ' ' | sed 's/ *$//')" >&2
     exit 1
   fi
+fi
+
+if [ -z "$REMOTE" ]; then
   # No remote to be stale against, and none to fetch from either, so the remote
   # field is reported as "-" and the caller reads the local ref directly.
   if [ -n "$DECLARED" ]; then
     if ! git -C "$PROJ_ABS" rev-parse --verify --quiet "refs/heads/$DECLARED" >/dev/null; then
-      echo "error: project \"$NAME\" declares base branch \"$DECLARED\", but $PROJ_ABS has no such branch and no \"$REMOTE\" remote to fetch it from" >&2
+      echo "error: project \"$NAME\" declares base branch \"$DECLARED\", but $PROJ_ABS has no such branch and configures no remote to fetch it from" >&2
       exit 1
     fi
     printf '%s %s %s\n' "$DECLARED" project-override -
