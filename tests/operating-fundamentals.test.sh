@@ -13,28 +13,27 @@ AGENTS="$ROOT/AGENTS.md"
 test_agent_only_folded_frontmatter_and_size() {
   local frontmatter line_count delimiter_count
 
-  assert_present "$SKILL" "operating-fundamentals SKILL.md is missing"
+  assert_present "$SKILL" "skill missing"
   frontmatter=$(awk 'NR == 1 && $0 == "---" { capture=1; next } capture && $0 == "---" { exit } capture' "$SKILL")
-  assert_contains "$frontmatter" "name: operating-fundamentals" "skill frontmatter is missing its canonical name"
-  assert_contains "$frontmatter" "description: >-" "skill description must use folded YAML metadata"
-  assert_contains "$frontmatter" "user-invocable: false" "skill must remain agent-only"
-  assert_contains "$frontmatter" "metadata:" "skill frontmatter is missing internal metadata"
-  assert_contains "$frontmatter" "  internal: true" "skill must remain internal"
-  assert_contains "$frontmatter" "Use when intaking any captain ask" "folded metadata must name a concrete intake trigger"
-  assert_contains "$frontmatter" "supervising under load" "folded metadata must name a concrete supervision trigger"
-  assert_contains "$frontmatter" "about to assert a fleet fact" "folded metadata must name a concrete verification trigger"
+  assert_contains "$frontmatter" "name: operating-fundamentals" "canonical name missing"
+  assert_contains "$frontmatter" "description: >-" "folded YAML required"
+  assert_contains "$frontmatter" "user-invocable: false" "agent-only required"
+  assert_contains "$frontmatter" "metadata:" "metadata missing"
+  assert_contains "$frontmatter" "  internal: true" "internal flag missing"
+  assert_contains "$frontmatter" "before making or relaying a consequential claim about success, failure, a blocker, or a capability" "claim trigger missing"
 
   delimiter_count=$(grep -c '^---$' "$SKILL")
-  [ "$delimiter_count" -eq 2 ] || fail "skill must have one closed YAML frontmatter block"
+  [ "$delimiter_count" -eq 2 ] || fail "invalid frontmatter delimiters"
   line_count=$(wc -l < "$SKILL" | tr -d '[:space:]')
   [ "$line_count" -le 90 ] || fail "skill exceeds the 90-line limit: $line_count"
-  pass "operating-fundamentals has folded agent-only frontmatter, concrete triggers, and stays within 90 lines"
+  pass "operating-fundamentals metadata and size"
 }
 
 test_seven_ordered_principles() {
-  local headings expected
-
+  local headings expected principle_seven contract_text
   headings=$(sed -nE 's/^## ([0-9]+\. .*)$/\1/p' "$SKILL")
+  principle_seven=$(awk '/^## 7\./ { capture=1; next } capture && /^## / { exit } capture' "$SKILL")
+  contract_text=$(git -C "$ROOT" ls-files 'AGENTS.md' '.agents/**/*.md' | sed "s#^#$ROOT/#" | xargs cat)
   expected=$(printf '%s\n' \
     "1. Orchestrate; never work inline" \
     "2. Saturate every available lane" \
@@ -42,44 +41,41 @@ test_seven_ordered_principles() {
     "4. Decouple validation from worker budgets" \
     "5. Reap continuously" \
     "6. Obey explicit orders decisively" \
-    "7. Always check before asserting")
-  [ "$headings" = "$expected" ] || fail "skill must contain exactly seven ordered operating-principle headings"
+    "7. Prove each consequential claim at the scope you report")
+  [ "$headings" = "$expected" ] || fail "seven principles out of order"
 
-  assert_grep "every captain ask" "$SKILL" "orchestration principle must cover every captain ask"
-  assert_grep "durable backlog item" "$SKILL" "orchestration principle must require durable backlog tracking"
-  assert_grep "tracked crewmate assignment" "$SKILL" "orchestration principle must require a tracked owner"
-  assert_grep "never perform project investigation, planning, implementation, or deliverable production inline" "$SKILL" "orchestration principle must forbid inline project and deliverable work"
-  assert_grep "every healthy lane" "$SKILL" "lane-saturation principle is missing"
-  assert_grep "blocker as a routing problem" "$SKILL" "blocker-routing principle is missing"
-  assert_grep "shared validation" "$SKILL" "independent-validation principle is missing"
-  assert_grep "single exhaustible budget" "$SKILL" "independent-validation principle must cover depleted worker budgets"
-  assert_grep "On every terminal wake" "$SKILL" "continuous-reaping principle is missing"
-  assert_grep "Fill released capacity" "$SKILL" "continuous-reaping principle must refill freed lanes"
-  assert_grep "explicit captain order as the governing objective" "$SKILL" "explicit-order principle is missing"
-  assert_grep "non-overridable safety and instruction constraints" "$SKILL" "explicit-order principle must retain non-overridable constraints"
-  assert_grep "consequential action" "$SKILL" "premise-check principle must cover consequential actions"
-  assert_grep "load-bearing assumption" "$SKILL" "premise-check principle must identify one load-bearing assumption"
-  assert_grep "clearly-false premises" "$SKILL" "premise-check principle must catch clearly-false premises"
-  assert_grep "do not overcorrect" "$SKILL" "premise-check principle must forbid overcorrection"
-  assert_grep "safe to bypass" "$SKILL" "purpose-before-bypass principle must cover bypass classification"
-  assert_grep "target outcome" "$SKILL" "purpose-before-bypass principle must establish the operation's purpose"
-  assert_grep "critical path" "$SKILL" "purpose-before-bypass principle must protect the target's critical path"
-  assert_grep "Before adding a bypass that gates an irreversible or high-stakes action, record the target outcome and the rationale" "$SKILL" "purpose-before-bypass principle must require a written purpose and rationale for consequential bypasses"
-  assert_grep "trivial skips are exempt" "$SKILL" "purpose-before-bypass principle must exempt trivial skips from recorded rationale"
-  assert_grep "operation failing, not noise" "$SKILL" "purpose-before-bypass principle must treat target-capability failure as operation failure"
-  pass "operating-fundamentals encodes all seven principles in the required order"
+  assert_grep "every captain ask" "$SKILL" "intake missing"
+  assert_grep "durable backlog item" "$SKILL" "backlog missing"
+  assert_grep "tracked crewmate assignment" "$SKILL" "owner missing"
+  assert_grep "never perform project investigation, planning, implementation, or deliverable production inline" "$SKILL" "inline ban missing"
+  assert_grep "every healthy lane" "$SKILL" "saturation missing"
+  assert_grep "blocker as a routing problem" "$SKILL" "routing missing"
+  assert_grep "shared validation" "$SKILL" "validation missing"
+  assert_grep "single exhaustible budget" "$SKILL" "budget isolation missing"
+  assert_grep "On every terminal wake" "$SKILL" "reaping missing"
+  assert_grep "Fill released capacity" "$SKILL" "refill missing"
+  assert_grep "explicit captain order as the governing objective" "$SKILL" "order priority missing"
+  assert_grep "non-overridable safety and instruction constraints" "$SKILL" "safety boundary missing"
+  assert_not_contains "$contract_text" "shallowest level" "shallow shortcut remains"
+  assert_not_contains "$contract_text" "one load-bearing assumption" "one-assumption shortcut remains"
+  for proof in "every leg covered" "neighboring pass" "single failure" "blocks the claim until reproduced and resolved or proven out-of-scope" "unresolved, report observations only" "direct end-to-end evidence" "unverified" "authoritative reference" "materially independent safe in-scope route" "narrowest supported result"; do assert_contains "$principle_seven" "$proof" "missing '$proof'"; done
+  for bypass_contract in "target outcome" "critical path" "record the target outcome and critical-path rationale" "operation failing, not noise"; do assert_contains "$principle_seven" "$bypass_contract" "missing '$bypass_contract'"; done
+  pass "seven principles preserved"
 }
 
 test_single_conditional_agents_trigger() {
-  local section global_count section_count
-
+  local section blocker_section global_count section_count
   section=$(awk '/^## 13\. Agent-only reference skills$/ { capture=1; next } capture && /^## / { exit } capture' "$AGENTS")
+  blocker_section=$(awk '/^## 9\./ { capture=1; next } capture && /^## / { exit } capture' "$AGENTS")
   global_count=$(grep -Fc "\`operating-fundamentals\`" "$AGENTS")
   section_count=$(printf '%s\n' "$section" | grep -Fc "\`operating-fundamentals\`")
-  [ "$global_count" -eq 1 ] || fail "AGENTS.md must reference operating-fundamentals exactly once"
-  [ "$section_count" -eq 1 ] || fail "the sole operating-fundamentals reference must be in section 13"
-  assert_contains "$section" "\`operating-fundamentals\` - load when intaking any captain ask" "section 13 must conditionally load the skill at intake"
-  pass "AGENTS.md contains one conditional section-13 trigger and no every-turn duplicate"
+  [ "$global_count" -eq 1 ] || fail "duplicate skill reference"
+  [ "$section_count" -eq 1 ] || fail "skill route misplaced"
+  assert_contains "$section" "before making or relaying a consequential claim about success, failure, a blocker, or a capability" "claim route missing"
+  assert_contains "$blocker_section" "applies equally to firstmate-owned and relayed claims" "symmetry missing"
+  assert_not_contains "$blocker_section" "directing the crewmate" "old blocker bar remains"
+  assert_not_contains "$blocker_section" "get it working through the crewmate first" "old stopping rule remains"
+  pass "claim route and blocker symmetry"
 }
 
 test_crew_steering_contract_and_trigger() {
@@ -111,8 +107,7 @@ test_crew_steering_contract_and_trigger() {
   assert_grep "Treat \`almost there\` as unfinished" "$CREW_SKILL" "crew steering must reject optimistic partial-completion claims"
   assert_grep "real evidence because work is not done until proven" "$CREW_SKILL" "crew steering must require evidence before completion"
   assert_grep "review adversarially rather than rubber-stamping" "$CREW_SKILL" "crew steering must require adversarial review"
-  assert_grep "one load-bearing assumption before it acts" "$CREW_SKILL" "crew steering must premise-check before action"
-  assert_grep "rejecting a shallow-false premise without overcorrecting" "$CREW_SKILL" "premise checking must reject false premises without overreach"
+  assert_grep "Reject a shallow-false premise without overcorrecting" "$CREW_SKILL" "premise checking must reject false premises without overreach"
   assert_grep "captain's technical-decision bias" "$CREW_SKILL" "crew steering must apply the captain's quality bar"
   assert_grep "reject preserving a leaky component merely to save development cost or sunk work" "$CREW_SKILL" "crew steering must prefer robustness over development cost or sunk work"
   assert_grep "Reject any quiet reframing of the task into a smaller win" "$CREW_SKILL" "crew steering must reject weakened goals"
@@ -137,6 +132,8 @@ test_live_surface_freshness_contract() {
   assert_grep "Do not edit \`request.md\` or \`manifest.toon\` after surfacing" "$LAVISH_SKILL" "surfaced decision contracts must be immutable"
   assert_grep "The answer file is authoritative; the wake record is only a pointer" "$LAVISH_SKILL" "durable answers must outrank wake pointers"
   assert_grep "Never start a server, open a browser, create or share a session URL, poll" "$LAVISH_SKILL" "the disqualified browser and polling lifecycle must stay prohibited"
+  assert_grep "before creating, repairing, or presenting a multi-option captain choice" "$LAVISH_SKILL" "Lavish frontmatter must trigger when presenting a choice"
+  assert_grep "load before creating, repairing, or presenting a multi-option captain choice" "$AGENTS" "AGENTS must route presenting a choice through Lavish"
   pass "live-surface freshness preserves completion history and in-progress answers"
 }
 

@@ -88,5 +88,6 @@
 95645	tests/fm-watch-triage.test.sh
 20435	tests/fm-watcher-lock.test.sh
 23744	tests/fm-x-mode.test.sh
+250	tests/lavish-repair.test.sh
 6200	tests/lavish.test.sh
 92	tests/operating-fundamentals.test.sh

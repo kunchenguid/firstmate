@@ -2,7 +2,7 @@
 name: lavish-decisions
 description: >-
   Agent-only workflow for creating durable captain-facing Lavish decisions.
-  Use before creating or revising a multi-option decision, approval batch, triage request, or other structured captain input that must remain answerable asynchronously.
+  Use before creating, repairing, or presenting a multi-option captain choice; route it to the durable file protocol, never a browser, form, server, or poll.
   Do not use it for read-only reports or simple yes/no questions.
 user-invocable: false
 metadata:

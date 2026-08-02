@@ -2,7 +2,7 @@
 name: operating-fundamentals
 description: >-
   Agent-only operating practice for firstmate.
-  Use when intaking any captain ask, deciding whether to dispatch or work inline, supervising under load, handling a blocked lane or a finished crewmate, protecting shared validation capacity, acting on an explicit captain order, about to make a consequential config/system change or an escalation, or about to assert a fleet fact.
+  Use when intaking any captain ask, deciding whether to dispatch or work inline, supervising under load, handling a blocked lane or a finished crewmate, protecting shared validation capacity, acting on an explicit captain order, before making or relaying a consequential claim about success, failure, a blocker, or a capability, making a consequential config/system change, or asserting a fleet fact.
 user-invocable: false
 metadata:
   internal: true
@@ -48,11 +48,12 @@ Treat an explicit captain order as the governing objective within non-overridabl
 Do not let a default workflow, local guardrail, or convenience silently replace that objective.
 Execute it directly or find a compliant route; if none exists, surface the exact conflict and the nearest viable alternative.
 
-## 7. Always check before asserting
+## 7. Prove each consequential claim at the scope you report
 
-Before ANY consequential action - a config/system change, an escalation to the captain, or a confident claim of fact/status - cheaply sanity-check the ONE load-bearing assumption: is it even true at the shallowest level?
-What am I actually changing, and what is its target?
-Catch clearly-false premises; do not overcorrect.
-Before classifying any gate, check, blocker, or failure as safe to bypass, establish the operation's target outcome and verify that the failing thing is neither that outcome nor on its critical path.
-Before adding a bypass that gates an irreversible or high-stakes action, record the target outcome and the rationale for the critical-path judgment; trivial skips are exempt.
-A failure in the capability the operation exists to deliver is the operation failing, not noise.
+Before reporting any mechanism, capability, check, or outcome as working, failed, blocked, or unavailable, record its exact actor or credential, command or surface, target environment, and every leg covered.
+Evidence about one coordinate or leg supports only it: neither a neighboring pass nor a single failure proves an untested positive or global absence.
+Contradictory directly relevant evidence blocks the claim until reproduced and resolved or proven out-of-scope; unresolved, report observations only.
+A positive needs direct end-to-end evidence on the actual target or an `unverified` label; a blocker or absence also needs the authoritative reference, one materially independent safe in-scope route or why none exists, and the narrowest supported result: `this route failed`, `capability unavailable`, or `captain action required`.
+Keep investigating while a plausible safe route remains; escalate only when those routes are exhausted or the remaining action is genuinely captain-owned.
+Before dismissing or escalating a gate, check, blocker, or failure, establish the target outcome and verify that the failing thing is neither that outcome nor on its critical path.
+Before adding a bypass that gates an irreversible or high-stakes action, record the target outcome and critical-path rationale; a failure in the capability the operation exists to deliver is the operation failing, not noise.
