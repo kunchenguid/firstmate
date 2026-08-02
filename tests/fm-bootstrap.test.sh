@@ -124,6 +124,17 @@ SH
   chmod +x "$fakebin/jq"
 }
 
+make_no_github_base_path() {
+  local dir=$1 base tool src
+  base="$dir/no-github-base"
+  mkdir -p "$base"
+  for tool in awk basename bash cat chmod cp cut date dirname git grep head ln mkdir mktemp mv rm rmdir sed sleep sort tail touch tr uname wc; do
+    src=$(command -v "$tool" 2>/dev/null) || fail "test fixture needs $tool"
+    ln -s "$src" "$base/$tool" 2>/dev/null || fail "failed to link $tool into no-GitHub PATH"
+  done
+  printf '%s\n' "$base"
+}
+
 make_fake_fleet_sync_root() {
   local dir=$1 fake_root
   fake_root="$dir/fake-root"
@@ -296,7 +307,7 @@ ROWS
 }
 
 test_forge_auth_mode_controls_github_auth_probe() {
-  local label mode github_tools expected case_dir fakebin out n
+  local label mode github_tools expected case_dir fakebin out n base_path
   n=0
   while IFS='^' read -r label mode github_tools expected; do
     [ -n "$label" ] || continue
@@ -321,8 +332,12 @@ SH
     chmod +x "$fakebin/gh"
     if [ "$github_tools" = absent ]; then
       rm -f "$fakebin/gh"
+      base_path=$(make_no_github_base_path "$case_dir")
+    else
+      base_path=$BASE_PATH
     fi
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    out=$(PATH="$fakebin:$base_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     case "$expected" in
       required)
