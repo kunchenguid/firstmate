@@ -288,7 +288,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
 # while the checkpoint holds its lock, then block after the bounded checkpoint
 # exits. A recently completed checkpoint is deliberately not health evidence.
 test_codex_checkpoint_health_ends_when_foreground_command_returns() {
-  local dir checkpoint_pid attempt live_out live_status after_out after_status checkpoint_status
+  local dir checkpoint_pid live_out live_status after_out after_status checkpoint_status
   dir="$TMP_ROOT/hook-codex-checkpoint"
   git clone -q "$ROOT" "$dir" || fail "could not create isolated Codex checkpoint fixture"
   dir=$(cd "$dir" && pwd -P)
@@ -298,7 +298,7 @@ test_codex_checkpoint_health_ends_when_foreground_command_returns() {
   FM_HOME="$dir" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
     "$dir/bin/fm-watch-checkpoint.sh" --seconds 3 >"$dir/checkpoint.out" 2>"$dir/checkpoint.err" &
   checkpoint_pid=$!
-  for attempt in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     [ -s "$dir/state/.watch.lock/pid" ] && [ -e "$dir/state/.last-watcher-beat" ] && break
     sleep 0.1
   done
