@@ -143,7 +143,7 @@ codex-cli 0.146.0
 ```
 
 This establishes that a concrete `harness=codex`, `model=gpt-5.6-luna`, `effort=max` dispatch tuple is supported by the current installed Codex surface.
-Firstmate therefore accepts Codex `max` only with this model, while the generic effort fallback never selects `max` on its own.
+[`docs/configuration.md`](../configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns the operator acceptance constraints for that tuple, including the standing-default prohibition.
 `bin/fm-spawn.sh` owns the exact conversion from that concrete profile to Codex launch arguments, and `tests/fm-spawn-dispatch-profile.test.sh` owns executable regression coverage for the emitted setting.
 
 ## Credential sources are independent per provider
