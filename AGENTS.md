@@ -89,7 +89,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/log.md        crewmate working log, maintained by the crewmate as it works; its resume-from-disk memory, survives teardown, and never wakes firstmate
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               volatile runtime signals; gitignored
-  <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
+  <id>.status        appended by crewmates: "<utc-stamp> <state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown

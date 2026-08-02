@@ -61,9 +61,10 @@ For a Firstmate-managed task, include an explicit status instruction:
 
 ```text
 Append supervisor-visible status lines to <absolute-firstmate-home>/state/<task-id>.status.
+Start every line with the current UTC time from `date -u +%Y-%m-%dT%H:%M:%SZ`, then the state prefix, so a supervisor can tell a fresh report from an old one.
 Use only these prefixes for status changes: working:, needs-decision:, blocked:, paused:, done:, failed:.
 Use paused: only for a deliberate known external wait that should be rechecked later, never for a blocker that needs firstmate to act.
-Before doing substantive work, append "working: Codex Desktop thread started".
+Before doing substantive work, append "<timestamp> working: Codex Desktop thread started".
 ```
 
 Verify the return channel before treating the thread as supervised:

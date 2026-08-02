@@ -22,7 +22,9 @@
 #     resolves only when its structured record is Done, and missing ids stay open.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
-#     state, source, detail, and raw line separately.
+#     state, source, age, detail, and raw line separately. age is that helper's
+#     evidence age: "live" for a run-step or pane read, a duration for a
+#     timestamped status-log line, "unknown" for an untimestamped legacy one.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
@@ -195,7 +197,7 @@ last_nonempty_line() {  # <file>
 }
 
 crew_state_json() {  # <id>
-  local id=$1 raw rest state source detail sep
+  local id=$1 raw rest state source detail age sep
   raw=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -210,6 +212,7 @@ crew_state_json() {  # <id>
   state=unknown
   source=none
   detail=
+  age=unknown
   case "$raw" in
     state:\ *"$sep"source:\ *)
       rest=${raw#state: }
@@ -219,10 +222,22 @@ crew_state_json() {  # <id>
         *"$sep"*) source=${rest%%"$sep"*}; detail=${rest#*"$sep"} ;;
         *) source=$rest ;;
       esac
+      # fm-crew-state.sh reports the age of the evidence behind the state as its
+      # own field ahead of the detail; keep it out of detail so a consumer reads
+      # "a done from 2h14m ago" without parsing prose.
+      case "$detail" in
+        age:\ *)
+          age=${detail%%"$sep"*}; age=${age#age: }
+          case "$detail" in
+            *"$sep"*) detail=${detail#*"$sep"} ;;
+            *) detail= ;;
+          esac
+          ;;
+      esac
       ;;
   esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" --arg age "$age" \
+    '{state:$state,source:$source,age:$age,detail:$detail,raw:$raw}'
 }
 
 status_event_json() {  # <status-log>

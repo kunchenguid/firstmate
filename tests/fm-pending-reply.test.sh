@@ -279,8 +279,14 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation should fire"
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated"
   status_line=$(tail -1 "$state/hibit.status")
-  case "$status_line" in
-    blocked:*pending-reply-missed:*pending-reply-id=$corr*) : ;;
+  # The escalation is a normal status append, so it carries the shared leading
+  # UTC stamp and must still classify as blocked through the shared parser.
+  [ -n "$(status_line_stamp "$status_line")" ] \
+    || fail "escalation line should carry a status timestamp"$'\n'"$status_line"
+  [ "$(status_line_verb "$status_line")" = blocked ] \
+    || fail "escalation line should classify as blocked"$'\n'"$status_line"
+  case "$(status_line_note "$status_line")" in
+    pending-reply-missed:*pending-reply-id=$corr*) : ;;
     *) fail "parent status should carry one blocked missed-report line"$'\n'"$status_line" ;;
   esac
   [ ! -s "$state/.wake-queue" ] || fail "direct escalation must not enqueue a duplicate check wake"
