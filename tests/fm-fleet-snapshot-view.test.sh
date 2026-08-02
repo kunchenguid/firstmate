@@ -467,6 +467,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [ ] queued-comma - Queued Comma Task (repo: beta, since 2026-07-08) (kind: ship)
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
+- [ ] mixed-blockers - Mixed Blockers blocked-by: missing blocked-by: done-comma (repo: beta) (kind: ship)
 - [ ] sample-decision-route - Choose sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
 
 ## Done
@@ -565,10 +566,12 @@ EOF
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$VIEW")
   assert_contains "$view" "• bold-task · Bold Task" \
     "view should render the in-flight task from the snapshot"
-  assert_contains "$view" "QUEUED 3 · READY 2 · BLOCKED 1" \
+  assert_contains "$view" "QUEUED 4 · READY 2 · BLOCKED 2" \
     "view should classify queued tasks by cleared blockers"
   assert_contains "$view" "• blocked-reason ← queued-comma · waits on queued-comma" \
     "view should render a blocked reason without title metadata"
+  assert_contains "$view" "• mixed-blockers ← missing" \
+    "view should classify and render only unresolved plural blockers"
   assert_contains "$view" "https://github.com/kunchenguid/firstmate/pull/43" \
     "view should render a landed PR artifact"
   pass "snapshot parses tasks-axi rows and respects operational overrides"

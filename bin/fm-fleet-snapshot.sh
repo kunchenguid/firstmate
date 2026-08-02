@@ -658,7 +658,7 @@ task_usage_records_json() {
 # used by secondmate_home_summary_json, without inventing live task rows.
 # Meta inventory remains the sole source of live workers; this object only
 # discloses backlog↔task inconsistency for renderers (Bearings omitted/gates).
-main_inventory_json() {  # <backlog-json> <tasks-json>
+main_inventory_json() {
   jq -s '
     .[0] as $backlog | .[1] as $tasks
     |
@@ -686,7 +686,7 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
 # validated parent read needs.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
-secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
+secondmate_home_summary_json() {
   jq -s \
     --arg generated "$SNAPSHOT_NOW" \
     --arg home "$FM_HOME" \
@@ -1169,11 +1169,12 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
     || { echo "fm-fleet-snapshot: parent evidence aggregation stream failed" >&2; return 1; }
 }
 
-secondmate_current_json() {  # <parent-tasks-json>
-  local tasks=$1 registry union rows total_registered total shown truncated
+secondmate_current_json() {
+  local tasks registry union rows total_registered total shown truncated
   local row id home registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes='' event_text event_note_json reason_text
+  tasks=$(jq -c '.') || return 1
   registry=$(registry_secondmates_json) || return 1
   union=$(printf '%s\n%s\n' "$registry" "$tasks" | jq -s '
     .[0] as $registry | .[1] as $tasks
@@ -1375,8 +1376,8 @@ EOF
      | {registry:$registry,records:$records,total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}'
 }
 
-secondmate_landed_from_current_json() {  # <secondmate-current-json>
-  printf '%s\n' "$1" | jq '
+secondmate_landed_from_current_json() {
+  jq '
     . as $current |
     {records:[ $current.records[]
       | select(.provenance.selected == "structured-home") as $mate
@@ -1413,18 +1414,18 @@ BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" 
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
-  printf '%s\n%s\n' "$BACKLOG_JSON" "$TASKS_JSON" | secondmate_home_summary_json "$BACKLOG_JSON" "$TASKS_JSON" \
+  printf '%s\n%s\n' "$BACKLOG_JSON" "$TASKS_JSON" | secondmate_home_summary_json \
     || { echo "fm-fleet-snapshot: secondmate home summary failed" >&2; exit 1; }
   exit 0
 fi
 
 SCOUT_REPORTS_JSON=$(scout_report_lines)
 TASK_USAGE_JSON=$(task_usage_records_json)
-MAIN_INVENTORY_JSON=$(printf '%s\n%s\n' "$BACKLOG_JSON" "$TASKS_JSON" | main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
+MAIN_INVENTORY_JSON=$(printf '%s\n%s\n' "$BACKLOG_JSON" "$TASKS_JSON" | main_inventory_json) \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
-SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
+SECONDMATE_CURRENT_JSON=$(printf '%s\n' "$TASKS_JSON" | secondmate_current_json) \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
-SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
+SECONDMATE_LANDED_JSON=$(printf '%s\n' "$SECONDMATE_CURRENT_JSON" | secondmate_landed_from_current_json) \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
 printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \

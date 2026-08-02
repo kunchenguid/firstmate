@@ -152,16 +152,13 @@ render_once() {
         | (.current_state.state // "unknown") as $state
         | select((["working","parked","blocked","done","failed","paused"]
                   | index($state)) == null)]) as $unknown
-    | ([.backlog.records[]? | select(.state == "done" and .structured == true) | .id]) as $done_ids
     | ([.backlog.records[]?
         | select(.state == "queued" and .structured == true
                  and (((.kind // "") == "captain" or (.hold_kind // "") == "captain") | not))]) as $queued
     | ([$queued[]
-        | .blocked_by as $blocker
-        | select(($blocker // "") == "" or (($done_ids | index($blocker)) != null))]) as $ready
+        | select(((.unresolved_blocker_ids // []) | length) == 0)]) as $ready
     | ([$queued[]
-        | .blocked_by as $blocker
-        | select(($blocker // "") != "" and (($done_ids | index($blocker)) == null))]) as $blocked
+        | select(((.unresolved_blocker_ids // []) | length) > 0)]) as $blocked
     | ("=" * $width),
       ("FIRSTMATE FLEET" | clip($width)),
       ("=" * $width),
@@ -230,7 +227,7 @@ render_once() {
          "  None."
        else
          $blocked[]
-         | line("• "; ((.id // "unknown") + " ← " + (.blocked_by // "unknown")
+         | line("• "; ((.id // "unknown") + " ← " + ((.unresolved_blocker_ids // []) | join(","))
                        + (if (.blocked_reason // "") == "" then "" else " · " + .blocked_reason end)))
        end)
   ' || {
