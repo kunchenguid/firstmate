@@ -33,7 +33,11 @@ Covered guarantees include:
 | --- | --- |
 | dependency checks are detect-only | `doctor` reports missing tools and the fake command log proves no installer command ran |
 | URL value safety | signed query strings, cookies, and redaction canaries are absent from manifests and diagnostics |
-| public-source rejection | unsafe schemes, playlist URLs, metadata-expanded playlists, live streams, authenticated/private videos, and DRM metadata are refused |
+| public-source rejection | unsafe schemes, playlist URLs, credential- or signature-bearing query fields, metadata-expanded playlists, live streams, authenticated/private videos, and DRM metadata are refused |
+| fetch-target fidelity | the exact supplied public URL reaches `yt-dlp`, including identity-bearing query parameters, while the manifest description drops tracking fields and redacts every value that is not a known public identifier |
+| transient media bounds | a declared size above the byte ceiling is refused before any download command runs, the default ceiling clamps to free space instead of failing, raising it above the default requires proven free space, and values above 16 GiB are refused |
+| honest visual coverage | `media.visual_coverage` reports full, section, or none; focused runs request a bounded provider section, a section that the provider ignores is downgraded to full with a warning, and a refused acquisition still returns transcript, chapters, and a focused-pass recommendation |
+| section timestamp fidelity | frames extracted from a bounded section are seeked relative to the acquired media while manifest timestamps stay absolute |
 | local-file boundary | local mode accepts only an explicit ordinary video file and refuses symlinks, non-video extensions, empty files, and oversized files |
 | transcript-first planning | caption metadata causes caption retrieval before media download, and matching transcript terms narrow selected ranges before frame extraction |
 | caption choice | requested language, manual captions, automatic captions, and English fallback are selected deterministically |
@@ -62,7 +66,8 @@ FM_VIDEO_WATCH_REAL_SMOKE=1 bin/fm-video-watch.sh smoke \
 The acceptance record must retain only sanitized facts: schema, sanitized source identity, transcript provenance and language, selected range count, frame count, timestamp-alignment spot checks, warnings, and successful cleanup proof.
 Downloaded media, captions, frames, signed URLs, raw command output, and local temp paths must not be committed.
 
-Verified on 2026-08-02 on macOS with `yt-dlp` 2026.06.09 and FFmpeg/ffprobe 8.0.1:
+Verified on 2026-08-02 on macOS with `yt-dlp` 2026.06.09 and FFmpeg/ffprobe 8.0.1.
+This record predates the URL-identity and transient-media-ceiling change, so its `source:` line reflects the earlier display form and it carries no `media:` block; re-run the smoke to refresh it.
 
 ```text
 schema: fm.video-watch.manifest.v1

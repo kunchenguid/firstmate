@@ -9,6 +9,16 @@
 #
 # This script owns the user-visible mechanics, limits, manifest contract, cleanup
 # receipt, and exit-code classes for the Firstmate watch skill.
+# A public URL is fetched exactly as supplied, so providers that carry the video
+# identity in query parameters keep working; URLs bearing credential, signature,
+# session, or token query fields are refused, and the manifest description prints
+# query values only for known public identifier keys.
+# Transient public media is bounded by --max-media-bytes: 4 GiB by default, up to
+# 16 GiB when local free space proves sufficient, enforced before download and
+# again after acquisition. Focused runs request a bounded provider section when
+# one is available; manifest field media.visual_coverage reports full, section, or
+# none, and a refused acquisition still returns transcript and chapter evidence
+# plus a focused-pass recommendation.
 # Its private Python implementation preserves and adapts useful MIT mechanics from
 # bradautomates/claude-video at git revision 755c157466738dda102c939158a0116b972925a3.
 # It does not depend on ~/.claude/skills/watch, does not install dependencies,

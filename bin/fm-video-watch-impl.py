@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 
 SCHEMA = "fm.video-watch.manifest.v1"
 OWNED_MARKER = ".fm-video-watch-owned.json"
@@ -35,9 +35,71 @@ DEFAULT_RESOLUTION = 512
 MAX_FULL_RESOLUTION = 768
 MAX_FOCUS_RESOLUTION = 1280
 DEFAULT_MAX_LOCAL_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_MAX_MEDIA_BYTES = 4 * 1024 * 1024 * 1024
+HARD_MAX_MEDIA_BYTES = 16 * 1024 * 1024 * 1024
+FREE_SPACE_MARGIN_BYTES = 512 * 1024 * 1024
 MAX_TRANSCRIPT_CHARS = 16_000
 MAX_COMMAND_SECONDS = 180
 SCENE_THRESHOLD = 0.28
+SECRET_QUERY_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "auth",
+    "authorization",
+    "client_secret",
+    "credential",
+    "hmac",
+    "key-pair-id",
+    "password",
+    "passwd",
+    "policy",
+    "pwd",
+    "secret",
+    "session",
+    "session_id",
+    "sessionid",
+    "sig",
+    "sign",
+    "signature",
+    "token",
+}
+SECRET_QUERY_PREFIXES = ("x-amz-", "__hdn", "__token")
+TRACKING_QUERY_KEYS = {
+    "ab_channel",
+    "embeds_referring_euri",
+    "embeds_referring_origin",
+    "fbclid",
+    "feature",
+    "gclid",
+    "msclkid",
+    "ncid",
+    "pp",
+    "ref",
+    "ref_src",
+    "referrer",
+    "si",
+    "source_ve_path",
+    "spm",
+    "utm_campaign",
+    "utm_content",
+    "utm_id",
+    "utm_medium",
+    "utm_source",
+    "utm_term",
+}
+IDENTITY_QUERY_KEYS = {
+    "clip",
+    "clip_id",
+    "id",
+    "media_id",
+    "v",
+    "vid",
+    "video",
+    "video_id",
+    "videoid",
+}
+REDACTED_VALUE = "redacted"
 
 
 class WatchError(Exception):
@@ -134,6 +196,39 @@ def is_public_url(source: str) -> bool:
     return urlsplit(source).scheme.lower() in {"http", "https"}
 
 
+def is_secret_query_key(key: str) -> bool:
+    lowered = key.lower()
+    return lowered in SECRET_QUERY_KEYS or lowered.startswith(SECRET_QUERY_PREFIXES)
+
+
+def describe_url(raw: str) -> dict[str, Any]:
+    """Build the display-only identity for a URL that already passed the source policy.
+
+    The fetch target stays byte-for-byte the supplied URL; only this description is
+    reduced, and it never reproduces a query value that is not a known public
+    resource identifier.
+    """
+    split = urlsplit(raw)
+    query = parse_qs(split.query, keep_blank_values=True)
+    display_pairs: list[tuple[str, str]] = []
+    for key, values in query.items():
+        lowered = key.lower()
+        if lowered in TRACKING_QUERY_KEYS:
+            continue
+        value = values[0] if values else ""
+        display_pairs.append((key, value if lowered in IDENTITY_QUERY_KEYS else REDACTED_VALUE))
+    display_query = "&".join(f"{quote(k, safe='')}={quote(v, safe='')}" for k, v in display_pairs)
+    host = (split.hostname or "").lower()
+    sanitized = urlunsplit((split.scheme.lower(), split.netloc.lower(), split.path, display_query, ""))
+    return {
+        "kind": "public_url",
+        "sanitized": sanitized,
+        "host": host,
+        "path": split.path or "/",
+        "query_keys": sorted({key for key, _ in display_pairs}),
+    }
+
+
 def sanitize_url(raw: str) -> tuple[str, dict[str, Any]]:
     split = urlsplit(raw)
     scheme = split.scheme.lower()
@@ -143,21 +238,16 @@ def sanitize_url(raw: str) -> tuple[str, dict[str, Any]]:
         raise WatchError("URL userinfo is not accepted", 4)
     if not split.netloc:
         raise WatchError("URL host is required", 4)
-    query = parse_qs(split.query, keep_blank_values=False)
+    query = parse_qs(split.query, keep_blank_values=True)
     if "list" in query or "playlist" in query:
         raise WatchError("playlist URLs are rejected; provide exactly one public video URL", 4)
-    safe_query: dict[str, list[str]] = {}
-    host = split.hostname or ""
-    if host.endswith("youtube.com") and split.path == "/watch" and query.get("v"):
-        safe_query["v"] = [query["v"][0]]
-    sanitized = urlunsplit((scheme, split.netloc.lower(), split.path, urlencode(safe_query, doseq=True), ""))
-    identity = {
-        "kind": "public_url",
-        "sanitized": sanitized,
-        "host": host.lower(),
-        "path": split.path or "/",
-    }
-    return sanitized, identity
+    if any(is_secret_query_key(key) for key in query):
+        raise WatchError(
+            "URL carries credential, signature, session, or token query fields; "
+            "supply the plain public video URL instead of a signed or authenticated one",
+            4,
+        )
+    return raw, describe_url(raw)
 
 
 def reject_unsafe_source(source: str) -> tuple[str, dict[str, Any], bool]:
@@ -165,8 +255,8 @@ def reject_unsafe_source(source: str) -> tuple[str, dict[str, Any], bool]:
     if split.scheme and split.scheme.lower() not in {"http", "https"}:
         raise WatchError("unsupported source scheme; use a public http(s) URL or an explicit local file path", 4)
     if is_public_url(source):
-        sanitized, identity = sanitize_url(source)
-        return sanitized, identity, True
+        fetch_url, identity = sanitize_url(source)
+        return fetch_url, identity, True
     return source, {"kind": "local_file", "sanitized": Path(source).name}, False
 
 
@@ -343,6 +433,29 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def parse_frame_rate(stream: dict[str, Any]) -> float:
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        raw = str(stream.get(key) or "")
+        if "/" not in raw:
+            continue
+        num, _, den = raw.partition("/")
+        numerator = safe_float(num, 0.0)
+        denominator = safe_float(den, 0.0)
+        if numerator > 0 and denominator > 0:
+            return numerator / denominator
+    return 0.0
+
+
+def tail_seek_limit(duration: float, frame_rate: float) -> float:
+    """Last timestamp that ffmpeg can still decode a frame at.
+
+    Seeking at or past the final frame's presentation time makes ffmpeg exit
+    non-zero without writing a file, so keep one safe frame of slack.
+    """
+    frame_gap = 1.0 / frame_rate if frame_rate > 0 else 0.5
+    return max(0.0, duration - max(2 * frame_gap, 0.5))
+
+
 def probe_video(path: Path) -> dict[str, Any]:
     result = run_quiet([
         "ffprobe",
@@ -370,6 +483,7 @@ def probe_video(path: Path) -> dict[str, Any]:
         raise WatchError("video duration could not be determined", 5)
     return {
         "duration_seconds": duration,
+        "frame_rate": parse_frame_rate(video_stream),
         "width": video_stream.get("width"),
         "height": video_stream.get("height"),
         "codec": video_stream.get("codec_name"),
@@ -554,10 +668,61 @@ def transcript_excerpt(segments: list[Segment], ranges: list[Range]) -> tuple[li
     return selected, truncated
 
 
-def download_video(url: str, work: Path) -> Path:
-    out_dir = work / "media"
+@dataclass
+class Media:
+    path: Path | None
+    coverage: str
+    byte_ceiling: int
+    declared_bytes: int | None = None
+    downloaded_bytes: int | None = None
+    section: tuple[float, float] | None = None
+    offset_seconds: float = 0.0
+    refusal: str | None = None
+
+
+def resolve_media_ceiling(requested: int | None, work: Path, warnings: list[str]) -> int:
+    ceiling = DEFAULT_MAX_MEDIA_BYTES if requested is None else requested
+    if ceiling <= 0:
+        raise WatchError("--max-media-bytes must be positive", 2)
+    if ceiling > HARD_MAX_MEDIA_BYTES:
+        raise WatchError(
+            f"--max-media-bytes cannot exceed the {HARD_MAX_MEDIA_BYTES} byte hard cap for transient public media",
+            2,
+        )
+    usable = max(0, shutil.disk_usage(work).free - FREE_SPACE_MARGIN_BYTES)
+    if ceiling > DEFAULT_MAX_MEDIA_BYTES and ceiling > usable:
+        raise WatchError(
+            "a transient media ceiling above the 4 GiB default requires proven local free space; "
+            f"only {usable} usable bytes are available",
+            2,
+        )
+    if ceiling > usable:
+        warnings.append(
+            f"transient media ceiling reduced to {usable} bytes because local free space is the binding limit"
+        )
+        ceiling = usable
+    if ceiling <= 0:
+        raise WatchError("no usable local free space remains for transient media", 5)
+    return ceiling
+
+
+def declared_media_bytes(metadata: dict[str, Any]) -> int | None:
+    for key in ("filesize", "filesize_approx"):
+        value = safe_float(metadata.get(key), 0.0)
+        if value > 0:
+            return int(value)
+    return None
+
+
+def purge_media(out_dir: Path) -> None:
+    if out_dir.exists():
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+def run_ytdlp_download(
+    url: str, out_dir: Path, max_bytes: int, section: tuple[float, float] | None
+) -> tuple[Path | None, bool, int]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    template = str(out_dir / "video.%(ext)s")
     cmd = [
         "yt-dlp",
         "-f",
@@ -566,20 +731,121 @@ def download_video(url: str, work: Path) -> Path:
         "mp4",
         "--no-playlist",
         "--no-warnings",
-        "-o",
-        template,
-        url,
+        "--max-filesize",
+        str(max_bytes),
     ]
+    if section is not None:
+        cmd += [
+            "--download-sections",
+            f"*{section[0]:.3f}-{section[1]:.3f}",
+            "--force-keyframes-at-cuts",
+        ]
+    cmd += ["-o", str(out_dir / "video.%(ext)s"), url]
     result = run_quiet(cmd, timeout=600)
     videos = sorted([p for p in out_dir.glob("video.*") if p.suffix.lower() in VIDEO_EXTS])
-    if result.returncode != 0 and not videos:
-        raise WatchError("public video download failed without safe public access", 4)
-    if not videos:
+    hit_ceiling = "max-filesize" in (result.stderr or "").lower() or "max-filesize" in (result.stdout or "").lower()
+    return (videos[0] if videos else None), hit_ceiling, result.returncode
+
+
+def acquire_media(
+    url: str,
+    work: Path,
+    ceiling: int,
+    declared: int | None,
+    section: tuple[float, float] | None,
+    warnings: list[str],
+) -> Media:
+    out_dir = work / "media"
+    if section is not None:
+        path, hit_ceiling, _ = run_ytdlp_download(url, out_dir, ceiling, section)
+        if path is not None:
+            return bound_downloaded_media(
+                Media(path, "section", ceiling, declared, section=section, offset_seconds=section[0]),
+                out_dir,
+                warnings,
+            )
+        purge_media(out_dir)
+        if hit_ceiling:
+            return Media(
+                None,
+                "none",
+                ceiling,
+                declared,
+                refusal=(
+                    "the provider could not deliver a bounded section and the full media exceeds the "
+                    "transient byte ceiling, so no video was downloaded"
+                ),
+            )
+        warnings.append(
+            "the provider could not deliver a bounded section download; a full media pass was attempted "
+            "within the transient byte ceiling"
+        )
+    if declared is not None and declared > ceiling:
+        purge_media(out_dir)
+        return Media(
+            None,
+            "none",
+            ceiling,
+            declared,
+            refusal="the declared public media size exceeds the transient byte ceiling, so no video was downloaded",
+        )
+    path, hit_ceiling, returncode = run_ytdlp_download(url, out_dir, ceiling, None)
+    if path is None:
+        purge_media(out_dir)
+        if hit_ceiling:
+            return Media(
+                None,
+                "none",
+                ceiling,
+                declared,
+                refusal="the public media size exceeds the transient byte ceiling, so no video was downloaded",
+            )
+        if returncode != 0:
+            raise WatchError("public video download failed without safe public access", 4)
         raise WatchError("public video download produced no video file", 5)
-    return videos[0]
+    return bound_downloaded_media(Media(path, "full", ceiling, declared), out_dir, warnings)
 
 
-def scene_timestamps(video: Path, ranges: list[Range]) -> tuple[list[float], list[str]]:
+def bound_downloaded_media(media: Media, out_dir: Path, warnings: list[str]) -> Media:
+    if media.path is None:
+        return media
+    downloaded = media.path.stat().st_size
+    if downloaded <= 0:
+        purge_media(out_dir)
+        raise WatchError("public video download produced no usable media", 5)
+    if downloaded > media.byte_ceiling:
+        purge_media(out_dir)
+        warnings.append(
+            "the acquired public media exceeded the transient byte ceiling and its partial artifacts were removed"
+        )
+        return Media(
+            None,
+            "none",
+            media.byte_ceiling,
+            media.declared_bytes,
+            refusal="the acquired public media exceeded the transient byte ceiling, so no video evidence was kept",
+        )
+    media.downloaded_bytes = downloaded
+    return media
+
+
+def confirm_section_media(media: Media, probed_duration: float, warnings: list[str]) -> Media:
+    if media.coverage != "section" or media.section is None:
+        return media
+    span = media.section[1] - media.section[0]
+    if probed_duration <= span + max(5.0, 0.25 * span):
+        return media
+    warnings.append(
+        "the provider ignored the bounded section request and returned full media; "
+        "frame timestamps remain absolute"
+    )
+    media.coverage = "full"
+    media.section = None
+    media.offset_seconds = 0.0
+    return media
+
+
+def scene_timestamps(video: Path, ranges: list[Range], offset: float = 0.0) -> tuple[list[float], list[str]]:
     warnings: list[str] = []
     timestamps: list[float] = []
     for selected in ranges:
@@ -589,9 +855,9 @@ def scene_timestamps(video: Path, ranges: list[Range]) -> tuple[list[float], lis
             "-loglevel",
             "info",
             "-ss",
-            f"{selected.start:.3f}",
+            f"{max(0.0, selected.start - offset):.3f}",
             "-to",
-            f"{selected.end:.3f}",
+            f"{max(0.0, selected.end - offset):.3f}",
             "-i",
             str(video),
             "-vf",
@@ -691,18 +957,33 @@ def extract_frame(video: Path, out_path: Path, timestamp: float, resolution: int
         raise WatchError("frame extraction failed", 5)
 
 
-def extract_frames(video: Path, work: Path, plan: list[dict[str, Any]], resolution: int) -> list[dict[str, Any]]:
+def extract_frames(
+    video: Path,
+    work: Path,
+    plan: list[dict[str, Any]],
+    resolution: int,
+    offset: float = 0.0,
+    last_decodable: float | None = None,
+) -> list[dict[str, Any]]:
     frames: list[dict[str, Any]] = []
     frame_dir = work / "frames"
     frame_dir.mkdir(parents=True, exist_ok=True)
-    for idx, item in enumerate(plan, start=1):
-        out_path = frame_dir / f"frame_{idx:04d}.jpg"
+    seen: set[float] = set()
+    for item in plan:
         timestamp = float(item["timestamp_seconds"])
-        extract_frame(video, out_path, timestamp, resolution)
+        if last_decodable is not None:
+            timestamp = min(timestamp, offset + last_decodable)
+        timestamp = round(max(offset, timestamp), 2)
+        if timestamp in seen:
+            continue
+        seen.add(timestamp)
+        idx = len(frames) + 1
+        out_path = frame_dir / f"frame_{idx:04d}.jpg"
+        extract_frame(video, out_path, max(0.0, timestamp - offset), resolution)
         frames.append({
             "index": idx,
             "path": str(out_path),
-            "timestamp_seconds": round(timestamp, 2),
+            "timestamp_seconds": timestamp,
             "timestamp": fmt_time(timestamp),
             "reason": item["reason"],
         })
@@ -734,8 +1015,30 @@ def source_title(metadata: dict[str, Any], local_path: Path | None) -> str | Non
     return str(title)[:200] if title else None
 
 
+def requested_section(
+    start: float | None, end: float | None, duration: float
+) -> tuple[float, float] | None:
+    if start is None and end is None:
+        return None
+    lo = start if start is not None else 0.0
+    hi = end if end is not None else (duration if duration > 0 else None)
+    if hi is None or hi <= lo:
+        return None
+    return (lo, hi)
+
+
+def focused_pass_recommendation(ranges: list[Range], duration: float) -> str:
+    anchor = ranges[0] if ranges else Range(0.0, duration, "full_video")
+    lo = anchor.start
+    hi = min(duration, lo + 300.0) if duration > 0 else lo + 300.0
+    return (
+        "no visual frames were acquired within the transient media ceiling; re-run one focused pass with "
+        f"--start {fmt_time(lo)} --end {fmt_time(hi)}, or raise --max-media-bytes if the local disk allows it"
+    )
+
+
 def build_manifest(args: argparse.Namespace, smoke_mode: bool = False) -> dict[str, Any]:
-    source_for_validation, source_identity, url_mode = reject_unsafe_source(args.source)
+    fetch_source, source_identity, url_mode = reject_unsafe_source(args.source)
     require_deps(url_mode)
     warnings: list[str] = []
     start = parse_time(args.start)
@@ -750,14 +1053,15 @@ def build_manifest(args: argparse.Namespace, smoke_mode: bool = False) -> dict[s
     transcript_segments: list[Segment] = []
     transcript_language: str | None = None
     transcript_provenance = "none"
-    video_path: Path | None = None
     local_path: Path | None = None
+    media = Media(None, "none", 0)
     try:
         if url_mode:
-            metadata = load_ytdlp_metadata(source_for_validation)
+            ceiling = resolve_media_ceiling(args.max_media_bytes, work, warnings)
+            metadata = load_ytdlp_metadata(fetch_source)
             transcript_language, caption_kind, caption_lang = choose_caption(metadata, args.caption_lang)
             if caption_lang:
-                caption_path = retrieve_captions(source_for_validation, work, caption_lang)
+                caption_path = retrieve_captions(fetch_source, work, caption_lang)
                 if caption_path:
                     transcript_segments = parse_vtt(caption_path)
                     transcript_provenance = f"captions:{caption_kind}"
@@ -765,29 +1069,71 @@ def build_manifest(args: argparse.Namespace, smoke_mode: bool = False) -> dict[s
                     warnings.append("caption metadata existed but caption retrieval produced no VTT file")
             else:
                 warnings.append("no compatible public captions were advertised; remote transcription is disabled in v1")
-            video_path = download_video(source_for_validation, work)
+            media = acquire_media(
+                fetch_source,
+                work,
+                ceiling,
+                declared_media_bytes(metadata),
+                requested_section(start, end, safe_float(metadata.get("duration"), 0.0)),
+                warnings,
+            )
         else:
-            local_path = validate_local(source_for_validation, args.max_local_bytes)
+            local_path = validate_local(fetch_source, args.max_local_bytes)
             media_dir = work / "media"
             media_dir.mkdir(parents=True, exist_ok=True)
-            video_path = media_dir / f"local{local_path.suffix.lower()}"
-            shutil.copy2(local_path, video_path)
+            local_copy = media_dir / f"local{local_path.suffix.lower()}"
+            shutil.copy2(local_path, local_copy)
+            media = Media(
+                local_copy,
+                "full",
+                args.max_local_bytes,
+                declared_bytes=local_copy.stat().st_size,
+                downloaded_bytes=local_copy.stat().st_size,
+            )
             warnings.append("local-file transcription is not enabled in v1 unless captions are separately supported later")
-        probed = probe_video(video_path)
-        duration = safe_float(metadata.get("duration"), 0.0) or float(probed["duration_seconds"])
+        video_path = media.path
+        if video_path is not None:
+            probed = probe_video(video_path)
+            media = confirm_section_media(media, float(probed["duration_seconds"]), warnings)
+        else:
+            probed = {}
+        duration = safe_float(metadata.get("duration"), 0.0) or float(probed.get("duration_seconds", 0.0))
+        if duration <= 0:
+            raise WatchError("video duration could not be determined", 5)
         chapters = normalize_chapters(metadata.get("chapters"), duration)
         ranges = select_ranges(duration, transcript_segments, chapters, args.question, start, end)
         max_frames, resolution = clamp_requested_limits(args, ranges[0].reason == "focused_range", warnings)
         selected_transcript, transcript_truncated = transcript_excerpt(transcript_segments, ranges)
         if transcript_truncated:
             warnings.append("transcript evidence was truncated to the bounded manifest budget")
-        scenes, scene_warnings = scene_timestamps(video_path, ranges)
-        warnings.extend(scene_warnings)
-        plan = combine_frame_plan(ranges, scenes, max_frames)
-        if not plan:
-            raise WatchError("frame planning produced no evidence frames", 5)
-        frames = extract_frames(video_path, work, plan, resolution)
-        if duration > 600 and not focused:
+        frames: list[dict[str, Any]] = []
+        recommendation: str | None = None
+        if video_path is not None:
+            scenes, scene_warnings = scene_timestamps(video_path, ranges, media.offset_seconds)
+            warnings.extend(scene_warnings)
+            plan = combine_frame_plan(ranges, scenes, max_frames)
+            if not plan:
+                raise WatchError("frame planning produced no evidence frames", 5)
+            frames = extract_frames(
+                video_path,
+                work,
+                plan,
+                resolution,
+                media.offset_seconds,
+                tail_seek_limit(float(probed["duration_seconds"]), float(probed.get("frame_rate") or 0.0)),
+            )
+        else:
+            recommendation = focused_pass_recommendation(ranges, duration)
+            warnings.append(media.refusal or "no visual evidence was acquired for this source")
+            warnings.append(
+                "this manifest carries transcript and chapter evidence only; do not claim any visual coverage"
+            )
+        if media.coverage == "section" and media.section is not None:
+            warnings.append(
+                "visual evidence covers only the requested section "
+                f"{fmt_time(media.section[0])}-{fmt_time(media.section[1])}, not the whole video"
+            )
+        if duration > 600 and not focused and frames:
             warnings.append("video is over 10 minutes; this is sparse sampled evidence, not every frame")
         frame_token_estimate = int(len(frames) * 1200 * (resolution / 512) ** 2)
         transcript_chars = sum(len(seg["text"]) for seg in selected_transcript)
@@ -809,6 +1155,19 @@ def build_manifest(args: argparse.Namespace, smoke_mode: bool = False) -> dict[s
                 "selected_segment_count": len(selected_transcript),
                 "segments": selected_transcript,
                 "remote_transcription": "disabled",
+            },
+            "media": {
+                "acquired": video_path is not None,
+                "visual_coverage": media.coverage,
+                "byte_ceiling": media.byte_ceiling,
+                "declared_bytes": media.declared_bytes,
+                "downloaded_bytes": media.downloaded_bytes,
+                "acquired_range": (
+                    {"start_seconds": round(media.section[0], 2), "end_seconds": round(media.section[1], 2)}
+                    if media.coverage == "section" and media.section is not None
+                    else None
+                ),
+                "focused_pass_recommendation": recommendation,
             },
             "frames": frames,
             "token_budget": {
@@ -858,6 +1217,16 @@ def add_prepare_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--resolution", type=int, default=DEFAULT_RESOLUTION, help="Frame width in pixels. Default 512; hard cap 768 full or 1280 focused.")
     parser.add_argument("--caption-lang", default=None, help="Preferred caption language, default en with compatible fallbacks")
     parser.add_argument("--max-local-bytes", type=int, default=DEFAULT_MAX_LOCAL_BYTES, help="Safety limit for explicit local video files")
+    parser.add_argument(
+        "--max-media-bytes",
+        type=int,
+        default=None,
+        help=(
+            "Transient public-media byte ceiling. Default 4 GiB; explicit values up to 16 GiB are honored "
+            "only when local free space proves sufficient. Sources declared above the ceiling are refused "
+            "before download and return transcript and chapter evidence with a focused-pass recommendation."
+        ),
+    )
 
 
 def parser() -> argparse.ArgumentParser:
@@ -867,7 +1236,12 @@ def parser() -> argparse.ArgumentParser:
         epilog=(
             "The manifest is sparse evidence: it reports sampled frames and transcript windows, "
             "not a claim that every frame was watched. Public URL mode uses yt-dlp only, with "
-            "no browser profiles, cookies, login state, headers, or extensions. Missing dependencies "
+            "no browser profiles, cookies, login state, headers, or extensions. The supplied public "
+            "URL is fetched exactly as given; only the manifest description redacts query values, and "
+            "credential, signature, session, or token query fields are refused outright. Public media "
+            "is bounded by a transient byte ceiling both before download and after acquisition, focused "
+            "runs request a bounded section when the provider supports one, and media.visual_coverage "
+            "reports whether the evidence is full, section-only, or absent. Missing dependencies "
             "are reported; no installer is run. Remote transcription is disabled in v1."
         ),
     )

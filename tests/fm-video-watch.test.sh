@@ -181,7 +181,39 @@ test_url_rejections_are_sanitized() {
   output=$(cat "$dir/out" "$dir/err")
   assert_not_contains "$output" 'SECRET_SHOULD_NOT_LEAK' "rejected URL does not leak signed query values"
   assert_not_contains "$output" 'signature=' "rejected URL does not echo signed query names"
-  pass "playlist and signed-query rejection is value-safe"
+
+  : > "$dir/commands.log"
+  set +e
+  FM_FAKE_COMMAND_LOG="$dir/commands.log" PATH="$fakebin:$BASE_PATH" "$WATCH" prepare \
+    'https://video.example/watch/one?id=42&Signature=SECRET_SHOULD_NOT_LEAK' \
+    --question 'summarize' > "$dir/signed.out" 2> "$dir/signed.err"
+  rc=$?
+  set +e
+  expect_code 4 "$rc" "signed URL is rejected before any fetch"
+  output=$(cat "$dir/signed.out" "$dir/signed.err")
+  assert_not_contains "$output" 'SECRET_SHOULD_NOT_LEAK' "signed rejection does not leak the signature value"
+  [ ! -s "$dir/commands.log" ] || fail "signed URL reached yt-dlp before rejection"
+  pass "playlist and credential-bearing query rejection is value-safe"
+}
+
+test_supplied_url_is_fetched_exactly() {
+  local dir="$TMP_ROOT/exact-url" out err commands receipt
+  mkdir -p "$dir"
+  out="$dir/out.json"
+  err="$dir/err"
+  run_prepare "$dir" "$out" "$err" 'https://player.vimeo.com/video/76979871?h=8272103f6e&utm_source=SECRET_SHOULD_NOT_LEAK' \
+    --question 'summarize'
+  commands=$(cat "$dir/commands.log")
+  assert_contains "$commands" 'https://player.vimeo.com/video/76979871?h=8272103f6e&utm_source=SECRET_SHOULD_NOT_LEAK' \
+    "yt-dlp did not receive the exact supplied URL"
+  [ "$(json_get "$out" "data['source']['sanitized']")" = 'https://player.vimeo.com/video/76979871?h=redacted' ] \
+    || fail "identity-bearing query parameter was not retained and redacted for display"
+  [ "$(json_get "$out" "data['source']['query_keys']")" = "['h']" ] || fail "retained query key names missing"
+  assert_not_contains "$(cat "$out" "$err")" 'SECRET_SHOULD_NOT_LEAK' "manifest leaked a tracking query value"
+  assert_not_contains "$(cat "$out" "$err")" '8272103f6e' "manifest printed a non-identifier query value"
+  receipt=$(json_get "$out" "data['cleanup_receipt']")
+  PATH="$(dirname "$REAL_PYTHON"):$BASE_PATH" "$WATCH" cleanup "$receipt" >/dev/null
+  pass "the exact supplied public URL is fetched while the manifest stays value-safe"
 }
 
 test_metadata_rejections() {
@@ -212,10 +244,13 @@ test_prepare_transcript_first_and_manifest_contract() {
   mkdir -p "$dir"
   out="$dir/out.json"
   err="$dir/err"
-  run_prepare "$dir" "$out" "$err" 'https://www.youtube.com/watch?v=abc123&signature=SECRET_SHOULD_NOT_LEAK' --question 'Where is the dashboard demo?'
+  run_prepare "$dir" "$out" "$err" 'https://www.youtube.com/watch?v=abc123&si=SECRET_SHOULD_NOT_LEAK' --question 'Where is the dashboard demo?'
   [ "$(json_get "$out" "data['schema']")" = 'fm.video-watch.manifest.v1' ] || fail "manifest schema mismatch"
   [ "$(json_get "$out" "data['source']['sanitized']")" = 'https://www.youtube.com/watch?v=abc123' ] || fail "sanitized YouTube URL mismatch"
-  assert_not_contains "$(cat "$out" "$err")" 'SECRET_SHOULD_NOT_LEAK' "manifest does not leak signed query canary"
+  assert_not_contains "$(cat "$out" "$err")" 'SECRET_SHOULD_NOT_LEAK' "manifest does not leak tracking query canary"
+  [ "$(json_get "$out" "data['media']['acquired']")" = True ] || fail "media acquisition not recorded"
+  [ "$(json_get "$out" "data['media']['visual_coverage']")" = 'full' ] || fail "full visual coverage not recorded"
+  [ "$(json_get "$out" "data['media']['byte_ceiling'] > 0")" = True ] || fail "transient media ceiling missing"
   [ "$(json_get "$out" "data['transcript']['provenance']")" = 'captions:manual' ] || fail "manual caption provenance missing"
   [ "$(json_get "$out" "len(data['selected_ranges'])")" -ge 1 ] || fail "selected range missing"
   [ "$(json_get "$out" "data['selected_ranges'][0]['start_seconds']")" != '0.0' ] || fail "question terms did not narrow transcript range"
@@ -254,9 +289,114 @@ test_focused_range_caps_and_language_choice() {
   warnings=$(json_get "$out" "' '.join(data['warnings'])")
   assert_contains "$warnings" 'hard cap' "cap warning missing"
   assert_contains "$(json_get "$out" "','.join(f['reason'] for f in data['frames'])")" 'focused_range_start' "focused start frame missing"
+  assert_contains "$(cat "$dir/commands.log")" '--download-sections *10.000-20.000' "focused run did not request a bounded provider section"
+  assert_contains "$warnings" 'ignored the bounded section request' "unbounded section fallback was not disclosed"
+  [ "$(json_get "$out" "data['media']['visual_coverage']")" = 'full' ] || fail "full media fallback coverage not recorded"
   receipt=$(json_get "$out" "data['cleanup_receipt']")
   PATH="$(dirname "$REAL_PYTHON"):$BASE_PATH" "$WATCH" cleanup "$receipt" >/dev/null
   pass "focused ranges use absolute timestamps, denser caps, and requested captions"
+}
+
+test_section_download_keeps_absolute_timestamps() {
+  local dir="$TMP_ROOT/section" out err fakebin receipt commands
+  mkdir -p "$dir"
+  out="$dir/out.json"
+  err="$dir/err"
+  fakebin=$(make_fakebin "$dir")
+  : > "$dir/commands.log"
+  FM_FAKE_COMMAND_LOG="$dir/commands.log" \
+    FM_FAKE_FFPROBE_JSON='{"format":{"duration":"10.0","size":"1000"},"streams":[{"codec_type":"video","width":1280,"height":720,"codec_name":"h264"}]}' \
+    PATH="$fakebin:$BASE_PATH" "$WATCH" prepare 'https://video.example/watch/one' --question 'read the text' \
+    --start 00:10 --end 00:20 --max-frames 6 > "$out" 2> "$err"
+  [ "$(json_get "$out" "data['media']['visual_coverage']")" = 'section' ] || fail "section coverage not recorded"
+  [ "$(json_get "$out" "data['media']['acquired_range']['start_seconds']")" = '10.0' ] || fail "acquired section range missing"
+  [ "$(json_get "$out" "min(f['timestamp_seconds'] for f in data['frames']) >= 10.0")" = True ] \
+    || fail "section frames did not keep absolute timestamps"
+  [ "$(json_get "$out" "max(f['timestamp_seconds'] for f in data['frames']) <= 19.5")" = True ] \
+    || fail "section frames were planned past the last decodable frame of the acquired media"
+  assert_contains "$(json_get "$out" "' '.join(data['warnings'])")" 'covers only the requested section' \
+    "section-only coverage was not disclosed"
+  commands=$(cat "$dir/commands.log")
+  assert_contains "$commands" '-ss 0.000' "section media was not seeked relative to the acquired section"
+  receipt=$(json_get "$out" "data['cleanup_receipt']")
+  PATH="$(dirname "$REAL_PYTHON"):$BASE_PATH" "$WATCH" cleanup "$receipt" >/dev/null
+  pass "bounded section downloads keep manifest timestamps absolute and coverage honest"
+}
+
+test_media_ceiling_refuses_before_download() {
+  local dir="$TMP_ROOT/ceiling" out err fakebin metadata receipt commands
+  mkdir -p "$dir"
+  out="$dir/out.json"
+  err="$dir/err"
+  metadata='{"id":"big","title":"Huge","duration":1200,"availability":"public","filesize_approx":9000000000,"subtitles":{"en":[{"ext":"vtt"}]},"chapters":[{"start_time":0,"end_time":600,"title":"Pricing hook"}]}'
+  fakebin=$(make_fakebin "$dir")
+  : > "$dir/commands.log"
+  FM_FAKE_COMMAND_LOG="$dir/commands.log" FM_FAKE_YTDLP_METADATA="$metadata" PATH="$fakebin:$BASE_PATH" \
+    "$WATCH" prepare 'https://video.example/watch/one' --question 'pricing' --max-media-bytes 1000000 > "$out" 2> "$err"
+  [ "$(json_get "$out" "data['media']['acquired']")" = False ] || fail "oversized media was still acquired"
+  [ "$(json_get "$out" "data['media']['visual_coverage']")" = 'none' ] || fail "absent visual coverage not recorded"
+  [ "$(json_get "$out" "len(data['frames'])")" = 0 ] || fail "frames were emitted without acquired media"
+  [ "$(json_get "$out" "data['transcript']['available']")" = True ] || fail "transcript evidence was not returned"
+  [ "$(json_get "$out" "len(data['chapters']) > 0")" = True ] || fail "chapter evidence was not returned"
+  assert_contains "$(json_get "$out" "data['media']['focused_pass_recommendation']")" '--start' \
+    "focused-pass recommendation missing"
+  assert_contains "$(json_get "$out" "' '.join(data['warnings'])")" 'do not claim any visual coverage' \
+    "manifest did not warn against claiming visual coverage"
+  commands=$(cat "$dir/commands.log")
+  assert_not_contains "$commands" '--merge-output-format' "media download ran despite exceeding the byte ceiling"
+  receipt=$(json_get "$out" "data['cleanup_receipt']")
+  PATH="$(dirname "$REAL_PYTHON"):$BASE_PATH" "$WATCH" cleanup "$receipt" >/dev/null
+  pass "declared media above the transient ceiling is refused before download with transcript evidence returned"
+}
+
+test_media_ceiling_override_requires_free_space() {
+  local dir="$TMP_ROOT/ceiling-override" fakebin rc output
+  mkdir -p "$dir"
+  fakebin=$(make_fakebin "$dir")
+  : > "$dir/commands.log"
+  set +e
+  FM_FAKE_COMMAND_LOG="$dir/commands.log" PATH="$fakebin:$BASE_PATH" \
+    "$WATCH" prepare 'https://video.example/watch/one' --question 'pricing' \
+    --max-media-bytes 99999999999999 > "$dir/out" 2> "$dir/err"
+  rc=$?
+  set +e
+  expect_code 2 "$rc" "a media ceiling above the 16 GiB hard cap is refused"
+  output=$(cat "$dir/out" "$dir/err")
+  assert_contains "$output" 'hard cap for transient public media' "hard-cap refusal did not name the bound"
+
+  "$REAL_PYTHON" - "$ROOT/bin/fm-video-watch-impl.py" <<'PY' || fail "free-space preflight does not gate only the override"
+import importlib.util, shutil, sys, tempfile
+from collections import namedtuple
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("fmvw", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+sys.modules["fmvw"] = mod
+spec.loader.exec_module(mod)
+
+usage = namedtuple("usage", "total used free")
+mod.shutil.disk_usage = lambda _path: usage(0, 0, 3 * 1024 * 1024 * 1024)
+work = Path(tempfile.gettempdir())
+
+warnings = []
+ceiling = mod.resolve_media_ceiling(None, work, warnings)
+assert ceiling < mod.DEFAULT_MAX_MEDIA_BYTES, "default ceiling must clamp to free space, not refuse"
+assert any("free space is the binding limit" in w for w in warnings), warnings
+
+assert mod.tail_seek_limit(10.0, 25.0) == 9.5, mod.tail_seek_limit(10.0, 25.0)
+assert mod.tail_seek_limit(10.0, 1.0) == 8.0, mod.tail_seek_limit(10.0, 1.0)
+assert mod.tail_seek_limit(10.0, 0.0) == 9.0, mod.tail_seek_limit(10.0, 0.0)
+assert mod.tail_seek_limit(0.2, 25.0) == 0.0, mod.tail_seek_limit(0.2, 25.0)
+
+try:
+    mod.resolve_media_ceiling(8 * 1024 * 1024 * 1024, work, [])
+except mod.WatchError as exc:
+    assert exc.code == 2, exc.code
+    assert "proven local free space" in str(exc), str(exc)
+else:
+    raise AssertionError("override above the default must require proven free space")
+PY
+  pass "the transient media ceiling clamps by default, keeps seeks inside the media, and requires proven free space only when raised"
 }
 
 test_local_file_refusals() {
@@ -302,7 +442,7 @@ test_malformed_metadata_and_failure_receipt_are_safe() {
   : > "$dir/commands.log"
   set +e
   FM_FAKE_COMMAND_LOG="$dir/commands.log" FM_FAKE_YTDLP_METADATA='{' PATH="$fakebin:$BASE_PATH" \
-    "$WATCH" prepare 'https://video.example/watch/one?token=SECRET_SHOULD_NOT_LEAK' --question 'summarize' > "$dir/out" 2> "$dir/err"
+    "$WATCH" prepare 'https://video.example/watch/one?h=SECRET_SHOULD_NOT_LEAK' --question 'summarize' > "$dir/out" 2> "$dir/err"
   rc=$?
   set +e
   expect_code 5 "$rc" "malformed yt-dlp metadata is refused"
@@ -315,7 +455,7 @@ test_malformed_metadata_and_failure_receipt_are_safe() {
   : > "$dir/commands.log"
   set +e
   FM_FAKE_COMMAND_LOG="$dir/commands.log" FM_FAKE_FFMPEG_EXTRACT_FAIL=1 FM_FAKE_SECRET=SECRET_SHOULD_NOT_LEAK PATH="$fakebin:$BASE_PATH" \
-    "$WATCH" prepare 'https://video.example/watch/one?token=SECRET_SHOULD_NOT_LEAK' --question 'pricing' > "$dir/out" 2> "$dir/err"
+    "$WATCH" prepare 'https://video.example/watch/one?h=SECRET_SHOULD_NOT_LEAK' --question 'pricing' > "$dir/out" 2> "$dir/err"
   rc=$?
   set +e
   expect_code 5 "$rc" "frame extraction failure is reported"
@@ -382,9 +522,13 @@ test_real_smoke_requires_two_opt_ins() {
 
 test_doctor_missing_is_detect_only
 test_url_rejections_are_sanitized
+test_supplied_url_is_fetched_exactly
 test_metadata_rejections
 test_prepare_transcript_first_and_manifest_contract
 test_focused_range_caps_and_language_choice
+test_section_download_keeps_absolute_timestamps
+test_media_ceiling_refuses_before_download
+test_media_ceiling_override_requires_free_space
 test_local_file_refusals
 test_malformed_metadata_and_failure_receipt_are_safe
 test_cleanup_receipt_mismatch_and_symlink_marker_resistance

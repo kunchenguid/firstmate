@@ -32,18 +32,22 @@ Run:
 bin/fm-video-watch.sh prepare "<source>" --question "<captain request>"
 ```
 
-Add `--start`, `--end`, `--max-frames`, `--resolution`, or `--caption-lang` only when the request justifies them.
+Add `--start`, `--end`, `--max-frames`, `--resolution`, `--caption-lang`, or `--max-media-bytes` only when the request justifies them.
 If the script refuses, report the concrete safe outcome: missing local dependency, unsupported public source, rejected playlist or live stream, unsafe local file, no captions, or failed preparation.
 Do not run an installer, ask for an API key, inspect `~/.config/watch/.env`, use browser profiles, attach a browser, pass cookies, or retry with authenticated state.
 
 The script works transcript-first where public captions are feasible.
 It gathers safe metadata and captions before downloading media, selects transcript windows and ranges from the question when possible, combines scene or slide changes with bounded periodic coverage, and emits a manifest with frame paths, timestamps, reasons, transcript provenance, warnings, token estimates, and cleanup receipt.
+It fetches the captain's public URL exactly as supplied, so providers that encode the video identity in query parameters keep working; do not rewrite, shorten, or strip the URL before passing it.
+Transient media is bounded by a byte ceiling, and a focused run asks the provider for just that section when it can.
 Remote transcription is disabled in v1; if public captions are absent or the local file has no transcript, answer from visual evidence only and say that audio transcript evidence was unavailable.
 
 ## Evidence reading
 
 1. Read the manifest JSON from stdout as the source of truth.
-   Treat `warnings`, `selected_ranges`, `frames[].reason`, and `token_budget` as mandatory context for the answer.
+   Treat `warnings`, `selected_ranges`, `media`, `frames[].reason`, and `token_budget` as mandatory context for the answer.
+   `media.visual_coverage` is binding: `full` means frames were sampled across the whole selection, `section` means only `media.acquired_range` was acquired, and `none` means there is no visual evidence at all.
+   When it is `section` or `none`, say so plainly and pass on `media.focused_pass_recommendation` instead of implying the whole video was seen.
 2. Read only the listed frame paths, preferably in batches of 10-20 frames.
    Do not read media files, audio files, raw downloads, or unrelated paths.
 3. Use the transcript segments embedded in the manifest as audio evidence.
