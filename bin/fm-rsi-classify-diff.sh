@@ -27,13 +27,15 @@ fi
 repo=$1
 base_ref=$2
 candidate_ref=$3
+export GIT_NO_REPLACE_OBJECTS=1
 
 base=$(git -C "$repo" rev-parse --verify --end-of-options "$base_ref^{commit}")
 candidate=$(git -C "$repo" rev-parse --verify --end-of-options "$candidate_ref^{commit}")
 
 file_list=$(mktemp "${TMPDIR:-/tmp}/fm-rsi-classify-diff.XXXXXX")
 trap 'rm -f "$file_list"' EXIT HUP INT TERM
-git -C "$repo" diff --no-renames --name-only -z "$base" "$candidate" -- > "$file_list"
+git -C "$repo" diff --no-ext-diff --no-textconv --ignore-submodules=none --no-renames \
+  --name-only -z "$base" "$candidate" -- > "$file_list"
 files=()
 while IFS= read -r -d '' file; do
   files+=("$file")
@@ -130,7 +132,8 @@ for file in "${files[@]}"; do
   fi
 
   if is_test_path "$file"; then
-    test_stats=$(GIT_LITERAL_PATHSPECS=1 git -C "$repo" diff --no-renames --numstat "$base" "$candidate" -- "$file")
+    test_stats=$(GIT_LITERAL_PATHSPECS=1 git -C "$repo" diff --no-ext-diff --no-textconv \
+      --ignore-submodules=none --no-renames --numstat "$base" "$candidate" -- "$file")
     if printf '%s\n' "$test_stats" | awk -F '\t' 'NF >= 2 && $2 != "0" { non_additive=1 } END { exit non_additive ? 0 : 1 }'; then
       add_reason "test_not_additive:$file"
     fi

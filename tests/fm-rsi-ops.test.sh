@@ -157,6 +157,91 @@ test_classifier_rejects_non_regular_entries() {
   pass "fm-rsi-classify-diff: rejects non-regular tree entries"
 }
 
+test_classifier_overrides_submodule_ignore() {
+  local gitlink_repo initial gitlink_base candidate output
+  gitlink_repo="$TMP_ROOT/gitlink-ignore-repo"
+  mkdir -p "$gitlink_repo"
+  git -C "$gitlink_repo" init -q
+  git -C "$gitlink_repo" config user.email tests@example.invalid
+  git -C "$gitlink_repo" config user.name tests
+  printf 'base\n' > "$gitlink_repo/readme.txt"
+  git -C "$gitlink_repo" add .
+  git -C "$gitlink_repo" commit -qm initial
+  initial=$(git -C "$gitlink_repo" rev-parse HEAD)
+  git -C "$gitlink_repo" update-index --add --cacheinfo 160000 "$initial" manual.md
+  printf 'body { color: black; }\n' > "$gitlink_repo/style.css"
+  git -C "$gitlink_repo" add style.css
+  git -C "$gitlink_repo" commit -qm gitlink-base
+  gitlink_base=$(git -C "$gitlink_repo" rev-parse HEAD)
+  git -C "$gitlink_repo" update-index --cacheinfo 160000 "$gitlink_base" manual.md
+  printf 'body { color: navy; }\n' > "$gitlink_repo/style.css"
+  git -C "$gitlink_repo" add style.css
+  git -C "$gitlink_repo" commit -qm gitlink-candidate
+  candidate=$(git -C "$gitlink_repo" rev-parse HEAD)
+  git -C "$gitlink_repo" config diff.ignoreSubmodules all
+  output=$("$ROOT/bin/fm-rsi-classify-diff.sh" "$gitlink_repo" "$gitlink_base" "$candidate")
+  [ "$(printf '%s' "$output" | jq -r .lane)" = full ] || fail "ignored gitlink update was not full: $output"
+  printf '%s' "$output" | jq -e '.files | index("manual.md") != null' >/dev/null \
+    || fail "submodule-ignore config hid the gitlink from evidence: $output"
+  printf '%s' "$output" | jq -e '.reasons | index("non_regular_entry:manual.md") != null' >/dev/null \
+    || fail "ignored gitlink update omitted non-regular evidence: $output"
+  pass "fm-rsi-classify-diff: overrides ambient submodule ignore"
+}
+
+test_classifier_disables_textconv_for_tests() {
+  local textconv_repo filter base candidate output
+  textconv_repo="$TMP_ROOT/textconv-repo"
+  filter="$TMP_ROOT/textconv-constant.sh"
+  mkdir -p "$textconv_repo"
+  git -C "$textconv_repo" init -q
+  git -C "$textconv_repo" config user.email tests@example.invalid
+  git -C "$textconv_repo" config user.name tests
+  printf '#!/usr/bin/env bash\nprintf "constant\\n"\n' > "$filter"
+  chmod +x "$filter"
+  git -C "$textconv_repo" config diff.constant.textconv "$filter"
+  printf '*.test.txt diff=constant\n' > "$textconv_repo/.gitattributes"
+  printf 'assert first\nassert second\n' > "$textconv_repo/safety.test.txt"
+  git -C "$textconv_repo" add .
+  git -C "$textconv_repo" commit -qm test-base
+  base=$(git -C "$textconv_repo" rev-parse HEAD)
+  printf 'assert first\n' > "$textconv_repo/safety.test.txt"
+  git -C "$textconv_repo" commit -qam test-candidate
+  candidate=$(git -C "$textconv_repo" rev-parse HEAD)
+  output=$("$ROOT/bin/fm-rsi-classify-diff.sh" "$textconv_repo" "$base" "$candidate")
+  [ "$(printf '%s' "$output" | jq -r .lane)" = full ] || fail "textconv-hidden test deletion was not full: $output"
+  printf '%s' "$output" | jq -e '.reasons | index("test_not_additive:safety.test.txt") != null' >/dev/null \
+    || fail "raw test deletion omitted additive-only evidence: $output"
+  pass "fm-rsi-classify-diff: disables textconv for test evidence"
+}
+
+test_classifier_disables_replacement_refs() {
+  local replacement_repo base candidate replacement output
+  replacement_repo="$TMP_ROOT/replacement-repo"
+  mkdir -p "$replacement_repo"
+  git -C "$replacement_repo" init -q
+  git -C "$replacement_repo" config user.email tests@example.invalid
+  git -C "$replacement_repo" config user.name tests
+  printf 'body { color: black; }\n' > "$replacement_repo/style.css"
+  git -C "$replacement_repo" add .
+  git -C "$replacement_repo" commit -qm base
+  base=$(git -C "$replacement_repo" rev-parse HEAD)
+  printf 'body { color: navy; }\n' > "$replacement_repo/style.css"
+  git -C "$replacement_repo" commit -qam candidate
+  candidate=$(git -C "$replacement_repo" rev-parse HEAD)
+  git -C "$replacement_repo" checkout -q --detach "$base"
+  printf 'body { color: navy; }\n' > "$replacement_repo/style.css"
+  printf 'window.enabled = true;\n' > "$replacement_repo/behavior.js"
+  git -C "$replacement_repo" add .
+  git -C "$replacement_repo" commit -qm replacement
+  replacement=$(git -C "$replacement_repo" rev-parse HEAD)
+  git -C "$replacement_repo" replace "$candidate" "$replacement"
+  output=$("$ROOT/bin/fm-rsi-classify-diff.sh" "$replacement_repo" "$base" "$candidate")
+  [ "$(printf '%s' "$output" | jq -r .lane)" = fast ] || fail "replacement ref changed frozen diff evidence: $output"
+  [ "$(printf '%s' "$output" | jq -r '.files | join(",")')" = style.css ] \
+    || fail "replacement ref injected paths into frozen diff evidence: $output"
+  pass "fm-rsi-classify-diff: disables replacement refs for all evidence"
+}
+
 test_classifier_preserves_unusual_paths() {
   local base candidate output path
   path='café.js'
@@ -299,6 +384,9 @@ test_classifier_rejects_case_variants_and_sensitive_paths
 test_classifier_rejects_mdx_and_all_script_tag_forms
 test_classifier_rejects_script_relocation
 test_classifier_rejects_non_regular_entries
+test_classifier_overrides_submodule_ignore
+test_classifier_disables_textconv_for_tests
+test_classifier_disables_replacement_refs
 test_classifier_preserves_unusual_paths
 test_classifier_freezes_moving_refs
 test_canary
