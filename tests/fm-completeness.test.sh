@@ -31,6 +31,17 @@ rc_of() {
   printf '%s' "$rc"
 }
 
+# --- Shipped defaults --------------------------------------------------------
+
+# Every verdict below that does not override FM_COMPLETENESS_RULES is decided by
+# the shipped rules file and engine, so their absence would silently turn this
+# whole suite into a fail-open no-op that still prints ok.
+[ -f "$ROOT/bin/fm-completeness.rules.json" ] \
+  || fail "the shipped rules file bin/fm-completeness.rules.json is missing"
+[ -x "$ROOT/bin/fm-completeness.py" ] \
+  || fail "the shipped engine bin/fm-completeness.py is missing or not executable"
+pass "the gate ships its default rules file and engine"
+
 # --- Tooling-agnostic tier ---------------------------------------------------
 
 # Off-switch always yields 0 regardless of facts.
