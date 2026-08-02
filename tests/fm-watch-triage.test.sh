@@ -1561,6 +1561,7 @@ case "$dest" in
         ;;
       kill-before) kill -KILL "$PPID"; exit 1 ;;
       kill-after) "$REAL_MV" "$@" || exit; kill -KILL "$PPID"; exit 1 ;;
+      fail) exit 1 ;;
     esac
     ;;
 esac
@@ -1643,6 +1644,29 @@ test_procevent_surface_crash_boundaries() {
   reap "$pid"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "post-marker fixture drain failed"
   pass "surfacing failures replay before marker commit and suppress only after delivered output"
+}
+
+test_procevent_marker_failure_exits_and_replays() {
+  local dir state out pid marker output_count
+  dir=$(make_case procevent-marker-failure); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:marker-failure:1" "check: procevent fixture marker-failure 1"
+  install_marker_mv_fault "$dir"
+  FM_MARKER_MV_MODE=fail procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "marker failure did not end the actionable watcher cycle successfully"
+  output_count=$(grep -Fc "procevent:marker-failure:1" "$out" || true)
+  [ "$output_count" = 1 ] || fail "marker failure printed the actionable reason $output_count times"
+  marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
+  [ -z "$marker" ] || fail "marker failure committed suppression"
+  [ ! -e "$state/.wake-queue.lock" ] && [ ! -L "$state/.wake-queue.lock" ] \
+    || fail "marker failure left the queue lock held"
+  procevent_watch_bg "$dir" "$out.replay"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "marker failure did not leave the durable record replayable"
+  grep -F "procevent:marker-failure:1" "$out.replay" >/dev/null \
+    || fail "marker failure lost the later proactive replay"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "marker-failure fixture drain failed"
+  pass "marker failure exits through the shared wake owner, releases its lock, and replays later"
 }
 
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
@@ -1815,6 +1839,7 @@ test_procevent_surfaced_result_does_not_rewake
 test_procevent_marker_keys_are_injective
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
+test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
