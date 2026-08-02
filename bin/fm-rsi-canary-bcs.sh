@@ -39,6 +39,9 @@ done
   printf 'fm-rsi-canary-bcs: --positive is required\n' >&2
   exit 2
 }
+case "$positive" in
+  *$'\n'*|*$'\r'*) printf 'fm-rsi-canary-bcs: positive marker must be single-line\n' >&2; exit 2 ;;
+esac
 [ -n "$candidate_sha" ] || {
   printf 'fm-rsi-canary-bcs: --candidate-sha is required\n' >&2
   exit 2

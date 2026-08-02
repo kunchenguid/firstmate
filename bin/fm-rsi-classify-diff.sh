@@ -53,11 +53,23 @@ add_reason() {
 }
 
 script_presence() {
-  perl -0777 -ne 'print "present\n" if /<\/?script\b/i'
+  perl -0777 -ne 'print "present\n" if /<\/?(?:[^<>\s\/:]+:)?script\b/i'
 }
 
 file_at_ref() {
-  git -C "$repo" show "$1:$2" 2>/dev/null || true
+  [ -n "$3" ] || return 0
+  git -C "$repo" cat-file blob "$1:$2"
+}
+
+mode_at_ref() {
+  GIT_LITERAL_PATHSPECS=1 git -C "$repo" ls-tree "$1" -- "$2" | awk 'NR == 1 { print $1 }'
+}
+
+is_regular_mode() {
+  case "$1" in
+    ''|100644|100755) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 is_test_path() {
@@ -98,12 +110,27 @@ is_sensitive_path() {
 
 shopt -s nocasematch
 for file in "${files[@]}"; do
+  base_mode=$(mode_at_ref "$base" "$file")
+  candidate_mode=$(mode_at_ref "$candidate" "$file")
+  if [ -z "$base_mode" ] && [ -z "$candidate_mode" ]; then
+    add_reason "unreadable_entry:$file"
+    continue
+  fi
+  if ! is_regular_mode "$base_mode" || ! is_regular_mode "$candidate_mode"; then
+    add_reason "non_regular_entry:$file"
+    continue
+  fi
+  if [ -n "$base_mode" ] && [ -n "$candidate_mode" ] && [ "$base_mode" != "$candidate_mode" ]; then
+    add_reason "entry_mode_change:$file"
+    continue
+  fi
+
   if is_sensitive_path "$file"; then
     add_reason "sensitive_path:$file"
   fi
 
   if is_test_path "$file"; then
-    test_stats=$(git -C "$repo" diff --no-renames --numstat "$base" "$candidate" -- "$file")
+    test_stats=$(GIT_LITERAL_PATHSPECS=1 git -C "$repo" diff --no-renames --numstat "$base" "$candidate" -- "$file")
     if printf '%s\n' "$test_stats" | awk -F '\t' 'NF >= 2 && $2 != "0" { non_additive=1 } END { exit non_additive ? 0 : 1 }'; then
       add_reason "test_not_additive:$file"
     fi
@@ -112,8 +139,8 @@ for file in "${files[@]}"; do
   fi
 
   if is_fast_markup_path "$file"; then
-    base_script=$(file_at_ref "$base" "$file" | script_presence)
-    candidate_script=$(file_at_ref "$candidate" "$file" | script_presence)
+    base_script=$(file_at_ref "$base" "$file" "$base_mode" | script_presence)
+    candidate_script=$(file_at_ref "$candidate" "$file" "$candidate_mode" | script_presence)
     if [ -n "$base_script" ] || [ -n "$candidate_script" ]; then
       add_reason "script_touch:$file"
     fi

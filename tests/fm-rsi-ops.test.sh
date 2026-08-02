@@ -105,6 +105,7 @@ test_classifier_rejects_mdx_and_all_script_tag_forms() {
   printf 'export const enabled = true\n\n# Executable MDX\n' > "$REPO/page.mdx"
   printf '.. raw:: html\n\n   <script src="app.js"></script>\n' > "$REPO/guide.rst"
   printf '<svg><script href="app.js"/></svg>\n' > "$REPO/icon.svg"
+  printf '<svg><svg:script href="app.js"/></svg>\n' > "$REPO/namespaced.svg"
   printf '<main><script src="app.js">\n' > "$REPO/fragment.html"
   candidate=$(commit_fixture executable-markup)
   output=$("$ROOT/bin/fm-rsi-classify-diff.sh" "$REPO" "$base" "$candidate")
@@ -115,6 +116,8 @@ test_classifier_rejects_mdx_and_all_script_tag_forms() {
     || fail "raw RST script classification omitted evidence: $output"
   printf '%s' "$output" | jq -e '.reasons | index("script_touch:icon.svg") != null' >/dev/null \
     || fail "self-closing SVG script classification omitted evidence: $output"
+  printf '%s' "$output" | jq -e '.reasons | index("script_touch:namespaced.svg") != null' >/dev/null \
+    || fail "namespaced SVG script classification omitted evidence: $output"
   printf '%s' "$output" | jq -e '.reasons | index("script_touch:fragment.html") != null' >/dev/null \
     || fail "unmatched HTML script classification omitted evidence: $output"
   pass "fm-rsi-classify-diff: rejects MDX and every script tag form"
@@ -131,6 +134,27 @@ test_classifier_rejects_script_relocation() {
   printf '%s' "$output" | jq -e '.reasons | index("script_touch:relocated.html") != null' >/dev/null \
     || fail "relocated script classification omitted evidence: $output"
   pass "fm-rsi-classify-diff: rejects script relocation"
+}
+
+test_classifier_rejects_non_regular_entries() {
+  local gitlink_repo base candidate output
+  gitlink_repo="$TMP_ROOT/gitlink-repo"
+  mkdir -p "$gitlink_repo"
+  git -C "$gitlink_repo" init -q
+  git -C "$gitlink_repo" config user.email tests@example.invalid
+  git -C "$gitlink_repo" config user.name tests
+  printf 'base\n' > "$gitlink_repo/readme.txt"
+  git -C "$gitlink_repo" add .
+  git -C "$gitlink_repo" commit -qm base
+  base=$(git -C "$gitlink_repo" rev-parse HEAD)
+  git -C "$gitlink_repo" update-index --add --cacheinfo 160000 "$base" manual.md
+  git -C "$gitlink_repo" commit -qm gitlink
+  candidate=$(git -C "$gitlink_repo" rev-parse HEAD)
+  output=$("$ROOT/bin/fm-rsi-classify-diff.sh" "$gitlink_repo" "$base" "$candidate")
+  [ "$(printf '%s' "$output" | jq -r .lane)" = full ] || fail "gitlink diff was not full: $output"
+  printf '%s' "$output" | jq -e '.reasons | index("non_regular_entry:manual.md") != null' >/dev/null \
+    || fail "gitlink classification omitted non-regular evidence: $output"
+  pass "fm-rsi-classify-diff: rejects non-regular tree entries"
 }
 
 test_classifier_preserves_unusual_paths() {
@@ -215,7 +239,7 @@ EOF
 }
 
 test_canary_validates_candidate_binding_and_regex() {
-  local candidate_sha positive status
+  local candidate_sha positive multiline_fixture multiline_positive status
   candidate_sha=0123456789012345678901234567890123456789
   positive="build-sha=$candidate_sha"
   status=0
@@ -226,6 +250,14 @@ test_canary_validates_candidate_binding_and_regex() {
   "$ROOT/bin/fm-rsi-canary-bcs.sh" --candidate-sha "$candidate_sha" --positive unrelated-marker --attempts 1 --retry-seconds 0 \
     > "$TMP_ROOT/canary-unbound.out" 2> "$TMP_ROOT/canary-unbound.err" || status=$?
   [ "$status" -eq 2 ] || fail "unbound positive marker was accepted (exit $status)"
+  status=0
+  multiline_fixture="$TMP_ROOT/canary-multiline.html"
+  printf 'unrelated body\n' > "$multiline_fixture"
+  multiline_positive="${positive}"$'\n'
+  PATH="$TMP_ROOT/bin:$PATH" CURL_FIXTURE="$multiline_fixture" \
+    "$ROOT/bin/fm-rsi-canary-bcs.sh" --candidate-sha "$candidate_sha" --positive "$multiline_positive" --attempts 1 --retry-seconds 0 \
+    > "$TMP_ROOT/canary-multiline.out" 2> "$TMP_ROOT/canary-multiline.err" || status=$?
+  [ "$status" -eq 2 ] || fail "multiline positive marker was accepted (exit $status)"
   status=0
   "$ROOT/bin/fm-rsi-canary-bcs.sh" --candidate-sha "$candidate_sha" --positive "$positive" --negative-regex '[' --attempts 1 --retry-seconds 0 \
     > "$TMP_ROOT/canary-invalid-regex.out" 2> "$TMP_ROOT/canary-invalid-regex.err" || status=$?
@@ -266,6 +298,7 @@ test_classifier_allows_additive_tests
 test_classifier_rejects_case_variants_and_sensitive_paths
 test_classifier_rejects_mdx_and_all_script_tag_forms
 test_classifier_rejects_script_relocation
+test_classifier_rejects_non_regular_entries
 test_classifier_preserves_unusual_paths
 test_classifier_freezes_moving_refs
 test_canary
