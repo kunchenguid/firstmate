@@ -2010,6 +2010,42 @@ SH
   pass "live lock refusal and cleanup failure have distinct statuses"
 }
 
+test_dead_reap_landing_statuses_are_distinct() {
+  local case_dir rc
+  case_dir=$(make_case reap-truly-unlanded-status)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt unlanded "unlanded task work"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "conclusively unlanded work must be a safety refusal"
+  assert_grep 'has work not on any remote and not landed' "$case_dir/stderr" \
+    "unlanded safety refusal was not named"
+
+  case_dir=$(make_case reap-landing-fetch-failure)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt unlanded "unlanded task work"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' fetch --quiet origin '*) exit 1 ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "failed landing fetch must remain operational"
+  assert_grep 'landing proof could not execute' "$case_dir/stderr" \
+    "landing machinery failure was not classified operationally"
+  pass "unlanded proof and landing machinery failure have distinct statuses"
+}
+
 test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
   local case_dir rc scratch_capture
   case_dir=$(make_case preserve-scratch)
@@ -5714,6 +5750,8 @@ if [ "${FM_TEST_FOCUSED:-}" = review-reaper-status ]; then
   test_dead_reap_leaf_helper_failures_remain_operational
   test_dead_reap_authority_statuses_are_distinct
   test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct
+  test_dead_reap_landing_statuses_are_distinct
+  test_content_in_default_fallback_allows
   exit 0
 fi
 
@@ -5910,6 +5948,7 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_dead_reap_leaf_helper_failures_remain_operational
   test_dead_reap_authority_statuses_are_distinct
   test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct
+  test_dead_reap_landing_statuses_are_distinct
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
   test_preserve_scratch_never_cleans_unlanded_commits
   test_preserve_scratch_refuses_tracked_drift_before_cleanup

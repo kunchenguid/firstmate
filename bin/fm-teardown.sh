@@ -857,11 +857,17 @@ remove_grok_turnend_auth() {
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
 pr_number_from_branch() {
-  local branch=$1 out n
-  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
+  local branch=$1 out n status
+  [ -n "$branch" ] && [ "$branch" != HEAD ] \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  if out=$(cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null); then
+    :
+  else
+    status=$?
+    return "$status"
+  fi
   n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
+  [ -n "$n" ] || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   printf '%s' "$n"
 }
 
@@ -929,26 +935,32 @@ EOF
 # current work is not contained in the PR head, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target view state head current status
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(pr_number_from_branch "$branch") || return 1
+    if target=$(pr_number_from_branch "$branch"); then
+      :
+    else
+      status=$?
+      return "$status"
+    fi
   fi
-  [ -n "$target" ] || return 1
+  [ -n "$target" ] || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   head=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
   case "$state" in
     MERGED|merged) ;;
-    *) return 1 ;;
+    *) return "$TEARDOWN_REAP_SAFETY_REFUSAL" ;;
   esac
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
-  unpushed_patches_are_in_pr_head "$head"
+  unpushed_patches_are_in_pr_head "$head" \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
 }
 
 # Is the branch's content already present in the up-to-date default branch?
@@ -962,7 +974,7 @@ content_matches_ref() {
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   if [ "$merged_tree" != "$default_tree" ]; then
     echo "teardown: task content is not present in authoritative $ref; retaining $WT" >&2
-    return 1
+    return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   fi
   return 0
 }
@@ -1030,9 +1042,21 @@ content_in_default() {
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # only for genuinely unlanded work.
 work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
+  local branch=$1 pr_status content_status
+  if pr_is_merged "$branch"; then
+    return 0
+  else
+    pr_status=$?
+  fi
+  if content_in_default; then
+    return 0
+  else
+    content_status=$?
+  fi
+  [ "$content_status" -eq "$TEARDOWN_REAP_SAFETY_REFUSAL" ] \
+    && return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  : "$pr_status"
+  return "$content_status"
 }
 
 backlog_refresh_reminder() {
@@ -1624,7 +1648,7 @@ validate_worktree_stash_absent() {
 }
 
 validate_worktree_committed_landing() {
-  local unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch landing_status
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
@@ -1658,7 +1682,14 @@ validate_worktree_committed_landing() {
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch"; then
+    if work_is_landed "$branch"; then
+      :
+    else
+      landing_status=$?
+      if [ "$landing_status" -ne "$TEARDOWN_REAP_SAFETY_REFUSAL" ]; then
+        echo "REFUSED: worktree $WT landing proof could not execute." >&2
+        return "$landing_status"
+      fi
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch or land its PR, then retry teardown." >&2
