@@ -491,9 +491,11 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    agy) printf '%s' 'agy --dangerously-skip-permissions --prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
+
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
