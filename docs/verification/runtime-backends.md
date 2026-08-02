@@ -545,7 +545,7 @@ tests/fm-backend-cmux-smoke.test.sh
 
 The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, and guarded exact cleanup.
 
-## Codex App host tools
+## Codex App
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.
 Local paths and task-specific ids are intentionally not retained here.
@@ -562,5 +562,7 @@ The host-tool sequence was:
 8. read the archived transcript with state `notLoaded`.
 
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
-The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
-App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+The shell-callable backend bridge was verified on 2026-08-02 against `codex-cli 0.146.0`.
+Firstmate started a private Unix-socket app-server, created a Desktop-visible thread in a real leased worktree, submitted and steered turns, observed native busy then idle lifecycle, read the bounded transcript, restarted the app-server and resumed the same durable thread, archived the exact thread, and returned the worktree through normal teardown.
+The app-server is detached with `setsid` when available so it survives the command that started it.
+Deterministic backend selection and lifecycle classification are pinned by `tests/fm-backend.test.sh` and `tests/fm-busy-state.test.sh`.

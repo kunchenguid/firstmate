@@ -31,6 +31,7 @@
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
+    "docs/codex-app-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [

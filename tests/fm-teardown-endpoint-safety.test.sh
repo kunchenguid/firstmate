@@ -136,14 +136,21 @@ test_supported_backend_endpoint_records_validate() {
     "backend=cmux" "cmux_workspace_id=workspace-1" "cmux_surface_id=surface-2"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid cmux endpoint refused"
 
-  for backend in tmux herdr zellij orca cmux; do
+  id=codex-app-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=019fc340-963e-7341-a8ce-c944c388a2fe" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=codex-app" \
+    "codex_app_thread_id=019fc340-963e-7341-a8ce-c944c388a2fe"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Codex App endpoint refused"
+
+  for backend in tmux herdr zellij orca cmux codex-app; do
     set +e
     fm_backend_kill "$backend" "" >/dev/null 2>&1
     target=$?
     set -e
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
-  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
+  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, and Codex App records validate while every empty backend target refuses"
 }
 
 test_tmux_empty_target_refuses_without_invocation() {
