@@ -177,6 +177,37 @@ JS
   pass "recovery cleans only exact dead receipt material and never retries remote work"
 }
 
+test_interrupted_temp_write_leaves_receipt_bound_material() {
+  local grant preload status receipt runtime
+  make_case interrupted-temp-write
+  grant=$(run_deploy issue task deploy-staging --authority-ref captain-staging-test)
+  preload="$CASE/interrupt-secrets-open.js"
+  cat > "$preload" <<'JS'
+const fs = require('fs');
+const openSync = fs.openSync;
+fs.openSync = function(file, flags, mode) {
+  if (typeof file === 'string' && file.endsWith('/secrets.staging')) process.exit(88);
+  return openSync.apply(this, arguments);
+};
+JS
+  set +e
+  FM_HOME="$CASE" FM_STATE_OVERRIDE="$CASE/state" FM_DATA_OVERRIDE="$CASE/data" \
+    FM_CONFIG_OVERRIDE="$CASE/config" FM_PROJECTS_OVERRIDE="$CASE/projects" \
+    node -r "$preload" "$ROOT/bin/fm-deploy.js" run "$grant" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -eq 88 ] || fail "synthetic interruption did not stop during temporary secret creation"
+  receipt=$(find "$CASE/state/deploy-runtime/task" -name '*.json' -type f | head -n 1)
+  [ -n "$receipt" ] || fail "interrupted secret write did not publish a recovery receipt"
+  assert_no_grep '0123456789abcdef0123456789abcdef' "$receipt" "interruption receipt contains canary"
+  grep -Fq '"rails":' "$receipt" || fail "interruption receipt did not bind the created rails key"
+  runtime=$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).directory)" "$receipt")
+  [ -e "$runtime/rails.key" ] || fail "synthetic interruption did not leave the rails key fixture"
+  run_deploy recover task || fail "recovery should clean interrupted receipt-bound material"
+  [ ! -e "$runtime" ] || fail "recovery left interrupted runtime directory behind"
+  pass "interrupted temporary key creation remains receipt-bound for recovery"
+}
+
 test_cross_project_and_dirty_worktree_refuse_before_source_read() {
   local out rc
   make_case cross-project
@@ -197,6 +228,7 @@ run_tests() {
   test_source_identity_and_destination_separation
   test_orca_task_binding_uses_the_recorded_worktree
   test_recovery_cleans_exact_dead_remote_receipt_without_retry
+  test_interrupted_temp_write_leaves_receipt_bound_material
   test_cross_project_and_dirty_worktree_refuse_before_source_read
 }
 run_tests

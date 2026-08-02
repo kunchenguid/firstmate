@@ -278,7 +278,7 @@ function sourceBytes(config, profile) {
   if (!Buffer.from(text, 'utf8').equals(bytes) || !/^[0-9a-fA-F]{32}\n?$/.test(text)) throw safeError('source key has invalid format');
   return { key: text.trim(), identity: { root: profile.source.root, relative_path: profile.source.relative_path, dev: before.dev, ino: before.ino, uid: before.uid, mode: mode(before), links: before.nlink } };
 }
-function writeTemp(task, transaction, key, source) {
+function writeTemp(task, transaction, key, receipt, persistReceipt) {
   const root = path.join(path.dirname(path.join('/tmp', `fm-${task.taskId}`)), `fm-${task.taskId}`, 'deploy-runtime');
   // tasktmp is metadata-owned where available; never write in the project copy.
   const meta = fs.readFileSync(path.join(STATE, `${task.taskId}.meta`), 'utf8');
@@ -287,13 +287,21 @@ function writeTemp(task, transaction, key, source) {
   mkdirPrivate(runtimeRoot);
   const directory = path.join(runtimeRoot, transaction);
   fs.mkdirSync(directory, { mode: 0o700 }); fs.chmodSync(directory, 0o700);
+  receipt.directory = directory;
+  persistReceipt();
   const rails = path.join(directory, 'rails.key'); const secrets = path.join(directory, `secrets.${task.profile.destination}`);
   for (const [file, contents] of [[rails, `${key}\n`], [secrets, `RAILS_MASTER_KEY=${key}\n`]]) {
     const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-    try { fs.writeFileSync(fd, contents, { encoding: 'utf8' }); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    const stat = lstatRegular(file, 0o600); if (stat.uid !== process.getuid()) throw safeError('temporary deployment file owner mismatch');
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.uid !== process.getuid() || !exactMode(stat, 0o600)) throw safeError('temporary deployment file owner mismatch');
+      if (file === rails) receipt.rails = { path: file, dev: stat.dev, ino: stat.ino, uid: stat.uid, mode: mode(stat) };
+      else receipt.secrets = { path: file, dev: stat.dev, ino: stat.ino, uid: stat.uid, mode: mode(stat) };
+      persistReceipt();
+      fs.writeFileSync(fd, contents, { encoding: 'utf8' }); fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
   }
-  return { directory, rails, secrets, source };
+  return { directory, rails, secrets };
 }
 function tempIdentity(file) { const stat = lstatRegular(file, 0o600); return { path: file, dev: stat.dev, ino: stat.ino, uid: stat.uid, mode: mode(stat) }; }
 function unlinkExact(identity) {
@@ -302,7 +310,8 @@ function unlinkExact(identity) {
   fs.unlinkSync(identity.path);
 }
 function cleanupReceipt(receipt) {
-  unlinkExact(receipt.rails); unlinkExact(receipt.secrets);
+  if (receipt.rails) unlinkExact(receipt.rails);
+  if (receipt.secrets) unlinkExact(receipt.secrets);
   const stat = lstatDir(receipt.directory); if (stat.uid !== process.getuid() || !exactMode(stat, 0o700)) throw safeError('temporary deployment directory identity changed');
   fs.rmdirSync(receipt.directory);
 }
@@ -382,9 +391,10 @@ async function run(grantId) {
     validateGrant(grant); if (grant.state !== 'pending') throw safeError('grant is not pending');
     grant.state = 'consumed'; privateFile(found.file, `${JSON.stringify(grant)}\n`);
     transaction = randomId(); const source = sourceBytes(config, task.profile); key = source.key;
-    const temp = writeTemp(task, transaction, key, source.identity);
-    receipt = { version: 1, transaction, grant_id: grant.grant_id, task_id: task.taskId, project: task.project, profile: grant.profile, destination: grant.destination, head: task.head, phase: 'prepared', started_at: now(), directory: temp.directory, rails: tempIdentity(temp.rails), secrets: tempIdentity(temp.secrets), source: source.identity };
-    privateFile(receiptPath(task.taskId, transaction), `${JSON.stringify(receipt)}\n`);
+    receipt = { version: 1, transaction, grant_id: grant.grant_id, task_id: task.taskId, project: task.project, profile: grant.profile, destination: grant.destination, head: task.head, phase: 'preparing-temp', started_at: now(), source: source.identity };
+    const persistReceipt = () => privateFile(receiptPath(task.taskId, transaction), `${JSON.stringify(receipt)}\n`);
+    const temp = writeTemp(task, transaction, key, receipt, persistReceipt);
+    receipt.phase = 'prepared'; persistReceipt();
     let exit = await runFixed(task, temp, key, ['bin/deploy', 'preflight', task.profile.destination]);
     if (exit !== 0) { appendLedger({ version: 1, transaction, task_id: task.taskId, project: task.project, profile: grant.profile, destination: grant.destination, head: task.head, authority_ref: grant.authority_ref, started_at: receipt.started_at, finished_at: now(), result: 'preflight-failed', exit_code: exit, preflight_passed: false, remote_phase_reached: false }); return exit; }
     receipt.phase = 'preflight-passed'; privateFile(receiptPath(task.taskId, transaction), `${JSON.stringify(receipt)}\n`);
@@ -416,7 +426,7 @@ function recover(taskId) {
   for (const file of fs.readdirSync(dir)) {
     if (!/^[0-9a-f]{32}\.json$/.test(file)) throw safeError('unsafe deployment recovery record');
     const receiptFile = path.join(dir, file); const receipt = readPrivateJson(receiptFile);
-    if (receipt.task_id !== taskId || !receipt.rails || !receipt.secrets || !receipt.directory) throw safeError('deployment recovery requires manual inspection');
+    if (receipt.task_id !== taskId || !receipt.directory) throw safeError('deployment recovery requires manual inspection');
     if (receiptChildIsAlive(receipt)) throw safeError('deployment recovery found a live recorded operation');
     const remoteReached = receipt.phase === 'remote-started' || receipt.phase === 'launching';
     cleanupReceipt(receipt); fs.unlinkSync(receiptFile);
