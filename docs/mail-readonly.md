@@ -126,7 +126,7 @@ Be honest with yourself about what this is: a guardrail, not a security boundary
 
 - It matches shapes and keywords, so a novel wording, a language it does not cover, or a code split across lines can slip past it.
 - It cannot see a code that is inside an image or an attachment, because it never opens either.
-- Redaction is aggressive and will mask harmless numbers and links in the same message, and harmless numbers in a subject it flags.
+- Redaction is aggressive and will mask harmless numbers and links in the same message, and harmless numbers in any subject it masks.
 - It never removes the need for deliberate selection: you still choose which message to open.
 
 ## Revoke and remove
