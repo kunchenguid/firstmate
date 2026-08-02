@@ -120,3 +120,8 @@ fm_pr_poll_publish_prepared || {
   exit 1
 }
 printf 'armed: state/%s.check.sh\n' "$ID"
+
+# Best-effort Linear linking runs last so it can never prevent metadata or poll publication.
+if [ -x "$FM_ROOT/bin/fm-linear-pr-link.sh" ]; then
+  "$FM_ROOT/bin/fm-linear-pr-link.sh" "$ID" "$URL" || true
+fi

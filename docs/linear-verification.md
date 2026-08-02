@@ -1,0 +1,196 @@
+# Linear mirror: live verification
+
+Evidence, not narrative. Every command and output below was run against the real
+Linear API and the real `psychogenesis` workspace on the date shown.
+The behavior contract itself is pinned by `tests/fm-linear.test.sh`, which stubs
+the network; this file records what was checked against production.
+
+Date: 2026-08-02.
+Workspace: `psychogenesis` (organisation `levelupself` on the GitHub side).
+Credential: the captain's existing `LINEAR_API_KEY`, already provisioned in
+Infisical (`psychogenesis`, env `prod`). It was passed through the environment
+and is not written anywhere in this repo.
+
+## 1. How Linear links a PR - established, not assumed
+
+Source: Linear's own GitHub documentation, <https://linear.app/docs/github>,
+fetched 2026-08-02. The relevant findings are quoted in `docs/linear.md`:
+the three supported linking paths (branch name, PR title, magic word plus issue
+ID in the PR description), that "To link a PR that is already open, modify the PR
+title or description", that "Magic words in PR comments won't create links", and
+the exact closing and non-closing magic-word lists.
+
+firstmate writes the non-closing `Part of <IDENT>` into the PR body. The
+reasoning is in `docs/linear.md`; the short version is that a closing word would
+make GitHub a second writer of the issue's status on merge, competing with
+`fm-linear-refresh.sh`, which owns the Done transition.
+
+## 2. Authentication and the join, against live Linear
+
+```
+$ curl ... -H "Authorization: $LINEAR_API_KEY" --data '{"query":"query { viewer { name email } organization { name urlKey } }"}'
+{"viewer":{"name":"Andrew Kim","email":"kim.andrew.h.w@gmail.com"},"organization":{"name":"psychogenesis","urlKey":"psychogenesis"}}
+```
+
+`fml_find_issue` run against live Linear through the real library:
+
+```
+010-basic-combat-damage          -> PSY-7   0cf8fcdb-...  https://linear.app/psychogenesis/issue/PSY-7/...   Backlog  backlog
+049-hostility-de-escalation      -> PSY-42  06796605-...  https://linear.app/psychogenesis/issue/PSY-42/...  Backlog  backlog
+061-linear-refresh-path          -> rc=1 (1=no issue, 2=unavailable)
+```
+
+The third line is the case the brief calls normal: an in-flight task that was
+never mirrored resolves to "no issue", distinctly from "could not ask".
+
+## 3. A task without a mirrored issue
+
+Covered above (`rc=1`) and end-to-end in `tests/fm-linear.test.sh`:
+
+```
+ok - no mirrored issue: reported, PR untouched, exit 0
+```
+
+The linker prints `linear: no mirrored issue for <id>; nothing linked` and
+exits 0 without calling `gh pr edit` at all.
+
+## 4. Linear unavailable never blocks the lifecycle
+
+Real `curl`, real `fm-pr-check.sh`, an unroutable endpoint:
+
+```
+$ time FM_HOME=... LINEAR_API_KEY=lin_api_bogus LINEAR_API_URL=https://10.255.255.1/graphql \
+    FM_LINEAR_PR_TIMEOUT=3 ./bin/fm-pr-check.sh vt https://github.com/levelupself/firstmate/pull/999
+armed: state/vt.check.sh polls https://github.com/levelupself/firstmate/pull/999
+linear: lookup unavailable (Linear did not answer within 3s or rejected the request); nothing linked, PR unaffected
+
+real    0m3.560s
+exit=0
+
+$ cat state/vt.meta
+window=fm-vt
+worktree=...
+pr=https://github.com/levelupself/firstmate/pull/999
+```
+
+The PR was still recorded, the merge poll was still armed, the wait was bounded
+by the configured timeout, and the exit code was 0.
+
+Against the real Linear endpoint with an invalid key:
+
+```
+$ FM_HOME=... LINEAR_API_KEY=lin_api_invalidkey ./bin/fm-linear-pr-link.sh vt https://github.com/.../pull/999
+linear: lookup unavailable (Linear did not answer within 8s or rejected the request); nothing linked, PR unaffected
+real    0m0.213s
+exit=0
+
+$ curl ... -H 'Authorization: lin_api_invalidkey' --data '{"query":"query { viewer { id } }"}'
+http=401
+{"errors":[{"message":"Authentication required, not authenticated", ...}]}
+```
+
+## 5. Refresh updates in place; the count does not double
+
+Run against live Linear with a deliberately scoped backlog of two items: one id
+already mirrored (`010-basic-combat-damage` = PSY-7), and one genuinely new
+(`061-linear-refresh-path`). Scoping avoids creating the 53 issues a full
+refresh would add to the captain's board unasked; the full-scale matching was
+still measured, by dry run, below.
+
+Before:
+
+```
+mirrored issues BEFORE: 45
+PSY-7 firstmate-sync fingerprint lines present: 0
+```
+
+Run 1:
+
+```
+  created   PSY-50       061-linear-refresh-path
+  updated   PSY-7        010-basic-combat-damage
+
+linear refresh: 2 backlog items, 45 mirrored issues in team PSY
+  created 1, updated 1, unchanged 0, moved to Done 0, PR links 0, failed 0
+
+  no longer in the backlog (44) - REPORTED ONLY, nothing was deleted:
+```
+
+Run 2, identical input:
+
+```
+linear refresh: 2 backlog items, 46 mirrored issues in team PSY
+  created 0, updated 0, unchanged 2, moved to Done 0, PR links 0, failed 0
+```
+
+After:
+
+```
+mirrored issues AFTER both runs: 46          # 45 + exactly one new id
+issues joined to 010-basic-combat-damage: PSY-7
+issues joined to 061-linear-refresh-path: PSY-50
+```
+
+Still exactly one issue per task id after three live runs. The 44 ids absent
+from the scoped backlog were reported as retired and nothing was done to them.
+
+Full-scale matching, measured by dry run against all 45 mirrored issues:
+
+```
+linear refresh (dry run): 98 backlog items, 45 mirrored issues in team PSY
+  created 53, updated 45, unchanged 0, moved to Done 0, PR links 0, failed 0
+```
+
+All 45 mirrored issues matched their backlog id. Zero duplicates were planned
+for them. The 53 creates are ids that never existed in Linear (in-flight items,
+Done items, and queued items filed after the original mirror run).
+
+## 6. Bug found and fixed during this verification
+
+The first live run corrupted PSY-7: its note body landed in the **Blocked by**
+line and the blocker id in **Delivered**.
+
+Cause: `IFS=$'\t' read -r state id title link blocked body`. Tab is IFS
+whitespace, so bash collapses runs of it; an item with no recorded link but a
+non-empty blocked-by produced two adjacent tabs and shifted every later column
+one to the left. It corrupted data instead of failing.
+
+Fixed by splitting the row with exact parameter expansion (`split_row` in
+`bin/fm-linear-refresh.sh`). A regression test was added and confirmed to fail
+against the old reader:
+
+```
+--- with the old collapsing reader restored ---
+not ok - the blocked-by lands in the Blocked by line (missing: '**Blocked by:** 028-spine')
+--- restored ---
+all linear tests passed
+```
+
+PSY-7 was repaired by re-running the refresh with the fixed code, and now reads:
+
+```
+`firstmate: 010-basic-combat-damage`
+
+**Blocked by:** 028-engine-seam-spine
+
+```
+Basic combat MVP: damage from real stats, HP, death, and death's persistent
+consequences. Spec: ...
+```
+
+## 7. Note-body rendering
+
+Because the first mirror run had to repair a formatting corruption Linear's
+Markdown parser introduced, the refresh emits the backlog note body verbatim
+inside a fenced code block by default (`LINEAR_BODY_STYLE=preserve`). Whitespace,
+ASCII diagrams, and aligned tables therefore cannot be reflowed or mangled.
+`LINEAR_BODY_STYLE=markdown` renders the body as Markdown instead.
+
+This is a visible change to how a mirrored issue reads, and it is the captain's
+call to overrule.
+
+## 8. Linking a real PR - end to end
+
+Deferred to this change's own pull request, which is the first PR whose task has
+a mirrored issue (PSY-50, created in section 5). The result is appended here
+before the task is reported complete.
