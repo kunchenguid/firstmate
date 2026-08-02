@@ -1900,6 +1900,8 @@ EOF
       # the marker path is embedded single-quoted inside that script.
       if [ -e "$WT/.cursor/hooks.json" ] && ! fm_cursor_hook_is_ours "$WT"; then
         echo "warning: $WT already has .cursor/hooks.json; relying on the brief's status appends for turn-end (leaving the existing hook file untouched)" >&2
+      elif [ -e "$WT/.cursor/fm-turn-end.sh" ] && ! fm_cursor_hook_script_is_ours "$WT"; then
+        echo "warning: $WT already has .cursor/fm-turn-end.sh; relying on the brief's status appends for turn-end (leaving the existing script untouched)" >&2
       else
         mkdir -p "$WT/.cursor"
         cat > "$WT/.cursor/fm-turn-end.sh" <<EOF

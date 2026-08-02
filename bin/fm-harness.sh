@@ -77,6 +77,10 @@ detect_own() {
     fi
   done
   # Layer 3: inheritable fallback markers.
+  if [ "${CURSOR_AGENT:-}" = "1" ] && [ -n "${CODEX_THREAD_ID:-}" ]; then
+    echo unknown
+    return
+  fi
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ -n "${CODEX_THREAD_ID:-}" ] && { echo codex; return; }
   echo unknown

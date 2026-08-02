@@ -504,12 +504,14 @@ retire_busy_state() {
 # git-tracked hook file. Firstmate's clone-wide exclude block goes with the last
 # hook of the clone.
 remove_cursor_worktree_hook() {
-  local wt=$1
+  local wt=$1 hook_is_ours=1 script_is_ours=1
   [ -n "$wt" ] || return 0
-  if fm_cursor_hook_is_ours "$wt"; then
+  fm_cursor_hook_is_ours "$wt" && hook_is_ours=0
+  fm_cursor_hook_script_is_ours "$wt" && script_is_ours=0
+  if [ "$hook_is_ours" -eq 0 ]; then
     rm -f "$wt/.cursor/hooks.json"
   fi
-  if fm_cursor_hook_script_is_ours "$wt"; then
+  if [ "$script_is_ours" -eq 0 ]; then
     rm -f "$wt/.cursor/fm-turn-end.sh"
   fi
   fm_cursor_hook_release_exclude "$wt"

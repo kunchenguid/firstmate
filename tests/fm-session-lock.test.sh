@@ -167,26 +167,25 @@ SH
   pass "Reclaim never overrides a live numeric lock holder"
 }
 
-# A live cursor-agent sets CURSOR_AGENT=1 itself; an inherited CODEX_THREAD_ID
-# from a multiplexer's stored environment must not relabel it as Codex.
-test_own_cursor_marker_outranks_inherited_codex_thread() {
+test_conflicting_cursor_codex_fallback_markers_fail_closed() {
   local dir fakebin got
-  dir="$TMP_ROOT/cursor-over-codex"
+  dir="$TMP_ROOT/cursor-codex-conflict"
   fakebin=$(fm_fakebin "$dir")
   make_ps_denied "$fakebin"
 
-  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  if got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID PATH="$fakebin:$BASE_PATH" \
     CODEX_THREAD_ID=thread-stale CURSOR_AGENT=1 CURSOR_CONVERSATION_ID=conversation-123 bash -c \
-    ". \"\$0/bin/fm-session-lock-lib.sh\"; fm_harness_ancestry_pid" "$ROOT")
-  [ "$got" = "cursor:conversation-123" ] || fail "inherited Codex thread outranked a live Cursor marker, got '$got'"
+    ". \"\$0/bin/fm-session-lock-lib.sh\"; fm_harness_ancestry_pid" "$ROOT"); then
+    fail "conflicting fallback markers produced a lock identity '$got'"
+  fi
 
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID PATH="$fakebin:$BASE_PATH" \
     CODEX_THREAD_ID=thread-stale CURSOR_AGENT=1 CURSOR_CONVERSATION_ID=conversation-123 "$ROOT/bin/fm-harness.sh")
-  [ "$got" = cursor ] || fail "inherited Codex thread relabelled a live Cursor harness as '$got'"
+  [ "$got" = unknown ] || fail "conflicting fallback markers resolved harness '$got'"
 
-  pass "A harness's own live marker outranks an inherited Codex thread id"
+  pass "Conflicting Cursor and Codex fallback markers fail closed"
 }
 
 # VSCODE_PID identifies an editor window, not an agent session: two sessions in
@@ -311,7 +310,7 @@ test_codex_marker_acquires_and_reuses_lock
 test_different_marker_lock_fails_closed
 test_marker_lock_reclaim_takes_over_confirmed_dead_session
 test_reclaim_never_overrides_a_live_pid_holder
-test_own_cursor_marker_outranks_inherited_codex_thread
+test_conflicting_cursor_codex_fallback_markers_fail_closed
 test_vscode_window_env_is_not_a_lock_identity
 test_unverified_cursor_env_is_not_a_lock_identity
 test_cursor_conversation_marker_identity_without_ps

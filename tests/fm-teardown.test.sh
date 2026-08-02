@@ -880,7 +880,7 @@ test_cursor_hook_files_are_allowed_but_cursor_deliverables_refuse() {
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
   mkdir -p "$case_dir/wt/.cursor"
   printf '{"version":1,"hooks":{"stop":[{"command":".cursor/fm-turn-end.sh"}]}}\n' > "$case_dir/wt/.cursor/hooks.json"
-  printf '#!/bin/sh\n' > "$case_dir/wt/.cursor/fm-turn-end.sh"
+  printf '#!/bin/sh\n# Firstmate cursor turn-end signal\n' > "$case_dir/wt/.cursor/fm-turn-end.sh"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -905,6 +905,23 @@ test_cursor_hook_files_are_allowed_but_cursor_deliverables_refuse() {
   grep -q REFUSED "$case_dir/stderr" || fail "cursor-project-hook: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "cursor-project-hook: refusal did not cite uncommitted changes"
   [ -f "$case_dir/wt/.cursor/hooks.json" ] || fail "cursor-project-hook: uncommitted cursor hook was discarded"
+
+  case_dir=$(make_case cursor-project-script)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  mkdir -p "$case_dir/wt/.cursor"
+  printf '#!/bin/sh\nexit 0\n' > "$case_dir/wt/.cursor/fm-turn-end.sh"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cursor-project-script: uncommitted cursor script must refuse teardown"
+  grep -q REFUSED "$case_dir/stderr" || fail "cursor-project-script: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" || fail "cursor-project-script: refusal did not cite uncommitted changes"
+  [ -f "$case_dir/wt/.cursor/fm-turn-end.sh" ] || fail "cursor-project-script: uncommitted cursor script was discarded"
 
   case_dir=$(make_case cursor-deliverable)
   write_meta "$case_dir" local-only ship

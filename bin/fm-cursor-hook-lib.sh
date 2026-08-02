@@ -5,10 +5,11 @@
 # Cursor discovers hooks only at the worktree root's .cursor/hooks.json, a path a
 # project may legitimately track, so fm-spawn and fm-teardown must agree on one
 # ownership test: a hook file is firstmate's when it references our generated
-# .cursor/fm-turn-end.sh script AND git does not track it. The same tracked-file
-# test gates the script itself. Spawn rewrites only its own hook (so a pooled
-# worktree carrying a stale one is re-armed instead of left signalling a dead
-# task); teardown removes only its own.
+# .cursor/fm-turn-end.sh script AND git does not track it. The script is
+# firstmate's only when that hook matches, git does not track the script, and
+# the script carries a firstmate turn-end signal. Spawn rewrites only its own
+# hook (so a pooled worktree carrying a stale one is re-armed instead of left
+# signalling a dead task); teardown removes only its own.
 #
 # info/exclude is clone-wide and developer-owned. Firstmate's cursor entries go
 # in as one self-identifying block and only that exact block is ever removed, so
@@ -31,6 +32,8 @@ fm_cursor_hook_script_is_ours() {
   local wt=$1
   [ -n "$wt" ] || return 1
   [ -e "$wt/.cursor/fm-turn-end.sh" ] || return 1
+  fm_cursor_hook_is_ours "$wt" || return 1
+  grep -qF 'Firstmate cursor turn-end signal' "$wt/.cursor/fm-turn-end.sh" 2>/dev/null || return 1
   ! git -C "$wt" ls-files --error-unmatch -- '.cursor/fm-turn-end.sh' >/dev/null 2>&1
 }
 
@@ -101,7 +104,7 @@ fm_cursor_hook_clone_holds_hook() {
       'worktree '*) other=${line#worktree } ;;
       *) continue ;;
     esac
-    [ ! -e "$other/.cursor/fm-turn-end.sh" ] || return 0
+    ! fm_cursor_hook_script_is_ours "$other" || return 0
   done <<EOF
 $worktrees
 EOF

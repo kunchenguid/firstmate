@@ -102,12 +102,12 @@ fm_marker_window_scope() {
 # invariant this lock exists to enforce, so window- or host-scoped values (e.g.
 # VSCODE_PID) are deliberately not accepted, and every accepted marker still
 # carries the window scope above because any of them can be inherited.
-# A harness's own live marker outranks a foreign marker retained in a terminal
-# multiplexer's stored environment, so CURSOR_AGENT=1 - which only a live
-# cursor-agent process sets - wins over an inherited CODEX_THREAD_ID.
 fm_harness_marker_identity() {
   local scope
   scope=$(fm_marker_window_scope)
+  if { [ "${CURSOR_AGENT:-}" = "1" ] || [ -n "${CURSOR_CONVERSATION_ID:-}" ]; } && [ -n "${CODEX_THREAD_ID:-}" ]; then
+    return 1
+  fi
   if [ "${CURSOR_AGENT:-}" = "1" ] && [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then
     printf 'cursor:%s%s\n' "$CURSOR_CONVERSATION_ID" "$scope"
     return 0
