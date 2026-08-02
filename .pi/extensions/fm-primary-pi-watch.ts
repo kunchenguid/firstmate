@@ -150,7 +150,7 @@ function markLoaded(): void {
 
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
-  return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
+  return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:)|context-ceiling:)/.test(line)) || "";
 }
 
 function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {

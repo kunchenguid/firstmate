@@ -323,7 +323,7 @@ EOF
   pass "Pi scheduled retry remains extension-owned after another tool call"
 }
 
-test_pi_actionable_close_starts_single_successor_before_delivery() {
+test_pi_context_ceiling_close_starts_single_successor_before_delivery() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-continuous-rearm-root"
   home="$TMP_ROOT/pi-continuous-rearm-home"
@@ -338,7 +338,7 @@ printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >>
 count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 if [ "$count" -eq 1 ]; then
-  printf 'signal: synthetic actionable close\n'
+  printf 'context-ceiling: CONTEXT_CEILING id=pi-fixture status=over percent=91\n'
   exit 0
 fi
 trap 'exit 0' TERM INT
@@ -352,6 +352,7 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 let deliveryStarted = false;
 let rowsAtDelivery = 0;
+let wakeMessage = "";
 let releaseDelivery = () => {};
 const deliveryBlocked = new Promise((resolve) => {
   releaseDelivery = resolve;
@@ -362,7 +363,8 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {
+  sendUserMessage: async (message) => {
+    wakeMessage = message;
     rowsAtDelivery = existsSync(process.env.FM_ARM_LOG)
       ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length
       : 0;
@@ -384,6 +386,7 @@ for (let i = 0; i < 250; i += 1) {
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 2) throw new Error(`expected one successor arm, got ${rows.length}: ${rows.join(" | ")}`);
 if (!deliveryStarted) throw new Error("wake delivery did not begin");
+if (!wakeMessage.includes("context-ceiling: CONTEXT_CEILING id=pi-fixture status=over percent=91")) throw new Error(`context-ceiling wake was lost: ${wakeMessage}`);
 if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
 if (!/predecessor=[0-9]+/.test(rows[1])) throw new Error(`successor did not receive predecessor identity: ${rows[1]}`);
 await new Promise((resolve) => setTimeout(resolve, 100));
@@ -395,9 +398,9 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "Pi actionable close must start one successor before wake delivery settles"
+  expect_code 0 "$status" "Pi context-ceiling close must start one successor before wake delivery settles"
   [ -z "$out" ] || fail "Pi continuous-rearm test printed output: $out"
-  pass "Pi actionable close starts one successor before wake delivery settles"
+  pass "Pi context-ceiling close starts one successor before wake delivery settles"
 }
 
 test_pi_hung_successor_falls_back_to_typed_wake() {
@@ -1398,7 +1401,7 @@ EOF
   pass "OpenCode watcher coordinator respects primary scope"
 }
 
-test_opencode_primary_watch_plugin_rearms_after_wake() {
+test_opencode_primary_watch_plugin_rearms_after_context_ceiling() {
   local plugin repo home log stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
   repo="$TMP_ROOT/opencode-rearm-root"
@@ -1415,7 +1418,7 @@ printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >>
 count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 if [ "$count" -eq 1 ]; then
-  printf 'signal: synthetic wake\n'
+  printf 'context-ceiling: CONTEXT_CEILING id=opencode-fixture status=over percent=91\n'
   exit 0
 fi
 trap 'exit 0' TERM INT
@@ -1429,13 +1432,15 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
 let rowsAtPrompt = 0;
+let promptBody = "";
 let releasePrompt = () => {};
 const promptBlocked = new Promise((resolve) => {
   releasePrompt = resolve;
 });
 const client = {
   session: {
-    promptAsync: async () => {
+    promptAsync: async (request) => {
+      promptBody = request.body.parts[0].text;
       rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
         ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length
         : 0;
@@ -1462,6 +1467,7 @@ for (let i = 0; i < 250; i += 1) {
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 2) throw new Error(`expected one successor arm, got ${rows.length}: ${rows.join(" | ")}`);
 if (prompts !== 1) throw new Error(`expected one blocked wake prompt, got ${prompts}`);
+if (!promptBody.includes("context-ceiling: CONTEXT_CEILING id=opencode-fixture status=over percent=91")) throw new Error(`context-ceiling wake was lost: ${promptBody}`);
 if (rowsAtPrompt !== 2) throw new Error(`wake prompt began before successor establishment (${rowsAtPrompt} arm rows)`);
 if (!/predecessor=[0-9]+/.test(rows[1])) throw new Error(`successor did not receive predecessor identity: ${rows[1]}`);
 await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1474,7 +1480,7 @@ EOF
   status=$?
   [ "$status" -eq 0 ] || fail "OpenCode watch plugin must start one successor before wake prompt delivery settles: $out"
   [ -z "$out" ] || fail "OpenCode rearm test printed output: $out"
-  pass "OpenCode watcher plugin starts one successor before wake prompt delivery settles"
+  pass "OpenCode watcher plugin delivers context-ceiling after starting one successor"
 }
 
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
@@ -2132,7 +2138,7 @@ test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
-test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_context_ceiling_close_starts_single_successor_before_delivery
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
@@ -2148,7 +2154,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
-test_opencode_primary_watch_plugin_rearms_after_wake
+test_opencode_primary_watch_plugin_rearms_after_context_ceiling
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

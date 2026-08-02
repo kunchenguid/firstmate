@@ -658,6 +658,17 @@ test_handle_wake_routes_self_and_escalate() {
   pass "handle_wake routes routine->self and captain->escalate"
 }
 
+test_context_ceiling_wake_escalates() {
+  local dir state reason
+  dir=$(make_supercase context-ceiling)
+  state="$dir/state"
+  reason="context-ceiling: CONTEXT_CEILING id=fixture status=over percent=91"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  grep -F "$reason" "$state/.subsuper-escalations" >/dev/null \
+    || fail "context-ceiling wake was not buffered for away-mode escalation"
+  pass "context-ceiling wake reaches away-mode escalation"
+}
+
 test_inject_skip_forces_self() {
   local dir state
   dir=$(make_supercase skip)
@@ -675,6 +686,7 @@ test_is_wake_reason_distinguishes_status_stdout() {
   is_wake_reason "stale: s:fm-x" || fail "stale: not recognized as wake"
   is_wake_reason "check: /s/c.sh: merged" || fail "check: not recognized as wake"
   is_wake_reason "heartbeat" || fail "heartbeat not recognized as wake"
+  is_wake_reason "context-ceiling: CONTEXT_CEILING id=x status=over percent=91" || fail "context-ceiling: not recognized as wake"
   is_wake_reason "watcher: already running" && fail "singleton status line misclassified as wake"
   is_wake_reason "watcher: already running pid 123" && fail "singleton status (pid) misclassified as wake"
   pass "is_wake_reason distinguishes watcher wake reasons from singleton-status stdout"
@@ -1859,6 +1871,7 @@ test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
+test_context_ceiling_wake_escalates
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker

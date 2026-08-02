@@ -90,6 +90,15 @@ printf 'stale: fixture-win actionable\n'
 exit 0
 SH
       ;;
+    context-ceiling)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'context-ceiling: CONTEXT_CEILING id=fixture status=over percent=91\n'
+exit 0
+SH
+      ;;
     failed)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -400,6 +409,19 @@ test_actionable_close_rewakes_with_reason() {
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
 }
 
+test_context_ceiling_close_rewakes_with_reason() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/context-ceiling")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" context-ceiling
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a context-ceiling close must exit 2 so Claude rewakes"
+  assert_contains "$out" "firstmate watcher wake" "context-ceiling rewake must carry the wake banner"
+  assert_contains "$out" "context-ceiling: CONTEXT_CEILING id=fixture status=over percent=91" "context-ceiling rewake must carry the arm's reason line"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "context-ceiling epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: context-ceiling close translates to an exit-2 rewake with reason"
+}
+
 test_failed_close_rewakes_with_failure_banner() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/failed")
@@ -513,6 +535,7 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
+test_context_ceiling_close_rewakes_with_reason
 test_failed_close_rewakes_with_failure_banner
 test_clean_close_exits_silently
 test_arms_for_x_mode_poll_need_without_inflight
