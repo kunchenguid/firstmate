@@ -1677,6 +1677,13 @@ if [ "$KIND" = secondmate ]; then
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi
+# Deployment runtime material is receipt-owned and may never be swept by the
+# broad tasktmp removal below. Recover only this task first; an identity or live
+# remote-operation refusal preserves every task record for manual inspection.
+if ! "$FM_ROOT/bin/fm-deploy.sh" recover "$ID"; then
+  echo "error: deployment cleanup for $ID requires manual inspection; retaining task state" >&2
+  exit 1
+fi
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true

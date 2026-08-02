@@ -151,6 +151,24 @@ An inherited `data/captain-shared.md` counts in a secondmate's total but remains
 The internal `/stow` skill curates only the editable local files in that case and reports the primary-owned shared file as a concrete exception if it alone exceeds the budget.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
+## Guarded deployment capabilities (config/deployment-capabilities.json)
+
+`config/deployment-capabilities.json` is an optional, local, owner-only `0600` deployment-capability document.
+When absent, Firstmate does not create a deployment grant, copy external material, change task creation, or alter ordinary isolated-copy cleanup.
+It is deliberately excluded from the inherited-local-material allowlist, so a secondmate needs its own separately authorized declaration.
+`bin/fm-deploy.sh` owns exact command syntax, grant fields, receipt fields, parsing, and mutation mechanics.
+The supported v1 document names source roots and registered-project profiles.
+Each profile fixes a project origin URL, destination, `rails-kamal-key-file-v1` source, and exact `bin/deploy <destination>` argv.
+The parser rejects duplicate JSON keys, unknown fields, unsafe names or paths, shell-like commands, and non-v1 documents before source access.
+A profile can run only for a clean ship task bound to its registered project, exact origin, isolated-copy identity, and unchanged HEAD.
+Issue a short-lived one-shot grant with a nonsecret authority reference, then run that grant, or use the atomic `deploy` form after concrete deployment authority.
+The runner validates the declared owner-only non-symlink source, accepts only a synthetic-or-authorized 32-hex Rails key, and creates owner-only raw-key and destination-suffixed Kamal dotenv files outside the isolated copy.
+It invokes only the profile's fixed argv with a sanitized environment containing the two nonsecret temporary paths, streams value-silent redaction, and records only value-silent private receipts.
+This reduces accidental same-user exposure and is not a hostile same-user security boundary.
+A deployment failure consumes its grant, and recovery never retries, unlocks, rolls back, or starts remote work.
+`fm-teardown.sh` performs exact receipt-bound local cleanup before broad task temporary-root removal, while locked startup performs bounded stale-receipt recovery.
+If identity validation cannot prove a receipt-owned path safe, cleanup stops and preserves the task for manual inspection.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

@@ -190,6 +190,9 @@ family_for_basename() {
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
+    fm-deploy.test.sh)
+      printf '%s\n' deployment-capability
+      ;;
     fm-bearings-snapshot.test.sh|fm-fleet-snapshot-view.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
@@ -228,6 +231,7 @@ session-bootstrap
 live-harness-optin
 backend-dispatch
 pr-forge
+deployment-capability
 afk
 snapshot-bearings
 cmux
@@ -890,6 +894,9 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
+      ;;
+    bin/fm-deploy.sh|bin/fm-deploy.js)
+      printf '%s\n' deployment-capability
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
