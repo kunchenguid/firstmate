@@ -54,6 +54,12 @@ SH
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
 case "${1:-}" in
+  status)
+    # An empty pool prints "[]", never nothing: bin/fm-worktree-guard.sh refuses
+    # a pool it cannot read.
+    echo '[]'
+    exit 0
+    ;;
   get)
     # Durable lease: print only the worktree path to stdout (banners to stderr),
     # and record the lease holder so tests can assert it is set and later cleared.

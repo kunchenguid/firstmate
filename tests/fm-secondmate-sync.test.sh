@@ -323,6 +323,9 @@ SH
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'Usage: treehouse get [--lease]'
 fi
+# An empty pool prints "[]", never nothing: bin/fm-worktree-guard.sh refuses a
+# pool it cannot read.
+[ "${1:-}" = status ] && echo '[]'
 exit 0
 SH
   chmod +x "$fakebin/treehouse"

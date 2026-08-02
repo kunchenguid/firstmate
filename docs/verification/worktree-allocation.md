@@ -76,6 +76,12 @@ The human-readable table abbreviates paths under `$HOME` to a leading `~` and ap
 An empty stdout is therefore never a valid empty-pool signal, and the guard refuses rather than treating it as one.
 This is why `jq` is required on the crewmate spawn path and its absence is a refusal.
 
+## treehouse must be executable from fm-spawn's own environment
+
+Before this guard, `bin/fm-spawn.sh` never ran `treehouse` itself: it sent the literal text `treehouse get` into the task pane, so only the pane's shell needed it on `PATH`.
+The guard runs `treehouse status --json` from fm-spawn's own process before allocating, so `treehouse` and `jq` must both resolve there.
+Neither being resolvable is a refusal with the missing dependency named, not a silent pass.
+
 ## Ownership is a process identity, not a pid
 
 A recorded pid alone cannot establish ownership across a restart: the kernel reissues pid numbers, so a pre-restart pid often resolves to an unrelated live process and reads as falsely alive.
