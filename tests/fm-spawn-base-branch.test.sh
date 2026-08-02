@@ -234,6 +234,31 @@ test_no_remote_uses_the_local_default() {
   pass "a project with no remote places the worker on its own default branch"
 }
 
+# A remote-less project that declares base= must still spawn. The override names
+# a branch; it does not promise a remote to fetch that branch from, and treating
+# it as one made this combination unable to launch at all.
+test_no_remote_declared_base_branch_is_used() {
+  local rec id out status
+  id=base-no-remote-declared-a8
+  rec=$(make_case no-remote-declared "$id" '- project [local-only base=release] - fixture (added 2026-08-02)')
+  read_case "$rec"
+  add_branch release
+  git -C "$PROJ" fetch -q origin release:refs/heads/release
+  git -C "$PROJ" remote remove origin
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "a remote-less project declaring base= must still spawn"
+  [ "$(git -C "$WT" rev-parse HEAD)" = "$(git -C "$PROJ" rev-parse refs/heads/release)" ] \
+    || fail "worker was not placed on the remote-less project's declared base branch"
+  assert_present "$WT/release.txt" "worker cannot see the declared branch's content"
+  assert_grep "base_branch=release" "$HOME_DIR/state/$id.meta" \
+    "spawn record does not show the declared base branch"
+  assert_grep "base_branch_source=project-override" "$HOME_DIR/state/$id.meta" \
+    "spawn record does not show the declared override as the source"
+  pass "a remote-less project's declared base branch is checked out with no fetch attempted"
+}
+
 # Nothing resolvable at all leaves the worktree exactly where it was, with no base
 # branch claimed in the record - the pre-existing behavior, preserved.
 test_unresolvable_base_leaves_the_worktree_alone() {
@@ -243,6 +268,7 @@ test_unresolvable_base_leaves_the_worktree_alone() {
   read_case "$rec"
   git -C "$PROJ" remote remove origin
   git -C "$PROJ" checkout -q --detach HEAD
+  git -C "$PROJ" branch -qm main trunk
   before=$(git -C "$WT" rev-parse HEAD)
 
   out=$(run_spawn "$id" --mode local-only --yolo off)
@@ -287,6 +313,7 @@ test_promotion_instructions_name_the_recorded_base_branch
 test_declared_base_branch_is_used
 test_missing_declared_branch_refuses_the_spawn
 test_no_remote_uses_the_local_default
+test_no_remote_declared_base_branch_is_used
 test_unresolvable_base_leaves_the_worktree_alone
 
 echo "# all fm-spawn-base-branch tests passed"

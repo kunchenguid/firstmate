@@ -9,6 +9,11 @@
 #                            worktree exactly where it already was
 # For source=none the branch and remote fields are "-", so the line always has
 # three fields and a caller can `read -r branch source remote` unconditionally.
+# The remote field is "-" whenever no remote is configured at all, including the
+# remote-less project-override case, so a caller decides "fetch it" versus "read
+# the local ref" from the remote field rather than from the source label: an
+# override is a declaration about which branch, never a promise that a remote
+# exists to fetch it from.
 #
 # WHY THIS EXISTS. A task worktree is cut from whatever the local clone happens to
 # hold. A clone records the remote's default branch once, at clone time, in
@@ -31,13 +36,22 @@
 # remote, an unreachable remote, and a remote that reports no default branch are
 # all hard errors.
 #
+# Every remote read runs under bin/fm-git-net-lib.sh's hard deadline, because a
+# refusal that hangs instead of returning is no better than the silent fallback
+# this script exists to prevent.
+#
 # Usage: fm-base-branch.sh <project-dir> [--name <project-name>]
 #   <project-dir>    the project's primary clone (its basename is the registry
 #                    name unless --name overrides it)
 #   FM_BASE_BRANCH_REMOTE  remote to resolve against (default: origin)
+#   FM_GIT_NET_TIMEOUT     seconds allowed per remote read (default: 20)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-git-net-lib.sh
+. "$SCRIPT_DIR/fm-git-net-lib.sh"
 
 usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
@@ -90,30 +104,35 @@ DECLARED=$("$FM_ROOT/bin/fm-project-mode.sh" --base "$NAME") || exit 1
 export GIT_TERMINAL_PROMPT=0
 
 if ! git -C "$PROJ_ABS" remote get-url "$REMOTE" >/dev/null 2>&1; then
-  # No remote to be stale against. A declared override still has to exist.
+  # No remote to be stale against, and none to fetch from either, so the remote
+  # field is reported as "-" and the caller reads the local ref directly.
   if [ -n "$DECLARED" ]; then
     if ! git -C "$PROJ_ABS" rev-parse --verify --quiet "refs/heads/$DECLARED" >/dev/null; then
       echo "error: project \"$NAME\" declares base branch \"$DECLARED\", but $PROJ_ABS has no such branch and no \"$REMOTE\" remote to fetch it from" >&2
       exit 1
     fi
-    printf '%s %s %s\n' "$DECLARED" project-override "$REMOTE"
+    printf '%s %s %s\n' "$DECLARED" project-override -
     exit 0
   fi
-  local_default=$(git -C "$PROJ_ABS" symbolic-ref --short --quiet HEAD || true)
+  # bin/fm-ff-lib.sh's default_branch owns this resolution fleet-wide: the
+  # default-branch ref first, then main/master. Deliberately NOT the checked-out
+  # HEAD, which would let a clone stranded on a feature branch propagate that
+  # stray branch to every worker cut from it.
+  local_default=$(default_branch "$PROJ_ABS" || true)
   if [ -z "$local_default" ]; then
-    # A remote-less clone sitting on a detached HEAD names no default branch at
-    # all. Report nothing rather than inventing one; the caller leaves the
+    # A remote-less clone that names no default branch at all resolves to
+    # nothing. Report nothing rather than inventing one; the caller leaves the
     # worktree where it already was, exactly as before this resolution existed.
     printf '%s %s %s\n' - none -
     exit 0
   fi
-  printf '%s %s %s\n' "$local_default" local-default "$REMOTE"
+  printf '%s %s %s\n' "$local_default" local-default -
   exit 0
 fi
 
 if [ -n "$DECLARED" ]; then
   set +e
-  git -C "$PROJ_ABS" ls-remote --exit-code --heads "$REMOTE" "refs/heads/$DECLARED" >/dev/null 2>&1
+  fm_git_net_run git -C "$PROJ_ABS" ls-remote --exit-code --heads "$REMOTE" "refs/heads/$DECLARED" >/dev/null 2>&1
   ls_status=$?
   set -e
   case "$ls_status" in
@@ -123,7 +142,7 @@ if [ -n "$DECLARED" ]; then
       exit 1
       ;;
     *)
-      echo "error: could not reach $REMOTE to verify project \"$NAME\"'s declared base branch \"$DECLARED\"" >&2
+      echo "error: could not reach $REMOTE to verify project \"$NAME\"'s declared base branch \"$DECLARED\": $(fm_git_net_reason "$ls_status")" >&2
       exit 1
       ;;
   esac
@@ -133,14 +152,18 @@ fi
 
 # The live read that the clone's cached refs/remotes/<remote>/HEAD cannot be
 # trusted for. --symref makes the server itself name the branch HEAD points at.
-symref=$(git -C "$PROJ_ABS" ls-remote --symref "$REMOTE" HEAD 2>/dev/null) || {
-  echo "error: could not reach $REMOTE to resolve project \"$NAME\"'s default branch" >&2
+set +e
+symref=$(fm_git_net_run git -C "$PROJ_ABS" ls-remote --symref "$REMOTE" HEAD 2>/dev/null)
+symref_status=$?
+set -e
+if [ "$symref_status" -ne 0 ]; then
+  echo "error: could not reach $REMOTE to resolve project \"$NAME\"'s default branch: $(fm_git_net_reason "$symref_status")" >&2
   exit 1
-}
-default_branch=$(printf '%s\n' "$symref" \
+fi
+remote_default=$(printf '%s\n' "$symref" \
   | awk '$1=="ref:" && $3=="HEAD" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
-if [ -z "$default_branch" ]; then
+if [ -z "$remote_default" ]; then
   echo "error: $REMOTE did not report a default branch for project \"$NAME\"; declare base=<branch> for it in the project registry" >&2
   exit 1
 fi
-printf '%s %s %s\n' "$default_branch" remote-default "$REMOTE"
+printf '%s %s %s\n' "$remote_default" remote-default "$REMOTE"

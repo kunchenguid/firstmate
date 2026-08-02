@@ -205,7 +205,9 @@ test_unreachable_remote_refuses() {
 }
 
 # A project with no remote has nothing to be stale against; its own default branch
-# is the answer, and no network is involved.
+# is the answer, no network is involved, and the remote field says "-" so the
+# caller reads the local ref instead of trying to fetch from a remote that is not
+# there.
 test_no_remote_uses_the_local_default() {
   local rec out
   rec=$(make_case no-remote)
@@ -213,23 +215,98 @@ test_no_remote_uses_the_local_default() {
   git -C "$PROJ" remote remove origin
 
   out=$(resolve "$PROJ")
-  [ "$out" = "main local-default origin" ] \
-    || fail "expected the clone's own default branch, got: $out"
+  [ "$out" = "main local-default -" ] \
+    || fail "expected the clone's own default branch and no remote, got: $out"
   pass "a project with no remote resolves to its own local default branch"
 }
 
-# A remote-less clone on a detached HEAD names no default branch at all. Reporting
-# "none" keeps the caller's pre-existing behavior instead of inventing a branch.
-test_no_remote_detached_reports_none() {
+# A remote-less clone declaring base= names a branch, not a remote to fetch it
+# from, so the remote field must be "-" here too. Reporting a remote that does not
+# exist is what made this combination unable to spawn at all.
+test_no_remote_declared_override_reports_no_remote() {
   local rec out
-  rec=$(make_case no-remote-detached)
+  rec=$(make_case no-remote-declared)
+  read_case "$rec"
+  add_branch "$BARE" "$CASE_DIR/upstream.work" release
+  git -C "$PROJ" fetch -q origin release:refs/heads/release
+  git -C "$PROJ" remote remove origin
+  register '- project [local-only base=release] - fixture (added 2026-08-02)'
+
+  out=$(resolve "$PROJ")
+  [ "$out" = "release project-override -" ] \
+    || fail "expected the declared branch with no remote to fetch it from, got: $out"
+  pass "a remote-less project's declared base branch reports no remote to fetch from"
+}
+
+# The clone the fleet cuts worktrees from can be sitting anywhere. Resolving from
+# the checked-out HEAD would hand every worker whatever stray branch the clone was
+# left on; bin/fm-ff-lib.sh's default_branch guards against exactly that.
+test_no_remote_stranded_on_a_feature_branch_still_resolves_the_default() {
+  local rec out
+  rec=$(make_case no-remote-stranded)
+  read_case "$rec"
+  git -C "$PROJ" remote remove origin
+  git -C "$PROJ" checkout -q -b someones-feature-branch
+
+  out=$(resolve "$PROJ")
+  [ "$out" = "main local-default -" ] \
+    || fail "expected the clone's default branch, not whatever it was left on, got: $out"
+  pass "a remote-less clone stranded on a feature branch still resolves its default branch"
+}
+
+# A remote-less clone that names no default branch at all resolves to nothing.
+# Reporting "none" keeps the caller's pre-existing behavior instead of inventing
+# a branch.
+test_no_resolvable_default_reports_none() {
+  local rec out
+  rec=$(make_case no-remote-no-default)
   read_case "$rec"
   git -C "$PROJ" remote remove origin
   git -C "$PROJ" checkout -q --detach HEAD
+  git -C "$PROJ" branch -qm main trunk
 
   out=$(resolve "$PROJ")
   [ "$out" = "- none -" ] || fail "expected a three-field none result, got: $out"
-  pass "a remote-less detached clone reports none rather than inventing a base branch"
+  pass "a remote-less clone with no resolvable default reports none rather than inventing one"
+}
+
+# An unresponsive remote is the failure mode an unreachable one is not: nothing
+# refuses, nothing succeeds, the spawn just stops. The bound turns it back into
+# the same loud refusal. git's ext:: transport runs the named command AS the
+# transport, so this hangs with no network involved at all.
+test_unresponsive_remote_is_bounded_and_refuses() {
+  local rec out status started elapsed
+  rec=$(make_case unresponsive)
+  read_case "$rec"
+  git -C "$PROJ" config protocol.ext.allow always
+  git -C "$PROJ" remote set-url origin "ext::sleep 10"
+
+  started=$(date +%s)
+  set +e
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_GIT_NET_TIMEOUT=1 "$RESOLVE" "$PROJ" 2>&1)
+  status=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+  [ "$status" -ne 0 ] || fail "an unresponsive remote must refuse rather than resolve"
+  [ "$elapsed" -lt 10 ] || fail "the default-branch read was not bounded (took ${elapsed}s)"
+  assert_contains "$out" "did not answer within 1s" "refusal did not say the read timed out"
+  assert_not_contains "$out" "main remote-default" "a timeout must not fall back to the stale cached default"
+
+  # The declared-override read is a second network call and is bounded too.
+  register '- project [no-mistakes base=release] - fixture (added 2026-08-02)'
+  started=$(date +%s)
+  set +e
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_GIT_NET_TIMEOUT=1 "$RESOLVE" "$PROJ" 2>&1)
+  status=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+  [ "$status" -ne 0 ] || fail "an unresponsive remote must refuse the declared-branch check too"
+  [ "$elapsed" -lt 10 ] || fail "the declared-branch check was not bounded (took ${elapsed}s)"
+  assert_contains "$out" "did not answer within 1s" "declared-branch refusal did not say the read timed out"
+  assert_not_contains "$out" "release project-override" "a timeout must not resolve the declared branch unverified"
+  pass "an unresponsive remote is bounded and refuses loudly instead of hanging the spawn"
 }
 
 # The registry name is the clone's basename by default and --name overrides it,
@@ -258,8 +335,11 @@ test_undeclared_reports_no_override
 test_declared_branch_missing_on_remote_refuses
 test_malformed_declaration_refuses
 test_unreachable_remote_refuses
+test_unresponsive_remote_is_bounded_and_refuses
 test_no_remote_uses_the_local_default
-test_no_remote_detached_reports_none
+test_no_remote_declared_override_reports_no_remote
+test_no_remote_stranded_on_a_feature_branch_still_resolves_the_default
+test_no_resolvable_default_reports_none
 test_name_override_selects_the_registry_entry
 
 echo "# all fm-base-branch tests passed"

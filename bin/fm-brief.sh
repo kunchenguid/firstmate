@@ -296,7 +296,12 @@ if [ -z "$BASE_BRANCH" ]; then
     BASE_PROJECT_DIR="$REPO"
   fi
   if [ -n "$BASE_PROJECT_DIR" ]; then
-    base_line=$("$FM_ROOT/bin/fm-base-branch.sh" "$BASE_PROJECT_DIR" 2>/dev/null || true)
+    # --name, not the resolved directory's basename: bin/fm-spawn.sh passes the
+    # logical project name, and a project reached through a differently named
+    # symlink would otherwise have the brief and the spawn consult two different
+    # registry entries and name two different branches.
+    base_line=$("$FM_ROOT/bin/fm-base-branch.sh" "$BASE_PROJECT_DIR" \
+      --name "$(basename "$BASE_PROJECT_DIR")" 2>/dev/null || true)
     [ -n "$base_line" ] || base_line='- none -'
     read -r base_name base_source _ <<EOF
 $base_line

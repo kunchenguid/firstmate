@@ -898,7 +898,8 @@ families_for_changed_path() {
       printf '%s\n' pr-forge
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
-    bin/fm-peek.sh|bin/fm-composer*|bin/fm-base-branch.sh|bin/fm-promote.sh)
+    bin/fm-peek.sh|bin/fm-composer*|bin/fm-base-branch.sh|bin/fm-git-net-lib.sh|\
+    bin/fm-promote.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       ;;

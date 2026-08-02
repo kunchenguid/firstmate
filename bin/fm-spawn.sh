@@ -116,7 +116,9 @@
 #   resolution runs BEFORE any endpoint is created, so a declared branch missing
 #   from the remote refuses the spawn instead of quietly starting a worker on the
 #   wrong code. The resolved branch and its source are recorded in the task's meta
-#   as base_branch=/base_branch_source= and printed on the success line.
+#   as base_branch=/base_branch_source= and printed on the success line. The fetch
+#   runs under bin/fm-git-net-lib.sh's FM_GIT_NET_TIMEOUT bound, so an unresponsive
+#   remote refuses the spawn instead of hanging it.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -204,6 +206,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-git-net-lib.sh
+. "$SCRIPT_DIR/fm-git-net-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1178,25 +1182,29 @@ fi
 # worker's starting point no longer depends on whichever commit the worktree pool
 # happened to warm itself from.
 place_worker_on_base() {
-  local target
-  case "$BASE_BRANCH_SOURCE" in
-    none) return 0 ;;
-    local-default)
-      # No remote exists, so the clone's own branch tip is all there is to use.
-      target="refs/heads/$BASE_BRANCH"
-      ;;
-    *)
-      # Fetch the branch itself rather than reusing anything already in the clone:
-      # a clone that has not been fetched recently is precisely the stale local
-      # state this whole path exists to stop trusting.
-      if ! git -C "$WT" fetch --quiet --no-tags "$BASE_BRANCH_REMOTE" \
-          "+refs/heads/$BASE_BRANCH:refs/remotes/$BASE_BRANCH_REMOTE/$BASE_BRANCH"; then
-        echo "error: could not fetch $BASE_BRANCH_REMOTE/$BASE_BRANCH for $PROJ_NAME; refusing to launch $ID on stale local state" >&2
-        exit 1
-      fi
-      target=FETCH_HEAD
-      ;;
-  esac
+  local target fetch_status
+  [ "$BASE_BRANCH_SOURCE" != none ] || return 0
+  # Whether the branch has to be fetched turns on whether a remote actually
+  # exists, never on which source named the branch: bin/fm-base-branch.sh reports
+  # the remote as "-" when the project has none, and a declared base= override is
+  # just as remote-less then as an undeclared one.
+  if [ -z "$BASE_BRANCH_REMOTE" ] || [ "$BASE_BRANCH_REMOTE" = - ]; then
+    # No remote exists, so the clone's own branch tip is all there is to use.
+    target="refs/heads/$BASE_BRANCH"
+  else
+    # Fetch the branch itself rather than reusing anything already in the clone:
+    # a clone that has not been fetched recently is precisely the stale local
+    # state this whole path exists to stop trusting. Bounded, so an unresponsive
+    # remote refuses the launch instead of hanging it.
+    fetch_status=0
+    fm_git_net_run git -C "$WT" fetch --quiet --no-tags "$BASE_BRANCH_REMOTE" \
+      "+refs/heads/$BASE_BRANCH:refs/remotes/$BASE_BRANCH_REMOTE/$BASE_BRANCH" || fetch_status=$?
+    if [ "$fetch_status" -ne 0 ]; then
+      echo "error: could not fetch $BASE_BRANCH_REMOTE/$BASE_BRANCH for $PROJ_NAME ($(fm_git_net_reason "$fetch_status")); refusing to launch $ID on stale local state" >&2
+      exit 1
+    fi
+    target=FETCH_HEAD
+  fi
   if ! git -C "$WT" checkout --quiet --detach "$target"; then
     echo "error: could not place the task worktree for $ID on $PROJ_NAME's base branch $BASE_BRANCH ($BASE_BRANCH_SOURCE); inspect $WT" >&2
     exit 1
