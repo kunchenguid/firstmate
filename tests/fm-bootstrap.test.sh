@@ -4,8 +4,10 @@
 # Bootstrap prints one block or line per actionable problem, optional verbose
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
-# 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
-# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
+# 'MISSING: tasks-axi (install: ...)', and 'BOOTSTRAP_INFO: ...' lines, so those
+# contracts are pinned verbatim. quota-axi is deliberately absent from that set:
+# capacity is advisory to dispatch, so its absence or age must never emit a
+# start-path blocker. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises
@@ -288,11 +290,11 @@ missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (insta
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
+missing quota-axi never blocks the start path^1^0.1.1^0^manual^empty^^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
 ROWS
-  pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
+  pass "bootstrap reports treehouse lease + tasks-axi bootstrap contracts"
 }
 
 test_no_mistakes_min_version() {
@@ -326,16 +328,14 @@ ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
-# 0.1.16 is the first quota-axi that reports per-credential auth sources and Grok
-# state.authStatus. Before it, a dispatch candidate could not be scoped to its own
-# authentication surface, which is exactly how one harness's expired CLI token
-# produced a captain-facing "log in" claim for a candidate that never read it. A
-# stale install used to pass this check silently, so the fix stayed uninstalled.
-test_quota_axi_min_version() {
-  local label version mode case_dir fakebin out missing n
-  missing='MISSING: quota-axi (install: npm install -g quota-axi)'
+# Capacity is advisory to dispatch (AGENTS.md section 4), so no quota-axi version
+# is a start-path blocker. An old, unparseable, or entirely absent capacity tool
+# must leave bootstrap silent; the routing decision then simply proceeds without
+# that advisory signal instead of refusing to dispatch.
+test_quota_axi_is_never_a_start_path_blocker() {
+  local label version case_dir fakebin out n
   n=0
-  while IFS='^' read -r label version mode; do
+  while IFS='^' read -r label version; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/quota-axi-$n"
@@ -343,24 +343,19 @@ test_quota_axi_min_version() {
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_tasks_axi "$fakebin" "0.1.1"
+    [ "$version" = "-" ] && rm -f "$fakebin/quota-axi"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_QUOTA_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
-    case "$mode" in
-      empty)
-        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
-    esac
+    [ -z "$out" ] || fail "$label: expected silence, got: $out"
   done <<'ROWS'
-minimum quota-axi version is accepted^0.1.16^empty
-newer quota-axi patch is accepted^0.1.17^empty
-newer quota-axi minor is accepted^0.2.0^empty
-newer quota-axi major is accepted^1.0.0^empty
-older quota-axi patch reports an upgrade^0.1.15^missing
-much older quota-axi minor reports an upgrade^0.0.9^missing
-unparseable quota-axi version reports an upgrade^quota-axi development build^missing
+current quota-axi stays silent^0.1.16
+newer quota-axi stays silent^1.0.0
+older quota-axi never reports an upgrade^0.1.15
+much older quota-axi never reports an upgrade^0.0.9
+unparseable quota-axi version never reports an upgrade^quota-axi development build
+absent quota-axi never reports a missing tool^-
 ROWS
-  pass "bootstrap enforces quota-axi minimum version"
+  pass "bootstrap keeps quota-axi advisory, never a start-path blocker"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -834,7 +829,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
-test_quota_axi_min_version
+test_quota_axi_is_never_a_start_path_blocker
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux

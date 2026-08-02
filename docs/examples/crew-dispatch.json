@@ -16,7 +16,7 @@
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
+      "why": "Use a strong coding profile for big, ambiguous work; pick between the alternatives at intake."
     }
   ],
   "default": [

@@ -62,7 +62,7 @@
 # go dark. So on refusal, bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1
 # mode) for its read-only detect lines - missing tools, gh auth, the
 # worktree-tangle check, the harness override, crew-dispatch validation,
-# tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
+# the tasks-axi tool check, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute without
 # verified lock ownership.
 # Only projection cleanup, the six bootstrap mutating sweeps, and the
