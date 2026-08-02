@@ -211,7 +211,8 @@ fm_proplane_promote_pr_body() {
   local pr_head_ref=${7:-} kind=${8:-record}
   local base_sha head_sha head_tip tip_line count listed_count count_line log report_line
   local pr_head_label diff_section lands_section will_close
-  local unshown_count unlanded_count unshown_log unlanded_log merge_only_count merge_only_log
+  local unshown_count unlanded_count unshown_log unlanded_log
+  local merge_only merge_only_count merge_only_log merge_only_lead
   base_sha=$(fm_proplane_promote_pr_short_sha "$git_root" "$base_ref")
   head_sha=$(fm_proplane_promote_pr_short_sha "$git_root" "$head_ref")
   count=$(fm_proplane_promote_pr_range_count "$git_root" "$base_ref" "$head_ref")
@@ -287,6 +288,12 @@ The promoted range above still states exactly what lands on \`main\`.
         fi
         unshown_count=$(fm_proplane_promote_pr_commit_count "$git_root" no-merges "$base_ref..$head_ref" --not "$pr_head_ref")
         unlanded_count=$(fm_proplane_promote_pr_commit_count "$git_root" no-merges "$pr_head_ref" --not "$head_ref")
+        # The head is outside the promoted range, yet nothing non-merge on it is:
+        # what keeps this record from closing is merge commits alone.
+        merge_only=0
+        if [ "$will_close" -eq 0 ] && [ "${unlanded_count:-0}" -eq 0 ]; then
+          merge_only=1
+        fi
         if [ "${unshown_count:-0}" -gt 0 ]; then
           unshown_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
             '- (none)' no-merges "$base_ref..$head_ref" --not "$pr_head_ref")
@@ -305,37 +312,42 @@ On \`$pr_head_label\` but NOT promoted, so this PR's diff shows them even though
 $unlanded_log
 "
         fi
-        if [ "${unshown_count:-0}" -eq 0 ] && [ "${unlanded_count:-0}" -eq 0 ]; then
-          if [ "$will_close" -eq 1 ]; then
-            diff_section="$diff_section
+        if [ "${unshown_count:-0}" -eq 0 ] && [ "${unlanded_count:-0}" -eq 0 ] && [ "$will_close" -eq 1 ]; then
+          diff_section="$diff_section
 \`$pr_head_label\` carries the same non-merge commits as the promoted range, so this PR's diff is the promotion.
 "
+        fi
+        # The ladder's own sync puts bare merge(main) commits on prakrit, so a head
+        # that is not contained while nothing non-merge is unlanded is routine, and
+        # it can happen alongside a divergence in the other direction. This is the
+        # single condition the closing sentence below reads too, so that sentence
+        # can never point at a listing this block did not emit.
+        if [ "$merge_only" -eq 1 ]; then
+          merge_only_count=$(fm_proplane_promote_pr_commit_count "$git_root" with-merges "$pr_head_ref" --not "$head_ref")
+          merge_only_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
+            '- (none)' with-merges "$pr_head_ref" --not "$head_ref")
+          if [ "${unshown_count:-0}" -eq 0 ]; then
+            merge_only_lead="\`$pr_head_label\` carries the same non-merge commits as the promoted range, so this PR's diff is the promotion, but \`$pr_head_label\` is still not contained in it"
           else
-            # The ladder's own sync puts bare merge(main) commits on prakrit, so a
-            # divergence of merges alone is routine. Naming and listing it is what
-            # keeps the record from asserting a close it will not get with no
-            # evidence a reader can act on.
-            merge_only_count=$(fm_proplane_promote_pr_commit_count "$git_root" with-merges "$pr_head_ref" --not "$head_ref")
-            merge_only_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
-              '- (none)' with-merges "$pr_head_ref" --not "$head_ref")
-            diff_section="$diff_section
-\`$pr_head_label\` carries the same non-merge commits as the promoted range, so this PR's diff is the promotion, but \`$pr_head_label\` is still not contained in it: the difference is merge commits only ($merge_only_count):
+            merge_only_lead="\`$pr_head_label\` is still not contained in the promoted range, which already carries every non-merge commit on \`$pr_head_label\`"
+          fi
+          diff_section="$diff_section
+$merge_only_lead: the difference is merge commits only ($merge_only_count):
 
 $merge_only_log
 "
-          fi
         fi
         diff_section="$diff_section
 "
         if [ "$will_close" -eq 1 ]; then
           lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR, which closes this PR as merged: \`main\` then contains \`$pr_head_label\`."
         else
-          if [ "${unlanded_count:-0}" -gt 0 ]; then
-            lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
-This PR does NOT close as merged, because \`main\` does not contain \`$pr_head_label\` after that fast-forward: \`$pr_head_label\` carries $unlanded_count commit(s) this promotion does not deliver, listed above."
-          else
+          if [ "$merge_only" -eq 1 ]; then
             lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
 This PR does NOT close as merged, because \`main\` does not contain \`$pr_head_label\` after that fast-forward: the difference is merge commits only, listed above."
+          else
+            lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
+This PR does NOT close as merged, because \`main\` does not contain \`$pr_head_label\` after that fast-forward: \`$pr_head_label\` carries $unlanded_count commit(s) this promotion does not deliver, listed above."
           fi
           lands_section="$lands_section
 It stays open until a later promotion records the range that catches that work up; \`main\` carries the promoted range above either way."

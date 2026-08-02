@@ -24,6 +24,8 @@
 #   (u) the reset guard refuses when it cannot read a worktree's state
 #   (v) the reconciliation reads the head branch as GitHub has it, not a stale ref
 #   (w) a head branch that cannot be read is recorded as unavailable, not guessed
+#   (x) a divergence of merge commits alone is explained, not self-contradicted
+#   (y) a divergence and a merge-only difference at once still point at evidence
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -334,6 +336,58 @@ assert_contains "$merge_only" 'merge commits only, listed above' \
 assert_not_contains "$merge_only" 'diff is the promotion.' \
   'the aligned wording is never printed for a head the promotion does not contain'
 pass 'a divergence of merge commits alone is explained, never self-contradicted'
+
+# Both directions at once, which is the ladder's normal case: another agent's
+# promotion finishes and its sync pushes a bare merge onto prakrit while this
+# promotion is parked in its gates, and this promotion's own validation then
+# commits a fix onto the integrate branch. The record then has commits prakrit
+# does not show AND a merge that keeps it from closing, so a body whose listing
+# and whose closing sentence are guarded separately points at evidence it never
+# emitted.
+case_y="$TMP_ROOT/y"
+mkdir -p "$case_y"
+make_repo "$case_y/repo"
+git -C "$case_y/repo" checkout -q main
+printf 'hotfix\n' > "$case_y/repo/hotfix.txt"
+git -C "$case_y/repo" add hotfix.txt
+git -C "$case_y/repo" commit -qm 'fix: landed on main before this promotion'
+git -C "$case_y/repo" push -q origin main
+git -C "$case_y/repo" fetch -q origin
+git -C "$case_y/repo" checkout -q -B integrate/prakrit-to-main origin/main
+git -C "$case_y/repo" merge -q --no-edit origin/prakrit -m 'integrate(prakrit): test fixture'
+git -C "$case_y/repo" checkout -q prakrit
+git -C "$case_y/repo" merge -q --no-edit origin/main -m 'merge(main): keep integration aligned after main promote'
+git -C "$case_y/repo" push -q origin prakrit
+git -C "$case_y/repo" fetch -q origin
+git -C "$case_y/repo" checkout -q integrate/prakrit-to-main
+printf 'fix\n' > "$case_y/repo/fix.txt"
+git -C "$case_y/repo" add fix.txt
+git -C "$case_y/repo" commit -qm 'fix: committed onto integrate by the validation'
+[ "$(fm_proplane_promote_pr_commit_count "$case_y/repo" no-merges origin/main..integrate/prakrit-to-main --not origin/prakrit)" = 1 ] ||
+  fail 'the fixture must promote a commit prakrit does not show'
+[ "$(fm_proplane_promote_pr_commit_count "$case_y/repo" no-merges origin/prakrit --not integrate/prakrit-to-main)" = 0 ] ||
+  fail 'the fixture must leave no non-merge commit unlanded'
+! git -C "$case_y/repo" merge-base --is-ancestor origin/prakrit integrate/prakrit-to-main 2>/dev/null ||
+  fail 'the fixture must leave prakrit outside the promoted range'
+
+both=$(fm_proplane_promote_pr_body "$case_y/repo" origin/main integrate/prakrit-to-main \
+  passed '' passed origin/prakrit)
+assert_contains "$both" 'Promoted but NOT on' 'the promoted commit prakrit does not show is named'
+assert_contains "$both" 'committed onto integrate by the validation' 'and listed'
+assert_contains "$both" 'merge commits only, listed above' \
+  'the closing sentence still explains why the record will not close'
+assert_contains "$both" 'the difference is merge commits only (1):' \
+  'the listing the closing sentence points at is actually emitted'
+assert_contains "$both" 'keep integration aligned after main promote' \
+  'the merge that keeps the record open is listed as evidence'
+assert_not_contains "$both" 'carries the same non-merge commits as the promoted range' \
+  'a head the range does not fully cover is never called aligned'
+# Every "listed above" in the body must have something above it to point at.
+printf '%s\n' "$both" | awk '
+  /^- [0-9a-f]+ / { seen++ }
+  /listed above/ { if (!seen) { exit 1 } }
+' || fail 'the record points at a listing it never emitted'
+pass 'a record with both a divergence and a merge-only difference points at real evidence'
 
 # With no head ref to reconcile against, the record states the condition for
 # closing rather than asserting an outcome it cannot know.
