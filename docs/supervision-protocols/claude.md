@@ -1,6 +1,7 @@
 Mode: Claude Stop-hook-owned supervision.
 
 When this session owns supervision and away mode is not active:
+
 1. Drain first with `bin/fm-wake-drain.sh`.
 2. Routine watcher arm and re-arm are owned by the Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`), never by you.
    Every turn end while supervision is needed launches or attaches one home-scoped watcher cycle with no model command and no model tokens.
@@ -16,8 +17,8 @@ When this session owns supervision and away mode is not active:
 6. Treat `watcher: started ...` and `watcher: attached ...` inside arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
 7. The durable wake queue preserves actionable events between a rewake and the next Stop-launched arm, while the bounded turn-end guard prevents a blind Stop when recovery did not start.
-   No PreToolUse hook denies fleet commands based on watcher status.
-   [`watcher-continuity.md`](../watcher-continuity.md) owns the exact session-lock recovery boundary.
+   During that active-turn gap, the Bash PreToolUse continuity gate allows wake drain, manual arm recovery, and ordinary literal fail-closed cleanup, but denies other Firstmate fleet commands until an identity-matched watcher is healthy.
+   [`watcher-continuity.md`](../watcher-continuity.md) owns the exact boundary and compatibility posture.
 8. The turn-end guard (`bin/fm-turnend-guard.sh --claude`) remains the final backstop.
    It allows the stop when a watcher is healthy, when the auto-arm already owns recovery for this event epoch, or when a fresh rewake is recorded; it re-blocks only when none of those materialize, within a bounded budget.
 9. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.

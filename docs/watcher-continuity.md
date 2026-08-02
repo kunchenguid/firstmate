@@ -26,7 +26,10 @@ This is deliberate Option B ordering: the fleet is protected before the model ha
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the unchanged bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
-No PreToolUse hook denies fleet commands based on watcher status.
+During that active-turn window, Claude's Bash `PreToolUse` integration runs `bin/fm-continuity-pretool-check.sh` before fleet commands.
+When real task records exist but no identity-matched watcher holds the active home's lock with a fresh beacon, it denies executed `bin/fm-*.sh` commands except wake drain, manual arm recovery, and ordinary literal fail-closed cleanup.
+It denies forced cleanup and cleanup with shell-expanded arguments.
+Malformed or opaque shell input and missing parsing dependencies remain silent fail-open compatibility paths rather than becoming a blanket shell block.
 The model no longer re-arms after ordinary wakes.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
 Codex retains its bounded foreground checkpoint protocol.
@@ -56,6 +59,8 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, and `/fork`, same-instance shutdown-plus-start, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
+`tests/fm-continuity-pretool-check.test.sh` drives the shared shell parser through direct and nested execution forms, scope and watcher identity boundaries, recovery and cleanup exceptions, dependency degradation, output shape, and the tracked Claude hook registration.
+The same behavior is revalidated through a real Claude Bash hook session in [`verification/supervision.md`](verification/supervision.md#watcher-continuity).
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, and exit-2 translation.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard.
@@ -65,6 +70,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
-Claude depends on the Stop `asyncRewake` rewake, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+Claude depends on the Stop `asyncRewake` rewake and is the only primary integration with the active-turn fleet-command gate.
+Codex, Grok, OpenCode, Pi, and pi-signed retain their existing continuity mechanisms because their current hook or extension surfaces do not share Claude's residual Stop-owned active-turn gap.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

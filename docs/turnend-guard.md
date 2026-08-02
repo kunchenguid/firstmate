@@ -6,7 +6,7 @@ Primary scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native ses
 Harness hook files adapt each enabled primary harness integration's turn-end mechanism to that shared predicate.
 
 Related PreToolUse guards deny unsafe commands before execution rather than detecting a blind turn end afterward.
-Their separate owners are [`arm-pretool-check.md`](arm-pretool-check.md), [`cd-guard.md`](cd-guard.md), and [`subagent-guard.md`](subagent-guard.md).
+Their separate owners are [`arm-pretool-check.md`](arm-pretool-check.md), [`cd-guard.md`](cd-guard.md), [`subagent-guard.md`](subagent-guard.md), and [`watcher-continuity.md`](watcher-continuity.md).
 Do not infer this guard's scope, loop safety, or compatibility tradeoffs for those guards.
 
 ## Current invariant
@@ -57,7 +57,7 @@ Any allow resets the budget.
 
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
-The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.
+The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP:` prefix, so Ahoy does not treat them as captain messages.
 Each passive adapter owns a loop latch.
 Pi keeps the latch across internal tool turns and clears it only when the generated follow-up settles or delivery fails.
 OpenCode's forced follow-up is supported for persistent TUI sessions and remains fail-open in headless `opencode run`.

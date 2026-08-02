@@ -187,6 +187,41 @@ Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+The Claude active-turn continuity gate was empirically reverified on 2026-08-02 against Claude Code 2.1.220 in a disposable plain-checkout Firstmate home.
+A real `claude -p` session loaded the tracked `.claude/settings.json` and followed an end-user acceptance sequence with Bash tool calls.
+With a task record and no watcher, `bin/fm-send.sh task before` was rejected before the fixture script ran and the transcript recorded one permission denial.
+The same session ran `bin/fm-wake-drain.sh`, started `bin/fm-watch-arm.sh` through Claude's background-task mechanism, then successfully ran `bin/fm-send.sh task after` after an identity-matched lock and fresh beacon existed.
+It also ran ordinary `printf ordinary-ok`, completed literal cleanup, retired the fixture watcher, and successfully ran `bin/fm-send.sh task idle` after the task record was gone.
+The transcript ended with `ACCEPTANCE_DONE`, the fixture execution log contained only `task after` and `task idle`, and the task record was absent.
+The deterministic executable suite separately proved that the deny writes no stdout and emits Claude's `permissionDecision: deny` object on stderr with the manual Claude background-task recovery instruction.
+It also proved forced and shell-expanded cleanup denial, linked child-copy exclusion, another home's absolute path exclusion, stale beacon and wrong identity denial, and silent malformed-input or missing-Node compatibility.
+The real end-of-turn and arm protections remained registered and their focused suites passed unchanged.
+
+Exact commands and bounded output:
+
+```text
+claude --version
+2.1.220 (Claude Code)
+
+# Disposable copied checkout and FM_HOME, real tracked Claude PreToolUse path.
+FM_HOME="$project" claude -p "$acceptance_prompt" \
+  --dangerously-skip-permissions --effort low \
+  --max-turns 12 --output-format stream-json --verbose
+# exit 0; result=ACCEPTANCE_DONE; permission_denials=1
+# fixture send log: task after, then task idle
+
+tests/fm-continuity-pretool-check.test.sh
+ok - direct, absolute, grouped, substituted, shell -c, sourced, eval, and heredoc fleet execution is classified
+ok - quoted, non-executed, cross-home, malformed, and opaque controls preserve compatibility
+ok - wake drain, Claude arm recovery, and literal cleanup stay available while forced or expanded cleanup is denied
+ok - the gate keys on real work plus an identity-matched live lock and fresh beacon
+ok - another home or process identity cannot satisfy this home's health proof
+ok - child task copies are outside the continuity gate
+ok - malformed input and dependency degradation fail open silently
+ok - the tracked Claude Bash PreToolUse registration invokes the continuity gate
+ok - continuity hook is shellcheck-clean
+```
+
 Deterministic entry points:
 
 ```sh
@@ -194,6 +229,7 @@ tests/fm-pi-watch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-subagent-pretool-check.test.sh
+tests/fm-continuity-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
