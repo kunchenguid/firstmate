@@ -135,6 +135,8 @@ SH
 cat > "$FAKEBIN/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# shellcheck source=/dev/null
+. "$(dirname "$0")/pane-shell.sh"
 printf '%s\n' "$*" >> "$FM_TEST_TMUX_LOG"
 if [ "${1:-}" = display-message ]; then
   case "$*" in
@@ -169,28 +171,11 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
-    cat "$FM_TEST_TMUX_LOG.spawn-screen" 2>/dev/null || true
+    fm_fake_pane_capture
     exit 0
     ;;
   send-keys)
-    screen="$FM_TEST_TMUX_LOG.spawn-screen"
-    staged="$screen.staged"
-    text=${4:-}
-    case "$text" in
-      *"__FM_SPAWN_READY_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
-        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$screen"
-        ;;
-      "FM_SPAWN_LAUNCH=''") : > "$staged" ;;
-      FM_SPAWN_LAUNCH=*)
-        rebuilt=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
-        printf '%s' "$rebuilt" > "$staged"
-        ;;
-      *"__FM_SPAWN_LAUNCH_OK_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
-        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$screen"
-        ;;
-    esac
+    fm_fake_pane_send "$@"
     exit 0
     ;;
 esac
@@ -198,6 +183,7 @@ exit 0
 SH
 
 chmod +x "$FAKEBIN/gh-axi" "$FAKEBIN/gh" "$FAKEBIN/treehouse" "$FAKEBIN/tmux"
+fm_fake_pane_shell "$FAKEBIN"
 
 fixture_cmd() {
   FM_ROOT_OVERRIDE="$ROOT" \
