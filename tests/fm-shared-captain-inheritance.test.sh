@@ -328,6 +328,7 @@ EOF
     > "$data_override/secondmates.md"
   fakebin=$(make_fake_spawn_toolchain "$w")
   add_bootstrap_compatible_tools "$fakebin"
+  fm_fake_treehouse "$fakebin"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     FM_DATA_OVERRIDE="$data_override" \
@@ -379,6 +380,7 @@ EOF
   fakebin=$(make_fake_spawn_toolchain "$w")
   add_bootstrap_compatible_tools "$fakebin"
   fm_fake_exit0 "$fakebin" pgrep
+  fm_fake_treehouse "$fakebin"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$ROOT/bin/fm-session-start.sh")
