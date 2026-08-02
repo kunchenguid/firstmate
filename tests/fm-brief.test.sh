@@ -295,6 +295,56 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The isolation assertion must ship as an evaluable comparison against two named
+# paths, never as prose the worker has to interpret. A worker cannot derive
+# either path itself - a firstmate-repo crewmate sees the primary checkout's path
+# repeatedly in its own brief and its worktree path nowhere - so the scaffold
+# emits placeholders that bin/fm-spawn.sh fills in from the worktree it has
+# already verified. Placeholders belong only where something fills them: the
+# scout scaffold and the secondmate charter carry no isolation assertion, so a
+# leaked placeholder there would be a permanently unfillable literal.
+test_ship_isolation_assertion_names_both_paths() {
+  local home id brief scout charter
+  home="$TMP_ROOT/isolation-facts-home"
+  mkdir -p "$home/data"
+  id="brief-isolation-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "- your isolated task worktree: {FM_WORKTREE}" "$brief" \
+    "ship brief lost the fillable task-worktree isolation fact"
+  assert_grep "- the primary checkout: {FM_PRIMARY_CHECKOUT}" "$brief" \
+    "ship brief lost the fillable primary-checkout isolation fact"
+  assert_grep "If it equals the primary checkout, STOP" "$brief" \
+    "ship brief lost the stop branch for the primary checkout"
+  assert_grep "If it equals your task worktree, you are isolated: proceed." "$brief" \
+    "ship brief lost the proceed branch for a correctly isolated worker"
+  assert_grep "blocked: launched in primary checkout, not an isolated worktree" "$brief" \
+    "ship brief lost the isolation refusal status line"
+  assert_grep "If it is any third path, or the command fails" "$brief" \
+    "ship brief lost the third-path branch that reports what was actually read"
+  assert_no_grep "not the worktree you were launched in, STOP" "$brief" \
+    "ship brief kept the unverifiable launched-in referent that refused correct isolation"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-isolation-d2 some-proj --scout >/dev/null 2>&1
+  scout="$home/data/brief-isolation-d2/brief.md"
+  assert_present "$scout" "scout brief was not scaffolded"
+  assert_no_grep "{FM_WORKTREE}" "$scout" \
+    "scout brief leaked an isolation placeholder nothing fills"
+  assert_no_grep "{FM_PRIMARY_CHECKOUT}" "$scout" \
+    "scout brief leaked an isolation placeholder nothing fills"
+
+  FM_SECONDMATE_CHARTER="fixture charter" FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-isolation-d3 --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/brief-isolation-d3/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  assert_no_grep "{FM_WORKTREE}" "$charter" \
+    "secondmate charter leaked an isolation placeholder nothing fills"
+  assert_no_grep "{FM_PRIMARY_CHECKOUT}" "$charter" \
+    "secondmate charter leaked an isolation placeholder nothing fills"
+  pass "fm-brief.sh: the ship isolation assertion names both paths and placeholders stay where they are filled"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -659,6 +709,7 @@ test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_isolation_assertion_names_both_paths
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

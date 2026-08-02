@@ -106,7 +106,10 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root distinct from the primary project checkout. Once verified,
+#   both paths are written into the brief's isolation facts
+#   ({FM_WORKTREE}/{FM_PRIMARY_CHECKOUT} from bin/fm-brief.sh), and a brief still
+#   holding either placeholder refuses to launch.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -929,6 +932,54 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  # The verified physical worktree root, for fill_isolation_facts below. Physical
+  # because the worker compares against `git rev-parse --show-toplevel`, which
+  # reports the resolved path even when the shell reached the worktree through a
+  # symlink, while $WT keeps whatever raw path the backend reported.
+  WT_REAL=$wt_real
+}
+
+# Fill the ship brief's isolation facts with the two paths the worker cannot
+# derive for itself: its own task worktree and the primary checkout.
+# bin/fm-brief.sh writes {FM_WORKTREE}/{FM_PRIMARY_CHECKOUT} placeholders because
+# neither path exists when the brief is scaffolded, and a worker asked to judge
+# in prose whether it is "in the primary checkout" can refuse correct isolation -
+# a firstmate-repo crewmate sees the primary checkout's path several times in its
+# own brief and its own worktree path nowhere.
+# Rewriting by line prefix rather than a one-shot placeholder swap keeps a
+# relaunch into a different worktree correct instead of pinning the brief to the
+# first slot it ever used. A brief carrying neither placeholder nor fact line -
+# every brief scaffolded before this contract, and every secondmate charter - is
+# left untouched. A placeholder surviving the rewrite is fatal: a worker reading a
+# literal {FM_WORKTREE} has no isolation check at all.
+fill_isolation_facts() {  # <brief> <worktree-real> <primary-real>
+  local brief=$1 worktree=$2 primary=$3 tmp worktree_fact=0 primary_fact=0
+  grep -q '^- your isolated task worktree: ' "$brief" 2>/dev/null && worktree_fact=1
+  grep -q '^- the primary checkout: ' "$brief" 2>/dev/null && primary_fact=1
+  if [ "$worktree_fact" = 1 ] && [ "$primary_fact" = 0 ]; then
+    echo "error: $brief is missing the '- the primary checkout:' isolation fact line; refusing to launch a worker whose isolation check is missing an operand" >&2
+    exit 1
+  fi
+  if [ "$worktree_fact" = 0 ] && [ "$primary_fact" = 1 ]; then
+    echo "error: $brief is missing the '- your isolated task worktree:' isolation fact line; refusing to launch a worker whose isolation check is missing an operand" >&2
+    exit 1
+  fi
+  if [ "$worktree_fact" = 1 ]; then
+    tmp="$brief.fm-isolation-facts.$$"
+    if ! { FM_FILL_WORKTREE="$worktree" FM_FILL_PRIMARY="$primary" awk '
+      /^- your isolated task worktree: / { print "- your isolated task worktree: " ENVIRON["FM_FILL_WORKTREE"]; next }
+      /^- the primary checkout: / { print "- the primary checkout: " ENVIRON["FM_FILL_PRIMARY"]; next }
+      { print }
+    ' "$brief" > "$tmp" && mv "$tmp" "$brief"; }; then
+      rm -f "$tmp"
+      echo "error: could not write the isolation facts into $brief; refusing to launch a brief whose isolation check has no paths to compare" >&2
+      exit 1
+    fi
+  fi
+  if grep -q -e '{FM_WORKTREE}' -e '{FM_PRIMARY_CHECKOUT}' "$brief" 2>/dev/null; then
+    echo "error: $brief still contains an unfilled isolation placeholder; refusing to launch a worker whose isolation check cannot be evaluated" >&2
+    exit 1
+  fi
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
@@ -1230,6 +1281,7 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    fill_isolation_facts "$BRIEF" "$WT_REAL" "$PROJ_ABS_REAL"
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -1456,6 +1508,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  fill_isolation_facts "$BRIEF" "$WT_REAL" "$PROJ_ABS_REAL"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

@@ -34,6 +34,10 @@
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# That assertion carries {FM_WORKTREE} and {FM_PRIMARY_CHECKOUT} placeholders
+# because neither path exists yet at scaffold time; bin/fm-spawn.sh fills both in
+# at launch, from the worktree it has already verified, and refuses to launch a
+# brief left holding either placeholder.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
@@ -369,9 +373,15 @@ $HERDR_SECTION
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
-**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
-The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
-If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+**Verify isolation before anything else.** Run \`cd "\$(git rev-parse --show-toplevel)" && pwd -P\` and compare what it prints against these two paths, which firstmate resolved and verified at launch:
+
+- your isolated task worktree: {FM_WORKTREE}
+- the primary checkout: {FM_PRIMARY_CHECKOUT}
+
+If it equals the primary checkout, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+If it equals your task worktree, you are isolated: proceed.
+If it is any third path, or the command fails, append \`blocked: isolation check read {the exact path or error}\` to the status file and stop.
+\`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` point into the primary checkout's \`.git\` for every linked worktree, including yours; that is expected and is not evidence that you are in the primary checkout.
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 

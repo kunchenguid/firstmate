@@ -123,6 +123,12 @@ test_bootstrap_line() {
 
 # The generated ship brief must carry the isolation assertion AHEAD of the
 # `git checkout -b` step, so the crewmate verifies its worktree before branching.
+# The assertion compares the crewmate's resolved top level against two named
+# paths that bin/fm-spawn.sh fills in at launch, so both operands must be present
+# and the git-dir/common-dir output must stay explicitly non-decisive: those
+# commands point into the primary checkout's `.git` for every linked worktree,
+# and a brief that let a crewmate read that as membership refused a correctly
+# isolated worker in the live fleet.
 test_brief_assertion_precedes_branch() {
   local home brief iso br
   home="$TMP_ROOT/brief-home"
@@ -132,8 +138,12 @@ test_brief_assertion_precedes_branch() {
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "blocked: launched in primary checkout, not an isolated worktree" "$brief" \
     "brief is missing the isolation blocked-status contract"
-  assert_grep "The path check is authoritative" "$brief" \
-    "brief must make the path check authoritative"
+  assert_grep "- your isolated task worktree:" "$brief" \
+    "brief must name the task worktree the path check compares against"
+  assert_grep "- the primary checkout:" "$brief" \
+    "brief must name the primary checkout the path check compares against"
+  assert_grep "is not evidence that you are in the primary checkout" "$brief" \
+    "brief must keep the path check authoritative over git-dir/common-dir output"
   assert_no_grep "A reliable test that you are in a linked worktree" "$brief" \
     "brief must not present git-dir/common-dir as decisive"
   assert_no_grep "they are identical in the primary checkout" "$brief" \
