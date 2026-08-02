@@ -1825,7 +1825,7 @@ test_forced_secondmate_preserves_the_home_own_attribution_record() {
   # a hand-written section whose schema is not the v2 join.
   printf '%s\n' \
     $'task\tworktree\tnote' \
-    $'hand-written\t/hand/wt\tkeep out of the v2 section' \
+    $'hand-written\t/hand/wt\tkeep out of the v2 section but keep it' \
     '# schema=firstmate-effort-attribution-v2' \
     $'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tstarted_at\tended_at' \
     $'home-task-a\t/home/wt-a\tcodex\tgpt-test\thigh\tship\t/home/project\t2026-07-30T00:00:00Z\t2026-07-30T01:00:00Z' \
@@ -1843,13 +1843,46 @@ test_forced_secondmate_preserves_the_home_own_attribution_record() {
     || fail "attribution-secondmate-home: only part of the home's record survived"
   grep -q $'^home-task-a\t/home/wt-a\tcodex\tgpt-test\thigh\tship\t/home/project\t2026-07-30T00:00:00Z\t2026-07-30T01:00:00Z$' "$file" \
     || fail "attribution-secondmate-home: a preserved row was rewritten"
-  grep -q '^hand-written	' "$file" \
+  grep -q $'^hand-written\t/hand/wt\tkeep out of the v2 section but keep it$' "$file" \
+    || fail "attribution-secondmate-home: the home's hand-written row was silently destroyed"
+  grep -qxF "# schema=firstmate-effort-attribution-preserved-legacy home=$home" "$file" \
+    || fail "attribution-secondmate-home: the preserved lines name no origin home"
+  awk '/^# schema=/ { section = $0; next } /^hand-written\t/ { print section }' "$file" \
+    | grep -qv 'preserved-legacy' \
     && fail "attribution-secondmate-home: a foreign-schema row was merged into the v2 section"
   [ "$(grep -cxF '# schema=firstmate-effort-attribution-v2' "$file")" = 1 ] \
     || fail "attribution-secondmate-home: preservation opened a duplicate schema section"
   grep -q '^task-x1	' "$file" \
     || fail "attribution-secondmate-home: the retired secondmate's own row is missing"
-  pass "retiring a secondmate home lifts its accumulated attribution into the parent"
+  pass "retiring a secondmate home lifts its whole record, join rows and hand-written alike"
+}
+
+test_forced_secondmate_preserves_a_home_record_that_has_no_marker() {
+  local case_dir home file
+  case_dir=$(make_case attribution-secondmate-home-unmarked)
+  write_meta "$case_dir" local-only secondmate
+  printf '%s\n' 'started_at=2026-08-01T08:00:00Z' >> "$case_dir/state/task-x1.meta"
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    $'task\tworktree\tnote' \
+    $'only-hand-written\t/hand/wt\tthe oldest and least recoverable record' \
+    > "$home/data/cost-attribution.tsv"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "attribution-secondmate-home-unmarked: forced secondmate teardown failed"
+
+  assert_absent "$home" "attribution-secondmate-home-unmarked: the retired home was not removed"
+  file="$case_dir/data/cost-attribution.tsv"
+  grep -q $'^only-hand-written\t/hand/wt\tthe oldest and least recoverable record$' "$file" \
+    || fail "attribution-secondmate-home-unmarked: an unmarked home's rows were dropped verbatim"
+  grep -qxF "# schema=firstmate-effort-attribution-preserved-legacy home=$home" "$file" \
+    || fail "attribution-secondmate-home-unmarked: the preserved lines name no origin home"
+  [ "$(awk '/^# schema=firstmate-effort-attribution-v2$/ { seen = 1; next } seen && /^task-x1\t/ { found = 1 } END { print found + 0 }' "$file")" = 1 ] \
+    || fail "attribution-secondmate-home-unmarked: the task row did not open a v2 section after the legacy block"
+  pass "a retiring home whose record has no marker keeps every line verbatim"
 }
 
 test_secondmate_home_attribution_survives_a_refused_removal_exactly_once() {
@@ -2111,6 +2144,7 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_secondmate_records_child_attribution_before_discard
 test_forced_secondmate_child_attribution_failure_still_retires
 test_forced_secondmate_preserves_the_home_own_attribution_record
+test_forced_secondmate_preserves_a_home_record_that_has_no_marker
 test_secondmate_home_attribution_survives_a_refused_removal_exactly_once
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

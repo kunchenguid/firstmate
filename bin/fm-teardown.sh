@@ -54,28 +54,38 @@
 # leased home and state in place instead of hiding a still-held lease.
 # After every successful cleanup, immediately before volatile metadata removal,
 # teardown best-effort appends the task-to-AI join to
-# data/cost-attribution.tsv. New files and legacy files receive an appended
-# `# schema=firstmate-effort-attribution-v2` section whose tab-separated columns
-# are task, worktree, harness, model, effort, kind, project, started_at, and
-# ended_at. Existing hand-written rows remain byte-for-byte intact above that
-# section. Values escape backslash, tab, carriage return, and newline as `\\`,
-# `\t`, `\r`, and `\n`. A legacy file whose last line has no trailing newline is
-# closed with one first, so no hand-written row is ever joined or rewritten, and
-# each task contributes its marker, header, and row as a single append so
-# concurrent teardowns cannot interleave. That append is serialized under
-# data/.cost-attribution.lock so two concurrent teardowns cannot each open a
-# second schema section; if the lock cannot be taken within its bounded wait the
-# row is still appended, because losing a row is worse than a duplicate header.
+# data/cost-attribution.tsv. The file is a sequence of sections, each opened by
+# its own `# schema=` line and running to the next one; the section a row belongs
+# to is the nearest `# schema=` line above it. New files and legacy files receive
+# an appended `# schema=firstmate-effort-attribution-v2` section whose
+# tab-separated columns are task, worktree, harness, model, effort, kind,
+# project, started_at, and ended_at. Existing hand-written rows remain
+# byte-for-byte intact above that section. Values escape backslash, tab, carriage
+# return, and newline as `\\`, `\t`, `\r`, and `\n`. A legacy file whose last line
+# has no trailing newline is closed with one first, so no hand-written row is ever
+# joined or rewritten, and each task contributes its marker, header, and row as a
+# single append so concurrent teardowns cannot interleave. That append is
+# serialized under data/.cost-attribution.lock so two concurrent teardowns cannot
+# each open a second schema section; if the lock cannot be taken within its
+# bounded wait the row is still appended, because losing a row is worse than a
+# duplicate header. A v2 row opens a fresh v2 section whenever the file's last
+# `# schema=` line is not the v2 marker, so a row can never land under a schema
+# that is not its own.
 # Forced secondmate retirement records the same row for every child task it
 # discards, into the surviving parent home's data/, because those children never
 # get their own teardown run. Removing a secondmate home also harvests that
-# home's own accumulated v2 rows before the removal and appends them to the
-# surviving parent's record once the removal succeeds, so retirement never
-# erases the joins that home already recorded and a failed removal never
-# duplicates them. New tasks carry an exact UTC spawn timestamp in metadata;
-# pre-existing metadata falls back to its filesystem birth time, then mtime.
-# Attribution failure warns but never changes teardown eligibility, retirement,
-# home removal, or completion.
+# home's whole record before the removal and appends it to the surviving parent's
+# record once the removal succeeds, so retirement never erases what that home
+# recorded and a failed removal never duplicates it. The home's v2 rows join the
+# parent's v2 section; every other non-blank line it held - hand-written rows
+# above the marker, a file with no marker at all, or a legacy section it had
+# itself preserved - is copied verbatim into an appended
+# `# schema=firstmate-effort-attribution-preserved-legacy` section naming the
+# home it came from, because an unparseable preserved row can still be recovered
+# by hand while a dropped one cannot. New tasks carry an exact UTC spawn
+# timestamp in metadata; pre-existing metadata falls back to its filesystem birth
+# time, then mtime. Attribution failure warns but never changes teardown
+# eligibility, retirement, home removal, or completion.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -287,6 +297,7 @@ attribution_legacy_started_at() {
 }
 
 ATTRIBUTION_MARKER='# schema=firstmate-effort-attribution-v2'
+ATTRIBUTION_LEGACY_MARKER='# schema=firstmate-effort-attribution-preserved-legacy'
 ATTRIBUTION_COLUMNS=$'task\tworktree\tharness\tmodel\teffort\tkind\tproject\tstarted_at\tended_at'
 ATTRIBUTION_LOCK_ATTEMPTS=${FM_ATTRIBUTION_LOCK_ATTEMPTS:-50}
 
@@ -299,9 +310,16 @@ attribution_lock_ready() {
     && declare -F fm_lock_release >/dev/null 2>&1
 }
 
-attribution_append_rows() {
-  local data=$1 rows=$2 file lock payload locked=0 attempt=0 status=0
-  [ -n "$rows" ] || return 0
+attribution_open_section() {
+  local file=$1
+  [ -s "$file" ] || return 0
+  grep -E '^# schema=' -- "$file" 2>/dev/null | tail -n 1 || true
+}
+
+attribution_append() {
+  local data=$1 kind=$2 content=$3 origin=${4:-}
+  local file lock payload locked=0 attempt=0 status=0
+  [ -n "$content" ] || return 0
   mkdir -p "$data" || return 1
   file="$data/cost-attribution.tsv"
   lock="$data/.cost-attribution.lock"
@@ -319,14 +337,24 @@ attribution_append_rows() {
   if [ -s "$file" ] && [ -n "$(tail -c 1 "$file" 2>/dev/null || true)" ]; then
     payload=$'\n'
   fi
-  if [ ! -s "$file" ] || ! grep -qxF "$ATTRIBUTION_MARKER" "$file"; then
+  if [ "$kind" = legacy ]; then
+    payload+="$ATTRIBUTION_LEGACY_MARKER home=$(attribution_escape "$origin")"$'\n'
+  elif [ "$(attribution_open_section "$file")" != "$ATTRIBUTION_MARKER" ]; then
     payload+="$ATTRIBUTION_MARKER"$'\n'
     payload+="$ATTRIBUTION_COLUMNS"$'\n'
   fi
-  payload+="$rows"$'\n'
+  payload+="$content"$'\n'
   printf '%s' "$payload" >> "$file" || status=1
   [ "$locked" -eq 0 ] || fm_lock_release "$lock"
   return "$status"
+}
+
+attribution_append_rows() {
+  attribution_append "$1" v2 "$2"
+}
+
+attribution_append_legacy() {
+  attribution_append "$1" legacy "$3" "$2"
 }
 
 record_cost_attribution() {
@@ -356,29 +384,42 @@ record_cost_attribution() {
   attribution_append_rows "$data" "$row"
 }
 
-# Read a retiring home's own v2 data rows so they can outlive that home. Only
-# the rows below the v2 marker are portable: anything the captain hand-wrote
-# above it has an unknown schema and must not be merged into a v2 section.
-collect_firstmate_home_attribution() {
+attribution_home_record_path() {
   local home=$1 file src dest
   file="$home/data/cost-attribution.tsv"
   [ -f "$file" ] && [ ! -L "$file" ] || return 0
   src=$(CDPATH='' cd -- "$home/data" 2>/dev/null && pwd -P) || return 0
   dest=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) || dest=
   [ "$src" != "$dest" ] || return 0
-  awk -F '\t' -v marker="$ATTRIBUTION_MARKER" '
-    !seen { if ($0 == marker) { seen = 1 } ; next }
-    /^#/ { next }
+  printf '%s\n' "$file"
+}
+
+# Read a retiring home's record so it can outlive that home. `v2` yields the
+# join rows, which belong in the parent's v2 section; `legacy` yields every other
+# non-blank line verbatim, because its schema is unknown and a preserved row a
+# human can still read beats a dropped one.
+collect_firstmate_home_attribution() {
+  local home=$1 want=$2 file
+  file=$(attribution_home_record_path "$home") || return 1
+  [ -n "$file" ] || return 0
+  awk -F '\t' -v marker="$ATTRIBUTION_MARKER" -v want="$want" '
+    BEGIN { section = "legacy" }
+    /^# schema=/ { section = ($0 == marker) ? "v2" : "legacy"; next }
     $0 == "" { next }
+    { if (section != want) next }
+    want == "legacy" { print; next }
+    /^#/ { next }
     $1 == "task" && $2 == "worktree" { next }
     { print }
   ' "$file"
 }
 
 preserve_firstmate_home_attribution() {
-  local label=$1 home=$2 rows=$3
-  [ -n "$rows" ] || return 0
-  if ! attribution_append_rows "$DATA" "$rows"; then
+  local label=$1 home=$2 legacy=$3 rows=$4
+  if [ -n "$legacy" ] && ! attribution_append_legacy "$DATA" "$home" "$legacy"; then
+    echo "warning: could not preserve the hand-written attribution lines recorded by $label $home; removal completed and those lines are lost" >&2
+  fi
+  if [ -n "$rows" ] && ! attribution_append_rows "$DATA" "$rows"; then
     echo "warning: could not preserve the AI effort attribution rows recorded by $label $home; removal completed and those rows are lost" >&2
   fi
   return 0
@@ -1174,17 +1215,20 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup preserved_rows
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+  local preserved_rows preserved_legacy harvest_ok=1
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
   # Harvest before the removal, hand off only after it succeeds: a removal that
   # fails and leaves the home in place must not seed duplicate rows upstream.
-  preserved_rows=
-  if ! preserved_rows=$(collect_firstmate_home_attribution "$abs_home_path"); then
-    preserved_rows=
-    echo "warning: could not read the AI effort attribution record in $label $abs_home_path; removal will continue and those rows may be lost" >&2
+  preserved_rows=$(collect_firstmate_home_attribution "$abs_home_path" v2) \
+    || { preserved_rows=; harvest_ok=0; }
+  preserved_legacy=$(collect_firstmate_home_attribution "$abs_home_path" legacy) \
+    || { preserved_legacy=; harvest_ok=0; }
+  if [ "$harvest_ok" -eq 0 ]; then
+    echo "warning: could not read the whole AI effort attribution record in $label $abs_home_path; removal will continue and part of it may be lost" >&2
   fi
   process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
@@ -1203,12 +1247,12 @@ remove_firstmate_home() {
       return 1
     }
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
-    preserve_firstmate_home_attribution "$label" "$abs_home_path" "$preserved_rows"
+    preserve_firstmate_home_attribution "$label" "$abs_home_path" "$preserved_legacy" "$preserved_rows"
     return 0
   fi
   if safe_rm_rf "$abs_home_path" "$label"; then
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
-    preserve_firstmate_home_attribution "$label" "$abs_home_path" "$preserved_rows"
+    preserve_firstmate_home_attribution "$label" "$abs_home_path" "$preserved_legacy" "$preserved_rows"
     return 0
   fi
   restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
