@@ -40,7 +40,11 @@ wake() {
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
-  echo "$1" || output_status=$?
+  if echo "$1"; then
+    output_status=0
+  else
+    output_status=$?
+  fi
   if [ -n "$FM_WAKE_POST_OUTPUT_ACTION" ]; then
     "$FM_WAKE_POST_OUTPUT_ACTION" "$output_status" || true
   fi

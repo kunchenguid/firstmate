@@ -251,12 +251,17 @@ fm_procevent_claim_mark_terminal_locked() {
     && [ -n "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ] || return 1
   root=$(fm_procevent_claim_root)
   tmp=$(umask 077; mktemp "$root/.claim.XXXXXX") || return 1
-  printf '%s\n%s\n%s\n%s\n%s\n%s\nterminal\n' \
+  if printf '%s\n%s\n%s\n%s\n%s\n%s\nterminal\n' \
     "$FM_PROCEVENT_CLAIM_HOME" "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_TOKEN" \
     "$FM_PROCEVENT_CLAIM_IDENTITY" "$FM_PROCEVENT_CLAIM_REG_DIR" \
     "$FM_PROCEVENT_CLAIM_REG_IDENTITY" > "$tmp" \
     && chmod 0600 "$tmp" \
-    && mv -f -- "$tmp" "$claim" || { rm -f -- "$tmp"; return 1; }
+    && mv -f -- "$tmp" "$claim"; then
+    return 0
+  else
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 # fm_procevent_claim_release_locked <source-id> <home> <pid> <token>
