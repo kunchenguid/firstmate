@@ -121,7 +121,7 @@ preview_promotion_pr() {
   title=$(fm_proplane_promote_pr_title "$base_sha" "$head_sha")
   body_file=$(mktemp)
   fm_proplane_promote_pr_body "$GIT_ROOT" "$base_ref" "$head_ref" \
-    "$pending" "" "$pending" >"$body_file"
+    "$pending" "" "$pending" origin/prakrit >"$body_file"
   fm_proplane_promote_pr_sync "$GIT_ROOT" main prakrit "$title" "$body_file" 1 || true
   rm -f "$body_file"
 }

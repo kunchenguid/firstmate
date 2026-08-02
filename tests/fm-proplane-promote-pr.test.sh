@@ -19,6 +19,9 @@
 #   (l) an open PR that is not a promotion record is never rewritten
 #   (m) end to end: a failed fast-forward annotates the record it already opened
 #   (p) end to end: a failure AFTER main lands leaves that record alone
+#   (s) the body reconciles the promoted range against the diff GitHub renders
+#   (t) end to end: a plain --dry-run runs no gate and still previews the record
+#   (u) the reset guard refuses when it cannot read a worktree's state
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -187,6 +190,64 @@ body_no_report=$(fm_proplane_promote_pr_body "$case_a/repo" origin/main origin/p
 assert_contains "$body_no_report" 'SKIPPED (captain-authorized)' 'skipped security outcome is stated'
 assert_not_contains "$body_no_report" '- report:' 'no report line without a report'
 pass 'promotion PR body reports skipped gates as skipped'
+
+# --- (s) the body reconciles the promoted range against the rendered diff -----
+#
+# The PR is opened FROM prakrit, because the keeper-branch rule never pushes
+# integrate/* to GitHub, while the promoted range is built ON the integrate
+# branch that the no-mistakes validation commits its fixes onto. GitHub renders
+# prakrit's diff either way, so a body that states only the range leaves a reader
+# unable to tell which commits that diff omits and which it shows but never
+# landed. Both directions have to be named.
+
+case_s="$TMP_ROOT/s"
+mkdir -p "$case_s"
+make_repo "$case_s/repo"
+# What a real promotion validates on: origin/prakrit merged into origin/main,
+# plus a fix the validation committed there, which never reaches prakrit.
+git -C "$case_s/repo" checkout -q -B integrate/prakrit-to-main origin/main
+git -C "$case_s/repo" merge -q --no-edit origin/prakrit -m 'integrate(prakrit): test fixture'
+printf 'fix\n' > "$case_s/repo/fix.txt"
+git -C "$case_s/repo" add fix.txt
+git -C "$case_s/repo" commit -qm 'fix: committed onto integrate by the validation'
+# And a commit another agent pushed to prakrit after the integrate branch was
+# cut, which this promotion does not deliver.
+git -C "$case_s/repo" checkout -q prakrit
+printf 'later\n' > "$case_s/repo/later.txt"
+git -C "$case_s/repo" add later.txt
+git -C "$case_s/repo" commit -qm 'feat: pushed to prakrit after the cut'
+git -C "$case_s/repo" push -q origin prakrit
+git -C "$case_s/repo" fetch -q origin
+integrate_tip=$(git -C "$case_s/repo" rev-parse integrate/prakrit-to-main)
+
+diverged=$(fm_proplane_promote_pr_body "$case_s/repo" origin/main integrate/prakrit-to-main \
+  passed '' passed origin/prakrit)
+assert_contains "$diverged" "$integrate_tip" 'the body names the exact tip main is fast-forwarded to'
+assert_contains "$diverged" 'Promoted but NOT on' 'the body says the diff omits promoted commits'
+assert_contains "$diverged" 'committed onto integrate by the validation' \
+  'the body lists the promoted commit GitHub cannot show'
+assert_contains "$diverged" 'but NOT promoted, so this PR' 'the body says the diff shows unpromoted commits'
+assert_contains "$diverged" 'pushed to prakrit after the cut' \
+  'the body lists the head-branch commit this promotion does not land'
+assert_contains "$diverged" 'does NOT close as merged' 'the body stops claiming a close it will not get'
+assert_contains "$diverged" 'authoritative' 'the promoted range is stated as the authority'
+pass 'the body reconciles the promoted range against the diff GitHub renders'
+
+# When the head branch and the promoted range agree, the record says so, and the
+# close-as-merged claim is the accurate one to make.
+aligned=$(fm_proplane_promote_pr_body "$case_a/repo" origin/main origin/prakrit passed '' passed origin/prakrit)
+assert_contains "$aligned" 'matches the promoted range exactly' 'an aligned head is recorded as aligned'
+assert_contains "$aligned" 'which closes this PR as merged' 'an aligned record states the close it does get'
+assert_not_contains "$aligned" 'NOT promoted' 'nothing is reported as unlanded when nothing is'
+pass 'a head branch matching the promoted range is recorded as the promotion itself'
+
+# With no head ref to reconcile against, the record states the condition for
+# closing rather than asserting an outcome it cannot know.
+unknown_head=$(fm_proplane_promote_pr_body "$case_s/repo" origin/main integrate/prakrit-to-main passed '' passed)
+assert_contains "$unknown_head" 'closes this PR as merged once' 'an unreconciled record states the condition'
+assert_not_contains "$unknown_head" 'right after opening this PR, which closes' \
+  'an unreconciled record never asserts the close unconditionally'
+pass 'a record with no head ref to reconcile states the condition, not the outcome'
 
 [ "$(fm_proplane_promote_pr_range_count "$case_a/repo" origin/main origin/prakrit)" = 1 ] ||
   fail 'range count should be 1'
@@ -483,9 +544,14 @@ rc=$?
 set -e
 expect_code 0 "$rc" 'the promotion should succeed'
 recorded=$(cat "$case_r/pr-body.md")
-assert_contains "$recorded" 'feat: promoted change' 'the record lists the commits this promotion delivers'
-assert_not_contains "$recorded" 'after the integrate branch was cut' \
-  'the record must not list a commit this promotion does not push'
+# Everything above the reconciliation section is what the record promotes; the
+# section below it is what GitHub's diff disagrees about.
+promoted=$(printf '%s\n' "$recorded" | awk '/^## Record versus/ { exit } { print }')
+assert_contains "$promoted" 'feat: promoted change' 'the record lists the commits this promotion delivers'
+assert_not_contains "$promoted" 'after the integrate branch was cut' \
+  'the record must not promote a commit this promotion does not push'
+assert_contains "$recorded" 'but NOT promoted, so this PR' \
+  'a commit the PR diff shows but the promotion never delivers is called out as unlanded'
 assert_contains "$recorded" '- commits: 1' 'the recorded count matches what is fast-forwarded'
 [ "$(origin_sha "$case_r" main)" = "$integrate_sha" ] || fail 'main should land the integrate tip'
 pass 'the record describes the refs the promotion was built on, not a fresh read of prakrit'
@@ -608,6 +674,48 @@ assert_contains "$out" 'origin/main..integrate/prakrit-to-main' 'dry run prints 
 [ "$(origin_sha "$case_h" main)" = "$main_sha_before" ] || fail 'dry run must not move origin/main'
 pass 'a dry-run promotion prints the record PR and opens none'
 
+# --- (t) a plain --dry-run runs no gate and still previews the record ----------
+#
+# Printing what a promotion would do is the whole job of the flag. The security
+# review spends real model quota and writes a report under $FM_HOME/state, so a
+# dry run that fires it is not dry; and a dry run that stops at the push gate
+# before the preview never does the one thing it exists for.
+
+case_t=$(make_promotion_case t none)
+: > "$case_t/gh.log"
+main_sha_before=$(origin_sha "$case_t" main)
+set +e
+out=$(run_promotion "$case_t" --dry-run)
+rc=$?
+set -e
+expect_code 0 "$rc" 'a plain dry run should succeed'
+assert_contains "$out" 'fm-proplane-security-review.sh' 'the dry run names the review it would run'
+assert_not_contains "$out" 'proplane-security-review:' 'the dry run must not run the real security review'
+assert_absent "$case_t/home/state" 'a dry run must not write a security review report'
+assert_contains "$out" 'DRY gh-axi pr create --base main --head prakrit' 'the dry run previews the record PR'
+assert_contains "$out" 'origin/main..integrate/prakrit-to-main' 'the dry run prints the promoted range'
+assert_contains "$out" 'NOT RUN' 'the previewed record says the gates did not run'
+[ ! -s "$case_t/gh.log" ] || fail 'a plain dry run must not call gh-axi'
+[ "$(origin_sha "$case_t" main)" = "$main_sha_before" ] || fail 'a plain dry run must not move origin/main'
+pass 'a plain --dry-run runs no security review and still previews the promotion record'
+
+# A dry run before any integrate branch exists is the common case (nothing has
+# been promoted yet), and it must preview cleanly rather than die resolving a ref
+# that a real run would have created.
+case_t2=$(make_promotion_case t-no-integrate none)
+: > "$case_t2/gh.log"
+git -C "$case_t2/repo" checkout -q main
+git -C "$case_t2/repo" branch -q -D integrate/prakrit-to-main
+set +e
+out=$(run_promotion "$case_t2" --dry-run)
+rc=$?
+set -e
+expect_code 0 "$rc" 'a dry run with no integrate branch should succeed'
+assert_contains "$out" 'DRY gh-axi pr create --base main --head prakrit' 'it still previews the record PR'
+assert_contains "$out" 'origin/main..origin/prakrit' 'it previews the range a real promotion would carry'
+[ ! -s "$case_t2/gh.log" ] || fail 'a dry run must not call gh-axi'
+pass 'a dry run with no integrate branch previews cleanly instead of dying on a missing ref'
+
 # --- nothing to promote -------------------------------------------------------
 
 case_i=$(make_promotion_case i none)
@@ -640,6 +748,64 @@ assert_contains "$out" 'origin/main..origin/prakrit' 'the ladder dry run shows t
 [ ! -s "$case_j/gh.log" ] || fail 'the ladder dry run must not call gh-axi'
 [ "$(origin_sha "$case_j" main)" = "$main_sha_before" ] || fail 'the ladder dry run must not move origin/main'
 pass 'the full ladder dry run previews the promotion record PR without opening it'
+
+# --- (u) the reset guard refuses when it cannot read a worktree's state --------
+#
+# fm_proplane_assert_resettable is what stops this ladder from hard-resetting a
+# sandbox that still holds unlanded work, and the promote flow consults it before
+# staging the integrate tip. A `git status` that FAILS answers "unknown", not
+# "clean": reading a stale .git pointer or a held index lock as an empty worktree
+# would let the reset through exactly when the guard cannot see what it destroys.
+
+BRANCH_LIB="$ROOT/bin/fm-proplane-agent-branches-lib.sh"
+case_u="$TMP_ROOT/u"
+mkdir -p "$case_u/home/config"
+fm_git_init_commit "$case_u/clean"
+cp -R "$case_u/clean" "$case_u/dirty"
+printf 'unlanded\n' > "$case_u/dirty/unlanded.txt"
+# A worktree whose .git pointer no longer resolves: `git status` fails, and its
+# porcelain output is empty for a reason that has nothing to do with being clean.
+mkdir -p "$case_u/unreadable"
+printf 'gitdir: %s\n' "$case_u/no-such-gitdir" > "$case_u/unreadable/.git"
+
+run_guard() {
+  FM_HOME="$case_u/home" bash -c '
+    . "$1"
+    fm_proplane_assert_resettable "$2" guard-test "$3"
+  ' _ "$BRANCH_LIB" "$1" "${2:-0}" 2>&1
+}
+
+set +e
+out=$(run_guard "$case_u/clean")
+rc=$?
+set -e
+expect_code 0 "$rc" 'a clean worktree stays resettable'
+
+set +e
+out=$(run_guard "$case_u/dirty")
+rc=$?
+set -e
+expect_code 1 "$rc" 'a worktree with unlanded work must not be reset'
+assert_contains "$out" 'REFUSING to reset' 'the refusal is explained'
+
+set +e
+out=$(run_guard "$case_u/unreadable")
+rc=$?
+set -e
+expect_code 1 "$rc" 'a worktree whose state cannot be read must not be reset'
+assert_contains "$out" 'REFUSING to reset' 'the unreadable worktree is refused, not assumed clean'
+assert_contains "$out" 'could not be read' 'the refusal says the state was unreadable'
+assert_contains "$out" 'git status failed' 'the underlying git error is shown, not an empty listing'
+
+# --force is the captain's explicit authorization to discard, and this change
+# only ever tightens the guard: it must still be honored where it was before.
+set +e
+out=$(run_guard "$case_u/dirty" 1)
+rc=$?
+set -e
+expect_code 0 "$rc" '--force must still allow an authorized discard'
+assert_contains "$out" 'discarding uncommitted work' 'the authorized discard is announced'
+pass 'the reset guard fails closed when it cannot read a worktree state'
 
 # --- the standing instructions match what the tooling now does ----------------
 #

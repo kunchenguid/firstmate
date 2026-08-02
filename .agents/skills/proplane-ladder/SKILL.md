@@ -40,7 +40,9 @@ Land commits on the owning keeper branch in that agent's worktree only.
 
 **Promotion PR (standing captain order, 2026-07-31):** every `prakrit` → `main` promotion opens a promotion-record PR from `prakrit` into `main`, carrying the promoted commit range, the security-review outcome, and the validation outcome.
 `bin/fm-proplane-promote-prakrit-to-main.sh --push-main` opens it, and `bin/fm-proplane-promote-pr-lib.sh` owns the contract.
-It is a record, not a second gate: the ladder fast-forwards `main` right after opening it, which closes it as merged, and a GitHub failure warns without stopping the promotion.
+It is a record, not a second gate: the ladder fast-forwards `main` right after opening it, and a GitHub failure warns without stopping the promotion.
+The promotion is built on `integrate/prakrit-to-main`, which is never pushed to GitHub, so the PR is opened from `prakrit` and the body reconciles the two: the promoted range is authoritative, and any commit the PR's diff omits or shows without landing is named there.
+GitHub closes the PR as merged only when `prakrit` carries nothing the promotion left behind; when it does not close, the body says so and the next promotion's record replaces it.
 Open **no other** PR unless the captain explicitly asks.
 
 ## After changes land

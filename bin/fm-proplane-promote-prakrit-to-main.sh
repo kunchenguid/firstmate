@@ -69,6 +69,9 @@ for arg in "$@"; do
       echo "                gate outcomes; it never gates the promotion, and a GitHub"
       echo "                failure is warned about rather than stopping the push."
       echo "  --dry-run     Prints the promotion record PR it would open, and opens none."
+      echo "                It runs no security review and no no-mistakes validation"
+      echo "                either; both are recorded as NOT RUN so a preview can never"
+      echo "                be read as evidence that the gates passed."
       echo "  --force       CAPTAIN-AUTHORIZED ONLY: allow the staging reset and sandbox"
       echo "                realignment to discard uncommitted work in those worktrees."
       echo "  --skip-gates  CAPTAIN-AUTHORIZED ONLY: skip the security review and the"
@@ -118,6 +121,14 @@ prepare_integrate_branch() {
 
 run_security_review() {
   local log rc
+  # A dry run spends nothing: the review burns real model quota and writes a
+  # report under $FM_HOME/state, which is a side effect a flag named --dry-run
+  # must never produce. The real path below is untouched.
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "DRY $SCRIPT_DIR/fm-proplane-security-review.sh $GIT_ROOT --base main --head $INTEGRATE_BRANCH"
+    SECURITY_REVIEW_REPORT=''
+    return 0
+  fi
   log=$(mktemp)
   # Tee stdout only: the review's own BLOCKED messages stay on stderr, and the
   # report path it prints becomes evidence in the promotion PR.
@@ -184,8 +195,11 @@ open_promotion_pr() {
   head_sha=$(fm_proplane_promote_pr_short_sha "$GIT_ROOT" "$head_ref")
   title=$(fm_proplane_promote_pr_title "$base_sha" "$head_sha")
   body_file=$(mktemp)
+  # The PR is opened from prakrit because integrate/* is never pushed to GitHub,
+  # so the body is told both refs and reconciles them: the promoted range stays
+  # authoritative, and any commit the rendered diff misses or adds is named.
   fm_proplane_promote_pr_body "$GIT_ROOT" "$base_ref" "$head_ref" \
-    "$SECURITY_REVIEW_STATUS" "$SECURITY_REVIEW_REPORT" "$VALIDATION_STATUS" >"$body_file"
+    "$SECURITY_REVIEW_STATUS" "$SECURITY_REVIEW_REPORT" "$VALIDATION_STATUS" origin/prakrit >"$body_file"
   echo "== promotion record PR (prakrit → main) =="
   fm_proplane_promote_pr_sync "$GIT_ROOT" main prakrit "$title" "$body_file" "$DRY_RUN"
   rc=$?
@@ -272,11 +286,14 @@ stage_integrate_for_local_test() {
   local line prakrit_worktree prakrit_port integrate_sha
   line=$(fm_proplane_agent_integration_rows) || return 0
   IFS=$'\t' read -r _ prakrit_worktree prakrit_port <<<"$line"
-  integrate_sha=$(git -C "$GIT_ROOT" rev-parse "$INTEGRATE_BRANCH")
+  # A dry run never builds the integrate branch, so it must not read its tip:
+  # resolving a ref that does not exist would abort the very run whose job is to
+  # print what a real promotion would do.
   if [ "$DRY_RUN" -eq 1 ]; then
-    echo "DRY stage $prakrit_worktree at $integrate_sha for localhost:$prakrit_port"
+    echo "DRY stage $prakrit_worktree at $INTEGRATE_BRANCH for localhost:$prakrit_port"
     return 0
   fi
+  integrate_sha=$(git -C "$GIT_ROOT" rev-parse "$INTEGRATE_BRANCH") || return 1
   fm_proplane_assert_resettable "$prakrit_worktree" "proplane-promote-main" "$FORCE" || return 1
   run_git "$prakrit_worktree" checkout prakrit || return 1
   run_git "$prakrit_worktree" reset --hard "$integrate_sha" || return 1
@@ -293,7 +310,11 @@ main() {
     else
       echo "== security review =="
       run_security_review || exit 1
-      SECURITY_REVIEW_STATUS='passed (no Critical or High findings)'
+      if [ "$DRY_RUN" -eq 1 ]; then
+        SECURITY_REVIEW_STATUS='NOT RUN (--dry-run: no security review was executed in this invocation)'
+      else
+        SECURITY_REVIEW_STATUS='passed (no Critical or High findings)'
+      fi
     fi
   else
     run_git "$GIT_ROOT" checkout "$INTEGRATE_BRANCH" 2>/dev/null || {
@@ -311,7 +332,11 @@ main() {
       echo "proplane-promote-main: no-mistakes did not complete — drive gates with no-mistakes axi respond, then re-run --validate-only" >&2
       exit 1
     }
-    VALIDATION_STATUS='passed (no-mistakes: review, tests, document, lint)'
+    if [ "$DRY_RUN" -eq 1 ]; then
+      VALIDATION_STATUS='NOT RUN (--dry-run: no validation was executed in this invocation)'
+    else
+      VALIDATION_STATUS='passed (no-mistakes: review, tests, document, lint)'
+    fi
   fi
 
   if [ "$VALIDATE_ONLY" -eq 0 ]; then
@@ -320,6 +345,15 @@ main() {
   fi
 
   if [ "$PUSH_MAIN" -eq 0 ]; then
+    # Printing what a promotion would do is the whole job of --dry-run, and the
+    # record PR is part of that, so the preview runs without --push-main too. It
+    # still opens nothing: fm_proplane_promote_pr_sync makes no GitHub call here.
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "DRY --push-main would open this promotion record PR before the fast-forward"
+      open_promotion_pr || {
+        echo "proplane-promote-main: WARNING could not preview the promotion record PR" >&2
+      }
+    fi
     echo "proplane-promote-main: validation complete — test on http://localhost:3000"
     echo "proplane-promote-main: no push yet. After you approve, run with --push-main (which also opens the promotion record PR)."
     exit 0

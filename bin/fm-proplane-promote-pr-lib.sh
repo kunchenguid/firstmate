@@ -12,6 +12,14 @@
 # Every function below therefore returns non-zero for the caller to warn on
 # rather than exiting the process.
 #
+# Record versus rendered diff: the promotion is built on integrate/prakrit-to-main
+# (the no-mistakes validation commits its fixes there, not onto prakrit), but the
+# keeper-branch rule never pushes integrate/* to GitHub, so the PR is opened from
+# prakrit and GitHub renders prakrit's diff. Those two can disagree in both
+# directions, so the body states the promoted range as authoritative, names the
+# exact tip main is fast-forwarded to, and lists the commits on either side of the
+# disagreement. A reader must never be misled about what landed.
+#
 # Sourced by bin/fm-proplane-promote-prakrit-to-main.sh (opens the PR) and
 # bin/fm-proplane-promote-full.sh (--dry-run preview). GitHub access goes
 # through gh-axi, per AGENTS.md.
@@ -21,9 +29,13 @@
 #     Commits in <base_ref>..<head_ref>, or 0 when the range cannot be read.
 #   fm_proplane_promote_pr_title <base_sha> <head_sha>
 #     One-line PR title naming the promoted range.
-#   fm_proplane_promote_pr_body <git_root> <base_ref> <head_ref> <security_status> <security_report> <validation_status>
-#     Markdown body: promoted commit range, security-review outcome, validation
-#     outcome. <security_report> may be empty when no report path was printed.
+#   fm_proplane_promote_pr_body <git_root> <base_ref> <head_ref> <security_status> <security_report> <validation_status> [pr_head_ref]
+#     Markdown body: promoted commit range, the exact tip main is fast-forwarded
+#     to, security-review outcome, validation outcome. <security_report> may be
+#     empty when no report path was printed. <pr_head_ref> is the local ref for
+#     the branch the PR is opened FROM (origin/prakrit); when it is given and
+#     resolvable, the body reconciles the promoted range against the diff GitHub
+#     actually renders. See "record versus rendered diff" below.
 #   fm_proplane_promote_pr_sync <git_root> <base> <head> <title> <body_file> <dry_run>
 #     Idempotent publish: updates the open <head> -> <base> PR when one exists
 #     AND its title marks it as a promotion record, otherwise creates one. Sets
@@ -100,31 +112,95 @@ fm_proplane_promote_pr_title() {
   printf '%s (%s..%s)\n' "$FM_PROPLANE_PR_TITLE_PREFIX" "$1" "$2"
 }
 
+# A capped `- <sha> <subject>` listing for the given rev-list arguments. The cap
+# keeps a long promotion from drowning the record; the marker keeps a capped
+# listing from reading as one the --no-merges filter shortened, so a reader can
+# always tell which commits the record omitted and why.
+fm_proplane_promote_pr_commit_listing() {
+  local git_root=$1 empty_text=$2
+  shift 2
+  local listing listed out
+  listing=$(git -C "$git_root" log --no-merges --format='- %h %s' "$@" 2>/dev/null) || listing=""
+  if [ -z "$listing" ]; then
+    printf '%s\n' "$empty_text"
+    return 0
+  fi
+  listed=$(printf '%s\n' "$listing" | wc -l | tr -d '[:space:]')
+  out=$(printf '%s\n' "$listing" | head -n "$FM_PROPLANE_PR_COMMIT_CAP")
+  if [ "$listed" -gt "$FM_PROPLANE_PR_COMMIT_CAP" ]; then
+    out="$out
+- (... $((listed - FM_PROPLANE_PR_COMMIT_CAP)) more, listing capped at $FM_PROPLANE_PR_COMMIT_CAP)"
+  fi
+  printf '%s\n' "$out"
+}
+
 fm_proplane_promote_pr_body() {
   local git_root=$1 base_ref=$2 head_ref=$3
-  local security_status=$4 security_report=$5 validation_status=$6
-  local base_sha head_sha count listing listed log report_line
+  local security_status=$4 security_report=$5 validation_status=$6 pr_head_ref=${7:-}
+  local base_sha head_sha head_tip count log report_line
+  local pr_head_label diff_section lands_section
+  local unshown_count unlanded_count unshown_log unlanded_log
   base_sha=$(fm_proplane_promote_pr_short_sha "$git_root" "$base_ref")
   head_sha=$(fm_proplane_promote_pr_short_sha "$git_root" "$head_ref")
+  # The full sha of the tip main is fast-forwarded to: the record has to name
+  # what landed exactly, not a ref name that keeps moving after the promotion.
+  head_tip=$(git -C "$git_root" rev-parse "$head_ref" 2>/dev/null) || head_tip=unknown
   count=$(fm_proplane_promote_pr_range_count "$git_root" "$base_ref" "$head_ref")
-  listing=$(git -C "$git_root" log --no-merges --format='- %h %s' "$base_ref..$head_ref" 2>/dev/null) || listing=""
-  if [ -z "$listing" ]; then
-    log='- (no non-merge commits in this range)'
-  else
-    listed=$(printf '%s\n' "$listing" | wc -l | tr -d '[:space:]')
-    log=$(printf '%s\n' "$listing" | head -n "$FM_PROPLANE_PR_COMMIT_CAP")
-    # Without this marker a capped listing is indistinguishable from one the
-    # --no-merges filter shortened, so a reader cannot tell which commits the
-    # record omitted or why.
-    if [ "$listed" -gt "$FM_PROPLANE_PR_COMMIT_CAP" ]; then
-      log="$log
-- (... $((listed - FM_PROPLANE_PR_COMMIT_CAP)) more, listing capped at $FM_PROPLANE_PR_COMMIT_CAP)"
-    fi
-  fi
+  log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
+    '- (no non-merge commits in this range)' "$base_ref..$head_ref")
   report_line=""
   if [ -n "$security_report" ]; then
     report_line="
 - report: \`$security_report\`"
+  fi
+
+  # Without a resolvable PR head there is nothing to reconcile the range against,
+  # so the closing line states the condition instead of asserting the outcome.
+  diff_section=""
+  lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
+GitHub closes this PR as merged once \`main\` contains this PR's head branch."
+
+  if [ -n "$pr_head_ref" ] && git -C "$git_root" rev-parse --verify --quiet "$pr_head_ref" >/dev/null 2>&1; then
+    pr_head_label=${pr_head_ref#origin/}
+    unshown_count=$(git -C "$git_root" rev-list --count "$base_ref..$head_ref" --not "$pr_head_ref" 2>/dev/null) || unshown_count=0
+    unlanded_count=$(git -C "$git_root" rev-list --count "$pr_head_ref" --not "$head_ref" 2>/dev/null) || unlanded_count=0
+    diff_section="## Record versus this PR's diff
+
+This PR's head is \`$pr_head_label\`, but the promoted range above is built on \`$head_ref\`, which the keeper-branch rule never pushes to GitHub.
+The promoted range above is authoritative for what lands on \`main\`; the diff GitHub renders here is \`$pr_head_label\` and can differ from it.
+"
+    if [ "${unshown_count:-0}" -gt 0 ]; then
+      unshown_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
+        '- (merge commits only)' "$base_ref..$head_ref" --not "$pr_head_ref")
+      diff_section="$diff_section
+Promoted but NOT on \`$pr_head_label\`, so this PR's diff does not show them ($unshown_count):
+
+$unshown_log
+"
+    fi
+    if [ "${unlanded_count:-0}" -gt 0 ]; then
+      unlanded_log=$(fm_proplane_promote_pr_commit_listing "$git_root" \
+        '- (merge commits only)' "$pr_head_ref" --not "$head_ref")
+      diff_section="$diff_section
+On \`$pr_head_label\` but NOT promoted, so this PR's diff shows them even though this promotion did not land them ($unlanded_count):
+
+$unlanded_log
+"
+    fi
+    if [ "${unshown_count:-0}" -eq 0 ] && [ "${unlanded_count:-0}" -eq 0 ]; then
+      diff_section="$diff_section
+\`$pr_head_label\` matches the promoted range exactly, so this PR's diff is the promotion.
+"
+    fi
+    diff_section="$diff_section
+"
+    if [ "${unlanded_count:-0}" -eq 0 ]; then
+      lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR, which closes this PR as merged: \`main\` then contains \`$pr_head_label\`."
+    else
+      lands_section="The ladder fast-forwards \`main\` to \`$head_tip\` right after opening this PR.
+This PR does NOT close as merged, because \`$pr_head_label\` carries $unlanded_count commit(s) this promotion does not deliver, so \`main\` does not contain \`$pr_head_label\` after the fast-forward.
+It stays open until a later promotion records the range that catches those commits up; \`main\` carries the promoted range above either way."
+    fi
   fi
 
   cat <<EOF
@@ -134,10 +210,11 @@ Promotion record for the PropPlane keeper ladder: \`prakrit\` -> \`main\`.
 
 - range: \`$base_ref..$head_ref\` (\`$base_sha..$head_sha\`)
 - commits: $count
+- \`main\` is fast-forwarded to: \`$head_tip\`
 
 $log
 
-## Security review
+${diff_section}## Security review
 
 - outcome: $security_status$report_line
 
@@ -147,7 +224,7 @@ $log
 
 ## How this lands
 
-The ladder fast-forwards \`main\` to this range right after opening this PR, which closes this PR as merged.
+$lands_section
 This PR is the promotion record, not a second approval gate, so nothing waits on a review here.
 EOF
 }

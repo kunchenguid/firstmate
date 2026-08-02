@@ -69,26 +69,37 @@ fm_proplane_agent_is_sandbox() {
 # True when a worktree holds work that a hard reset would destroy: uncommitted
 # tracked edits, staged changes, or untracked files that are not ignored.
 # Firstmate never tears down unlanded work, so every reset path consults this.
+#
+# A `git status` that FAILS answers "unknown", not "clean". A stale .git pointer
+# or a held index lock produces no porcelain output, and reading that as an empty
+# worktree would let a hard reset through exactly when the guard cannot see what
+# it would destroy. This guard may only ever become stricter, so it fails closed.
 fm_proplane_worktree_is_dirty() {
-  local worktree=$1
-  [ -n "$(git -C "$worktree" status --porcelain 2>/dev/null)" ]
+  local worktree=$1 status
+  status=$(git -C "$worktree" status --porcelain 2>/dev/null) || return 0
+  [ -n "$status" ]
 }
 
 # Guard a destructive reset. Returns non-zero (caller should abort) when the
 # worktree is dirty and the caller was not explicitly authorized to discard.
 # $3 is the caller's force flag: 1 means the captain asked for the discard.
 fm_proplane_assert_resettable() {
-  local worktree=$1 label=$2 force=${3:-0}
+  local worktree=$1 label=$2 force=${3:-0} state
   fm_proplane_worktree_is_dirty "$worktree" || return 0
   if [ "$force" -eq 1 ]; then
     echo "$label: discarding uncommitted work in $worktree (--force)" >&2
     return 0
   fi
+  # `git status` failing is why the refusal fired in the unreadable case, so its
+  # error is the state to show; an operator who sees an empty listing instead
+  # cannot tell a guard that worked from one that misfired.
+  state=$(git -C "$worktree" status --short 2>&1) || state="(git status failed: $state)"
   {
     echo "$label: REFUSING to reset $worktree — it has uncommitted work that a"
-    echo "  hard reset would destroy. Commit or stash it, or re-run with --force"
-    echo "  only if you intend to discard it. Current state:"
-    git -C "$worktree" status --short 2>/dev/null | sed 's/^/    /'
+    echo "  hard reset would destroy, or its state could not be read. Commit or"
+    echo "  stash it, or re-run with --force only if you intend to discard it."
+    echo "  Current state:"
+    printf '%s\n' "$state" | sed 's/^/    /'
   } >&2
   return 1
 }
