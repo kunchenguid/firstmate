@@ -245,7 +245,7 @@ Send in-scope work to the fitting secondmate unless it is blocked or the captain
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
-Link intake: whenever the captain sends meaningful URL input, inspect each link with the suitable existing browser or media tool and record its normalized result or visible failure through `bin/fm-link-intake.sh`.
+Link intake: whenever the captain sends meaningful URL input, inspect each link with the suitable existing browser or media tool and record its normalized result or visible failure through `bin/fm-link-intake.sh`, which also prepares one queued ingest scout per retrievable link for you to dispatch under the ordinary intake rules.
 
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
