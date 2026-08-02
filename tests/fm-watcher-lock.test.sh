@@ -575,6 +575,55 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   pass "arm attaches to a live fresh watcher and fails loudly when that cycle has no successor"
 }
 
+test_attached_arm_accepts_actionable_peer_close() {
+  local dir state fakebin ownerout attachedout owner_arm attached_arm watcher_pid owner_status attached_status wake_seq i
+  dir=$(make_case arm-actionable-peer-close)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ownerout="$dir/owner.out"
+  attachedout="$dir/attached.out"
+  mark_pr_check_migration_complete "$state"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$ownerout" &
+  owner_arm=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$ownerout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$watcher_pid" "$ownerout" || fail "owner arm did not start its watcher"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$attachedout" &
+  attached_arm=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$watcher_pid" "$attachedout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$watcher_pid" "$attachedout" || fail "peer arm did not attach to the healthy watcher"
+
+  printf 'done: synthetic actionable close\n' > "$state/task.status"
+  wait_for_exit "$owner_arm" 80
+  owner_status=$?
+  [ "$owner_status" -eq 0 ] || fail "owner arm did not propagate the actionable watcher close (status $owner_status): $(cat "$ownerout")"
+  grep -q '^signal:' "$ownerout" || fail "owner arm omitted the actionable signal reason: $(cat "$ownerout")"
+  wake_seq=$(cat "$state/.wake-queue.seq" 2>/dev/null || true)
+  case "$wake_seq" in
+    ''|*[!0-9]*|0) fail "actionable close did not advance the durable wake sequence (got '${wake_seq:-empty}')" ;;
+  esac
+
+  wait_for_exit "$attached_arm" 80
+  attached_status=$?
+  [ "$attached_status" -eq 0 ] || fail "attached arm mislabeled an actionable peer close as failure (status $attached_status): $(cat "$attachedout")"
+  ! grep -qF 'watcher: FAILED' "$attachedout" || fail "attached arm printed FAILED for an actionable peer close: $(cat "$attachedout")"
+  grep -qF 'watcher: completed - attached cycle ended after an actionable wake' "$attachedout" || fail "attached arm omitted the honest actionable-close classification: $(cat "$attachedout")"
+  grep -q 'reason=actionable-peer-close' "$state/.watch-cycle-exits.log" || fail "attached arm did not classify the actionable peer close in the lifecycle ledger"
+  pass "attached arm treats a peer cycle with a newly queued actionable wake as a normal close"
+}
+
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   local dir state fakebin out armout i wpid armpid status
   dir=$(make_case attached-arm-signal-ledger)
@@ -1011,6 +1060,7 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_attached_arm_accepts_actionable_peer_close
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse

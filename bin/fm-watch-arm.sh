@@ -28,6 +28,9 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   watcher: completed - attached cycle ended after an actionable wake
+#                                                        - the observed peer queued a real reason
+#                                                          before ending without a successor
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -104,12 +107,23 @@ cycle_watcher_pid=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
+cycle_wake_seq_before=0
+
+cycle_wake_sequence() {
+  local seq
+  seq=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || echo 0)
+  case "$seq" in
+    ''|*[!0-9]*) seq=0 ;;
+  esac
+  printf '%s\n' "$seq"
+}
 
 cycle_begin() {
   cycle_watcher_pid=$1
   cycle_origin=$2
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
+  cycle_wake_seq_before=$(cycle_wake_sequence)
   cycle_active=1
 }
 
@@ -172,6 +186,29 @@ cycle_log_append() {
   esac
   fm_lock_release "$CYCLE_LOG_LOCK"
   cycle_active=0
+}
+
+# An attached arm cannot read a peer watcher's captured stdout, but every real
+# watcher reason advances the durable wake sequence before that watcher exits.
+# The peer owner's lifecycle record closes the narrow race where the wake was
+# already queued immediately before this arm attached.
+cycle_has_actionable_peer_close() {
+  local current_seq
+  current_seq=$(cycle_wake_sequence)
+  [ "$current_seq" -gt "$cycle_wake_seq_before" ] && return 0
+  [ -f "$CYCLE_LOG" ] || return 1
+  awk -F '\t' -v pid="$cycle_watcher_pid" -v since="$cycle_started_at" '
+    {
+      watcher = ended = reason = ""
+      for (i = 1; i <= NF; i += 1) {
+        if ($i ~ /^watcher_pid=/) watcher = substr($i, 13)
+        if ($i ~ /^ended_at=/) ended = substr($i, 10)
+        if ($i ~ /^reason=/) reason = substr($i, 8)
+      }
+      if (watcher == pid && ended + 0 >= since + 0 && reason ~ /^actionable-/) found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$CYCLE_LOG"
 }
 
 # A persistent adapter passes the arm pid that just closed. Once this new arm
@@ -283,6 +320,11 @@ attach_and_wait() {
       cycle_begin "$attached_pid" attached
       report_attached
       continue
+    fi
+    if cycle_has_actionable_peer_close; then
+      cycle_log_append 0 none actionable-peer-close none
+      echo "watcher: completed - attached cycle ended after an actionable wake"
+      return 0
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
     fail_unexplained_cycle
