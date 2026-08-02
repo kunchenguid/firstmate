@@ -612,6 +612,43 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_presentation_contract_renders_all_brief_scaffolds() {
+  local home kind id brief
+  home="$TMP_ROOT/presentation-contract-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout secondmate; do
+    id="brief-presentation-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise presentation contract work.' \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "# Presentation contract" "$brief" \
+      "$kind brief missing the presentation contract heading"
+    assert_grep "Use plain ASCII diagrams for CLI and terminal output." "$brief" \
+      "$kind brief missing the ASCII terminal requirement"
+    assert_grep "Never emit Mermaid source in CLI or terminal output." "$brief" \
+      "$kind brief missing the terminal Mermaid prohibition"
+    assert_grep "If the task input contains Mermaid, translate it into an equivalent ASCII diagram for terminal output." "$brief" \
+      "$kind brief missing the Mermaid-to-ASCII translation rule"
+    assert_grep "Mermaid is allowed only when you can positively verify that the user-facing surface is Codex App/Desktop and the diagram materially improves understanding; an unknown surface defaults to ASCII." "$brief" \
+      "$kind brief missing the Codex App/Desktop verification rule"
+    assert_grep "Do not force a diagram when prose is clearer." "$brief" \
+      "$kind brief missing the prose-when-clearer rule"
+  done
+  pass "fm-brief.sh: presentation contract renders in ship, scout, and secondmate scaffolds"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -648,4 +685,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_presentation_contract_renders_all_brief_scaffolds
 test_scout_and_secondmate_scaffold

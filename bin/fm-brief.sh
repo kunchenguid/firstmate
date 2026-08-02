@@ -128,6 +128,16 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+IFS= read -r -d '' PRESENTATION_CONTRACT <<'EOF' || true
+# Presentation contract
+Use plain ASCII diagrams for CLI and terminal output.
+Never emit Mermaid source in CLI or terminal output.
+If the task input contains Mermaid, translate it into an equivalent ASCII diagram for terminal output.
+Mermaid is allowed only when you can positively verify that the user-facing surface is Codex App/Desktop and the diagram materially improves understanding; an unknown surface defaults to ASCII.
+Do not force a diagram when prose is clearer.
+EOF
+PRESENTATION_CONTRACT=${PRESENTATION_CONTRACT%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -157,6 +167,8 @@ $SECONDMATE_CHARTER
 
 # Routing scope
 $SECONDMATE_SCOPE
+
+$PRESENTATION_CONTRACT
 
 # Project clones
 $PROJECT_CLONES_BODY
@@ -253,6 +265,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$PRESENTATION_CONTRACT
 
 $HERDR_SECTION
 
@@ -362,6 +376,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$PRESENTATION_CONTRACT
 
 $HERDR_SECTION
 
