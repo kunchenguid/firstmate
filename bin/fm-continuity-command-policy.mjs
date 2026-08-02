@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import {
 	Lexer,
 	commandPosition,
+	shellHereStringPayloads,
 	splitProgram,
 } from "./fm-arm-command-policy.mjs";
 
@@ -147,6 +148,11 @@ function collectExecutedFleetScripts(command, root, depth = 0) {
 				scripts.push(fleetScriptRecord(script, position, shell.index));
 		}
 		if (shell?.kind === "stdin") {
+			for (const payload of shellHereStringPayloads(tokens, position)) {
+				scripts.push(
+					...collectExecutedFleetScripts(payload, root, depth + 1),
+				);
+			}
 			for (const token of tokens) {
 				if (
 					token.type === "redir" &&

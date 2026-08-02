@@ -119,15 +119,17 @@ for command in \
 	"bash -lc 'bin/fm-send.sh task go'" \
 	'source bin/fm-send.sh task go' \
 	"eval 'bin/fm-send.sh task go'" \
+	"bash <<< 'bin/fm-send.sh task go'" \
 	$'bash <<\'EOF\'\nbin/fm-send.sh task go\nEOF'; do
 	assert_policy deny "$command"
 done
-pass "direct, absolute, grouped, substituted, shell -c, sourced, eval, and heredoc fleet execution is classified"
+pass "direct, absolute, grouped, substituted, shell -c, sourced, eval, here-string, and heredoc fleet execution is classified"
 
 for command in \
 	"echo 'bin/fm-send.sh task go'" \
 	"printf '%s\\n' 'bin/fm-send.sh task go'" \
 	"bash -n -c 'bin/fm-send.sh task go'" \
+	'bash <<< "$payload"' \
 	'if false; then bin/fm-send.sh task go; fi' \
 	'/tmp/unrelated/bin/fm-send.sh task go' \
 	'bin/fm-send.sh "unterminated'; do
