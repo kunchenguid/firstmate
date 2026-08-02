@@ -4,8 +4,16 @@
 # Usage:
 #   fm-procevent-lavish.sh arm <artifact.html>
 #   fm-procevent-lavish.sh classify <result-file>
+#   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
+#
+# classify   Print the lifecycle state a handler should act on: feedback, ended,
+#            waiting, missing, or unknown.
+# terminal   Exit 0 when the captured result means this Lavish source will never
+#            produce another result, so the runner may retire it; any other exit
+#            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
+#            calls, and the only place Lavish's notion of "ended" is decided.
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
 # canonical source identity, the argv for the currently published poll command,
@@ -39,7 +47,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -78,20 +86,27 @@ cmd_retire() {
   "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
 }
 
-# Classify a completed result into a lifecycle state for the handler. The status
-# lives in the response's leading `session:` block and is INDENTED, so it is read
-# as the first status line rather than an anchored whole-line match; anchoring on
-# "^status:" silently never matches and treats every ended review as feedback.
+# Read one field of the response's leading `session:` block. Those fields are
+# INDENTED, so each is read as the first indented match inside that block rather
+# than an anchored whole-line match; anchoring on "^status:" silently never
+# matches and treats every ended review as feedback. Confining the read to the
+# leading block is also what stops prompt payload text from forging a session
+# field. <field> is a fixed field name supplied by this adapter, never by input.
+session_field() {  # <result-file> <field>
+  awk -v field="$2" '
+    $0 == "session:" { in_s=1; next }
+    in_s && $0 !~ /^[[:space:]]/ { exit }
+    in_s && $0 ~ "^[[:space:]]+" field ":[[:space:]]*[A-Za-z_]+[[:space:]]*$" {
+      sub("^[[:space:]]+" field ":[[:space:]]*", ""); sub(/[[:space:]]*$/, ""); print; exit }
+  ' "$1"
+}
+
+# Classify a completed result into a lifecycle state for the handler.
 cmd_classify() {
   local file=${1-} status error_code error_message
   [ -n "$file" ] || usage
   [ -f "$file" ] || die "result file does not exist: $file"
-  status=$(awk '
-    $0 == "session:" { in_s=1; next }
-    in_s && $0 !~ /^[[:space:]]/ { exit }
-    in_s && $0 ~ /^[[:space:]]+status:[[:space:]]*[A-Za-z_]+[[:space:]]*$/ {
-      sub(/^[[:space:]]+status:[[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); print; exit }
-  ' "$file")
+  status=$(session_field "$file" status)
   case "$status" in
     feedback) printf 'feedback\n'; return 0 ;;
     ended)    printf 'ended\n'; return 0 ;;
@@ -111,11 +126,31 @@ cmd_classify() {
   fi
 }
 
+# Whether a captured result ends this source, for the generic runner's automatic
+# retirement. Lavish's notion of "ended" lives here and nowhere else: an ended
+# session produces nothing further, a missing session has nothing left to
+# produce, and the published poll delivers the final feedback of a `Send & End`
+# review marked with session_ended and returns only empty ended sessions after
+# it. Anything else - including an unreadable result - keeps the source armed.
+cmd_terminal() {
+  local file=${1-}
+  [ -n "$file" ] || usage
+  [ -f "$file" ] || die "result file does not exist: $file"
+  case "$(cmd_classify "$file")" in
+    ended|missing) return 0 ;;
+  esac
+  case "$(session_field "$file" session_ended)" in
+    true|True|TRUE) return 0 ;;
+  esac
+  return 1
+}
+
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
+  terminal)  shift; cmd_terminal "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

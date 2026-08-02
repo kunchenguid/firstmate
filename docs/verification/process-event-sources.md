@@ -34,6 +34,24 @@ Note that `lavish-axi <anything> --help` exits 0 for any argument, including a n
 
 The adapter depends on none of this: it uses only the published poll shape above.
 
+## Why an ended Lavish review is terminal
+
+Re-verified on 2026-08-01 against the same installed build.
+The published poll help states the lifecycle directly:
+
+```text
+$ lavish-axi poll --help | tr '.' '\n' | grep -F 'Send & End'
+ `Send & End` ends the session
+$ lavish-axi poll --help | tr '.' '\n' | grep -F 'polling stops'
+ After that response, polling stops, and the agent must not reopen the session uninvited
+```
+
+The sentence between those two, in the same help text, is "Its final feedback is still delivered once."
+
+So the last useful response of an ended review is a `feedback` response, and every poll after it returns an empty ended session immediately.
+That is why the adapter's terminal verdict covers a `feedback` response carrying `session_ended`, not only `status: ended` and a missing session: without it, one human `Send & End` leaves the source armed and each later cycle captures another empty ended result.
+`session_ended` is a session-level field emitted beside `status` in the response's leading `session:` block, which is why the adapter reads it there and ignores identical text appearing in prompt payloads.
+
 ## The loss limitation this runner cannot close
 
 The published poll clears feedback destructively before returning it.
@@ -53,11 +71,18 @@ Never at-least-once, no-loss, or lossless.
 
 ## What the runner does prove
 
-Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose completion is a process event, not a timer:
+Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose completion is a process event, not a timer, and - for the two supervision-delivery rows below - by `tests/fm-watch-triage.test.sh` driving a real `bin/fm-watch.sh` over a real capture:
 
 | Guarantee | How it is proven |
 | --- | --- |
 | capture before publication | the captured result exists at `0600` and its event names its committed sequence only afterward |
+| proactive delivery of a captured result | a real capture into an isolated home queues its `check` record, and a healthy watcher with a fresh beacon then exits reporting that queued result as an actionable check, before any manual drain |
+| single delivery per source and sequence | after that first proactive wake, a still-unhandled result keeps being re-announced onto the durable queue but never wakes the watcher again; once existing records are drained and the result is acknowledged, it is neither re-announced nor reported |
+| proactive-delivery crash and drain boundaries | dotted and underscored source ids at the same sequence receive distinct markers; a concurrent drain cannot consume between queue revalidation and marker commit; failed output, failed marker commit, and a crash before marker commit leave replay available, while successful output still ends the actionable cycle and a crash after marker commit suppresses a duplicate |
+| adapter-owned terminal verdict | two fixture adapters - one that ends on any result, one with no terminal knowledge - decide the outcome alone: the first has its registration and claim retired automatically after one capture and is never restarted, the second stays armed |
+| terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |
+| registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, performs no second poll, and completes idempotently once removal recovers |
+| one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
 | bounded re-announcement until handled | a durably captured result with no handled acknowledgement is re-announced by `reconcile` with the same source and sequence on every call - not only the first restart after a crash - and a drained-but-unhandled wake resurfaces identically after a simulated replacement session |
 | handled acknowledgement | `fm-procevent.sh handled <source-id> <sequence>` atomically and idempotently records handling at mode `0600`, fails without leaving a marker when private-mode enforcement fails, reports the first call distinctly from every repeat, stops further re-announcement once recorded, and never authorizes a paired effect twice across repeat calls |
 | publication-and-acknowledgement serialization | a concurrent `reconcile` cannot append a wake after `handled` wins the shared per-source boundary, so an acknowledged result is not re-announced by a publication race |
@@ -113,4 +138,9 @@ Without this launcher, reconcile would silently fail to start a runner on macOS 
 ## Scope
 
 The runner is domain-neutral and creates no endpoint, task metadata, or backlog item, so the supported primary harnesses and runtime backends are unaffected except through the `check` wake they already consume.
-Lavish is the first adapter; adding another requires only a new `bin/fm-procevent-<adapter>.sh`.
+Lavish is the first adapter; adding another requires only a new `bin/fm-procevent-<adapter>.sh`, whose `terminal` command is optional and defaults to keeping the source armed.
+
+Proactive delivery is inside that same boundary.
+The watcher reports a queued process-event result through the one shared actionable-exit path (`wake` in `bin/fm-push-transition-lib.sh`) that every existing signal, stale, and check wake already uses, so it reads no pane, queries no backend, and names no harness.
+Both axes are therefore unaffected by construction rather than by assumption: every supported primary harness re-arms from that same exit, and every runtime backend supplies endpoint state only to the pane paths this change does not touch.
+While `state/.afk` exists the watcher stays one-shot as before, because this delivery ends the cycle exactly like the existing check path and leaves classification to the daemon.

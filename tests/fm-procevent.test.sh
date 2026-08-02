@@ -320,6 +320,176 @@ private_mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -
 assert_contains "$private_mode" 600 "the handled marker is private under a permissive caller umask"
 pass "handled acknowledgement creation is private and fails safely"
 
+# --- a terminal result retires its source, on the adapter's verdict alone ----
+# The runner must carry no notion of its own about what "done" means for a
+# source. It asks that source's adapter whether the captured result ends the
+# source, and retires the registration only on that adapter's verdict. Two
+# fixture adapters isolate exactly that decision - one that ends on any result,
+# one with no terminal knowledge at all - so the observed behavior is proven to
+# follow the adapter rather than any condition built into the runner.
+ADAPTER_ROOT="$TMP_ROOT/adapter-root"
+mkdir -p "$ADAPTER_ROOT/bin"
+cat > "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture adapter: every captured result ends this source.
+case "${1-}" in
+  terminal) [ -f "${2-}" ] && exit 0 || exit 1 ;;
+esac
+exit 2
+SH
+cat > "$ADAPTER_ROOT/bin/fm-procevent-openended.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture adapter with no terminal knowledge at all: nothing ever ends it.
+exit 2
+SH
+chmod +x "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" "$ADAPTER_ROOT/bin/fm-procevent-openended.sh"
+
+pe_adapter() {  # <home> <command>...: run the runner against the fixture adapters
+  local home=$1
+  shift
+  FM_ROOT_OVERRIDE="$ADAPTER_ROOT" FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" "$@"
+}
+
+HTERM="$TMP_ROOT/hterm"; new_home "$HTERM"
+PE_TRACKED+=("$HTERM|ends-src")
+pe_adapter "$HTERM" register endnow ends-src -- /bin/echo "terminal payload" >/dev/null
+out=$(pe_adapter "$HTERM" start ends-src)
+assert_contains "$out" "captured:" "a terminal result is still captured durably"
+assert_contains "$out" "retired: ends-src" "the runner reports the adapter-driven retirement"
+assert_absent "$HTERM/state/procevent/ends-src.source" "an adapter-classified terminal result retires its registration"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/ends-src.claim" "terminal retirement releases this runner's own claim"
+assert_contains "$(wake_payloads "$HTERM")" "procevent endnow ends-src 1" "the terminal result is still announced"
+[ "$(count_results "$HTERM" ends-src)" = 1 ] || fail "terminal retirement lost or duplicated the captured result"
+TERMINAL_RESULT=$(first_result "$HTERM" ends-src || true)
+assert_grep 'terminal payload' "$TERMINAL_RESULT" "automatic retirement retains the captured output verbatim"
+out=$(pe_adapter "$HTERM" reconcile)
+assert_contains "$out" "started=0" "a retired terminal source is never restarted"
+assert_contains "$out" "published=1" "an unhandled terminal result is still re-announced until acknowledged"
+[ "$(count_results "$HTERM" ends-src)" = 1 ] || fail "a retired terminal source ran its poll again"
+out=$(pe_adapter "$HTERM" retire ends-src)
+assert_contains "$out" "retired: ends-src" "explicit retirement stays supported and idempotent after automatic retirement"
+ack_out=$(pe_adapter "$HTERM" handled ends-src 1)
+assert_contains "$ack_out" "handled: ends-src 1" "a terminal result is acknowledged through the owned interface"
+out=$(pe_adapter "$HTERM" reconcile)
+assert_contains "$out" "published=0" "an acknowledged terminal result stops being re-announced"
+pass "an adapter-classified terminal result is captured once, announced, and retires its source automatically"
+
+HOPEN="$TMP_ROOT/hopen"; new_home "$HOPEN"
+PE_TRACKED+=("$HOPEN|open-src")
+pe_adapter "$HOPEN" register openended open-src -- /bin/echo "open payload" >/dev/null
+out=$(pe_adapter "$HOPEN" start open-src)
+assert_contains "$out" "captured:" "a result from an adapter with no terminal verdict is captured"
+assert_not_contains "$out" "retired:" "an adapter with no terminal verdict never retires its source"
+assert_present "$HOPEN/state/procevent/open-src.source" "a source with no terminal verdict stays armed"
+pe_adapter "$HOPEN" retire open-src >/dev/null
+pass "a source stays armed unless its own adapter classifies the result terminal"
+
+HREPLACE="$TMP_ROOT/hreplace"; new_home "$HREPLACE"
+PE_TRACKED+=("$HREPLACE|replace-src")
+OLD_TRIGGER="$TMP_ROOT/replace-old-trigger"
+pe_adapter "$HREPLACE" register endnow replace-src -- "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
+pe_adapter "$HREPLACE" start replace-src > "$TMP_ROOT/replace-old.out" 2>&1 &
+replace_old_pid=$!
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/replace-src.claim" || fail "the old registration was never claimed"
+pe_adapter "$HREPLACE" register openended replace-src -- /bin/echo "replacement payload" >/dev/null
+touch "$OLD_TRIGGER"
+wait "$replace_old_pid" || fail "the old terminal runner failed"
+assert_contains "$(cat "$TMP_ROOT/replace-old.out")" "cannot retire terminal source" \
+  "an old runner refuses to retire a replacement registration"
+assert_present "$HREPLACE/state/procevent/replace-src.source" \
+  "a replacement registration survives the old runner's terminal result"
+assert_contains "$(cat "$HREPLACE/state/procevent/replace-src.source")" "adapter=openended" \
+  "the surviving registration is the replacement generation"
+out=$(pe_adapter "$HREPLACE" start replace-src)
+assert_contains "$out" "captured:" "the replacement registration remains independently runnable"
+[ "$(count_results "$HREPLACE" replace-src)" = 2 ] \
+  || fail "the replacement generation did not capture its own result"
+pe_adapter "$HREPLACE" retire replace-src >/dev/null
+pass "terminal retirement preserves and releases a concurrently replaced registration"
+
+HRETFAIL="$TMP_ROOT/hretfail"; new_home "$HRETFAIL"
+PE_TRACKED+=("$HRETFAIL|retire-fail-src")
+FAIL_RM_BIN=$(fm_fakebin "$TMP_ROOT/retire-fail-bin")
+REAL_RM=$(command -v rm)
+export REAL_RM
+cat > "$FAIL_RM_BIN/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */retire-fail-src.source) exit 1 ;; esac
+done
+exec "$REAL_RM" "$@"
+SH
+chmod +x "$FAIL_RM_BIN/rm"
+pe_adapter "$HRETFAIL" register endnow retire-fail-src -- /bin/echo "one terminal payload" >/dev/null
+out=$(PATH="$FAIL_RM_BIN:$PATH" pe_adapter "$HRETFAIL" start retire-fail-src 2>&1)
+assert_contains "$out" "cannot retire terminal source" "a failed registration removal is reported"
+assert_present "$HRETFAIL/state/procevent/retire-fail-src.source" \
+  "failed retirement preserves the exact registration"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
+  "failed retirement preserves its terminal ownership claim"
+out=$(PATH="$FAIL_RM_BIN:$PATH" pe_adapter "$HRETFAIL" reconcile)
+assert_contains "$out" "started=0" "failed terminal retirement never restarts the poll"
+[ "$(count_results "$HRETFAIL" retire-fail-src)" = 1 ] \
+  || fail "failed retirement allowed recurring terminal capture"
+pe_adapter "$HRETFAIL" reconcile >/dev/null
+assert_absent "$HRETFAIL/state/procevent/retire-fail-src.source" \
+  "repeated retirement removes the same registration once removal recovers"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
+  "the claim releases only after that registration is removed"
+[ "$(count_results "$HRETFAIL" retire-fail-src)" = 1 ] \
+  || fail "retirement recovery reran the terminal source"
+pass "failed terminal retirement is fail-closed and idempotently recoverable"
+
+# --- end-user-aligned regression: one Send & End, one captured result -------
+# The dogfood defect: a real armed Lavish source received one human `Send & End`
+# action, and the runner captured four results - the human's real feedback, then
+# recurring empty ended sessions - because it kept restarting a source whose own
+# adapter already knew the session had ended. Driven through the adapter's own
+# arm command against a stand-in for the published poll shape, so registration,
+# the runner, capture, publication, and retirement all run for real.
+HLT="$TMP_ROOT/hlt"; new_home "$HLT"
+LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/lavish-stub")
+LAVISH_POLL_COUNT="$TMP_ROOT/lavish-poll-count"
+export LAVISH_POLL_COUNT
+cat > "$LAVISH_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>` around a human `Send & End`: the final
+# feedback is delivered exactly once carrying session_ended, and every later
+# poll returns an empty ended session immediately.
+n=$(cat "$LAVISH_POLL_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$LAVISH_POLL_COUNT"
+if [ "$n" = 1 ]; then
+  printf 'session:\n  file: /review.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n'
+else
+  printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n'
+fi
+SH
+chmod +x "$LAVISH_BIN/lavish-axi"
+REVIEW_ART="$TMP_ROOT/review.html"
+printf '<h1>review</h1>\n' > "$REVIEW_ART"
+lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
+PE_TRACKED+=("$HLT|$lavish_id")
+PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
+for _ in $(seq 1 6); do
+  PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
+  sleep 0.3
+done
+[ "$(cat "$LAVISH_POLL_COUNT")" = 1 ] \
+  || fail "an ended review kept being polled: $(cat "$LAVISH_POLL_COUNT") polls for one Send & End"
+[ "$(count_results "$HLT" "$lavish_id")" = 1 ] \
+  || fail "one Send & End produced $(count_results "$HLT" "$lavish_id") captured results"
+[ "$(wake_payloads "$HLT" | sort -u | grep -c .)" = 1 ] \
+  || fail "one Send & End produced more than one distinct event: $(wake_payloads "$HLT" | sort -u)"
+assert_contains "$(wake_payloads "$HLT")" "procevent lavish $lavish_id 1" "the human's final feedback is announced"
+assert_absent "$HLT/state/procevent/$lavish_id.source" "the ended review source retires automatically"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$lavish_id.claim" "the ended review releases its owned claim"
+LAVISH_RESULT=$(first_result "$HLT" "$lavish_id" || true)
+assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's final feedback"
+out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
+assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
+pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
+
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
 # real blocking source completes, its result is captured and published, the
@@ -859,6 +1029,32 @@ assert_contains "$("$ROOT/bin/fm-procevent-lavish.sh" classify "$CLS")" missing 
 printf 'garbage that is not a session block\n' > "$CLS"
 assert_contains "$("$ROOT/bin/fm-procevent-lavish.sh" classify "$CLS")" unknown "malformed output classifies as unknown rather than a lifecycle state"
 pass "the adapter classifies published poll output safely"
+
+# The adapter, not the runner, decides which results end a Lavish source. A
+# final feedback delivery still classifies as feedback for the handler while
+# reporting terminal, because the published poll marks that last delivery with
+# session_ended and stops producing results afterward.
+TRM="$TMP_ROOT/terminal-verdict"
+printf 'session:\n  file: /a.html\n  status: feedback\n  session_ended: true\n  ended_by: user\n' > "$TRM"
+assert_contains "$("$ROOT/bin/fm-procevent-lavish.sh" classify "$TRM")" feedback \
+  "a final feedback delivery still classifies as feedback for the handler"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
+  || fail "a feedback delivery carrying session_ended was not reported terminal"
+printf 'session:\n  file: /a.html\n  status: feedback\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
+  && fail "an ordinary feedback delivery was reported terminal"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" || fail "an ended session was not reported terminal"
+printf 'error: No active Lavish Editor session for this file\ncode: NOT_FOUND\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" || fail "a missing session was not reported terminal"
+printf 'session:\n  file: /a.html\n  status: waiting\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" && fail "a waiting session was reported terminal"
+printf 'garbage that is not a session block\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" && fail "an unreadable result was reported terminal"
+printf 'session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  session_ended: true\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
+  && fail "prompt payload text was read as a session-level terminal marker"
+pass "the adapter owns which Lavish results end a source, and payload text cannot forge one"
 
 # --- the loss limitation is stated on the public interface ------------------
 # Checked through --help, the operator-facing surface, rather than by reading
