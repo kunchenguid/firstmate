@@ -135,30 +135,66 @@ budget_reset() {
 
 # A systemMessage is the one operator-visible channel a Claude Stop hook has on
 # an allow, so emit at most one and never alongside a second stdout object.
+# Succeeds only when this call actually wrote one, so a caller never records an
+# announcement the operator did not receive.
 SYSTEM_MESSAGE_EMITTED=0
 emit_system_message() {
-  [ "$SYSTEM_MESSAGE_EMITTED" -eq 0 ] || return 0
+  [ "$SYSTEM_MESSAGE_EMITTED" -eq 0 ] || return 1
+  printf '%s' "$1" | jq -Rsc '{systemMessage: .}' 2>/dev/null || return 1
   SYSTEM_MESSAGE_EMITTED=1
-  printf '%s' "$1" | jq -Rsc '{systemMessage: .}' 2>/dev/null || SYSTEM_MESSAGE_EMITTED=0
 }
 
 fm_supervision_status "$STATE" "$GRACE"
 # This never blocks on its own; it just refuses to let a home that no
 # process-event command can service end its turns with no signal at all. The
-# line rides stderr, which every harness surfaces when the guard blocks and the
-# pi, OpenCode, and legacy-Grok adapters surface on an allow; --claude mode owns
-# stdout, so it repeats the same text there as a systemMessage before allowing.
+# stderr line is deliberately unlatched: every harness surfaces it when the guard
+# blocks, and the pi, OpenCode, and legacy-Grok adapters read it on an allow to
+# drive their own once-per-episode latches. --claude mode owns stdout, so it
+# repeats the same text there as a systemMessage, latched below.
 PROCEVENT_WARNING=
+CONTAINMENT_FILE="$STATE/.turnend-claude-containment"
 if [ "$FM_SUP_PROCEVENT_UNSAFE" = true ]; then
   PROCEVENT_WARNING="process-event state is not private to this home: $FM_SUP_PROCEVENT_UNSAFE_PATH is a symlink or not a directory. Every bin/fm-procevent.sh command that reaches that path refuses this home until it is an ordinary directory, so registered sources cannot be started, reconciled, or published."
   printf 'WARNING: %s\n' "$PROCEVENT_WARNING" >&2
+elif [ "$CLAUDE_MODE" -eq 1 ]; then
+  rm -f "$CONTAINMENT_FILE" 2>/dev/null || true
 fi
+
+SESSION_ID=unknown
+if [ "$CLAUDE_MODE" -eq 1 ]; then
+  SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+fi
+
+# A Claude Stop hook is a fresh process per turn, so once-per-episode needs a
+# durable record rather than the in-process latch the passive adapters use. An
+# episode is one session plus one damaged path: a new session (so any restart
+# re-announces), a different damaged path, or a repaired-then-damaged-again home
+# all start a new one. Without a session identity nothing is ever suppressed.
+containment_notice_due() {
+  local recorded_session recorded_path
+  [ -n "$PROCEVENT_WARNING" ] || return 1
+  [ "$SESSION_ID" != unknown ] || return 0
+  [ -f "$CONTAINMENT_FILE" ] || return 0
+  recorded_session=$(sed -n '1s/^session=//p' "$CONTAINMENT_FILE" 2>/dev/null || true)
+  recorded_path=$(sed -n '2s/^path=//p' "$CONTAINMENT_FILE" 2>/dev/null || true)
+  [ "$recorded_session" = "$SESSION_ID" ] \
+    && [ "$recorded_path" = "$FM_SUP_PROCEVENT_UNSAFE_PATH" ] && return 1
+  return 0
+}
+
+containment_notice_record() {
+  printf 'session=%s\npath=%s\n' "$SESSION_ID" "$FM_SUP_PROCEVENT_UNSAFE_PATH" \
+    > "$CONTAINMENT_FILE" 2>/dev/null || true
+}
+
 # Every allow path must carry the containment notice on the one channel Claude
-# reads, so no exit-0 route can drop it.
+# reads, so no exit-0 route can drop the first announcement of an episode.
 allow_notice() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
-  [ -n "$PROCEVENT_WARNING" ] || return 0
-  emit_system_message "firstmate turn-end guard: $PROCEVENT_WARNING"
+  containment_notice_due || return 0
+  emit_system_message "firstmate turn-end guard: $PROCEVENT_WARNING" \
+    && containment_notice_record
+  return 0
 }
 trap 'rc=$?; [ "$rc" -ne 0 ] || allow_notice' EXIT
 
@@ -237,7 +273,6 @@ fi
 # The auto-arm genuinely failed to establish: re-block, but never past the
 # budget so the session can always end and Claude's 8-block override is never
 # approached.
-SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 COUNT=0
 if [ -f "$BUDGET_FILE" ]; then
   old_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
@@ -258,8 +293,14 @@ if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
     NEED_DESC="X-mode relay polling active"
   fi
   DEGRADED_MSG="firstmate turn-end guard: $NEED_DESC with no live watcher and no Stop auto-arm claim; block budget exhausted, allowing this stop. Repair supervision (bin/fm-watch-arm.sh as a Claude Code background task) or investigate why bin/fm-claude-stop-autoarm.sh is not claiming this home."
-  [ -z "$PROCEVENT_WARNING" ] || DEGRADED_MSG="$DEGRADED_MSG Also: $PROCEVENT_WARNING"
-  emit_system_message "$DEGRADED_MSG"
+  FOLDED_CONTAINMENT=0
+  if containment_notice_due; then
+    DEGRADED_MSG="$DEGRADED_MSG Also: $PROCEVENT_WARNING"
+    FOLDED_CONTAINMENT=1
+  fi
+  if emit_system_message "$DEGRADED_MSG" && [ "$FOLDED_CONTAINMENT" -eq 1 ]; then
+    containment_notice_record
+  fi
   exit 0
 fi
 printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$COUNT" > "$BUDGET_FILE" 2>/dev/null || true

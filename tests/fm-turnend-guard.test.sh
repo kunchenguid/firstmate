@@ -1198,10 +1198,19 @@ EOF
 # cooperates with the Stop-owned auto-arm instead: allow on health, live owner
 # claim, or a fresh rewake epoch; bounded re-block only when none materialize.
 
-run_hook_claude() {
-  local dir=$1 stop_active=$2 home
+run_hook_claude_session() {
+  local dir=$1 stop_active=$2 session=$3 home payload
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
+  if [ "$session" = none ]; then
+    payload=$(printf '{"stop_hook_active":%s}' "$stop_active")
+  else
+    payload=$(printf '{"stop_hook_active":%s,"session_id":"%s"}' "$stop_active" "$session")
+  fi
+  printf '%s' "$payload" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
+}
+
+run_hook_claude() {
+  run_hook_claude_session "$1" "$2" sess-claude-mode
 }
 
 # The 2026-07-21 incident regression: after a spent forced continuation the old
@@ -1303,6 +1312,79 @@ test_hook_claude_mode_reports_unsafe_state_on_allow() {
       '.systemMessage | test("process-event state is not private") and contains($path)' >/dev/null \
     || fail "--claude containment notice is not a well-formed systemMessage naming the path: $out"
   pass "fm-turnend-guard --claude: an allow still reports unserviceable process-event state"
+}
+
+claude_notice_count() {  # <hook output>: stdout systemMessage objects carrying the notice
+  printf '%s\n' "$1" | grep '^{' \
+    | jq -e 'select(.systemMessage | test("process-event state is not private"))' 2>/dev/null \
+    | grep -c '^{' || true
+}
+
+# A Claude Stop hook is a fresh process per turn, so the once-per-episode rule
+# the passive adapters own in memory needs a durable record here. It must stay
+# an episode latch, never a permanent mute: a restart, a different damaged path,
+# or a repaired-then-damaged-again home has to announce again.
+test_hook_claude_mode_containment_notice_is_once_per_episode() {
+  local dir outside other out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-notice-latch")
+  outside="$TMP_ROOT/hook-claude-notice-outside"
+  other="$TMP_ROOT/hook-claude-notice-other"
+  mkdir -p "$outside" "$other"
+  ln -s "$outside" "$dir/state/procevent"
+
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "damaged process-event state alone must not block a --claude stop"
+  [ "$(claude_notice_count "$out")" -eq 1 ] \
+    || fail "the first allow of an episode must announce the containment notice: $out"
+
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "a repeat allow in the same episode must still not block"
+  [ "$(claude_notice_count "$out")" -eq 0 ] \
+    || fail "the same episode announced the containment notice twice: $out"
+  # The adapters parse this line to drive their own latches, so it must never be
+  # suppressed even when the Claude systemMessage is.
+  assert_contains "$out" "WARNING: process-event state is not private to this home" \
+    "the unlatched stderr line must survive the systemMessage latch"
+
+  # A restart is a new session id, and must not inherit the previous mute.
+  out=$(run_hook_claude_session "$dir" false sess-after-restart)
+  [ "$(claude_notice_count "$out")" -eq 1 ] \
+    || fail "a new session must re-announce standing containment damage: $out"
+  out=$(run_hook_claude_session "$dir" false sess-after-restart)
+  [ "$(claude_notice_count "$out")" -eq 0 ] \
+    || fail "the new session re-announced within one episode: $out"
+
+  # No session identity means no way to bound an episode, so never suppress.
+  out=$(run_hook_claude_session "$dir" false none)
+  [ "$(claude_notice_count "$out")" -eq 1 ] \
+    || fail "a payload with no session id must never be suppressed: $out"
+  out=$(run_hook_claude_session "$dir" false none)
+  [ "$(claude_notice_count "$out")" -eq 1 ] \
+    || fail "a payload with no session id must never be suppressed: $out"
+
+  # A different damaged path is a different episode.
+  rm "$dir/state/procevent"
+  ln -s "$other" "$dir/state/procevent-inbox"
+  mkdir -p "$dir/state/procevent"
+  out=$(run_hook_claude "$dir" false)
+  [ "$(claude_notice_count "$out")" -eq 1 ] \
+    || fail "a newly damaged path must open a new episode: $out"
+  assert_contains "$out" "$dir/state/procevent-inbox" "the new episode must name the new path"
+
+  # Repair clears the latch, so a recurrence is heard again in the same session.
+  rm "$dir/state/procevent-inbox"
+  mkdir -p "$dir/state/procevent-inbox"
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "a repaired home must allow silently"
+  [ "$(claude_notice_count "$out")" -eq 0 ] || fail "a repaired home announced damage: $out"
+  [ ! -e "$dir/state/.turnend-claude-containment" ] \
+    || fail "repair must clear the episode latch, not leave it recording a fixed path"
+  rmdir "$dir/state/procevent-inbox"
+  ln -s "$other" "$dir/state/procevent-inbox"
+  out=$(run_hook_claude "$dir" false)
+  [ "$(claude_notice_count "$out")" -eq 1 ] \
+    || fail "damage recurring after a repair must announce again: $out"
+  pass "fm-turnend-guard --claude: containment notices are once per episode, never muted across sessions"
 }
 
 # The degraded allow already owns stdout, so the containment notice must fold
@@ -1455,6 +1537,7 @@ test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_block_budget_then_degraded_allow
 test_hook_claude_mode_reports_unsafe_state_on_allow
+test_hook_claude_mode_containment_notice_is_once_per_episode
 test_hook_claude_mode_degraded_allow_folds_containment_notice
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim

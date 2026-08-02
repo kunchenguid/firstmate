@@ -79,9 +79,10 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 When `state`, `state/procevent`, or `state/procevent-inbox` is a symlink or not a directory, the affected `bin/fm-procevent.sh` commands refuse the home and `bin/fm-watch.sh` swallows that refusal, so the guard names the offending path.
 This is a report, never a block: it changes no exit status, and a home with no other supervision need still allows its turn to end.
 
-The guard writes one `WARNING: process-event state is not private to this home: ...` line to stderr, and each integration surfaces it on the allow path through the one channel it owns:
+The guard writes one `WARNING: process-event state is not private to this home: ...` line to stderr on every run. That line is deliberately unlatched, because the passive adapters read it to drive their own latches. Each integration then surfaces it on the allow path through the one channel it owns, once per episode:
 
 - Claude also receives the same text as a stdout `systemMessage`, the only operator-visible channel a Stop hook has on an allow; the degraded budget-exhausted allow folds it into that single object rather than emitting a second one.
+  A Stop hook is a fresh process per turn, so the episode latch is durable in `state/.turnend-claude-containment` rather than in memory. An episode is one session id plus one damaged path, so a restart, a different damaged path, or a repaired-then-damaged-again home announces again, and a payload carrying no session id is never suppressed. Repair deletes the record.
 - Pi reports it as a displayed `pi.sendMessage` custom message, latched to one notice per episode, and never as a forced follow-up.
 - OpenCode reports it through `client.tui.showToast` when the running client exposes that surface, latched the same way, and never as a forced prompt; a client without it falls back to the guard's stderr.
 - Grok's legacy fallback passes the line to its own stderr instead of burying it in the discarded resume buffer, and never resumes for a warning. The native path already returns the guard's stderr to the same Grok process.
@@ -108,7 +109,7 @@ Every harness sees the line when the guard also blocks, because the block writes
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, unserviceable process-event state reported without silencing an in-home source and surfaced on the allow path by the Claude `systemMessage`, the Pi custom message, the OpenCode toast, and the legacy Grok adapter without any forced continuation, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-turnend-guard.test.sh` covers the predicate, unserviceable process-event state reported without silencing an in-home source and surfaced on the allow path by the Claude `systemMessage`, the Pi custom message, the OpenCode toast, and the legacy Grok adapter without any forced continuation, the Claude notice's durable once-per-episode latch across repeats, restarts, path changes, missing session ids, and repair-then-recurrence, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
