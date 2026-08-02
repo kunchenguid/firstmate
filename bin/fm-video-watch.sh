@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# fm-video-watch.sh - prepare bounded video evidence manifests for Firstmate /watch.
+#
+# Public interface:
+#   fm-video-watch.sh doctor
+#   fm-video-watch.sh prepare <public-url-or-local-video> [options]
+#   fm-video-watch.sh cleanup <opaque-receipt>
+#   fm-video-watch.sh smoke --url <public-url> --i-understand-this-uses-network [prepare options]
+#
+# This script owns the user-visible mechanics, limits, manifest contract, cleanup
+# receipt, and exit-code classes for the Firstmate watch skill.
+# Its private Python implementation preserves and adapts useful MIT mechanics from
+# bradautomates/claude-video at git revision 755c157466738dda102c939158a0116b972925a3.
+# It does not depend on ~/.claude/skills/watch, does not install dependencies,
+# does not use browser profiles or cookies, and does not read or write
+# ~/.config/watch/.env.
+#
+# Exit codes:
+#   0 success
+#   2 command-line usage or invalid input
+#   3 missing required local dependency
+#   4 unsupported, unsafe, authenticated, DRM, playlist, or live source
+#   5 media probing, caption retrieval, download, frame extraction, or cleanup failed
+#
+# Use --help for the full operator contract.
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMPL="$SELF_DIR/fm-video-watch-impl.py"
+
+exec python3 "$IMPL" "$@"
