@@ -165,7 +165,46 @@ assert_contains "$inbox_out" "private ordinary directories" \
   "symlinked process-event inbox refusal was not actionable"
 assert_absent "$HINBOX_OUTSIDE/symlinked-inbox.1.result" \
   "capture wrote through a symlinked process-event inbox"
+sup=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$HINBOX/state")
+assert_contains "$sup" no \
+  "supervision waited on a source no command can service through a symlinked inbox"
 pass "process-event registry and inbox refuse symlink escapes"
+
+# The state directory itself is the outermost leaf the runner refuses, so
+# supervision must not count a source reached entirely through a symlinked state.
+HSTATE="$TMP_ROOT/hstate"; mkdir -p "$HSTATE"
+HSTATE_OUTSIDE="$TMP_ROOT/hstate-outside"; mkdir -p "$HSTATE_OUTSIDE/procevent"
+printf 'adapter=lavish\nargc=1\nargv:\n/bin/echo\n' > "$HSTATE_OUTSIDE/procevent/foreign.source"
+ln -s "$HSTATE_OUTSIDE" "$HSTATE/state"
+sup=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$HSTATE/state")
+assert_contains "$sup" no \
+  "supervision counted a source reached through a symlinked state directory"
+state_status=0
+state_out=$(pe "$HSTATE" list 2>&1) || state_status=$?
+[ "$state_status" -ne 0 ] || fail "a public command accepted a symlinked state directory"
+assert_contains "$state_out" "private ordinary directories" \
+  "symlinked state refusal was not actionable"
+pass "a symlinked state directory is neither supervised nor served"
+
+# The per-source runner record is written after the claim is taken, so it needs
+# the same refusal as every other file the runner touches.
+HRUNNER="$TMP_ROOT/hrunner"; new_home "$HRUNNER"
+pe_register "$HRUNNER" lavish symlinked-runner -- /bin/echo escaped >/dev/null
+HRUNNER_OUTSIDE="$TMP_ROOT/hrunner-outside"; mkdir -p "$HRUNNER_OUTSIDE"
+ln -s "$HRUNNER_OUTSIDE/escaped.pid" "$HRUNNER/state/procevent/symlinked-runner.runner"
+runner_status=0
+runner_out=$(pe "$HRUNNER" start symlinked-runner 2>&1) || runner_status=$?
+[ "$runner_status" -ne 0 ] || fail "start accepted a symlinked runner record"
+assert_contains "$runner_out" "cannot safely record the runner pid" \
+  "symlinked runner record refusal was not actionable"
+assert_absent "$HRUNNER_OUTSIDE/escaped.pid" \
+  "start wrote the runner pid through a symlinked runner record"
+[ "$(count_results "$HRUNNER" symlinked-runner)" -eq 0 ] \
+  || fail "a refused start still captured a result"
+rm -f "$HRUNNER/state/procevent/symlinked-runner.runner"
+pe "$HRUNNER" start symlinked-runner >/dev/null \
+  || fail "a refused start left the source claimed and unusable"
+pass "a symlinked runner record is refused and releases the source for retry"
 
 # --- a blocking source completes into exactly one normalized event ----------
 H1="$TMP_ROOT/h1"; new_home "$H1"

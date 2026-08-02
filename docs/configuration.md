@@ -409,6 +409,7 @@ A long-polling external process is registered as a *source* through its adapter,
 
 This section is the single owner of the runner's operating contract.
 Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before it is published.
+Those paths are private to the home: every command refuses before reading or writing when `state`, `state/procevent`, or `state/procevent-inbox` is a symlink or not a directory, or when a per-source runner record is a symlink, and supervision counts no source reached through any of those shapes, so a damaged home reports an actionable error instead of touching files outside itself or waiting forever on a source it cannot service.
 Results are published as ordinary `check` wakes carrying the source id and committed result sequence through the existing durable wake queue, so the runner adds no second notification control plane.
 The watcher delivers a queued result on its ordinary cycle by reporting it as an actionable `check` wake, so a captured result reaches firstmate through the same rewake path every other wake uses and never waits for a manual drain.
 Delivery is reported at most once per captured source and sequence while any records for that key remain queued.

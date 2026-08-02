@@ -20,6 +20,23 @@ fm_sup_stat_mtime() {
   fi
 }
 
+# A damaged process-event state must not make this home supervise files reached
+# through a symlink outside its private state. This mirrors
+# fm_procevent_state_paths_safe in bin/fm-procevent-lib.sh exactly, including the
+# inbox leaf: every public process-event command refuses that shape, so counting
+# a source behind it would pin the home in a supervision need that no reconcile
+# could ever satisfy. It is duplicated rather than sourced because callers copy
+# and source this predicate on its own.
+fm_sup_procevent_state_safe() {
+  local state=${1-} path
+  [ -n "$state" ] || return 1
+  for path in "$state" "$state/procevent" "$state/procevent-inbox"; do
+    [ -L "$path" ] && return 1
+    [ -e "$path" ] && [ ! -d "$path" ] && return 1
+  done
+  return 0
+}
+
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
@@ -45,11 +62,7 @@ fm_supervision_status() {
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
   FM_SUP_SOURCES=0
-  # A damaged process-event registry must not make this home supervise files
-  # reached through a symlink outside its private state. The runner refuses the
-  # same shape before any public lifecycle operation, so the predicate stays
-  # aligned and reports no external source as this home's wait.
-  if [ -d "$state/procevent" ] && [ ! -L "$state/procevent" ]; then
+  if fm_sup_procevent_state_safe "$state" && [ -d "$state/procevent" ]; then
     for source in "$state"/procevent/*.source; do
       [ -e "$source" ] || continue
       FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
