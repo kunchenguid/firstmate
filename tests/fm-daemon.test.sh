@@ -1364,6 +1364,7 @@ test_wedge_alarm_herdr_channel_selected() {
 # these two pin that the real JSON result now governs the verdict.
 test_wedge_alarm_herdr_not_shown_is_a_failure() {
   local dir fb daemon_log rc
+  command -v jq >/dev/null 2>&1 || { pass "herdr shown=false verdict skipped without jq"; return; }
   dir="$TMP_ROOT/wedge-herdr-not-shown"; fb="$dir/fakebin"; mkdir -p "$fb"
   daemon_log="$dir/daemon.log"
   cat > "$fb/herdr" <<'SH'
