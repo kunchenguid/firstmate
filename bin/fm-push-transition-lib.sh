@@ -43,7 +43,7 @@ wake() {
   if echo "$1"; then
     output_status=0
   else
-    output_status=$?
+    output_status=1
   fi
   if [ -n "$FM_WAKE_POST_OUTPUT_ACTION" ]; then
     "$FM_WAKE_POST_OUTPUT_ACTION" "$output_status" || true
