@@ -13,8 +13,12 @@
 # distinct staleness episode in this FM_HOME (keyed to beacon mtime or absence);
 # later guarded commands in the same episode print a one-line reminder instead.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
-# bounded). Independent alarms (queued wakes, worktree tangle) are never
-# suppressed by that dedup. Normal wake handling (watcher briefly down between a
+# bounded). Independent alarms (queued wakes, worktree tangle, process-event
+# state that is not private to this home) are never suppressed by that dedup;
+# the containment banner in particular prints on every run, including the
+# no-supervision-needed early exit, because no fm-procevent.sh command can serve
+# that home until an operator repairs the path (docs/configuration.md owns the
+# contract). Normal wake handling (watcher briefly down between a
 # wake and the next supervision resume) stays inside the grace window and stays
 # silent. Always exits 0: the guard warns, it never blocks.
 set -u
