@@ -68,13 +68,18 @@
 # the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch]
+# Usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch] [--reap-dead]
 #   --force permits recursive kind=secondmate retirement. It never bypasses
 #   dirty, untracked, stash, landed-work, endpoint, identity, or report proofs.
 #   --preserve-scratch permits a ship/scout teardown to preserve tracked diffs
 #   and non-ignored untracked files under data/<task-id>/scratch/ before cleaning.
 #   Ignored files remain exempt and are summarized before a leased return.
 #   Committed work must still pass the ordinary landed-work proof first.
+#   --reap-dead is the conservative dead-endpoint path used by
+#   bin/fm-treehouse-reap.sh.
+#   It refuses a present or unknown endpoint, repeats that absence proof under
+#   the checkout lock, and uses non-forcing `treehouse return` after the ordinary
+#   identity, cleanliness, stash, and landed-work proofs pass.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crewmate process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -150,13 +155,14 @@ case "$TEARDOWN_UPSTREAM_TIMEOUT" in
     ;;
 esac
 [ "$#" -ge 1 ] || {
-  echo "usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch]" >&2
+  echo "usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch] [--reap-dead]" >&2
   exit 2
 }
 ID=$1
 shift
 FORCE=
 PRESERVE_SCRATCH=0
+REAP_DEAD=0
 for option in "$@"; do
   case "$option" in
     --force)
@@ -173,12 +179,24 @@ for option in "$@"; do
       }
       PRESERVE_SCRATCH=1
       ;;
+    --reap-dead)
+      [ "$REAP_DEAD" -eq 0 ] || {
+        echo "error: duplicate teardown option: --reap-dead" >&2
+        exit 2
+      }
+      REAP_DEAD=1
+      ;;
     *)
       echo "error: unknown teardown option: $option" >&2
       exit 2
       ;;
   esac
 done
+if [ "$REAP_DEAD" -eq 1 ] && { [ -n "$FORCE" ] || [ "$PRESERVE_SCRATCH" -eq 1 ]; }; then
+  echo "error: --reap-dead cannot be combined with --force or --preserve-scratch" >&2
+  exit 2
+fi
+
 META="$STATE/$ID.meta"
 
 require_safe_task_metadata() {
@@ -401,6 +419,10 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 }
 if [ "$PRESERVE_SCRATCH" -eq 1 ] && [ "$KIND" = secondmate ]; then
   echo "error: --preserve-scratch is supported only for ship and scout worktrees" >&2
+  exit 2
+fi
+if [ "$REAP_DEAD" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --reap-dead is supported only for ship worktrees" >&2
   exit 2
 fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
@@ -1333,11 +1355,20 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
-# Return a worktree/home via `treehouse return --force`, tolerating a transient or
-# stale git index.lock left by a killed crewmate process. See the script header.
+# Return a worktree/home via Treehouse, tolerating a transient or stale git
+# index.lock left by a killed crewmate process. See the script header.
 teardown_treehouse_return_locked() {
   local dir=$1 cd_dir=$2 label=$3 expected_holder=$4 post_cleanup_check=${5:-} post_return_cleanup=${6:-}
+  local return_mode=${7:---force}
   local out lock attempt=0 max_retries lock_desc return_status return_branch=
+
+  case "$return_mode" in
+    --force|--safe) ;;
+    *)
+      echo "teardown: $label return aborted because its return mode is invalid" >&2
+      return 1
+      ;;
+  esac
 
   require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder" || {
     echo "teardown: $label return aborted because Treehouse task ownership changed" >&2
@@ -1358,7 +1389,7 @@ teardown_treehouse_return_locked() {
     }
   fi
   validate_removal_tree_boundaries "$dir" "$label" || return 1
-  if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
+  if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" "$return_mode" 2>&1); then
     [ -n "$out" ] && printf '%s\n' "$out"
     if [ -n "$post_return_cleanup" ]; then
       "$post_return_cleanup" "$return_branch" "$dir" "$cd_dir" || return 1
@@ -1404,7 +1435,7 @@ teardown_treehouse_return_locked() {
       return 1
     fi
     validate_removal_tree_boundaries "$dir" "$label" || return 1
-    if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
+    if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" "$return_mode" 2>&1); then
       [ -n "$out" ] && printf '%s\n' "$out"
       if [ -n "$post_return_cleanup" ]; then
         "$post_return_cleanup" "$return_branch" "$dir" "$cd_dir" || return 1
@@ -1448,7 +1479,7 @@ teardown_treehouse_return_locked() {
         return 1
       fi
       validate_removal_tree_boundaries "$dir" "$label" || return 1
-      if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
+      if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" "$return_mode" 2>&1); then
         [ -n "$out" ] && printf '%s\n' "$out"
         if [ -n "$post_return_cleanup" ]; then
           "$post_return_cleanup" "$return_branch" "$dir" "$cd_dir" || return 1
@@ -1602,6 +1633,20 @@ validate_worktree_teardown_safety() {
     fi
     return 1
   fi
+}
+
+validate_reap_worktree_safety() {
+  local dirty_raw
+  validate_worktree_teardown_safety || return $?
+  dirty_raw=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+    echo "REFUSED: dead-task reaping cannot inspect worktree $WT for uncommitted changes." >&2
+    return 1
+  }
+  [ -z "$dirty_raw" ] || {
+    echo "REFUSED: dead-task reaping never discards uncommitted changes in $WT." >&2
+    printf '%s\n' "$dirty_raw" | sed -n '1,5p' >&2
+    return 1
+  }
 }
 
 summarize_ignored_worktree_paths() {
@@ -4664,6 +4709,36 @@ PROBE_HOME=
 ENDPOINT_HOME=$(fm_backend_endpoint_home "$BACKEND" "$KIND" "$FM_HOME" "$HOME_PATH")
 [ "$ENDPOINT_HOME" = "$FM_HOME" ] || PROBE_HOME=$ENDPOINT_HOME
 
+require_reap_endpoint_absent() {
+  local endpoint_status scoped_target
+  if [ "$DIRECT_SPAWN_CLEANUP" = pending ] && [ "$DIRECT_SPAWN_ENDPOINT" = not-created ]; then
+    return 0
+  fi
+  scoped_target=$(meta_value "$META" tmux_session_target)
+  if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$PROBE_HOME" "$scoped_target"; then
+    return 0
+  else
+    endpoint_status=$?
+  fi
+  if [ "$endpoint_status" -eq 2 ]; then
+    echo "REFUSED: dead-task reaping cannot prove the endpoint absent for $ID." >&2
+  else
+    echo "REFUSED: dead-task reaping found a live endpoint for $ID." >&2
+  fi
+  return 1
+}
+
+REPORT_PUBLISHED=0
+publish_completion_report_if_required() {
+  [ "$REPORT_GATED" = 1 ] && [ "$SPAWN_NEVER_LAUNCHED" != 1 ] || return 0
+  if [ "$MANAGED_ACCOUNT" = 1 ]; then
+    reconcile_managed_account_rollback "$META" "$ID" "$DATA" || return $?
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-report-stack.mjs" publish "$ID" || return 1
+  REPORT_PUBLISHED=1
+}
+
 quiesce_task_endpoint() {
   local endpoint_status zellij_tab scoped_target
   if [ "$MANAGED_ACCOUNT" = 1 ]; then
@@ -4749,7 +4824,18 @@ post_quiescence_safety_refusal() {
   echo "The task endpoint has already been shut down; the worktree and task metadata are preserved for a safe retry." >&2
 }
 
-if [ "$DIRECT_SPAWN_CLEANUP" = pending ]; then
+if [ "$REAP_DEAD" -eq 1 ]; then
+  [ "$BACKEND" != orca ] || {
+    echo "error: --reap-dead does not support Orca worktrees" >&2
+    exit 2
+  }
+  require_reap_endpoint_absent || exit 1
+  validate_teardown_target_identity || exit 1
+  # Publication is non-destructive and owns a globally contended lock.
+  # Join that queue before the slower landing proof, then still require every
+  # ordinary and reaper-specific safety proof before releasing the lease.
+  publish_completion_report_if_required || exit $?
+elif [ "$DIRECT_SPAWN_CLEANUP" = pending ]; then
   if [ "$DIRECT_SPAWN_ENDPOINT" != not-created ]; then
     quiesce_retained_direct_spawn_endpoint || exit 1
   fi
@@ -4783,13 +4869,18 @@ if [ "$PRESERVE_SCRATCH" -eq 1 ] && [ -d "$WT" ]; then
 fi
 
 if [ -d "$WT" ]; then
-  if validate_worktree_teardown_safety; then
+  if [ "$REAP_DEAD" -eq 1 ]; then
+    safety_command=validate_reap_worktree_safety
+  else
+    safety_command=validate_worktree_teardown_safety
+  fi
+  if "$safety_command"; then
     :
   else
     safety_rc=$?
     if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
       cleanup_stale_lock_for_safety_check "$WT" || { post_quiescence_safety_refusal; exit 1; }
-      validate_worktree_teardown_safety || { post_quiescence_safety_refusal; exit 1; }
+      "$safety_command" || { post_quiescence_safety_refusal; exit 1; }
     else
       post_quiescence_safety_refusal
       exit 1
@@ -4799,12 +4890,8 @@ fi
 
 # Report-gated tasks restore any pending rollback generation and fail closed on
 # their machine-global completion report before lease release or worktree removal.
-if [ "$REPORT_GATED" = 1 ] && [ "$SPAWN_NEVER_LAUNCHED" != 1 ]; then
-  if [ "$MANAGED_ACCOUNT" = 1 ]; then
-    reconcile_managed_account_rollback "$META" "$ID" "$DATA" || exit $?
-  fi
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-    "$FM_ROOT/bin/fm-report-stack.mjs" publish "$ID" || exit 1
+if [ "$REPORT_PUBLISHED" -ne 1 ]; then
+  publish_completion_report_if_required || exit $?
 fi
 
 if [ "$MANAGED_ACCOUNT" = 1 ]; then
@@ -4851,6 +4938,16 @@ validate_returned_worktree_bookkeeping_locked() {
   }
 }
 
+validate_reap_return_safety() {
+  require_reap_endpoint_absent || return 1
+  validate_reap_worktree_safety_and_summarize_ignored
+}
+
+validate_reap_worktree_safety_and_summarize_ignored() {
+  validate_reap_worktree_safety || return 1
+  summarize_ignored_worktree_paths
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -4869,8 +4966,14 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     # directory, so run it from the project.
     # teardown_treehouse_return tolerates transient and stale git locks left by
     # a killed crewmate process; see the script header for the retry proof.
-    post_lock_cleanup_check=validate_worktree_teardown_safety_and_summarize_ignored
-    teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree || {
+    if [ "$REAP_DEAD" -eq 1 ]; then
+      post_lock_cleanup_check=validate_reap_return_safety
+      treehouse_return_mode=--safe
+    else
+      post_lock_cleanup_check=validate_worktree_teardown_safety_and_summarize_ignored
+      treehouse_return_mode=--force
+    fi
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree "$treehouse_return_mode" || {
       echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
       exit 1
     }
