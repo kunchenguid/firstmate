@@ -406,7 +406,7 @@ See [verification/public-followup.md](verification/public-followup.md) for the c
 
 Read-only mailbox access ships inert: `bin/fm-mail.py` does nothing until a home has a local, gitignored `config/mail.json`, and no watcher check, poll or background read is ever armed for it.
 The file is a JSON object with `client_id`, the non-secret application (client) id GUID of the operator's own Microsoft app registration; `account`, the mailbox address the stored credential is pinned to; and optional `tenant`, which defaults to `consumers` and otherwise accepts only a tenant GUID, because the ambiguous `common` and `organizations` authorities are refused.
-Any other key is refused rather than ignored, and a group- or world-writable file is refused because a writable configuration could redirect the sign-in authority.
+Any other key is refused rather than ignored, and a group- or world-writable file, or a group- or world-writable `config/` directory around it, is refused because a writable configuration - or a directory in which it can be replaced - could redirect the sign-in authority.
 
 `account` is an identity pin, not a filter: every read resolves the signed-in mailbox first and refuses to continue when it is not the pinned one.
 The refresh credential lives only in the macOS login Keychain under the service `firstmate-mail-readonly`, keyed by the client id, and never in this file, in a process argument, or anywhere on disk; no access token, message, or mailbox metadata is cached at all.

@@ -37,8 +37,11 @@ Boundaries this file enforces, in order of importance:
   * A local heuristic classifier refuses to render a message that looks like it
     carries an authentication secret (one-time code, password reset, magic link,
     recovery code, API key). `--redacted` renders it with those shapes masked.
-    The classifier's limits are documented in docs/mail-readonly.md; it is a
-    guardrail, not a security boundary.
+    A subject the classifier flags is masked everywhere it is printed, in a
+    listing as much as in a withheld or redacted message, because providers
+    routinely put the code in the subject line itself. The classifier's limits
+    are documented in docs/mail-readonly.md; it is a guardrail, not a security
+    boundary.
   * A message is selected by a local fingerprint of its identifier, never by the
     identifier itself, so no mailbox identifier reaches process arguments or
     shell history.
@@ -118,7 +121,7 @@ REF_CHARS = 12
 
 GUID_RE = re.compile(r"\A[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 ADDRESS_RE = re.compile(r"\A[^\s@<>\"']{1,64}@[^\s@<>\"']{1,190}\.[A-Za-z]{2,24}\Z")
-TOKEN_RE = re.compile(r"\A[A-Za-z0-9._~+/=-]{20,%d}\Z" % MAX_TOKEN_CHARS)
+TOKEN_RE = re.compile(r"\A[!-~]{20,%d}\Z" % MAX_TOKEN_CHARS)
 REF_RE = re.compile(r"\A[0-9a-f]{%d}\Z" % REF_CHARS)
 MESSAGE_ID_RE = re.compile(r"\A[A-Za-z0-9+/=_%.:@-]{1,512}\Z")
 
@@ -135,7 +138,8 @@ CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
 URL_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"')]+", re.IGNORECASE)
 LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{16,}\b")
-DIGIT_RUN_RE = re.compile(r"\b\d{4,12}\b")
+GROUPED_CODE_RE = re.compile(r"\b\d{3,}(?:[ .-]\d{3,})+\b")
+DIGIT_RUN_RE = re.compile(r"\b\d{4,}\b")
 
 BODY_PREFIX = "> "
 ENVELOPE_BEGIN = "----- BEGIN UNTRUSTED MESSAGE BODY -----"
@@ -182,7 +186,10 @@ CREDENTIAL_PATTERNS = (
         "names recovery or backup codes",
     ),
     (
-        re.compile(r"\bcode\b[^\n]{0,40}?\b\d{4,10}\b", re.IGNORECASE),
+        re.compile(
+            r"\bcode\b[^\n]{0,40}?\b\d{4,10}\b|\b\d{4,10}\b[^\n]{0,40}?\bcode\b",
+            re.IGNORECASE,
+        ),
         "carries a code-shaped value",
     ),
     (
@@ -245,6 +252,17 @@ def load_config() -> Config:
     if os.path.islink(path) or not os.path.isfile(path):
         raise MailError(
             "no mailbox configuration at %s; docs/mail-readonly.md has the setup steps" % path,
+            2,
+        )
+    directory = os.path.dirname(path) or "."
+    try:
+        directory_mode = os.stat(directory).st_mode
+    except OSError as exc:
+        raise MailError("the mailbox configuration directory is unreadable: %s" % exc, 2) from exc
+    if directory_mode & 0o022:
+        raise MailError(
+            "refusing a group- or world-writable mailbox configuration directory at %s; run chmod 700 "
+            "on it, because anyone who can write the directory can replace the configuration" % directory,
             2,
         )
     mode = os.stat(path).st_mode
@@ -674,7 +692,7 @@ def classify_credential_risk(subject: str, body: str):
     for pattern, reason in CREDENTIAL_PATTERNS:
         if pattern.search(haystack) and reason not in reasons:
             reasons.append(reason)
-    if len(body) <= LONE_CODE_MAX_CHARS and LONE_CODE_RE.search(body):
+    if len(haystack) <= LONE_CODE_MAX_CHARS and LONE_CODE_RE.search(haystack):
         reason = "carries a standalone numeric code"
         if reason not in reasons:
             reasons.append(reason)
@@ -683,15 +701,19 @@ def classify_credential_risk(subject: str, body: str):
 
 def _redact_long_token(match):
     value = match.group(0)
-    has_alpha = any(char.isalpha() for char in value)
-    has_digit = any(char.isdigit() for char in value)
-    return "[redacted-token]" if has_alpha and has_digit else value
+    return "[redacted-code]" if value.isdigit() else "[redacted-token]"
 
 
 def redact(text: str) -> str:
     redacted = URL_RE.sub("[redacted-link]", text)
     redacted = LONG_TOKEN_RE.sub(_redact_long_token, redacted)
+    redacted = GROUPED_CODE_RE.sub("[redacted-code]", redacted)
     return DIGIT_RUN_RE.sub("[redacted-code]", redacted)
+
+
+def render_subject(subject: str, reasons) -> str:
+    """Mask a subject when the message it belongs to looks credential-shaped."""
+    return redact(subject) if reasons else subject
 
 
 def print_envelope(body: str) -> None:
@@ -776,8 +798,9 @@ def cmd_list(args) -> int:
             sanitize_line(str(message.get("receivedDateTime") or ""), 32),
             ", ".join(flags) or "read",
         ))
+        subject = sanitize_line(str(message.get("subject") or ""))
         print("  from:    %s" % sanitize_line(sender_of(message), 90))
-        print("  subject: %s" % sanitize_line(str(message.get("subject") or "")))
+        print("  subject: %s" % render_subject(subject, classify_credential_risk(subject, "")))
     print("")
     print("Read one message with: fm-mail.py show <ref>")
     return 0
@@ -811,11 +834,13 @@ def cmd_show(args) -> int:
     body = body if isinstance(body, dict) else {}
     content_type = str(body.get("contentType") or "").strip().lower()
     subject = sanitize_line(str(message.get("subject") or ""))
+    content = sanitize_text(str(body.get("content") or "")) if content_type == "text" else ""
+    reasons = classify_credential_risk(subject, content)
 
     print("ref:      %s" % args.ref)
     print("received: %s" % sanitize_line(str(message.get("receivedDateTime") or ""), 32))
     print("from:     %s" % sanitize_line(sender_of(message), 90))
-    print("subject:  %s" % subject)
+    print("subject:  %s" % render_subject(subject, reasons))
     if message.get("hasAttachments") is True:
         print("attachments: present; this tool never downloads or opens them")
     print("")
@@ -825,8 +850,6 @@ def cmd_show(args) -> int:
             "the mailbox returned this message as %s; this tool renders plain text only and never "
             "renders HTML" % (content_type or "an unknown content type")
         )
-    content = sanitize_text(str(body.get("content") or ""))
-    reasons = classify_credential_risk(subject, content)
     if reasons and not args.redacted:
         print("Body withheld: this message looks like it carries authentication material.")
         for reason in reasons:
