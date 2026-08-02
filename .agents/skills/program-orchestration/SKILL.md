@@ -62,6 +62,21 @@ A ticket that has no eligible candidate becomes a concrete blocker or captain de
 After selecting a host, resolve the worker's concrete runtime, model, and effort through the ordinary dispatch profile and `harness-adapters` rules.
 The orchestrator may recommend a route, but the worker's per-task profile remains the dispatch record of authority.
 
+## Consuming an upstream scope envelope and test contract
+
+A planner artifact carries a scope envelope and a test contract, at spec level and per ticket.
+`planner` owns those artifact fields; this section owns consuming them, and neither restates the other's list.
+
+When a program's source spec or tickets carry them, they are the upstream draft for each ticket's worker brief:
+
+1. **Preserve provenance.** Record which artifact and which version each ticket's envelope and test contract came from, so a later reader can tell an approved boundary from an orchestrator inference.
+2. **Revalidate before every dispatch.** Check the envelope and contract against the current code, the current dependency frontier, and the tickets that have already landed. An artifact approved days ago describes a codebase that has since moved.
+3. **Narrow into the worker brief.** Fill `{SCOPE}` by narrowing the ticket's block to what this one worker touches, under the statement contract `bin/fm-brief.sh` owns. Copying a stale block unchanged is the failure this step exists to prevent.
+4. **Never widen.** Anything beyond the accepted envelope, and any required behavior the captain never approved, is a scope decision that returns to the captain under `ask-user-authority`.
+5. **Escalate a stale, incorrect, or insufficient envelope** as a concrete blocker rather than repairing it in place. Repairing it silently replaces a captain-approved boundary with an orchestrator-chosen one.
+
+For a paired ticket, the navigator independently challenges and refines the approved test contract at the plan gate; `paired-review` owns that gate.
+
 ## Remote-host ramp
 
 Treat every remote host as untrusted capacity until it completes the ramp below.

@@ -32,7 +32,7 @@ Hard rules, in priority order:
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
    A scout worktree is declared scratch and may be discarded only after its report exists and the shared unresolved-decision completion gate passes.
 4. **Crewmates never address the captain.**
-   All crewmate communication flows through firstmate, with one narrow exception: a `paired-review` driver and navigator exchange directly through their shared file, and even they route every captain-facing message and every escalation through firstmate.
+   All crewmate communication flows through firstmate.
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
@@ -168,7 +168,6 @@ When that section reports its checks still in progress it names exactly what is 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the required tools are present and GitHub authentication is good.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
-Always pass `-R <owner>/<repo>` on every `gh-axi pr` call that names a bare PR number when the PR belongs to a project rather than this home: without it `gh-axi` resolves against the home repository, and a same-numbered PR there can report a stale `merged` with an unrelated title and a months-old merge date. Confirm the returned title matches the intended PR before believing a merge result.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
@@ -283,7 +282,6 @@ Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
 
-Load `paired-review` before dispatching the high-blast-radius implementation work its section 13 trigger names, because that protocol launches a second worker in the same dispatch.
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
@@ -299,7 +297,6 @@ Supervise all live work under section 8.
 
 The selected delivery path owns its own rigor.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
-The captain's standing `paired-review` pairing is the one pre-authorized exception to that, and its own trigger owns when it applies.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
@@ -421,8 +418,6 @@ The skill owns the daemon procedure; these safety facts remain inline:
 
 Load `stuck-crewmate-recovery` after a stale wake, looping or confused pane, answered-by-brief question, unresponsive worker, or failed steer.
 
-A repeatedly wedge-escalating pane is not proof of a dead worker. A worker that announces a long command and then ends its turn without running it stalls at the turn boundary: the pane text freezes mid-sentence with an unchanged context percentage and no child process for the announced command, while the agent process itself stays present and the backend agent-state classifier still reports it alive. A plain nudge resumes it with no work lost, so establish the classifier state and on-disk progress (file mtimes, commits, dirty count) before considering a replacement launch. Matching on a bare process name is a real trap here: a `ps` pattern that misses the harness's own short process name reads a live worker as dead and invites a duplicate launch against it.
-
 ## 9. Escalation and captain etiquette
 
 **Talk in outcomes, not mechanics.**
@@ -491,7 +486,6 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
-Fill every ship and scout brief's `{SCOPE}` placeholder by default rather than on request, naming the owning module or layer, the locations that are out of bounds, and the seam assumptions as that script's header defines.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
@@ -524,8 +518,6 @@ These skills are not captain-invocable; load them only at their precise triggers
   Cloning or registering a project is add intake and uses the same trigger.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
-- `program-orchestration` - load before launching, recovering, handing off, or distributing a long-running program orchestrator or its workers across local or remote hosts; it owns program custody and routing while `harness-adapters`, `secondmate-provisioning`, and the ordinary delivery lifecycle retain their existing authority.
-- `paired-review` - load before dispatching high-blast-radius implementation work (a database migration, a contract or schema change, a subsystem deletion or relocation, or any task the captain names as paired), before dispatching a bug or regression diagnosis, which is never paired work and whose root cause is judged before any fix action, and when supervising or deciding an escalation from a pair already under way.
 - `decision-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
 - `process-event-sources` - load before arming a long-polling source, and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.

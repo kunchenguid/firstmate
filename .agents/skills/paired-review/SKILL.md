@@ -95,6 +95,12 @@ Write the same statement into both briefs and cite every firstmate-home path in 
 
 The stated scope and seam assumptions are part of the accepted contract, so widening or correcting them is an escalation, never something the pair settles between themselves.
 
+When the task came from a planner artifact, the ticket also carries an approved test contract - the acceptance intent the captain signed off with the scope, whose fields `planner` owns.
+At the plan gate the navigator challenges and refines it independently, the same way it challenges the plan: would what the driver is about to build actually be proven by the approved acceptance intent, observed where the contract says it is observed?
+That challenge sharpens acceptance intent within the accepted product scope and never expands it.
+The driver alone writes production and test code and runs validation; exact test names, fixtures, mocks, and commands are its decisions unless one is materially contract-defining.
+A required new behavior discovered at this gate is a scope decision for the captain, not a test the navigator adds.
+
 ## The four gates
 
 1. **Independent read, at launch.**
