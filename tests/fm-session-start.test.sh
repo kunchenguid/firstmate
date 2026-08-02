@@ -688,7 +688,7 @@ EOF
 }
 
 test_session_lock_concurrent_single_winner() {
-  local rec root home fakebin ready completed winners pids i pid count
+  local rec root home fakebin ready completed winners pids i pid count total
   rec=$(new_world lock-concurrency)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -707,44 +707,66 @@ for argument in "$@"; do
   [ "$previous" = -p ] && pid=$argument
   previous=$argument
 done
+real_parent=
+if [ -n "$pid" ]; then
+  real_parent=$(/bin/ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+fi
 case "$*" in
   *"comm="*)
     if [ -f "$FM_FAKE_LOCK_STATE/harness-$pid" ]; then
       printf '%s\n' /usr/local/bin/claude
-    else
+    elif [ "$real_parent" = "$FM_FAKE_WORKER_PID" ]; then
       printf '%s\n' /bin/bash
+    else
+      exec /bin/ps "$@"
     fi
     ;;
   *"args="*)
     if [ -f "$FM_FAKE_LOCK_STATE/harness-$pid" ]; then
       printf '%s\n' claude
-    else
+    elif [ "$real_parent" = "$FM_FAKE_WORKER_PID" ]; then
       printf '%s\n' bash
+    else
+      exec /bin/ps "$@"
     fi
     ;;
-  *"ppid="*) printf '%s\n' "$FM_FAKE_HARNESS_PID" ;;
-  *) exit 1 ;;
+  *"ppid="*)
+    if [ -f "$FM_FAKE_LOCK_STATE/harness-$pid" ]; then
+      printf '%s\n' 1
+    elif [ "$real_parent" = "$FM_FAKE_WORKER_PID" ]; then
+      printf '%s\n' "$FM_FAKE_HARNESS_PID"
+    else
+      exec /bin/ps "$@"
+    fi
+    ;;
+  *) exec /bin/ps "$@" ;;
 esac
 SH
   chmod +x "$fakebin/ps"
 
+  total=8
   pids=
   i=1
-  while [ "$i" -le 40 ]; do
+  while [ "$i" -le "$total" ]; do
     (
-      harness_pid=$BASHPID
+      sleep 300 &
+      harness_pid=$!
       : > "$home/state/harness-$harness_pid"
+      worker_pid=$(/bin/ps -o ppid= -p "$harness_pid" 2>/dev/null | tr -d ' ')
+      trap 'kill "$harness_pid" 2>/dev/null || true; wait "$harness_pid" 2>/dev/null || true' EXIT
       : > "$ready/$i"
-      while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
+      while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt "$total" ]; do
         sleep 0.01
       done
-      if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
-        FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
+      if env -u CLAUDECODE -u CODEX_THREAD_ID -u CURSOR_AGENT -u PI_CODING_AGENT -u GROK_AGENT \
+        -u CURSOR_CONVERSATION_ID -u HERDR_ENV -u HERDR_PANE_ID \
+        FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
+        FM_FAKE_HARNESS_PID="$harness_pid" FM_FAKE_WORKER_PID="$worker_pid" PATH="$fakebin:$BASE_PATH" \
         "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
         printf '%s\n' "$harness_pid" >> "$winners"
       fi
       : > "$completed/$i"
-      while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
+      while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt "$total" ]; do
         sleep 0.01
       done
     ) &

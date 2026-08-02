@@ -144,7 +144,7 @@ resolve_permissive_tmux_kill_ref() {
 OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-x-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
-OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
+OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh fm-cursor-hook-lib.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
   local name=$1 root bin f
@@ -161,7 +161,13 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   cp -R "$ROOT/bin/backends" "$bin/backends"
   git -C "$ROOT" show "$BASE_REF:bin/backends/tmux.sh" > "$bin/backends/tmux.sh"
   for f in $OLD_BIN_REFACTORED; do
-    git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
+    if git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f" 2>/dev/null; then
+      :
+    elif [ "$f" = fm-cursor-hook-lib.sh ] && [ -f "$ROOT/bin/$f" ]; then
+      cp "$ROOT/bin/$f" "$bin/$f"
+    else
+      return 1
+    fi
     chmod +x "$bin/$f"
   done
   printf '%s\n' "$root"
