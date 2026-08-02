@@ -75,6 +75,7 @@ Tabs are still created as `fm-<id>`; post-spawn rename is best-effort and must n
 Husk re-spawn and list-live therefore match either the create label or the scout/ship display form so a renamed husk is not stranded.
 The primary seed tab labeled `1` is never renamed.
 Secondmate launches are out of scope for automatic display names.
+When presentation spaces are enabled and the task tab is a projected child, only the agent is renamed: the tab keeps its `fm-<id>` label so husk reclaim's exact-label match (see below) still finds it on re-spawn.
 
 ## Optional presentation spaces
 
