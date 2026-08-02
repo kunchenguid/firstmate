@@ -25,6 +25,7 @@ LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
 
 FAILED=0
+FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS=${FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS:-30}
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
 pass() { printf 'ok - %s\n' "$1"; }
 assert_contains() { case "$1" in *"$2"*) : ;; *) fail "$3" ;; esac; }
@@ -448,7 +449,7 @@ unit_namespace_guard_releases_when_owner_crashes() {
     while :; do :; done
   ' _ "$LAUNCH" > "$st/owner.out" 2>&1 &
   owner=$!
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != owner-held ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != owner-held ]; then
     fail "launcher namespace-guard owner did not acquire the kernel lock"
     kill -KILL "$owner" 2>/dev/null || true; wait "$owner" 2>/dev/null || true
     exec 8>&-; rm -rf "$st"; return
@@ -462,7 +463,7 @@ unit_namespace_guard_releases_when_owner_crashes() {
     fm_afk_launch_namespace_guard_release
   ' _ "$LAUNCH" > "$st/waiter.out" 2>&1 &
   waiter=$!
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != waiter-acquired ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != waiter-acquired ]; then
     fail "launcher namespace guard remained locked after its owner was killed"
     kill -KILL "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true
     exec 8>&-; rm -rf "$st"; return
@@ -504,13 +505,13 @@ unit_abandoned_reclaim_parent_aba_is_fenced() {
     bash -c '. "$1"; fm_afk_launch_lock_acquire; rc=$?; [ "$rc" -ne 0 ] || fm_afk_launch_lock_release; exit "$rc"' \
       _ "$LAUNCH" > "$st/child.out" 2>&1 &
   child=$!
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != abandoned-before-revalidate ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != abandoned-before-revalidate ]; then
     fail "launcher abandoned-reclaim ABA did not reach its pre-revalidation fence"
     kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true
     exec 8>&-; exec 9>&-; rm -rf "$st"; return
   fi
   printf 'proceed\n' >&9
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != abandoned-after-revalidate ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != abandoned-after-revalidate ]; then
     fail "launcher abandoned-reclaim ABA did not reach the guarded post-revalidation point"
     kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true
     exec 8>&-; exec 9>&-; rm -rf "$st"; return
@@ -525,13 +526,13 @@ unit_abandoned_reclaim_parent_aba_is_fenced() {
   printf '%s' "$owner_identity" > "$lock/.reclaim/pid-identity"
   printf 'live-reclaim' > "$lock/.reclaim/token"
   printf 'proceed\n' >&9
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != abandoned-after-quarantine ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != abandoned-after-quarantine ]; then
     fail "launcher abandoned-reclaim ABA did not expose its guarded quarantine checkpoint"
     kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true
     exec 8>&-; exec 9>&-; rm -rf "$st"; return
   fi
   printf 'proceed\n' >&9
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != abandoned-quarantine-restored ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != abandoned-quarantine-restored ]; then
     fail "launcher abandoned-reclaim ABA did not restore the swapped reclaim generation"
     kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true
     exec 8>&-; exec 9>&-; rm -rf "$st"; return
@@ -582,13 +583,13 @@ unit_claimed_parent_swap_restores_quarantine() {
     bash -c '. "$1"; fm_afk_launch_lock_acquire; rc=$?; [ "$rc" -ne 0 ] || fm_afk_launch_lock_release; exit "$rc"' \
       _ "$LAUNCH" > "$st/child.out" 2>&1 &
   child=$!
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != claimed-before-revalidate ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != claimed-before-revalidate ]; then
     fail "launcher claimed-parent ABA did not reach final generation revalidation"
     kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true
     exec 8>&-; exec 9>&-; rm -rf "$st"; return
   fi
   printf 'proceed\n' >&9
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != claimed-after-revalidate ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != claimed-after-revalidate ]; then
     fail "launcher claimed-parent ABA did not reach the post-fence rename point"
     kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true
     exec 8>&-; exec 9>&-; rm -rf "$st"; return
@@ -600,7 +601,7 @@ unit_claimed_parent_swap_restores_quarantine() {
   printf 'live-parent' > "$lock/token"
   printf 'new-parent-sentinel' > "$lock/sentinel"
   printf 'proceed\n' >&9
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != claimed-after-quarantine ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != claimed-after-quarantine ]; then
     fail "launcher claimed-parent ABA did not reach its guarded post-quarantine checkpoint"
     kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true
     exec 8>&-; exec 9>&-; rm -rf "$st"; return
@@ -613,14 +614,14 @@ unit_claimed_parent_swap_restores_quarantine() {
     fm_afk_launch_lock_release
   ' _ "$LAUNCH" > "$st/third.out" 2>&1 &
   third=$!
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != third-started ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != third-started ]; then
     fail "launcher namespace-guard contender did not start during the canonical-name gap"
     kill "$child" "$third" 2>/dev/null || true
     wait "$child" 2>/dev/null || true; wait "$third" 2>/dev/null || true
     exec 8>&-; exec 9>&-; rm -rf "$st"; return
   fi
   printf 'proceed\n' >&9
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != claimed-quarantine-restored ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != claimed-quarantine-restored ]; then
     fail "launcher claimed-parent ABA did not restore the mismatched quarantine"
     [ "$phase" != third-acquired ] \
       || fail "launcher namespace guard admitted a third installer before quarantine restoration"
@@ -640,7 +641,7 @@ unit_claimed_parent_swap_restores_quarantine() {
   printf 'proceed\n' >&9
   wait "$child" || child_status=$?
   [ "$child_status" -eq 0 ] || fail "launcher claimed-parent ABA child failed: $(cat "$st/child.out")"
-  if ! IFS= read -r -t 5 phase <&8 || [ "$phase" != third-acquired ]; then
+  if ! IFS= read -r -t "$FM_AFK_TEST_LIVENESS_TIMEOUT_SECONDS" phase <&8 || [ "$phase" != third-acquired ]; then
     fail "launcher namespace guard did not admit the third installer after restoration completed"
   fi
   wait "$third" || third_status=$?

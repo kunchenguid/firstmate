@@ -112,7 +112,7 @@ test_new_ship_without_row_is_refused_with_fix() {
   expect_code 1 "$status" "new ship without a backlog row should be refused"
   assert_contains "$out" "new ship task $id has no In flight or Queued row in $HOME_DIR/data/backlog.md" \
     "refusal did not name the task and home backlog"
-  expected_fix="tasks-axi add '$id' '<one line>' --kind 'ship' --repo 'project' --start --backend markdown --file '$HOME_DIR/data/backlog.md'"
+  expected_fix="'$ROOT/bin/fm-data-write.py' --data '$HOME_DIR/data' -- tasks-axi add '$id' '<one line>' --kind 'ship' --repo 'project' --start --backend markdown --file '$HOME_DIR/data/backlog.md'"
   assert_contains "$out" "$expected_fix" "refusal did not print the exact tasks-axi repair command"
   assert_absent "$HOME_DIR/state/$id.meta" "backlog refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "backlog refusal created an endpoint launch"

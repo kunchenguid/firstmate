@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { execFile } from 'node:child_process';
-import { access, readFile, stat } from 'node:fs/promises';
+import { access, lstat, readFile, readdir, stat } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
@@ -18,10 +19,13 @@ import {
   listDecisions,
   readAnswer,
   readDecision,
+  validateCollectPayload,
+  validateDecisionId,
 } from './protocol.mjs';
+import { renderBoard } from './board.mjs';
 import { migrateLegacy } from './migration.mjs';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const PROGRAM = basename(process.argv[1] ?? 'lavish-axi');
 const SOURCE_WAKE_ADAPTER = fileURLToPath(
   new URL('../../../bin/fm-lavish-wake.sh', import.meta.url),
@@ -34,17 +38,21 @@ Human commands:
   lavish inbox [--home <path>]
   lavish show <decision-id> [--home <path>]
   lavish answer <decision-id> [--home <path>]
+  lavish board <decision-id> [--home <path>] [--out <path>]
 
 Agent commands:
   lavish-axi create --id <id> --title <title> --request <request.md>
-    --questions <questions.json> --destination <relative-path> [--home <path>]
+    --questions <questions.json> --destination <relative-path>
+    [--visuals <dir>] [--home <path>]
+  lavish-axi collect <decision-id> --payload <json-file> [--home <path>]
   lavish-axi intake [--home <path>]
   lavish-axi configure-wake --command <absolute-executable> [--home <path>]
   lavish-axi migrate-legacy --state <state.json> --snapshot-dir <dir>
     [--pending-map <map.json>] [--home <path>]
 
 Every command reads files, performs bounded local work, and exits.
-There is no server, browser, listener, poll, watcher, or resident process.`;
+There is no server, listener, poller, watcher, or resident process.
+The board command writes self-contained HTML but does not open a browser.`;
 }
 
 function parseArguments(argv) {
@@ -239,6 +247,8 @@ async function enqueueWake(home, decision, answerDigest) {
         decision.answerPath,
         '--digest',
         answerDigest,
+        '--destination',
+        decision.manifest.destination,
       ],
       {
         env: process.env,
@@ -254,6 +264,196 @@ async function enqueueWake(home, decision, answerDigest) {
     );
     child.stdin?.end();
   });
+}
+
+function sameBatch(answer, batch) {
+  return (
+    JSON.stringify(answer.answers) === JSON.stringify(batch.selections)
+    && answer.note === batch.note
+  );
+}
+
+function landingCandidateId(name) {
+  let match = name.match(/^lavish-board-([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)\.payload\.json$/);
+  if (match !== null) return match[1];
+  match = name.match(/^lavish-answer-([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)(?: \([0-9]+\))?\.json$/);
+  if (match !== null) return match[1];
+  return undefined;
+}
+
+async function discoverLandingCandidates(home) {
+  const stateDirectory = resolve(process.env.FM_STATE_OVERRIDE || join(home, 'state'));
+  const directories = [
+    stateDirectory,
+    process.env.LAVISH_DOWNLOADS_DIR,
+    process.env.LAVISH_SCAN_HOME_DOWNLOADS === '0' ? undefined : join(homedir(), 'Downloads'),
+  ].filter((directory, index, all) => (
+    typeof directory === 'string'
+    && directory.trim() !== ''
+    && all.indexOf(directory) === index
+  ));
+  const candidates = [];
+  for (const directory of directories) {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      candidates.push({
+        id: '<scan>',
+        path: directory,
+        error: `payload_scan_error: ${error.message}`,
+      });
+      continue;
+    }
+    for (const entry of entries) {
+      const id = landingCandidateId(entry.name);
+      if (id === undefined) continue;
+      let path = join(directory, entry.name);
+      try {
+        validateDecisionId(id);
+        path = resolve(path);
+        const info = await lstat(path);
+        if (!info.isFile() || info.isSymbolicLink()) {
+          candidates.push({
+            id,
+            path,
+            error: 'payload_unsafe_file: candidate is not a regular file',
+          });
+          continue;
+        }
+        candidates.push({ id, path, mtimeMs: info.mtimeMs });
+      } catch (error) {
+        candidates.push({ id, path, error: `payload_scan_error: ${error.message}` });
+      }
+    }
+  }
+  candidates.sort((left, right) => (
+    left.id.localeCompare(right.id)
+    || (right.mtimeMs ?? 0) - (left.mtimeMs ?? 0)
+    || left.path.localeCompare(right.path)
+  ));
+  return candidates;
+}
+
+async function recoverLandingPayloads(home) {
+  const candidates = await discoverLandingCandidates(home);
+  const byId = new Map();
+  for (const candidate of candidates) {
+    if (!byId.has(candidate.id)) byId.set(candidate.id, []);
+    byId.get(candidate.id).push(candidate);
+  }
+  const results = [];
+  let failed = false;
+
+  for (const [id, idCandidates] of byId) {
+    if (id === '<scan>') {
+      failed = true;
+      for (const candidate of idCandidates) {
+        results.push({ id, status: 'error', detail: `${candidate.path}: ${candidate.error}` });
+      }
+      continue;
+    }
+
+    let decision;
+    try {
+      decision = await readDecision(home, id);
+    } catch (error) {
+      failed = true;
+      results.push({
+        id,
+        status: 'payload-unmatched',
+        detail: `${idCandidates[0].path}: ${error.message}`,
+      });
+      continue;
+    }
+
+    let existingAnswer;
+    try {
+      existingAnswer = (await readAnswer(decision)).answer;
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        failed = true;
+        results.push({ id, status: 'error', detail: error.message });
+        continue;
+      }
+    }
+
+    let selected;
+    for (const candidate of idCandidates) {
+      if (candidate.error !== undefined) {
+        failed = true;
+        results.push({ id, status: 'error', detail: `${candidate.path}: ${candidate.error}` });
+        continue;
+      }
+      let payload;
+      try {
+        payload = JSON.parse(await readFile(candidate.path, 'utf8'));
+      } catch (error) {
+        failed = true;
+        results.push({
+          id,
+          status: 'payload-invalid',
+          detail: `${candidate.path}: payload_invalid_json: ${error.message}`,
+        });
+        continue;
+      }
+      let batch;
+      try {
+        batch = validateCollectPayload(payload, decision.manifest);
+      } catch (error) {
+        failed = true;
+        results.push({ id, status: 'payload-invalid', detail: `${candidate.path}: ${error.message}` });
+        continue;
+      }
+      if (existingAnswer !== undefined) {
+        if (sameBatch(existingAnswer, batch)) {
+          continue;
+        } else {
+          failed = true;
+          results.push({
+            id,
+            status: 'payload-conflict',
+            detail: `${candidate.path}: decision already has different answer content`,
+          });
+        }
+        continue;
+      }
+      if (selected !== undefined && !sameBatch({ answers: selected.batch.selections, note: selected.batch.note }, batch)) {
+        failed = true;
+        results.push({
+          id,
+          status: 'payload-conflict',
+          detail: `${candidate.path}: multiple landing payloads disagree`,
+        });
+        continue;
+      }
+      selected ??= { candidate, batch };
+    }
+
+    if (existingAnswer !== undefined || selected === undefined) {
+      continue;
+    }
+    try {
+      const committed = await commitAnswer(
+        decision,
+        selected.batch.selections,
+        selected.batch.note,
+      );
+      const wake = await enqueueWake(home, decision, committed.digest);
+      results.push({
+        id,
+        status: wake.ok ? 'payload-collected' : 'payload-collected-wake-error',
+        detail: wake.detail || selected.candidate.path,
+      });
+      if (!wake.ok) failed = true;
+    } catch (error) {
+      failed = true;
+      results.push({ id, status: 'error', detail: `${selected.candidate.path}: ${error.message}` });
+    }
+  }
+
+  return { results, failed };
 }
 
 async function configureWakeCommand(options) {
@@ -314,7 +514,71 @@ async function answerCommand(id, options) {
     process.exitCode = 5;
     return;
   }
-  process.stdout.write(`Answer saved for ${id}; firstmate wake queued.\n`);
+  process.stdout.write(
+    `Answer saved for ${id}; firstmate wake queued.${wake.detail ? `\n${wake.detail}\n` : '\n'}`,
+  );
+}
+
+async function boardCommand(id, options) {
+  rejectUnknownOptions(options, ['home', 'out']);
+  const decision = await readDecision(resolveHome(options), id);
+  try {
+    const existing = await readAnswer(decision);
+    throw new LavishError(
+      `decision ${id} was already submitted at ${existing.answer.submitted_at}`,
+      3,
+    );
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  const outputPath = resolve(options.out ?? `${id}.html`);
+  await atomicWrite(outputPath, await renderBoard(decision), { mode: 0o600 });
+  process.stdout.write(`Board written: ${outputPath}\n`);
+}
+
+async function collectCommand(id, options) {
+  rejectUnknownOptions(options, ['home', 'payload']);
+  const home = resolveHome(options);
+  const decision = await readDecision(home, id);
+  const payloadPath = resolve(requireOption(options, 'payload'));
+  let payload;
+  try {
+    payload = JSON.parse(await readFile(payloadPath, 'utf8'));
+  } catch (error) {
+    throw new LavishError(`payload_invalid_json: ${error.message}`, 2);
+  }
+  const batch = validateCollectPayload(payload, decision.manifest);
+  try {
+    const existing = await readAnswer(decision);
+    if (
+      JSON.stringify(existing.answer.answers) === JSON.stringify(batch.selections)
+      && existing.answer.note === batch.note
+    ) {
+      process.stdout.write(
+        `Decision ${id} already contains this collected payload; answer unchanged.\n`,
+      );
+      return;
+    }
+    throw new LavishError(`decision ${id} is already answered with different content`, 3);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  const committed = await commitAnswer(decision, batch.selections, batch.note);
+  const wake = await enqueueWake(home, decision, committed.digest);
+  if (!wake.ok) {
+    process.stderr.write(
+      `answer saved; wake not queued${wake.detail ? `: ${wake.detail}` : ''}\n`,
+    );
+    process.exitCode = 5;
+    return;
+  }
+  process.stdout.write(
+    `Collected answer for ${id}; firstmate wake queued.${wake.detail ? `\n${wake.detail}\n` : '\n'}`,
+  );
 }
 
 async function createCommand(options) {
@@ -325,6 +589,7 @@ async function createCommand(options) {
     'request',
     'questions',
     'destination',
+    'visuals',
     'created-at',
   ]);
   const home = resolveHome(options);
@@ -342,6 +607,7 @@ async function createCommand(options) {
     request: await readFile(requestPath),
     questions,
     destination: requireOption(options, 'destination'),
+    visualsDirectory: options.visuals === undefined ? undefined : resolve(options.visuals),
     createdAt: options['created-at'] ?? new Date().toISOString(),
   });
   process.stdout.write(
@@ -352,12 +618,15 @@ async function createCommand(options) {
 
 async function intakeCommand(options) {
   rejectUnknownOptions(options, ['home']);
-  const result = await intakeAll(resolveHome(options));
-  if (result.results.length === 0) {
+  const home = resolveHome(options);
+  const recovered = await recoverLandingPayloads(home);
+  const result = await intakeAll(home);
+  const results = [...recovered.results, ...result.results];
+  if (results.length === 0) {
     return;
   }
-  process.stdout.write(encodeToon({ decisions: result.results }));
-  if (result.failed) {
+  process.stdout.write(encodeToon({ decisions: results }));
+  if (recovered.failed || result.failed) {
     process.exitCode = 6;
   }
 }
@@ -422,9 +691,17 @@ async function main(argv) {
       if (id === undefined) throw new LavishError('answer requires a decision id', 2);
       await answerCommand(id, options);
       break;
+    case 'board':
+      if (id === undefined) throw new LavishError('board requires a decision id', 2);
+      await boardCommand(id, options);
+      break;
     case 'create':
       if (id !== undefined) throw new LavishError('create uses --id, not a positional id', 2);
       await createCommand(options);
+      break;
+    case 'collect':
+      if (id === undefined) throw new LavishError('collect requires a decision id', 2);
+      await collectCommand(id, options);
       break;
     case 'intake':
       if (id !== undefined) throw new LavishError('intake takes no decision id', 2);

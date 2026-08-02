@@ -23,7 +23,7 @@ set -u
 
 SEND="$ROOT/bin/fm-send.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-send-marker)
+fm_test_tmproot_into TMP_ROOT fm-send-marker
 
 # A fake tmux that (a) records the literal text of every `send-keys -l` to
 # FM_SEND_LOG and (b) lets fm-send's submit path reach a clean "empty" verdict.

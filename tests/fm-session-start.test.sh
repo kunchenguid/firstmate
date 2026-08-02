@@ -27,7 +27,7 @@ set -u
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
-TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
+fm_test_tmproot_into TMP_ROOT fm-session-start-tests
 fm_git_identity fmtest fmtest@example.invalid
 
 # --- world builders ----------------------------------------------------------

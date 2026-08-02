@@ -10,6 +10,7 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
 A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
+The generated `## Pipeline` section must contain `Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)` exactly; prose that merely says the checks passed is not a substitute for that machine-verifiable marker.
 Dependency bots are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
 
 ## Workflow
@@ -79,8 +80,8 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 Agent Fleet is independently packaged under `tools/agent-fleet` and requires Python 3.11 or newer plus `uv`.
 Run the complete locked verification in [`tools/agent-fleet/RELEASING.md`](tools/agent-fleet/RELEASING.md) before pushing; that document also owns versioning, tagging, and clean-install verification.
 
-Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so run one directly to focus on a subject.
-When triaging a red `Behavior tests` job, remember that CI runs that loop under `set -eu` while the local loop above does not: CI stops at the first failing script, so its log proves nothing about the suites that sort after it, and a red job is a lower bound on the failure count rather than the whole list.
+Discover behavior-test entrypoints by listing `tests/*.test.sh` and run one directly to focus on a subject; partition wrappers source their matching `tests/*-suite.sh` implementation.
+When triaging a red behavior shard, use its begin and end markers to identify each failing script: the shard continues through its complete assignment and records every exit code before the final `Behavior tests` job verifies the executed union.
 Reproduce with the exclusion-aware local loop to see every safe failure at once before concluding which ones are real.
 Reproduce in a checkout whose `origin` is the repository's https URL, as CI's own checkout is: the secondmate network-authority fixtures assert that the product pins the resolved address of the origin host, and a checkout whose `origin` is a local filesystem path has no host to pin, so those cases refuse for a reason that exists only locally.
 Run the suites from a checkout sitting on its default branch, not from a task-branch worktree - the worktree-tangle guard fires and several secondmate suites require the default branch, which produces more failures that are pure local artifacts.

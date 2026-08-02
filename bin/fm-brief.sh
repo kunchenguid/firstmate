@@ -111,6 +111,8 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+FM_HOME_ARG=$(shell_quote "$FM_HOME")
+NM_REATTACH_HELPER=$(shell_quote "$FM_ROOT/bin/fm-no-mistakes-reattach.sh")
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -394,8 +396,9 @@ $RULE1
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs.
+   If reattach returns \`drive run: reconcile run ... read response ... socket: i/o timeout\`, run \`FM_HOME=$FM_HOME_ARG $NM_REATTACH_HELPER $ID\`; it retries only that transient read timeout after a read-only running-daemon preflight. Ordinary \`axi run\` calls \`EnsureDaemon\`, so this narrows risk but cannot guarantee that a daemon stopping after preflight will not be started; strict no-start behavior requires an upstream attach-only operation.
+   Append \`blocked: {the daemon error}\` only if that helper exhausts its retries or for any other daemon error, then stop; only firstmate manages the daemon.
 
 $REPORT_CONTRACT
 

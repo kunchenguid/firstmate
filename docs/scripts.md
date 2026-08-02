@@ -8,7 +8,8 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | Script                   | Purpose                                                                              |
 | ------------------------ | ------------------------------------------------------------------------------------ |
 | `fm-session-start.sh`    | Compose lock, bootstrap, and wake drain into the single ordered session-start digest |
-| `fm-autocompact.sh`      | Bridge Claude context compaction through a durable anchor and session-start recovery |
+| `fm-autocompact.sh`      | Bridge Claude context compaction through deterministic state, bounded judgment capture, and session-start recovery |
+| `fm-autocompact-judgment.py` | Extract transcript judgment and publish validated private-memory or backlog edits safely |
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
 | `fm-checkout-refresh.sh` | Discover worktree seed checkouts, react to live upstream-default changes, surface untracked skill drafts, enforce the timed backstop, and manage the home-scoped scheduler |
 | `fm-fleet-sync.sh`       | Serialize live-default-proven project refreshes with safe fast-forwards, `STUCK:` reports, branch pruning, and orphaned-lock recovery |
@@ -30,12 +31,13 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-decision-pretool-check.sh` | Exact-identity gate that routes structured captain decisions to Lavish (docs/decision-pretool-check.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
-| `fm-spawn.sh`            | Spawn, native-resume, or provider-neutrally continue crewmates on the resolved account and runtime backend |
+| `fm-spawn.sh`            | Spawn, native-resume, or provider-neutrally continue crewmates while recording pre-metadata Treehouse acquisition ownership |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule through quota or the deferred legacy pool-summary branch |
 | `fm-account-directory.sh` | Select a direct Claude/Codex account directory and install its per-profile Herdr hook |
 | `fm-account-routing-lib.sh` | Own routing mode plus legacy Agent Fleet lease, exec, resume, and release recovery |
 | `fm-account-session-sync.sh` | Reconcile real Agent Fleet provider-session mappings into managed task metadata       |
 | `fm-account-continuation.sh` | Build a verified task-owned packet for fresh cross-profile continuation             |
+| `fm-treehouse-lib.sh`    | Prove exact Treehouse task leases and resolve one unique leased worktree             |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
@@ -47,18 +49,21 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `backends/cmux.sh`       | Experimental cmux session-provider adapter                                           |
 | `fm-config-push.sh`      | Push declared inheritable local config to live secondmate homes mid-session          |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`           |
-| `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
+| `fm-merge-local.sh`      | Fast-forward an approved `local-only` branch and immediately invoke terminal auto-reaping |
 | `fm-review-diff.sh`      | Review a crewmate branch or recorded PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker, detector, and idempotent transformation         |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with honest status reporting                |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |
+| `fm-auto-reap.sh`        | Reap proven terminal tasks and aged, owner-dead pre-metadata Treehouse acquisitions  |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and any backend terminal lifecycle                 |
 | `fm-supervisor-target-lib.sh` | Resolve the compatibility injection target and backend for the daemon and launcher |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, complete native tasks or inject compatibility digests |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crewmate                            |
+| `fm-no-mistakes-reattach.sh` | Retry one home-scoped existing run after its transient reconciliation timeout    |
+| `fm-nm-step-liveness.sh` | Read a no-mistakes step's processes as alive, stalled, dead, or unknown              |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
@@ -67,8 +72,11 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-process-tree-lib.sh` | Shared bounded command runner that terminates and reaps complete process trees         |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inheritable-config propagation                        |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
+| `fm-lavish-board.sh`     | Open a self-contained decision board and arm its profile-first bounded submission check |
 | `fm-lavish-intake.sh`    | Invoke compatible store-and-forward Lavish intake at an existing turn boundary       |
-| `fm-lavish-wake.sh`      | Append one durable Lavish answer pointer through the canonical wake queue lock        |
+| `fm-lavish-queue.sh`     | Queue redundant visible delivery only to a session-lock-proven home-bound supervisor |
+| `fm-lavish-version-lib.sh` | Shared Lavish store-forward minimum-version compatibility check                    |
+| `fm-lavish-wake.sh`      | Append a durable answer pointer, then attempt proven home-bound visible delivery      |
 | `fm-wake-drain.sh`       | Intake Lavish answers, atomically drain queued wakes, then assert watcher liveness    |
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |
 | `fm-classify-lib.sh`     | Shared captain-relevant and declared-external-wait wake classification vocabulary    |
@@ -85,6 +93,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-teardown.sh`         | Fail-closed teardown of worktrees, endpoints, secondmate homes, and managed account leases |
 | `fm-harness.sh`          | Detect the running harness and resolve crewmate or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
+| `fm-session-lock-lib.sh` | Shared session-lock format, holder liveness, and home-bound supervisor route proof    |
 | `fm-lint.sh`             | Single owner of the shell-lint definition that CI and the no-mistakes gate both run  |
 | `fm-install-shellcheck.sh` | Install CI's pinned, checksum-verified ShellCheck build                            |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |

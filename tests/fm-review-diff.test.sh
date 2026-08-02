@@ -15,7 +15,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 REVIEW_DIFF="$ROOT/bin/fm-review-diff.sh"
-TMP_ROOT=$(fm_test_tmproot fm-review-diff-tests)
+fm_test_tmproot_into TMP_ROOT fm-review-diff-tests
 
 make_case() {
   local name=$1 case_dir

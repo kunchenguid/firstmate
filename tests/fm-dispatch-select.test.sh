@@ -7,7 +7,7 @@ export FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
-TMP_ROOT=$(fm_test_tmproot fm-dispatch-select-tests)
+fm_test_tmproot_into TMP_ROOT fm-dispatch-select-tests
 mkdir -p "$TMP_ROOT"
 
 write_quota() {

@@ -342,19 +342,28 @@ test_send_refuses_and_admits() {
 # task (HEAD reachable from origin), so a normal teardown genuinely succeeds and a
 # refused one leaves the task untouched (mirrors tests/fm-teardown make_case).
 make_teardown_case() {
-  local name=$1 case_dir fakebin
+  local name=$1 case_dir fakebin wt
   case_dir="$TMP/$name"; fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/treehouse"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+state="$(dirname "$0")/.tmux-live"
 case "${1:-}" in
-  display-message) exit 1 ;;
-  list-windows) exit 0 ;;
+  display-message)
+    [ -f "$state" ] || exit 1
+    case " $* " in
+      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    esac
+    exit 0
+    ;;
+  list-windows) [ ! -f "$state" ] || printf '%s\n' fm-task-x1; exit 0 ;;
+  kill-window) rm -f "$state"; exit 0 ;;
 esac
 exit 0
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux"
+  touch "$fakebin/.tmux-live"
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -379,12 +388,13 @@ SH
   rm -rf "$case_dir/_seed"
   git clone -q "$case_dir/origin.git" "$case_dir/project"
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
-  mkdir -p "$case_dir/treehouse-pool/1"
-  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/treehouse-pool/1/wt" main
-  git -C "$case_dir/treehouse-pool/1/wt" commit -q --allow-empty -m "shippable work"
-  git -C "$case_dir/treehouse-pool/1/wt" push -q origin fm/task-x1
+  wt="$case_dir/treehouse-pool/1/wt"
+  mkdir -p "$(dirname "$wt")"
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$wt" main
+  git -C "$wt" commit -q --allow-empty -m "shippable work"
+  git -C "$wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
-  python3 - "$case_dir/treehouse-pool/treehouse-state.json" "$case_dir/treehouse-pool/1/wt" <<'PY'
+  python3 - "$case_dir/treehouse-pool/treehouse-state.json" "$wt" <<'PY'
 import json
 import os
 import sys
@@ -399,6 +409,7 @@ with open(state, "w", encoding="utf-8") as stream:
                     "path": os.path.realpath(worktree),
                     "leased": True,
                     "lease_holder": "firstmate-task-x1",
+                    "destroying": False,
                 }
             ]
         },
@@ -406,7 +417,7 @@ with open(state, "w", encoding="utf-8") as stream:
     )
 PY
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=firstmate:fm-task-x1" "worktree=$case_dir/treehouse-pool/1/wt" "project=$case_dir/project" \
+    "window=firstmate:fm-task-x1" "worktree=$wt" "project=$case_dir/project" \
     "kind=ship" "mode=no-mistakes"
   touch "$case_dir/state/.last-watcher-beat"
   printf '%s\n' "$case_dir"
@@ -535,6 +546,7 @@ EOF
   IFS='|' read -r case_dir before <<EOF
 $local_case
 EOF
+  fm_fake_exit0 "$NORMAL_CWD/bin" fm-auto-reap.sh
   out=$(run_local_merge_guarded "$NORMAL_CWD" "$case_dir"); rc=$?
   expect_code 0 "$rc" "local merge: normal session should still merge"
   after=$(git -C "$case_dir/project" rev-parse main)

@@ -24,12 +24,23 @@ jobs:
       # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
       - run: bin/fm-lint.sh
 
-  tests:
-    name: Behavior tests
+  behavior-test-plan:
+    name: Behavior test shard plan
     runs-on: ubuntu-latest
-    # The pre-cutover suite reached 25m35s, and the exhaustive Bridge crash
-    # matrix adds bounded work. Keep enough margin without masking a real hang.
-    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prove complete, disjoint shard coverage
+        run: bin/fm-behavior-shards.sh --check 8
+
+  behavior-tests:
+    name: Behavior tests (shard ${{ matrix.shard }}/8)
+    needs: behavior-test-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -55,11 +66,49 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - run: |
+      - name: Prepare private shard state
+        run: |
           set -eu
-          for test_script in tests/*.test.sh; do
-            "$test_script"
-          done
+          shard_root="$RUNNER_TEMP/fm-behavior-${{ matrix.shard }}"
+          install -d -m 700 "$shard_root/tmp" "$shard_root/tmux"
+          {
+            echo "TMPDIR=$shard_root/tmp"
+            echo "TMP=$shard_root/tmp"
+            echo "TEMP=$shard_root/tmp"
+            echo "TMUX_TMPDIR=$shard_root/tmux"
+          } >> "$GITHUB_ENV"
+      - name: Run behavior shard ${{ matrix.shard }}/8
+        run: |
+          set -eu
+          manifest="$RUNNER_TEMP/executed-${{ matrix.shard }}.tsv"
+          bin/fm-behavior-shards.sh --run "${{ matrix.shard }}" 8 "$manifest"
+      - name: Upload executed-test manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: behavior-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/executed-${{ matrix.shard }}.tsv
+          if-no-files-found: warn
+          overwrite: true
+
+  behavior-tests-complete:
+    # Preserve the historical required-check name while proving the union of
+    # what the eight runners actually executed, not only the planned inventory.
+    name: Behavior tests
+    needs: behavior-tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download executed-test manifests
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: behavior-shard-*
+          path: ${{ runner.temp }}/behavior-manifests
+          merge-multiple: true
+      - name: Verify complete execution union
+        run: bin/fm-behavior-shards.sh --verify 8 "$RUNNER_TEMP/behavior-manifests"
 
   agent-fleet:
     name: Agent Fleet package

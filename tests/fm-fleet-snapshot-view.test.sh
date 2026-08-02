@@ -8,7 +8,7 @@ set -u
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
-TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
+fm_test_tmproot_into TMP_ROOT fm-fleet-snapshot
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
@@ -49,7 +49,12 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  cat > "$fb/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/fm-crew-state.sh"
   printf '%s\n' "$fb"
 }
 
@@ -171,6 +176,48 @@ test_fixture_snapshot_json() {
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
+}
+
+test_snapshot_preserves_liveness_and_decision_actionability() {
+  local home fakebin out view current verdict expected_pending
+  home=$(make_home liveness)
+  mkdir -p "$home/projects/task"
+  fm_write_meta "$home/state/task.meta" \
+    "window=firstmate:fm-task" \
+    "worktree=$home/projects/task" \
+    "kind=ship"
+  printf 'needs-decision [key=review]: inspect the stopped validation\n' > "$home/state/task.status"
+  fakebin=$(make_fakebin "$home")
+
+  for verdict in alive dead unknown absent; do
+    case "$verdict" in
+      alive) current='state: working · source: run-step · validating (running) · liveness: alive (2 procs) · step: test'; expected_pending=false ;;
+      dead) current='state: working · source: run-step · validating (running) · liveness: dead (0 procs) · step: test'; expected_pending=true ;;
+      unknown) current='state: working · source: run-step · validating (running) · liveness: unknown (probe timed out) · step: test'; expected_pending=true ;;
+      absent) current='state: working · source: run-step · validating (running)'; expected_pending=false ;;
+    esac
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE="$current" "$SNAPSHOT" --json)
+    if [ "$verdict" = absent ]; then
+      printf '%s' "$out" | jq -e --argjson pending "$expected_pending" '
+        .tasks[] | select(.id == "task")
+        | .current_state.liveness == null and .hints.pending_decision == $pending
+      ' >/dev/null || fail "a line without liveness did not preserve snapshot behavior: $out"
+    else
+      printf '%s' "$out" | jq -e --arg verdict "$verdict" --argjson pending "$expected_pending" '
+        .tasks[] | select(.id == "task")
+        | .current_state.liveness == $verdict and .hints.pending_decision == $pending
+      ' >/dev/null || fail "$verdict liveness was collapsed in the snapshot: $out"
+    fi
+  done
+
+  current='state: working · source: run-step · validating (running) · liveness: unknown (probe timed out) · step: test'
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE="$current" "$VIEW")
+  assert_contains "$view" "liveness:unknown" "the human fleet view keeps unknown visibly distinct"
+  pass "fleet snapshot and view preserve alive/dead/unknown liveness without assuming unknown is healthy"
 }
 
 test_event_hints_follow_reconciled_current_state() {
@@ -552,8 +599,14 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+if [ "${FM_TEST_FOCUSED:-}" = liveness-verdicts ]; then
+  test_snapshot_preserves_liveness_and_decision_actionability
+  exit 0
+fi
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_snapshot_preserves_liveness_and_decision_actionability
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint

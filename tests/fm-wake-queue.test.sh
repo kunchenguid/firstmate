@@ -14,7 +14,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
+fm_test_tmproot_into TMP_ROOT fm-wake-tests
 
 
 test_concurrent_append_and_drain() {

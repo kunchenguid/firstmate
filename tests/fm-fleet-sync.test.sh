@@ -139,7 +139,7 @@ build_packed_prunable() {
 
 plant_packed_refs_lock() { : > "$1/.git/packed-refs.lock"; }
 
-# lsof shims mirror tests/fm-teardown.test.sh: no-holder (provably free), a live
+# lsof shims mirror tests/fm-teardown-suite.sh: no-holder (provably free), a live
 # holder, and an lsof error. Written into a per-home fakebin/ prepended to PATH.
 lsof_no_holder() {
   cat > "$1/lsof" <<'SH'
@@ -776,7 +776,7 @@ test_whole_fleet_form() {
 }
 
 test_bootstrap_relays_recovered_and_stuck() {
-  local home stuck rec out
+  local home stuck rec out wait_seconds
   home=$(new_home)
   # A clone we will leave STUCK (dirty), and one that self-heals (detached-clean-ancestor).
   stuck=$(build_pair "$home" stuck-clone)
@@ -788,7 +788,10 @@ test_bootstrap_relays_recovered_and_stuck() {
 
   # Full bootstrap: no state/ dir -> secondmate sync no-ops; no .env -> X mode off.
   # We only assert the fleet-sync relay lines; other detect lines are irrelevant.
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  wait_seconds=$(fm_test_load_scaled_timeout_seconds 30 150)
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT="$wait_seconds" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
   assert_contains "$out" "FLEET_SYNC: stuck-clone: STUCK:" "bootstrap relays the STUCK outcome"
   assert_contains "$out" "FLEET_SYNC: rec-clone: recovered:" "bootstrap relays the recovered outcome"

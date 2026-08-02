@@ -102,3 +102,31 @@ fm_lock_is_provably_stale() {
   fi
   [ "$age" -ge "$min_age" ]
 }
+
+fm_lock_staleness_state() {
+  local lock=$1 dir=$2 min_age=$3 age status
+  [ -n "$lock" ] && [ -e "$lock" ] || return 1
+  command -v lsof >/dev/null 2>&1 || return 1
+  if fm_lock_lsof_holder "$lock"; then
+    printf 'live\n'
+    return 0
+  else
+    status=$?
+    [ "$status" -eq 1 ] || return 1
+  fi
+  if [ -n "$dir" ]; then
+    if fm_lock_lsof_holder "$dir"; then
+      printf 'live\n'
+      return 0
+    else
+      status=$?
+      [ "$status" -eq 1 ] || return 1
+    fi
+  fi
+  age=$(fm_lock_age "$lock") || return 1
+  if [ "$age" -ge "$min_age" ]; then
+    printf 'stale\n'
+  else
+    printf 'fresh\n'
+  fi
+}

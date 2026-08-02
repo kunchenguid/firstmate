@@ -14,7 +14,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-brief)
+fm_test_tmproot_into TMP_ROOT fm-brief
 
 # The script itself must always parse. This is the direct regression test for
 # issue #166: a stray apostrophe in any of the three DOD heredoc bodies
@@ -80,6 +80,16 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD lost its guidance-reference sentence"
   assert_no_grep "no-mistakes' own guidance" "$brief" \
     "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
+  assert_grep "FM_HOME='$home' '$ROOT/bin/fm-no-mistakes-reattach.sh' $id" "$brief" \
+    "no-mistakes brief does not route the transient reconciliation timeout through the task-scoped helper"
+  assert_grep "retries only that transient read timeout after a read-only running-daemon preflight" "$brief" \
+    "no-mistakes brief lost the bounded retry boundary"
+  assert_grep "Never stop, restart, or update the shared \`no-mistakes\` daemon" "$brief" \
+    "no-mistakes brief lost the shared-daemon lifecycle prohibition"
+  assert_grep "Ordinary \`axi run\` calls \`EnsureDaemon\`" "$brief" \
+    "no-mistakes brief lost the upstream auto-start limitation"
+  assert_grep "strict no-start behavior requires an upstream attach-only operation" "$brief" \
+    "no-mistakes brief lost the explicit attach-only requirement"
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 

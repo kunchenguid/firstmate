@@ -15,9 +15,19 @@
 # at a fresh non-git dir to keep it inert across these suites - the same trick the
 # direct fm-guard.sh tests use. A per-call FM_ROOT_OVERRIDE still wins where a
 # suite sets its own (e.g. the watcher-lock guard-banner cases).
+FM_WAKE_TEST_ROOT_CREATED=0
 if [ -z "${FM_ROOT_OVERRIDE:-}" ]; then
-  FM_ROOT_OVERRIDE="$(fm_test_tmproot fm-wake-tangle-root)"
+  fm_test_tmproot_into FM_ROOT_OVERRIDE fm-wake-tangle-root
   export FM_ROOT_OVERRIDE
+  FM_WAKE_TEST_ROOT_CREATED=1
+fi
+if [ "$FM_WAKE_TEST_ROOT_CREATED" = 1 ]; then
+  mkdir -p "$FM_ROOT_OVERRIDE/bin"
+  cat > "$FM_ROOT_OVERRIDE/bin/fm-auto-reap.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$FM_ROOT_OVERRIDE/bin/fm-auto-reap.sh"
 fi
 
 # Wedge-alarm notifier recorder (safety seam). The away-mode wedge alarm fires a
@@ -32,13 +42,10 @@ fi
 # that channel, to exercise graceful degradation. Suites that do not source this
 # harness still cannot fire a real notification: the daemon defaults the seam to
 # "discard" whenever it is sourced (its library-mode guard).
-# Create the recorder dir with mktemp directly (not fm_test_tmproot, whose
-# first call installs an EXIT trap that, invoked inside a command-substitution
-# subshell, would delete the dir on subshell exit). Register it for the same
-# cleanup and install the trap in THIS shell if it is the first registration.
-_fm_wedge_rec_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-wedge-rec.XXXXXX")
-if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then trap fm_test_cleanup EXIT; fi
-FM_TEST_CLEANUP_DIRS+=("$_fm_wedge_rec_dir")
+# Create and register the recorder directory in this shell so it shares the
+# suite's run-owned cleanup lifecycle.
+_fm_wedge_rec_dir=
+fm_test_tmproot_into _fm_wedge_rec_dir fm-wedge-rec
 cat > "$_fm_wedge_rec_dir/rec" <<'REC'
 #!/usr/bin/env bash
 printf '%s\t%s\n' "${1:-}" "${2:-}" >> "${FM_WEDGE_ALARM_LOG:-/dev/null}"
@@ -64,6 +71,11 @@ make_case() {
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
+  # Behavioral watcher fixtures should not enter machine-global maintenance
+  # before reaching the signal/stale path they own. Cadence-owner tests remove
+  # their marker explicitly when they need to exercise a due sweep.
+  touch "$dir/state/.last-report-retention" \
+    "$dir/state/.last-account-session-sync"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -245,7 +257,8 @@ wait_for_exit() {
   local pid=$1 limit i=0
   limit=$(fm_test_liveness_iterations "${2:-50}" 0.1)
   while [ "$i" -lt "$limit" ]; do
-    if ! kill -0 "$pid" 2>/dev/null; then
+    # kill -0 also succeeds for an exited child that is waiting to be reaped.
+    if ! is_live_non_zombie "$pid"; then
       wait "$pid"
       return "$?"
     fi

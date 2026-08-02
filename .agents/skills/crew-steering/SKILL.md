@@ -31,7 +31,7 @@ Treat `almost there` as unfinished, require real evidence because work is not do
 
 ## 3. Fact-check the load-bearing premise
 
-Cheaply test the crewmate's one load-bearing assumption before it acts, rejecting a shallow-false premise without overcorrecting; `operating-fundamentals` section 7 owns the premise-check rule.
+Reject a shallow-false premise without overcorrecting.
 
 ## 4. Prefer quality and robustness
 

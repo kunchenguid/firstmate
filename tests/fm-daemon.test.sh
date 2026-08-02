@@ -23,7 +23,7 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   . "$DAEMON"
 fi
 
-TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
+fm_test_tmproot_into TMP_ROOT fm-daemon-tests
 
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
@@ -117,14 +117,54 @@ test_classify_terminal_signal_escalates() {
 }
 
 test_classify_check_and_unknown_escalate() {
-  local out
+  local dir state out
+  dir=$(make_supercase classify-check)
+  state="$dir/state"
   out=$(classify_check "check: /s/c.check.sh: merged: https://x")
   case "$out" in escalate\|*) ;; *) fail "check did not escalate: $out" ;; esac
   out=$(classify_unknown "frobnicate: weird")
   case "$out" in escalate\|*) ;; *) fail "unknown did not fail-safe escalate: $out" ;; esac
-  out=$(classify_heartbeat)
+  out=$(classify_heartbeat "$state")
   case "$out" in self\|*) ;; *) fail "heartbeat did not self-handle: $out" ;; esac
   pass "check + unknown escalate; heartbeat self-handles"
+}
+
+test_liveness_verdicts_surface_through_away_classifiers() {
+  local verdict dir state fakebin current out
+  for verdict in alive dead unknown; do
+    dir=$(make_supercase "away-liveness-$verdict")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    make_fake_crew_state "$fakebin" >/dev/null
+    fm_write_meta "$state/task.meta" "window=sess:fm-task" "kind=ship"
+    : > "$state/task.turn-ended"
+    current="state: working · source: run-step · validating (running) · liveness: $verdict (probe result) · step: test"
+
+    out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE="$current" classify_signal "$state/task.turn-ended" "$state")
+    case "$verdict:$out" in
+      alive:self\|*) ;;
+      dead:escalate\|*|unknown:escalate\|*) ;;
+      *) fail "away signal classification mishandled $verdict liveness: $out" ;;
+    esac
+
+    out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE="$current" classify_stale "sess:fm-task" "$state")
+    case "$verdict:$out" in
+      alive:self\|*) ;;
+      dead:escalate\|*|unknown:escalate\|*) ;;
+      *) fail "away stale classification mishandled $verdict liveness: $out" ;;
+    esac
+
+    out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE="$current" classify_heartbeat "$state")
+    case "$verdict:$out" in
+      alive:self\|*) ;;
+      dead:escalate\|*|unknown:escalate\|*) ;;
+      *) fail "away heartbeat classification mishandled $verdict liveness: $out" ;;
+    esac
+  done
+  pass "away-mode signal, stale, and heartbeat classifiers preserve alive/dead/unknown actionability"
 }
 
 test_stale_transient_self_records_marker() {
@@ -1675,6 +1715,11 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   pass "inject_msg: defers on a dead-shell/unreadable composer (unknown), never typing the escalation into a shell"
 }
 
+if [ "${FM_TEST_FOCUSED:-}" = liveness-verdicts ]; then
+  test_liveness_verdicts_surface_through_away_classifiers
+  exit 0
+fi
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -1682,6 +1727,7 @@ test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_liveness_verdicts_surface_through_away_classifiers
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause

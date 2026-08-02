@@ -2018,8 +2018,8 @@ record_alert() {
 
 record_reinspection_failure() {
   local checkout=$1 key alert output
-  key=$(checkout_key "$checkout") || {
-    printf '%s: skipped: covered checkout lock identity cannot be resolved\n' "$checkout"
+  key=$(fm_checkout_hash_value "$checkout" 24) || {
+    printf '%s: skipped: covered checkout alert identity cannot be resolved\n' "$checkout"
     return 1
   }
   alert="$STATE_ROOT/$key.alert"
@@ -2029,6 +2029,18 @@ record_reinspection_failure() {
     printf '%s: skipped: checkout alert cannot be persisted\n' "$checkout"
     return 1
   }
+}
+
+reinspect_covered_checkout() {
+  local checkout=$1 count
+  if [ "${FM_CHECKOUT_REFRESH_TEST:-0}" = 1 ] \
+      && [ "${FM_CHECKOUT_TEST_REINSPECTION_FAILURE_AT:-}" = "$checkout" ]; then
+    count=$(cat "${FM_CHECKOUT_TEST_REINSPECTION_COUNT:?}" 2>/dev/null || printf 0)
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_CHECKOUT_TEST_REINSPECTION_COUNT"
+    return 1
+  fi
+  exact_git_root "$checkout"
 }
 
 CHECKOUT_REFRESH_AUTHORITY=
@@ -2572,9 +2584,10 @@ run_once() {
 
   while IFS= read -r checkout; do
     [ -n "$checkout" ] || continue
-    if ! reinspected=$(exact_git_root "$checkout") || [ "$reinspected" != "$checkout" ]; then
+    if ! reinspected=$(reinspect_covered_checkout "$checkout") || [ "$reinspected" != "$checkout" ]; then
       record_reinspection_failure "$checkout" || status=1
       coverage_failed=1
+      status=1
       continue
     fi
     key=$(checkout_key "$checkout") || {
@@ -2596,9 +2609,10 @@ run_once() {
 
   while IFS= read -r checkout; do
     [ -n "$checkout" ] || continue
-    if ! reinspected=$(exact_git_root "$checkout") || [ "$reinspected" != "$checkout" ]; then
+    if ! reinspected=$(reinspect_covered_checkout "$checkout") || [ "$reinspected" != "$checkout" ]; then
       record_reinspection_failure "$checkout" || status=1
       coverage_failed=1
+      status=1
       continue
     fi
     key=$(checkout_key "$checkout") || {

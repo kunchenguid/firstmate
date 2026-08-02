@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
+# Shared tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
@@ -301,8 +301,10 @@ state="$(dirname "$0")/.tmux-live"
 case "${1:-}" in
   display-message)
     [ -f "$state" ] || exit 1
-    case " $* " in
-      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    case "$*" in
+      *pane_current_command*) printf 'bash\n' ;;
+      *session_name*window_name*) printf 'firstmate\tfm-task-x1\n' ;;
+      *) printf '%%1\n' ;;
     esac
     exit 0
     ;;
@@ -850,7 +852,6 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   local case_dir out
   case_dir=$(make_case tasks-axi-reminder)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'tasktmp=/tmp/fm-task-x1' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   add_compatible_tasks_axi "$case_dir"
 
@@ -875,7 +876,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   add_compatible_tasks_axi "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
-  printf '%s\n' "$out" | grep -F 'Update data/backlog.md - move task-x1 to Done' >/dev/null \
+  printf '%s\n' "$out" | grep -F 'update data/backlog.md - move task-x1 to Done' >/dev/null \
     || fail "teardown did not prompt manual backlog update under opt-out: $out"
   printf '%s\n' "$out" | grep -F 'tasks-axi done' >/dev/null \
     && fail "teardown prompted tasks-axi despite manual backend opt-out: $out"
@@ -1534,6 +1535,7 @@ test_dead_task_reaper_returns_only_clean_landed_work_without_force() {
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt landed "landed task work"
   add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin https://github.com/example/repo.git
   rm -f "$case_dir/fakebin/.tmux-live"
   write_reaper_pool_lease "$case_dir"
   install_nonforcing_treehouse_recorder "$case_dir"
@@ -1552,6 +1554,50 @@ test_dead_task_reaper_returns_only_clean_landed_work_without_force() {
   assert_absent "$case_dir/state/task-x1.meta" \
     "dead reaper left stale task metadata after releasing the lease"
   pass "dead task reaping releases clean remote-reachable work without forcing"
+}
+
+test_dead_task_reaper_treats_stale_status_as_no_liveness_evidence() {
+  local dead_case live_case out
+  dead_case=$(make_case dead-reaper-stale-working-status)
+  mkdir -p "$dead_case/home"
+  write_meta "$dead_case" no-mistakes ship
+  wt_commit_file "$dead_case" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$dead_case"
+  git -C "$dead_case/wt" remote set-url origin https://github.com/example/repo.git
+  rm -f "$dead_case/fakebin/.tmux-live"
+  write_reaper_pool_lease "$dead_case"
+  install_nonforcing_treehouse_recorder "$dead_case"
+  : > "$dead_case/treehouse-return.log"
+  printf '%s\n' 'working: stale event from a dead endpoint' > "$dead_case/state/task-x1.status"
+
+  out=$(run_treehouse_reaper "$dead_case" reap --auto) \
+    || fail "stale working status prevented dead endpoint recovery: $out"
+  assert_contains "$out" "TREEHOUSE_REAP: released task=task-x1" \
+    "automatic reaping treated stale status history as live state"
+  assert_absent "$dead_case/state/task-x1.meta" \
+    "automatic reaping retained dead task metadata because of stale status history"
+
+  live_case=$(make_case live-reaper-stale-working-status)
+  mkdir -p "$live_case/home"
+  write_meta "$live_case" no-mistakes ship
+  wt_commit_file "$live_case" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$live_case"
+  git -C "$live_case/wt" remote set-url origin https://github.com/example/repo.git
+  : > "$live_case/fakebin/.tmux-live"
+  write_reaper_pool_lease "$live_case"
+  install_nonforcing_treehouse_recorder "$live_case"
+  : > "$live_case/treehouse-return.log"
+  printf '%s\n' 'working: recent event from a live endpoint' > "$live_case/state/task-x1.status"
+
+  out=$(run_treehouse_reaper "$live_case" reap --auto 2>&1) \
+    || fail "live-endpoint safety refusal should be a successful automatic reap pass: $out"
+  assert_contains "$out" "found a live endpoint" \
+    "automatic reaping did not make the authoritative endpoint check"
+  assert_present "$live_case/state/task-x1.meta" \
+    "automatic reaping removed metadata for a live endpoint"
+  [ ! -s "$live_case/treehouse-return.log" ] \
+    || fail "automatic reaping returned a live endpoint's worktree"
+  pass "status history never substitutes for the authoritative endpoint proof"
 }
 
 test_dead_task_reaper_reconciles_an_already_returned_lease() {
@@ -1597,7 +1643,7 @@ test_dead_task_reaper_retains_dirty_work_and_live_endpoints() {
   out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
   rc=$?
   set -e
-  expect_code 1 "$rc" "dead reaper dirty-work refusal"
+  expect_code 0 "$rc" "dead reaper dirty-work safety refusal"
   assert_contains "$out" "TREEHOUSE_REAP: retained task=task-x1 reason=teardown-refused" \
     "dead reaper did not report its dirty-work refusal"
   assert_present "$case_dir/wt/operator-note.txt" \
@@ -1614,7 +1660,7 @@ test_dead_task_reaper_retains_dirty_work_and_live_endpoints() {
   out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
   rc=$?
   set -e
-  expect_code 1 "$rc" "dead reaper live-endpoint refusal"
+  expect_code 0 "$rc" "dead reaper live-endpoint safety refusal"
   assert_contains "$out" "found a live endpoint" \
     "dead reaper did not cite the live endpoint"
   assert_present "$case_dir/fakebin/.tmux-live" \
@@ -1642,7 +1688,7 @@ test_dead_task_reaper_requires_exact_lease_and_closed_pr() {
   out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
   rc=$?
   set -e
-  expect_code 1 "$rc" "dead reaper lease-holder mismatch refusal"
+  expect_code 0 "$rc" "dead reaper lease-holder mismatch safety refusal"
   assert_contains "$out" "lease-holder-mismatch holder=firstmate-misleading-label" \
     "dead reaper trusted a misleading lease label"
   [ ! -s "$case_dir/treehouse-return.log" ] \
@@ -1659,7 +1705,7 @@ SH
   out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
   rc=$?
   set -e
-  expect_code 1 "$rc" "dead reaper open-PR refusal"
+  expect_code 0 "$rc" "dead reaper open-PR safety refusal"
   assert_contains "$out" "reason=open-pr" \
     "dead reaper did not preserve the worktree for an open PR"
   assert_present "$case_dir/state/task-x1.meta" \
@@ -1696,7 +1742,7 @@ SH
   out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
   rc=$?
   set -e
-  expect_code 1 "$rc" "dead reaper unrecorded open-PR refusal"
+  expect_code 0 "$rc" "dead reaper unrecorded open-PR safety refusal"
   assert_contains "$out" "reason=open-pr branch=fm/task-x1" \
     "dead reaper did not discover the open PR from the task branch"
   assert_present "$case_dir/state/task-x1.meta" \
@@ -1714,7 +1760,7 @@ SH
   out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
   rc=$?
   set -e
-  expect_code 1 "$rc" "dead reaper unsupported-kind refusal"
+  expect_code 0 "$rc" "dead reaper unsupported-kind safety refusal"
   assert_contains "$out" "reason=unsupported-kind kind=scout" \
     "dead reaper did not conservatively reject a scout lease"
   [ ! -s "$case_dir/treehouse-return.log" ] \
@@ -1900,6 +1946,463 @@ test_ignored_worktree_content_is_summarized_without_blocking() {
   assert_absent "$case_dir/state/task-x1.meta" \
     "ignored-summary: teardown left task metadata behind"
   pass "ignored content stays exempt and receives a collapsed summary"
+}
+
+prepare_reap_case() {
+  local case_dir=$1 ignore=$2
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" .gitignore "$ignore" "define ignored outputs"
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/project" remote set-url origin \
+    https://github.com/Ruby-Labs/firstmate.git
+  rm -f "$case_dir/fakebin/.tmux-live"
+}
+
+test_dead_reap_allows_generated_ignored_output_with_summary() {
+  local case_dir rc
+  case_dir=$(make_case reap-generated-ignored)
+  prepare_reap_case "$case_dir" $'build/\ncoverage/'
+  mkdir -p "$case_dir/wt/build/assets" "$case_dir/wt/coverage"
+  printf 'bundle\n' > "$case_dir/wt/build/assets/app.js"
+  printf 'coverage\n' > "$case_dir/wt/coverage/results.json"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reap should allow confidently generated ignored output"
+  assert_grep 'ignored worktree summary: count=2' "$case_dir/stdout" \
+    "successful dead reap omitted its ignored inventory summary"
+  pass "dead reap inventories and allows generated ignored output"
+}
+
+test_dead_reap_refuses_work_shaped_ignored_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-work-shaped-ignored)
+  prepare_reap_case "$case_dir" $'docs/\n'
+  mkdir -p "$case_dir/wt/docs"
+  printf 'draft\n' > "$case_dir/wt/docs/launch-draft.md"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "dead reap must safely refuse ignored work-shaped output"
+  assert_grep 'docs/launch-draft.md' "$case_dir/stderr" \
+    "work-shaped refusal omitted the exact ignored file"
+  pass "dead reap names refused ignored work"
+}
+
+test_dead_reap_refuses_ambiguous_ignored_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-ambiguous-ignored)
+  prepare_reap_case "$case_dir" $'mystery/'
+  mkdir -p "$case_dir/wt/mystery"
+  printf 'unknown\n' > "$case_dir/wt/mystery/payload.bin"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "dead reap must safely refuse ambiguous ignored output"
+  assert_grep 'mystery/payload.bin (ambiguous)' "$case_dir/stderr" \
+    "ambiguous refusal omitted the exact ignored file and reason"
+  pass "dead reap refuses ambiguous ignored output"
+}
+
+test_dead_reap_refuses_recent_hand_edit_shaped_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-recent-hand-edit)
+  prepare_reap_case "$case_dir" $'build/'
+  mkdir -p "$case_dir/wt/build"
+  printf 'manual recovery code\n' > "$case_dir/wt/build/manual-recovery.js"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "dead reap must safely refuse recent hand-edit-shaped output"
+  assert_grep 'build/manual-recovery.js (recent-ambiguous)' "$case_dir/stderr" \
+    "recent hand-edit refusal omitted the exact ignored file"
+  pass "dead reap refuses recent hand-edit-shaped ignored output"
+}
+
+test_dead_reap_refuses_old_ambiguous_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-old-ambiguous)
+  prepare_reap_case "$case_dir" $'build/'
+  mkdir -p "$case_dir/wt/build"
+  printf 'old manual recovery code\n' > "$case_dir/wt/build/manual-recovery.js"
+  touch -t 202001010000 "$case_dir/wt/build/manual-recovery.js"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "dead reap must safely refuse old ambiguous ignored output"
+  assert_grep 'build/manual-recovery.js (ambiguous)' "$case_dir/stderr" \
+    "old ambiguous refusal omitted the exact ignored file"
+  pass "dead reap never ages ambiguous ignored output into safety"
+}
+
+test_dead_reap_protects_work_roots_before_dependencies() {
+  local case_dir rc
+  case_dir=$(make_case reap-protected-dependencies)
+  prepare_reap_case "$case_dir" $'docs/\ndata/\n.agents/skills/'
+  mkdir -p "$case_dir/wt/docs/node_modules" \
+    "$case_dir/wt/data/.venv" \
+    "$case_dir/wt/.agents/skills/x/node_modules"
+  printf 'docs recovery\n' > "$case_dir/wt/docs/node_modules/recovery.md"
+  printf 'operator note\n' > "$case_dir/wt/data/.venv/operator-note"
+  printf 'skill draft\n' \
+    > "$case_dir/wt/.agents/skills/x/node_modules/draft.md"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "protected work roots must safely block dependency ownership"
+  assert_grep 'docs/node_modules/recovery.md (work-shaped)' "$case_dir/stderr" \
+    "docs dependency refusal omitted the exact ignored file"
+  assert_grep 'data/.venv/operator-note (work-shaped)' "$case_dir/stderr" \
+    "data dependency refusal omitted the exact ignored file"
+  assert_grep '.agents/skills/x/node_modules/draft.md (work-shaped)' \
+    "$case_dir/stderr" \
+    "skill dependency refusal omitted the exact ignored file"
+  pass "protected work roots outrank dependency ownership"
+}
+
+test_dead_reap_allows_dependency_tree_contents() {
+  local case_dir rc
+  case_dir=$(make_case reap-dependency-ignored)
+  prepare_reap_case "$case_dir" $'node_modules/'
+  mkdir -p "$case_dir/wt/node_modules/report-skill"
+  printf 'dependency notice\n' > "$case_dir/wt/node_modules/report-skill/NOTICE.txt"
+  printf '{"name":"report-skill"}\n' \
+    > "$case_dir/wt/node_modules/report-skill/package.json"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reap should allow dependency-owned ignored contents"
+  assert_grep 'ignored worktree summary: count=1' "$case_dir/stdout" \
+    "dependency-owned successful reap omitted its ignored summary"
+  pass "dead reap allows structurally owned dependency output"
+}
+
+test_dead_reap_rechecks_open_pr_at_locked_return() {
+  local case_dir rc
+  case_dir=$(make_case reap-locked-open-pr)
+  prepare_reap_case "$case_dir" $'build/'
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    case " $* " in
+      *' --repo Ruby-Labs/firstmate '*) ;;
+      *) exit 88 ;;
+    esac
+    printf '%s\n' 'count: 1 (showing first 1)' \
+      'pull_requests[1]{url}:' \
+      '  https://github.com/Ruby-Labs/firstmate/pull/99'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "locked return must classify an open PR as a safety refusal"
+  assert_grep 'found an open PR under the checkout lock' "$case_dir/stderr" \
+    "locked return did not surface its repeated open-PR proof"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "locked open-PR refusal cleared task metadata"
+  pass "dead reap repeats open-PR protection under the checkout lock"
+}
+
+test_dead_reap_rechecks_endpoint_after_local_proofs() {
+  local case_dir rc
+  case_dir=$(make_case reap-endpoint-restored-during-scan)
+  prepare_reap_case "$case_dir" $'build/'
+  mkdir -p "$case_dir/wt/build/assets"
+  printf 'bundle\n' > "$case_dir/wt/build/assets/app.js"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' ls-files --others --ignored --exclude-standard '*)
+    : > "$(dirname "$0")/.tmux-live"
+    ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "restored endpoint must return the safety-refusal status"
+  assert_grep 'found a live endpoint' "$case_dir/stderr" \
+    "post-scan endpoint proof did not detect the restored endpoint"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "restored-endpoint refusal cleared task metadata"
+  pass "dead reap repeats endpoint proof after slow local scans"
+}
+
+run_treehouse_reaper_status_fixture() {
+  local case_dir=$1
+  shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/home" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TREEHOUSE_ROOT="$case_dir/home/.treehouse" \
+  HOME="$case_dir/home" \
+    "$TREEHOUSE_REAPER" "$@"
+}
+
+test_treehouse_reaper_safe_refusals_exit_success() {
+  local case_dir explicit_rc auto_rc
+  case_dir=$(make_case reaper-safe-refusal-status)
+  mkdir -p "$case_dir/home"
+  set +e
+  run_treehouse_reaper_status_fixture "$case_dir" reap missing-task \
+    > "$case_dir/explicit-stdout" 2> "$case_dir/explicit-stderr"
+  explicit_rc=$?
+  fm_write_meta "$case_dir/state/safe-scout.meta" 'kind=scout'
+  run_treehouse_reaper_status_fixture "$case_dir" reap --auto \
+    > "$case_dir/auto-stdout" 2> "$case_dir/auto-stderr"
+  auto_rc=$?
+  set -e
+  expect_code 0 "$explicit_rc" "explicit metadata safety refusal should succeed"
+  expect_code 0 "$auto_rc" "automatic unsupported-kind safety refusal should succeed"
+  assert_grep 'retained task=missing-task reason=metadata-unavailable' \
+    "$case_dir/explicit-stdout" \
+    "explicit safe refusal omitted its retained reason"
+  assert_grep 'retained task=safe-scout reason=unsupported-kind kind=scout' \
+    "$case_dir/auto-stdout" \
+    "automatic safe refusal omitted its retained reason"
+  pass "explicit and automatic safety refusals exit successfully"
+}
+
+test_treehouse_reaper_operational_failure_exits_nonzero() {
+  local case_dir rc
+  case_dir=$(make_case reaper-operational-failure-status)
+  mkdir -p "$case_dir/home"
+  set +e
+  FM_TREEHOUSE_REAP_TEARDOWN="$case_dir/missing-teardown" \
+    run_treehouse_reaper_status_fixture "$case_dir" reap missing-task \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "missing teardown machinery should fail operationally"
+  assert_grep 'operational-error reason=teardown-unavailable' "$case_dir/stderr" \
+    "operational failure was not classified explicitly"
+  pass "reaper operational failures remain nonzero"
+}
+
+prepare_reaper_execution_case() {
+  local case_dir=$1 pool state worktree
+  write_meta "$case_dir" no-mistakes ship
+  add_fork_with_pushed_branch "$case_dir"
+  pool="$case_dir/home/.treehouse/test-pool"
+  state="$pool/treehouse-state.json"
+  worktree=$(cd "$case_dir/wt" && pwd -P)
+  mkdir -p "$pool"
+  python3 - "$state" "$worktree" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump({"worktrees": [{
+        "path": sys.argv[2],
+        "leased": True,
+        "lease_holder": "firstmate-task-x1",
+    }]}, stream)
+PY
+}
+
+test_treehouse_reaper_translates_only_safety_status() {
+  local case_dir rc
+  case_dir=$(make_case reaper-dedicated-safety-status)
+  mkdir -p "$case_dir/home"
+  prepare_reaper_execution_case "$case_dir"
+  cat > "$case_dir/fake-teardown" <<'SH'
+#!/usr/bin/env bash
+exit 77
+SH
+  chmod +x "$case_dir/fake-teardown"
+  set +e
+  FM_TREEHOUSE_REAP_TEARDOWN="$case_dir/fake-teardown" \
+    run_treehouse_reaper_status_fixture "$case_dir" reap task-x1 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dedicated teardown safety status should become success"
+  assert_grep 'retained task=task-x1 reason=teardown-refused status=77' \
+    "$case_dir/stdout" \
+    "dedicated safety status omitted retained output"
+  pass "reaper translates only the dedicated safety-refusal status"
+}
+
+test_treehouse_reaper_executable_failures_remain_nonzero() {
+  local cause case_dir rc
+  for cause in report-publication checkout-helper; do
+    case_dir=$(make_case "reaper-$cause-failure")
+    mkdir -p "$case_dir/home"
+    prepare_reaper_execution_case "$case_dir"
+    cat > "$case_dir/fake-teardown" <<SH
+#!/usr/bin/env bash
+echo "$cause failed" >&2
+exit 1
+SH
+    chmod +x "$case_dir/fake-teardown"
+    set +e
+    FM_TREEHOUSE_REAP_TEARDOWN="$case_dir/fake-teardown" \
+      run_treehouse_reaper_status_fixture "$case_dir" reap task-x1 \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "$cause failure should remain operational"
+    assert_grep 'operational-error task=task-x1 reason=teardown-failed status=1' \
+      "$case_dir/stderr" \
+      "$cause failure was masked as safe retention"
+  done
+  pass "report and checkout-helper failures remain operational"
+}
+
+test_dead_reap_leaf_helper_failures_remain_operational() {
+  local case_dir rc
+  for helper in git python3; do
+    case_dir=$(make_case "reap-broken-$helper")
+    prepare_reap_case "$case_dir" $'build/'
+    cat > "$case_dir/fakebin/$helper" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    chmod +x "$case_dir/fakebin/$helper"
+    set +e
+    run_teardown "$case_dir" --reap-dead \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "broken $helper inspection must remain operational"
+  done
+  pass "broken git and python inspection remain operational"
+}
+
+test_dead_reap_authority_statuses_are_distinct() {
+  local case_dir rc state
+  case_dir=$(make_case reap-authority-mismatch-status)
+  prepare_reap_case "$case_dir" $'build/'
+  state="$TMP_ROOT/treehouse-state.json"
+  python3 - "$state" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    state = json.load(stream)
+state["worktrees"][0]["lease_holder"] = "firstmate-other"
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+PY
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "inspected authority mismatch must be a safety refusal"
+
+  case_dir=$(make_case reap-authority-unreadable-status)
+  prepare_reap_case "$case_dir" $'build/'
+  printf '{broken\n' > "$TMP_ROOT/treehouse-state.json"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unreadable authority state must remain operational"
+  pass "authority mismatch and inspection failure have distinct statuses"
+}
+
+install_lock_blocking_git() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' status --porcelain=v1 --untracked-files=all '*)
+    [ ! -e "$FM_FAKE_INDEX_LOCK" ] || exit 128
+    ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
+test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct() {
+  local case_dir lock rc
+  case_dir=$(make_case reap-live-lock-status)
+  prepare_reap_case "$case_dir" $'build/'
+  lock=$(git_index_lock_path "$case_dir/wt")
+  : > "$lock"
+  install_lock_blocking_git "$case_dir"
+  add_lsof_live_holder "$case_dir"
+  set +e
+  FM_FAKE_INDEX_LOCK="$lock" FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "live git lock must be a safety refusal"
+
+  case_dir=$(make_case reap-lock-cleanup-failure)
+  prepare_reap_case "$case_dir" $'build/'
+  lock=$(git_index_lock_path "$case_dir/wt")
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+  install_lock_blocking_git "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+[ "${2:-}" != "$FM_FAKE_INDEX_LOCK" ] || exit 1
+exec /bin/rm "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+  set +e
+  FM_FAKE_INDEX_LOCK="$lock" FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "git lock cleanup failure must remain operational"
+  pass "live lock refusal and cleanup failure have distinct statuses"
+}
+
+test_dead_reap_landing_statuses_are_distinct() {
+  local case_dir rc
+  case_dir=$(make_case reap-truly-unlanded-status)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt unlanded "unlanded task work"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "conclusively unlanded work must be a safety refusal"
+  assert_grep 'has work not on any remote and not landed' "$case_dir/stderr" \
+    "unlanded safety refusal was not named"
+
+  case_dir=$(make_case reap-landing-fetch-failure)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt unlanded "unlanded task work"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' fetch --quiet origin '*) exit 1 ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "failed landing fetch must remain operational"
+  assert_grep 'landing proof could not execute' "$case_dir/stderr" \
+    "landing machinery failure was not classified operationally"
+  pass "unlanded proof and landing machinery failure have distinct statuses"
 }
 
 test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
@@ -2228,7 +2731,7 @@ test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
 
   expect_code 1 "$rc" "stale-lock-dirty-recheck: teardown should refuse dirty work after clearing the stale lock"
   assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
-    "stale-lock-dirty-recheck: teardown did not report clearing the stale lock"
+    "stale-lock-dirty-recheck: teardown did not report clearing the stale lock: $(cat "$case_dir/stderr")"
   assert_grep "uncommitted changes present" "$case_dir/stderr" \
     "stale-lock-dirty-recheck: teardown did not re-run the dirty check"
   assert_absent "$lock" "stale-lock-dirty-recheck: stale lock file should have been removed"
@@ -2635,24 +3138,22 @@ test_managed_teardown_locks_generation_before_endpoint_cleanup() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+state="$(dirname "$0")/.tmux-live"
 case "${1:-}" in
+  display-message)
+    [ -f "$state" ] || exit 1
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *session_name*window_name*) printf 'firstmate\tfm-task-x1\n' ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
+  list-windows) [ ! -f "$state" ] || printf 'fm-task-x1\n' ;;
   kill-window)
     : > "$FM_FAKE_KILL_STARTED"
     while [ ! -f "$FM_FAKE_ALLOW_KILL" ]; do sleep 0.01; done
     : > "$FM_FAKE_KILLED"
-    exit 0
-    ;;
-  list-windows)
-    # Teardown only performs endpoint cleanup for an endpoint it can still see,
-    # and then requires confirmed absence, so a stub pinned to either state
-    # cannot exercise this: reported absent, kill-window is skipped and the
-    # generation-lock race below never happens; reported present forever,
-    # teardown refuses. Observable until the kill lands, gone after it.
-    [ -f "$FM_FAKE_KILLED" ] || printf 'fm-task-x1\n'
-    exit 0
-    ;;
-  display-message)
-    [ -f "$FM_FAKE_KILL_STARTED" ] && exit 1
+    rm -f "$state"
     exit 0
     ;;
 esac
@@ -2739,25 +3240,40 @@ test_managed_child_teardown_locks_generation_before_snapshot() {
     'account_predecessor_cleanup=pending' \
     'provider_session_id=session-old'
   add_fake_agent_fleet "$case_dir"
+  : > "$case_dir/fakebin/.child-tmux-live"
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+parent_state="$(dirname "$0")/.tmux-live"
+child_state="$(dirname "$0")/.child-tmux-live"
 case "${1:-}" in
+  display-message)
+    case "$*" in
+      *fm-child-lock-x3*) state=$child_state; label=fm-child-lock-x3 ;;
+      *) state=$parent_state; label=fm-task-x1 ;;
+    esac
+    [ -f "$state" ] || exit 1
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *session_name*window_name*) printf 'firstmate\t%s\n' "$label" ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
+  list-windows)
+    [ ! -f "$parent_state" ] || printf 'fm-task-x1\n'
+    [ ! -f "$child_state" ] || printf 'fm-child-lock-x3\n'
+    ;;
   kill-window)
     case "$*" in
       *fm-child-lock-x3*)
         : > "$FM_FAKE_KILL_STARTED"
         while [ ! -f "$FM_FAKE_ALLOW_KILL" ]; do sleep 0.01; done
         : > "$FM_FAKE_KILLED"
+        rm -f "$child_state"
         ;;
+      *) rm -f "$parent_state" ;;
     esac
-    exit 0
     ;;
-  list-windows)
-    [ -f "$FM_FAKE_KILLED" ] || printf 'fm-child-lock-x3\n'
-    exit 0
-    ;;
-  display-message) exit 1 ;;
 esac
 exit 0
 SH
@@ -2773,6 +3289,7 @@ SH
   teardown_pid=$!
   if ! fm_test_wait_for_file "$kill_started" "$teardown_pid" 0.05; then
     kill "$teardown_pid" 2>/dev/null || true
+    wait "$teardown_pid" 2>/dev/null || true
     fail "managed child teardown never reached endpoint cleanup: $(cat "$case_dir/stderr")"
   fi
 
@@ -3147,9 +3664,9 @@ SH
   rc=$?
   set -e
 
-  expect_code 76 "$rc" "unverified Treehouse process cleanup should fail distinctly"
+  expect_code 76 "$rc" "unverified Treehouse process cleanup should fail distinctly: $(cat "$case_dir/stderr")"
   assert_present "$child_pid_file" "unverified Treehouse return did not start its descendant"
-  assert_present "$lock" "unverified process cleanup released the checkout lock"
+  assert_present "$lock" "unverified process cleanup released expected checkout lock $lock: $(cat "$case_dir/stderr")"
   assert_present "$lock/process-group" "unverified process cleanup lost its guarded group identity"
   group=$(cat "$lock/process-group")
   anchor_state=$(ps -p "$group" -o pid= -o pgid= 2>/dev/null | awk '{$1=$1; print}')
@@ -3287,7 +3804,7 @@ SH
   rc=$?
   set -e
 
-  expect_code 75 "$rc" "forced secondmate cleanup should surface checkout lock contention distinctly"
+  expect_code 75 "$rc" "forced secondmate cleanup should surface checkout lock contention distinctly: $(cat "$case_dir/stderr")"
   assert_present "$child_worktree" "checkout lock contention deleted the child worktree"
   assert_present "$case_dir/wt/state/$child_id.meta" "checkout lock contention removed child retry metadata"
   assert_present "$case_dir/state/task-x1.meta" "checkout lock contention removed parent retry metadata"
@@ -3322,7 +3839,7 @@ SH
   : > "$marker"
 
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "herdr-marker-cleanup: forced teardown failed"
+    || fail "herdr-marker-cleanup: forced teardown failed: $(cat "$case_dir/stderr")"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
@@ -3438,8 +3955,15 @@ test_required_report_restores_rollback_generation_before_publish() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) [ -f "$FM_FAKE_REPORT_LIVE" ]; exit $? ;;
-  list-panes) exit 0 ;;
+  display-message)
+    [ -f "$FM_FAKE_REPORT_LIVE" ] || exit 1
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *session_name*window_name*) printf 'firstmate\tfm-task-x1\n' ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
+  list-windows) [ ! -f "$FM_FAKE_REPORT_LIVE" ] || printf 'fm-task-x1\n' ;;
   kill-window) rm -f "$FM_FAKE_REPORT_LIVE"; exit 0 ;;
 esac
 exit 0
@@ -3674,7 +4198,7 @@ SH
 }
 
 test_secondmate_rejects_drifted_home_repository_identity() {
-  local case_dir marker rc
+  local case_dir home_abs marker rc
   case_dir=$(make_case secondmate-home-identity-drift)
   mkdir -p "$case_dir/data" "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" \
     "$case_dir/wt/projects"
@@ -3711,7 +4235,7 @@ SH
   assert_present "$case_dir/wt" "identity-drifted secondmate home was removed"
   assert_present "$case_dir/state/task-x1.meta" "identity-drifted secondmate metadata was removed"
   assert_grep "secondmate home repository identity does not match" "$case_dir/stderr" \
-    "secondmate home identity drift was not surfaced"
+    "secondmate home identity drift was not surfaced: $(cat "$case_dir/stderr")"
   pass "secondmate teardown proves its home repository identity"
 }
 
@@ -3969,20 +4493,98 @@ test_teardown_refuses_unsafe_tasktmp_metadata() {
   expect_code 1 "$rc" "unsafe tasktmp teardown exit"
   assert_present "$sentinel/marker" "teardown deleted a metadata-selected arbitrary directory"
   assert_present "$case_dir/state/task-x1.meta" "unsafe tasktmp refusal removed task metadata"
-  assert_grep 'unsafe task temp path' "$case_dir/stderr" "unsafe teardown tasktmp refusal was unclear"
+  assert_grep 'unsafe task temp path' "$case_dir/stderr" \
+    "unsafe teardown tasktmp refusal was unclear"
   pass "teardown only removes its exact task temp root"
+}
+
+test_teardown_accepts_legacy_tasktmp_with_clean_absent_endpoint() {
+  local case_dir legacy_tasktmp
+  case_dir=$(make_case legacy-tasktmp-clean-absent-endpoint)
+  legacy_tasktmp=/tmp/fm-task-x1
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^generation_id=.*/generation_id=account:recoveredgeneration/' \
+    "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak" "$case_dir/fakebin/.tmux-live"
+  printf 'tasktmp=%s\ntasktmp_phase=created\n' "$legacy_tasktmp" \
+    >> "$case_dir/state/task-x1.meta"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "legacy tasktmp remained blocked after endpoint absence was proved: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy tasktmp teardown retained completed task metadata"
+  assert_absent "$case_dir/fakebin/.tmux-live" \
+    "legacy tasktmp teardown recreated an absent endpoint"
+  pass "teardown accepts an exact legacy tasktmp for a clean task with an absent endpoint"
+}
+
+test_teardown_refuses_tasktmp_bound_to_different_generation() {
+  local case_dir mismatched_tasktmp rc
+  case_dir=$(make_case tasktmp-different-generation)
+  mismatched_tasktmp="$case_dir/state/.task-tmp/fm-task-x1-othergeneration"
+  mkdir -p "$mismatched_tasktmp"
+  printf '%s\n' preserve > "$mismatched_tasktmp/sentinel"
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^generation_id=.*/generation_id=account:currentgeneration/' \
+    "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak" "$case_dir/fakebin/.tmux-live"
+  printf 'tasktmp=%s\ntasktmp_phase=created\n' "$mismatched_tasktmp" \
+    >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "different generation-bound tasktmp teardown exit"
+  assert_present "$mismatched_tasktmp/sentinel" \
+    "different generation-bound tasktmp refusal removed the mismatched root"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "different generation-bound tasktmp refusal removed task metadata"
+  assert_grep 'task temp path belongs to a different task generation' "$case_dir/stderr" \
+    "different generation-bound tasktmp did not receive its own refusal classification"
+  pass "teardown refuses a tasktmp bound to a different generation"
+}
+
+test_teardown_refuses_unknown_tasktmp_classification() {
+  local case_dir unknown_tasktmp rc
+  case_dir=$(make_case tasktmp-unknown-classification)
+  unknown_tasktmp="$case_dir/unknown-tasktmp"
+  mkdir -p "$unknown_tasktmp"
+  printf '%s\n' preserve > "$unknown_tasktmp/sentinel"
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^generation_id=.*/generation_id=account:currentgeneration/' \
+    "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak" "$case_dir/fakebin/.tmux-live"
+  printf 'tasktmp=%s\ntasktmp_phase=created\n' "$unknown_tasktmp" \
+    >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unknown tasktmp teardown exit"
+  assert_present "$unknown_tasktmp/sentinel" \
+    "unknown tasktmp refusal removed an unprovable root"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "unknown tasktmp refusal removed task metadata"
+  assert_grep 'unknown or unprovable task temp path' "$case_dir/stderr" \
+    "unknown tasktmp did not receive its own refusal classification"
+  pass "teardown refuses an unknown tasktmp classification"
 }
 
 test_teardown_removes_safe_tasktmp_and_accepts_absence() {
   local case_dir tasktmp
-  tasktmp=/tmp/fm-task-x1
-  assert_absent "$tasktmp" "safe tasktmp fixture collided with an existing task temp root"
+  case_dir=$(make_case safe-tasktmp)
+  tasktmp="$case_dir/state/.task-tmp/fm-task-x1-safe-tasktmp"
   mkdir -p "$tasktmp/gotmp"
   printf '%s\n' leftover > "$tasktmp/gotmp/build-artifact"
 
-  case_dir=$(make_case safe-tasktmp)
   write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^generation_id=.*/generation_id=spawn:safe-tasktmp/' \
+    "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
   printf 'tasktmp=%s\n' "$tasktmp" >> "$case_dir/state/task-x1.meta"
+  printf 'tasktmp_phase=created\n' >> "$case_dir/state/task-x1.meta"
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "teardown rejected its exact task temp root: $(cat "$case_dir/stderr")"
   assert_absent "$tasktmp" "teardown retained its exact task temp root"
@@ -4143,6 +4745,28 @@ SH
   assert_present "$case_dir/wt/.git" "retained direct-spawn teardown recycled the worktree without endpoint proof"
   assert_present "$case_dir/state/task-x1.meta" "retained direct-spawn teardown erased cleanup metadata without endpoint proof"
   pass "retained direct-spawn teardown requires confirmed endpoint quiescence"
+}
+
+test_missing_ship_worktree_retains_endpoint_and_metadata() {
+  local case_dir rc
+  case_dir=$(make_case missing-ship-worktree)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unlanded ship work"
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "missing ship worktree must block teardown before quiescence"
+  assert_present "$case_dir/fakebin/.tmux-live" \
+    "missing ship worktree teardown stopped the task endpoint without landing proof"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "missing ship worktree teardown erased task metadata without landing proof"
+  assert_grep 'not an exact inspectable repository root' "$case_dir/stderr" \
+    "missing ship worktree refusal did not identify the absent safety proof"
+  pass "a missing ship worktree cannot bypass landing proof or endpoint safety"
 }
 
 test_never_created_direct_spawn_endpoint_is_not_quiesced() {
@@ -4356,7 +4980,7 @@ test_secondmate_retirement_recurses_into_ignored_nested_repositories() {
   assert_present "$nested/unlanded.txt" "unpushed submodule repository work was discarded"
   assert_present "$case_dir/state/task-x1.meta" "nested repository work allowed metadata removal"
   assert_grep 'not proven on a live remote branch' "$case_dir/stderr" \
-    "unlanded nested repository ref was not surfaced"
+    "unlanded nested repository ref was not surfaced: $(cat "$case_dir/stderr")"
   pass "secondmate retirement recursively proves submodule repositories"
 }
 
@@ -5027,7 +5651,7 @@ SH
 }
 
 test_surviving_object_storage_is_bound_through_graph_proof() {
-  local case_dir source objects pack redirected marker release teardown_pid rc waited
+  local case_dir source objects pack redirected marker release teardown_pid rc wait_seconds
   case_dir=$(make_case secondmate-object-storage-toctou)
   prepare_secondmate_home_fixture "$case_dir"
   write_secondmate_meta "$case_dir"
@@ -5045,15 +5669,12 @@ test_surviving_object_storage_is_bound_through_graph_proof() {
   FM_TEARDOWN_TEST_OBJECT_SCAN_RELEASE="$release" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
   teardown_pid=$!
-  waited=0
-  while [ ! -f "$marker" ] && [ "$waited" -lt 200 ]; do
-    sleep 0.05
-    waited=$((waited + 1))
-  done
-  if [ ! -f "$marker" ]; then
+  wait_seconds=$(fm_test_load_scaled_timeout_seconds 30 150)
+  if ! FM_TEST_LIVENESS_TIMEOUT_SECONDS="$wait_seconds" \
+    fm_test_wait_for_file "$marker" "$teardown_pid" 0.05; then
     : > "$release"
     wait "$teardown_pid" || true
-    fail "object-storage graph proof did not expose its retained-identity boundary"
+    fail "object-storage graph proof did not expose its retained-identity boundary: $(cat "$case_dir/stderr")"
   fi
   mv "$pack" "$redirected"
   ln -s "$redirected" "$pack"
@@ -5070,7 +5691,7 @@ test_surviving_object_storage_is_bound_through_graph_proof() {
 }
 
 test_secondmate_retirement_serializes_child_spawn() {
-  local case_dir child_project rc teardown_pid spawn_rc waited
+  local case_dir rc teardown_pid spawn_rc waited
   case_dir=$(make_case secondmate-retirement-child-race)
   prepare_secondmate_home_fixture "$case_dir"
   write_secondmate_meta "$case_dir"
@@ -5109,14 +5730,15 @@ SH
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
   teardown_pid=$!
   waited=0
-  while [ ! -f "$case_dir/fakebin/.retirement-started" ] && [ "$waited" -lt 200 ]; do
+  while [ ! -f "$case_dir/fakebin/.retirement-started" ] && [ "$waited" -lt 600 ]; do
+    kill -0 "$teardown_pid" 2>/dev/null || break
     sleep 0.05
     waited=$((waited + 1))
   done
   [ -f "$case_dir/fakebin/.retirement-started" ] || {
     : > "$case_dir/fakebin/.retirement-release"
     wait "$teardown_pid" || true
-    fail "secondmate retirement did not reach the serialized quiescence boundary"
+    fail "secondmate retirement did not reach the serialized quiescence boundary: $(cat "$case_dir/stderr")"
   }
   set +e
   FM_HOME="$case_dir/wt" \
@@ -5270,6 +5892,21 @@ if [ "${FM_TEST_FOCUSED:-}" = managed-endpoint-identity ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = managed-generation-lock ]; then
+  test_managed_teardown_locks_generation_before_endpoint_cleanup
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = managed-child-generation-lock ]; then
+  test_managed_child_teardown_locks_generation_before_snapshot
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = non-linked-index-lock ]; then
+  test_non_linked_index_lock_path_is_checked_from_worktree
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-34-report-required ]; then
   test_teardown_rejects_malformed_report_requirement
   exit 0
@@ -5328,6 +5965,28 @@ fi
 if [ "${FM_TEST_FOCUSED:-}" = review-round-10-treehouse-return ]; then
   test_forced_secondmate_retains_child_on_treehouse_failure
   test_forced_secondmate_retains_child_when_treehouse_unavailable
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = child-return-unverified ]; then
+  test_forced_secondmate_retains_unverified_process_group
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = herdr-marker ]; then
+  test_herdr_teardown_clears_escalation_marker
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = report-lifecycle ]; then
+  test_required_report_blocks_then_publishes_before_cleanup
+  test_required_report_restores_rollback_generation_before_publish
+  test_required_report_revalidates_after_quiescence
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = nested-repository ]; then
+  test_secondmate_retirement_recurses_into_ignored_nested_repositories
   exit 0
 fi
 
@@ -5429,6 +6088,7 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = dead-treehouse-reap ]; then
   test_dead_task_reaper_returns_only_clean_landed_work_without_force
+  test_dead_task_reaper_treats_stale_status_as_no_liveness_evidence
   test_dead_task_reaper_reconciles_an_already_returned_lease
   test_dead_task_reaper_retains_dirty_work_and_live_endpoints
   test_dead_task_reaper_requires_exact_lease_and_closed_pr
@@ -5436,9 +6096,42 @@ if [ "${FM_TEST_FOCUSED:-}" = dead-treehouse-reap ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-reap-final-proofs ]; then
+  test_dead_reap_allows_generated_ignored_output_with_summary
+  test_dead_reap_refuses_work_shaped_ignored_output
+  test_dead_reap_refuses_ambiguous_ignored_output
+  test_dead_reap_refuses_recent_hand_edit_shaped_output
+  test_dead_reap_refuses_old_ambiguous_output
+  test_dead_reap_protects_work_roots_before_dependencies
+  test_dead_reap_allows_dependency_tree_contents
+  test_dead_reap_rechecks_open_pr_at_locked_return
+  test_dead_reap_rechecks_endpoint_after_local_proofs
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-reaper-status ]; then
+  test_dead_reap_refuses_ambiguous_ignored_output
+  test_dead_reap_rechecks_open_pr_at_locked_return
+  test_treehouse_reaper_safe_refusals_exit_success
+  test_treehouse_reaper_operational_failure_exits_nonzero
+  test_treehouse_reaper_translates_only_safety_status
+  test_treehouse_reaper_executable_failures_remain_nonzero
+  test_dead_reap_leaf_helper_failures_remain_operational
+  test_dead_reap_authority_statuses_are_distinct
+  test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct
+  test_dead_reap_landing_statuses_are_distinct
+  test_content_in_default_fallback_allows
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
   test_never_created_direct_spawn_endpoint_is_not_quiesced
   test_never_created_scout_without_report_cleans_bookkeeping
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = missing-ship-worktree ]; then
+  test_missing_ship_worktree_retains_endpoint_and_metadata
   exit 0
 fi
 
@@ -5457,115 +6150,195 @@ if [ "${FM_TEST_FOCUSED:-}" = preserve-scratch ]; then
   exit 0
 fi
 
-test_local_only_fork_remote_allows
-test_teardown_prompts_tasks_axi_done_when_compatible
-test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
-test_local_only_truly_unpushed_refuses
-test_local_only_merged_to_local_main_allows
-test_no_mistakes_origin_remote_allows
-test_no_mistakes_truly_unpushed_refuses
-test_local_only_force_retains_unpushed
-test_managed_force_teardown_retains_unlanded_lease_and_session
-test_managed_teardown_retains_lease_when_endpoint_state_is_unknown
-test_managed_release_failure_preserves_unrecycled_worktree_for_retry
-test_managed_teardown_locks_generation_before_endpoint_cleanup
-test_managed_child_teardown_locks_generation_before_snapshot
-test_forced_secondmate_child_uses_child_home_for_endpoint_verification
-test_forced_secondmate_quiesces_parent_before_child_cleanup
-test_forced_secondmate_retains_child_on_treehouse_failure
-test_forced_secondmate_retains_unverified_process_group
-test_forced_secondmate_retains_child_when_treehouse_unavailable
-test_forced_secondmate_retains_child_on_checkout_lock_contention
-test_herdr_teardown_clears_escalation_marker
-test_required_report_blocks_then_publishes_before_cleanup
-test_required_report_restores_rollback_generation_before_publish
-test_required_report_revalidates_after_quiescence
-test_legacy_teardown_revalidates_after_quiescence
-test_teardown_rejects_nested_metadata_roots_before_quiescence
-test_teardown_rejects_drifted_treehouse_task_lease
-test_teardown_rechecks_treehouse_lease_after_locked_safety
-test_secondmate_rejects_drifted_home_repository_identity
-test_normal_secondmate_retires_proven_detached_head
-test_forced_secondmate_retains_untracked_skill_draft
-test_forced_secondmate_retains_unique_detached_head
-test_forced_secondmate_retains_stash
-test_forced_secondmate_retains_unlanded_child_work
-test_forced_secondmate_retains_unquiesced_unmanaged_child
-test_secondmate_registry_duplicate_home_blocks_removal
-test_secondmate_retirement_retains_idle_registered_child
-test_secondmate_retirement_retains_unlanded_project_clone
-test_secondmate_project_tags_do_not_prove_landing
-test_secondmate_project_origin_authority_survives_home_removal
-test_secondmate_retirement_recurses_into_ignored_nested_repositories
-test_secondmate_retirement_rejects_linked_worktree_graphs
-test_secondmate_retirement_accounts_for_directory_symlinks
-test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority
-test_secondmate_retirement_rejects_mount_boundaries
-test_secondmate_retirement_rejects_effective_ssh_redirects
-test_secondmate_retirement_rejects_incomplete_surviving_authority
-test_secondmate_retirement_validates_top_level_source_storage
-test_secondmate_retirement_rejects_local_network_aliases
-test_secondmate_retirement_rejects_in_home_remote_object_storage
-test_secondmate_retirement_rejects_source_common_dir_in_home
-test_teardown_removal_roots_fail_closed
-test_treehouse_return_stays_bound_to_validated_root
-test_teardown_distinguishes_dead_and_live_harness_processes
-test_secondmate_retirement_retains_reflog_and_rewritten_history
-test_secondmate_retirement_rejects_http_proxy_and_object_redirects
-test_secondmate_network_fetches_pin_validated_addresses
-test_surviving_object_storage_is_bound_through_graph_proof
-test_secondmate_retirement_serializes_child_spawn
-test_nested_secondmate_cleanup_requires_child_home_lock
-test_secondmate_registry_updates_are_locked_and_literal
-test_teardown_retains_untracked_claude_skill_draft
-test_teardown_refuses_unsafe_tasktmp_metadata
-test_teardown_removes_safe_tasktmp_and_accepts_absence
-test_teardown_rejects_malformed_report_requirement
-test_secondmate_state_enumeration_fails_closed
-test_secondmate_missing_treehouse_child_is_retained
-test_secondmate_registry_home_drift_blocks_removal
-test_retained_direct_spawn_requires_confirmed_endpoint_quiescence
-test_never_created_direct_spawn_endpoint_is_not_quiesced
-test_never_created_scout_without_report_cleans_bookkeeping
-test_squash_merged_branch_deleted_allows
-test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
-test_no_pr_recorded_discovers_merged_pr_by_branch_allows
-test_squash_merged_pr_allows_replayed_unpushed_patch
-test_merged_pr_with_later_local_commit_refuses
-test_pr_check_does_not_refresh_stale_pr_head
-test_pr_check_records_remote_head_when_local_lags
-test_pr_check_serializes_with_account_session_updates
-test_pr_check_rejects_reused_task_generation
-test_content_in_default_fallback_allows
-test_content_fallback_refreshes_stale_origin_ref
-test_content_fallback_uses_live_default
-test_content_fallback_reprobes_live_default_after_fetch
-test_content_fallback_honors_shared_checkout_lock
-test_locked_return_reuses_checkout_lock_for_landing_recheck
-test_treehouse_return_timeout_reaps_children_before_unlock
-test_dirty_worktree_refuses
-test_dead_task_reaper_returns_only_clean_landed_work_without_force
-test_dead_task_reaper_reconciles_an_already_returned_lease
-test_dead_task_reaper_retains_dirty_work_and_live_endpoints
-test_dead_task_reaper_requires_exact_lease_and_closed_pr
-test_treehouse_capacity_reports_low_clean_availability
-test_nonignored_untracked_work_refuses_without_preservation
-test_already_returned_worktree_finishes_bookkeeping
-test_already_returned_worktree_refuses_preservation_without_mutation
-test_watchman_cookies_do_not_block_teardown
-test_ignored_worktree_content_is_summarized_without_blocking
-test_preserve_scratch_captures_then_reclaims_dirty_worktree
-test_preserve_scratch_never_cleans_unlanded_commits
-test_preserve_scratch_refuses_tracked_drift_before_cleanup
-test_preserve_scratch_refuses_index_drift_during_tracked_verification
-test_gh_error_and_content_absent_refuses
-test_stale_index_lock_cleared_and_teardown_succeeds
-test_live_index_lock_is_never_removed_and_teardown_refuses
-test_lsof_error_never_clears_index_lock
-test_stale_index_lock_cleanup_rechecks_dirty_worktree
-test_non_linked_index_lock_path_is_checked_from_worktree
-test_index_lock_mtime_read_failure_refuses
-test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
-test_persistent_index_lock_exhausts_retries_and_refuses_loudly
-test_empty_retry_wait_uses_default_without_aborting
-test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+if [ "${FM_TEST_FOCUSED:-}" = tasktmp-classification ]; then
+  test_teardown_accepts_legacy_tasktmp_with_clean_absent_endpoint
+  test_teardown_refuses_tasktmp_bound_to_different_generation
+  test_teardown_refuses_unknown_tasktmp_classification
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = tasktmp-legacy-classification ]; then
+  test_teardown_accepts_legacy_tasktmp_with_clean_absent_endpoint
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = tasktmp-different-generation ]; then
+  test_teardown_refuses_tasktmp_bound_to_different_generation
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = tasktmp-unknown-classification ]; then
+  test_teardown_refuses_unknown_tasktmp_classification
+  exit 0
+fi
+
+run_partitioned_test() {
+  local assigned_part test_function=$1
+  assigned_part=$((FM_TEST_PART_SEQUENCE % FM_TEST_PART_TOTAL + 1))
+  FM_TEST_PART_SEQUENCE=$((FM_TEST_PART_SEQUENCE + 1))
+  if [ "$assigned_part" -ne "$FM_TEST_PART_INDEX" ]; then
+    return 0
+  fi
+  FM_TEARDOWN_PART_CASES=$((FM_TEARDOWN_PART_CASES + 1))
+  printf 'FM_TEARDOWN_CASE_BEGIN part=%s/%s case=%s\n' \
+    "$FM_TEST_PART_INDEX" "$FM_TEST_PART_TOTAL" "$test_function"
+  "$test_function"
+  printf 'FM_TEARDOWN_CASE_END part=%s/%s case=%s exit=0\n' \
+    "$FM_TEST_PART_INDEX" "$FM_TEST_PART_TOTAL" "$test_function"
+}
+
+FM_TEST_PART_INDEX=${FM_TEST_PART_INDEX:-1}
+FM_TEST_PART_TOTAL=${FM_TEST_PART_TOTAL:-1}
+case "$FM_TEST_PART_INDEX:$FM_TEST_PART_TOTAL" in
+  *[!0-9:]* | 0:* | *:0)
+    fail "teardown partition requires positive numeric part index and total"
+    ;;
+esac
+[ "$FM_TEST_PART_INDEX" -le "$FM_TEST_PART_TOTAL" ] \
+  || fail "teardown partition index exceeds total"
+FM_TEST_PART_SEQUENCE=0
+FM_TEARDOWN_PART_CASES=0
+
+TEARDOWN_FULL_SUITE_CASES=(
+  test_local_only_fork_remote_allows
+  test_teardown_prompts_tasks_axi_done_when_compatible
+  test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
+  test_local_only_truly_unpushed_refuses
+  test_local_only_merged_to_local_main_allows
+  test_no_mistakes_origin_remote_allows
+  test_no_mistakes_truly_unpushed_refuses
+  test_local_only_force_retains_unpushed
+  test_managed_force_teardown_retains_unlanded_lease_and_session
+  test_managed_teardown_retains_lease_when_endpoint_state_is_unknown
+  test_managed_release_failure_preserves_unrecycled_worktree_for_retry
+  test_managed_teardown_locks_generation_before_endpoint_cleanup
+  test_managed_child_teardown_locks_generation_before_snapshot
+  test_forced_secondmate_child_uses_child_home_for_endpoint_verification
+  test_forced_secondmate_quiesces_parent_before_child_cleanup
+  test_forced_secondmate_retains_child_on_treehouse_failure
+  test_forced_secondmate_retains_unverified_process_group
+  test_forced_secondmate_retains_child_when_treehouse_unavailable
+  test_forced_secondmate_retains_child_on_checkout_lock_contention
+  test_herdr_teardown_clears_escalation_marker
+  test_required_report_blocks_then_publishes_before_cleanup
+  test_required_report_restores_rollback_generation_before_publish
+  test_required_report_revalidates_after_quiescence
+  test_legacy_teardown_revalidates_after_quiescence
+  test_teardown_rejects_nested_metadata_roots_before_quiescence
+  test_teardown_rejects_drifted_treehouse_task_lease
+  test_teardown_rechecks_treehouse_lease_after_locked_safety
+  test_secondmate_rejects_drifted_home_repository_identity
+  test_normal_secondmate_retires_proven_detached_head
+  test_forced_secondmate_retains_untracked_skill_draft
+  test_forced_secondmate_retains_unique_detached_head
+  test_forced_secondmate_retains_stash
+  test_forced_secondmate_retains_unlanded_child_work
+  test_forced_secondmate_retains_unquiesced_unmanaged_child
+  test_secondmate_registry_duplicate_home_blocks_removal
+  test_secondmate_retirement_retains_idle_registered_child
+  test_secondmate_retirement_retains_unlanded_project_clone
+  test_secondmate_project_tags_do_not_prove_landing
+  test_secondmate_project_origin_authority_survives_home_removal
+  test_secondmate_retirement_recurses_into_ignored_nested_repositories
+  test_secondmate_retirement_rejects_linked_worktree_graphs
+  test_secondmate_retirement_accounts_for_directory_symlinks
+  test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority
+  test_secondmate_retirement_rejects_mount_boundaries
+  test_secondmate_retirement_rejects_effective_ssh_redirects
+  test_secondmate_retirement_rejects_incomplete_surviving_authority
+  test_secondmate_retirement_validates_top_level_source_storage
+  test_secondmate_retirement_rejects_local_network_aliases
+  test_secondmate_retirement_rejects_in_home_remote_object_storage
+  test_secondmate_retirement_rejects_source_common_dir_in_home
+  test_teardown_removal_roots_fail_closed
+  test_treehouse_return_stays_bound_to_validated_root
+  test_teardown_distinguishes_dead_and_live_harness_processes
+  test_secondmate_retirement_retains_reflog_and_rewritten_history
+  test_secondmate_retirement_rejects_http_proxy_and_object_redirects
+  test_secondmate_network_fetches_pin_validated_addresses
+  test_surviving_object_storage_is_bound_through_graph_proof
+  test_secondmate_retirement_serializes_child_spawn
+  test_nested_secondmate_cleanup_requires_child_home_lock
+  test_secondmate_registry_updates_are_locked_and_literal
+  test_teardown_retains_untracked_claude_skill_draft
+  test_teardown_refuses_unsafe_tasktmp_metadata
+  test_teardown_accepts_legacy_tasktmp_with_clean_absent_endpoint
+  test_teardown_refuses_tasktmp_bound_to_different_generation
+  test_teardown_refuses_unknown_tasktmp_classification
+  test_teardown_removes_safe_tasktmp_and_accepts_absence
+  test_teardown_rejects_malformed_report_requirement
+  test_secondmate_state_enumeration_fails_closed
+  test_secondmate_missing_treehouse_child_is_retained
+  test_secondmate_registry_home_drift_blocks_removal
+  test_retained_direct_spawn_requires_confirmed_endpoint_quiescence
+  test_missing_ship_worktree_retains_endpoint_and_metadata
+  test_never_created_direct_spawn_endpoint_is_not_quiesced
+  test_never_created_scout_without_report_cleans_bookkeeping
+  test_squash_merged_branch_deleted_allows
+  test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
+  test_no_pr_recorded_discovers_merged_pr_by_branch_allows
+  test_squash_merged_pr_allows_replayed_unpushed_patch
+  test_merged_pr_with_later_local_commit_refuses
+  test_pr_check_does_not_refresh_stale_pr_head
+  test_pr_check_records_remote_head_when_local_lags
+  test_pr_check_serializes_with_account_session_updates
+  test_pr_check_rejects_reused_task_generation
+  test_content_in_default_fallback_allows
+  test_content_fallback_refreshes_stale_origin_ref
+  test_content_fallback_uses_live_default
+  test_content_fallback_reprobes_live_default_after_fetch
+  test_content_fallback_honors_shared_checkout_lock
+  test_locked_return_reuses_checkout_lock_for_landing_recheck
+  test_treehouse_return_timeout_reaps_children_before_unlock
+  test_dirty_worktree_refuses
+  test_dead_task_reaper_returns_only_clean_landed_work_without_force
+  test_dead_task_reaper_treats_stale_status_as_no_liveness_evidence
+  test_dead_task_reaper_reconciles_an_already_returned_lease
+  test_dead_task_reaper_retains_dirty_work_and_live_endpoints
+  test_dead_task_reaper_requires_exact_lease_and_closed_pr
+  test_treehouse_capacity_reports_low_clean_availability
+  test_nonignored_untracked_work_refuses_without_preservation
+  test_already_returned_worktree_finishes_bookkeeping
+  test_already_returned_worktree_refuses_preservation_without_mutation
+  test_watchman_cookies_do_not_block_teardown
+  test_ignored_worktree_content_is_summarized_without_blocking
+  test_dead_reap_allows_generated_ignored_output_with_summary
+  test_dead_reap_refuses_work_shaped_ignored_output
+  test_dead_reap_refuses_ambiguous_ignored_output
+  test_dead_reap_refuses_recent_hand_edit_shaped_output
+  test_dead_reap_refuses_old_ambiguous_output
+  test_dead_reap_protects_work_roots_before_dependencies
+  test_dead_reap_allows_dependency_tree_contents
+  test_dead_reap_rechecks_open_pr_at_locked_return
+  test_dead_reap_rechecks_endpoint_after_local_proofs
+  test_treehouse_reaper_safe_refusals_exit_success
+  test_treehouse_reaper_operational_failure_exits_nonzero
+  test_treehouse_reaper_translates_only_safety_status
+  test_treehouse_reaper_executable_failures_remain_nonzero
+  test_dead_reap_leaf_helper_failures_remain_operational
+  test_dead_reap_authority_statuses_are_distinct
+  test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct
+  test_dead_reap_landing_statuses_are_distinct
+  test_preserve_scratch_captures_then_reclaims_dirty_worktree
+  test_preserve_scratch_never_cleans_unlanded_commits
+  test_preserve_scratch_refuses_tracked_drift_before_cleanup
+  test_preserve_scratch_refuses_index_drift_during_tracked_verification
+  test_gh_error_and_content_absent_refuses
+  test_stale_index_lock_cleared_and_teardown_succeeds
+  test_live_index_lock_is_never_removed_and_teardown_refuses
+  test_lsof_error_never_clears_index_lock
+  test_stale_index_lock_cleanup_rechecks_dirty_worktree
+  test_non_linked_index_lock_path_is_checked_from_worktree
+  test_index_lock_mtime_read_failure_refuses
+  test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
+  test_persistent_index_lock_exhausts_retries_and_refuses_loudly
+  test_empty_retry_wait_uses_default_without_aborting
+  test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+)
+
+for teardown_test_function in "${TEARDOWN_FULL_SUITE_CASES[@]}"; do
+  run_partitioned_test "$teardown_test_function"
+done
+printf 'FM_TEARDOWN_PART_RESULT part=%s/%s cases=%s total=%s\n' \
+  "$FM_TEST_PART_INDEX" "$FM_TEST_PART_TOTAL" "$FM_TEARDOWN_PART_CASES" \
+  "${#TEARDOWN_FULL_SUITE_CASES[@]}"

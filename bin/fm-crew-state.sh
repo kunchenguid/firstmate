@@ -15,21 +15,26 @@
 # and log reads plus fixed mapping logic, no heuristics and no LLM. Output is one
 # stable, parseable, token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|stale|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   ... · liveness: <alive|dead|unknown> · step: <name>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crewmate's branch, active or terminal
 #      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
-#      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
-#      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. A passed
-#      outcome's PR detail is cross-checked against GitHub through gh-axi rather
-#      than inferred from the pipeline outcome. EXCEPT: while the active step is
-#      ci, `axi status` alone cannot tell "still waiting on checks" from "checks
-#      green, waiting on merge" (see nm_ci_checks_state) - a ci-step log-tail
-#      check overrides working -> done once checks read green, so a green PR is
-#      never silently read as still-validating.
+#      The run-step is AUTHORITATIVE for active, parked, and failed states:
+#      running/fixing -> working, ci -> working, awaiting_approval/fix_review ->
+#      parked (with gate findings), and failed/cancelled -> failed. A PR-ready
+#      passed/checks-passed claim becomes done only after GitHub resolves the
+#      rendered run head to one full remote commit, that identity exactly matches
+#      the live PR head, and a completed snapshot is still the newest branch run.
+#      Local Git objects and a PR URL found only in the append-only status log are
+#      never publication-currentness evidence.
+#      Missing remote proof -> unknown and a mismatch or newer run -> stale.
+#      While the active step is ci, `axi status` alone cannot tell "still waiting
+#      on checks" from "checks green, waiting on merge" (see nm_ci_checks_state),
+#      so a ci-step log-tail marker supplies the ready claim before the same
+#      remote-currentness checks decide whether it is done.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -64,7 +69,11 @@ ID=${1:-}
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
-case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+case "$NM_TIMEOUT" in
+  ''|*[!0-9]*) NM_TIMEOUT=10 ;;
+  *) case "$NM_TIMEOUT" in *[1-9]*) ;; *) NM_TIMEOUT=10 ;; esac ;;
+esac
+NM_LIVENESS_BIN=${FM_CREW_STATE_NM_LIVENESS_BIN:-$SCRIPT_DIR/fm-nm-step-liveness.sh}
 GH_TIMEOUT=${FM_CREW_STATE_GH_TIMEOUT:-10}
 case "$GH_TIMEOUT" in
   ''|*[!0-9]*) GH_TIMEOUT=10 ;;
@@ -322,6 +331,100 @@ nm_pr_state() {  # <pr-url>
   esac
 }
 
+# Resolve the live head SHA for a GitHub PR through gh-axi's API surface.
+# `gh-axi pr view` deliberately omits the head SHA, so this targeted read is the
+# only way to prove that a completed run-step still describes the code currently
+# published in the open PR.
+nm_pr_head() {  # <pr-url>
+  local pr_url=$1 owner repo number out head
+  [ -n "$pr_url" ] || return 0
+  command -v gh-axi >/dev/null 2>&1 || return 0
+  if [[ "$pr_url" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/([0-9]+)/?$ ]]; then
+    owner=${BASH_REMATCH[1]}
+    repo=${BASH_REMATCH[2]}
+    number=${BASH_REMATCH[3]}
+  else
+    return 0
+  fi
+  out=$(gh_axi_run api "/repos/$owner/$repo/pulls/$number")
+  head=$(printf '%s\n' "$out" \
+    | sed -n '/^[[:space:]]*head:[[:space:]]*$/,/^[[:space:]]*base:[[:space:]]*$/s/^[[:space:]]*sha:[[:space:]]*\(.*\)/\1/p' \
+    | head -1)
+  strip_quotes "$head"
+}
+
+# Resolve no-mistakes' rendered run head in the PR's remote repository and
+# return GitHub's full commit identity. The rendered head may be abbreviated,
+# so comparing it directly would be a prefix test rather than an identity test.
+# Local Git objects are intentionally irrelevant here: fetching an unrelated
+# remote must never change a publication-currentness verdict.
+nm_remote_commit_head() {  # <pr-url> <commit-ref>
+  local pr_url=$1 commit_ref=$2 owner repo out head
+  [ -n "$pr_url" ] && [[ "$commit_ref" =~ ^[0-9a-fA-F]{7,64}$ ]] || return 0
+  command -v gh-axi >/dev/null 2>&1 || return 0
+  if [[ "$pr_url" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/[0-9]+/?$ ]]; then
+    owner=${BASH_REMATCH[1]}
+    repo=${BASH_REMATCH[2]}
+  else
+    return 0
+  fi
+  out=$(gh_axi_run api "/repos/$owner/$repo/commits/$commit_ref")
+  head=$(printf '%s\n' "$out" | sed -n 's/^sha:[[:space:]]*\(.*\)/\1/p' | head -1)
+  strip_quotes "$head"
+}
+
+# A PR-ready result is merge input, so branch equality is insufficient: a
+# branch can have a newer PR head while `axi status` still renders an earlier
+# completed run for that branch. Resolve both facts through GitHub, compare
+# exact full identities, and fail closed when either remote proof is unavailable.
+verify_ready_head_or_emit() {  # <run-id> <validated-head> <pr-url>
+  local run_id=$1 validated_head=$2 pr_url=$3 live_head resolved_head
+  if [ -z "$run_id" ]; then
+    emit unknown run-step "PR-ready current run identity is unavailable; do not merge"
+  fi
+  if [ -z "$validated_head" ] || [ -z "$pr_url" ]; then
+    emit unknown run-step "PR-ready run-step currentness is unavailable; do not merge"
+  fi
+  live_head=$(nm_pr_head "$pr_url")
+  if [ -z "$live_head" ]; then
+    emit unknown run-step "PR-ready run-step could not verify the live PR head; do not merge"
+  fi
+  resolved_head=$(nm_remote_commit_head "$pr_url" "$validated_head")
+  if ! [[ "$resolved_head" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+    emit unknown run-step "PR-ready run-step could not resolve validated head $validated_head through GitHub; do not merge"
+  fi
+  if ! [[ "$live_head" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+    emit unknown run-step "PR-ready run-step received an invalid live PR head; do not merge"
+  fi
+  if [ "$resolved_head" != "$live_head" ]; then
+    emit stale run-step "stale run-step: validated head $validated_head resolves remotely to ${resolved_head:0:8}, not PR head ${live_head:0:8}; do not merge"
+  fi
+}
+
+# `axi status` may return an earlier completed run even after another run has
+# started for the same branch. The newest-first `no-mistakes runs` view is the
+# independent currentness check for that case. A completed result must never be
+# treated as merge input while the newest branch run is still active, even when
+# both runs validate the same commit and the live PR-head comparison therefore
+# cannot distinguish them.
+verify_no_newer_active_run_or_emit() {  # <branch>
+  local branch=$1 newest newest_status newest_rest newest_head
+  newest=$(nm_runs_status_for_branch "$branch")
+  if [ -z "$newest" ]; then
+    emit unknown run-step "PR-ready run-step could not verify the newest branch run; do not merge"
+  fi
+  newest_status=${newest%%|*}
+  newest_rest=${newest#*|}
+  newest_head=${newest_rest%%|*}
+  [ -n "$newest_head" ] || newest_head=unknown
+  case "$newest_status" in
+    completed) return 0 ;;
+    running) emit stale run-step "stale run-step: a newer active run exists for $branch at $newest_head; do not merge" ;;
+    failed|cancelled) emit stale run-step "stale run-step: the newest run for $branch is $newest_status at $newest_head; do not merge" ;;
+    *) emit unknown run-step "PR-ready run-step has unverifiable newest-run status $newest_status; do not merge" ;;
+  esac
+}
+
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
   case "$(status_line_note "$LOG_LINE")" in
@@ -415,8 +518,80 @@ nm_ci_checks_state() {
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# True when `axi status` renders the active step as quiet. A configured shell
+# command step (commands.test / commands.lint) ALWAYS renders quiet for its whole
+# duration, because no-mistakes flushes that step's log only when the step ends
+# (2026-08-02 incident; docs/postmortems/nm-quiet-test-step.md). So quiet here is
+# a prompt to check real liveness, never on its own evidence that anything died.
+nm_step_is_quiet() {
+  printf '%s\n' "$RUN_OUT" | grep -qE 'quiet[[:space:]]+[0-9]'
+}
+
+# Name of the step in the active_steps table, e.g. `test`. Empty when absent.
+nm_active_step_name() {
+  local row
+  row=$(printf '%s\n' "$RUN_OUT" | sed -n '/^[[:space:]]*active_steps\[/,$p' | sed -n '2p')
+  row=$(trim "$row")
+  [ -n "$row" ] || return 0
+  strip_quotes "$(trim "${row%%,*}")"
+}
+
+# One-line liveness verdict for the active step's own processes. Presence-only
+# (--sample 0) keeps the heartbeat path bounded and gives this consumer exactly
+# three verdicts: alive, dead, or unknown. A missing, failed, empty, or malformed
+# probe is unknown, never silence and never evidence of health or death.
+nm_step_liveness() {
+  local run_id out status=0 verdict procs doing detail line
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] || { printf 'unknown (probe unreadable: run id unavailable)'; return; }
+  [ -x "$NM_LIVENESS_BIN" ] || { printf 'unknown (probe unreadable: executable unavailable)'; return; }
+  case "$HAVE_TIMEOUT" in
+    timeout)  out=$(timeout "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 0 2>/dev/null) || status=$? ;;
+    gtimeout) out=$(gtimeout "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 0 2>/dev/null) || status=$? ;;
+    # Same bounded perl fallback nm_run already uses. Without this case, a host
+    # with neither timeout nor gtimeout - the ordinary macOS default, including
+    # this one - fell through to an UNBOUNDED probe call, so a slow lsof or
+    # process scan could block the supervision read for as long as it took.
+    perl)     out=$(perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+                  "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 0 2>/dev/null) || status=$? ;;
+    *)        printf 'unknown (probe unreadable: no bounded runner available)'; return ;;
+  esac
+  case "$status" in
+    0) ;;
+    124) printf 'unknown (probe timed out after %ss)' "$NM_TIMEOUT"; return ;;
+    *) printf 'unknown (probe unreadable: exited %s)' "$status"; return ;;
+  esac
+  [ -n "$out" ] || { printf 'unknown (probe unreadable: empty result)'; return; }
+  # Compact the probe's own line to `<verdict> (<n> procs) on <unit> (<age>)`.
+  # This rides on every heartbeat read, so it stays token-tight - but the unit of
+  # work and its age are the two fields that separate SLOW from HUNG, and this
+  # line is the read firstmate actually makes. Omitting them would leave the
+  # follow-up question ("alive, but stuck on the same script for three hours?")
+  # needing a second command on every heartbeat.
+  verdict=$(printf '%s\n' "$out" | sed -n 's/^liveness:[[:space:]]*\([a-z]*\).*/\1/p')
+  procs=$(printf '%s\n' "$out" | sed -n 's/.*procs:[[:space:]]*\([0-9]*\).*/\1/p')
+  case "$verdict" in
+    alive|dead|unknown) ;;
+    *) printf 'unknown (probe result unparseable)'; return ;;
+  esac
+  case "$procs" in ''|*[!0-9]*) printf 'unknown (probe result unparseable)'; return ;; esac
+  # `doing: <argv> (<etime>)` is the probe's last field when it could name one.
+  # The probe already truncates argv, so take it verbatim rather than re-parsing
+  # a command line whose shape varies by whatever the step happens to be running.
+  doing=${out##*doing: }
+  [ "$doing" = "$out" ] && doing=""
+  line="$verdict ($procs procs)"
+  if [ "$verdict" = unknown ]; then
+    detail=${out##*"$SEP"}
+    [ "$detail" = "$out" ] && detail="probe reported unknown"
+    line="unknown ($procs procs; $detail)"
+  fi
+  [ -n "$doing" ] && line="$line on $doing"
+  printf '%s' "$line"
+}
+
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br
+  local branch=$1 out row st rest br head pr field
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -427,7 +602,17 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     br=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      printf '%s' "$st"
+      # The human-oriented runs row is whitespace-delimited and always starts
+      # with status, branch, and short head. Preserve the optional PR URL so a
+      # coarse branch match can still verify a checks-green status-log event.
+      # shellcheck disable=SC2086 # Intentional whitespace tokenization of CLI output.
+      set -- $row
+      head=${3:-}
+      pr=
+      for field in "$@"; do
+        case "$field" in https://github.com/*/*/pull/[0-9]*) pr=$field ;; esac
+      done
+      printf '%s|%s|%s' "$st" "$head" "$pr"
       return 0
     fi
   done <<< "$out"
@@ -460,8 +645,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      coarse_run=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      if [ -n "$coarse_run" ]; then
+        COARSE_STATUS=${coarse_run%%|*}
         HAVE_RUN=1
         RUN_SOURCE=coarse
       fi
@@ -477,6 +663,10 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
+  RUN_ID=""
+  RUN_HEAD=""
+  RUN_PR=""
+  READY_CLAIM=0
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
     # true/working, done, or failed. A crewmate genuinely parked at a gate still
@@ -487,7 +677,10 @@ if [ "$HAVE_RUN" = 1 ]; then
     # coarse-vs-full distinction, so a real gate is never silently missed.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
+      completed)
+        RUN_STATE=unknown
+        RUN_DETAIL="completed runs-list result lacks exact current run identity; do not merge"
+        ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
@@ -495,6 +688,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
+    RUN_ID=$(strip_quotes "$(nm_field id)")
+    RUN_HEAD=$(strip_quotes "$(nm_field head)")
+    RUN_PR=$(strip_quotes "$(nm_field pr)")
     outcome=$(strip_quotes "$(nm_field outcome)")
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
     gate_status=$(nm_gate_status)
@@ -510,12 +706,12 @@ if [ "$HAVE_RUN" = 1 ]; then
           case "$pr_state" in
             merged)  RUN_DETAIL="run passed: PR merged (verified)" ;;
             closed)  RUN_DETAIL="run passed: PR closed without merge (verified)" ;;
-            open)    RUN_DETAIL="run passed: PR open (not merged)" ;;
+            open)    RUN_DETAIL="run passed: PR open (not merged)"; READY_CLAIM=1 ;;
             missing) RUN_DETAIL="run passed: no PR to verify" ;;
             *)       RUN_DETAIL="run passed: PR state unavailable (not verified)" ;;
           esac
           ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"; READY_CLAIM=1 ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
@@ -539,7 +735,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
+        completed)      RUN_STATE=unknown; RUN_DETAIL="completed run has no terminal outcome; do not merge" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
         cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
@@ -553,6 +749,7 @@ if [ "$HAVE_RUN" = 1 ]; then
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+              READY_CLAIM=1
             fi
             ;;
           fixing)
@@ -563,9 +760,36 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
+  if [ "$RUN_STATE" = "done" ] && [ "$READY_CLAIM" = 1 ]; then
+    if [ "$RUN_SOURCE" = full ] && [ "$RUN_STATUS" = completed ]; then
+      verify_no_newer_active_run_or_emit "$CREW_BRANCH"
+    fi
+    verify_ready_head_or_emit "$RUN_ID" "$RUN_HEAD" "$RUN_PR"
+  fi
+
+  # A quiet working step is the exact reading that made firstmate abort two
+  # healthy runs on 2026-08-02, so answer "dead or just slow?" here instead of
+  # leaving it to a hand check that gets it wrong. The verdict is APPENDED as an
+  # observation and never overrides RUN_STATE: a step momentarily between
+  # processes would otherwise be misreported as dead, which is the very failure
+  # mode this exists to end. The ci step is excluded because its monitoring runs
+  # inside the daemon with no worktree process at all, so `dead` there is
+  # meaningless rather than informative.
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ] && nm_step_is_quiet; then
+    ACTIVE_STEP=$(nm_active_step_name)
+    case "$ACTIVE_STEP" in
+      ci) ;;
+      '') RUN_DETAIL="$RUN_DETAIL${SEP}liveness: unknown (probe unreadable: active step unavailable)${SEP}step: unknown" ;;
+      *)
+        LIVENESS=$(nm_step_liveness)
+        RUN_DETAIL="$RUN_DETAIL${SEP}liveness: $LIVENESS${SEP}step: $ACTIVE_STEP"
+        ;;
+    esac
+  fi
+
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit unknown status-log "checks-green runs-list result lacks exact current run identity; do not merge"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -576,6 +800,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
+      verify_ready_head_or_emit "$RUN_ID" "$RUN_HEAD" "$RUN_PR"
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi
@@ -610,6 +835,10 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # signature is not meaningful for them; read their state from the status log only.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
   emit working pane "harness busy"
+fi
+
+if log_reports_ci_ready; then
+  emit unknown status-log "checks-green currentness is unavailable; do not merge"
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real

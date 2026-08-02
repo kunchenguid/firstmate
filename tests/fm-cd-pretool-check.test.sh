@@ -17,7 +17,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 fm_git_identity fmtest fmtest@example.invalid
-TMP_ROOT=$(fm_test_tmproot fm-cd-pretool-check)
+fm_test_tmproot_into TMP_ROOT fm-cd-pretool-check
 
 # A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, bin/ with
 # the transport plus both policy files (fm-cd-command-policy.mjs imports the

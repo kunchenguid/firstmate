@@ -117,6 +117,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-account-routing-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-lavish-version-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-lavish-version-lib.sh"
 fm_refuse_if_gate_agent
 
 report_retention_ensure() {
@@ -554,13 +556,7 @@ lavish_axi_compatible() {
   local output
   command -v lavish-axi >/dev/null 2>&1 || return 1
   output=$(lavish-axi --version 2>/dev/null) || return 1
-  # Empty-output stubs are used by hermetic bootstrap tests.
-  # A real versioned binary must identify the firstmate-owned protocol.
-  [ -z "$output" ] && return 0
-  case "$output" in
-    'lavish-axi 1.'*'(store-forward protocol 1)') return 0 ;;
-    *) return 1 ;;
-  esac
+  fm_lavish_version_compatible "$output" 1
 }
 
 # Write CONTENT to DEST only when it differs, so re-running bootstrap does not

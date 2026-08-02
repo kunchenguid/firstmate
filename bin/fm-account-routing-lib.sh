@@ -236,6 +236,99 @@ fm_account_real_directory() {
   [ -d "$1" ] && [ ! -L "$1" ]
 }
 
+fm_account_task_tmp_path() {  # <task-id> <generation-id>
+  local task=$1 generation=$2 token state
+  fm_account_valid_id "$task" || return 1
+  case "$generation" in
+    spawn:*|account:*)
+      token=${generation##*:}
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  fm_account_valid_id "$token" || return 1
+  if [ -n "${STATE:-}" ]; then
+    state=$STATE
+  elif [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    state=$FM_STATE_OVERRIDE
+  elif [ -n "${FM_HOME:-}" ]; then
+    state=$FM_HOME/state
+  else
+    return 1
+  fi
+  fm_account_real_directory "$state" || return 1
+  state=$(cd "$state" 2>/dev/null && pwd -P) || return 1
+  [ "$state" != / ] || return 1
+  printf '%s/.task-tmp/fm-%s-%s\n' "${state%/}" "$task" "$token"
+}
+
+fm_account_previous_task_tmp_path() {  # <task-id>
+  local task=$1 state
+  fm_account_valid_id "$task" || return 1
+  if [ -n "${STATE:-}" ]; then
+    state=$STATE
+  elif [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    state=$FM_STATE_OVERRIDE
+  elif [ -n "${FM_HOME:-}" ]; then
+    state=$FM_HOME/state
+  else
+    return 1
+  fi
+  fm_account_real_directory "$state" || return 1
+  state=$(cd "$state" 2>/dev/null && pwd -P) || return 1
+  [ "$state" != / ] || return 1
+  printf '%s/.task-tmp/fm-%s\n' "${state%/}" "$task"
+}
+
+fm_account_legacy_task_tmp_path() {  # <task-id>
+  fm_account_valid_id "$1" || return 1
+  printf '/tmp/fm-%s\n' "$1"
+}
+
+fm_account_task_tmp_is_current() {  # <task-id> <path> <generation-id>
+  local expected
+  expected=$(fm_account_task_tmp_path "$1" "$3") || return 1
+  [ "$2" = "$expected" ]
+}
+
+fm_account_task_tmp_is_previous() {  # <task-id> <path>
+  local previous
+  previous=$(fm_account_previous_task_tmp_path "$1") || return 1
+  [ "$2" = "$previous" ]
+}
+
+fm_account_task_tmp_is_legacy() {  # <task-id> <path>
+  local legacy
+  legacy=$(fm_account_legacy_task_tmp_path "$1") || return 1
+  [ "$2" = "$legacy" ]
+}
+
+fm_account_task_tmp_is_expected() {  # <task-id> <path> <generation-id>
+  # Legacy metadata remains recognizable, but callers must use
+  # fm_account_task_tmp_is_current before any filesystem mutation.
+  fm_account_task_tmp_is_current "$1" "$2" "$3" \
+    || fm_account_task_tmp_is_previous "$1" "$2" \
+    || fm_account_task_tmp_is_legacy "$1" "$2"
+}
+
+fm_account_safe_remove_task_tmp() {  # <task-id> <path> <generation-id> [subdirectory]
+  local task=$1 target=$2 generation=$3 child=${4:-} legacy
+  [ -n "$target" ] || return 0
+  fm_account_task_tmp_is_expected "$task" "$target" "$generation" || return 1
+  legacy=$(fm_account_legacy_task_tmp_path "$task") || return 1
+  [ "$target" != "$legacy" ] || return 0
+  fm_account_task_tmp_is_current "$task" "$target" "$generation" \
+    || fm_account_task_tmp_is_previous "$task" "$target" \
+    || return 1
+  case "$child" in
+    '') ;;
+    gotmp) target="$target/$child" ;;
+    *) return 1 ;;
+  esac
+  python3 "$FM_ACCOUNT_ROUTING_LIB_DIR/fm-safe-task-tmp.py" "$target" || return 1
+}
+
 fm_account_safe_file_destination() {
   [ ! -L "$1" ] && { [ ! -e "$1" ] || [ -f "$1" ]; }
 }
@@ -602,6 +695,84 @@ fm_account_task_key() {  # <home> <task> <attempt>
     return 1
   }
   printf 'fm-%.16s-%s-%s\n' "$home_hash" "$task" "$attempt"
+}
+
+fm_tasktmp_path() {  # <task> <generation>
+  local task=$1 generation=$2 token
+  fm_account_valid_id "$task" || return 1
+  token=${generation##*:}
+  fm_account_valid_id "$token" || return 1
+  printf '/tmp/fm-%s-%s\n' "$task" "$token"
+}
+
+fm_tasktmp_owner_record() {  # <state> <task> <generation>
+  local state=$1 task=$2 generation=$3 token
+  fm_account_valid_id "$task" || return 1
+  token=${generation##*:}
+  fm_account_valid_id "$token" || return 1
+  printf '%s/%s.tasktmp-owner.%s\n' "$state" "$task" "$token"
+}
+
+fm_tasktmp_owner_write() {  # <state> <home> <task> <generation> <root>
+  local state=$1 home=$2 task=$3 generation=$4 root=$5 home_real expected record tmp
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  expected=$(fm_tasktmp_path "$task" "$generation") || return 1
+  [ "$root" = "$expected" ] || return 1
+  record=$(fm_tasktmp_owner_record "$state" "$task" "$generation") || return 1
+  [ ! -e "$record" ] && [ ! -L "$record" ] || return 1
+  tmp=$(mktemp "$state/.$task.tasktmp-owner.XXXXXX") || return 1
+  {
+    printf 'home=%s\n' "$home_real"
+    printf 'task=%s\n' "$task"
+    printf 'generation=%s\n' "$generation"
+    printf 'root=%s\n' "$root"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! ln "$tmp" "$record" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
+fm_tasktmp_owner_validate() {  # <record> <home> <task> <generation> <root>
+  local record=$1 home=$2 task=$3 generation=$4 root=$5 home_real expected
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  [ "$(wc -l < "$record" | tr -d ' ')" = 4 ] || return 1
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  expected=$(fm_tasktmp_path "$task" "$generation") || return 1
+  [ "$root" = "$expected" ] || return 1
+  [ "$(sed -n '1s/^home=//p' "$record")" = "$home_real" ] || return 1
+  [ "$(sed -n '2s/^task=//p' "$record")" = "$task" ] || return 1
+  [ "$(sed -n '3s/^generation=//p' "$record")" = "$generation" ] || return 1
+  [ "$(sed -n '4s/^root=//p' "$record")" = "$root" ] || return 1
+}
+
+fm_tasktmp_create() {  # <state> <home> <task> <generation> <root>
+  local state=$1 home=$2 task=$3 generation=$4 root=$5 proof="$5/.fm-tasktmp-owner" record
+  record=$(fm_tasktmp_owner_record "$state" "$task" "$generation") || return 1
+  fm_tasktmp_owner_write "$state" "$home" "$task" "$generation" "$root" || return 1
+  if ! mkdir "$root"; then
+    rm -f "$record"
+    return 1
+  fi
+  if ! cp "$record" "$proof" || ! chmod 600 "$proof" || ! mkdir "$root/gotmp"; then
+    rm -rf "$root"
+    rm -f "$record"
+    return 1
+  fi
+}
+
+fm_tasktmp_remove_owned() {  # <state> <home> <task> <generation> <root>
+  local state=$1 home=$2 task=$3 generation=$4 root=$5 record
+  record=$(fm_tasktmp_owner_record "$state" "$task" "$generation") || return 1
+  fm_tasktmp_owner_validate "$record" "$home" "$task" "$generation" "$root" || return 1
+  if [ -e "$root" ] || [ -L "$root" ]; then
+    [ -d "$root" ] && [ ! -L "$root" ] || return 1
+    fm_tasktmp_owner_validate "$root/.fm-tasktmp-owner" "$home" "$task" "$generation" "$root" || return 1
+    rm -rf "$root" || return 1
+  fi
+  rm -f "$record"
 }
 
 fm_account_ps_bin() {
@@ -1116,7 +1287,7 @@ fm_account_safe_lineage_value() {
 
 fm_account_meta_key_owned() {  # <key>
   case "$1" in
-    window|worktree|worktree_git_dir|worktree_git_dir_identity|worktree_git_ref|worktree_git_head|worktree_git_setup_ref|worktree_git_setup_head|project|harness|kind|mode|yolo|tasktmp|model|effort|report_required|generation_id|backend|tmux_window_id|tmux_session_target|account_home|direct_spawn_cleanup|direct_spawn_endpoint|direct_spawn_backup|direct_spawn_artifacts|direct_recovery_cleanup|direct_recovery_backup|direct_recovery_artifacts|account_pool|account_profile|account_task|account_attempt|account_predecessor_task|account_predecessor_attempt|account_predecessor_provider|account_predecessor_profile|account_predecessor_pool|account_predecessor_session|account_predecessor_cleanup|account_rollback_cleanup|account_rollback_backup|account_rollback_artifacts|account_rollback_preserve_session|continuation_packet|provider_session_id|herdr_session|herdr_workspace_id|herdr_tab_id|herdr_pane_id|zellij_session|zellij_tab_id|zellij_pane_id|orca_worktree_id|terminal|orca_cleanup_pending|orca_cleanup_phase|orca_terminal_proof|orca_repo_id|orca_expected_task|orca_provider_task|orca_discovery_label|orca_provider_scope|cmux_workspace_id|cmux_surface_id|home|projects|rollback_pending) return 0 ;;
+    window|worktree|worktree_git_dir|worktree_git_dir_identity|worktree_git_ref|worktree_git_head|worktree_git_setup_ref|worktree_git_setup_head|project|harness|kind|mode|yolo|tasktmp|tasktmp_phase|model|effort|report_required|generation_id|backend|tmux_window_id|tmux_session_target|account_home|direct_spawn_cleanup|direct_spawn_endpoint|direct_spawn_backup|direct_spawn_artifacts|direct_recovery_cleanup|direct_recovery_backup|direct_recovery_artifacts|account_pool|account_profile|account_task|account_attempt|account_predecessor_task|account_predecessor_attempt|account_predecessor_provider|account_predecessor_profile|account_predecessor_pool|account_predecessor_session|account_predecessor_cleanup|account_rollback_cleanup|account_rollback_backup|account_rollback_artifacts|account_rollback_preserve_session|continuation_packet|provider_session_id|herdr_session|herdr_workspace_id|herdr_tab_id|herdr_pane_id|zellij_session|zellij_tab_id|zellij_pane_id|orca_worktree_id|terminal|orca_cleanup_pending|orca_cleanup_phase|orca_terminal_proof|orca_repo_id|orca_expected_task|orca_provider_task|orca_discovery_label|orca_provider_scope|cmux_workspace_id|cmux_surface_id|home|projects|rollback_pending) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1195,7 +1366,7 @@ fm_account_meta_value() {  # <meta> <key>
 }
 
 fm_account_restore_artifacts() {
-  local state=$1 task=$2 backup_name=$3 tasktmp=${4:-} retain=${5:-0} backup name source
+  local state=$1 task=$2 backup_name=$3 tasktmp=${4:-} retain=${5:-0} generation=${6:-} backup name source
   local PATH=$FM_ACCOUNT_SYSTEM_PATH
   [ -n "$backup_name" ] || return 0
   case "$backup_name" in
@@ -1213,11 +1384,17 @@ fm_account_restore_artifacts() {
     fi
   done
   if [ -n "$tasktmp" ]; then
-    [ "$tasktmp" = "/tmp/fm-$task" ] || return 1
-    if [ -e "$backup/tasktmp-existed" ]; then
-      [ -e "$backup/gotmp-existed" ] || fm_account_system_exec "$FM_ACCOUNT_SYSTEM_RM_BIN" -rf "$tasktmp/gotmp" || return 1
+    if fm_account_task_tmp_is_current "$task" "$tasktmp" "$generation" \
+      || fm_account_task_tmp_is_previous "$task" "$tasktmp"; then
+      if [ -e "$backup/tasktmp-existed" ]; then
+        [ -e "$backup/gotmp-existed" ] || fm_account_safe_remove_task_tmp "$task" "$tasktmp" "$generation" gotmp || return 1
+      else
+        fm_account_safe_remove_task_tmp "$task" "$tasktmp" "$generation" || return 1
+      fi
     else
-      fm_account_system_exec "$FM_ACCOUNT_SYSTEM_RM_BIN" -rf "$tasktmp" || return 1
+      # A legacy tasktmp is metadata-only compatibility. Never inspect or
+      # mutate the shared /tmp path while restoring task-owned artifacts.
+      fm_account_task_tmp_is_legacy "$task" "$tasktmp" || return 1
     fi
   fi
   [ "$retain" = 1 ] || fm_account_system_exec "$FM_ACCOUNT_SYSTEM_RM_BIN" -rf "$backup"
@@ -1289,7 +1466,7 @@ fm_account_cleanup_rollback() {  # <meta> <data-dir> <task>
   if [ "$preserve" != 1 ]; then
     fm_account_session_remove "$account_task" || return 1
   fi
-  fm_account_restore_artifacts "$(fm_account_system_exec "$FM_ACCOUNT_SYSTEM_DIRNAME_BIN" "$meta")" "$task" "$artifacts_name" "$tasktmp" 1 || return 1
+  fm_account_restore_artifacts "$(fm_account_system_exec "$FM_ACCOUNT_SYSTEM_DIRNAME_BIN" "$meta")" "$task" "$artifacts_name" "$tasktmp" 1 "$(fm_account_meta_value "$meta" generation_id)" || return 1
   lock=$(fm_account_meta_lock_acquire "$(fm_account_system_exec "$FM_ACCOUNT_SYSTEM_DIRNAME_BIN" "$meta")" "$task") || return 1
   if [ ! -f "$meta" ] \
     || [ "$(fm_account_meta_value "$meta" account_task)" != "$account_task" ] \

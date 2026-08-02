@@ -59,6 +59,34 @@ pass() {
 
 FM_TEST_LIVENESS_TIMEOUT_SECONDS=${FM_TEST_LIVENESS_TIMEOUT_SECONDS:-30}
 
+fm_test_load_scaled_timeout_seconds() {
+  local floor=${1:-30} ceiling=${2:-150} system_load=0 cpus=1
+  if [ -r /proc/loadavg ]; then
+    system_load=$(LC_ALL=C awk '{ print $1 }' /proc/loadavg 2>/dev/null || printf '0')
+  elif command -v sysctl >/dev/null 2>&1; then
+    system_load=$(LC_ALL=C sysctl -n vm.loadavg 2>/dev/null | awk '{ print $2 }' || printf '0')
+  fi
+  if command -v getconf >/dev/null 2>&1; then
+    cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')
+  elif command -v sysctl >/dev/null 2>&1; then
+    cpus=$(sysctl -n hw.ncpu 2>/dev/null || printf '1')
+  fi
+  LC_ALL=C awk -v floor="$floor" -v ceiling="$ceiling" -v system_load="$system_load" -v cpus="$cpus" '
+    BEGIN {
+      if (cpus !~ /^[1-9][0-9]*$/ || system_load !~ /^[0-9]+([.][0-9]+)?$/) {
+        print floor
+        exit
+      }
+      factor = int(system_load / cpus)
+      if ((system_load / cpus) > factor) factor++
+      if (factor < 1) factor = 1
+      budget = floor * factor
+      if (budget > ceiling) budget = ceiling
+      print budget
+    }
+  '
+}
+
 fm_test_liveness_iterations() {
   local requested=${1:-1} interval=${2:-0.1} minimum
   minimum=$(awk -v seconds="$FM_TEST_LIVENESS_TIMEOUT_SECONDS" -v tick="$interval" \
@@ -120,6 +148,17 @@ fm_test_tmproot() {
   root=$(cd "$root" && pwd -P)
   printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_MANIFEST"
   printf '%s\n' "$root"
+}
+
+# Compatibility for suites replayed from the run-unique temp-root migration.
+# The manifest-backed allocator remains authoritative and Bash 3.2 safe.
+fm_test_tmproot_into() {
+  local target_var=$1 prefix=${2:-fm-test} root
+  case "$target_var" in
+    ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) return 2 ;;
+  esac
+  root=$(fm_test_tmproot "$prefix") || return 1
+  printf -v "$target_var" '%s' "$root"
 }
 
 # --- node capability probe ---------------------------------------------------

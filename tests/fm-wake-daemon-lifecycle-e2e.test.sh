@@ -31,7 +31,7 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   . "$DAEMON"
 fi
 
-TMP_ROOT=$(fm_test_tmproot fm-wake-daemon-e2e)
+fm_test_tmproot_into TMP_ROOT fm-wake-daemon-e2e
 
 # Run the daemon-managed watcher once: under the supervise-daemon (away mode) the
 # watcher is one-shot - it exits with a single reason line on EVERY wake and the

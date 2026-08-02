@@ -88,10 +88,10 @@ run_with_perl_timeout() {
 
 set +e
 if command -v timeout >/dev/null 2>&1; then
-  timeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+  timeout --kill-after=2 "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
   RC=$?
 elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+  gtimeout --kill-after=2 "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
   RC=$?
 else
   run_with_perl_timeout >"$OUT" 2>"$ERR"

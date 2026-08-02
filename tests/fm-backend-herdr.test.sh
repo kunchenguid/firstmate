@@ -18,7 +18,7 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
-TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+fm_test_tmproot_into TMP_ROOT fm-backend-herdr-tests
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 export FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1
 
@@ -2736,6 +2736,24 @@ test_kill_is_best_effort() {
   pass "fm_backend_herdr_kill: calls pane close and stays best-effort on failure"
 }
 
+test_native_readsteer_does_not_require_legacy_server_certificate() {
+  local dir log resp fb
+  dir="$TMP_ROOT/native-readsteer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_server_adapter_owned() { return 1; }
+      unset FM_TEST_HERDR_REQUIRE_CERT_LIFECYCLE
+      fm_backend_herdr_server_reachable_for_readsteer fmtest || exit 1
+      if FM_TEST_HERDR_REQUIRE_CERT_LIFECYCLE=firstmate-herdr-tests-v1 \
+          fm_backend_herdr_server_reachable_for_readsteer fmtest; then
+        exit 2
+      fi
+    ' "$ROOT" || fail "native read/steer required a removed server certificate or legacy test mode skipped its proof"
+  pass "native Herdr read/steer accepts a running server without the removed certificate while legacy certificate mode still proves ownership"
+}
+
 test_managed_identity_rejects_reused_pane() {
   local dir home state log fb out
   dir="$TMP_ROOT/managed-identity"; home="$dir/home"; state="$home/state"; log="$dir/log"
@@ -4310,6 +4328,11 @@ if [ "${FM_TEST_FOCUSED:-}" = server-cert-lifecycle ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = native-readsteer ]; then
+  test_native_readsteer_does_not_require_legacy_server_certificate
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = workspace-prune ]; then
   test_workspace_ensure_prunes_default_tab
   exit 0
@@ -4376,6 +4399,7 @@ test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
+test_native_readsteer_does_not_require_legacy_server_certificate
 test_managed_identity_rejects_reused_pane
 test_target_state_distinguishes_absent_from_malformed_panes
 test_target_state_refuses_absence_on_workspace_identity_collisions

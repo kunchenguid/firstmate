@@ -21,7 +21,7 @@ set -u
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$ROOT/bin/fm-tangle-lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-tangle-guard)
+fm_test_tmproot_into TMP_ROOT fm-tangle-guard
 fm_git_identity fmtest fmtest@example.invalid
 
 # A fresh git repo on `main` with one commit. Echoes its path.
@@ -179,7 +179,7 @@ SH
 
 run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
-  mkdir -p "$home/data/$id"
+  mkdir -p "$home/data/$id" "$home/treehouse-pools"
   printf 'brief\n' > "$home/data/$id/brief.md"
   printf '# Backlog\n\n## In flight\n- [ ] %s - isolation guard test (repo: %s)\n\n## Queued\n\n## Done\n' \
     "$id" "$(basename "$proj")" > "$home/data/backlog.md"
@@ -193,13 +193,35 @@ run_spawn() {
 }
 
 test_spawn_isolation_abort() {
-  local home proj fakebin out status
+  local home proj fakebin out status isolated state
   home="$TMP_ROOT/spawn-home"
-  mkdir -p "$home/data" "$home/treehouse-pools"
+  isolated="$home/treehouse-pools/project/1/spawn-wt"
+  state="$home/treehouse-pools/project/treehouse-state.json"
+  mkdir -p "$home/data" "$(dirname "$isolated")"
   proj=$(make_repo "$TMP_ROOT/spawn-proj")
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake")
   # A genuine isolated linked worktree of the project, detached on the default.
-  git -C "$proj" worktree add -q --detach "$TMP_ROOT/spawn-wt" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$isolated" >/dev/null 2>&1
+  python3 - "$state" "$isolated" <<'PY'
+import json
+import sys
+
+state, worktree = sys.argv[1:]
+with open(state, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "worktrees": [
+                {
+                    "name": "1",
+                    "path": worktree,
+                    "leased": True,
+                    "lease_holder": "firstmate-ok-isolated-ff6",
+                }
+            ]
+        },
+        stream,
+    )
+PY
   mkdir -p "$TMP_ROOT/spawn-notgit" "$proj/sub"
 
   # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
@@ -214,7 +236,7 @@ test_spawn_isolation_abort() {
   assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
 
   # Proceed: the pane resolves to a genuine, isolated worktree.
-  out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
+  out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$isolated" "$fakebin"); status=$?
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
@@ -266,7 +288,7 @@ SH
 
 run_spawn_record() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6
-  mkdir -p "$home/data/$id"
+  mkdir -p "$home/data/$id" "$home/treehouse-pools"
   printf 'brief\n' > "$home/data/$id/brief.md"
   printf '# Backlog\n\n## In flight\n- [ ] %s - tmux construction test (repo: %s)\n\n## Queued\n\n## Done\n' \
     "$id" "$(basename "$proj")" > "$home/data/backlog.md"
@@ -281,18 +303,39 @@ run_spawn_record() {
 }
 
 test_spawn_tmux_window_construction() {
-  local home proj fakebin rec wt out status
+  local home proj fakebin rec wt out status state
   home="$TMP_ROOT/spawn-rec-home"
-  mkdir -p "$home/data" "$home/treehouse-pools"
+  wt="$home/treehouse-pools/project/1/spawn-rec-wt"
+  state="$home/treehouse-pools/project/treehouse-state.json"
+  mkdir -p "$home/data" "$(dirname "$wt")"
   proj=$(make_repo "$TMP_ROOT/spawn-rec-proj")
   fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/spawn-rec-fake")
   rec="$TMP_ROOT/spawn-rec.log"
   : > "$rec"
-  wt="$TMP_ROOT/spawn-rec-wt"
   git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  python3 - "$state" "$wt" <<'PY'
+import json
+import sys
+
+state, worktree = sys.argv[1:]
+with open(state, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "worktrees": [
+                {
+                    "name": "1",
+                    "path": worktree,
+                    "leased": True,
+                    "lease_holder": "firstmate-rec-win-gg7",
+                }
+            ]
+        },
+        stream,
+    )
+PY
 
   out=$(run_spawn_record "$home" rec-win-gg7 "$proj" "$wt" "$fakebin" "$rec"); status=$?
-  expect_code 0 "$status" "spawn into a genuine worktree should succeed"
+  expect_code 0 "$status" "spawn into a genuine worktree should succeed: $out"
   assert_contains "$out" "spawned rec-win-gg7" "recording spawn did not report success"
 
   # Bug 1 fix: append-form window creation (trailing colon on the session target).

@@ -16,7 +16,7 @@ SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 SESSION_SYNC="$ROOT/bin/fm-account-session-sync.sh"
 CONTINUATION="$ROOT/bin/fm-account-continuation.sh"
-TMP_ROOT=$(fm_test_tmproot fm-account-routing-tests)
+fm_test_tmproot_into TMP_ROOT fm-account-routing-tests
 
 assert_not_grep() {
   local pattern=$1 file=$2 label=$3
@@ -247,14 +247,37 @@ if [ "${1:-}" = return ] && [ -n "${FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE:-}" 
 fi
 if [ "${1:-}" = get ]; then
   lease_holder=
-  previous=
-  for argument in "$@"; do
-    [ "$previous" != --lease-holder ] || lease_holder=$argument
-    previous=$argument
+  prev=
+  for arg in "$@"; do
+    if [ "$prev" = --lease-holder ]; then
+      lease_holder=$arg
+      break
+    fi
+    prev=$arg
   done
-  pool=$(dirname "$(dirname "${FM_FAKE_TREEHOUSE_PATH:?}")")
-  printf '{"worktrees":[{"path":"%s","leased":true,"lease_holder":"%s","destroying":false}]}\n' \
-    "$FM_FAKE_TREEHOUSE_PATH" "$lease_holder" > "$pool/treehouse-state.json"
+  if [ -n "${FM_FAKE_TREEHOUSE_STATE:-}" ] && [ -n "$lease_holder" ]; then
+    python3 - "$FM_FAKE_TREEHOUSE_STATE" "${FM_FAKE_TREEHOUSE_PATH:?}" "$lease_holder" <<'PY'
+import json
+import os
+import sys
+
+state, path, holder = sys.argv[1:]
+with open(state, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "worktrees": [
+                {
+                    "name": "1",
+                    "path": os.path.realpath(path),
+                    "leased": True,
+                    "lease_holder": holder,
+                }
+            ]
+        },
+        stream,
+    )
+PY
+  fi
   printf '%s\n' "${FM_FAKE_TREEHOUSE_PATH:?}"
 fi
 exit 0
@@ -299,6 +322,11 @@ for arg in "$@"; do
   prev=$arg
 done
 case "$*" in
+  '--format json profile list')
+    root=${FM_ACCOUNT_DIRECTORY_ROOT:?}
+    printf '{"profiles":[{"provider":"%s","home":"%s/%s/account-1","pools":["%s-crew"],"enabled":true,"safety_policy":"worker"}]}\n' \
+      "$provider" "$root" "$provider" "$provider"
+    ;;
   '--format json contract')
     [ -z "${FM_FAKE_AF_CONTRACT_SLEEP:-}" ] || sleep "$FM_FAKE_AF_CONTRACT_SLEEP"
     printf '{"contract_version":%s}\n' "${FM_FAKE_AF_CONTRACT_VERSION:-2}"
@@ -320,6 +348,7 @@ case "$*" in
     [ -n "$pool" ] || pool=${FM_FAKE_AF_POOL:-claude-crew}
     case "$*" in
       *" lease recover "*)
+        [ -z "${FM_FAKE_AF_RECOVER_MARKER:-}" ] || touch "$FM_FAKE_AF_RECOVER_MARKER"
         [ "${FM_FAKE_AF_RECOVER_FAIL:-0}" != 1 ] || exit "${FM_FAKE_AF_RECOVER_FAIL_STATUS:-42}"
         if [ -n "${FM_FAKE_AF_RECOVER_FAIL_ONCE_FILE:-}" ] && [ ! -e "$FM_FAKE_AF_RECOVER_FAIL_ONCE_FILE" ]; then
           : > "$FM_FAKE_AF_RECOVER_FAIL_ONCE_FILE"
@@ -330,6 +359,7 @@ case "$*" in
         [ "${FM_FAKE_AF_STALE_REFRESH_ON_RECOVER:-0}" != 1 ] || touch "${FM_FAKE_AF_SESSION_REFRESHED:?}"
         ;;
       *" lease choose "*|*" lease acquire "*)
+        [ -z "${FM_FAKE_AF_SELECT_MARKER:-}" ] || touch "$FM_FAKE_AF_SELECT_MARKER"
         [ -z "${FM_FAKE_AF_CHOOSE_FAIL_STATUS:-}" ] || exit "$FM_FAKE_AF_CHOOSE_FAIL_STATUS"
         [ -z "${FM_FAKE_AF_SELECT_SLEEP:-}" ] || sleep "$FM_FAKE_AF_SELECT_SLEEP"
         [ -z "${FM_FAKE_AF_SELECT_COMPLETED:-}" ] || touch "$FM_FAKE_AF_SELECT_COMPLETED"
@@ -395,6 +425,7 @@ case "$*" in
     printf '{"schema":%s,"task":"%s","profile":"%s","provider":"%s","pool":"%s","workspace":"%s","session_id":"sess-%s","session_event_seq":%s,"updated_at":"%s"}\n' "$session_schema" "$task" "$profile" "$provider" "$pool" "$workspace" "$task" "$session_event_seq" "$updated_at"
     ;;
   *" lease release "*)
+    [ -z "${FM_FAKE_AF_RELEASE_START_MARKER:-}" ] || touch "$FM_FAKE_AF_RELEASE_START_MARKER"
     [ -z "${FM_FAKE_AF_RELEASE_SLEEP:-}" ] || sleep "$FM_FAKE_AF_RELEASE_SLEEP"
     [ -z "${FM_FAKE_AF_RELEASE_COMPLETED:-}" ] || touch "$FM_FAKE_AF_RELEASE_COMPLETED"
     [ -z "${FM_FAKE_AF_RELEASE_MARKER:-}" ] || touch "$FM_FAKE_AF_RELEASE_MARKER"
@@ -434,18 +465,30 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
-  wt="$case_dir/treehouse-pool/1/wt"
+  wt="$case_dir/treehouse-root/pool/1/wt"
   fakebin=$(make_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" \
-    "$case_dir/treehouse-pool/1" "$case_dir/treehouse-pools"
+    "$case_dir/treehouse-root/pool" "$case_dir/treehouse-pools"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   git -C "$wt" checkout --quiet --detach
   fm_git_add_origin "$proj" "$case_dir/origin.git"
-  if [ -n "$first_id" ]; then
-    printf '{"worktrees":[{"path":"%s","leased":true,"lease_holder":"firstmate-%s"}]}\n' \
-      "$wt" "$first_id" > "$case_dir/treehouse-pool/treehouse-state.json"
-  fi
+  python3 - "$case_dir/treehouse-root/pool/treehouse-state.json" "$wt" "$first_id" <<'PY'
+import json
+import os
+import sys
+
+state, path, first_id = sys.argv[1:]
+worktree = {
+    "name": "1",
+    "path": os.path.realpath(path),
+    "leased": bool(first_id),
+}
+if first_id:
+    worktree["lease_holder"] = f"firstmate-{first_id}"
+with open(state, "w", encoding="utf-8") as stream:
+    json.dump({"worktrees": [worktree]}, stream)
+PY
   touch "$home/state/.last-watcher-beat"
   printf '# Backlog\n\n## In flight\n' > "$home/data/backlog.md"
   for id in "$@"; do
@@ -492,7 +535,8 @@ run_spawn() {
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" FM_FAKE_LIFECYCLE_LOG="$LIFECYCLE_LOG" \
     FM_EXPECT_CHECKOUT_LOCK_ROOT="${FM_EXPECT_CHECKOUT_LOCK_ROOT:-}" \
     FM_EXPECT_CHECKOUT_LOCK_MARKER="${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" \
-    FM_FAKE_TREEHOUSE_PATH="$WT_DIR" FM_TREEHOUSE_ROOT="$CASE_DIR/treehouse-pools" \
+    FM_FAKE_TREEHOUSE_PATH="$WT_DIR" FM_FAKE_TREEHOUSE_STATE="$CASE_DIR/treehouse-root/pool/treehouse-state.json" \
+    FM_TREEHOUSE_ROOT="$CASE_DIR/treehouse-root" \
     FM_FAKE_TREEHOUSE_SLEEP="${FM_FAKE_TREEHOUSE_SLEEP:-}" \
     FM_FAKE_TREEHOUSE_RETURN_SLEEP="${FM_FAKE_TREEHOUSE_RETURN_SLEEP:-}" \
     FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE="${FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE:-}" \
@@ -518,10 +562,12 @@ run_teardown() {
   FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_REPORT_STACK_ROOT="$CASE_DIR/report-stack" \
     FM_FAKE_TMUX_LOG="$TMUX_LOG" FM_FAKE_AF_LOG="$AF_LOG" \
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" \
     FM_FAKE_TREEHOUSE_RETURN_SLEEP="${FM_FAKE_TREEHOUSE_RETURN_SLEEP:-}" \
     FM_TREEHOUSE_ROOT="$CASE_DIR/treehouse-pools" \
+    FM_REPORT_STACK_ROOT="$CASE_DIR/report-stack" \
     FM_FAKE_TMUX_LABEL_FILE="$CASE_DIR/tmux-label" \
     FM_AGENT_FLEET_BIN="$FAKEBIN_DIR/agent-fleet" \
     TMUX="fake,1,0" PATH="$FAKEBIN_DIR:$PATH" "$TEARDOWN" "$@"
@@ -569,7 +615,7 @@ use_named_fake_tmux_target() {
 }
 
 test_off_is_byte_compatible_and_never_calls_agent_fleet() {
-  local id rec out status launch expected
+  local id rec out status launch expected task_tmp generation token
   id=account-off-z1
   rec=$(make_case off claude "$id")
   read_case "$rec"
@@ -582,6 +628,13 @@ test_off_is_byte_compatible_and_never_calls_agent_fleet() {
   [ "$launch" = "$expected" ] || fail "routing off changed the launch bytes"
   assert_not_grep '^account_' "$HOME_DIR/state/$id.meta" "routing off wrote account metadata"
   assert_not_grep '^provider_session_id=' "$HOME_DIR/state/$id.meta" "routing off wrote session metadata"
+  task_tmp=$(sed -n 's/^tasktmp=//p' "$HOME_DIR/state/$id.meta")
+  generation=$(sed -n 's/^generation_id=//p' "$HOME_DIR/state/$id.meta")
+  token=${generation##*:}
+  [ "$task_tmp" = "$HOME_DIR/state/.task-tmp/fm-$id-$token" ] \
+    || fail "routing fixture did not namespace its task temp root to this spawn generation"
+  assert_present "$task_tmp/gotmp" \
+    "routing fixture did not create its run-scoped Go temp root"
   assert_regex '^generation_id=spawn:a[0-9a-f]{15}$' "$HOME_DIR/state/$id.meta" "routing off did not record a stable spawn generation"
   assert_grep 'report_required=1' "$HOME_DIR/state/$id.meta" "post-cutover spawn did not activate the report gate"
   assert_grep '# Completion report' "$HOME_DIR/data/$id/brief.md" "post-cutover spawn did not upgrade a legacy unspawned brief"
@@ -725,9 +778,13 @@ test_changed_acquisition_is_retained_during_unmanaged_rollback() {
     FM_FAKE_TMUX_FAIL_SEND_MATCH=GOTMPDIR \
     run_spawn "$id" "$PROJ_DIR" > "$out_file" &
   spawn_pid=$!
-  for _ in $(seq 1 600); do [ -f "$marker" ] && break; sleep 0.05; done
+  for _ in $(seq 1 600); do
+    [ -f "$marker" ] && break
+    kill -0 "$spawn_pid" 2>/dev/null || break
+    sleep 0.05
+  done
   [ -f "$marker" ] \
-    || { kill "$spawn_pid" 2>/dev/null || true; fail "changed-acquisition test never reached the post-install failure"; }
+    || { touch "$release"; wait "$spawn_pid" 2>/dev/null || true; fail "changed-acquisition test never reached the post-install failure"; }
   printf '%s\n' retained-commit > "$WT_DIR/retained-commit.txt"
   git -C "$WT_DIR" add retained-commit.txt
   git -C "$WT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
@@ -822,7 +879,7 @@ SH
   common=$(git -C "$WT_DIR" rev-parse --git-common-dir)
   case "$common" in /*) ;; *) common="$WT_DIR/$common" ;; esac
   common=$(cd "$common" && pwd -P)
-  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  key=$(printf '%s' "$common" | tr '[:upper:]' '[:lower:]' | shasum -a 256 | awk '{print substr($1,1,24)}')
   lock="$CASE_DIR/checkout-refresh-locks/$key.lock"
   assert_present "$CASE_DIR/treehouse-return-child.pid" \
     "spawn rollback did not exercise a surviving Treehouse descendant"
@@ -1493,10 +1550,12 @@ test_unmanaged_spawn_refuses_while_teardown_lifecycle_is_held() {
 }
 
 test_unmanaged_respawn_preserves_report_cutover_state() {
-  local id rec out status
+  local id rec out status prior_task_tmp
   id=account-legacy-respawn-z9b
   rec=$(make_case legacy-respawn claude "$id")
   read_case "$rec"
+  prior_task_tmp="$HOME_DIR/state/.task-tmp/fm-$id-a111111111111111"
+  mkdir -p "$prior_task_tmp/gotmp"
   fm_write_meta "$HOME_DIR/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "worktree=$WT_DIR" \
@@ -1504,6 +1563,8 @@ test_unmanaged_respawn_preserves_report_cutover_state() {
     "harness=claude" \
     "kind=ship" \
     "mode=no-mistakes" \
+    "tasktmp=$prior_task_tmp" \
+    "generation_id=spawn:a111111111111111" \
     "pr=418" \
     "x_request=req-legacy" \
     "custom_extension=preserve-success"
@@ -1515,15 +1576,18 @@ test_unmanaged_respawn_preserves_report_cutover_state() {
   assert_grep 'pr=418' "$HOME_DIR/state/$id.meta" "managed respawn dropped the existing PR pointer"
   assert_grep 'x_request=req-legacy' "$HOME_DIR/state/$id.meta" "managed respawn dropped the existing X-mode link"
   assert_grep 'custom_extension=preserve-success' "$HOME_DIR/state/$id.meta" "managed respawn dropped extension metadata"
+  assert_absent "$prior_task_tmp" "successful respawn orphaned the prior task temp generation"
   assert_not_grep "$id" "$HOME_DIR/data/backlog.md" "existing-metadata relaunch fixture retained its backlog row"
   pass "unmanaged respawn preserves a legacy task's report cutover state"
 }
 
 test_failed_managed_respawn_restores_unmanaged_metadata() {
-  local id rec expected out status artifact
+  local id rec expected out status artifact prior_task_tmp
   id=account-unmanaged-rollback-z9c
   rec=$(make_case unmanaged-rollback claude "$id")
   read_case "$rec"
+  prior_task_tmp="$HOME_DIR/state/.task-tmp/fm-$id-a222222222222222"
+  mkdir -p "$prior_task_tmp/gotmp"
   fm_write_meta "$HOME_DIR/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "worktree=$WT_DIR" \
@@ -1531,6 +1595,8 @@ test_failed_managed_respawn_restores_unmanaged_metadata() {
     "harness=claude" \
     "kind=ship" \
     "mode=no-mistakes" \
+    "tasktmp=$prior_task_tmp" \
+    "generation_id=spawn:a222222222222222" \
     "pr=417" \
     "custom_extension=preserve-me"
   expected="$CASE_DIR/original.meta"
@@ -1552,8 +1618,164 @@ test_failed_managed_respawn_restores_unmanaged_metadata() {
       || fail "failed managed respawn did not restore prior $artifact state"
   done
   assert_grep 'lease release ' "$AF_LOG" "failed managed respawn leaked its acquired reservation"
+  assert_present "$prior_task_tmp/gotmp" "failed respawn destroyed the prior task temp generation"
   [ -n "$out" ] || true
   pass "failed managed respawn restores every field from existing unmanaged metadata"
+}
+
+test_task_tmp_removal_refuses_symlinked_parent() {
+  local id generation state outside target
+  id=account-tasktmp-parent-z9d
+  generation=spawn:a333333333333333
+  state="$TMP_ROOT/tasktmp-parent/state"
+  outside="$TMP_ROOT/tasktmp-parent/outside"
+  target="$state/.task-tmp/fm-$id-a333333333333333"
+  mkdir -p "$state" "$outside/${target##*/}"
+  ln -s "$outside" "$state/.task-tmp"
+  STATE=$state
+  . "$ROOT/bin/fm-account-routing-lib.sh"
+  if fm_account_safe_remove_task_tmp "$id" "$target" "$generation" >/dev/null 2>&1; then
+    fail "task temp removal followed a symlinked parent"
+  fi
+  assert_present "$outside/${target##*/}" "task temp removal deleted through a symlinked parent"
+  pass "task temp removal refuses a symlinked parent"
+}
+
+test_task_tmp_removal_pins_ancestors_during_swap() {
+  local id generation root state moved outside target name
+  id=account-tasktmp-swap-z9e
+  generation=spawn:a444444444444444
+  root="$TMP_ROOT/tasktmp-swap"
+  state="$root/state"
+  moved="$root/state-moved"
+  outside="$root/outside"
+  name="fm-$id-a444444444444444"
+  target="$state/.task-tmp/$name"
+  mkdir -p "$target/gotmp" "$outside/.task-tmp/$name/gotmp"
+  printf 'outside\n' > "$outside/.task-tmp/$name/gotmp/sentinel"
+  STATE=$state
+  . "$ROOT/bin/fm-account-routing-lib.sh"
+  FM_ACCOUNT_TEST_HOOKS=firstmate-account-tests-v1 \
+    FM_SAFE_TASK_TMP_SWAP_ANCESTOR="$state" \
+    FM_SAFE_TASK_TMP_SWAP_MOVED="$moved" \
+    FM_SAFE_TASK_TMP_SWAP_OUTSIDE="$outside" \
+    fm_account_safe_remove_task_tmp "$id" "$target" "$generation" \
+    || fail "task temp removal lost its pinned ancestor during swap"
+  assert_absent "$moved/.task-tmp/$name" "task temp removal missed its pinned original directory"
+  assert_present "$outside/.task-tmp/$name/gotmp/sentinel" "task temp removal followed a swapped ancestor"
+  pass "task temp removal pins every ancestor during deletion"
+}
+
+test_task_tmp_partial_removal_fails_closed() {
+  local id generation state target
+  id=account-tasktmp-partial-z9f
+  generation=spawn:a555555555555555
+  state="$TMP_ROOT/tasktmp-partial/state"
+  target="$state/.task-tmp/fm-$id-a555555555555555"
+  mkdir -p "$target"
+  printf 'vanish\n' > "$target/disappearing"
+  printf 'retain\n' > "$target/retained"
+  STATE=$state
+  . "$ROOT/bin/fm-account-routing-lib.sh"
+  if FM_ACCOUNT_TEST_HOOKS=firstmate-account-tests-v1 \
+    FM_SAFE_TASK_TMP_DISAPPEAR_ENTRY=disappearing \
+    fm_account_safe_remove_task_tmp "$id" "$target" "$generation" >/dev/null 2>&1; then
+    fail "partial task temp removal reported success"
+  fi
+  assert_present "$target/retained" "partial task temp removal discarded the remaining root"
+  pass "partial task temp removal fails closed"
+}
+
+test_spawn_rollback_task_tmp_refusal_is_retryable() {
+  local mode id rec marker release output ancestor moved outside tasktmp spawn_pid status tries
+  for mode in direct managed; do
+    id="account-tasktmp-rollback-$mode-z9g"
+    rec=$(make_case "tasktmp-rollback-$mode" claude "$id")
+    read_case "$rec"
+    marker="$CASE_DIR/gotmp-send-started"
+    release="$CASE_DIR/gotmp-send-release"
+    output="$CASE_DIR/spawn.out"
+    ancestor="$HOME_DIR/state/.task-tmp"
+    moved="$HOME_DIR/state/task-tmp-$mode-moved"
+    outside="$HOME_DIR/state/task-tmp-$mode-outside"
+    mkdir -p "$outside"
+
+    if [ "$mode" = direct ]; then
+      mkdir -p "$CASE_DIR/accounts/claude/account-1/.agent-fleet-quota-cache/quota-axi"
+      printf 'granted\n' > "$CASE_DIR/accounts/claude/account-1/.agent-fleet-quota-cache/quota-axi/claude-keychain-access-granted"
+      chmod 600 "$CASE_DIR/accounts/claude/account-1/.agent-fleet-quota-cache/quota-axi/claude-keychain-access-granted"
+      cat > "$FAKEBIN_DIR/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = integration ] && [ "${2:-}" = install ] && [ "${3:-}" = claude ] || exit 64
+mkdir -p "${CLAUDE_CONFIG_DIR:?}/hooks"
+printf '#!/usr/bin/env bash\n' > "$CLAUDE_CONFIG_DIR/hooks/herdr-agent-state.sh"
+SH
+      chmod +x "$FAKEBIN_DIR/herdr"
+      FM_ACCOUNT_ROUTING_LEGACY_NEW_LAUNCH_TEST='' \
+        FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
+        FM_ACCOUNT_DIRECTORY_ROOT="$CASE_DIR/accounts" \
+        FM_ACCOUNT_DIRECTORY_AGENT_FLEET="$FAKEBIN_DIR/agent-fleet" \
+        FM_ACCOUNT_DIRECTORY_HERDR="$FAKEBIN_DIR/herdr" \
+        FM_ACCOUNT_TEST_HOOKS=firstmate-account-tests-v1 \
+        FM_SAFE_TASK_TMP_SWAP_ANCESTOR="$ancestor" \
+        FM_SAFE_TASK_TMP_SWAP_MOVED="$moved" \
+        FM_SAFE_TASK_TMP_SWAP_OUTSIDE="$outside" \
+        FM_SAFE_TASK_TMP_DISAPPEAR_ENTRY=gotmp \
+        FM_FAKE_TMUX_GATE_SEND_MATCH=GOTMPDIR \
+        FM_FAKE_TMUX_GATE_SEND_MARKER="$marker" \
+        FM_FAKE_TMUX_GATE_SEND_RELEASE="$release" \
+        FM_FAKE_TMUX_FAIL_SEND_MATCH=GOTMPDIR \
+        run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew > "$output" &
+    else
+      FM_ACCOUNT_TEST_HOOKS=firstmate-account-tests-v1 \
+        FM_SAFE_TASK_TMP_SWAP_ANCESTOR="$ancestor" \
+        FM_SAFE_TASK_TMP_SWAP_MOVED="$moved" \
+        FM_SAFE_TASK_TMP_SWAP_OUTSIDE="$outside" \
+        FM_SAFE_TASK_TMP_DISAPPEAR_ENTRY=gotmp \
+        FM_FAKE_TMUX_GATE_SEND_MATCH=GOTMPDIR \
+        FM_FAKE_TMUX_GATE_SEND_MARKER="$marker" \
+        FM_FAKE_TMUX_GATE_SEND_RELEASE="$release" \
+        FM_FAKE_TMUX_FAIL_SEND_MATCH=GOTMPDIR \
+        run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew > "$output" &
+    fi
+    spawn_pid=$!
+    tries=0
+    while [ ! -f "$marker" ] && kill -0 "$spawn_pid" 2>/dev/null && [ "$tries" -lt 200 ]; do
+      sleep 0.05
+      tries=$((tries + 1))
+    done
+    if [ ! -f "$marker" ]; then
+      touch "$release"
+      wait "$spawn_pid" 2>/dev/null || true
+      fail "$mode rollback task temp test never reached its post-metadata failure: $(cat "$output" 2>/dev/null || true)"
+    fi
+    tasktmp=$(sed -n 's/^tasktmp=//p' "$HOME_DIR/state/$id.meta" | tail -1)
+    [ -n "$tasktmp" ] || {
+      touch "$release"
+      wait "$spawn_pid" 2>/dev/null || true
+      fail "$mode rollback task temp test did not publish provisional metadata"
+    }
+    mkdir -p "$outside/${tasktmp##*/}"
+    printf 'preserve\n' > "$outside/${tasktmp##*/}/sentinel"
+    touch "$release"
+    if wait "$spawn_pid"; then status=0; else status=$?; fi
+    [ "$status" -ne 0 ] || fail "$mode rollback task temp refusal unexpectedly succeeded"
+    assert_present "$outside/${tasktmp##*/}/sentinel" \
+      "$mode rollback followed the swapped task temp ancestor"
+    assert_present "$moved/${tasktmp##*/}" \
+      "$mode rollback discarded its partially cleaned task temp generation"
+    assert_contains "$(cat "$output")" "retaining cleanup metadata" \
+      "$mode rollback did not report retryable task temp cleanup"
+    if [ "$mode" = direct ]; then
+      assert_regex '^direct_spawn_cleanup=pending$' "$HOME_DIR/state/$id.meta" \
+        "direct rollback task temp refusal lost retry metadata"
+    else
+      assert_regex '^account_rollback_cleanup=pending$' "$HOME_DIR/state/$id.meta" \
+        "managed rollback task temp refusal lost retry metadata"
+    fi
+  done
+  pass "spawn rollback task temp refusals preserve outside data and retry state"
 }
 
 test_preinstall_managed_failure_restores_artifact_snapshot() {
@@ -1666,7 +1888,7 @@ test_session_sync_all_bounds_each_task_and_reaches_later_mappings() {
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_AGENT_FLEET_BIN="$FAKEBIN_DIR/agent-fleet" \
     FM_FAKE_AF_LOG="$AF_LOG" FM_FAKE_AF_SESSION_SLEEP=10 FM_FAKE_AF_SESSION_SLEEP_TASK="$first" \
-    FM_ACCOUNT_SESSION_QUERY_TIMEOUT=1 FM_ACCOUNT_SESSION_TASK_TIMEOUT=2 \
+    FM_ACCOUNT_SESSION_QUERY_TIMEOUT=1 FM_ACCOUNT_SESSION_TASK_TIMEOUT=3 \
     PATH="$FAKEBIN_DIR:$PATH" "$SESSION_SYNC" --all 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "sync-all hid the timed-out first mapping"
@@ -2252,14 +2474,16 @@ test_enforced_secondmate_requires_routing_inheritance_and_capable_home() {
   rec=$(make_case secondmate-incapable-refuse claude)
   read_case "$rec"
   sm="$CASE_DIR/secondmate-home"
-  make_seeded_secondmate_home "$sm" "$id" incapable
+  make_seeded_secondmate_home "$sm" "$id"
   sm=$(cd "$sm" && pwd -P)
+  git -C "$sm" update-index --assume-unchanged bin/fm-account-routing-lib.sh
+  rm -f "$sm/bin/fm-account-routing-lib.sh"
   printf 'enforce\n' > "$HOME_DIR/config/account-routing-mode"
   out=$(FM_TEST_PANE_PATH="$sm" run_spawn "$id" "$sm" --secondmate)
   status=$?
   [ "$status" -ne 0 ] || fail "enforced secondmate launched from a pre-Agent-Fleet home"
   assert_contains "$out" "$sm" "capability refusal omitted the offending secondmate home"
-  assert_contains "$out" "lacks Agent Fleet routing support" \
+  assert_contains "$out" "missing tracked Agent Fleet routing support" \
     "capability refusal did not stop at the capability gate"
   assert_not_grep '^new-window ' "$TMUX_LOG" "capability refusal created an endpoint"
   pass "enforced secondmates require inherited routing policy and Agent Fleet-capable homes"
@@ -2500,7 +2724,11 @@ SH
     kill -0 "$spawn_pid" 2>/dev/null || break
     sleep 0.05
   done
-  [ -f "$marker" ] || { touch "$gate" "$installed_gate"; wait "$spawn_pid" 2>/dev/null || true; fail "spawn never persisted provisional managed metadata"; }
+  [ -f "$marker" ] || {
+    touch "$gate" "$installed_gate"
+    wait "$spawn_pid" 2>/dev/null || true
+    fail "spawn never persisted provisional managed metadata: $(cat "$CASE_DIR/spawn-stdout" "$CASE_DIR/spawn-stderr")"
+  }
   meta="$HOME_DIR/state/$id.meta"
   task=$(meta_account_task "$id")
   assert_grep 'account_rollback_cleanup=pending' "$meta" "provisional metadata was not marked for rollback recovery"
@@ -2516,7 +2744,11 @@ SH
     kill -0 "$spawn_pid" 2>/dev/null || break
     sleep 0.05
   done
-  [ -f "$installed_marker" ] || { touch "$installed_gate"; wait "$spawn_pid" 2>/dev/null || true; fail "spawn never installed endpoint metadata"; }
+  [ -f "$installed_marker" ] || {
+    touch "$installed_gate"
+    wait "$spawn_pid" 2>/dev/null || true
+    fail "spawn never installed endpoint metadata: $(cat "$CASE_DIR/spawn-stdout" "$CASE_DIR/spawn-stderr")"
+  }
   assert_grep 'account_rollback_cleanup=pending' "$meta" "endpoint metadata cleared rollback recovery before launch commit"
   assert_grep 'account_profile=claude-2' "$meta" "endpoint metadata lost the selected account profile"
   assert_grep "tmux_session_target=firstmate:fm-$id" "$meta" \
@@ -3210,7 +3442,7 @@ test_failed_continuation_cleanup_restores_predecessor_for_retry() {
 }
 
 test_concurrent_continuations_serialize_before_mutation() {
-  local id rec marker gate first_pid second_pid first_rc second_rc lease_count endpoint_count second_lock_waiter
+  local id rec marker gate first_pid second_pid first_rc second_rc lease_count endpoint_count second_lock_waiter wait_seconds
   id=account-continuation-race-z21d
   rec=$(make_case continuation-race claude "$id")
   read_case "$rec"
@@ -3223,24 +3455,33 @@ test_concurrent_continuations_serialize_before_mutation() {
   FM_FAKE_AF_PROFILE=claude-3 FM_FAKE_AF_POOL=explicit FM_FAKE_TMUX_NEW_WINDOW_MARKER="$marker" FM_FAKE_TMUX_NEW_WINDOW_GATE="$gate" \
     run_spawn "$id" --continue-account --account-profile claude-3 > "$CASE_DIR/first.out" 2>&1 &
   first_pid=$!
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 600); do
     [ -f "$marker" ] && break
+    kill -0 "$first_pid" 2>/dev/null || break
     sleep 0.05
   done
-  [ -f "$marker" ] || { kill "$first_pid" 2>/dev/null || true; fail "first continuation never reached endpoint creation"; }
+  [ -f "$marker" ] || {
+    touch "$gate"
+    wait "$first_pid" 2>/dev/null || true
+    fail "first continuation never reached endpoint creation: $(cat "$CASE_DIR/first.out")"
+  }
   second_lock_waiter="$CASE_DIR/second-lock-wait-observed"
+  wait_seconds=$(fm_test_load_scaled_timeout_seconds 30 150)
   FM_FAKE_AF_PROFILE=claude-3 FM_FAKE_AF_POOL=explicit \
+    FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS="$wait_seconds" \
     FM_ACCOUNT_TEST_HOOKS=firstmate-account-tests-v1 FM_ACCOUNT_LOCK_WAIT_TEST_OBSERVED="$second_lock_waiter" \
     run_spawn "$id" --continue-account --account-profile claude-3 > "$CASE_DIR/second.out" 2>&1 &
   second_pid=$!
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 600); do
     [ -f "$second_lock_waiter" ] && break
+    kill -0 "$second_pid" 2>/dev/null || break
     sleep 0.05
   done
   if [ ! -f "$second_lock_waiter" ]; then
     touch "$gate"
-    kill "$first_pid" "$second_pid" 2>/dev/null || true
-    fail "second continuation never waited behind the first lifecycle owner"
+    wait "$first_pid" 2>/dev/null || true
+    wait "$second_pid" 2>/dev/null || true
+    fail "second continuation never waited behind the first lifecycle owner: first=$(cat "$CASE_DIR/first.out"); second=$(cat "$CASE_DIR/second.out")"
   fi
   touch "$gate"
   wait "$first_pid"
@@ -3249,7 +3490,8 @@ test_concurrent_continuations_serialize_before_mutation() {
   second_rc=$?
   [ "$first_rc" -eq 0 ] || fail "first serialized continuation failed: $(cat "$CASE_DIR/first.out")"
   [ "$second_rc" -ne 0 ] || fail "second concurrent continuation also launched"
-  assert_grep 'managed recovery endpoint is still alive' "$CASE_DIR/second.out" "concurrent continuation did not revalidate the serialized replacement endpoint"
+  assert_grep 'managed recovery endpoint is still alive' "$CASE_DIR/second.out" \
+    "concurrent continuation did not revalidate the serialized replacement endpoint: $(cat "$CASE_DIR/second.out")"
   lease_count=$(grep -Ec 'lease choose|lease acquire' "$AF_LOG" || true)
   endpoint_count=$(grep -c '^new-window ' "$TMUX_LOG" || true)
   [ "$lease_count" -eq 1 ] || fail "concurrent continuations acquired $lease_count leases"
@@ -3333,6 +3575,7 @@ test_session_sync_cannot_recreate_metadata_after_teardown() {
   teardown_pid=$!
   for _ in $(seq 1 300); do
     [ -f "$release_marker" ] && break
+    kill -0 "$teardown_pid" 2>/dev/null || break
     sleep 0.1
   done
   [ -f "$release_marker" ] || {
@@ -4615,8 +4858,12 @@ test_continuation_rollback_preserves_concurrent_packet_replacement() {
     FM_ACCOUNT_CONTINUATION_INSTALL_TEST_PROCEED="$proceed" PATH="$FAKEBIN_DIR:$PATH" \
     "$CONTINUATION" "$id" owned-rollback > "$output" 2>&1 &
   packet_pid=$!
-  for _ in $(seq 1 100); do [ -e "$ready" ] && break; sleep 0.05; done
-  [ -e "$ready" ] || { kill -TERM "$packet_pid" 2>/dev/null || true; fail "owned-rollback continuation gate did not open"; }
+  for _ in $(seq 1 400); do [ -e "$ready" ] && break; sleep 0.05; done
+  [ -e "$ready" ] || {
+    kill -TERM "$packet_pid" 2>/dev/null || true
+    wait "$packet_pid" 2>/dev/null || true
+    fail "owned-rollback continuation gate did not open: $(cat "$output" 2>/dev/null)"
+  }
   rm -f "$packet"
   cp "$replacement" "$packet"
   printf 'changed during owned packet rollback\n' > "$worktree/owned-rollback-race.txt"
@@ -4935,7 +5182,9 @@ test_account_metadata_lock_reclaims_orphans_without_overlapping_owners() {
   [ "$owner_lines" -eq 2 ] || fail "published metadata lock did not contain complete ownership"
 
   mkdir -p "$lock"
-  printf '%s\nstale-owner\n' "$$" > "$lock/owner"
+  # PID 1 is observable on both CI Linux and macOS; the deliberately mismatched
+  # start identity makes this owner stale without assuming a PID is absent.
+  printf '1\nstale-owner\n' > "$lock/owner"
   workers="$case_dir/workers.sh"
   cat > "$workers" <<'SH'
 #!/usr/bin/env bash
@@ -4974,10 +5223,10 @@ SH
   rm -rf "$lock"
 
   mkdir -p "$lock/.reclaiming"
-  printf '%s\nstale-reclaimer\n' "$$" > "$lock/.reclaiming/owner"
+  printf '1\nstale-reclaimer\n' > "$lock/.reclaiming/owner"
   touch -t 200001010000 "$lock" "$lock/.reclaiming"
-  FM_ACCOUNT_META_LOCK_WAIT_SECONDS=2 FM_ACCOUNT_META_LOCK_ORPHAN_GRACE_SECONDS=0 \
-    bash -c '. "$1"; held=$(fm_account_meta_lock_acquire "$2" lock-task); fm_account_meta_lock_release "$held"' \
+  FM_ACCOUNT_META_LOCK_ORPHAN_GRACE_SECONDS=0 \
+    bash -c '. "$1"; held=$(fm_account_meta_lock_acquire "$2" lock-task) || exit $?; fm_account_meta_lock_release "$held"' \
     _ "$ROOT/bin/fm-account-routing-lib.sh" "$state" || fail "abandoned metadata reclaim owner blocked acquisition"
   assert_absent "$lock" "metadata lock retained an abandoned reclaim owner"
   pass "metadata locks reclaim abandoned directories without deleting new owners"
@@ -5145,6 +5394,34 @@ SH
   ' _ "$ROOT/bin/fm-account-routing-lib.sh" "$fakebin" "$file") || fail "Linux account stat helpers failed"
   [ "$output" = '12345:67890' ] || fail "Linux account stat helpers accepted filesystem-stat output: $output"
   pass "account metadata stat helpers select GNU stat without probing BSD filesystem stat"
+}
+
+test_darwin_stat_mode_preserves_special_permission_bits() {
+  local case_dir fakebin file output
+  case_dir="$TMP_ROOT/darwin-stat-mode"
+  fakebin="$case_dir/fakebin"
+  file="$case_dir/file"
+  mkdir -p "$fakebin"
+  : > "$file"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+SH
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -f ] && [ "${2:-}" = %Mp%Lp ] || exit 2
+printf '1777\n'
+SH
+  chmod +x "$fakebin/uname" "$fakebin/stat"
+  output=$(bash -c '
+    . "$1"
+    FM_ACCOUNT_SYSTEM_UNAME_BIN=$2/uname
+    FM_ACCOUNT_SYSTEM_STAT_BIN=$2/stat
+    fm_account_path_mode "$3"
+  ' _ "$ROOT/bin/fm-account-routing-lib.sh" "$fakebin" "$file") \
+    || fail "Darwin account mode helper failed"
+  [ "$output" = 1777 ] || fail "Darwin account mode helper lost special permission bits: $output"
+  pass "account metadata stat helpers preserve Darwin special permission bits"
 }
 
 test_stale_reclaim_guard_is_owned_before_lock_removal() {
@@ -5616,6 +5893,7 @@ test_agent_fleet_lifecycle_calls_are_bounded() {
   assert_grep 'lease recover ' "$AF_LOG" "timed-out lease choice did not reconcile ownership"
 
   rm -f "$CASE_DIR/endpoint-live"
+  write_teardown_completion_report "$id"
   clear_case_logs
   release_completed="$CASE_DIR/release-completed"
   if out=$(FM_FAKE_AF_RELEASE_SLEEP=10 FM_FAKE_AF_RELEASE_COMPLETED="$release_completed" \
@@ -5904,6 +6182,7 @@ test_teardown_stops_after_rollback_restores_predecessor() {
   [ "$failed_task" != "$old_task" ] || fail "failed continuation did not install its rollback generation"
 
   rm -f "$CASE_DIR/endpoint-live"
+  write_teardown_completion_report "$id"
   clear_case_logs
   if out=$(run_teardown "$id" --force 2>&1); then status=0; else status=$?; fi
   [ "$status" -ne 0 ] || fail "teardown continued after restoring predecessor metadata"
@@ -5911,7 +6190,6 @@ test_teardown_stops_after_rollback_restores_predecessor() {
   assert_not_grep "lease release --task $old_task" "$AF_LOG" "teardown released the restored predecessor in the stale generation pass"
   assert_contains "$out" "rerun teardown against the restored task generation" "rollback restoration retry guidance was not surfaced"
 
-  write_test_completion_report "$id"
   clear_case_logs
   write_teardown_completion_report "$id"
   run_teardown "$id" --force >/dev/null || fail "restored predecessor could not be torn down on a fresh pass"
@@ -5966,10 +6244,19 @@ run_isolated_test() {
   # a condition context suppresses errexit for the whole test body, so an
   # in-test `set -e` would be silently ignored.
   local status
+  FM_TEST_PART_SEQUENCE=$((FM_TEST_PART_SEQUENCE + 1))
+  if [ "$FM_TEST_PART_TOTAL" -gt 1 ] \
+    && [ $(((FM_TEST_PART_SEQUENCE - 1) % FM_TEST_PART_TOTAL + 1)) -ne "$FM_TEST_PART_INDEX" ]; then
+    return 0
+  fi
   ( "$@" )
   status=$?
   [ "$status" -eq 0 ] || exit "$status"
 }
+
+FM_TEST_PART_INDEX=${FM_TEST_PART_INDEX:-1}
+FM_TEST_PART_TOTAL=${FM_TEST_PART_TOTAL:-1}
+FM_TEST_PART_SEQUENCE=0
 
 if [ "${FM_TEST_FOCUSED:-}" = backlog-row-exemptions ]; then
   run_isolated_test test_resume_uses_sticky_recovery_and_preserves_mapping_on_failure
@@ -6164,6 +6451,7 @@ if [ "${FM_TEST_FOCUSED:-}" = session-sync-teardown-race ]; then
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = rollback-safety ]; then
+  run_isolated_test test_spawn_rollback_task_tmp_refusal_is_retryable
   run_isolated_test test_secondmate_rollback_refuses_unsafe_tasktmp
   run_isolated_test test_rollback_backup_rejects_symlink_and_rechecks_under_lock
   exit 0
@@ -6435,12 +6723,34 @@ if [ "${FM_TEST_FOCUSED:-}" = production-routing-authority ]; then
   run_isolated_test test_agent_fleet_entrypoint_is_physically_pinned_per_operation
   run_isolated_test test_agent_fleet_validation_ignores_ambient_system_tool_shadows
   run_isolated_test test_linux_stat_selection_avoids_filesystem_stat_output
+  run_isolated_test test_darwin_stat_mode_preserves_special_permission_bits
   run_isolated_test test_production_routing_ignores_ambient_mode_and_forbids_binary_override
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = concurrent-continuation ]; then
+  run_isolated_test test_concurrent_continuations_serialize_before_mutation
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = teardown-report-gates ]; then
+  run_isolated_test test_agent_fleet_lifecycle_calls_are_bounded
+  run_isolated_test test_teardown_stops_after_rollback_restores_predecessor
   exit 0
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = production-fleet-environment ]; then
   run_isolated_test test_production_fleet_environment_is_closed_before_control_and_worker_exec
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = prior-tasktmp-cleanup ]; then
+  run_isolated_test test_unmanaged_respawn_preserves_report_cutover_state
+  run_isolated_test test_failed_managed_respawn_restores_unmanaged_metadata
+  run_isolated_test test_task_tmp_removal_refuses_symlinked_parent
+  run_isolated_test test_task_tmp_removal_pins_ancestors_during_swap
+  run_isolated_test test_task_tmp_partial_removal_fails_closed
+  run_isolated_test test_agent_fleet_task_keys_are_namespaced_by_home_and_attempt
   exit 0
 fi
 
@@ -6550,6 +6860,7 @@ run_isolated_test test_account_locks_never_reclaim_on_indeterminate_process_prob
 run_isolated_test test_ownerless_lock_marker_rejects_symlink_clobber
 run_isolated_test test_account_lock_owner_controls_reject_symlinks
 run_isolated_test test_linux_stat_selection_avoids_filesystem_stat_output
+run_isolated_test test_darwin_stat_mode_preserves_special_permission_bits
 run_isolated_test test_stale_reclaim_guard_is_owned_before_lock_removal
 run_isolated_test test_task_owned_account_artifacts_reject_symlink_paths
 run_isolated_test test_secondmate_home_lock_key_fails_closed_without_fixed_hasher

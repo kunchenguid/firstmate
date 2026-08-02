@@ -56,7 +56,9 @@ default_branch() {
 primary_head_commit() {
   local root=$1 default
   default=$(default_branch "$root") || return 1
-  git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || return 1
+  git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null \
+    || git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$default^{commit}" 2>/dev/null \
+    || return 1
 }
 
 resolve_path() {

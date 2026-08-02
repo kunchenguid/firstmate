@@ -2,8 +2,8 @@
 name: stuck-crewmate-recovery
 description: >-
   Agent-only playbook for stuck firstmate direct reports.
-  Use after a stale wake, permission-prompt or system-dialog suspicion, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
-  Routes permission grants to the captain before the ordinary peek, steer, interrupt, relaunch, and failed-status ladder.
+  Use after a stale wake, permission-prompt or system-dialog suspicion, no-mistakes reattach socket read timeout, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
+  Routes permission grants and home-scoped validation recovery before the ordinary peek, steer, interrupt, relaunch, and failed-status ladder.
 user-invocable: false
 metadata:
   internal: true
@@ -15,6 +15,19 @@ Use this playbook when a direct report is stale, permission-blocked, looping, re
 
 Load `harness-adapters` before handling a permission prompt or sending an interrupt, exit command, resume command, or harness-specific skill invocation.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
+
+## No-mistakes reattach timeout branch
+
+Handle an error shaped as `drive run: reconcile run ...: read response: ... socket: i/o timeout` before the ordinary ladder.
+That signature means an established daemon connection missed the bounded run-snapshot response deadline; it is not evidence that the daemon stopped.
+
+1. Run `FM_HOME=<this-firstmate-home> bin/fm-no-mistakes-reattach.sh <id>` from the active firstmate repository unless `FM_HOME` already names the active home.
+2. Let the helper own retry timing and task identity checks.
+   It retries only the observed transient signature and requires the daemon to report running before every attempt. This read-only preflight narrows risk but cannot guarantee no start because ordinary `axi run` calls `EnsureDaemon` after the check; strict protection requires an upstream attach-only operation.
+3. Treat a returned gate or outcome as the current run result and continue the ordinary validation decision or completion workflow.
+4. If the helper exhausts its retries, preserve its exact final error and escalate the lane as blocked without changing daemon lifecycle state.
+5. Do not use this branch for another daemon error.
+   Diagnose that error through the ordinary ladder and retain the shared-daemon prohibition.
 
 ## Permission-blocked branch
 

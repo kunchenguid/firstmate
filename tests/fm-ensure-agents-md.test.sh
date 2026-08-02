@@ -5,7 +5,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-ensure-agents-md)
+fm_test_tmproot_into TMP_ROOT fm-ensure-agents-md
 
 test_created_agents_md_includes_self_governance() {
   local repo agents

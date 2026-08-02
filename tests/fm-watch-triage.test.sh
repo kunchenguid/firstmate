@@ -29,7 +29,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
+fm_test_tmproot_into TMP_ROOT fm-watch-triage-tests
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
 # test overrides them, so a test only exercises the path it targets. FM_CREW_STATE_BIN
@@ -197,6 +197,12 @@ test_crew_is_provably_working_classifier() {
   export FM_FAKE_CREW_STATE
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   crew_is_provably_working a || fail "active run-step not treated as provably working"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · liveness: alive (2 procs) · step: test'
+  crew_is_provably_working a || fail "alive command-step liveness not treated as provably working"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · liveness: dead (0 procs) · step: test'
+  ! crew_is_provably_working a || fail "dead command-step liveness was treated as provably working"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · liveness: unknown (probe timed out) · step: test'
+  ! crew_is_provably_working a || fail "unknown command-step liveness was treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   crew_is_provably_working a || fail "busy pane not treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
@@ -324,12 +330,37 @@ test_failure_pause_is_failure_classifier() {
 # (surface it) - so the watcher's stale path gets both for one bounded call.
 # crew_is_paused delegates to it exactly as crew_is_provably_working does.
 test_crew_absorb_class_classifier() {
-  local dir fakebin
+  local dir fakebin malformed
   dir=$(make_case absorb-class); fakebin="$dir/fakebin"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   [ "$(crew_absorb_class a)" = working ] || fail "active run-step not classed working"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · liveness: alive (2 procs) · step: test'
+  [ "$(crew_absorb_class a)" = working ] || fail "alive command-step liveness not classed working"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · liveness: dead (0 procs) · step: test'
+  [ "$(crew_absorb_class a)" = none ] || fail "dead command-step liveness was absorbed as working"
+  ! crew_is_paused a || fail "dead command-step liveness was absorbed as paused"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · liveness: unknown (probe unreadable) · step: test'
+  [ "$(crew_absorb_class a)" = none ] || fail "unknown command-step liveness was absorbed as working"
+  ! crew_is_paused a || fail "unknown command-step liveness was absorbed as paused"
+  for malformed in \
+    'state: working · source: run-step · validating (running) · liveness:' \
+    'state: working · source: run-step · validating (running) · liveness:alive (2 procs)' \
+    'state: working · source: run-step · validating (running) · liveness: healthy (2 procs)' \
+    'state: working · source: run-step · validating (running) · LIVENESS: alive (2 procs)' \
+    'state: working · source: run-step · validating (running) · liveness : alive (2 procs)'; do
+    [ "$(crew_state_liveness_verdict "$malformed")" = unknown ] \
+      || fail "malformed liveness field was treated as absent: $malformed"
+    FM_FAKE_CREW_STATE=$malformed
+    [ "$(crew_absorb_class a)" = none ] \
+      || fail "malformed liveness field was absorbed as working: $malformed"
+  done
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  [ -z "$(crew_state_liveness_verdict "$FM_FAKE_CREW_STATE")" ] \
+    || fail "a state line without a liveness field gained an observation"
+  [ "$(crew_absorb_class a)" = working ] \
+    || fail "a state line without a liveness field changed classification"
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   [ "$(crew_absorb_class a)" = working ] || fail "busy pane not classed working"
   FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
@@ -362,17 +393,23 @@ test_signal_crew_provably_working_classifier() {
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE_a='state: working · source: run-step · running'
   export FM_FAKE_CREW_STATE_b='state: done · source: run-step · run passed'
+  export FM_FAKE_CREW_STATE_c='state: working · source: run-step · running · liveness: dead (0 procs) · step: test'
+  export FM_FAKE_CREW_STATE_d='state: working · source: run-step · running · liveness: unknown (probe timed out) · step: test'
   signal_crew_provably_working "$state/a.status" "$state/a.turn-ended" \
     || fail "a single provably-working crew (status+turn-end) was not benign"
   ! signal_crew_provably_working "$state/a.status" "$state/b.turn-ended" \
     || fail "a coalesced batch including a stopped crew was treated as benign"
   ! signal_crew_provably_working "$state/b.turn-ended" \
     || fail "a stopped crew's bare turn-end was treated as benign"
+  ! signal_crew_provably_working "$state/c.turn-ended" \
+    || fail "a dead command-step turn-end was treated as benign"
+  ! signal_crew_provably_working "$state/d.turn-ended" \
+    || fail "an unknown command-step turn-end was treated as benign"
   ! signal_crew_provably_working "$state/a.meta" \
     || fail "a non-signal file resolved to a benign verdict"
   ! signal_crew_provably_working \
     || fail "an empty signal file list was treated as benign"
-  unset FM_FAKE_CREW_STATE_a FM_FAKE_CREW_STATE_b
+  unset FM_FAKE_CREW_STATE_a FM_FAKE_CREW_STATE_b FM_FAKE_CREW_STATE_c FM_FAKE_CREW_STATE_d
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
 }
 
@@ -1594,6 +1631,28 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+test_heartbeat_surfaces_dead_and_unknown_liveness() {
+  local verdict dir state fakebin out pid
+  for verdict in dead unknown; do
+    dir=$(make_case "heartbeat-liveness-$verdict")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    fm_write_meta "$state/task.meta" "kind=ship"
+    PATH="$fakebin:$PATH" \
+      FM_STATE_OVERRIDE="$state" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE="state: working · source: run-step · validating (running) · liveness: $verdict (probe result) · step: test" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 \
+      "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 50 || fail "heartbeat did not surface $verdict command-step liveness"
+    grep -Fx "heartbeat" "$out" >/dev/null \
+      || fail "$verdict command-step liveness did not exit through the heartbeat actionability boundary"
+  done
+  pass "heartbeat actionability surfaces both dead and unknown command-step liveness"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1651,7 +1710,7 @@ test_afk_present_reverts_watcher_to_one_shot() {
 # must still hand off the plain window identity to the daemon, rather than running
 # the normal-mode pause re-surface and decorating the stale identity.
 test_afk_paused_changed_pane_hands_off_plain_stale() {
-  local dir state fakebin out drain_out capture_file statusf window key sig pid back
+  local dir state fakebin out drain_out capture_file statusf window key sig pid back i
   dir=$(make_case afk-paused-changed-pane); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-afk-held"
@@ -1664,6 +1723,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-held_status"
   date '+%s' > "$state/.afk"
+  touch "$state/.last-check" "$state/.last-account-session-sync" "$state/.last-report-retention"
   key=$(printf '%s' "$window" | tr '.:/' '___')
 
   # Deliberately do not seed .hash-*: this is the changed-pane path that used to
@@ -1673,6 +1733,12 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] || fail "AFK watcher did not enter its supervision loop"
   wait_for_exit "$pid" 40 || fail "AFK paused changed pane did not hand off a stale wake"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "AFK paused stale did not preserve its plain window identity: $(cat "$out")"
   grep -F "awaiting external" "$out" >/dev/null && fail "AFK watcher decorated a stale identity instead of handing it to the daemon"
@@ -1693,6 +1759,7 @@ test_account_session_sync_is_bounded_and_cadenced() {
   task_timeout_file="$dir/account-session-sync-task.timeout"
   elapsed_file="$dir/account-session-sync.elapsed"
   sync_cadence_file="$state/.last-account-session-sync"
+  rm -f "$sync_cadence_file"
   mkdir -p "$fake_root/bin"
 cat > "$sync_bin" <<'SH'
 #!/usr/bin/env bash
@@ -1816,6 +1883,11 @@ if [ "${FM_TEST_FOCUSED:-}" = permission-prompts ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = afk-paused-handoff ]; then
+  test_afk_paused_changed_pane_hands_off_plain_stale
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = pause-regressions ]; then
   test_declared_pause_preempts_permission_prompt_stale
   test_nonterminal_stale_not_working_surfaced
@@ -1829,6 +1901,14 @@ fi
 if [ "${FM_TEST_FOCUSED:-}" = failure-pause ]; then
   test_failure_pause_is_failure_classifier
   test_failure_pause_stale_surfaced_not_absorbed
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = liveness-verdicts ]; then
+  test_crew_is_provably_working_classifier
+  test_crew_absorb_class_classifier
+  test_signal_crew_provably_working_classifier
+  test_heartbeat_surfaces_dead_and_unknown_liveness
   exit 0
 fi
 
@@ -1871,6 +1951,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_heartbeat_surfaces_dead_and_unknown_liveness
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
