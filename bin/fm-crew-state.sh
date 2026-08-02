@@ -25,7 +25,11 @@
 #      fallback)? Bare `axi status` owns current-run chronology: its same-branch
 #      nonterminal run remains the current validation owner when its nonempty,
 #      mutable head has advanced beyond history available to the unchanged
-#      submitting worktree. Terminal and coarse historical attribution stays
+#      submitting worktree. A run head the branch's own local reflog records as
+#      a former tip is not such an advance: the branch was rewritten away from
+#      it after submission, so that abandoned nonterminal run is rejected as
+#      stale rather than masking the crew's current state.
+#      Terminal and coarse historical attribution stays
 #      strictly head-bound, and the coarse fallback stops at the newest row for
 #      the branch rather than searching older history after an identity miss.
 #      For strict head binding, a run matches when its head equals the worktree
@@ -381,11 +385,23 @@ nm_run_head_matches_worktree() {
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
+# 0 if the crew branch's local reflog records this exact commit as a former
+# tip. A divergent run head that the branch itself once pointed at means the
+# submitting worktree rewrote the branch after submission - the run is an
+# abandoned leftover, not a pipeline-advanced current head. A missing or
+# unreadable reflog yields no entries and never rejects on its own.
+nm_branch_reflog_contains() {  # <full-sha>
+  [ -n "$CREW_BRANCH" ] || return 1
+  git -C "$WT" reflog show --format=%H "refs/heads/$CREW_BRANCH" 2>/dev/null \
+    | grep -qxF "$1"
+}
+
 # Bare axi status selects the branch's current run. A clearly nonterminal run
 # with a nonempty mutable head therefore retains ownership when that head is
 # divergent from or unavailable to the unchanged submitting worktree. Local
-# work strictly ahead of the run is still newer code and rejects attribution;
-# terminal runs retain the strict historical head binding above.
+# work strictly ahead of the run is still newer code and rejects attribution,
+# a divergent head the branch's own reflog shows was rewritten away rejects as
+# stale, and terminal runs retain the strict historical head binding above.
 nm_primary_run_matches() {
   local run_head status outcome local_full run_full
   run_head=$(strip_quotes "$(nm_field head)")
@@ -401,6 +417,7 @@ nm_primary_run_matches() {
   local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
   run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 0
   git -C "$WT" merge-base --is-ancestor "$run_full" "$local_full" 2>/dev/null && return 1
+  nm_branch_reflog_contains "$run_full" && return 1
   return 0
 }
 
