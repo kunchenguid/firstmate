@@ -30,7 +30,7 @@ The cost is coordination, and this skill is that coordination written down.
 3. Resolve the harness per crew from what actually provides that skill.
    A skill delivered as a harness-specific plugin can only run on that harness, so the roster can force a harness pin that differs from this home's usual crewmate default.
    Perform that check against the skill's real delivery surface before spawn; do not assume a fixed harness name here.
-   Inside the routing precedence `AGENTS.md` section 4 owns, an explicit per-task captain override still wins, but a pin that delivery makes mandatory outranks a matching crew-dispatch profile's harness, because a profile harness that cannot run the assigned skill silently defeats the dispatch.
+   Resolve the pin through the routing precedence `AGENTS.md` section 4 owns, and when delivery makes a harness mandatory, confirm it with the captain and carry it as the explicit per-task captain override that precedence already ranks first.
    Load `harness-adapters` before any spawn so the pin is applied through the ordinary dispatch path.
 4. Resolve the repository the crews will be spawned into before dispatch.
    A spawn allocates a worktree, so a subject with no repository yet must go through the `project-management` skill first rather than mid-run.
