@@ -694,6 +694,11 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
+    # Attribution and provenance prose that sits beside the skills rather than
+    # inside one. The documentation-audience contract owns it, same family.
+    .agents/skills/agent-skills-MIT.txt|.agents/skills/agent-skills-source.md)
+      printf '%s\n' pure-contract-unit
+      ;;
     .github/workflows/ci.yml|.no-mistakes.yaml)
       printf '%s\n' pure-contract-unit
       printf '%s\n' real-herdr-gated

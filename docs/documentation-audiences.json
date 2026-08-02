@@ -108,7 +108,19 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/agent-skills-MIT.txt",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": ".agents/skills/agent-skills-source.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": ".agents/skills/ahoy/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/api-and-interface-design/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -148,7 +160,19 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/frontend-ui-engineering/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/incremental-implementation/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/performance-optimization/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -168,11 +192,19 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/security-and-hardening/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/stow/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/test-driven-development/SKILL.md",
       "audience": "agent-runtime"
     },
     {
