@@ -230,6 +230,17 @@ Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+Attach verification and non-zero exit reporting were verified on 2026-08-02 on macOS 26.6 (Darwin 25.6.0) with GNU bash 3.2.57 and ShellCheck 0.11.0, by running the two regression cases against the pre-change scripts and then against the current ones:
+
+```sh
+tests/fm-watcher-lock.test.sh   # test_arm_refuses_to_attach_to_a_dying_watcher
+tests/fm-watcher-lock.test.sh   # test_nonzero_watcher_exit_reports_an_actionable_reason
+```
+
+Against the pre-change scripts, a lock holder that died moments after the arm's single healthy read was still announced as `watcher: attached pid=624 (beacon 0s)`, and a watcher terminated mid-cycle produced only `watcher: FAILED - watcher cycle exited 1 without an actionable reason`.
+Against the current scripts both cases pass: the dying target is never announced, the arm restarts and confirms a fresh watcher, and the terminated cycle reports its step and `after SIGTERM`.
+The same 2026-08-02 run measured the previously flaky TERM-resistant-peer fixture at 1 failure in 6 before its readiness handshake and 0 in 6 after, on both the pre-change and current scripts.
+
 Deterministic entry points:
 
 ```sh

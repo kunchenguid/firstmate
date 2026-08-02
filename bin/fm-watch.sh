@@ -53,6 +53,9 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+# Any non-zero exit instead prints one diagnostic line naming the exit code, the
+# step the cycle was in, and the trapped signal when one caused it:
+#   watcher: FAILED - watcher cycle exited <rc> during <step>[ after SIG<name>]
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -86,6 +89,15 @@ mkdir -p "$STATE"
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+# Failure diagnostics. Every non-zero exit of this watcher must name something an
+# operator can act on. WATCH_STEP is the phase the cycle is currently in and is
+# advanced (a plain assignment, no IO) as the loop moves; WATCH_SIGNAL records a
+# trapped signal when one ends the cycle. The EXIT trap installed at the main
+# entry below turns both into one reason line on stdout, which bin/fm-watch-arm.sh
+# captures and reports. Without it a crash, a `set -u` abort, and a TERM at a turn
+# boundary were all indistinguishable from each other as a bare exit 1.
+WATCH_STEP="startup"
+WATCH_SIGNAL=
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -568,20 +580,24 @@ run_check_capture() {
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
-  trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
+  trap 'FM_CHECK_SIGNAL_PENDING=HUP' HUP
+  trap 'FM_CHECK_SIGNAL_PENDING=INT' INT
+  trap 'FM_CHECK_SIGNAL_PENDING=TERM' TERM
   set -m
   ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
-  trap 'exit 1' HUP INT TERM
+  trap 'watcher_signal_exit HUP' HUP
+  trap 'watcher_signal_exit INT' INT
+  trap 'watcher_signal_exit TERM' TERM
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
     fm_check_output_cleanup
     return 1
   fi
-  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || watcher_signal_exit "$FM_CHECK_SIGNAL_PENDING"
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
@@ -705,14 +721,53 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
+WATCH_LOCK_HELD=0
+watcher_cleanup() {
+  fm_active_check_stop || return 1
+  fm_check_output_cleanup
+  fm_custom_check_snapshot_cleanup
+  fm_lock_release "$WATCH_LOCK"
+}
+
+# One reason line for every non-zero exit, on stdout so the arm layer captures
+# and reports it alongside any stderr the cycle produced.
+watcher_report_failure() {  # <exit-code>
+  local rc=$1 note=''
+  [ -z "$WATCH_SIGNAL" ] || note=" after SIG$WATCH_SIGNAL"
+  printf 'watcher: FAILED - watcher cycle exited %s during %s%s\n' "$rc" "$WATCH_STEP" "$note"
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+watcher_on_exit() {
+  local rc=$?
+  [ "$WATCH_LOCK_HELD" -eq 0 ] || watcher_cleanup || true
+  [ "$rc" -eq 0 ] || watcher_report_failure "$rc"
+  return 0
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below and by run_check_capture.
+watcher_signal_exit() {  # <signal-name>
+  WATCH_SIGNAL=$1
+  exit 1
+}
+
+# Installed before the first thing that can fail, so even a pre-lock refusal
+# names its step instead of exiting silently.
+trap watcher_on_exit EXIT
+trap 'watcher_signal_exit HUP' HUP
+trap 'watcher_signal_exit INT' INT
+trap 'watcher_signal_exit TERM' TERM
+
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
+WATCH_STEP="pr-check-migration"
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
   echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
   exit 1
 }
 
+WATCH_STEP="lock-acquire"
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
@@ -732,14 +787,8 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
-watcher_cleanup() {
-  fm_active_check_stop || return 1
-  fm_check_output_cleanup
-  fm_custom_check_snapshot_cleanup
-  fm_lock_release "$WATCH_LOCK"
-}
-trap watcher_cleanup EXIT
-trap 'exit 1' HUP INT TERM
+WATCH_LOCK_HELD=1
+WATCH_STEP="lock-publish"
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
@@ -755,6 +804,7 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
+WATCH_STEP="pr-poll-retirement-recovery"
 if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
   reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
   fm_wake_append check pr-poll-retirement "$reason" || exit 1
@@ -769,18 +819,21 @@ while :; do
   # no-ops because the lock pid is not ours, so the survivor's lock is untouched.
   # This makes any duplicate self-resolve within one poll instead of persisting
   # and doubling every wake.
+  WATCH_STEP="self-eviction-check"
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
     exit 0
   fi
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
+  WATCH_STEP="beacon"
   touch "$STATE/.last-watcher-beat"
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
+  WATCH_STEP="pending-reply-tick"
   fm_pending_reply_tick "$STATE" || true
 
   # Process-to-event liveness repair. This never discovers a result by polling:
@@ -801,10 +854,12 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
+  WATCH_STEP="check-scan"
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      WATCH_STEP="check:$(basename "$c")"
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -867,6 +922,7 @@ while :; do
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  WATCH_STEP="signal-scan"
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
@@ -924,6 +980,7 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
   while IFS= read -r w; do
+    WATCH_STEP="stale-scan:$w"
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     key=${w//:/_}
@@ -1091,6 +1148,7 @@ EOF
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
   # surfaced non-heartbeat wake.
+  WATCH_STEP="heartbeat-scan"
   streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
@@ -1122,5 +1180,6 @@ EOF
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
+  WATCH_STEP="terminal-wait"
   event_wait_or_sleep
 done

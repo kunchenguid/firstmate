@@ -26,12 +26,22 @@
 # single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
 # exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
-#   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
-#                                                          this arm attaches and follows it
+#   watcher: attached pid=<N> (beacon <age>s, verified <W>s[, beacon advanced])
+#                                                        - a live+fresh successor holds the lock
+#                                                          and STAYED this home's live watcher for
+#                                                          the whole verification window; this arm
+#                                                          attaches and follows it
+#   watcher: restarting after a failed attach - <why>    - the target stopped verifying inside that
+#                                                          window, so this arm restarts instead of
+#                                                          reporting a healthy attach
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
+# Every FAILED line carries concrete evidence in parentheses - exit code, trapped
+# signal, watcher-reported step, stderr tail, lock pid and liveness, beacon age,
+# queued-wake count, and the last recorded lifecycle row for the watcher - because
+# a failure an operator cannot act on is the same as no report at all.
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
@@ -43,6 +53,19 @@
 # failure. Neither is ever a clean empty completion. On FAILED it exits non-zero
 # so the failure is loud. A live cycle already present means re-arm attaches - do
 # not start a second watcher.
+#
+# ATTACH IS NOT A SINGLE READ. One healthy read proves the target was alive
+# RECENTLY, not that it is alive now, and a fresh beacon inside the grace can
+# coexist with no watcher process at all. Every attach therefore holds its claim
+# for FM_ARM_ATTACH_VERIFY seconds and keeps re-checking process liveness, lock
+# identity, and beacon freshness before the attached line is printed; when the
+# beacon advances inside that window the line says so, because that is positive
+# proof of progress rather than of recent existence. A target that stops
+# verifying inside the window is a FAILED attach, and this arm re-executes itself
+# as `--restart` (bounded by FM_ARM_RESTART_MAX, tracked through
+# FM_ARM_RESTART_DEPTH) so supervision is genuinely restored instead of reported
+# restored. Past that window the attached poll keeps re-checking the same three
+# facts every FM_ARM_ATTACH_POLL, so a later death is caught within one poll.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -79,6 +102,17 @@ esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
+# How long an attach candidate must keep verifying as this home's live watcher
+# before the attached line may claim it, and how many times one arm may
+# re-execute itself as --restart after a failed attach.
+ATTACH_VERIFY=${FM_ARM_ATTACH_VERIFY:-2}
+ARM_RESTART_MAX=${FM_ARM_RESTART_MAX:-1}
+ARM_RESTART_DEPTH=${FM_ARM_RESTART_DEPTH:-0}
+STDERR_TAIL_LINES=${FM_ARM_STDERR_TAIL_LINES:-5}
+case "$ATTACH_VERIFY" in *[!0-9]*|'') ATTACH_VERIFY=2 ;; esac
+case "$ARM_RESTART_MAX" in *[!0-9]*|'') ARM_RESTART_MAX=1 ;; esac
+case "$ARM_RESTART_DEPTH" in *[!0-9]*|'') ARM_RESTART_DEPTH=0 ;; esac
+case "$STDERR_TAIL_LINES" in *[!0-9]*|''|0) STDERR_TAIL_LINES=5 ;; esac
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
@@ -248,10 +282,105 @@ healthy_watcher() {
   HEALTHY_IDENTITY=$FM_WATCHER_HEALTHY_IDENTITY
 }
 
+# Bounded post-attach verification. A single healthy read proves the target was
+# alive RECENTLY; it does not prove the target is alive now, and a beacon still
+# inside the grace can coexist with no watcher process at all. Keep re-checking
+# liveness, lock identity, and beacon freshness for the whole window, and record
+# whether the beacon actually advanced - the one positive proof of progress
+# rather than of recent existence. Sets ATTACH_VERIFY_REASON on failure.
+ATTACH_VERIFY_REASON=
+ATTACH_VERIFY_BEACON_ADVANCED=0
+attach_verified() {  # <pid>
+  local pid=$1 deadline before now
+  ATTACH_VERIFY_REASON=
+  ATTACH_VERIFY_BEACON_ADVANCED=0
+  before=$(fm_path_mtime "$BEAT" 2>/dev/null || true)
+  deadline=$(( $(date +%s) + ATTACH_VERIFY ))
+  while :; do
+    if ! healthy_watcher; then
+      HEALTHY_PID=$pid
+      ATTACH_VERIFY_REASON="attach target pid=$pid stopped verifying as this home's live watcher within ${ATTACH_VERIFY}s (pid $(pid_liveness "$pid"), beacon $(fm_path_age "$BEAT")s)"
+      return 1
+    fi
+    if [ "$HEALTHY_PID" != "$pid" ]; then
+      ATTACH_VERIFY_REASON="the watcher lock moved from pid=$pid to pid=$HEALTHY_PID within ${ATTACH_VERIFY}s of attaching"
+      HEALTHY_PID=$pid
+      return 1
+    fi
+    now=$(fm_path_mtime "$BEAT" 2>/dev/null || true)
+    if [ -n "$now" ] && [ "$now" != "$before" ]; then
+      ATTACH_VERIFY_BEACON_ADVANCED=1
+    fi
+    [ "$(date +%s)" -ge "$deadline" ] && return 0
+    sleep 0.1
+  done
+}
+
 report_attached() {
-  local age
+  local age note=''
   age=$(fm_path_age "$BEAT")
-  echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+  [ "$ATTACH_VERIFY_BEACON_ADVANCED" -eq 1 ] && note=', beacon advanced'
+  echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s, verified ${ATTACH_VERIFY}s$note)"
+}
+
+pid_liveness() {  # <pid>
+  if fm_pid_alive "$1"; then printf 'alive'; else printf 'gone'; fi
+}
+
+queued_wake_count() {
+  local n
+  [ -f "$STATE/.wake-queue" ] || { printf '0'; return; }
+  n=$(wc -l < "$STATE/.wake-queue" 2>/dev/null | tr -d '[:space:]')
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$n"
+}
+
+# One bounded line of whatever the cycle wrote to stderr. The watcher's own
+# refusals (a blocked check migration, a stale live lock, a `set -u` abort) all
+# land there, and losing them is what made an unexplained exit unexplained.
+child_stderr_tail() {  # <stderr-file>
+  local err=${1:-} text
+  { [ -n "$err" ] && [ -s "$err" ]; } || { printf 'none'; return; }
+  text=$(tail -n "$STDERR_TAIL_LINES" "$err" 2>/dev/null | tr '\t\r\n' '   ' | cut -c1-500)
+  [ -n "$text" ] || text=none
+  printf '%s' "$text"
+}
+
+# The last lifecycle row that actually classified this watcher pid. It is often
+# the missing half of the story - an owning arm recorded exit_code=143
+# signal=TERM reason=arm-interrupted while an attached arm saw only that the
+# cycle vanished.
+last_cycle_record() {  # <watcher-pid>
+  local pid=$1 out
+  [ -f "$CYCLE_LOG" ] || { printf 'none'; return; }
+  out=$(awk -F'\t' -v want="watcher_pid=$pid" '
+    $2 == want {
+      ec = ""; sg = ""; rs = ""
+      for (i = 1; i <= NF; i += 1) {
+        if ($i ~ /^exit_code=/) ec = substr($i, 11)
+        if ($i ~ /^signal=/) sg = substr($i, 8)
+        if ($i ~ /^reason=/) rs = substr($i, 8)
+      }
+      if (ec != "" && ec != "unknown") last = "exit_code=" ec " signal=" sg " reason=" rs
+    }
+    END { if (last != "") print last }
+  ' "$CYCLE_LOG" 2>/dev/null)
+  [ -n "$out" ] || out=none
+  printf '%s' "$out"
+}
+
+# Why no watcher could be confirmed, in the terms an operator would check by
+# hand: who holds the lock, whether that pid is alive, whether it is really this
+# home's watcher, and how old the beacon is.
+no_fresh_watcher_detail() {
+  local lock_pid identity=mismatch
+  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  [ -n "$lock_pid" ] || lock_pid=none
+  if [ "$lock_pid" != none ] && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
+    identity=match
+  fi
+  printf 'lock pid=%s %s, watcher identity %s, beacon %ss' \
+    "$lock_pid" "$(pid_liveness "$lock_pid")" "$identity" "$(fm_path_age "$BEAT")"
 }
 
 # Give a successor the same bounded confirmation window used for a fresh child.
@@ -269,22 +398,37 @@ wait_for_healthy_successor() {
   done
 }
 
-fail_unexplained_cycle() {
-  echo "watcher: FAILED - cycle ended without an actionable reason"
+# The attached chain ended with no verified successor. Report the facts an
+# operator would otherwise have to reconstruct: whether the target process is
+# still there, how old the beacon is, whether wakes are already queued (the
+# normal case when the cycle simply exited on an actionable wake it owned), and
+# how that watcher's own lifecycle row classified it.
+fail_attached_cycle() {  # <attached-pid>
+  local pid=$1
+  echo "watcher: FAILED - cycle ended without an actionable reason (attached watcher pid=$pid $(pid_liveness "$pid"), beacon $(fm_path_age "$BEAT")s, queued wakes: $(queued_wake_count), last recorded cycle for it: $(last_cycle_record "$pid"))"
+  return 1
+}
+
+# An owned child returned 0 with no wake reason and no healthy successor.
+fail_owned_clean_cycle() {  # <watcher-pid> <stderr-file>
+  local pid=$1 err=${2:-}
+  echo "watcher: FAILED - cycle ended without an actionable reason (owned watcher pid=$pid exited 0 with no wake reason, $(no_fresh_watcher_detail), queued wakes: $(queued_wake_count), stderr: $(child_stderr_tail "$err"))"
   return 1
 }
 
 # Close a cycle whose reason line this arm could not read against the bounded
-# terminal-delivery ledger the watcher publishes before releasing its lock.
+# terminal-delivery ledger the watcher publishes before releasing its lock. This
+# is the FIRST question asked whenever a cycle ends without an observable reason:
+# a cycle the ledger proves delivered a wake is a success and must never be
+# reported as a failure. It prints only that delivered reason, and returns
+# non-zero silently so the caller - which holds the evidence about its own
+# attached or owned cycle - reports the typed failure.
 close_unobserved_cycle() {
   local i reason clean_identity record_pid record_identity record_reason
   clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
   i=0
   while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
-    [ "$i" -lt 20 ] || {
-      fail_unexplained_cycle
-      return 1
-    }
+    [ "$i" -lt 20 ] || return 1
     sleep 0.02
     i=$((i + 1))
   done
@@ -297,25 +441,49 @@ close_unobserved_cycle() {
     done < "$WATCH_DELIVERY_LOG"
   fi
   fm_lock_release "$WATCH_DELIVERY_LOCK"
-  if [ -n "$reason" ]; then
-    printf '%s\n' "$reason"
-    return 0
-  fi
-  fail_unexplained_cycle
-  return 1
+  [ -n "$reason" ] || return 1
+  printf '%s\n' "$reason"
+}
+
+# A verified-then-dead attach target is a FAILED attach, not a healthy one.
+# Rather than return success against a cycle that is already gone, hand this
+# process to a fresh --restart arm so supervision is genuinely restored. Bounded
+# by ARM_RESTART_MAX so a watcher that dies on every launch reports the failure
+# instead of looping. Returns non-zero when the budget is spent, leaving the
+# caller to report honestly.
+restart_after_failed_attach() {
+  [ "$ARM_RESTART_DEPTH" -lt "$ARM_RESTART_MAX" ] || return 1
+  echo "watcher: restarting after a failed attach - $ATTACH_VERIFY_REASON"
+  trap - HUP TERM INT
+  cleanup_child
+  export FM_ARM_RESTART_DEPTH=$((ARM_RESTART_DEPTH + 1))
+  exec "$SCRIPT_DIR/fm-watch-arm.sh" --restart
 }
 
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, report the wake that cycle durably
-# delivered, or fail loudly - never a clean empty completion that an adapter could
-# mistake for a no-op.
+# delivered, or fail loudly - never a clean empty completion that an adapter
+# could mistake for a no-op. Every candidate holder passes attach_verified before
+# it is reported, so a successor that is itself in the act of dying is never
+# announced as healthy.
 attach_and_wait() {
-  local attached_pid=$1
+  local attached_pid=$1 candidate
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ] || [ "$HEALTHY_IDENTITY" != "$cycle_watcher_identity" ]; then
-        cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
-        attached_pid=$HEALTHY_PID
+        candidate=$HEALTHY_PID
+        if ! attach_verified "$candidate"; then
+          # Do not announce a replacement that did not survive verification;
+          # re-evaluate on the ordinary cadence rather than spinning on a
+          # flapping lock.
+          sleep "$ATTACH_POLL"
+          continue
+        fi
+        cycle_log_append unknown unknown lock-replaced "attached:$candidate"
+        attached_pid=$candidate
+        # HEALTHY_IDENTITY is the identity attach_verified just proved for this
+        # pid, so the recorded cycle identity can never lag the attached one and
+        # read as yet another successor on the next poll.
         cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
         report_attached
       fi
@@ -323,17 +491,32 @@ attach_and_wait() {
       continue
     fi
     if wait_for_healthy_successor; then
-      cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
-      attached_pid=$HEALTHY_PID
-      cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
-      report_attached
-      continue
+      candidate=$HEALTHY_PID
+      if attach_verified "$candidate"; then
+        cycle_log_append unknown unknown attached-cycle-ended "attached:$candidate"
+        attached_pid=$candidate
+        cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
+        report_attached
+        continue
+      fi
+      # The successor did not survive verification. The cycle this arm was
+      # attached to may still have durably delivered a wake before it ended, so
+      # the ledger is resolved before any failure is reported.
+      if close_unobserved_cycle; then
+        cycle_log_append unknown unknown attached-delivered-wake none
+        return 0
+      fi
+      cycle_log_append unknown unknown attach-verification-failed none
+      restart_after_failed_attach || true
+      echo "watcher: FAILED - cycle ended without an actionable reason ($ATTACH_VERIFY_REASON; no restart budget left)"
+      return 1
     fi
     if close_unobserved_cycle; then
       cycle_log_append unknown unknown attached-delivered-wake none
       return 0
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
+    fail_attached_cycle "$attached_pid"
     return 1
   done
 }
@@ -372,6 +555,39 @@ print_watch_output() {
   [ -s "$out" ] && cat "$out"
 }
 
+# The watcher's stderr is captured to a file rather than inherited so a failure
+# line can quote it, then replayed to this arm's stderr so nothing an operator
+# used to see is lost.
+print_watch_stderr() {
+  local err=${1:-}
+  { [ -n "$err" ] && [ -s "$err" ]; } || return 0
+  cat "$err" >&2
+}
+
+# The owned child's bookkeeping is declared before the attach path because a
+# failed attach may restart through cleanup_child while no child exists yet.
+child=
+child_out=
+child_err=
+cleanup_child() {
+  if [ -n "$child" ] && fm_pid_alive "$child"; then
+    kill -TERM "$child" 2>/dev/null || true
+  fi
+  if [ -n "$child_out" ]; then
+    rm -f "$child_out" 2>/dev/null || true
+  fi
+  if [ -n "$child_err" ]; then
+    rm -f "$child_err" 2>/dev/null || true
+  fi
+}
+
+drop_child_capture() {
+  rm -f "$child_out" "$child_err" 2>/dev/null || true
+  child=
+  child_out=
+  child_err=
+}
+
 mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
@@ -404,28 +620,30 @@ fi
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
-  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
-  report_attached
-  attach_and_wait "$HEALTHY_PID"
-  exit $?
+  attach_candidate=$HEALTHY_PID
+  # Captured before attach_verified re-reads the lock, so the abandoned-attach
+  # cycle is still recorded against the identity this arm actually saw.
+  attach_candidate_identity=$HEALTHY_IDENTITY
+  if attach_verified "$attach_candidate"; then
+    cycle_mark_predecessor_successor "attached:$attach_candidate"
+    cycle_begin "$attach_candidate" attached "$HEALTHY_IDENTITY"
+    report_attached
+    attach_and_wait "$attach_candidate"
+    exit $?
+  fi
+  # The target stopped verifying: restart rather than report a healthy attach.
+  # With the restart budget spent, fall through to the ordinary start path, which
+  # either self-heals a now-dead lock or reports the honest failure below.
+  cycle_begin "$attach_candidate" attached "$attach_candidate_identity"
+  cycle_log_append unknown unknown attach-verification-failed none
+  restart_after_failed_attach || true
+  echo "watcher: attach abandoned - $ATTACH_VERIFY_REASON"
 fi
 
 # Start a watcher as a tracked child and confirm it before settling in. The child
 # stays our child for its whole life: we wait on it, so killing this arm (the
 # harness-tracked task) tears the watcher down too, and the watcher's eventual
 # wake exit propagates out so the harness re-notifies firstmate.
-child=
-child_out=
-cleanup_child() {
-  if [ -n "$child" ] && fm_pid_alive "$child"; then
-    kill -TERM "$child" 2>/dev/null || true
-  fi
-  if [ -n "$child_out" ]; then
-    rm -f "$child_out" 2>/dev/null || true
-  fi
-}
-
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_arm_signal() {
   local signal=$1 rc=$2
@@ -444,49 +662,71 @@ trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
 
 child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
-  echo "watcher: FAILED - no live watcher with a fresh beacon"
+  echo "watcher: FAILED - no live watcher with a fresh beacon (could not create the arm's output capture under $STATE)"
   exit 1
 }
-"$WATCH" >"$child_out" &
+child_err=$(mktemp "$STATE/.watch-arm-stderr.XXXXXX") || {
+  rm -f "$child_out" 2>/dev/null || true
+  echo "watcher: FAILED - no live watcher with a fresh beacon (could not create the arm's stderr capture under $STATE)"
+  exit 1
+}
+"$WATCH" >"$child_out" 2>"$child_err" &
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
 
 owned_child_finished() {
-  local rc=$1 signal reason_type status
+  local rc=$1 signal reason_type status owned_pid successor
   signal=$(cycle_signal_name "$rc")
+  owned_pid=$child
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
     print_watch_output "$child_out"
-    rm -f "$child_out" 2>/dev/null || true
-    child=
-    child_out=
+    print_watch_stderr "$child_err"
+    drop_child_capture
     return 0
   fi
 
   if [ "$rc" -eq 0 ]; then
     if wait_for_healthy_successor; then
-      cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
+      successor=$HEALTHY_PID
+      if attach_verified "$successor"; then
+        cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$successor"
+        print_watch_output "$child_out"
+        print_watch_stderr "$child_err"
+        drop_child_capture
+        cycle_mark_predecessor_successor "attached:$successor"
+        report_attached
+        cycle_begin "$successor" attached "$HEALTHY_IDENTITY"
+        attach_and_wait "$successor"
+        return $?
+      fi
       print_watch_output "$child_out"
-      rm -f "$child_out" 2>/dev/null || true
-      child=
-      child_out=
-      cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-      report_attached
-      cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
-      attach_and_wait "$HEALTHY_PID"
-      return $?
+      print_watch_stderr "$child_err"
+      drop_child_capture
+      # The successor did not verify, but this child may still have durably
+      # delivered a wake before it exited. The ledger answers that before any
+      # failure is reported, and a delivered cycle needs no restart.
+      if close_unobserved_cycle; then
+        cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
+        return 0
+      fi
+      cycle_log_append "$rc" "$signal" attach-verification-failed none
+      restart_after_failed_attach || true
+      echo "watcher: FAILED - cycle ended without an actionable reason ($ATTACH_VERIFY_REASON; no restart budget left)"
+      return 1
     fi
     print_watch_output "$child_out"
-    rm -f "$child_out" 2>/dev/null || true
-    child=
-    child_out=
+    print_watch_stderr "$child_err"
     if close_unobserved_cycle; then
       cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
+      drop_child_capture
       return 0
     fi
     cycle_log_append "$rc" "$signal" unexpected-clean-exit none
+    fail_owned_clean_cycle "$owned_pid" "$child_err" || true
+    drop_child_capture
     return 1
   fi
 
@@ -494,12 +734,14 @@ owned_child_finished() {
   [ "$signal" = none ] || reason_type="signal-exit"
   cycle_log_append "$rc" "$signal" "$reason_type" none
   print_watch_output "$child_out"
+  print_watch_stderr "$child_err"
+  # The watcher names its own failing step on stdout. Only when it could not -
+  # a kill, an abort before the trap, a lost process - does this arm synthesize
+  # the line, and then it carries every fact it still has.
   if ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
-    echo "watcher: FAILED - watcher cycle exited $rc without an actionable reason"
+    echo "watcher: FAILED - watcher cycle exited $rc without an actionable reason (watcher pid=$owned_pid, signal=$signal, $(no_fresh_watcher_detail), queued wakes: $(queued_wake_count), stderr: $(child_stderr_tail "$child_err"))"
   fi
-  rm -f "$child_out" 2>/dev/null || true
-  child=
-  child_out=
+  drop_child_capture
   status=$rc
   [ "$status" -gt 0 ] || status=1
   return "$status"
@@ -541,9 +783,11 @@ done
 
 trap - HUP TERM INT
 print_watch_output "$child_out"
+print_watch_stderr "$child_err"
+timeout_detail="$(no_fresh_watcher_detail), forked watcher pid=$child $(pid_liveness "$child"), stderr: $(child_stderr_tail "$child_err")"
 cleanup_child
 wait "$child" 2>/dev/null
 rc=$?
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
-echo "watcher: FAILED - no live watcher with a fresh beacon"
+echo "watcher: FAILED - no live watcher with a fresh beacon after ${CONFIRM_TIMEOUT}s ($timeout_detail)"
 exit 1
