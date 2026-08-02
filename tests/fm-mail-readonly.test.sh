@@ -619,31 +619,64 @@ RISKY = (
     "Or use this magic link: https://accounts.example.invalid/magic?t=Zm9vYmFyYmF6cXV4MTIzNA\n"
     "Do not share this code with anyone.\n"
 )
-for label, argv, must_hide in (
-    ("withheld by default", ["show", fm.message_ref(MESSAGE_ID)], True),
-    ("redacted on request", ["show", fm.message_ref(MESSAGE_ID), "--redacted"], True),
-):
-    _directory, transport = scenario("risky-" + label.replace(" ", "-"), stored=REFRESH)
+SECRETS = ("483920", "accounts.example.invalid", "Zm9vYmFyYmF6cXV4MTIzNA")
+
+
+def wire_one_message(name, subject, content):
+    """A stubbed mailbox holding exactly one readable plain-text message."""
+    _directory, transport = scenario(name, stored=REFRESH)
     wire_refresh(transport)
     wire_me(transport)
     transport.route("GET", fm.GRAPH_HOST, "/v1.0/me/mailFolders/inbox/messages", 200,
                     {"value": [{"id": MESSAGE_ID}]})
     transport.route(
         "GET", fm.GRAPH_HOST, "/v1.0/me/messages/" + urllib.parse.quote(MESSAGE_ID, safe=""), 200,
-        {"id": MESSAGE_ID, "subject": "Your security code",
-         "body": {"contentType": "text", "content": RISKY}},
+        {"id": MESSAGE_ID, "subject": subject, "body": {"contentType": "text", "content": content}},
     )
-    code, out, err = run(argv)
-    expect(code == 0, "%s failed: %s%s" % (label, out, err))
-    expect("483920" not in out, "%s exposed the one-time code" % label)
-    expect("accounts.example.invalid" not in out, "%s exposed the sign-in link" % label)
-    expect("Zm9vYmFyYmF6cXV4MTIzNA" not in out, "%s exposed the link token" % label)
-    expect(must_hide, "unreachable")
+    return transport
+
+
+wire_one_message("risky-withheld", "Your security code", RISKY)
+code, out, err = run(["show", fm.message_ref(MESSAGE_ID)])
+expect(code == 0, "the default rendering failed: %s%s" % (out, err))
+for secret in SECRETS:
+    expect(secret not in out, "the default rendering exposed %s" % secret)
+expect("Body withheld" in out, "a credential-shaped body was not withheld by default")
+expect(fm.ENVELOPE_BEGIN not in out,
+       "a withheld body still opened the untrusted-data envelope, so it was rendered rather than withheld")
+expect("--redacted" in out, "the withheld body never names the way to read it masked")
+
+wire_one_message("risky-redacted", "Your security code", RISKY)
+code, out, err = run(["show", fm.message_ref(MESSAGE_ID), "--redacted"])
+expect(code == 0, "the redacted rendering failed: %s%s" % (out, err))
+for secret in SECRETS:
+    expect(secret not in out, "the redacted rendering exposed %s" % secret)
 expect("[redacted-code]" in out and "[redacted-link]" in out,
        "the redacted rendering did not mark what it masked")
 expect(fm.ENVELOPE_BEGIN in out, "the redacted rendering left the untrusted-data envelope off")
 expect("heuristic" in out or "heuristic" in err, "the classifier's limits are not stated where it fires")
 ok("mail that looks like it carries an authentication secret is withheld by default and aggressively redacted on request")
+
+# --- explicit masking of mail the classifier never flagged ------------------
+
+MISSED_SUBJECT = "Anmeldebestaetigung"
+MISSED = "Dein Einmalpasswort lautet ABCD-9932-XY, gueltig bis 18:45.\n"
+expect(not fm.classify_credential_risk(MISSED_SUBJECT, MISSED),
+       "this scenario needs a message the classifier does not flag")
+
+wire_one_message("missed-default", MISSED_SUBJECT, MISSED)
+code, out, err = run(["show", fm.message_ref(MESSAGE_ID)])
+expect(code == 0, "the unflagged default rendering failed: %s%s" % (out, err))
+expect("ABCD-9932-XY" in out, "an unflagged message is no longer rendered plainly by default")
+
+wire_one_message("missed-redacted", MISSED_SUBJECT, MISSED)
+code, out, err = run(["show", fm.message_ref(MESSAGE_ID), "--redacted"])
+expect(code == 0, "the requested masking failed: %s%s" % (out, err))
+expect("ABCD-9932-XY" not in out and "9932" not in out,
+       "--redacted printed a code the classifier had not flagged")
+expect("[redacted-code]" in out, "--redacted masked the body without marking it")
+expect(fm.ENVELOPE_BEGIN in out, "--redacted dropped the untrusted-data envelope")
+ok("--redacted masks the message it is given even when the classifier flagged nothing, so it is never a silent no-op")
 
 # --- a code that lives in the subject line ----------------------------------
 

@@ -36,7 +36,9 @@ Boundaries this file enforces, in order of importance:
     downloaded.
   * A local heuristic classifier refuses to render a message that looks like it
     carries an authentication secret (one-time code, password reset, magic link,
-    recovery code, API key). `--redacted` renders it with those shapes masked.
+    recovery code, API key). `--redacted` renders it with those shapes masked,
+    and masks any message it is asked for, whether or not the classifier fired,
+    so the flag still protects mail the heuristic missed.
     A subject the classifier flags is masked everywhere it is printed, in a
     listing as much as in a withheld or redacted message, because providers
     routinely put the code in the subject line itself. The classifier's limits
@@ -711,9 +713,9 @@ def redact(text: str) -> str:
     return DIGIT_RUN_RE.sub("[redacted-code]", redacted)
 
 
-def render_subject(subject: str, reasons) -> str:
-    """Mask a subject when the message it belongs to looks credential-shaped."""
-    return redact(subject) if reasons else subject
+def render_subject(subject: str, masked: bool) -> str:
+    """Mask a subject whenever the message it belongs to is rendered masked."""
+    return redact(subject) if masked else subject
 
 
 def print_envelope(body: str) -> None:
@@ -800,7 +802,7 @@ def cmd_list(args) -> int:
         ))
         subject = sanitize_line(str(message.get("subject") or ""))
         print("  from:    %s" % sanitize_line(sender_of(message), 90))
-        print("  subject: %s" % render_subject(subject, classify_credential_risk(subject, "")))
+        print("  subject: %s" % render_subject(subject, bool(classify_credential_risk(subject, ""))))
     print("")
     print("Read one message with: fm-mail.py show <ref>")
     return 0
@@ -827,7 +829,7 @@ def cmd_show(args) -> int:
         config,
         token,
         "/me/messages/" + quoted,
-        {"$select": "id,receivedDateTime,subject,from,toRecipients,hasAttachments,body"},
+        {"$select": "id,receivedDateTime,subject,from,hasAttachments,body"},
         prefer_text=True,
     )
     body = message.get("body")
@@ -836,11 +838,12 @@ def cmd_show(args) -> int:
     subject = sanitize_line(str(message.get("subject") or ""))
     content = sanitize_text(str(body.get("content") or "")) if content_type == "text" else ""
     reasons = classify_credential_risk(subject, content)
+    masked = bool(reasons) or args.redacted
 
     print("ref:      %s" % args.ref)
     print("received: %s" % sanitize_line(str(message.get("receivedDateTime") or ""), 32))
     print("from:     %s" % sanitize_line(sender_of(message), 90))
-    print("subject:  %s" % render_subject(subject, reasons))
+    print("subject:  %s" % render_subject(subject, masked))
     if message.get("hasAttachments") is True:
         print("attachments: present; this tool never downloads or opens them")
     print("")
@@ -857,10 +860,14 @@ def cmd_show(args) -> int:
         print("Re-run with --redacted to read it with codes, links and tokens masked.")
         print("The classifier is a heuristic guardrail, not a guarantee; see docs/mail-readonly.md.")
         return 0
-    if reasons:
-        print("Credential-shaped content detected; codes, links and tokens below are masked.")
-        for reason in reasons:
-            print("  - it %s" % reason)
+    if masked:
+        if reasons:
+            print("Credential-shaped content detected; codes, links and tokens below are masked.")
+            for reason in reasons:
+                print("  - it %s" % reason)
+        else:
+            print("Masking was requested; codes, links and tokens below are masked.")
+            print("The classifier saw nothing credential-shaped in this message.")
         print("Masking is a heuristic guardrail, not a guarantee; see docs/mail-readonly.md.")
         content = redact(content)
         print("")
@@ -936,7 +943,7 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument(
         "--redacted",
         action="store_true",
-        help="render a credential-shaped message with codes, links and tokens masked",
+        help="render the message with codes, links and tokens masked, flagged or not",
     )
 
     sub.add_parser("logout", help="delete the stored credential from the macOS Keychain")
