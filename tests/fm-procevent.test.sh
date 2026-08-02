@@ -1100,6 +1100,71 @@ assert_contains "$guard_out" "1 process-event source(s) registered" \
   "the general guard identifies the source-only supervision need"
 pass "source-only homes trigger the general supervision guard"
 
+# The general guard is the operator's broadest automatic channel, and every
+# fm-procevent.sh command refuses a home whose process-event state is not
+# private to it, so the guard must name that path on its own - including on the
+# no-supervision-needed path, which exits before every other warning.
+run_guard() {  # <home> [env assignments...]
+  env FM_ROOT_OVERRIDE="$TMP_ROOT/guard-root" FM_HOME="$1" FM_GUARD_GRACE=1 \
+    "${@:2}" "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
+HGUARD_OK="$TMP_ROOT/hguard-ok"; new_home "$HGUARD_OK"
+mkdir -p "$HGUARD_OK/state/procevent" "$HGUARD_OK/state/procevent-inbox"
+: > "$HGUARD_OK/state/procevent/clean.source"
+guard_out=$(run_guard "$HGUARD_OK")
+assert_not_contains "$guard_out" "PROCESS-EVENT STATE IS NOT PRIVATE TO THIS HOME" \
+  "ordinary process-event directories must not trip the guard's containment banner"
+
+HGUARD_INBOX="$TMP_ROOT/hguard-inbox"; new_home "$HGUARD_INBOX"
+HGUARD_INBOX_OUTSIDE="$TMP_ROOT/hguard-inbox-outside"; mkdir -p "$HGUARD_INBOX_OUTSIDE"
+mkdir -p "$HGUARD_INBOX/state/procevent"
+: > "$HGUARD_INBOX/state/procevent/in-home.source"
+ln -s "$HGUARD_INBOX_OUTSIDE" "$HGUARD_INBOX/state/procevent-inbox"
+guard_status=0
+guard_out=$(run_guard "$HGUARD_INBOX") || guard_status=$?
+[ "$guard_status" -eq 0 ] || fail "the guard must warn, never block, on damaged process-event state"
+assert_contains "$guard_out" "PROCESS-EVENT STATE IS NOT PRIVATE TO THIS HOME" \
+  "the general guard does not name unserviceable process-event state"
+assert_contains "$guard_out" "$HGUARD_INBOX/state/procevent-inbox" \
+  "the guard's containment banner does not name the offending path"
+assert_contains "$guard_out" "Replace it with a private directory" \
+  "the guard's containment banner is not actionable"
+assert_contains "$guard_out" "1 process-event source(s) registered" \
+  "a damaged inbox silenced the guard's count of sources this home genuinely holds"
+[ -z "$(ls -A "$HGUARD_INBOX_OUTSIDE")" ] \
+  || fail "the guard wrote through a symlinked process-event inbox: $(ls -A "$HGUARD_INBOX_OUTSIDE")"
+
+# Nothing else needs supervision here, so this home takes the `needed=false`
+# early exit: without the containment banner it would be completely silent about
+# a home no fm-procevent.sh command can serve.
+HGUARD_REG="$TMP_ROOT/hguard-registry"; new_home "$HGUARD_REG"
+HGUARD_REG_OUTSIDE="$TMP_ROOT/hguard-registry-outside"; mkdir -p "$HGUARD_REG_OUTSIDE"
+: > "$HGUARD_REG_OUTSIDE/foreign.source"
+ln -s "$HGUARD_REG_OUTSIDE" "$HGUARD_REG/state/procevent"
+guard_status=0
+guard_out=$(run_guard "$HGUARD_REG") || guard_status=$?
+[ "$guard_status" -eq 0 ] || fail "damaged process-event state alone must not make the guard fail"
+assert_contains "$guard_out" "PROCESS-EVENT STATE IS NOT PRIVATE TO THIS HOME" \
+  "a home with no other supervision need went silent about its damaged registry"
+assert_contains "$guard_out" "$HGUARD_REG/state/procevent" \
+  "the guard's containment banner does not name the symlinked registry"
+assert_not_contains "$guard_out" "WATCHER DOWN - SUPERVISION IS OFF" \
+  "a source behind a symlinked registry must not be counted as this home's wait"
+
+# A read-only advisory session (fm-session-start.sh without verified lock
+# ownership) still reports the damage, but must not prescribe the repair.
+guard_out=$(run_guard "$HGUARD_REG" FM_GUARD_READ_ONLY=1)
+assert_contains "$guard_out" "PROCESS-EVENT STATE IS NOT PRIVATE TO THIS HOME" \
+  "a read-only session must still report unserviceable process-event state"
+assert_contains "$guard_out" "should report the damage, not repair it" \
+  "the read-only containment banner does not defer the repair"
+assert_not_contains "$guard_out" "Replace it with a private directory" \
+  "a read-only session must not prescribe the process-event repair"
+[ "$(ls -A "$HGUARD_REG_OUTSIDE")" = "foreign.source" ] \
+  || fail "the guard changed state behind a symlinked registry: $(ls -A "$HGUARD_REG_OUTSIDE")"
+pass "the general guard names unserviceable process-event state without blocking"
+
 CLS="$TMP_ROOT/cls"
 printf 'session:\n  file: /a.html\n  status: feedback\nprompts[1]{uid}:\n  p1\n' > "$CLS"
 out=$("$ROOT/bin/fm-procevent-lavish.sh" classify "$CLS")
