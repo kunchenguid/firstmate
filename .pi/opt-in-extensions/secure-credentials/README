@@ -1,0 +1,75 @@
+# secure-credentials-tui
+
+Esta extensão coleta credenciais somente em uma sessão especialista TUI iniciada de propósito.
+
+Pi não descobre este diretório automaticamente.
+
+Use `pi -e ./.pi/opt-in-extensions/secure-credentials/index.ts` para carregá-lo.
+
+A sessão precisa definir `WAYFINDER_SECURE_CREDENTIALS_MANIFEST` para um arquivo JSON local do operador.
+
+O arquivo do manifest precisa ser regular, não ser symlink, ter um link e não ser gravável por grupo ou outros usuários.
+
+O diretório pai de cada destino precisa ser regular, não ser symlinkado, ser privado e pertencer ao operador atual.
+
+O formato do manifest é:
+
+```json
+{
+  "version": 1,
+  "destinations": [
+    {
+      "id": "specialist-env",
+      "path": "/private/operator/path/credentials.env",
+      "keys": ["EXAMPLE_API_KEY", "EXAMPLE_MODEL_KEY"]
+    }
+  ]
+}
+```
+
+Use nomes de chave no formato de variável de ambiente.
+
+O mesmo nome de chave não pode aparecer duas vezes no manifest.
+
+O modelo envia somente a lista de nomes allowlisted.
+
+O modelo não envia caminho, comando, sink ou valor secreto.
+
+Exemplo de inicialização:
+
+```sh
+chmod 700 /private/operator/path
+chmod 600 /private/operator/path/secure-credentials.json
+WAYFINDER_SECURE_CREDENTIALS_MANIFEST=/private/operator/path/secure-credentials.json \
+  pi -e ./.pi/opt-in-extensions/secure-credentials/index.ts
+```
+
+O arquivo de destino novo recebe modo `0600`.
+
+Uma atualização usa arquivo temporário privado, `fsync` quando suportado e rename atômico.
+
+Cada destino usa fila no processo e lock de diretório durante toda a janela de leitura, confirmação e escrita.
+
+Um lock existente faz a chamada pular sem coletar valor.
+
+Após uma falha do processo, remova o diretório `<destino>.lock` somente depois de confirmar que nenhuma sessão especialista ainda está ativa.
+
+Uma chave já existente permanece intacta por padrão.
+
+A substituição exige uma escolha explícita na tela TUI.
+
+Escape, Ctrl+C, abort e reload encerram a página sem aplicar a transação pendente.
+
+A tela usa uma máscara de largura fixa e nunca mostra prefixo, sufixo, tamanho exato ou fragmento do valor.
+
+O editor mantém o marcador `CURSOR_MARKER` quando recebe foco para posicionamento de IME.
+
+O valor não entra em `process.env`, argv, comandos shell, URLs, logs, stderr, resultado da ferramenta, renderer ou sessão JSONL.
+
+A implementação não promete zeroização de strings JavaScript.
+
+Ela reduz cópias e mantém o valor somente durante a coleta e a escrita.
+
+RPC, print e JSON recusam antes de abrir qualquer página ou ler um destino.
+
+Este primeiro corte não implementa Vercel, Convex, keychain, login de provider, rotação automática ou instalação automática.
