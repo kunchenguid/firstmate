@@ -206,8 +206,24 @@ test_long_task_id_keeps_verification_markers_on_one_pane_line() {
   pass "fm-spawn keeps verification markers bounded independently of task ID length"
 }
 
+test_wrapped_delivery_marker_still_proves_shell_execution() {
+  local id rec out rc
+  id='launch-wrap-z3'
+  rec=$(make_case wrapped-marker "$id")
+  read_case "$rec"
+  out=$(FM_FAKE_PANE_COLUMNS=20 \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$(long_raw_launch)")
+  rc=$?
+  expect_code 0 "$rc" "a terminal-wrapped verification marker should still prove launch delivery"$'\n'"$out"
+  assert_contains "$(cat "$CASE_DIR/screen-history")" "__FM_SPAWN_READY_" \
+    "wrapped-marker fixture did not render the shell-ready marker"
+  assert_contains "$out" "spawned $id" "wrapped marker did not complete verified launch delivery"
+  pass "fm-spawn accepts a verification marker split across terminal rows"
+}
+
 test_retries_the_recorded_truncation_signature_and_never_types_a_long_line
 test_refuses_to_report_success_when_every_delivery_check_is_truncated
 test_long_task_id_keeps_verification_markers_on_one_pane_line
+test_wrapped_delivery_marker_still_proves_shell_execution
 
 echo "# all fm-spawn-launch-delivery tests passed"
