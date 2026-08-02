@@ -187,6 +187,13 @@ The adapter starts and polls a named server before workspace, tab, pane, or agen
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
 
+A session name is not by itself proof of which physical server owns it: Herdr's own session registry can carry more than one registration under the same name, and a single liveness probe can transiently misreport.
+`fm_backend_herdr_server_ensure` never autostarts a server on the strength of one probe alone.
+When this process is itself running inside a Herdr pane, its own injected pane/session/socket identity (the same live proof `fm_backend_herdr_launcher_identity` uses for placement) is checked first: a verified match is proof positive that a server for that session is already running, so no probe is even attempted and no restart is ever risked; a verified mismatch refuses loudly rather than guessing which server to address.
+With no such identity to check, before concluding a server is missing the adapter consults the session registry by name rather than trusting the probe alone: zero registrations means it is safe to start one, exactly one reports its own running state directly, and more than one refuses loudly instead of guessing or starting another.
+The registry is re-checked once a freshly started server reports running, so a start that collided with a concurrent one is caught rather than accepted silently.
+Ordinary send and read operations (`fm_backend_herdr_target_ready`, used by every capture, send, and current-path call) apply the same own-pane identity check before addressing a session, so they refuse rather than silently reading or writing a different server than the one this process is actually running in.
+
 Literal text and Enter are separate operations for ordinary steers.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
@@ -303,6 +310,7 @@ tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
+tests/fm-backend-herdr-server-identity-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh

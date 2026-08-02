@@ -506,14 +506,20 @@ test_container_ensure_starts_server_and_workspace() {
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   # 2: server_ensure's status --json check -> not running
   printf '{"server":{"running":false}}\n' > "$resp/2.out"
-  # 3: `herdr server` backgrounded launch - no meaningful output
-  # 4: server_ensure poll -> now running
-  printf '{"server":{"running":true}}\n' > "$resp/4.out"
-  # 5: workspace list -> empty (no "firstmate" workspace yet)
-  printf '{"result":{"workspaces":[]}}\n' > "$resp/5.out"
-  # 6: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
+  # 3: server_ensure's pre-start ambiguity check (session list by name) -> no
+  # existing registration, safe to start.
+  printf '{"sessions":[]}\n' > "$resp/3.out"
+  # 4: `herdr server` backgrounded launch - no meaningful output
+  # 5: server_ensure poll -> now running
+  printf '{"server":{"running":true}}\n' > "$resp/5.out"
+  # 6: server_ensure's post-start confirmation (session list by name) -> the
+  # new server is the only registration under this name.
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/fake/fmtest.sock"}]}\n' > "$resp/6.out"
+  # 7: workspace list -> empty (no "firstmate" workspace yet)
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/7.out"
+  # 8: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
   # the seeded tab/pane ids in the SAME response - verified empirically).
-  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/6.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
@@ -536,6 +542,103 @@ test_container_ensure_reuses_existing_workspace() {
   [ "$out" = $'fmtest:w9\t' ] || fail "container_ensure should reuse the existing firstmate workspace id with an EMPTY seeded-tab field (an ADOPTED workspace is never a prune candidate), got '$out'"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "container_ensure should not create a workspace that already exists"
   pass "fm_backend_herdr_container_ensure: reuses an existing firstmate workspace without recreating it, and reports no seeded default tab (adopted, not created)"
+}
+
+# --- server_ensure hardening (2026-08-01 incident) ---------------------------
+#
+# fm_backend_herdr_server_ensure used to trust a single `status --json` probe
+# and unconditionally launch another `herdr ... server` whenever that probe
+# read anything but exactly "true" - including a transient miss against a
+# session that was already alive, which is exactly what caused a real,
+# disruptive restart of the captain's own already-running session. These
+# cases cover the two independent hardenings: an own-pane identity proof that
+# skips the probe entirely, and (when there is no such identity) an
+# authoritative session-registry check before ever concluding it is safe to
+# start a server, refusing loudly on ambiguity rather than guessing.
+
+test_server_ensure_own_pane_identity_skips_probe_and_never_restarts() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/ensure-own-pane-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  ( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT" )
+  status=$?
+  expect_code 0 "$status" "server_ensure must succeed when firstmate's own pane already proves the session is live"
+  assert_not_contains "$(cat "$log")" $'\x1f''status'$'\x1f''--json' \
+    "the own-pane short-circuit must never even reach the liveness probe"
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\n' \
+    "the own-pane short-circuit must never invoke 'herdr ... server' - the disruptive restart from the 2026-08-01 incident"
+  pass "fm_backend_herdr_server_ensure: an own-pane identity match skips the liveness probe entirely and never restarts"
+}
+
+test_server_ensure_own_pane_mismatch_refuses() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/ensure-own-pane-xsession"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=someother \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a launcher pane naming another herdr session must refuse rather than guess which server to address"
+  assert_contains "$out" "someother" "the cross-session refusal did not name the mismatched session"
+  [ ! -s "$log" ] || fail "a cross-session own-pane identity must be refused before any herdr call"
+  pass "fm_backend_herdr_server_ensure: refuses before any herdr call when firstmate's own pane names a different session"
+}
+
+test_server_ensure_no_ancestry_registry_confirms_already_running() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/ensure-registry-running"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"server":{"running":false}}\n' > "$resp/1.out"
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  ( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT" )
+  status=$?
+  expect_code 0 "$status" "server_ensure must succeed when the session registry shows this name already running"
+  assert_contains "$(cat "$log")" $'\x1f''session'$'\x1f''list'$'\x1f''--json' \
+    "server_ensure did not consult the session registry before concluding it was safe to start a server"
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\n' \
+    "a misreported liveness probe must never cause a server to be started against an already-registered, already-running session"
+  pass "fm_backend_herdr_server_ensure: with no launcher identity, a misreported probe does not restart a session the registry shows is already running"
+}
+
+test_server_ensure_no_ancestry_ambiguous_registry_refuses() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/ensure-registry-ambiguous"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"server":{"running":false}}\n' > "$resp/1.out"
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/fake/a.sock"},{"name":"fmtest","running":true,"socket_path":"/fake/b.sock"}]}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "server_ensure must refuse, not guess, when the session registry shows more than one registration under this name"
+  assert_contains "$out" "2 herdr sessions are already registered" "the ambiguity refusal did not explain itself"
+  assert_not_contains "$(cat "$log")" $'\x1f''server'$'\n' \
+    "an ambiguous registration must never be resolved by starting yet another server"
+  pass "fm_backend_herdr_server_ensure: refuses loudly on an ambiguous session registry instead of guessing or starting another server"
+}
+
+test_server_ensure_post_start_collision_refuses() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/ensure-post-start-collision"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: first status probe -> not running
+  printf '{"server":{"running":false}}\n' > "$resp/1.out"
+  # 2: pre-start registry check -> nothing owns it yet
+  printf '{"sessions":[]}\n' > "$resp/2.out"
+  # 3: `herdr server` backgrounded launch - no meaningful output
+  # 4: poll -> now running
+  printf '{"server":{"running":true}}\n' > "$resp/4.out"
+  # 5: post-start registry check -> a concurrent start collided
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/fake/a.sock"},{"name":"fmtest","running":true,"socket_path":"/fake/b.sock"}]}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "server_ensure must refuse when starting a server produced more than one registration under the same name"
+  assert_contains "$out" "registrations under that name" "the post-start collision refusal did not explain itself"
+  pass "fm_backend_herdr_server_ensure: refuses when a fresh start collides with a concurrent registration under the same name"
 }
 
 test_create_task_refuses_duplicate_label() {
@@ -3880,6 +3983,11 @@ test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
+test_server_ensure_own_pane_identity_skips_probe_and_never_restarts
+test_server_ensure_own_pane_mismatch_refuses
+test_server_ensure_no_ancestry_registry_confirms_already_running
+test_server_ensure_no_ancestry_ambiguous_registry_refuses
+test_server_ensure_post_start_collision_refuses
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
 test_workspace_ensure_prunes_default_tab

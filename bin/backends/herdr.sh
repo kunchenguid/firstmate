@@ -1208,14 +1208,96 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. Bounded poll for the server to report running.
+#
+# 2026-08-01 incident: this used to trust a single `status --json` probe and
+# unconditionally launch another `herdr ... server` whenever that one probe
+# read anything but exactly "true" - including a transient miss against a
+# session that was already alive. Reproduced in the isolated lab: forcing
+# just the FIRST such probe to misreport made this function invoke `herdr
+# server` again against an already-running named session, and the session
+# was unreachable for the remainder of the 10s poll before recovering - a
+# real, disruptive restart of a server nothing was ever wrong with, entirely
+# from this function's own lack of tolerance for one bad read. Two
+# independent hardenings close that:
+#
+#   1. If THIS process is itself running inside a herdr pane that verifiably
+#      belongs to <session> right now (fm_backend_herdr_own_pane_socket_check),
+#      that is proof positive a server for <session> is live - no RPC probe
+#      is trusted over it, and none is ever attempted. A pane that proves a
+#      DIFFERENT session refuses loudly rather than guessing which server to
+#      address or start.
+#   2. Otherwise (no herdr ancestry to check), before concluding "not running"
+#      from one probe, the authoritative session registry is consulted by
+#      NAME: zero matches means nothing owns it yet (safe to start), exactly
+#      one match reports its own running state directly, and MORE than one
+#      match is refused loudly rather than guessed at - never autostarting a
+#      server when any registration already claims this exact name. The same
+#      registry is re-checked once the new server reports running, so a
+#      start that collided with a concurrent one is caught rather than
+#      silently accepted.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i
+  local session=$1 running out i own_status sessions_json count pane=${HERDR_PANE_ID:-}
+
+  fm_backend_herdr_own_pane_socket_check "$session"
+  own_status=$?
+  case "$own_status" in
+    0) return 0 ;;
+    1)
+      case "$FM_BACKEND_HERDR_OWN_SOCKET_REASON" in
+        cross-session)
+          echo "error: this process's own herdr pane '$pane' reports session '$(fm_backend_herdr_session)' but '$session' was requested; refusing to start or address a server other than the one this process is actually running in" >&2
+          ;;
+        no-socket)
+          echo "error: this process's own herdr pane '$pane' has no injected socket identity; refusing to guess whether it belongs to session '$session'" >&2
+          ;;
+        bad-socket)
+          echo "error: this process's own herdr pane '$pane' reports an unusable socket path; refusing to guess whether it belongs to session '$session'" >&2
+          ;;
+        unresolvable-session)
+          echo "error: herdr session '$session' has no unambiguous socket to match against this process's own pane; refusing to guess server ownership" >&2
+          ;;
+        socket-mismatch)
+          echo "error: this process's own herdr pane '$pane' belongs to the server at '$FM_BACKEND_HERDR_OWN_SOCKET', not session '$session' at '$FM_BACKEND_HERDR_OWN_SESSION_SOCKET'; refusing to start or address a server other than the one this process is actually running in" >&2
+          ;;
+      esac
+      return 1
+      ;;
+    *) ;;  # 2: no herdr ancestry at all - fall through to the name-based path
+  esac
+
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
+
+  sessions_json=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || {
+    echo "error: could not list herdr sessions to confirm no server already owns '$session' before starting one" >&2
+    return 1
+  }
+  count=$(printf '%s' "$sessions_json" | jq -r --arg n "$session" '[.sessions[]? | select(.name == $n)] | length' 2>/dev/null)
+  case "$count" in
+    ''|*[!0-9]*)
+      echo "error: herdr session list returned an unreadable result for '$session'; refusing to guess whether a server already owns it" >&2
+      return 1
+      ;;
+  esac
+  if [ "$count" -gt 1 ]; then
+    echo "error: ${count} herdr sessions are already registered under the name '$session'; refusing to guess which one owns it or to start another" >&2
+    return 1
+  fi
+  if [ "$count" -eq 1 ]; then
+    running=$(printf '%s' "$sessions_json" | jq -r --arg n "$session" '[.sessions[]? | select(.name == $n)][0].running // false' 2>/dev/null)
+    [ "$running" = "true" ] && return 0
+  fi
+
   ( fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
-    [ "$running" = "true" ] && return 0
+    if [ "$running" = "true" ]; then
+      sessions_json=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || sessions_json=
+      count=$(printf '%s' "$sessions_json" | jq -r --arg n "$session" '[.sessions[]? | select(.name == $n)] | length' 2>/dev/null)
+      [ "$count" = 1 ] && return 0
+      echo "error: starting a herdr server for session '$session' produced ${count:-an unreadable number of} registrations under that name; refusing to proceed with an ambiguous server" >&2
+      return 1
+    fi
     sleep 0.5
   done
   echo "error: herdr server for session '$session' did not report running within 10s" >&2
@@ -1259,6 +1341,69 @@ fm_backend_herdr_workspace_find() {  # <session>
   fm_backend_herdr_workspace_find_all "$1" | head -1
 }
 
+# fm_backend_herdr_own_pane_socket_check: does THIS process's own injected
+# herdr pane identity verifiably belong to the exact live server behind
+# <session> right now? Single owner of the "same-session, same-socket" proof
+# shared by worker placement (fm_backend_herdr_launcher_identity) and
+# server-level binding (fm_backend_herdr_server_ensure,
+# fm_backend_herdr_target_ready): a process's own pane is proof positive that
+# a server for its exact session is live, which is stronger and cheaper than
+# any single RPC liveness probe, and a mismatch here is proof the caller is
+# about to address a DIFFERENT server than the one it is actually running in.
+#
+# Never prints anything - callers own their own wording, keyed off
+# FM_BACKEND_HERDR_OWN_SOCKET_REASON, so each call site's message stays
+# specific to what it was trying to do (place a worker vs. bind a server).
+#
+# Sets, only on a 0 return, FM_BACKEND_HERDR_OWN_SOCKET to the canonical
+# claimed socket. Always sets FM_BACKEND_HERDR_OWN_SOCKET_REASON.
+#
+# Returns:
+#   0 - this process's own pane's session and socket both match <session>.
+#   2 - this process is NOT running in a herdr pane (no HERDR_PANE_ID at all);
+#       reason "no-pane". Not a failure - there is simply no identity to bind.
+#   1 - a launcher pane IS claimed but its binding is missing, stale, or
+#       belongs to another herdr session/server. Reason is one of:
+#       cross-session, no-socket, bad-socket, unresolvable-session,
+#       socket-mismatch.
+fm_backend_herdr_own_pane_socket_check() {  # <session>
+  local session=$1 pane=${HERDR_PANE_ID:-} claimed_session claimed_socket session_socket
+  FM_BACKEND_HERDR_OWN_SOCKET_REASON=""
+  FM_BACKEND_HERDR_OWN_SOCKET=""
+  FM_BACKEND_HERDR_OWN_SESSION_SOCKET=""
+  if [ -z "$pane" ]; then
+    FM_BACKEND_HERDR_OWN_SOCKET_REASON="no-pane"
+    return 2
+  fi
+  claimed_session=$(fm_backend_herdr_session)
+  if [ "$claimed_session" != "$session" ]; then
+    FM_BACKEND_HERDR_OWN_SOCKET_REASON="cross-session"
+    return 1
+  fi
+  claimed_socket=${HERDR_SOCKET_PATH:-}
+  if [ -z "$claimed_socket" ]; then
+    FM_BACKEND_HERDR_OWN_SOCKET_REASON="no-socket"
+    return 1
+  fi
+  claimed_socket=$(fm_backend_herdr_canonical_socket_path "$claimed_socket") || {
+    FM_BACKEND_HERDR_OWN_SOCKET_REASON="bad-socket"
+    return 1
+  }
+  # shellcheck disable=SC2034  # callers format their own message on refusal
+  FM_BACKEND_HERDR_OWN_SOCKET=$claimed_socket
+  session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+    FM_BACKEND_HERDR_OWN_SOCKET_REASON="unresolvable-session"
+    return 1
+  }
+  # shellcheck disable=SC2034  # callers format their own message on refusal
+  FM_BACKEND_HERDR_OWN_SESSION_SOCKET=$session_socket
+  if [ "$claimed_socket" != "$session_socket" ]; then
+    FM_BACKEND_HERDR_OWN_SOCKET_REASON="socket-mismatch"
+    return 1
+  fi
+  return 0
+}
+
 # fm_backend_herdr_launcher_identity: the EXACT herdr workspace that the
 # process making this spawn is itself running in.
 #
@@ -1278,6 +1423,11 @@ fm_backend_herdr_workspace_find() {  # <session>
 # rewrite a running process's environment. Only a live read is the CURRENT
 # parent, which is what placement has to bind to.
 #
+# The same-session/same-socket proof itself is owned by
+# fm_backend_herdr_own_pane_socket_check; this function translates its reason
+# codes to the exact wording this call site has always used, then continues
+# with the pane/tab/workspace resolution that check does not cover.
+#
 # Sets, only on a 0 return:
 #   FM_BACKEND_HERDR_LAUNCHER_PANE_ID
 #   FM_BACKEND_HERDR_LAUNCHER_TAB_ID
@@ -1295,40 +1445,44 @@ fm_backend_herdr_workspace_find() {  # <session>
 #       refuse before creating or publishing any worker endpoint rather than
 #       degrading to a label search.
 fm_backend_herdr_launcher_identity() {  # <session>
-  local session=$1 pane=${HERDR_PANE_ID:-} claimed_session claimed_socket session_socket
+  local session=$1 pane=${HERDR_PANE_ID:-} status
   local pane_out tab_out list tab workspace
   FM_BACKEND_HERDR_LAUNCHER_PANE_ID=""
   FM_BACKEND_HERDR_LAUNCHER_TAB_ID=""
   FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID=""
   [ -n "$pane" ] || return 2
 
-  # Same-session proof, before the pane id is trusted at all: herdr pane ids
-  # ("w2:p1") restart at the same low numbers in every session, so a pane id
-  # borrowed from another session can silently resolve to a real but unrelated
-  # workspace here. The injected socket path is the server identity herdr
-  # exposes, and the session name independently binds the named session.
-  claimed_session=$(fm_backend_herdr_session)
-  if [ "$claimed_session" != "$session" ]; then
-    echo "error: herdr launcher pane '$pane' reports session '$claimed_session' but this spawn targets session '$session'; refusing to place a worker from a cross-session parent identity" >&2
-    return 1
-  fi
-  claimed_socket=${HERDR_SOCKET_PATH:-}
-  if [ -z "$claimed_socket" ]; then
-    echo "error: herdr launcher pane '$pane' has no injected socket identity; refusing to place a worker from an unverifiable parent identity" >&2
-    return 1
-  fi
-  claimed_socket=$(fm_backend_herdr_canonical_socket_path "$claimed_socket") || {
-    echo "error: herdr launcher pane '$pane' reports an unusable socket path; refusing to place a worker from an unverifiable parent identity" >&2
-    return 1
-  }
-  session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
-    echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
-    return 1
-  }
-  if [ "$claimed_socket" != "$session_socket" ]; then
-    echo "error: herdr launcher pane '$pane' belongs to the server at '$claimed_socket', not session '$session' at '$session_socket'; refusing to place a worker from a cross-session parent identity" >&2
-    return 1
-  fi
+  # Same-session/same-socket proof, before the pane id is trusted at all:
+  # herdr pane ids ("w2:p1") restart at the same low numbers in every
+  # session, so a pane id borrowed from another session can silently resolve
+  # to a real but unrelated workspace here. Owned by
+  # fm_backend_herdr_own_pane_socket_check; this call site keeps its own
+  # historical wording per reason.
+  fm_backend_herdr_own_pane_socket_check "$session"
+  status=$?
+  case "$status" in
+    2) return 2 ;;
+    1)
+      case "$FM_BACKEND_HERDR_OWN_SOCKET_REASON" in
+        cross-session)
+          echo "error: herdr launcher pane '$pane' reports session '$(fm_backend_herdr_session)' but this spawn targets session '$session'; refusing to place a worker from a cross-session parent identity" >&2
+          ;;
+        no-socket)
+          echo "error: herdr launcher pane '$pane' has no injected socket identity; refusing to place a worker from an unverifiable parent identity" >&2
+          ;;
+        bad-socket)
+          echo "error: herdr launcher pane '$pane' reports an unusable socket path; refusing to place a worker from an unverifiable parent identity" >&2
+          ;;
+        unresolvable-session)
+          echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
+          ;;
+        socket-mismatch)
+          echo "error: herdr launcher pane '$pane' belongs to the server at '$FM_BACKEND_HERDR_OWN_SOCKET', not session '$session' at '$FM_BACKEND_HERDR_OWN_SESSION_SOCKET'; refusing to place a worker from a cross-session parent identity" >&2
+          ;;
+      esac
+      return 1
+      ;;
+  esac
 
   pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || {
     echo "error: herdr launcher pane '$pane' could not be read in session '$session'; refusing to place a worker without its exact parent workspace" >&2
@@ -2268,6 +2422,12 @@ fm_backend_herdr_parse_target() {  # <target>
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
 }
 
+# fm_backend_herdr_target_ready: the single choke point for every ordinary
+# send and read (capture, capture_ansi, send_text_line, send_literal,
+# send_key, current_path). fm_backend_herdr_server_ensure owns binding this
+# call to the exact server identity of firstmate's own pane when it has one,
+# so every one of those operations refuses rather than silently addressing a
+# different server than the one this process is actually running in.
 fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
