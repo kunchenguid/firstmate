@@ -31,6 +31,7 @@
 #   (p) the override is never inferred from the environment or from after --
 #   (q) the torn-down-metadata refusal still fires first, unchanged
 #   (r) the real GitHub query is exercised end to end against API-shaped JSON
+#   (s) a head that changes after the early check is refused by the final check
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -106,6 +107,13 @@ case "$fields" in
       jq -r "$query" "$FM_TEST_GH_FIXTURE"
       exit $?
     fi
+    if [ -n "${FM_TEST_GH_VERIFY_SEQUENCE_PREFIX:-}" ]; then
+      verify_call=$(cat "$FM_TEST_GH_VERIFY_SEQUENCE_PREFIX.count" 2>/dev/null || printf '0')
+      verify_call=$((verify_call + 1))
+      printf '%s\n' "$verify_call" > "$FM_TEST_GH_VERIFY_SEQUENCE_PREFIX.count"
+      cat "$FM_TEST_GH_VERIFY_SEQUENCE_PREFIX.$verify_call"
+      exit 0
+    fi
     cat "$FM_TEST_GH_VERIFY_PAYLOAD"
     exit 0
     ;;
@@ -148,6 +156,7 @@ run_pr_merge() {
   FM_TEST_GH_VERIFY_PAYLOAD="$case_dir/verify.txt" \
   FM_TEST_GH_VERIFY_RC="${FM_TEST_GH_VERIFY_RC:-0}" \
   FM_TEST_GH_FIXTURE="${FM_TEST_GH_FIXTURE:-}" \
+  FM_TEST_GH_VERIFY_SEQUENCE_PREFIX="${FM_TEST_GH_VERIFY_SEQUENCE_PREFIX:-}" \
   PATH="${FM_TEST_PATH_OVERRIDE:-$case_dir/fakebin:$PATH}" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -699,6 +708,37 @@ test_verified_merge_records_verification() {
   pass "fm-pr-merge records the verified head so a verified merge is distinguishable"
 }
 
+test_final_verification_refuses_changed_head() {
+  local case_dir rc
+  local early_head=9191919191919191919191919191919191919191
+  local changed_head=9292929292929292929292929292929292929292
+  case_dir=$(make_case final-verification-race)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$early_head"
+  write_green_payload "$case_dir/verify-sequence.1" "$early_head"
+  write_verify_payload "$case_dir/verify-sequence.2" "$changed_head" MERGEABLE '' 10 1
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  FM_TEST_GH_VERIFY_SEQUENCE_PREFIX="$case_dir/verify-sequence" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/44 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "final-verification-race: a changed red head must refuse the merge"
+  assert_grep '1 of 10 check runs are not successful' "$case_dir/stderr" \
+    "final-verification-race: the final check did not report the changed head's failure"
+  assert_grep "$changed_head" "$case_dir/stderr" \
+    "final-verification-race: the refusal did not name the changed head"
+  assert_grep 'pr=https://github.com/example/repo/pull/44' "$case_dir/state/task-x1.meta" \
+    "final-verification-race: the final check did not run after fm-pr-check"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "final-verification-race: the changed red head still reached gh-axi pr merge"
+  pass "fm-pr-merge re-verifies after fm-pr-check and refuses a changed red head"
+}
+
 # The override must be an explicit flag on this invocation and nothing else: no
 # environment fallback, and no smuggling it through to gh-axi after --.
 test_override_is_never_inferred() {
@@ -843,5 +883,6 @@ test_unreadable_forge_state_refuses
 test_absent_gh_refuses
 test_allow_unverified_merges_and_records_override
 test_verified_merge_records_verification
+test_final_verification_refuses_changed_head
 test_override_is_never_inferred
 test_real_query_against_api_shaped_json

@@ -5,11 +5,14 @@
 # is parsed by bin/fm-pr-lib.sh and the derived owner/repository and PR number
 # are passed to gh-axi as separate arguments.
 #
-# Verification re-reads the pull request at merge time rather than trusting any
-# recorded value, because a PR can go red between an earlier check and the merge
-# and state/<id>.meta may carry a stale pr_head=. One `gh pr view` call reads the
-# head, mergeability, review decision, and check rollup together, so every
-# refusal names the exact head it evaluated. The merge is refused when:
+# Verification re-reads the pull request rather than trusting any recorded
+# value, because a PR can go red between an earlier check and the merge and
+# state/<id>.meta may carry a stale pr_head=. An early read refuses without
+# recording the PR or arming its poll, then a final authoritative read runs after
+# fm-pr-check.sh and immediately before the verification metadata write and
+# merge. Each `gh pr view` call reads the head, mergeability, review decision,
+# and check rollup together, so every refusal names the exact head it evaluated.
+# The merge is refused when:
 #   * no check runs exist on that head - an empty rollup is never read as green,
 #     which is the whole point of this guard: a cross-repo fork PR held at
 #     action_required dispatches zero workflows and reports zero failures;
@@ -28,6 +31,16 @@
 # verified. Both keys are written before pr= so the metadata identity contract in
 # bin/fm-pr-lib.sh still parses. The flag is recognised only before the optional
 # -- separator; after it, it is forwarded to gh-axi, which rejects it.
+#
+# The final verification is not atomically bound to the merge. It narrows the
+# remaining race window to the verification metadata write, but a head can still
+# change before the merge. Closing that race requires a server-side head
+# precondition under decision
+# pipeline-reports-green-on-absent-ci-decision-merge-atomic-binding. The real
+# `gh pr merge` supports `--match-head-commit SHA`, but gh-axi constructs its gh
+# arguments from a fixed allowlist of the method, --auto, --delete-branch, --body,
+# and --subject and silently drops other flags. Adopting the precondition later
+# therefore requires changing the single gh-axi invocation at the end.
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
@@ -215,9 +228,21 @@ record_merge_verification() {
   MERGE_META_TMP=
 }
 
+if [ "$ALLOW_UNVERIFIED" -ne 1 ]; then
+  verify_current_head || exit 1
+fi
+
+"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+grep -qxF "pr=$URL" "$META" || {
+  echo "error: PR metadata recording failed" >&2
+  exit 1
+}
+
 if [ "$ALLOW_UNVERIFIED" -eq 1 ]; then
   MERGE_VERIFICATION=override
+  VERIFIED_HEAD=
 else
+  VERIFIED_HEAD=
   verify_current_head || exit 1
   MERGE_VERIFICATION=verified
 fi
@@ -228,12 +253,6 @@ record_merge_verification "$MERGE_VERIFICATION" "$VERIFIED_HEAD" || {
 }
 grep -qxF "merge_verification=$MERGE_VERIFICATION" "$META" || {
   echo "error: merge verification metadata could not be recorded" >&2
-  exit 1
-}
-
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
-grep -qxF "pr=$URL" "$META" || {
-  echo "error: PR metadata recording failed" >&2
   exit 1
 }
 
