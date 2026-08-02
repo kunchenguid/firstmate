@@ -66,16 +66,15 @@
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
 #          The operational alert inbox watch follows fm-ops-inbox-lib.sh's
-#          decision: auto mode arms only when this home has an alert inbox, while
-#          explicit enablement arms fail-closed even when the spool is absent.
+#          decision: it arms only from the home's explicit private config; auto
+#          mode arms when the configured alert inbox exists, while explicit
+#          enablement arms fail-closed even when the spool is absent.
 #          docs/ops-inbox-wake.md owns the contract.
 #          Arming registers the reserved standing check state/ops-watch.check.sh
 #          through the ordinary custom-check trust binding.
 #          Arming and disarming are silent unless FM_BOOTSTRAP_VERBOSE_FACTS=1
 #          requests the BOOTSTRAP_INFO fact.
 #          Only a failure prints an actionable OPS_INBOX line.
-#          FM_OPS_INBOX_STATE_DIR overrides the default watched operations state
-#          directory for tests and specialized setups.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -746,10 +745,10 @@ EOF
 
 # Operational alert inbox watch: keep the standing check that turns an unreviewed
 # critical alert backlog into an ordinary watcher wake. It is armed exactly when
-# fm_ops_inbox_watch_expected says so - by default only when the configured alert
-# spool actually exists - so a home with no operations runtime stays inert and
-# writes nothing. Arming registers state/ops-watch.check.sh through the normal
-# custom-check trust binding, which is what authorizes the watcher to run it.
+# fm_ops_inbox_watch_expected says so - only after private configuration selects
+# an alert inbox - so a home with no configured integration stays inert and writes
+# nothing. Arming registers state/ops-watch.check.sh through the normal custom-
+# check trust binding, which is what authorizes the watcher to run it.
 # Steady state, either armed or inert, is silent; only a real transition prints a
 # BOOTSTRAP_INFO fact, and only a failure prints an actionable OPS_INBOX line.
 # The check id is reserved, so a task that somehow owns it wins and the watch
@@ -795,6 +794,9 @@ ops_inbox_setup() {
   fi
 
   if ! fm_ops_inbox_config_load "$CONFIG"; then
+    if [ "$FM_OPS_INBOX_CONFIG_ERROR" = "jq is required to read config/ops-inbox.json" ]; then
+      echo "MISSING: jq (install: $(install_cmd jq))"
+    fi
     echo "OPS_INBOX: $FM_OPS_INBOX_CONFIG_ERROR; fix config/ops-inbox.json, then rerun bootstrap"
     return 0
   fi

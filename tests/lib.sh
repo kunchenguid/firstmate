@@ -34,14 +34,6 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
-# Keep the operational alert inbox watch out of every temp home by default. Its
-# arming decision otherwise reads the real machine's alert spool under $HOME, so
-# a developer machine that happens to run that operations runtime would arm a
-# standing check inside unrelated test homes and change their bootstrap results.
-# Point it at a path that cannot exist; a test that exercises the watch sets its
-# own FM_OPS_INBOX_STATE_DIR or config/ops-inbox.json explicitly.
-export FM_OPS_INBOX_STATE_DIR="/nonexistent/fm-tests-no-ops-inbox"
-
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

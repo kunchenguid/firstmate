@@ -1,4 +1,3 @@
 {
-  "enabledModels": ["claude-*", "openai-codex/*"],
   "theme": "firstmate-dark"
 }

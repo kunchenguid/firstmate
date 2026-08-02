@@ -72,18 +72,17 @@ fm_ops_inbox_shim_content() {
 }
 
 # Resolve the watch settings from optional <config-dir>/ops-inbox.json.
-# Absent config means auto: watch the default operations state directory when its
-# alert spool actually exists, so a home with no such runtime stays inert.
-# That default directory is $HOME/.openclaw/state, overridable for tests and
-# specialized setups by FM_OPS_INBOX_STATE_DIR; an explicit config value wins over
-# both so a configured home never depends on ambient environment.
-# A malformed config is preserved as an error rather than silently defaulted.
+# An absent config disables the optional integration, so one home's external
+# operations runtime can never become another install's implicit default.
+# A present config defaults to auto mode and must name its watched state_dir or
+# all three paths explicitly. A malformed config is preserved as an error rather
+# than silently defaulted.
 # shellcheck disable=SC2034 # Result globals read by callers after this returns.
 fm_ops_inbox_config_load() {
   local config_dir=$1 file raw
   FM_OPS_INBOX_CONFIG_ERROR=
-  FM_OPS_INBOX_ENABLED=auto
-  FM_OPS_INBOX_STATE_DIR="${FM_OPS_INBOX_STATE_DIR:-${HOME:-}/.openclaw/state}"
+  FM_OPS_INBOX_ENABLED=false
+  FM_OPS_INBOX_STATE_DIR=
   FM_OPS_INBOX_SPOOL=
   FM_OPS_INBOX_ACKS=
   FM_OPS_INBOX_RECEIPT=
@@ -96,6 +95,7 @@ fm_ops_inbox_config_load() {
 
   file="$config_dir/ops-inbox.json"
   if [ -e "$file" ] || [ -L "$file" ]; then
+    FM_OPS_INBOX_ENABLED=auto
     if [ ! -f "$file" ] || [ -L "$file" ]; then
       FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json is not an ordinary file"
       return 1
@@ -192,9 +192,17 @@ $raw
 EOF
   fi
 
-  [ -n "$FM_OPS_INBOX_SPOOL" ] || FM_OPS_INBOX_SPOOL="$FM_OPS_INBOX_STATE_DIR/ops-inbox.jsonl"
-  [ -n "$FM_OPS_INBOX_ACKS" ] || FM_OPS_INBOX_ACKS="$FM_OPS_INBOX_STATE_DIR/ops-inbox-acks.jsonl"
-  [ -n "$FM_OPS_INBOX_RECEIPT" ] || FM_OPS_INBOX_RECEIPT="$FM_OPS_INBOX_STATE_DIR/ops-inbox-receipt.json"
+  if [ "$FM_OPS_INBOX_ENABLED" != false ] \
+    && [ -z "$FM_OPS_INBOX_STATE_DIR" ] \
+    && { [ -z "$FM_OPS_INBOX_SPOOL" ] || [ -z "$FM_OPS_INBOX_ACKS" ] || [ -z "$FM_OPS_INBOX_RECEIPT" ]; }; then
+    FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json must set state_dir or all of spool, acks, and receipt when enabled"
+    return 1
+  fi
+  if [ -n "$FM_OPS_INBOX_STATE_DIR" ]; then
+    [ -n "$FM_OPS_INBOX_SPOOL" ] || FM_OPS_INBOX_SPOOL="$FM_OPS_INBOX_STATE_DIR/ops-inbox.jsonl"
+    [ -n "$FM_OPS_INBOX_ACKS" ] || FM_OPS_INBOX_ACKS="$FM_OPS_INBOX_STATE_DIR/ops-inbox-acks.jsonl"
+    [ -n "$FM_OPS_INBOX_RECEIPT" ] || FM_OPS_INBOX_RECEIPT="$FM_OPS_INBOX_STATE_DIR/ops-inbox-receipt.json"
+  fi
   [ "$FM_OPS_INBOX_GROWTH" -ge 1 ] || FM_OPS_INBOX_GROWTH=1
 }
 

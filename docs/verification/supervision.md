@@ -290,13 +290,10 @@ FM_PI_PACKAGE_DIR="$(npm root -g)/@earendil-works/pi-coding-agent" tests/fm-pi-p
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.82.0
 ok - Firstmate Pi footer preserves fields, statuses, and cumulative native usage
 ok - Pi 0.82.0 real TUI rendered the Firstmate footer and retained its project/branch/model title
-ok - Pi 0.82.0 model picker defaults to OAuth subscriptions and keeps OpenRouter under all providers
 ```
 
 The focused Pi presentation test resolves the installed compiler and Pi package through the npm environment, covers narrow, medium, and wide footer layouts, asserts that every complete native field and status value remains represented without overflow, verifies cumulative usage across every Pi 0.82.0 usage-bearing entry type, and checks stable single-line keyed status rendering.
 Its offline real-TUI check launches only the tracked footer extension, confirms the themed footer renders without provider traffic, and reads tmux's terminal title after startup to verify the project, branch, and model title survives Pi's default rebind update.
-The isolated model-picker check supplies fixture OAuth credentials for Anthropic and OpenAI Codex alongside an OpenRouter API key, verifies the picker opens on the subscription-backed scoped providers, and verifies Tab still reaches OpenRouter through the all-provider view.
-The tracked model scope uses family and provider wildcards rather than a fixed model catalog, so Pi catalog refreshes can add subscription-backed models without a Firstmate settings update.
 
 ## Wedge-alarm channels
 

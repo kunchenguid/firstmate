@@ -119,9 +119,10 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`veri
 ## Operational alert inbox watch (config/ops-inbox.json)
 
 On a machine whose operations runtime records critical alerts into a durable inbox rather than a chat transport, firstmate watches that inbox so an unreviewed backlog wakes the first mate instead of sitting unread.
-Local, gitignored `config/ops-inbox.json` under the effective home holds this watch's operating choices.
+Local, gitignored `config/ops-inbox.json` under the effective home holds this watch's operating choices and source paths.
+Absent configuration leaves the optional watch disabled.
 This file is deliberately not inherited into secondmate homes, and a secondmate home never auto-arms the watch: one machine has one alert inbox, and the primary owns watching it.
-[`ops-inbox-wake.md`](ops-inbox-wake.md) owns the settings, defaults, arming, wake, dedupe, and two-paths-named-ops-inbox contracts; `bin/fm-ops-inbox-lib.sh`'s header owns the exact resolution mechanics.
+[`ops-inbox-wake.md`](ops-inbox-wake.md) owns the settings, defaults, arming, wake, and dedupe contracts; `bin/fm-ops-inbox-lib.sh`'s header owns the exact resolution mechanics.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -461,7 +462,6 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
-FM_OPS_INBOX_STATE_DIR= # alternate watched operations state dir for the alert inbox watch, mainly for tests; an explicit config/ops-inbox.json value wins (docs/ops-inbox-wake.md)
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
