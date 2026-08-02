@@ -14,6 +14,7 @@ if [ -z "${FM_PROPLANE_AGENT_CONFIG:-}" ]; then
     # under `set -e`; with the sentinel, every reader below takes its
     # "config missing" branch and returns non-zero no matter how it was invoked.
     FM_PROPLANE_AGENT_CONFIG=/nonexistent/fm-proplane-agent-branches-unresolved
+    # shellcheck disable=SC2317  # reachable when executed rather than sourced: `return` fails there, so `exit` is what stops it.
     return 1 2>/dev/null || exit 1
   fi
   FM_PROPLANE_AGENT_CONFIG="${FM_HOME}/config/proplane-agent-branches"
