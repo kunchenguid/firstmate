@@ -241,16 +241,11 @@ clear_stale_recorded_watcher_lock() {
 HEALTHY_PID=
 HEALTHY_IDENTITY=
 healthy_watcher() {
-  local candidate_pid candidate_identity
   HEALTHY_PID=
   HEALTHY_IDENTITY=
-  candidate_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
-  candidate_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 1
   HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
-  [ "$candidate_pid" = "$HEALTHY_PID" ] || return 1
-  [ -n "$candidate_identity" ] || return 1
-  HEALTHY_IDENTITY=$candidate_identity
+  HEALTHY_IDENTITY=$FM_WATCHER_HEALTHY_IDENTITY
 }
 
 report_attached() {

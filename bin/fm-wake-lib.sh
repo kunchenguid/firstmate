@@ -78,8 +78,10 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  FM_WATCHER_MATCHED_IDENTITY=
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
@@ -88,22 +90,28 @@ fm_watcher_lock_matches_pid() {
   [ "$lock_path" = "$watch_path" ] || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ]
+  [ "$current_identity" = "$lock_identity" ] || return 1
+  FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
 FM_WATCHER_HEALTHY_PID=
+FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
   FM_WATCHER_HEALTHY_PID=
+  FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  identity=$FM_WATCHER_MATCHED_IDENTITY
   age=$(fm_path_age "$beat")
   [ "$age" -lt "$grace" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
+  # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
+  FM_WATCHER_HEALTHY_IDENTITY=$identity
   return 0
 }
 
