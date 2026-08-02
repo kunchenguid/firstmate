@@ -264,6 +264,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/rsi-ops.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/scripts.md",
       "audience": "operator-current"
     },

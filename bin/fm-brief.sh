@@ -290,6 +290,9 @@ The report must stand alone: what you did, what you found, the evidence (command
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
+
+Report: \`$DATA/$ID/report.md\` (absolute path resolved from \`FM_HOME\`).
+Status: \`$STATE/$ID.status\` (absolute path resolved from \`FM_HOME\`).
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
@@ -407,5 +410,7 @@ If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, ad
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
+
+Status: \`$STATE/$ID.status\` (absolute path resolved from \`FM_HOME\`).
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

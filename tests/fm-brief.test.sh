@@ -632,6 +632,23 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_ship_and_scout_footers_use_absolute_home_paths() {
+  local home ship scout
+  home="$TMP_ROOT/rsi-footer-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" rsi-ship firstmate >/dev/null 2>&1
+  ship="$home/data/rsi-ship/brief.md"
+  assert_grep "Status: \`$home/state/rsi-ship.status\` (absolute path resolved from \`FM_HOME\`)." "$ship" \
+    "ship brief did not render an absolute FM_HOME status footer"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" rsi-scout firstmate --scout >/dev/null 2>&1
+  scout="$home/data/rsi-scout/brief.md"
+  assert_grep "Report: \`$home/data/rsi-scout/report.md\` (absolute path resolved from \`FM_HOME\`)." "$scout" \
+    "scout brief did not render an absolute FM_HOME report footer"
+  assert_grep "Status: \`$home/state/rsi-scout.status\` (absolute path resolved from \`FM_HOME\`)." "$scout" \
+    "scout brief did not render an absolute FM_HOME status footer"
+  pass "fm-brief.sh: ship and scout footers render absolute FM_HOME paths"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -649,3 +666,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_ship_and_scout_footers_use_absolute_home_paths
