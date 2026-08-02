@@ -87,6 +87,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
   <id>/log.md        crewmate working log, maintained by the crewmate as it works; its resume-from-disk memory, survives teardown, and never wakes firstmate
+  repos/<key>.md     per-repo ground truth (architecture, studied tool choices, hard constraints) injected into every scaffolded brief; `bin/fm-ground.sh` owns resolution and the external-repo `repo-path:` form
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<utc-stamp> <state>: <note>" wake-event lines, not current-state truth
