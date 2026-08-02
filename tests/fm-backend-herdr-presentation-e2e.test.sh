@@ -321,6 +321,8 @@ LAB_READY=0
 RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
 MACOS_ACTIVATION_WATCH_PID=
+RESTART_RECOVERY_LOCK_OWNER_PID=
+RESTART_RECOVERY_PID=
 cleanup_all() {
   local wt
   if [ -n "$MACOS_ACTIVATION_WATCH_PID" ]; then
@@ -332,6 +334,16 @@ cleanup_all() {
     kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     LOCK_CONTENTION_OWNER_PID=
+  fi
+  if [ -n "$RESTART_RECOVERY_PID" ]; then
+    kill "$RESTART_RECOVERY_PID" 2>/dev/null || true
+    wait "$RESTART_RECOVERY_PID" 2>/dev/null || true
+    RESTART_RECOVERY_PID=
+  fi
+  if [ -n "$RESTART_RECOVERY_LOCK_OWNER_PID" ]; then
+    kill "$RESTART_RECOVERY_LOCK_OWNER_PID" 2>/dev/null || true
+    wait "$RESTART_RECOVERY_LOCK_OWNER_PID" 2>/dev/null || true
+    RESTART_RECOVERY_LOCK_OWNER_PID=
   fi
   while IFS= read -r wt; do
     [ -n "$wt" ] || continue
@@ -1191,8 +1203,58 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     fail "$RESTART_ID restart fixture unexpectedly retained a registered agent"
   fi
   RECLAIM_FOCUS=$(focus_snapshot)
-  spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" \
-    || fail "$RESTART_ID same-identity reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
+  if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
+    RESTART_RECOVERY_LOCK_READY="$TMP_ROOT/restart-recovery-lock-ready"
+    RESTART_RECOVERY_LOCK_ATTEMPTED="$TMP_ROOT/restart-recovery-lock-attempted"
+    RESTART_RECOVERY_LOCK_RELEASE="$TMP_ROOT/restart-recovery-lock-release"
+    RESTART_RECOVERY_LOCK_PATH=$(session_presentation_lock_path) \
+      || fail "could not resolve the session lock for restart recovery"
+    ROOT="$ROOT" READY="$RESTART_RECOVERY_LOCK_READY" ATTEMPTED="$RESTART_RECOVERY_LOCK_ATTEMPTED" RELEASE="$RESTART_RECOVERY_LOCK_RELEASE" LOCK="$RESTART_RECOVERY_LOCK_PATH" bash -c '
+      . "$ROOT/bin/fm-wake-lib.sh"
+      fm_lock_try_acquire "$LOCK" || exit 1
+      owner=$(readlink "$LOCK") || exit 1
+      holder=${BASHPID:-$$}
+      cleanup_owner() {
+        if [ -p "$owner/pid" ]; then
+          printf "%s\n" "$holder" > "$owner/pid.next"
+          mv -f "$owner/pid.next" "$owner/pid"
+        fi
+        fm_lock_release "$LOCK"
+      }
+      trap cleanup_owner EXIT
+      trap "exit 143" HUP INT TERM
+      rm -f "$owner/pid"
+      mkfifo "$owner/pid" || exit 1
+      : > "$READY"
+      printf "%s\n" "$holder" > "$owner/pid"
+      printf "%s\n" "$holder" > "$owner/pid.next"
+      mv -f "$owner/pid.next" "$owner/pid"
+      : > "$ATTEMPTED"
+      while [ ! -e "$RELEASE" ]; do sleep 0.05; done
+      fm_lock_release "$LOCK"
+      trap - EXIT
+    ' &
+    RESTART_RECOVERY_LOCK_OWNER_PID=$!
+    while [ ! -e "$RESTART_RECOVERY_LOCK_READY" ] && kill -0 "$RESTART_RECOVERY_LOCK_OWNER_PID" 2>/dev/null; do sleep 0.01; done
+    [ -e "$RESTART_RECOVERY_LOCK_READY" ] || fail "could not hold the session lock for restart recovery"
+    spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" &
+    RESTART_RECOVERY_PID=$!
+    while [ ! -e "$RESTART_RECOVERY_LOCK_ATTEMPTED" ] \
+      && kill -0 "$RESTART_RECOVERY_LOCK_OWNER_PID" 2>/dev/null \
+      && kill -0 "$RESTART_RECOVERY_PID" 2>/dev/null; do sleep 0.01; done
+    [ -e "$RESTART_RECOVERY_LOCK_ATTEMPTED" ] \
+      || fail "restart recovery did not attempt the held session lock"
+    sleep 6
+    : > "$RESTART_RECOVERY_LOCK_RELEASE"
+    wait "$RESTART_RECOVERY_LOCK_OWNER_PID" || fail "restart-recovery lock owner failed"
+    RESTART_RECOVERY_LOCK_OWNER_PID=
+    wait "$RESTART_RECOVERY_PID" \
+      || fail "$RESTART_ID reclaim gave up before the delayed session lock was released: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
+    RESTART_RECOVERY_PID=
+  else
+    spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" \
+      || fail "$RESTART_ID same-identity reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
+  fi
   NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
   NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)

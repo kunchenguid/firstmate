@@ -284,9 +284,6 @@ HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 # Fresh best-effort projection gives a contended session lock five seconds
 # before falling back to the ordinary flat layout.
 HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS=50
-# Exact recovery gives each distinct lock owner enough time for its permitted
-# 60-second Treehouse handoff plus bounded projection and launch-settle work.
-HERDR_PRESENTATION_RECOVERY_LOCK_ATTEMPTS=700
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
@@ -369,38 +366,25 @@ spawn_abort_cleanup() {
 }
 trap spawn_abort_cleanup EXIT
 
-# One bounded lock per live Herdr session/socket, shared across all homes.
+# One lock per live Herdr session/socket, shared across all homes.
 # <session> is required so secondmate and primary spawns serialize against the
 # same session without writing any other home's state directory.
 spawn_herdr_presentation_order_lock_acquire() {
-  local session=${1:-} max_attempts=${2:-$HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS}
-  local reset_on_owner_change=${3:-0} attempt lock_path owner observed_owner
+  local session=${1:-} policy=${2:-best-effort} attempt lock_path
   [ -n "$session" ] || session=$(fm_backend_herdr_session)
-  case "$max_attempts" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  [ "$max_attempts" -gt 0 ] || return 1
-  case "$reset_on_owner_change" in
-    0|1) ;;
-    *) return 1 ;;
-  esac
   lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
   HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
+  if [ "$policy" = exact-recovery ]; then
+    fm_lock_acquire_wait "$HERDR_PRESENTATION_ORDER_LOCK" || return 1
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=1
+    return 0
+  fi
+  [ "$policy" = best-effort ] || return 1
   attempt=0
-  observed_owner=
-  while [ "$attempt" -lt "$max_attempts" ]; do
+  while [ "$attempt" -lt "$HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS" ]; do
     if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
       HERDR_PRESENTATION_ORDER_LOCK_HELD=1
       return 0
-    fi
-    if [ "$reset_on_owner_change" = 1 ]; then
-      owner=$(fm_lock_link_owner "$HERDR_PRESENTATION_ORDER_LOCK" 2>/dev/null || true)
-      if [ -n "$owner" ]; then
-        if [ -n "$observed_owner" ] && [ "$owner" != "$observed_owner" ]; then
-          attempt=0
-        fi
-        observed_owner=$owner
-      fi
     fi
     sleep 0.1
     attempt=$((attempt + 1))
@@ -1107,8 +1091,7 @@ case "$BACKEND" in
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
           exit 1
         }
-        spawn_herdr_presentation_order_lock_acquire \
-          "$HERDR_SES" "$HERDR_PRESENTATION_RECOVERY_LOCK_ATTEMPTS" 1 || {
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" exact-recovery || {
           echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
           exit 1
         }
@@ -1335,7 +1318,13 @@ spawn_capture() {  # <target>
 }
 
 spawn_capture_has_line() {  # <capture> <exact-line>
-  printf '%s\n' "$1" | grep -Fqx "$2"
+  # Herdr's pane read exposes terminal-row wrapping literally.  A marker can
+  # therefore be split across adjacent rows even though the shell emitted one
+  # newline-terminated line.  The full marker is deliberately absent from the
+  # submitted probe, so joining captured rows cannot mistake typed input for
+  # execution proof.
+  printf '%s\n' "$1" | grep -Fqx "$2" \
+    || printf '%s' "$1" | tr -d '\r\n' | grep -Fq "$2"
 }
 
 spawn_wait_for_marker() {  # <target> <marker>

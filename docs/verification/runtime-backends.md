@@ -340,6 +340,28 @@ FM_REQUIRE_MACOS_FOCUS_AUDIT=1 \
 The test starts an `NSWorkspace.didActivateApplicationNotification` watcher before the complete projected spawn and keeps it active through a two-second settle window.
 It fails if any activation has an empty or different bundle identifier from the initially frontmost app.
 The required macOS Herdr-focus CI job makes an unavailable activation audit a hard failure, while non-macOS runs retain the logical focus checks without claiming app-activation coverage.
+
+The guarded lifecycle stress suite ran on 2026-08-02 against Herdr 0.7.3:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Herdr lab: flag-off spawn retains the Stage 1 Herdr command sequence with zero ordering calls
+ok - real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence
+ok - real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent
+ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift
+ok - real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority
+ok - real Herdr lab validation completed on Herdr 0.7.3 with the default-session tripwire intact
+```
+
+The runner exited with status 0.
+The `fm-hibit-resume-r1` case held the named-session presentation lock for six seconds, beyond fresh projection's five-second budget, and the same-identity recovery completed after release instead of falling back or refusing the resume.
+The guard exercised only a generated non-default `fm-lab-` session and captured the server-log window before and after the run.
 ### Workspace-removal focus safety
 
 The focus-flash regression ran on 2026-07-28 against Herdr 0.7.5 protocol 17 on macOS aarch64:

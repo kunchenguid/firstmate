@@ -2229,45 +2229,41 @@ test_presentation_session_lock_path_rejects_malformed_socket() {
   pass "herdr presentation lock: null and missing socket paths fail closed"
 }
 
-test_presentation_recovery_lock_budget_covers_recovery_wave() {
-  local lock_source default_attempts recovery_attempts out
+test_presentation_recovery_lock_waits_on_live_owner() {
+  local lock_source default_attempts expected out
   lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
   default_attempts=$(sed -n 's/^HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS=//p' "$ROOT/bin/fm-spawn.sh")
-  recovery_attempts=$(sed -n 's/^HERDR_PRESENTATION_RECOVERY_LOCK_ATTEMPTS=//p' "$ROOT/bin/fm-spawn.sh")
-  out=$(LOCK_SOURCE="$lock_source" DEFAULT_ATTEMPTS="$default_attempts" RECOVERY_ATTEMPTS="$recovery_attempts" \
+  expected="$default_attempts 0 1 1"
+  out=$(LOCK_SOURCE="$lock_source" DEFAULT_ATTEMPTS="$default_attempts" \
     bash -c '
       HERDR_PRESENTATION_ORDER_LOCK=
       HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+      HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS=$DEFAULT_ATTEMPTS
       eval "$LOCK_SOURCE"
       fm_backend_herdr_presentation_session_lock_path() { printf "%s" /tmp/fm-herdr-budget.lock; }
       sleep() { :; }
       tries=0
-      owner=
+      waits=0
       fm_lock_try_acquire() {
         tries=$((tries + 1))
-        if [ "$tries" -le 600 ]; then
-          owner=/tmp/fm-herdr-budget.lock.owner.first
-          return 1
-        fi
-        if [ "$tries" -le 1200 ]; then
-          owner=/tmp/fm-herdr-budget.lock.owner.second
-          return 1
-        fi
+        return 1
+      }
+      fm_lock_acquire_wait() {
+        [ "$1" = /tmp/fm-herdr-budget.lock ] || exit 1
+        waits=$((waits + 1))
         return 0
       }
-      fm_lock_link_owner() { printf "%s\n" "$owner"; }
-      if spawn_herdr_presentation_order_lock_acquire fmtest "$DEFAULT_ATTEMPTS"; then
+      if spawn_herdr_presentation_order_lock_acquire fmtest; then
         exit 1
       fi
       printf "%s " "$tries"
       tries=0
-      owner=
-      spawn_herdr_presentation_order_lock_acquire fmtest "$RECOVERY_ATTEMPTS" 1 || exit 1
-      printf "%s %s" "$tries" "$HERDR_PRESENTATION_ORDER_LOCK_HELD"
+      spawn_herdr_presentation_order_lock_acquire fmtest exact-recovery || exit 1
+      printf "%s %s %s" "$tries" "$waits" "$HERDR_PRESENTATION_ORDER_LOCK_HELD"
     ')
-  [ "$out" = "50 1201 1" ] \
-    || fail "recovery lock budget did not drain two complete predecessor handoffs: $out"
-  pass "herdr presentation lock: recovery drains progressing predecessor waves while fresh projection stays best-effort"
+  [ "$out" = "$expected" ] \
+    || fail "recovery did not use the live-owner wait after fresh projection's bounded fallback: $out"
+  pass "herdr presentation lock: recovery waits on the live owner while fresh projection stays best-effort"
 }
 
 test_projection_order_rejects_malformed_socket() {
@@ -3981,7 +3977,7 @@ test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
-test_presentation_recovery_lock_budget_covers_recovery_wave
+test_presentation_recovery_lock_waits_on_live_owner
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
