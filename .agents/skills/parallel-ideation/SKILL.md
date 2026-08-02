@@ -76,7 +76,7 @@ The cost is coordination, and this skill is that coordination written down.
    Only captain-confirmed facts enter the premise note and the relay.
 6. Repeat the loop until every crew has written its report or a genuine blocker requires captain or firstmate action outside this skill.
 
-## 5. Synthesis and close
+## 5. Synthesis, seats verification, and close
 
 1. Each crew must write its report before its scratch worktree can be discarded.
    Do not clean up a crew that has not left a self-contained report.
@@ -90,9 +90,23 @@ The cost is coordination, and this skill is that coordination written down.
    - an explicit contradictions section for every material point where the crews disagreed, with each position attributed to the crew that held it.
 4. Do not average, blend, or silently drop a minority position.
    Preserving the contradiction is the deliverable's main value, because agreement between the crews was already cheap to obtain.
-5. Any decision the run surfaced but did not resolve follows `decision-hold-lifecycle` before the run is treated as complete.
-6. Cleanup happens only after every report exists and the synthesis is written.
-   Tear down scout worktrees only through the ordinary landed-report and unresolved-decision completion path; never force discard without explicit authority.
+5. After the synthesis is written and before the run is closed, load `seats` and run a readonly inspection of the synthesis document together with the crew reports it was built from.
+   This skill owns only when the inspection happens, what it is pointed at, and what is done with what comes back; `seats` owns how seats are chosen, dispatched, and ranked.
+6. Choose seats for the question actually in front of this run, not from a fixed list in this skill.
+   The `seats` starting points for deciding a design are a useful pointer when the synthesis is design-shaped; do not freeze that or any other roster into this skill.
+7. Seats are readonly for this use.
+   Firstmate remains the only writer of the synthesis, and seats return findings only.
+8. Rank what comes back under the ranking rules `seats` owns, then fold surviving findings into the synthesis yourself.
+9. The crews' attributed contradictions section must survive the seats pass.
+   A seat finding may add to it, sharpen it, or add a new contradiction, but must never be used to collapse a minority crew position into a single agreed answer.
+   Preserving that disagreement is the run's main deliverable and outranks a seat's tidier conclusion.
+10. A dead seat is a hole in the coverage of the check: never retry it and never soften it into an empty finding set.
+    When any seat is a hole, say plainly in the close that the inspection was partial.
+11. Any decision the run surfaced but did not resolve - whether from the crews or from the seats pass - follows `decision-hold-lifecycle` before the run is treated as complete.
+12. Cleanup happens only after every report exists, the synthesis is written, and the seats pass has finished.
+    The seats pass runs before scout worktrees are discarded, so a finding that requires re-reading a crew's scratch state can still be answered.
+    Tear down scout worktrees only through the ordinary landed-report and unresolved-decision completion path; never force discard without explicit authority.
+13. This seats pass is a deliberate bounded exception to firstmate's usual rule that delegated work goes through `bin/fm-spawn.sh`: `seats` launches its own readonly workers through its own scripts, it writes nothing, and it is not a precedent for routing other work around the ordinary spawn and supervision path.
 
 ## Out of scope
 
@@ -100,6 +114,9 @@ The cost is coordination, and this skill is that coordination written down.
 - Answering product questions in place of the captain.
 - Turning the synthesis into implementation without a separate ship authorization.
 - Hard-coding which ideation skills, plugins, or harnesses participate.
+- Choosing, dispatching, or ranking seats (owned by `seats`).
+- Freezing a seats roster into this skill.
+- Collapsing attributed crew contradictions because a seat preferred a single answer.
 
 ## Cross-references
 
@@ -107,4 +124,5 @@ The cost is coordination, and this skill is that coordination written down.
 - Harness pins and skill-invocation: `harness-adapters`.
 - Missing repository at intake: `project-management`.
 - Unresolved captain decisions at close: `decision-hold-lifecycle`.
+- Seats verification of the synthesis: `seats`.
 - Captain-facing outcome language: `AGENTS.md` section 9.
