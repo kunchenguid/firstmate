@@ -404,6 +404,7 @@ handle_arm_signal() {
     wait "$child" 2>/dev/null || true
   fi
   cycle_log_append "$rc" "$signal" arm-interrupted none
+  print_watch_stderr
   cleanup_child
   exit "$rc"
 }
@@ -417,6 +418,7 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   exit 1
 }
 child_err=$(mktemp "$STATE/.watch-arm-stderr.XXXXXX") || {
+  rm -f "$child_out" 2>/dev/null || true
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }

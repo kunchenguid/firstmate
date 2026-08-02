@@ -1661,14 +1661,6 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
-# Worktree discovery proves the endpoint is isolated, but the treehouse shell
-# handoff can still leave a subsequent command in the original project cwd on
-# tmux/WSL. Anchor the actual agent process to the validated isolated path so
-# the process and its git writes cannot escape the worktree after discovery.
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  WT_REAL=$(real_path_or_raw "$WT")
-  LAUNCH="cd -- $(shell_quote "$WT_REAL") && $LAUNCH"
-fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
@@ -1683,6 +1675,17 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home $LAUNCH"
+fi
+# Worktree discovery proves the endpoint is isolated, but the treehouse shell
+# handoff can still leave a subsequent command in the original project cwd on
+# tmux/WSL. Anchor the actual agent process to the validated isolated path so
+# the process and its git writes cannot escape the worktree after discovery.
+# Applied after every env prefix above: an assignment prefix on the regular
+# builtin `cd` does not persist past the `&&`, so the anchor has to wrap the
+# env-prefixed command rather than be wrapped by it.
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  WT_REAL=$(real_path_or_raw "$WT")
+  LAUNCH="cd -- $(shell_quote "$WT_REAL") && $LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
