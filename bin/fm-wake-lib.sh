@@ -406,6 +406,23 @@ fm_wake_append() {
   return "$status"
 }
 
+# fm_wake_queued_keys <kind>
+# Print the distinct keys currently queued for <kind>, oldest first. Read under
+# the append lock so a concurrent append is never observed half-written. The
+# durable queue stays the authority: a key appears here exactly while a record
+# for it is queued and unconsumed, and disappears when a drain consumes it.
+fm_wake_queued_keys() {
+  local kind=$1
+  case "$kind" in
+    signal|stale|check|heartbeat) ;;
+    *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
+  esac
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  awk -F '\t' -v kind="$kind" 'NF >= 5 && $3 == kind && !seen[$4]++ { print $4 }' \
+    "$FM_WAKE_QUEUE" 2>/dev/null || true
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
 fm_wake_restore_queue() {
   local drained=$1 restore
   restore="$STATE/.wake-queue.restore.$(fm_current_pid)"

@@ -20,7 +20,9 @@
 #            output, publish normalized wakes for pending results, then release
 #            the claim. It blocks for as long as the source blocks and is meant
 #            to run as a supervised background process, never in a conversational
-#            turn.
+#            turn. After publishing, it asks the source's own adapter whether the
+#            captured result ends the source and retires the registration when it
+#            says so, so a source that has ended stops being restarted.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
 #            republish every durably captured result with no handled
 #            acknowledgement yet - regardless of any earlier publication - and
@@ -36,10 +38,18 @@
 #            bounded re-announcement on every reconcile. Marking a result
 #            handled does not retire its source registration or claim.
 # retire     Drop a registration, stop a runner this home owns, release the claim.
+#            Idempotent, and still the supported explicit path after a source has
+#            already retired itself on its adapter's terminal verdict.
 # sweep-home Retire a bounded snapshot of this home's registrations and owned
 #            claims, then refuse unless no registration, runner record, or owned
 #            claim remains. Used by supported Firstmate home retirement.
 # list       Show registered sources, owners, and pending captured results.
+#
+# Terminal knowledge is adapter-owned. This runner never inspects a result and
+# never names an adapter-specific status: it calls
+# `bin/fm-procevent-<adapter>.sh terminal <result-file>` and treats exit 0 as the
+# only terminal verdict. A missing command, an error, or any other exit keeps the
+# registration armed, so an adapter that has no notion of ending needs no change.
 #
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
@@ -69,9 +79,20 @@ REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,53p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
+
+# Ask the source's own adapter whether a captured result ends the source. Exit 0
+# is the only terminal verdict; everything else - including a missing adapter
+# command - keeps the registration armed. See the terminal-knowledge note in the
+# header: no adapter-specific condition may appear in this runner.
+adapter_result_is_terminal() {  # <adapter> <result-file>
+  local script
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  "$script" terminal "$2" >/dev/null 2>&1
+}
 
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
@@ -295,7 +316,40 @@ cmd_start() {
 
   publish_pending >/dev/null
   rm -f -- "$(runner_file "$id")"
+  # Publication is already durable, so retiring an ended source here can never
+  # cost the result or its wake; leaving it armed, by contrast, lets every later
+  # reconcile restart a source that will only return empty ended results.
+  if adapter_result_is_terminal "$adapter" "$durable"; then
+    if retire_owned_terminal_source "$id"; then
+      printf 'retired: %s (adapter classified the captured result terminal)\n' "$id"
+    else
+      printf 'cannot retire terminal source; it remains registered: %s\n' "$id" >&2
+    fi
+  fi
   printf 'captured: %s\n' "$durable"
+}
+
+# Retire a source this runner owns because its adapter classified the captured
+# result terminal. Ownership is re-proved, the registration is dropped, and this
+# runner's own claim is released under ONE source-lock hold, so no concurrent
+# reconcile can observe a registered source with no owner (and start a
+# replacement) or an owned claim with no registration (and signal this runner
+# mid-exit), and a generation this runner no longer owns is never unregistered.
+# The EXIT trap's own release then no-ops, because the generation is already gone.
+retire_owned_terminal_source() {  # <source-id>
+  local id=$1 status=0
+  fm_procevent_source_lock_acquire "$id" || return 1
+  if fm_procevent_claim_load_locked "$id" 2>/dev/null \
+    && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
+    && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
+    && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ]; then
+    rm -f -- "$(source_file "$id")" || status=1
+    fm_procevent_claim_release_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
+  else
+    status=1
+  fi
+  fm_procevent_source_lock_release "$id"
+  return "$status"
 }
 
 # Start a runner outside the watcher cycle that noticed it was missing. The

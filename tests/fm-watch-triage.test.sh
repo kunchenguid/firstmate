@@ -1422,6 +1422,113 @@ SH
   pass "triage log capping handles wc byte counts with leading spaces"
 }
 
+# --- process-event delivery -------------------------------------------------
+# A durably captured process-event result publishes an ordinary `check` wake on
+# the durable queue. The watcher must deliver that queued wake proactively -
+# print an actionable reason and exit into the same rewake path every other
+# actionable wake uses - rather than leaving it to be found by a manual drain.
+
+# Run the runner against a case home. FM_ROOT_OVERRIDE (exported by the shared
+# wake harness to keep the drain's tangle check inert) would otherwise point the
+# runner at a root with no installed adapters, and the claim root must stay
+# inside the case so nothing here can observe a real home's source ownership.
+pe_case() {  # <dir> <command>...
+  local dir=$1
+  shift
+  (unset FM_ROOT_OVERRIDE
+   FM_PROCEVENT_CLAIM_ROOT="$dir/claims" FM_HOME="$dir" "$ROOT/bin/fm-procevent.sh" "$@")
+}
+
+# Capture one real process-event result into <dir>'s home, then retire the
+# source so the fixture holds exactly the reported end state: one durably
+# captured, unhandled, queued result and no remaining poll work.
+seed_captured_procevent_result() {  # <dir>
+  local dir=$1 i=0
+  pe_case "$dir" register lavish delivery-src -- \
+    /bin/sh -c 'printf "session:\n  file: /a.html\n  status: waiting\n"' >/dev/null || return 1
+  pe_case "$dir" reconcile >/dev/null || return 1
+  while [ "$i" -lt 100 ]; do
+    [ -s "$dir/state/.wake-queue" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  pe_case "$dir" retire delivery-src >/dev/null || return 1
+  [ -s "$dir/state/.wake-queue" ]
+}
+
+# The watcher, scoped by FM_HOME rather than FM_STATE_OVERRIDE, so the
+# per-cycle reconcile it launches resolves the same home's state.
+procevent_watch_bg() {  # <dir> <out>
+  local dir=$1 out=$2
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+}
+
+test_procevent_captured_result_surfaces_proactively() {
+  local dir state out drain_out pid beacon_age
+  dir=$(make_case procevent-delivery); state="$dir/state"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
+  grep -F "procevent lavish delivery-src 1" "$state/.wake-queue" >/dev/null \
+    || fail "the captured result was never published to the durable queue"
+
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a healthy watcher never surfaced a durably captured process-event result: $(cat "$out")"
+  grep -F "check:" "$out" >/dev/null \
+    || fail "the process-event wake was not reported as an actionable check: $(cat "$out")"
+  grep -F "procevent:delivery-src:1" "$out" >/dev/null \
+    || fail "the actionable reason did not name the queued result: $(cat "$out")"
+  beacon_age=$(FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_path_age "$2"' _ "$ROOT" "$state/.last-watcher-beat")
+  [ "$beacon_age" -lt 60 ] || fail "the surfacing watcher was not a healthy one (beacon age ${beacon_age}s)"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the process-event wake failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "procevent lavish delivery-src 1" >/dev/null \
+    || fail "the process-event result was not queued for the drain that follows the wake"
+  pass "a captured process-event result wakes a healthy watcher proactively, with no manual drain"
+}
+
+test_procevent_surfaced_result_does_not_rewake() {
+  local dir state out pid before after
+  dir=$(make_case procevent-no-rewake); state="$dir/state"
+  out="$dir/watch.out"
+  seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
+
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the first proactive wake never happened: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain after the first process-event wake failed"
+
+  # Still unhandled: the result stays eligible for re-announcement on the durable
+  # queue, but that must never produce a second proactive wake.
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    fail "an already-surfaced process-event result woke the watcher again: $(cat "$out")"
+  fi
+  reap "$pid"
+  grep -F "procevent lavish delivery-src 1" "$state/.wake-queue" >/dev/null \
+    || fail "re-announcement of the unhandled result stopped when its wake was suppressed"
+
+  pe_case "$dir" handled delivery-src 1 >/dev/null || fail "could not acknowledge the captured result"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain before the handled control failed"
+  before=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    fail "a handled process-event result woke the watcher: $(cat "$out")"
+  fi
+  reap "$pid"
+  after=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$after" = "$before" ] || fail "a handled result was announced again ($before -> $after queued records)"
+  pass "a process-event wake is delivered once: no duplicate wake while queued, and none once handled"
+}
+
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
 test_heartbeat_no_change_absorbed() {
@@ -1587,6 +1694,8 @@ test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
+test_procevent_captured_result_surfaces_proactively
+test_procevent_surfaced_result_does_not_rewake
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
