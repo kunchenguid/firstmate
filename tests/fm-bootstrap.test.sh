@@ -22,7 +22,7 @@ export FM_ORCA_TEST_AUTHORITY_CAPABILITIES=verified-v1
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
-TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
+fm_test_tmproot_into TMP_ROOT fm-bootstrap-tests
 export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 
 # Hermetic runtime-backend detection. These cases pin the backend per-home via

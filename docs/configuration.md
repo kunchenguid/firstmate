@@ -37,7 +37,8 @@ Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected un
 Every new task refuses `backend=orca` before any owned mutation, legacy respawn and destructive teardown currently fail closed on unavailable authority capability, and Orca also refuses `--secondmate`; the Orca guide owns the rationale and re-enablement contract.
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 The session-start secondmate liveness sweep uses a deeper `fm_backend_agent_alive` probe where verified.
-Today that probe can classify tmux and herdr secondmate endpoints as `alive`, `dead`, or `unknown`; zellij, Orca, and cmux report `unknown` until their own agent-process classifiers are verified.
+Today tmux and herdr can classify secondmate endpoints as `alive`, `dead`, or `unknown`.
+Zellij reports `dead` only when the recorded session or pane is absent and otherwise reports `unknown`, while Orca and cmux report `unknown` until their own agent-process classifiers are verified.
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires the Herdr tool delta owned by "Toolchain" below, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
@@ -46,6 +47,8 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 A legacy Orca task may additionally record `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
+Every new spawn records a generation-bound task temporary root beneath that home's physical state directory.
+Respawn removes only a validated prior generation after the replacement metadata is committed, teardown removes the recorded current generation, and legacy `/tmp/fm-<id>` metadata remains readable but is never mutated.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
@@ -207,6 +210,8 @@ Neither mode invokes Agent Fleet selection or leases for a new ship/scout launch
 The existing `--account-pool`, `--account-profile`, and dispatch-profile fields remain compatibility activation inputs for those crewmates while the inactive-code removal is handled separately.
 Their legacy aliases do not constrain the new usage-based account choice.
 Secondmate integration is deferred: secondmate launches retain their pre-cutover Agent Fleet selection and lease behavior, including `config/secondmate-account-pool`.
+Every secondmate launch refuses a home whose index tracks Agent Fleet routing support but whose working tree has removed it, even when routing is off.
+An older home that does not track the support may still launch with a warning while routing is off or observe, but enforce mode refuses it until the home is reconciled.
 Firstmate's spawn flags and `config/secondmate-account-pool` continue to accept aliases made only of letters, digits, dot, underscore, and dash, excluding values that begin with dot or dash; `config/crew-dispatch.json` deliberately narrows those fields to an alphanumeric first character.
 Account email addresses and filesystem paths are invalid in every input surface.
 Direct ship/scout task metadata records only `account_home=` from this account mechanism.

@@ -399,6 +399,29 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
   fm_backend_zellij_pane_exists "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE"
 }
 
+fm_backend_zellij_agent_alive() {  # <target>
+  local panes
+  fm_backend_zellij_parse_target "$1" || { printf 'unknown'; return 0; }
+  fm_backend_zellij_session_exists "$FM_BACKEND_ZELLIJ_SESSION" || { printf 'dead'; return 0; }
+  panes=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  printf '%s\n' "$panes" | jq -e '
+    type == "array"
+    and all(.[];
+      type == "object"
+      and has("id")
+      and .id != null
+      and (.is_plugin | type) == "boolean"
+      and (.is_plugin or (has("tab_id") and .tab_id != null)))
+  ' >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  if printf '%s\n' "$panes" | jq -e --arg pane "$FM_BACKEND_ZELLIJ_PANE" \
+    'any(.[]?; .is_plugin == false and (.id | tostring) == $pane)' >/dev/null 2>&1; then
+    printf 'unknown'
+  else
+    printf 'dead'
+  fi
+}
+
 # fm_backend_zellij_current_path: the live pane's cwd, or empty on any error.
 # Mirrors tmux's pane_current_path poll used for worktree-path discovery after
 # `treehouse get`.

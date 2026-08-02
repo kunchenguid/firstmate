@@ -126,7 +126,9 @@ case "${1:-} ${2:-}" in
     else
       worktree="wt-${terminal#term-}"
     fi
-    if [ -f "$RESP/.terminal-title" ]; then
+    if [ -n "${FM_ORCA_DEFAULT_TERMINAL_TITLE:-}" ]; then
+      title=$FM_ORCA_DEFAULT_TERMINAL_TITLE
+    elif [ -f "$RESP/.terminal-title" ]; then
       title=$(cat "$RESP/.terminal-title")
     elif [ -n "${FM_STATE_OVERRIDE:-}" ] && [ -d "$FM_STATE_OVERRIDE" ]; then
       title=
@@ -170,6 +172,8 @@ process.stdout.write(JSON.stringify(data) + "\n");
       if [ -n "${FM_ORCA_REMOVE_LOCAL_PATH:-}" ] && [ -n "${FM_ORCA_REMOVE_LOCAL_PROJECT:-}" ]; then
         rm -rf "$FM_ORCA_REMOVE_LOCAL_PATH"
         git -C "$FM_ORCA_REMOVE_LOCAL_PROJECT" worktree prune
+      elif [ -n "${FM_ORCA_REMOVE_PROJECT:-}" ] && [ -n "${FM_ORCA_REMOVE_PATH:-}" ]; then
+        git -C "$FM_ORCA_REMOVE_PROJECT" worktree remove --force "$FM_ORCA_REMOVE_PATH" || exit 1
       fi
       printf '{"ok":true,"result":{"removed":true}}\n'
     fi
@@ -224,6 +228,17 @@ initialize_secondmate_home_repo() {
     git -C "$source/projects/${project##*/}" remote set-url origin "$source/projects/${project##*/}"
     git -C "$project" remote add origin "$source/projects/${project##*/}"
   done
+}
+
+initialize_secondmate_project_repo() {
+  local source_root=$1 clone=$2 worktree=$3 branch=$4 authority
+  authority="$source_root/project-origins/alpha"
+  mkdir -p "$source_root/projects" "$source_root/project-origins"
+  fm_git_init_commit "$authority"
+  git clone -q "$authority" "$source_root/projects/alpha"
+  git clone -q "$source_root/projects/alpha" "$clone"
+  git -C "$clone" remote set-url origin "$authority"
+  git -C "$clone" worktree add --quiet -b "$branch" "$worktree"
 }
 
 add_tmux_fake() {
@@ -571,9 +586,11 @@ test_terminal_state_classifies_closed_live_and_ambiguous_orca() {
 test_remove_worktree_refuses_empty_id() {
   local out status
   orca_case remove-empty
+  set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree ""' "$ROOT" 2>&1 )
   status=$?
+  set +e
   [ "$status" -ne 0 ] || fail "remove_worktree should fail when the Orca worktree id is empty"
   assert_contains "$out" "missing Orca worktree id" "remove_worktree did not explain the missing id"
   [ ! -s "$LOG" ] || fail "remove_worktree should not call Orca with an empty id"
@@ -585,9 +602,11 @@ test_remove_worktree_rejects_orca_error_json() {
   orca_case remove-error-json
   token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
+  set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree_bound wt-gone /tmp/orca-wt "$1"' "$ROOT" "$token" 2>&1 )
   status=$?
+  set +e
   [ "$status" -ne 0 ] || fail "bound remove_worktree should fail on Orca ok:false JSON"
   assert_contains "$out" "worktree not found" "bound remove_worktree should surface the Orca removal error"
   assert_contains "$(cat "$LOG")" $'--expected-path\x1f/tmp/orca-wt' \
@@ -787,13 +806,15 @@ test_legacy_respawn_refuses_without_provider_task_authority() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-spawn"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s"},"terminal":{"handle":"term-spawn"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s","terminals":[{"handle":"term-spawn"}]}}}\n' \
+    "$wt" > "$RESP/4.out"
   if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 ); then
     fail "legacy Orca respawn proceeded without provider task authority"
   fi
-  assert_contains "$out" "did not return matching worktree id, path, and task authority" \
+  assert_contains "$out" "Orca terminal is not authoritatively bound" \
     "legacy Orca respawn did not explain its fail-closed authority refusal"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send' \
     "refused legacy Orca respawn launched the harness"
@@ -1902,7 +1923,10 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
   child_id="orcachildz6"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/projects"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
-  fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
+  orca_case secondmate-child-cleanup
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  initialize_secondmate_home_repo "$subhome" "$neutral"
+  initialize_secondmate_project_repo "$home" "$childproj" "$childwt" "fm/$child_id"
   fm_write_meta "$home/state/domain.meta" \
     "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
     "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
@@ -1913,7 +1937,6 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
     "window=fm-$child_id" "terminal=term-child-cleanup" "worktree=$childwt" "project=$childproj" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-child-cleanup"
-  orca_case secondmate-child-cleanup
   printf '{"ok":true,"result":{"worktree":{"id":"wt-child-cleanup","name":"fm-%s","path":"%s","terminals":[{"handle":"term-child-cleanup","title":"fm-%s"}]}}}\n' \
     "$child_id" "$childwt" "$child_id" > "$RESP/1.out"
   printf 'fm-%s\n' "$child_id" > "$RESP/.terminal-title"
@@ -1945,8 +1968,11 @@ test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
   child_id="orcachildmismatchz1"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/projects"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
-  fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
-  git -C "$childproj" worktree add --quiet -b "fm/$child_id-other" "$other_wt"
+  orca_case secondmate-child-mismatch
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  initialize_secondmate_home_repo "$subhome" "$neutral"
+  initialize_secondmate_project_repo "$home" "$childproj" "$childwt" "fm/$child_id"
+  mkdir -p "$other_wt"
   fm_write_meta "$home/state/domain.meta" \
     "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
     "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
@@ -1957,7 +1983,6 @@ test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
     "window=fm-$child_id" "terminal=term-child-mismatch" "worktree=$childwt" "project=$childproj" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-child-mismatch"
-  orca_case secondmate-child-mismatch
   printf '{"ok":true,"result":{"worktree":{"id":"wt-child-mismatch","path":"%s"}}}\n' "$other_wt" > "$RESP/1.out"
   add_tmux_fake "$FB"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
@@ -1985,7 +2010,10 @@ test_secondmate_force_teardown_retains_partial_orca_child() {
   child_id="orcapartialz9"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/projects"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
-  fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
+  orca_case secondmate-partial-child-cleanup
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  initialize_secondmate_home_repo "$subhome" "$neutral"
+  initialize_secondmate_project_repo "$home" "$childproj" "$childwt" "fm/$child_id"
   fm_write_meta "$home/state/domain.meta" \
     "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
     "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
@@ -1996,7 +2024,6 @@ test_secondmate_force_teardown_retains_partial_orca_child() {
     "window=fm-$child_id" "worktree=$childwt" "project=$childproj" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-partial-child"
-  orca_case secondmate-partial-child-cleanup
   printf '{"ok":true,"result":{"worktree":{"id":"wt-partial-child","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"
   add_tmux_fake "$FB"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")

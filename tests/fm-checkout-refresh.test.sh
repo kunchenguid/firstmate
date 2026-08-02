@@ -19,7 +19,7 @@ pass() {
 
 fm_git_identity fmtest fmtest@example.invalid
 
-TMP_ROOT=$(fm_test_tmproot fm-checkout-refresh-tests)
+fm_test_tmproot_into TMP_ROOT fm-checkout-refresh-tests
 TEST_HOME="$TMP_ROOT/user"
 FM_TEST_HOME="$TMP_ROOT/fm-home"
 STATE_ROOT="$TMP_ROOT/refresh-state"
@@ -950,7 +950,7 @@ test_lock_root_failure_invalidates_coverage_before_preparation() {
 }
 
 test_reinspection_failure_invalidates_coverage_health() {
-  local remote home state_root lock_root treehouse project fakebin real_git out key alert
+  local remote home state_root lock_root treehouse project out status key alert
   local initial_head reinspection_count
   remote=$(build_origin reinspection)
   home="$TMP_ROOT/reinspection-home"
@@ -958,54 +958,34 @@ test_reinspection_failure_invalidates_coverage_health() {
   lock_root="$TMP_ROOT/reinspection-locks"
   treehouse="$TMP_ROOT/reinspection-treehouse"
   project="$home/projects/reinspection"
-  fakebin="$TMP_ROOT/reinspection-fakebin"
-  real_git=$(command -v git)
   fm_git_init_commit "$home"
-  mkdir -p "$home/projects" "$home/config" "$state_root" "$treehouse" "$fakebin"
+  mkdir -p "$home/projects" "$home/config" "$state_root" "$treehouse"
   clone_from "$remote" "$project"
   project=$(cd "$project" && pwd -P)
   home=$(cd "$home" && pwd -P)
   initial_head=$(git -C "$project" rev-parse HEAD)
   advance_origin reinspection changed-after-discovery
   printf '%s\n' manual-reinspection-heartbeat > "$state_root/heartbeat"
-  cat > "$fakebin/git" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = -C ] \
-  && [ "${2:-}" = "${FM_TEST_REINSPECTION_TARGET:?}" ] \
-  && [ "${3:-}" = rev-parse ] \
-  && [ "${4:-}" = --show-toplevel ]; then
-  count=$(cat "${FM_TEST_REINSPECTION_COUNT:?}" 2>/dev/null || printf 0)
-  count=$((count + 1))
-  printf '%s\n' "$count" > "$FM_TEST_REINSPECTION_COUNT"
-  # Fail each post-discovery exact-root proof, then allow the immediately
-  # following stable-key lookup used to persist the alert. This keeps the
-  # fixture on the reinspection-failure path without making alert identity
-  # resolution fail first.
-  if [ $((count % 2)) -eq 0 ]; then
-    printf '%s\n' "${FM_TEST_REINSPECTION_ENCLOSING:?}"
-    exit 0
-  fi
-fi
-exec "${FM_TEST_REAL_GIT:?}" "$@"
-SH
-  chmod +x "$fakebin/git"
 
+  set +e
   out=$(HOME="$TEST_HOME" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_ROOT="$state_root" \
     FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
     FM_TREEHOUSE_ROOT="$treehouse" \
-    FM_TEST_REAL_GIT="$real_git" FM_TEST_REINSPECTION_TARGET="$project" \
-    FM_TEST_REINSPECTION_ENCLOSING="$home" \
-    FM_TEST_REINSPECTION_COUNT="$TMP_ROOT/reinspection-count" \
-    PATH="$fakebin:$PATH" \
+    FM_CHECKOUT_REFRESH_TEST=1 \
+    FM_CHECKOUT_TEST_REINSPECTION_FAILURE_AT="$project" \
+    FM_CHECKOUT_TEST_REINSPECTION_COUNT="$TMP_ROOT/reinspection-count" \
     "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
+  status=$?
+  set -e
 
+  [ "$status" -ne 0 ] || fail "covered-checkout reinspection failure reported healthy coverage"
   assert_contains "$out" "$project: skipped: covered checkout became uninspectable during refresh" \
     "covered-checkout reinspection failure was not surfaced"
   assert_refresh_state "$state_root" unhealthy
   assert_heartbeat_value "$state_root" manual-reinspection-heartbeat
   reinspection_count=$(cat "$TMP_ROOT/reinspection-count")
-  [ "$reinspection_count" -ge 3 ] \
+  [ "$reinspection_count" -eq 2 ] \
     || fail "both post-discovery passes did not repeat the exact-root proof"
   [ "$(git -C "$project" rev-parse HEAD)" = "$initial_head" ] \
     || fail "identity-drifted covered path was refreshed through its enclosing repository"

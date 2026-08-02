@@ -8,7 +8,7 @@ set -u
 
 # shellcheck disable=SC2153
 AUTOCOMPACT="$ROOT/bin/fm-autocompact.sh"
-TMP_ROOT=$(fm_test_tmproot fm-autocompact-tests)
+fm_test_tmproot_into TMP_ROOT fm-autocompact-tests
 fm_git_identity fmtest fmtest@example.invalid
 
 new_primary() {

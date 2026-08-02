@@ -6,7 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LOCK="$ROOT/bin/fm-lock.sh"
-TMP_ROOT=$(fm_test_tmproot fm-lock)
+fm_test_tmproot_into TMP_ROOT fm-lock
 FM_LOCK_TEST_PIDS=()
 
 cleanup_lock_tests() {

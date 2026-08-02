@@ -5,7 +5,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-supervision-instructions)
+fm_test_tmproot_into TMP_ROOT fm-supervision-instructions
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
 
 test_selected_harness_block_only() {

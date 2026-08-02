@@ -27,7 +27,7 @@ UPDATE="$ROOT/bin/fm-update.sh"
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
 
-TMP_ROOT=$(fm_test_tmproot fm-update-tests)
+fm_test_tmproot_into TMP_ROOT fm-update-tests
 
 # Build a fresh world: a bare origin seeded with one commit, a firstmate repo
 # clone checked out on main, and a home dir with state/ and data/. Echoes the

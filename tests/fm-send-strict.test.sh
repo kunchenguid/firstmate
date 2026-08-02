@@ -11,7 +11,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
-TMP_ROOT=$(fm_test_tmproot fm-send-strict)
+fm_test_tmproot_into TMP_ROOT fm-send-strict
 
 # shellcheck source=bin/fm-account-routing-lib.sh
 . "$ROOT/bin/fm-account-routing-lib.sh"

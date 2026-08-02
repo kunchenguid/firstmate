@@ -275,7 +275,7 @@ path_age() {
 
 recover_acquisition() {  # <record>
   local record=$1 id project holder recorded_worktree worktree snapshot owner_state lock tmp find_status absence_status
-  local recorded_home home_real generation tasktmp tasktmp_owner tasktmp_phase endpoint_phase backend endpoint_window
+  local recorded_home home_real generation tasktmp tasktmp_phase endpoint_phase backend endpoint_window
   local tmux_window_id tmux_session_target herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id
   local zellij_session zellij_tab_id zellij_pane_id cmux_workspace_id cmux_surface_id
   [ -f "$record" ] && [ ! -L "$record" ] || return 0
@@ -332,7 +332,7 @@ recover_acquisition() {  # <record>
     refuse "stale acquisition record has missing or malformed task temp ownership"
     return 0
   }
-  [ "$(fm_tasktmp_path "$id" "$generation" 2>/dev/null)" = "$tasktmp" ] || {
+  fm_account_task_tmp_is_current "$id" "$tasktmp" "$generation" || {
     refuse "stale acquisition task temp path does not match its exact generation"
     return 0
   }
@@ -414,25 +414,16 @@ recover_acquisition() {  # <record>
     refuse "endpoint creation phase is ambiguous; retained stale acquisition for exact endpoint reconciliation"
     return 0
   fi
-  tasktmp_owner=$(fm_tasktmp_owner_record "$STATE" "$id" "$generation") || {
-    fm_account_lifecycle_lock_release "$lock" >/dev/null 2>&1 || true
-    refuse "stale acquisition task temp ownership record is malformed"
-    return 0
-  }
   if [ "$tasktmp_phase" = not-created ]; then
-    if [ -e "$tasktmp_owner" ] || [ -L "$tasktmp_owner" ] || [ -e "$tasktmp" ] || [ -L "$tasktmp" ]; then
+    if [ -e "$tasktmp" ] || [ -L "$tasktmp" ]; then
       fm_account_lifecycle_lock_release "$lock" >/dev/null 2>&1 || true
-      refuse "not-created task temp phase has ownership artifacts; retained stale acquisition"
+      refuse "not-created task temp phase has a task temp root; retained stale acquisition"
       return 0
     fi
-  elif ! fm_tasktmp_owner_validate "$tasktmp_owner" "$FM_HOME" "$id" "$generation" "$tasktmp"; then
-    fm_account_lifecycle_lock_release "$lock" >/dev/null 2>&1 || true
-    refuse "created task temp phase has no exact authoritative owner record; retained stale acquisition"
-    return 0
   elif { [ -e "$tasktmp" ] || [ -L "$tasktmp" ]; } \
-    && ! fm_tasktmp_owner_validate "$tasktmp/.fm-tasktmp-owner" "$FM_HOME" "$id" "$generation" "$tasktmp"; then
+    && { [ ! -d "$tasktmp" ] || [ -L "$tasktmp" ]; }; then
     fm_account_lifecycle_lock_release "$lock" >/dev/null 2>&1 || true
-    refuse "created task temp phase has no exact root proof; retained stale acquisition"
+    refuse "created task temp phase has an unsafe root; retained stale acquisition"
     return 0
   fi
   recorded_worktree=$(sed -n 's/^worktree=//p' "$record" | tail -1)
@@ -456,9 +447,9 @@ recover_acquisition() {  # <record>
       fi
       if [ "$absence_status" -eq 0 ]; then
         if [ "$tasktmp_phase" = created ]; then
-          fm_tasktmp_remove_owned "$STATE" "$FM_HOME" "$id" "$generation" "$tasktmp" || {
+          fm_account_safe_remove_task_tmp "$id" "$tasktmp" "$generation" || {
             fm_account_lifecycle_lock_release "$lock" >/dev/null 2>&1 || true
-            refuse "Treehouse lease is absent but task temp ownership is forged or ambiguous; retained stale acquisition"
+            refuse "Treehouse lease is absent but task temp ownership is unsafe or ambiguous; retained stale acquisition"
             return 0
           }
         fi

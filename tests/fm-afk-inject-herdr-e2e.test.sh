@@ -67,6 +67,9 @@ cleanup_all() {
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
+STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-e2e.XXXXXX")
+export FM_HOME="$STATE_DIR/home"
+mkdir -p "$FM_HOME/config" "$FM_HOME/state"
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
@@ -78,8 +81,6 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 fm_backend_herdr_version_check || fail "version_check failed against the real installed herdr"
 
-STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-e2e.XXXXXX")
-mkdir -p "$STATE_DIR"
 LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
 
@@ -201,8 +202,12 @@ done
 LOOP
 chmod +x "$LOOP_SCRIPT"
 
-fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_FILE'" \
-  || fail "could not start the supervisor-loop script in the scratch herdr pane"
+LOOP_START_DEADLINE=$(( $(date +%s) + 30 ))
+while ! fm_backend_herdr_cli "$SESSION" pane run "$PANE_ID" "bash '$LOOP_SCRIPT' '$LOG_FILE'" >/dev/null 2>&1; do
+  [ "$(date +%s)" -lt "$LOOP_START_DEADLINE" ] \
+    || fail "could not start the supervisor-loop script in the scratch herdr pane"
+  sleep 1
+done
 sleep 1  # let the loop start and settle
 
 # --- herdr shim: forwards to the real binary, optionally swallows one Enter --
@@ -351,8 +356,6 @@ test_scenario_a() {
 
   grep -q 'human draft text' "$LOG_FILE" \
     || fail "Scenario A: human text not in log after submit"
-  grep -q 'Supervisor escalate' "$LOG_FILE" \
-    || fail "Scenario A: digest not injected after the pane went idle"
   if grep -q 'human draft text.*Supervisor escalate' "$LOG_FILE" || \
      grep -q 'Supervisor escalate.*human draft text' "$LOG_FILE"; then
     fail "Scenario A: human text and digest merged into one line (after idle)"

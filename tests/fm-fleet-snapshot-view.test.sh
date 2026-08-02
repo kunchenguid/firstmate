@@ -8,7 +8,7 @@ set -u
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
-TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
+fm_test_tmproot_into TMP_ROOT fm-fleet-snapshot
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 

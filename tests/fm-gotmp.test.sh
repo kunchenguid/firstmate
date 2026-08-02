@@ -5,7 +5,7 @@
 # gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
 # meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
 #
-# These tests exercise the shared ownership helpers directly.
+# These tests exercise the shared generation-path and descriptor-pinned cleanup helpers directly.
 # The fm-spawn side is verified both structurally (the source has the contract lines)
 # and behaviorally (the mkdir + meta-write pattern it uses).
 # They also verify teardown wiring structurally.
@@ -43,8 +43,11 @@ test_spawn_contract_and_mkdir_pattern() {
   # Structural: fm-spawn must create the gotmp dir, record tasktmp in meta, and export
   # GOTMPDIR into the pane. Assert the contract lines are present in the source.
   # shellcheck disable=SC2016  # single quotes are deliberate: these are literal source strings
-  grep -F 'fm_tasktmp_create "$STATE" "$FM_HOME" "$ID" "$SPAWN_GENERATION_ID" "$TASK_TMP"' "$SPAWN" >/dev/null \
-    || fail "fm-spawn missing: owned per-generation task temp creation"
+  grep -F 'SPAWN_TASK_TMP=$(fm_account_task_tmp_path "$ID" "$SPAWN_GENERATION_ID")' "$SPAWN" >/dev/null \
+    || fail "fm-spawn missing: generation-scoped task temp derivation"
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
+  grep -F 'mkdir -p "$TASK_TMP/gotmp"' "$SPAWN" >/dev/null \
+    || fail "fm-spawn missing: generation-scoped task temp creation"
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
   grep -F 'echo "tasktmp=$TASK_TMP"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: tasktmp= line in meta write"
@@ -77,18 +80,19 @@ test_spawn_contract_and_mkdir_pattern() {
 test_teardown_removes_tasktmp_dir() {
   local id=td-rm-z2
   local generation=spawn:testgeneration
-  local task_tmp="/tmp/fm-$id-testgeneration"
   local fake="$TMP_ROOT/$id-owner"
   mkdir -p "$fake/state"
   # shellcheck source=bin/fm-account-routing-lib.sh
   . "$ROOT/bin/fm-account-routing-lib.sh"
-  fm_tasktmp_create "$fake/state" "$fake" "$id" "$generation" "$task_tmp" \
-    || fail "could not create an exactly owned task temp root"
+  local task_tmp
+  task_tmp=$(STATE="$fake/state" fm_account_task_tmp_path "$id" "$generation") \
+    || fail "could not derive a generation-scoped task temp root"
+  mkdir -p "$task_tmp/gotmp"
   printf 'leftover\n' > "$task_tmp/gotmp/build-artifact"
   grep -F "safe_remove_task_tmp \"\$TASK_TMP\"" "$TEARDOWN" >/dev/null \
     || fail "fm-teardown no longer delegates exact task temp cleanup"
-  FM_HOME="$fake" fm_tasktmp_remove_owned "$fake/state" "$fake" "$id" "$generation" "$task_tmp" \
-    || fail "exact owned task temp cleanup failed"
+  STATE="$fake/state" FM_HOME="$fake" fm_account_safe_remove_task_tmp "$id" "$task_tmp" "$generation" \
+    || fail "exact generation-scoped task temp cleanup failed"
   [ ! -e "$task_tmp" ] \
     || fail "teardown did not remove the tasktmp dir ($task_tmp still exists)"
   pass "fm-teardown removes the dir pointed to by tasktmp= in meta"
@@ -105,19 +109,16 @@ test_teardown_skips_gracefully_without_tasktmp() {
 test_teardown_skips_gracefully_when_dir_missing() {
   # tasktmp= points to a path that does not exist. Teardown must not error.
   local id=td-missing-z4
-  local task_tmp="/tmp/fm-$id-testgeneration"
-  # Intentionally do NOT create $task_tmp.
-  [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
   local fake="$TMP_ROOT/$id-owner"
   local generation=spawn:testgeneration
   mkdir -p "$fake/state"
-  {
-    printf 'home=%s\n' "$(cd "$fake" && pwd -P)"
-    printf 'task=%s\ngeneration=%s\nroot=%s\n' "$id" "$generation" "$task_tmp"
-  } > "$fake/state/$id.tasktmp-owner.testgeneration"
   # shellcheck source=bin/fm-account-routing-lib.sh
   . "$ROOT/bin/fm-account-routing-lib.sh"
-  FM_HOME="$fake" fm_tasktmp_remove_owned "$fake/state" "$fake" "$id" "$generation" "$task_tmp" \
+  local task_tmp
+  task_tmp=$(STATE="$fake/state" fm_account_task_tmp_path "$id" "$generation") \
+    || fail "could not derive the absent generation-scoped task temp root"
+  [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
+  STATE="$fake/state" FM_HOME="$fake" fm_account_safe_remove_task_tmp "$id" "$task_tmp" "$generation" \
     || fail "exact absent task temp cleanup failed"
   [ ! -e "$task_tmp" ] || fail "teardown created/left the tasktmp dir unexpectedly"
   pass "fm-teardown skips gracefully when tasktmp= points to a nonexistent dir"
@@ -130,12 +131,12 @@ test_generation_roots_are_isolated_and_owned() {
   mkdir -p "$home_a/state" "$home_b/state"
   # shellcheck source=bin/fm-account-routing-lib.sh
   . "$ROOT/bin/fm-account-routing-lib.sh"
-  root_a=$(fm_tasktmp_path "$id" "$generation_a")
-  root_b=$(fm_tasktmp_path "$id" "$generation_b")
+  root_a=$(STATE="$home_a/state" fm_account_task_tmp_path "$id" "$generation_a")
+  root_b=$(STATE="$home_b/state" fm_account_task_tmp_path "$id" "$generation_b")
   [ "$root_a" != "$root_b" ] || fail "independent generations collided"
-  fm_tasktmp_create "$home_a/state" "$home_a" "$id" "$generation_a" "$root_a" &
+  mkdir -p "$root_a/gotmp" &
   local pid_a=$!
-  fm_tasktmp_create "$home_b/state" "$home_b" "$id" "$generation_b" "$root_b" &
+  mkdir -p "$root_b/gotmp" &
   local pid_b=$!
   local status_a=0 status_b=0
   wait "$pid_a" || status_a=$?
@@ -143,37 +144,39 @@ test_generation_roots_are_isolated_and_owned() {
   if [ "$status_a" -ne 0 ] || [ "$status_b" -ne 0 ]; then
     fail "concurrent owned root creation failed"
   fi
-  FM_HOME="$home_a" fm_tasktmp_remove_owned "$home_a/state" "$home_a" "$id" "$generation_a" "$root_a" \
+  STATE="$home_a/state" FM_HOME="$home_a" fm_account_safe_remove_task_tmp "$id" "$root_a" "$generation_a" \
     || fail "first home could not remove its exact root"
   [ -d "$root_b" ] || fail "first home cleanup altered the second home root"
-  FM_HOME="$home_b" fm_tasktmp_remove_owned "$home_b/state" "$home_b" "$id" "$generation_b" "$root_b" \
+  STATE="$home_b/state" FM_HOME="$home_b" fm_account_safe_remove_task_tmp "$id" "$root_b" "$generation_b" \
     || fail "second home could not remove its exact root"
-  root_c=$(fm_tasktmp_path "$id" "$generation_c")
+  root_c=$(STATE="$home_a/state" fm_account_task_tmp_path "$id" "$generation_c")
   [ "$root_c" != "$root_a" ] || fail "sequential reuse did not receive a new root"
-  fm_tasktmp_create "$home_a/state" "$home_a" "$id" "$generation_c" "$root_c" \
-    || fail "sequential generation could not create its new root"
-  FM_HOME="$home_a" fm_tasktmp_remove_owned "$home_a/state" "$home_a" "$id" "$generation_c" "$root_c" \
+  mkdir -p "$root_c/gotmp" || fail "sequential generation could not create its new root"
+  STATE="$home_a/state" FM_HOME="$home_a" fm_account_safe_remove_task_tmp "$id" "$root_c" "$generation_c" \
     || fail "sequential generation cleanup failed"
   pass "same task ids use isolated roots across homes and generations"
 }
 
 test_forged_ownership_fails_closed() {
-  local id=forged-root home="$TMP_ROOT/forged-home" generation=spawn:forgedgeneration root
+  local id=forged-root home="$TMP_ROOT/forged-home" generation=spawn:forgedgeneration root outside
   mkdir -p "$home/state"
   # shellcheck source=bin/fm-account-routing-lib.sh
   . "$ROOT/bin/fm-account-routing-lib.sh"
-  root=$(fm_tasktmp_path "$id" "$generation")
-  fm_tasktmp_create "$home/state" "$home" "$id" "$generation" "$root" \
-    || fail "forged fixture setup failed"
-  printf 'home=/forged\ntask=%s\ngeneration=%s\nroot=%s\n' "$id" "$generation" "$root" > "$root/.fm-tasktmp-owner"
-  if FM_HOME="$home" fm_tasktmp_remove_owned "$home/state" "$home" "$id" "$generation" "$root"; then
-    fail "forged root ownership was accepted"
+  root=$(STATE="$home/state" fm_account_task_tmp_path "$id" "$generation")
+  outside="$home/must-survive"
+  mkdir -p "$outside"
+  printf 'preserve\n' > "$outside/marker"
+  mkdir -p "$(dirname "$root")"
+  ln -s "$outside" "$root"
+  if STATE="$home/state" FM_HOME="$home" fm_account_safe_remove_task_tmp "$id" "$root" "$generation"; then
+    fail "redirected task temp root was accepted"
   fi
-  [ -d "$root" ] || fail "forged root was not retained"
-  cp "$home/state/$id.tasktmp-owner.forgedgeneration" "$root/.fm-tasktmp-owner"
-  FM_HOME="$home" fm_tasktmp_remove_owned "$home/state" "$home" "$id" "$generation" "$root" \
-    || fail "exact recorded recovery did not clean its root"
-  pass "forged ownership fails closed and exact recovery succeeds"
+  [ -f "$outside/marker" ] || fail "redirected task temp cleanup altered outside data"
+  rm "$root"
+  mkdir -p "$root/gotmp"
+  STATE="$home/state" FM_HOME="$home" fm_account_safe_remove_task_tmp "$id" "$root" "$generation" \
+    || fail "exact descriptor-pinned recovery did not clean its root"
+  pass "redirected ownership fails closed and exact recovery succeeds"
 }
 
 test_spawn_contract_and_mkdir_pattern

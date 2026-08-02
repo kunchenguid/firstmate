@@ -5,7 +5,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-report-stack)
+fm_test_tmproot_into TMP_ROOT fm-report-stack
 HOME_DIR="$TMP_ROOT/home"
 STACK="$TMP_ROOT/stack"
 SCRIPT="$ROOT/bin/fm-report-stack.mjs"

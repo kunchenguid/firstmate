@@ -19,7 +19,7 @@ set -u
 
 SEND="$ROOT/bin/fm-send.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-send-settle)
+fm_test_tmproot_into TMP_ROOT fm-send-settle
 
 # A fake tmux that lets fm-send's submit path reach a clean "empty" verdict, plus a
 # fake sleep that records every requested duration (one per line) instead of

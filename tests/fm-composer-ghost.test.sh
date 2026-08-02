@@ -26,7 +26,7 @@ PEEK="$ROOT/bin/fm-peek.sh"
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$LIB"
 
-TMP_ROOT=$(fm_test_tmproot fm-ghost-tests)
+fm_test_tmproot_into TMP_ROOT fm-ghost-tests
 
 # ESC byte for building styled fixtures and asserting escape-free output.
 ESC=$(printf '\033')

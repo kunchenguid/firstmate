@@ -4,7 +4,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-prompt-exec)
+fm_test_tmproot_into TMP_ROOT fm-prompt-exec
 mkdir -p "$TMP_ROOT"
 
 path_identity() {

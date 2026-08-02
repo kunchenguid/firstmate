@@ -179,7 +179,6 @@ for option in "$@"; do
       ;;
   esac
 done
-
 META="$STATE/$ID.meta"
 
 require_safe_task_metadata() {
@@ -256,18 +255,23 @@ if [ "$BACKEND" = orca ]; then
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-# tasktmp is recorded by fm-spawn for tasks that set up a per-generation temp root.
+# tasktmp is recorded by fm-spawn for tasks that set up a per-generation temp root;
+# absent for tasks spawned before that change, so tolerate empty legacy metadata.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
-TASK_GENERATION=$(fm_meta_get "$META" generation_id)
+TASK_GENERATION=$(grep '^generation_id=' "$META" | cut -d= -f2- || true)
+if [ -n "$TASK_TMP" ] && ! fm_account_task_tmp_is_expected "$ID" "$TASK_TMP" "$TASK_GENERATION"; then
+  echo "REFUSED: unsafe task temp path in metadata for $ID: $TASK_TMP" >&2
+  exit 1
+fi
 TASK_TMP_PHASE=$(fm_meta_get "$META" tasktmp_phase)
 case "$TASK_TMP_PHASE" in
   '') ;;
   created)
-    [ -n "$TASK_TMP" ] || { echo "error: created task temp phase has no task temp path for $ID" >&2; exit 1; }
+    fm_account_task_tmp_is_current "$ID" "$TASK_TMP" "$TASK_GENERATION" \
+      || { echo "error: created task temp phase is not bound to the exact task generation for $ID" >&2; exit 1; }
     ;;
   not-created)
-    [ -n "$TASK_TMP" ] \
-      && [ "$(fm_tasktmp_path "$ID" "$TASK_GENERATION" 2>/dev/null || true)" = "$TASK_TMP" ] || {
+    fm_account_task_tmp_is_current "$ID" "$TASK_TMP" "$TASK_GENERATION" || {
       echo "error: not-created task temp phase is not bound to the exact task generation for $ID" >&2
       exit 1
     }
@@ -488,6 +492,10 @@ quiesce_child_endpoint() {
     fi
   fi
   if [ "$backend" = orca ]; then
+    [ -n "$target" ] || {
+      echo "error: child endpoint identity for $task is missing; refusing destructive cleanup" >&2
+      return 1
+    }
     quiesce_authoritative_orca_endpoint "$target" "$scoped_target" "fm-$task" || {
       echo "error: child Orca endpoint authority or quiescence is unproven for $task" >&2
       return 1
@@ -2108,19 +2116,17 @@ import sys
 
 home, state_path = sys.argv[1:]
 try:
-    if os.path.islink(state_path):
-        raise OSError("state directory must not be a symlink")
-    metadata = os.stat(state_path)
+    home_root = os.path.realpath(home)
+    state_root = os.path.realpath(state_path)
+    if state_root == home_root or os.path.commonpath((home_root, state_root)) != home_root:
+        raise OSError("state directory resolves outside its secondmate home")
+    metadata = os.stat(state_root)
     permissions = stat.S_IMODE(metadata.st_mode)
     if not stat.S_ISDIR(metadata.st_mode):
         raise NotADirectoryError(state_path)
     if not permissions & 0o444 or not permissions & 0o111:
         raise PermissionError("state directory is unreadable")
-    home_root = os.path.realpath(home)
-    state_root = os.path.realpath(state_path)
-    if state_root != os.path.join(home_root, "state"):
-        raise OSError("state directory resolves outside its secondmate home")
-    with os.scandir(state_path) as entries:
+    with os.scandir(state_root) as entries:
         for entry in sorted(entries, key=lambda item: item.name):
             metadata = entry.stat(follow_symlinks=False)
             if not entry.name.endswith(".meta"):
@@ -2131,7 +2137,7 @@ try:
                 raise PermissionError(f"unreadable child metadata entry: {entry.path}")
             if any(character in entry.path for character in ("\n", "\r")):
                 raise OSError("child metadata path contains unsupported control characters")
-            print(entry.path)
+            print(os.path.join(state_root, entry.name))
 except OSError as error:
     print(
         f"REFUSED: secondmate child state is unprovable at {state_path}: {error}",
@@ -2398,50 +2404,16 @@ safe_rm_rf_child_worktree() {
 }
 
 safe_remove_task_tmp() {
-  local target=$1 base owner_record
+  local target=$1
   [ -n "$target" ] || return 0
-  owner_record=$(fm_tasktmp_owner_record "$STATE" "$ID" "$TASK_GENERATION") || return 1
   if [ "$TASK_TMP_PHASE" = not-created ]; then
-    if [ -e "$owner_record" ] || [ -L "$owner_record" ] || [ -e "$target" ] || [ -L "$target" ]; then
-      echo "REFUSED: not-created task temp phase has ownership artifacts for $ID: $target" >&2
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      echo "REFUSED: not-created task temp phase has a task temp root for $ID: $target" >&2
       return 1
     fi
     return 0
   fi
-  if ! fm_tasktmp_owner_validate "$owner_record" "$FM_HOME" "$ID" "$TASK_GENERATION" "$target"; then
-    echo "REFUSED: task temp ownership is missing, malformed, or ambiguous for $ID: $target" >&2
-    return 1
-  fi
-  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
-    rm -f "$owner_record"
-    return 0
-  fi
-  if ! fm_tasktmp_owner_validate "$target/.fm-tasktmp-owner" "$FM_HOME" "$ID" "$TASK_GENERATION" "$target"; then
-    echo "REFUSED: task temp root proof is missing, malformed, or forged for $ID: $target" >&2
-    return 1
-  fi
-  base=$(python3 - <<'PY'
-import os
-import stat
-
-base = os.path.realpath("/tmp")
-if base not in ("/tmp", "/private/tmp"):
-    raise SystemExit(1)
-current = os.path.sep
-for component in base.split(os.path.sep):
-    if not component:
-        continue
-    current = os.path.join(current, component)
-    metadata = os.lstat(current)
-    if stat.S_ISLNK(metadata.st_mode):
-        raise SystemExit(1)
-if not stat.S_ISDIR(os.lstat(base).st_mode):
-    raise SystemExit(1)
-print(base)
-PY
-  ) || return 1
-  removal_tree_operation "$base/${target##*/}" "task temp root" remove || return 1
-  rm -f "$owner_record"
+  fm_account_safe_remove_task_tmp "$ID" "$target" "$TASK_GENERATION"
 }
 
 remove_worktree_compatibility_artifacts() {
@@ -2563,6 +2535,10 @@ validate_secondmate_home_landed_state() {
     $0 == "?? .claude/settings.local.json" { next }
     $0 == "?? .opencode/plugins/fm-turn-end.js" { next }
     $0 == "?? .fm-grok-turnend" { next }
+    $0 == "?? config" { next }
+    $0 == "?? data" { next }
+    $0 == "?? projects" { next }
+    $0 == "?? state" { next }
     $0 != "" { print }
   ')
   [ -z "$unsafe" ] || {
@@ -2972,9 +2948,15 @@ def inspect(objects):
         return
     visited.add(identity)
     object_device = metadata.st_dev
+    entries = []
     for name in sorted(os.listdir(directory)):
         path = os.path.join(objects, name)
         item = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        entries.append((name, path, item))
+    if objects != initial:
+        os.close(directory)
+        held[-1] = (objects, None, held[-1][2])
+    for name, path, item in entries:
         if item.st_dev != object_device:
             raise OSError(f"object storage crosses a filesystem boundary: {path}")
         if stat.S_ISLNK(item.st_mode):
@@ -2990,9 +2972,6 @@ def inspect(objects):
     if os.path.lexists(http_alternates):
         raise OSError(f"HTTP alternates are not durable proof: {http_alternates}")
     if not os.path.lexists(alternates):
-        if objects != initial:
-            os.close(directory)
-            held[held_index] = (objects, None, held[held_index][2])
         return
     alternate_fd, _ = retain(alternates, False, True)
     with os.fdopen(os.dup(alternate_fd), "r", encoding="utf-8") as stream:
@@ -3004,9 +2983,6 @@ def inspect(objects):
             raise OSError(f"quoted alternates are ambiguous: {alternates}")
         candidate = entry if os.path.isabs(entry) else os.path.join(objects, entry)
         inspect(os.path.realpath(candidate))
-    if objects != initial:
-        os.close(directory)
-        held[held_index] = (objects, None, held[held_index][2])
 
 def verify_retained():
     for path, descriptor, expected in held:
@@ -3029,6 +3005,12 @@ def verify_retained():
         if current != expected or retained != expected or stat.S_ISLNK(metadata.st_mode):
             raise OSError(f"object storage identity changed during graph proof: {path}")
 
+def release_nested_descriptors():
+    for index, (path, descriptor, expected) in enumerate(held[1:], start=1):
+        if descriptor is not None:
+            os.close(descriptor)
+            held[index] = (path, None, expected)
+
 def run(arguments, input_data=None):
     environment = os.environ.copy()
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
@@ -3046,6 +3028,7 @@ def run(arguments, input_data=None):
 
 try:
     inspect(initial)
+    release_nested_descriptors()
     marker = os.environ.get("FM_TEARDOWN_TEST_OBJECT_SCAN_MARKER", "")
     release = os.environ.get("FM_TEARDOWN_TEST_OBJECT_SCAN_RELEASE", "")
     scan_root = os.environ.get("FM_TEARDOWN_TEST_OBJECT_SCAN_ROOT", "")
@@ -3315,6 +3298,7 @@ EOF
   }
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
+    [ "$ref" != refs/stash ] || continue
     git -C "$repository" cat-file -e "$ref^{object}" 2>/dev/null || {
       echo "REFUSED: $label ref $ref depends on unavailable objects" >&2
       return 1
@@ -3965,7 +3949,7 @@ EOF
 validate_secondmate_project_clones() {
   local home=$1 registry=$2 expected_id=$3 expected_source=$4 projects_root source_projects_root
   local source_projects_candidate
-  local expected listed project clone source_clone repositories relative repository source_repository
+  local home_root expected listed project clone source_clone repositories relative repository source_repository
   if ! expected=$(fm_secondmate_registry_query "$registry" query "$expected_id" projects); then
     if [ "$registry" = "$PREPARED_REGISTRY_PATH" ] \
         && [ "$expected_id" = "$PREPARED_REGISTRY_ID" ] \
@@ -3979,7 +3963,12 @@ validate_secondmate_project_clones() {
       return 1
     fi
   fi
-  projects_root=$(fm_checkout_trusted_dir "$home/projects") || {
+  home_root=$(canonical_existing_dir "$home") || return 1
+  projects_root=$(cd "$home/projects" 2>/dev/null && pwd -P) || {
+    echo "REFUSED: secondmate projects directory is missing, redirected, or unreadable at $home/projects" >&2
+    return 1
+  }
+  path_is_ancestor_of "$home_root" "$projects_root" || {
     echo "REFUSED: secondmate projects directory is missing, redirected, or unreadable at $home/projects" >&2
     return 1
   }
@@ -4234,7 +4223,7 @@ validate_firstmate_home_children_removal() {
       child_proj=$(meta_value "$child_meta" project)
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" "$home/data/secondmates.md" "$child_proj" >/dev/null || return 1
+      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" "$home/data/secondmates.md" "$child_proj" 1 >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
       require_orca_task_metadata_identity "$child_meta" "$child_id" || return 1
@@ -4860,7 +4849,7 @@ if [ "$DIRECT_SPAWN_CLEANUP" = pending ] && [ -n "$DIRECT_SPAWN_BACKUP" ]; then
     exit 1
   }
   direct_spawn_restore_lock=$(fm_account_meta_lock_acquire "$STATE" "$ID") || exit 1
-  if ! fm_account_restore_artifacts "$STATE" "$ID" "$DIRECT_SPAWN_ARTIFACTS" "$TASK_TMP" 1 \
+  if ! fm_account_restore_artifacts "$STATE" "$ID" "$DIRECT_SPAWN_ARTIFACTS" "$TASK_TMP" 1 "$TASK_GENERATION" \
     || ! fm_account_meta_merge_extensions "$META" "$direct_spawn_backup_path" \
     || ! fm_account_safe_file_destination "$META" \
     || ! mv "$direct_spawn_backup_path" "$META"; then
@@ -4916,7 +4905,7 @@ EOF
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the exact owned per-generation temp root recorded by spawn.
+# Remove the exact recorded per-generation task temp root, including gotmp.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -z "$TASK_TMP" ] || safe_remove_task_tmp "$TASK_TMP" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"

@@ -29,7 +29,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
+fm_test_tmproot_into TMP_ROOT fm-watch-triage-tests
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
 # test overrides them, so a test only exercises the path it targets. FM_CREW_STATE_BIN
@@ -1700,6 +1700,7 @@ test_account_session_sync_is_bounded_and_cadenced() {
   task_timeout_file="$dir/account-session-sync-task.timeout"
   elapsed_file="$dir/account-session-sync.elapsed"
   sync_cadence_file="$state/.last-account-session-sync"
+  rm -f "$sync_cadence_file"
   mkdir -p "$fake_root/bin"
 cat > "$sync_bin" <<'SH'
 #!/usr/bin/env bash

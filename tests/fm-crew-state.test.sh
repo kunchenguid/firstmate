@@ -34,7 +34,7 @@ set -u
 . "$ROOT/bin/fm-classify-lib.sh"
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
-TMP_ROOT=$(fm_test_tmproot fm-crew-state)
+fm_test_tmproot_into TMP_ROOT fm-crew-state
 fm_git_identity fmtest fmtest@example.invalid
 
 # A real git repo checked out on <branch>, so the helper's branch attribution

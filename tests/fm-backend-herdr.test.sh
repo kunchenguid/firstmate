@@ -18,7 +18,7 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
-TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+fm_test_tmproot_into TMP_ROOT fm-backend-herdr-tests
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 export FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1
 

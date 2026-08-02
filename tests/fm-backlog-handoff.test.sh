@@ -13,7 +13,7 @@ set -u
 # binary. Skip cleanly when it is absent (matching the backend smoke suites).
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (required by the delegated handoff path)"; exit 0; }
 
-TMP_ROOT=$(fm_test_tmproot fm-backlog-handoff)
+fm_test_tmproot_into TMP_ROOT fm-backlog-handoff
 
 setup_homes() {
   local home=$1 subhome=$2 id=${3:-design}

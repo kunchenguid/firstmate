@@ -106,7 +106,7 @@ fm_checkout_git_common_dir() {
 }
 
 fm_checkout_validate_git_metadata() {
-  local checkout=$1 root metadata absolute_git common listed line listed_root found=0
+  local checkout=$1 root metadata absolute_git common top listed line listed_root found=0
   root=$(fm_checkout_trusted_dir "$checkout") || return 1
   metadata="$root/.git"
   [ -e "$metadata" ] && [ ! -L "$metadata" ] || return 1
@@ -118,11 +118,16 @@ fm_checkout_validate_git_metadata() {
     *) common="$root/$common" ;;
   esac
   common=$(fm_checkout_trusted_dir "$common") || return 1
+  top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top=$(fm_checkout_trusted_dir "$top") || return 1
+  [ "$top" = "$root" ] || return 1
   if [ -d "$metadata" ]; then
     [ "$(fm_checkout_trusted_dir "$metadata")" = "$absolute_git" ] || return 1
     [ "$absolute_git" = "$common" ] || return 1
   elif [ -f "$metadata" ]; then
-    case "$absolute_git" in "$common"/worktrees/*) ;; *) return 1 ;; esac
+    if [ "$absolute_git" != "$common" ]; then
+      case "$absolute_git" in "$common"/worktrees/*) ;; *) return 1 ;; esac
+    fi
   else
     return 1
   fi
@@ -131,7 +136,15 @@ fm_checkout_validate_git_metadata() {
     case "$line" in
       "worktree "*)
         listed_root=$(fm_checkout_trusted_dir "${line#worktree }" 2>/dev/null) || return 1
-        [ "$listed_root" != "$root" ] || found=$((found + 1))
+        if [ "$listed_root" = "$root" ]; then
+          found=$((found + 1))
+        elif [ -f "$metadata" ] && [ "$absolute_git" = "$common" ] \
+          && [ "$listed_root" = "$common" ]; then
+          # An absorbed submodule's worktree listing identifies its common
+          # Git directory rather than the checked-out root. The exact
+          # show-toplevel proof above binds that Git directory back to root.
+          found=$((found + 1))
+        fi
         ;;
     esac
   done <<EOF

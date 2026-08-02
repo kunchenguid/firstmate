@@ -371,7 +371,7 @@ test_failopen_garbage_stdin() {
 
 test_failopen_missing_jq() {
   local dir fakebin rc real
-  dir=$(fm_test_tmproot fm-arm-pretool-check)
+  fm_test_tmproot_into dir fm-arm-pretool-check
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
   local tool
@@ -387,7 +387,7 @@ test_failopen_missing_jq() {
 
 test_failopen_missing_node() {
   local dir fakebin rc real tool
-  dir=$(fm_test_tmproot fm-arm-pretool-node)
+  fm_test_tmproot_into dir fm-arm-pretool-node
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
   for tool in bash dirname; do
@@ -403,11 +403,11 @@ test_failopen_missing_node() {
 # --- --claude output shaping ---------------------------------------------------
 
 test_claude_mode_stdout_empty_on_deny() {
-  local out err rc
-  out=$("$CHECK" --claude --command 'bin/fm-watch-arm.sh &' 2>/tmp/fm-arm-pretool-check-claude-stderr.$$)
+  local out err rc err_file="$MATRIX_TMP/claude-stderr"
+  out=$("$CHECK" --claude --command 'bin/fm-watch-arm.sh &' 2>"$err_file")
   rc=$?
-  err=$(cat "/tmp/fm-arm-pretool-check-claude-stderr.$$" 2>/dev/null)
-  rm -f "/tmp/fm-arm-pretool-check-claude-stderr.$$"
+  err=$(cat "$err_file" 2>/dev/null)
+  rm -f "$err_file"
   [ "$rc" -eq 2 ] || fail "--claude deny must still exit 2, got $rc"
   [ -z "$out" ] || fail "--claude deny must leave stdout EMPTY (Claude Code only honors a stderr-only deny), got: $out"
   printf '%s' "$err" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \

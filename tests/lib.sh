@@ -122,6 +122,17 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+# Compatibility for suites replayed from the run-unique temp-root migration.
+# The manifest-backed allocator remains authoritative and Bash 3.2 safe.
+fm_test_tmproot_into() {
+  local target_var=$1 prefix=${2:-fm-test} root
+  case "$target_var" in
+    ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) return 2 ;;
+  esac
+  root=$(fm_test_tmproot "$prefix") || return 1
+  printf -v "$target_var" '%s' "$root"
+}
+
 # --- node capability probe ---------------------------------------------------
 #
 # fm_node_supports_ts_import succeeds when the ambient node can import a .ts

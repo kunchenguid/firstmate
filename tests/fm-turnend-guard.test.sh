@@ -16,7 +16,7 @@ set -u
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$ROOT/bin/fm-supervision-lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
+fm_test_tmproot_into TMP_ROOT fm-turnend-guard
 fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='resume supervision with bin/fm-watch-arm.sh as its own Claude Code background task'

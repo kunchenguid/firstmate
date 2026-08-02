@@ -5,7 +5,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-herdr-lab)
+fm_test_tmproot_into TMP_ROOT fm-herdr-lab
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 FAKE_STATE="$TMP_ROOT/herdr-state"
 FAKE_LOG="$TMP_ROOT/herdr.log"

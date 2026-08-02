@@ -14,7 +14,7 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the zellij adapter)"; exit 0; }
 
-TMP_ROOT=$(fm_test_tmproot fm-backend-zellij-tests)
+fm_test_tmproot_into TMP_ROOT fm-backend-zellij-tests
 
 # make_zellij_fakebin: a `zellij` stub that logs every invocation (one line,
 # unit-separated args, to $FM_ZELLIJ_LOG) and returns the canned response for

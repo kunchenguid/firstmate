@@ -7,7 +7,7 @@ set -u
 
 SCRIPT="$ROOT/bin/fm-macos-permissions.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
-TMP_ROOT=$(fm_test_tmproot fm-macos-permissions-tests)
+fm_test_tmproot_into TMP_ROOT fm-macos-permissions-tests
 
 make_world() {
   local world="$TMP_ROOT/$1" fakebin

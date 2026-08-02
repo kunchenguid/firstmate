@@ -13,7 +13,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
-TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
+fm_test_tmproot_into TMP_ROOT fm-spawn-batch
 export FM_BACKEND=tmux
 
 # Clear ambient firstmate overrides so the behavior test owns its environment.

@@ -210,8 +210,8 @@ write_dead_acquisition() {  # <id> <project> <worktree> <mode> [endpoint-phase] 
     printf '999999\nMon Jan  1 00:00:00 2001\n'
     printf 'id=%s\nproject=%s\nholder=firstmate-%s\n' "$id" "$project" "$id"
     printf 'home=%s\n' "$home_real"
-    printf 'kind=ship\nmode=%s\nyolo=off\ngeneration_id=orphan-test\n' "$mode"
-    printf 'tasktmp=/tmp/fm-%s-orphan-test\ntasktmp_phase=%s\n' "$id" "$tasktmp_phase"
+    printf 'kind=ship\nmode=%s\nyolo=off\ngeneration_id=spawn:orphan-test\n' "$mode"
+    printf 'tasktmp=%s/state/.task-tmp/fm-%s-orphan-test\ntasktmp_phase=%s\n' "$HOME_DIR" "$id" "$tasktmp_phase"
     printf 'backend=%s\nendpoint_phase=%s\n' "$backend" "$endpoint_phase"
     printf 'worktree=%s\n' "$worktree"
   } > "$record"
@@ -240,7 +240,7 @@ test_dead_acquisition_recovers_but_live_owner_is_untouched() {
     printf '%s\n%s\n' "$$" "$start"
     printf 'id=live-slot\nproject=%s\nholder=firstmate-live-slot\n' "$project"
     printf 'home=%s\n' "$(cd "$HOME_DIR" && pwd -P)"
-    printf 'kind=ship\nmode=direct\nyolo=off\ngeneration_id=live\ntasktmp=/tmp/fm-live-slot-live\n'
+    printf 'kind=ship\nmode=direct\nyolo=off\ngeneration_id=spawn:live\ntasktmp=%s/state/.task-tmp/fm-live-slot-live\n' "$HOME_DIR"
     printf 'tasktmp_phase=not-created\nbackend=tmux\nendpoint_phase=not-created\nworktree=\n'
   } > "$live_record"
   touch -t 202001010000 "$live_record"

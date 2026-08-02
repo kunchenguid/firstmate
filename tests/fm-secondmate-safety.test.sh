@@ -12,7 +12,7 @@ set -u
 # shellcheck source=bin/fm-checkout-lock-lib.sh disable=SC1091
 . "$ROOT/bin/fm-checkout-lock-lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
+fm_test_tmproot_into TMP_ROOT fm-secondmate-safety
 export FM_BACKEND=tmux
 
 make_live_default_firstmate_worktree() {
@@ -29,6 +29,22 @@ make_live_default_firstmate_worktree() {
   git clone --quiet "file://$remote_abs" "$source"
   git -C "$source" worktree add --quiet --detach "$destination" main
   printf '%s\n' "$source"
+}
+
+make_live_default_firstmate_clone() {
+  local destination=$1 default source_origin target
+  # actions/checkout may leave a detached PR head without origin/HEAD.
+  default=$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'origin/main')
+  default=${default#origin/}
+  target=$(git -C "$ROOT" rev-parse "refs/remotes/origin/$default^{commit}")
+  source_origin=$(git -C "$ROOT" remote get-url origin)
+  git init -q "$destination"
+  git -C "$destination" remote add origin "$ROOT"
+  git -C "$destination" fetch -q --no-tags origin "$target"
+  git -C "$destination" checkout --quiet --detach "$target"
+  git -C "$destination" remote set-url origin "$source_origin"
+  git -C "$destination" update-ref "refs/remotes/origin/$default" "$target"
+  git -C "$destination" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$default"
 }
 
 FM_ROOT_OVERRIDE=$(make_live_default_firstmate_worktree \
@@ -857,7 +873,7 @@ EOF
     fail "project-less seed converted a populated secondmate home"
   fi
   grep -F 'existing-clone' "$err" >/dev/null \
-    || fail "project-less conversion refusal did not name the existing clone"
+    || fail "project-less conversion refusal did not name the existing clone: $(cat "$err")"
   grep -F 'registry-only' "$err" >/dev/null \
     || fail "project-less conversion refusal did not name the registry entry"
   grep -F 'retire or clean this home first' "$err" >/dev/null \
@@ -917,8 +933,9 @@ test_home_seed_refuses_projectless_home_with_symlinked_projects() {
   sub="$TMP_ROOT/no-projects-symlinked-projects-subhome"
   target="$sub/retained-projects"
   err="$TMP_ROOT/no-projects-symlinked-projects.err"
-  mkdir -p "$home/data" "$home/state" "$sub/data" "$target/hidden-clone"
-  mark_firstmate_home "$sub"
+  mkdir -p "$home/data" "$home/state"
+  make_live_default_firstmate_clone "$sub"
+  mkdir -p "$sub/data" "$target/hidden-clone"
   fm_git_init_commit "$target/hidden-clone"
   ln -s "$target" "$sub/projects"
   chmod 311 "$target"
@@ -931,7 +948,7 @@ test_home_seed_refuses_projectless_home_with_symlinked_projects() {
   fi
   chmod 700 "$target"
   grep -F 'projects directory' "$err" >/dev/null \
-    || fail "project-less seed did not identify the symlinked projects directory"
+    || fail "project-less seed did not identify the symlinked projects directory: $(cat "$err")"
   grep -F 'it is a symlink' "$err" >/dev/null \
     || fail "project-less seed did not explain the symlinked projects directory refusal"
   assert_present "$target/hidden-clone/.git" "project-less symlink refusal removed the target clone"
@@ -989,8 +1006,9 @@ test_home_seed_refuses_projectless_home_with_non_directory_projects() {
   home="$TMP_ROOT/no-projects-nondirectory-projects-home"
   sub="$TMP_ROOT/no-projects-nondirectory-projects-subhome"
   err="$TMP_ROOT/no-projects-nondirectory-projects.err"
-  mkdir -p "$home/data" "$home/state" "$sub/data"
-  mark_firstmate_home "$sub"
+  mkdir -p "$home/data" "$home/state"
+  make_live_default_firstmate_clone "$sub"
+  mkdir -p "$sub/data"
   printf '%s\n' 'retained project path' > "$sub/projects"
   projects_before=$(cat "$sub/projects")
 
@@ -1019,8 +1037,9 @@ test_home_seed_refuses_projectless_home_with_uninspectable_registry() {
   home="$TMP_ROOT/no-projects-uninspectable-registry-home"
   sub="$TMP_ROOT/no-projects-uninspectable-registry-subhome"
   err="$TMP_ROOT/no-projects-uninspectable-registry.err"
-  mkdir -p "$home/data" "$home/state" "$sub/data"
-  mark_firstmate_home "$sub"
+  mkdir -p "$home/data" "$home/state"
+  make_live_default_firstmate_clone "$sub"
+  mkdir -p "$sub/data"
   printf '%s\n' '- hidden-registry [direct-PR] - retained project entry (added 2026-06-22)' > "$sub/data/projects.md"
   registry_before=$(cat "$sub/data/projects.md")
   chmod 000 "$sub/data/projects.md"
@@ -1275,14 +1294,16 @@ EOF
   scaffold_secondmate_charter "$home" design 'design domain' alpha \
     || fail "charter scaffold failed for registered-overlap seed test"
 
-  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$nested" alpha >/dev/null 2>"$err"; then
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='design domain' FM_SECONDMATE_SCOPE='design domain' \
+    "$ROOT/bin/fm-home-seed.sh" design "$nested" alpha >/dev/null 2>"$err"; then
     fail "seed accepted a home inside a registered secondmate home"
   fi
   grep -F 'overlaps registered secondmate home' "$err" >/dev/null \
     || fail "seed did not explain registered ancestor overlap"
   [ ! -e "$nested" ] || fail "seed created a nested home inside a registered home"
 
-  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$parent" alpha >/dev/null 2>"$err"; then
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='design domain' FM_SECONDMATE_SCOPE='design domain' \
+    "$ROOT/bin/fm-home-seed.sh" design "$parent" alpha >/dev/null 2>"$err"; then
     fail "seed accepted a home containing a registered secondmate home"
   fi
   grep -F 'overlaps registered secondmate home' "$err" >/dev/null \
@@ -1748,9 +1769,10 @@ test_fm_send_refuses_bare_window_without_home_meta() {
 }
 
 test_secondmate_teardown_retires_empty_home() {
-  local home subhome subhome_abs fakebin log lease fmroot
+  local home subhome subhome_abs fakebin log lease fmroot err
   home="$TMP_ROOT/teardown-home"
   fmroot="$TMP_ROOT/teardown-fmroot"
+  err="$TMP_ROOT/teardown.err"
   make_firstmate_git_root "$fmroot"
   subhome=$(make_leased_secondmate_home "$TMP_ROOT/teardown-pool" "$fmroot" domain)
   mkdir -p "$home/state" "$home/data" "$TMP_ROOT/remotes" "$subhome/state"
@@ -1781,8 +1803,8 @@ EOF
   printf 'domain\n' > "$lease"
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-fake/pane.txt" \
     FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
-    || fail "teardown failed for empty secondmate home"
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err" \
+    || fail "teardown failed for empty secondmate home: $(cat "$err")"
   grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null || fail "teardown did not release the secondmate home lease via treehouse return"
   [ ! -e "$lease" ] || fail "teardown left the secondmate home lease held after retirement"
   [ ! -d "$subhome" ] || fail "teardown did not remove the retired secondmate home"
@@ -1837,10 +1859,11 @@ EOF
 }
 
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return() {
-  local home subhome subhome_abs fakebin log fmroot
+  local home subhome subhome_abs fakebin log fmroot err
   home="$TMP_ROOT/plain-clone-teardown-home"
   subhome="$TMP_ROOT/plain-clone-teardown-subhome"
   fmroot="$TMP_ROOT/plain-clone-teardown-fmroot"
+  err="$TMP_ROOT/plain-clone-teardown.err"
   # A plain-CLONE home has to actually be a clone: teardown proves the home is an
   # exact repository root whose identity resolves back to the source before it will
   # remove anything, and a bare mkdir'd directory is refused long before the
@@ -1874,8 +1897,8 @@ EOF
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/plain-clone-teardown-fake/pane.txt" \
     FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
-    || fail "teardown failed for plain-clone secondmate home"
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err" \
+    || fail "teardown failed for plain-clone secondmate home: $(cat "$err")"
   grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null && fail "teardown tried to return a plain-clone home through treehouse"
   [ ! -d "$subhome" ] || fail "teardown did not remove the plain-clone secondmate home"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta for plain-clone home"
@@ -1906,6 +1929,7 @@ EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
+tmux_session_target=firstmate:fm-child
 worktree=$childwt
 project=$childproj
 harness=echo
@@ -1977,6 +2001,7 @@ EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
+tmux_session_target=firstmate:fm-child
 worktree=$childwt
 project=$childproj
 harness=echo
@@ -2035,7 +2060,8 @@ SH
   [ -e "$lock" ] || fail "force teardown removed unproven child index.lock"
   [ -d "$subhome" ] || fail "force teardown removed subhome after child lock refusal"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after child lock refusal"
-  grep -F 'not provably stale' "$err" >/dev/null || fail "force teardown did not explain unproven child lock refusal"
+  grep -F 'not provably stale' "$err" >/dev/null \
+    || fail "force teardown did not explain unproven child lock refusal: $(cat "$err")"
   pass "secondmate force teardown preserves child worktree after unproven lock refusal"
 }
 
@@ -2146,6 +2172,7 @@ EOF
 test_secondmate_force_teardown_refuses_operational_dir_symlinks_inside_home() {
   local opdir home subhome target fakebin err log
   for opdir in data state config projects; do
+    [ -z "${FM_TEST_OPERATIONAL_DIR:-}" ] || [ "$FM_TEST_OPERATIONAL_DIR" = "$opdir" ] || continue
     home="$TMP_ROOT/symlink-inside-teardown-home-$opdir"
     subhome="$TMP_ROOT/symlink-inside-teardown-subhome-$opdir"
     target="$subhome/internal-$opdir"
@@ -2205,7 +2232,8 @@ test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home() {
   fi
   [ -d "$subhome" ] || fail "force teardown removed subhome after symlinked state refusal"
   [ -d "$external_state" ] || fail "force teardown removed external symlink target"
-  grep -F 'state directory' "$err" >/dev/null || fail "teardown did not explain symlinked state refusal"
+  grep -F 'state directory' "$err" >/dev/null \
+    || fail "teardown did not explain symlinked state refusal: $(cat "$err")"
   grep -F 'resolves outside the secondmate home' "$err" >/dev/null || fail "teardown did not identify unsafe state symlink"
   grep -F 'kill-window' "$log" >/dev/null && fail "teardown killed a window before symlinked state refusal"
   pass "force teardown refuses operational directory symlinks outside the subhome"
@@ -2477,7 +2505,8 @@ EOF
   [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta after child validation refusal"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after child validation refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before child validation refusal"
-  grep -F 'inside the active firstmate home' "$err" >/dev/null || fail "force teardown did not explain active home descendant rejection"
+  grep -F 'inside the active firstmate home' "$err" >/dev/null \
+    || fail "force teardown did not explain active home descendant rejection: $(cat "$err")"
   pass "force teardown refuses child worktrees inside the active home"
 }
 
@@ -2518,7 +2547,8 @@ EOF
   [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta after repo child validation refusal"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after repo child validation refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before repo child validation refusal"
-  grep -F 'inside the firstmate repo' "$err" >/dev/null || fail "force teardown did not explain repo descendant rejection"
+  grep -F 'inside the firstmate repo' "$err" >/dev/null \
+    || fail "force teardown did not explain repo descendant rejection: $(cat "$err")"
   pass "force teardown refuses child worktrees inside the firstmate repo"
 }
 
@@ -2559,7 +2589,8 @@ EOF
   [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta after unregistered child refusal"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after unregistered child refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before unregistered child refusal"
-  grep -F 'is not a git worktree for' "$err" >/dev/null || fail "force teardown did not explain unregistered child rejection"
+  grep -F 'is not a git worktree for' "$err" >/dev/null \
+    || fail "force teardown did not explain unregistered child rejection: $(cat "$err")"
   pass "force teardown refuses unregistered child worktree paths"
 }
 
@@ -2769,6 +2800,87 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
   test_secondmate_spawn_requires_exact_registration_and_target_home_lock
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = empty-charter ]; then
+  test_home_seed_refuses_empty_charter_fields
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = projectless-existing ]; then
+  test_home_seed_refuses_projectless_conversion_of_populated_home
+  test_home_seed_refuses_projectless_home_with_uninspectable_projects
+  test_home_seed_refuses_projectless_home_with_symlinked_projects
+  test_home_seed_refuses_projectless_home_with_non_directory_projects
+  test_home_seed_refuses_projectless_home_with_uninspectable_registry
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = registered-overlap ]; then
+  test_home_seed_refuses_home_overlapping_registered_home
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = existing-projects ]; then
+  test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
+  test_home_seed_skips_initialized_existing_no_mistakes_projects
+  test_home_seed_refuses_uninitialized_existing_no_mistakes_project
+  test_home_seed_refuses_project_destinations_outside_subhome
+  test_home_seed_refuses_operational_dirs_outside_subhome
+  test_home_seed_refuses_symlinked_leaf_files
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = teardown-empty ]; then
+  test_secondmate_teardown_retires_empty_home
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = teardown-lock ]; then
+  test_secondmate_force_teardown_preserves_child_on_unproven_lock
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = teardown-inside-symlinks ]; then
+  test_secondmate_force_teardown_refuses_operational_dir_symlinks_inside_home
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = teardown-after-symlinks ]; then
+  test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
+  test_secondmate_teardown_refuses_registered_nested_home
+  test_secondmate_teardown_refuses_child_registry_nested_home
+  test_secondmate_force_teardown_prevalidates_before_child_cleanup
+  test_secondmate_force_teardown_refuses_child_active_home_descendant
+  test_secondmate_force_teardown_refuses_child_repo_descendant
+  test_secondmate_force_teardown_refuses_unregistered_child_worktree
+  test_secondmate_teardown_path_boundary_matrix
+  test_secondmate_idle_pane_is_not_stale
+  test_secondmate_charter_brief_is_idle_by_default
+  test_backlog_handoff_aborts_safely
+  test_backlog_handoff_refuses_done_items_and_non_secondmate_homes
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = teardown-rest ]; then
+  test_secondmate_teardown_refuses_failed_leased_home_return
+  test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
+  test_secondmate_force_teardown_retains_unlanded_child_work
+  test_secondmate_force_teardown_preserves_child_on_unproven_lock
+  test_secondmate_force_teardown_refuses_operational_dir_symlinks_inside_home
+  test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
+  test_secondmate_teardown_refuses_registered_nested_home
+  test_secondmate_teardown_refuses_child_registry_nested_home
+  test_secondmate_force_teardown_prevalidates_before_child_cleanup
+  test_secondmate_force_teardown_refuses_child_active_home_descendant
+  test_secondmate_force_teardown_refuses_child_repo_descendant
+  test_secondmate_force_teardown_refuses_unregistered_child_worktree
+  test_secondmate_teardown_path_boundary_matrix
+  test_secondmate_idle_pane_is_not_stale
+  test_secondmate_charter_brief_is_idle_by_default
+  test_backlog_handoff_aborts_safely
+  test_backlog_handoff_refuses_done_items_and_non_secondmate_homes
   exit 0
 fi
 

@@ -43,8 +43,10 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 FM_TEST_REAL_NODE=$(command -v node)
 export FM_TEST_REAL_NODE
 fm_git_identity fmtest fmtest@example.com
+FM_TEST_REAL_NODE=$(command -v node) || fail "node is required"
+export FM_TEST_REAL_NODE
 
-TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
+fm_test_tmproot_into TMP_ROOT fm-secondmate-liveness
 
 # --- unit level: fm_backend_tmux_agent_alive --------------------------------
 
@@ -175,7 +177,7 @@ test_agent_alive_dispatcher_routes_and_falls_back() {
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_agent_alive herdr sess:p1' "$ROOT")
   [ "$out" = alive ] || fail "dispatcher should route herdr to fm_backend_herdr_agent_alive, got '$out'"
 
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive zellij sess:win' "$ROOT")
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive cmux sess:win' "$ROOT")
   [ "$out" = unknown ] || fail "dispatcher should report unknown for a backend with no verified classifier, got '$out'"
 
   pass "fm_backend_agent_alive: routes tmux/herdr correctly, unknown for an unverified backend"
@@ -311,23 +313,32 @@ SH
 new_world() {
   local name=$1 w
   w="$TMP_ROOT/$name"
-  mkdir -p "$w/home/state" "$w/home/config"
+  mkdir -p "$w/home/state" "$w/home/config" "$w/home/data"
   touch "$w/home/state/.last-watcher-beat"
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf '%s\n' "$w"
 }
 
-# add_sm_home <w> <id> <window>: a plain (non-git) secondmate home - the
-# probe/respawn machinery under test never requires the home to be a real
-# worktree; a non-git home just makes the unrelated fast-forward sweep log a
-# harmless "not a git repo" skip.
+# add_sm_home <w> <id> <window>: a fresh detached secondmate home at the
+# primary default tip, so recovery exercises the same freshness gate as a real
+# secondmate instead of relying on a non-Git legacy fixture.
 add_sm_home() {
   local w=$1 id=$2 window=$3 harness=${4:-claude}
-  local home="$w/$id"
-  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  local home="$w/$id" home_abs source_origin primary_root="$w/primary-root"
+  source_origin=$(git -C "$ROOT" remote get-url origin)
+  if [ ! -d "$primary_root/.git" ]; then
+    git clone --quiet "$source_origin" "$primary_root"
+  fi
+  git clone --quiet --no-checkout "$primary_root" "$home"
+  git -C "$home" remote set-url origin "$source_origin"
+  git -C "$home" checkout --quiet --detach refs/remotes/origin/main
+  git -C "$home" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"
+  home_abs=$(cd "$home" && pwd -P)
+  printf '%s\n' "- $id - test secondmate (home: $home_abs; scope: test; projects: test; added 2026-07-25)" \
+    > "$w/home/data/secondmates.md"
   {
     printf 'window=%s\n' "$window"
     printf 'kind=secondmate\n'
@@ -570,9 +581,8 @@ test_enforced_recovery_sweep_installs_meta_with_inherited_lock() {
   generation=account:$account_task:a1234
   # shellcheck source=bin/fm-account-routing-lib.sh
   . "$ROOT/bin/fm-account-routing-lib.sh"
-  task_tmp=$(fm_tasktmp_path sm1 "$generation")
-  fm_tasktmp_create "$w/home/state" "$w/home" sm1 "$generation" "$task_tmp" \
-    || fail "could not create exact task temp ownership for enforced recovery"
+  task_tmp=$(STATE="$w/home/state" fm_account_task_tmp_path sm1 "$generation")
+  mkdir -p "$task_tmp/gotmp"
   mkdir -p "$w/home/data/sm1"
   printf -- '- sm1 - test secondmate (home: %s; scope: test; projects: ; added 2026-07-13)\n' \
     "$workspace" > "$w/home/data/secondmates.md"
@@ -582,6 +592,7 @@ project=$workspace
 mode=secondmate
 yolo=off
 tasktmp=$task_tmp
+tasktmp_phase=created
 account_pool=claude-crew
 account_profile=claude-2
 account_task=$account_task
@@ -590,7 +601,6 @@ provider_session_id=sess-$account_task
 generation_id=$generation
 EOF
   printf 'enforce\n' > "$w/home/config/account-routing-mode"
-
   spawn_root="$w/spawn-root"
   git clone -q --no-checkout "$ROOT" "$spawn_root"
   git -C "$spawn_root" checkout -q -B main "$primary_tip"
@@ -607,7 +617,7 @@ exit "$status"
 SH
   cat > "$fake_root/bin/fm-account-session-sync.sh" <<'SH'
 #!/usr/bin/env bash
-FM_ROOT_OVERRIDE="$FM_TEST_REAL_ROOT" exec "$FM_TEST_REAL_ROOT/bin/fm-account-session-sync.sh" "$@"
+FM_ROOT_OVERRIDE="$FM_TEST_PRIMARY_ROOT" exec "$FM_TEST_REAL_ROOT/bin/fm-account-session-sync.sh" "$@"
 SH
   cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
 #!/usr/bin/env bash
@@ -654,7 +664,7 @@ SH
   refreshed="$w/session-refreshed"
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
     FM_ROOT_OVERRIDE="$fake_root" FM_TEST_REAL_ROOT="$ROOT" \
-    FM_TEST_SPAWN_ROOT="$spawn_root" \
+    FM_TEST_PRIMARY_ROOT="$w/primary-root" FM_TEST_SPAWN_ROOT="$spawn_root" \
     FM_AGENT_FLEET_BIN="$fake_af" FM_ACCOUNT_SESSION_WAIT_SECONDS=2 \
     FM_MANAGED_WORKSPACE="$workspace" \
     FM_MANAGED_NATIVE_DIR_FILE="$native_dir_file" FM_MANAGED_SESSION_REFRESHED="$refreshed" \
@@ -667,7 +677,7 @@ SH
   assert_no_grep '^account_rollback_cleanup=' "$meta" \
     "enforced secondmate recovery did not commit its metadata installation"
   assert_present "$refreshed" "enforced secondmate recovery never crossed its fresh SessionStart gate"
-  FM_HOME="$w/home" fm_tasktmp_remove_owned "$w/home/state" "$w/home" sm1 "$generation" "$task_tmp" \
+  STATE="$w/home/state" FM_HOME="$w/home" fm_account_safe_remove_task_tmp sm1 "$task_tmp" "$generation" \
     || fail "could not clean exact task temp ownership after enforced recovery"
   pass "sweep: enforced secondmate recovery installs metadata under the inherited lifecycle lock"
 }

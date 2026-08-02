@@ -21,7 +21,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
-TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
+fm_test_tmproot_into TMP_ROOT fm-pr-merge-tests
 
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
 # fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.

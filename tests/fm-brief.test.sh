@@ -14,7 +14,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-brief)
+fm_test_tmproot_into TMP_ROOT fm-brief
 
 # The script itself must always parse. This is the direct regression test for
 # issue #166: a stray apostrophe in any of the three DOD heredoc bodies

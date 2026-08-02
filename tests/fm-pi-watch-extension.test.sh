@@ -5,7 +5,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
+fm_test_tmproot_into TMP_ROOT fm-pi-watch-extension
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 
 install_pi_watch_extension_fixture() {

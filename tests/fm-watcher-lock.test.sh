@@ -13,7 +13,7 @@ WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
+fm_test_tmproot_into TMP_ROOT fm-watcher-lock-tests
 
 
 test_singleton_start() {

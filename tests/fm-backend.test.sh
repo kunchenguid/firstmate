@@ -35,7 +35,7 @@ fm_git_identity fmtest fmtest@example.invalid
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
+fm_test_tmproot_into TMP_ROOT fm-backend-tests
 
 # fm_backend_detect's cmux fallback (bundle id + process ancestry,
 # docs/cmux-backend.md "Runtime auto-detection") consults uname, lsappinfo,
@@ -125,7 +125,7 @@ BASE_REF=$(resolve_base_ref) \
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-supervision-lib.sh fm-classify-lib.sh fm-transition-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-process-tree-lib.sh fm-checkout-lock-lib.sh fm-account-routing-lib.sh fm-report-contract-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-supervision-lib.sh fm-classify-lib.sh fm-transition-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-process-tree-lib.sh fm-checkout-lock-lib.sh fm-account-routing-lib.sh fm-treehouse-lib.sh fm-report-contract-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
@@ -1110,7 +1110,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   assert_contains "$out" "worktree=$wt" \
     "fm-spawn.sh did not resolve a symlinked-prefix project to its real worktree when the backend reports $first_reply cwd"
 
-  rm -rf "/tmp/fm-$id"
+  rm -rf "$state/.task-tmp/fm-$id"
 }
 
 test_spawn_symlinked_project_prefix_avoids_false_refusal() {
@@ -1297,7 +1297,7 @@ test_spawn_default_backend_writes_no_meta_field() {
   expect_code 0 $? "explicit --backend tmux should spawn successfully"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux (the default) must not write backend= to meta (P1 compatibility contract)"
-  rm -rf "/tmp/fm-$id"
+  rm -rf "$state/.task-tmp/fm-$id"
   pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
 }
 
@@ -1324,7 +1324,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   expect_code 0 $? "explicit --backend tmux should spawn successfully even with HERDR_ENV=1 set"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux must win over an ambient HERDR_ENV=1 auto-detect marker"
-  rm -rf "/tmp/fm-$id"
+  rm -rf "$state/.task-tmp/fm-$id"
   pass "fm-spawn.sh: explicit --backend tmux wins over an ambient HERDR_ENV=1 auto-detect marker"
 }
 
@@ -1357,7 +1357,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   case "$out" in
     *NOTICE*) fail "auto-detecting tmux (even nested inside herdr) must stay silent, no NOTICE expected"$'\n'"$out" ;;
   esac
-  rm -rf "/tmp/fm-$id"
+  rm -rf "$state/.task-tmp/fm-$id"
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 

@@ -30,7 +30,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LIB="$ROOT/bin/fm-checkout-lock-lib.sh"
-TMP_ROOT=$(fm_test_tmproot fm-checkout-return-boundary)
+fm_test_tmproot_into TMP_ROOT fm-checkout-return-boundary
 BOUNDARY_PY="$TMP_ROOT/boundary.py"
 REFUSED=74
 

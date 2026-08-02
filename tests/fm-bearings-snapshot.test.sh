@@ -11,7 +11,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
-TMP_ROOT=$(fm_test_tmproot fm-bearings)
+fm_test_tmproot_into TMP_ROOT fm-bearings
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 

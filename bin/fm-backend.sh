@@ -927,8 +927,7 @@ fm_backend_target_state() {  # <backend> <target> [expected-label] [recorded-sco
         *) printf 'unknown'; return 0 ;;
       esac
       if [ "$pane_record" = null ]; then
-        if [ -n "$expected_tab_id" ] && printf '%s\n' "$panes" | jq -e --arg tab "$expected_tab_id" \
-          'any(.[]?; .is_plugin == false and (.tab_id | tostring) == $tab)' >/dev/null 2>&1; then
+        if [ -n "$expected_tab_id" ]; then
           printf 'present'
         else
           printf 'absent'
@@ -1035,9 +1034,11 @@ fm_backend_target_state() {  # <backend> <target> [expected-label] [recorded-sco
 # Scoped to today's --secondmate-spawn-capable backends with an empirically
 # verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe") and
 # herdr (docs/herdr-backend.md "Agent liveness probe reuses the husk
-# classifier"). zellij, orca, and cmux report unknown until independently
-# verified - future work, not a functional gap for the two backends
-# --secondmate spawns actually support today plus tmux's reference path.
+# classifier"). Zellij can report dead only when the recorded session or pane
+# is structurally absent; a present pane remains unknown. Orca and cmux report
+# unknown until independently verified - future work, not a functional gap for
+# the two backends --secondmate spawns actually support today plus tmux's
+# reference path.
 # Callers must treat unknown exactly like an unreadable target: NEVER license
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
@@ -1048,6 +1049,7 @@ fm_backend_agent_alive() {  # <backend> <target> [expected-label] [recorded-scop
   case "$backend" in
     tmux) fm_backend_tmux_agent_alive "$target" "$expected_label" "${4:-}" ;;
     herdr) fm_backend_herdr_agent_alive "$target" "$expected_label" ;;
+    zellij) fm_backend_zellij_agent_alive "$target" ;;
     *) printf 'unknown' ;;
   esac
 }

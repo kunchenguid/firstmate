@@ -39,33 +39,34 @@ case "${1:-}" in
     ;;
   list-windows)
     if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
-      printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+      if [ ! -f "$FM_FAKE_TMUX_LOG.killed" ] \
+        || ! grep -Eq ":${FM_FAKE_TMUX_WINDOW}$" "$FM_FAKE_TMUX_LOG.killed"; then
+        printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+      fi
     fi
     exit 0
     ;;
   display-message)
-    target=
+    target= format=
     prev=
     for arg in "$@"; do
       [ "$prev" = -t ] && target=$arg
       prev=$arg
+      format=$arg
     done
     if [ -n "$target" ] && [ -f "$FM_FAKE_TMUX_LOG.killed" ] && grep -qxF "$target" "$FM_FAKE_TMUX_LOG.killed"; then
       exit 1
     fi
-    # Answer #{pane_current_command} separately. A present pane whose foreground
-    # command is unreadable classifies as `unknown` (fm_backend_tmux_agent_alive),
-    # and callers must never act on unknown - so every caller that has to prove an
-    # endpoint's state would retain instead, for an unprovable read rather than
-    # for anything the fixture meant to say. This pane is idle, matching the
-    # "idle prompt" capture below; FM_FAKE_TMUX_COMMAND overrides it.
-    case " $* " in
-      *' #{pane_current_command} '*)
+    case "$format" in
+      *pane_current_command*)
         printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-bash}"
-        exit 0
         ;;
+      *session_name*window_name*)
+        printf '%s\t%s\n' "${target%%:*}" "${target#*:}"
+        ;;
+      *pane_id*) printf '%%1\n' ;;
+      *) printf 'firstmate\n' ;;
     esac
-    printf 'firstmate\n'
     exit 0
     ;;
   list-panes)
@@ -196,7 +197,7 @@ make_firstmate_git_root() {
   # are ignored by construction. Without it, teardown correctly reports the marker
   # as unlanded changes and refuses - a fixture artifact, not a product refusal.
   # Mirrors the operational subset of this repo's real .gitignore.
-  printf '%s\n' 'projects/' 'state/' 'data/' '.no-mistakes/' '.fm-secondmate-home' \
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' '.fm-secondmate-home' \
     > "$home/.gitignore"
   cat > "$home/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash

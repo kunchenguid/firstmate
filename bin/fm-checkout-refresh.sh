@@ -2031,6 +2031,18 @@ record_reinspection_failure() {
   }
 }
 
+reinspect_covered_checkout() {
+  local checkout=$1 count
+  if [ "${FM_CHECKOUT_REFRESH_TEST:-0}" = 1 ] \
+      && [ "${FM_CHECKOUT_TEST_REINSPECTION_FAILURE_AT:-}" = "$checkout" ]; then
+    count=$(cat "${FM_CHECKOUT_TEST_REINSPECTION_COUNT:?}" 2>/dev/null || printf 0)
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_CHECKOUT_TEST_REINSPECTION_COUNT"
+    return 1
+  fi
+  exact_git_root "$checkout"
+}
+
 CHECKOUT_REFRESH_AUTHORITY=
 resolve_checkout_refresh_authority() {
   local checkout=$1 mode_line mode
@@ -2572,9 +2584,10 @@ run_once() {
 
   while IFS= read -r checkout; do
     [ -n "$checkout" ] || continue
-    if ! reinspected=$(exact_git_root "$checkout") || [ "$reinspected" != "$checkout" ]; then
+    if ! reinspected=$(reinspect_covered_checkout "$checkout") || [ "$reinspected" != "$checkout" ]; then
       record_reinspection_failure "$checkout" || status=1
       coverage_failed=1
+      status=1
       continue
     fi
     key=$(checkout_key "$checkout") || {
@@ -2596,9 +2609,10 @@ run_once() {
 
   while IFS= read -r checkout; do
     [ -n "$checkout" ] || continue
-    if ! reinspected=$(exact_git_root "$checkout") || [ "$reinspected" != "$checkout" ]; then
+    if ! reinspected=$(reinspect_covered_checkout "$checkout") || [ "$reinspected" != "$checkout" ]; then
       record_reinspection_failure "$checkout" || status=1
       coverage_failed=1
+      status=1
       continue
     fi
     key=$(checkout_key "$checkout") || {

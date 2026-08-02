@@ -431,7 +431,7 @@ acquire_treehouse_home() {
 }
 
 ensure_home() {
-  local id=$1 requested=$2 home
+  local id=$1 requested=$2 home default target source_origin
   if [ "$requested" = "-" ]; then
     home=$(acquire_treehouse_home "$id")
     verify_firstmate_home "$home"
@@ -443,8 +443,38 @@ ensure_home() {
   if [ -e "$home" ]; then
     [ -d "$home" ] || { echo "error: $home exists and is not a directory" >&2; return 1; }
   else
+    default=$(git -C "$FM_ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    default=${default#origin/}
+    if [ -z "$default" ]; then
+      for default in main master; do
+        git -C "$FM_ROOT" show-ref --verify --quiet "refs/heads/$default" && break
+      done
+    fi
+    target=$(git -C "$FM_ROOT" rev-parse --verify --quiet "refs/remotes/origin/$default^{commit}" 2>/dev/null \
+      || git -C "$FM_ROOT" rev-parse --verify --quiet "refs/heads/$default^{commit}") || {
+      echo "error: cannot resolve the firstmate default branch for $home" >&2
+      return 1
+    }
+    source_origin=$(git -C "$FM_ROOT" remote get-url origin 2>/dev/null || true)
     mkdir -p "$(dirname "$home")"
-    git clone --quiet "$FM_ROOT" "$home"
+    git init -q "$home"
+    git -C "$home" remote add origin "$FM_ROOT"
+    git -C "$home" fetch -q --no-tags origin "$target"
+    git -C "$home" checkout --quiet --detach "$target" || return 1
+    git -C "$home" for-each-ref --format='delete %(refname)' refs/remotes/origin \
+      | git -C "$home" update-ref --stdin || return 1
+    if [ -n "$source_origin" ]; then
+      git -C "$home" remote set-url origin "$source_origin" || return 1
+    fi
+    # A source without its own origin is still a valid local authority. Keep the
+    # explicit home pointed at that source path so preflight and verify-home can
+    # prove its live default tip instead of leaving the detached clone with no
+    # resolvable authority at all.
+    git -C "$home" config --unset-all remote.origin.fetch || true
+    git -C "$home" config --add remote.origin.fetch \
+      "+refs/heads/$default:refs/remotes/origin/$default" || return 1
+    git -C "$home" update-ref "refs/remotes/origin/$default" "$target" || return 1
+    git -C "$home" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$default" || return 1
   fi
   verify_firstmate_home "$home"
 }
@@ -894,8 +924,44 @@ refuse_projectful_projectless_charter() {
   return 1
 }
 
+prepare_seed_charter() {
+  local id=$1 no_projects=$2 charter_summary charter_scope
+  shift 2
+  if [ ! -f "$SEED_PARENT_BRIEF" ]; then
+    [ -n "${FM_SECONDMATE_CHARTER:-}" ] || {
+      echo "error: no filled secondmate charter brief at $SEED_PARENT_BRIEF; set FM_SECONDMATE_CHARTER or scaffold one and replace {TASK}" >&2
+      return 1
+    }
+    [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
+    if [ "$no_projects" -eq 1 ]; then
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
+    else
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
+    fi
+    SEED_PARENT_BRIEF_CREATED=1
+  fi
+  if grep -F '{TASK}' "$SEED_PARENT_BRIEF" >/dev/null 2>&1; then
+    echo "error: secondmate charter brief at $SEED_PARENT_BRIEF still contains {TASK}; fill it before seeding" >&2
+    return 1
+  fi
+  charter_summary=$(registry_summary_for_brief "$SEED_PARENT_BRIEF")
+  [ -n "$charter_summary" ] || {
+    echo "error: secondmate charter brief at $SEED_PARENT_BRIEF has an empty Charter section; fill it before seeding" >&2
+    return 1
+  }
+  charter_scope=$(registry_scope_for_brief "$SEED_PARENT_BRIEF")
+  [ -n "$charter_scope" ] || {
+    echo "error: secondmate charter brief at $SEED_PARENT_BRIEF has an empty Routing scope section; fill it before seeding" >&2
+    return 1
+  }
+  if [ "$no_projects" -eq 1 ]; then
+    refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
+  fi
+}
+
 seed_home() {
-  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
+  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst
+  local preflight_out
   local no_projects=0 arg
   local filtered=()
   shift 2
@@ -954,6 +1020,10 @@ seed_home() {
     }
   fi
 
+  if [ "$requested_home" != "-" ]; then
+    prepare_seed_charter "$id" "$no_projects" "$@" || return 1
+  fi
+
   if [ "$requested_home" = "-" ]; then
     SEED_HOME_ACQUIRED=1
     home=$(acquire_treehouse_home "$id")
@@ -969,6 +1039,7 @@ seed_home() {
     # is already armed, so the acquired home is still kept for manual recovery.
     refuse_active_home_path "$home" || return 1
     SEED_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$home") || return 1
+    prepare_seed_charter "$id" "$no_projects" "$@" || return 1
     freshness_status=0
     "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$home" "$FM_ROOT" || freshness_status=$?
     if [ "$freshness_status" -ne 0 ]; then
@@ -997,8 +1068,11 @@ seed_home() {
     SEED_HOME="$requested_abs"
     [ -e "$requested_abs" ] || SEED_HOME_CREATED=1
     home=$(ensure_home "$id" "$requested_abs")
-    "$SCRIPT_DIR/fm-checkout-refresh.sh" preflight "$home" || {
-      echo "error: refusing explicit secondmate home whose default branch cannot be refreshed safely" >&2
+    if [ "$no_projects" -eq 1 ]; then
+      refuse_populated_projectless_home "$home" || return 1
+    fi
+    preflight_out=$("$SCRIPT_DIR/fm-checkout-refresh.sh" preflight "$home" 2>&1) || {
+      echo "error: refusing explicit secondmate home whose default branch cannot be refreshed safely: $(printf '%s\n' "$preflight_out" | sed -n '1p')" >&2
       return 1
     }
     "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-home "$home" "$FM_ROOT" || {
@@ -1026,34 +1100,6 @@ seed_home() {
     cp "$home/$SUB_HOME_MARKER" "$SEED_BACKUP_DIR/marker"
   fi
   SEED_HOME_BACKED_UP=1
-
-  if [ ! -f "$SEED_PARENT_BRIEF" ]; then
-    [ -n "${FM_SECONDMATE_CHARTER:-}" ] || {
-      echo "error: no filled secondmate charter brief at $SEED_PARENT_BRIEF; set FM_SECONDMATE_CHARTER or scaffold one and replace {TASK}" >&2
-      return 1
-    }
-    [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
-    if [ "$no_projects" -eq 1 ]; then
-      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
-    else
-      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
-    fi
-    SEED_PARENT_BRIEF_CREATED=1
-  fi
-  if grep -F '{TASK}' "$SEED_PARENT_BRIEF" >/dev/null 2>&1; then
-    echo "error: secondmate charter brief at $SEED_PARENT_BRIEF still contains {TASK}; fill it before seeding" >&2
-    return 1
-  fi
-  charter_summary=$(registry_summary_for_brief "$SEED_PARENT_BRIEF")
-  [ -n "$charter_summary" ] || {
-    echo "error: secondmate charter brief at $SEED_PARENT_BRIEF has an empty Charter section; fill it before seeding" >&2
-    return 1
-  }
-  charter_scope=$(registry_scope_for_brief "$SEED_PARENT_BRIEF")
-  [ -n "$charter_scope" ] || {
-    echo "error: secondmate charter brief at $SEED_PARENT_BRIEF has an empty Routing scope section; fill it before seeding" >&2
-    return 1
-  }
 
   for project in "$@"; do
     project_dst=$(validate_project_destination "$home" "$project") || return 1

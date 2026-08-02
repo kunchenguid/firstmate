@@ -11,7 +11,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP=$(fm_test_tmproot fm-supervision-events)
+fm_test_tmproot_into TMP fm-supervision-events
 STATE_DIR="$TMP/state"
 mkdir -p "$STATE_DIR"
 

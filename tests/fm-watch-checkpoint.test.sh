@@ -6,13 +6,17 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
-TMP_ROOT=$(fm_test_tmproot fm-watch-checkpoint)
+fm_test_tmproot_into TMP_ROOT fm-watch-checkpoint
 
 make_home() {
   local name=$1 home
   home="$TMP_ROOT/$name"
   mkdir -p "$home/state" "$home/data" "$home/config"
-  touch "$home/state/.last-account-session-sync" "$home/state/.last-report-retention"
+  # Keep this checkpoint fixture isolated from the machine-global report stack
+  # and account-session reconciliation. Those slow cadences are covered by
+  # their own suites; a foreground checkpoint must begin at signal polling.
+  touch "$home/state/.last-report-retention" \
+    "$home/state/.last-account-session-sync"
   printf '%s\n' "$home"
 }
 
@@ -25,7 +29,8 @@ test_quiet_checkpoint_exits_124_cleanly() {
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
   expect_code 124 "$status" "quiet checkpoint exit"
   assert_contains "$(cat "$out")" "checkpoint: no actionable wake within 1s" "quiet checkpoint line missing"
-  assert_absent "$home/state/.watch.lock/pid" "watch lock pid survived quiet checkpoint timeout"
+  assert_absent "$home/state/.watch.lock/pid" \
+    "watch lock pid survived quiet checkpoint timeout: out=$(cat "$out"); err=$(cat "$err")"
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
 
@@ -39,8 +44,11 @@ test_signal_passes_through_and_exits_zero() {
     printf 'done: synthetic wake\n' > "$home/state/demo.status"
   ) &
   status=0
-  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 8 >"$out" 2>"$err" || status=$?
-  expect_code 0 "$status" "signal checkpoint exit"
+  # Startup and the first poll can contend with other Behavior jobs on CI; the
+  # assertion is signal delivery, so give that observable path a bounded 20s.
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 20 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" \
+    "signal checkpoint exit: out=$(cat "$out"); err=$(cat "$err")"
   assert_contains "$(cat "$out")" "signal:" "signal wake was not passed through"
   drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh")
   assert_contains "$drained" $'\tsignal\tdemo.status\t' "signal wake was not queued durably"

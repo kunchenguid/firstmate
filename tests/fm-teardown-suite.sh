@@ -225,8 +225,10 @@ state="$(dirname "$0")/.tmux-live"
 case "${1:-}" in
   display-message)
     [ -f "$state" ] || exit 1
-    case " $* " in
-      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    case "$*" in
+      *pane_current_command*) printf 'bash\n' ;;
+      *session_name*window_name*) printf 'firstmate\tfm-task-x1\n' ;;
+      *) printf '%%1\n' ;;
     esac
     exit 0
     ;;
@@ -1912,7 +1914,7 @@ test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
 
   expect_code 1 "$rc" "stale-lock-dirty-recheck: teardown should refuse dirty work after clearing the stale lock"
   assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
-    "stale-lock-dirty-recheck: teardown did not report clearing the stale lock"
+    "stale-lock-dirty-recheck: teardown did not report clearing the stale lock: $(cat "$case_dir/stderr")"
   assert_grep "uncommitted changes present" "$case_dir/stderr" \
     "stale-lock-dirty-recheck: teardown did not re-run the dirty check"
   assert_absent "$lock" "stale-lock-dirty-recheck: stale lock file should have been removed"
@@ -2319,24 +2321,22 @@ test_managed_teardown_locks_generation_before_endpoint_cleanup() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+state="$(dirname "$0")/.tmux-live"
 case "${1:-}" in
+  display-message)
+    [ -f "$state" ] || exit 1
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *session_name*window_name*) printf 'firstmate\tfm-task-x1\n' ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
+  list-windows) [ ! -f "$state" ] || printf 'fm-task-x1\n' ;;
   kill-window)
     : > "$FM_FAKE_KILL_STARTED"
     while [ ! -f "$FM_FAKE_ALLOW_KILL" ]; do sleep 0.01; done
     : > "$FM_FAKE_KILLED"
-    exit 0
-    ;;
-  list-windows)
-    # Teardown only performs endpoint cleanup for an endpoint it can still see,
-    # and then requires confirmed absence, so a stub pinned to either state
-    # cannot exercise this: reported absent, kill-window is skipped and the
-    # generation-lock race below never happens; reported present forever,
-    # teardown refuses. Observable until the kill lands, gone after it.
-    [ -f "$FM_FAKE_KILLED" ] || printf 'fm-task-x1\n'
-    exit 0
-    ;;
-  display-message)
-    [ -f "$FM_FAKE_KILL_STARTED" ] && exit 1
+    rm -f "$state"
     exit 0
     ;;
 esac
@@ -2423,25 +2423,40 @@ test_managed_child_teardown_locks_generation_before_snapshot() {
     'account_predecessor_cleanup=pending' \
     'provider_session_id=session-old'
   add_fake_agent_fleet "$case_dir"
+  : > "$case_dir/fakebin/.child-tmux-live"
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+parent_state="$(dirname "$0")/.tmux-live"
+child_state="$(dirname "$0")/.child-tmux-live"
 case "${1:-}" in
+  display-message)
+    case "$*" in
+      *fm-child-lock-x3*) state=$child_state; label=fm-child-lock-x3 ;;
+      *) state=$parent_state; label=fm-task-x1 ;;
+    esac
+    [ -f "$state" ] || exit 1
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *session_name*window_name*) printf 'firstmate\t%s\n' "$label" ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
+  list-windows)
+    [ ! -f "$parent_state" ] || printf 'fm-task-x1\n'
+    [ ! -f "$child_state" ] || printf 'fm-child-lock-x3\n'
+    ;;
   kill-window)
     case "$*" in
       *fm-child-lock-x3*)
         : > "$FM_FAKE_KILL_STARTED"
         while [ ! -f "$FM_FAKE_ALLOW_KILL" ]; do sleep 0.01; done
         : > "$FM_FAKE_KILLED"
+        rm -f "$child_state"
         ;;
+      *) rm -f "$parent_state" ;;
     esac
-    exit 0
     ;;
-  list-windows)
-    [ -f "$FM_FAKE_KILLED" ] || printf 'fm-child-lock-x3\n'
-    exit 0
-    ;;
-  display-message) exit 1 ;;
 esac
 exit 0
 SH
@@ -2457,6 +2472,7 @@ SH
   teardown_pid=$!
   if ! fm_test_wait_for_file "$kill_started" "$teardown_pid" 0.05; then
     kill "$teardown_pid" 2>/dev/null || true
+    wait "$teardown_pid" 2>/dev/null || true
     fail "managed child teardown never reached endpoint cleanup: $(cat "$case_dir/stderr")"
   fi
 
@@ -2831,9 +2847,9 @@ SH
   rc=$?
   set -e
 
-  expect_code 76 "$rc" "unverified Treehouse process cleanup should fail distinctly"
+  expect_code 76 "$rc" "unverified Treehouse process cleanup should fail distinctly: $(cat "$case_dir/stderr")"
   assert_present "$child_pid_file" "unverified Treehouse return did not start its descendant"
-  assert_present "$lock" "unverified process cleanup released the checkout lock"
+  assert_present "$lock" "unverified process cleanup released expected checkout lock $lock: $(cat "$case_dir/stderr")"
   assert_present "$lock/process-group" "unverified process cleanup lost its guarded group identity"
   group=$(cat "$lock/process-group")
   anchor_state=$(ps -p "$group" -o pid= -o pgid= 2>/dev/null | awk '{$1=$1; print}')
@@ -2971,7 +2987,7 @@ SH
   rc=$?
   set -e
 
-  expect_code 75 "$rc" "forced secondmate cleanup should surface checkout lock contention distinctly"
+  expect_code 75 "$rc" "forced secondmate cleanup should surface checkout lock contention distinctly: $(cat "$case_dir/stderr")"
   assert_present "$child_worktree" "checkout lock contention deleted the child worktree"
   assert_present "$case_dir/wt/state/$child_id.meta" "checkout lock contention removed child retry metadata"
   assert_present "$case_dir/state/task-x1.meta" "checkout lock contention removed parent retry metadata"
@@ -3006,7 +3022,7 @@ SH
   : > "$marker"
 
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "herdr-marker-cleanup: forced teardown failed"
+    || fail "herdr-marker-cleanup: forced teardown failed: $(cat "$case_dir/stderr")"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
@@ -3122,8 +3138,15 @@ test_required_report_restores_rollback_generation_before_publish() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) [ -f "$FM_FAKE_REPORT_LIVE" ]; exit $? ;;
-  list-panes) exit 0 ;;
+  display-message)
+    [ -f "$FM_FAKE_REPORT_LIVE" ] || exit 1
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *session_name*window_name*) printf 'firstmate\tfm-task-x1\n' ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
+  list-windows) [ ! -f "$FM_FAKE_REPORT_LIVE" ] || printf 'fm-task-x1\n' ;;
   kill-window) rm -f "$FM_FAKE_REPORT_LIVE"; exit 0 ;;
 esac
 exit 0
@@ -3358,7 +3381,7 @@ SH
 }
 
 test_secondmate_rejects_drifted_home_repository_identity() {
-  local case_dir marker rc
+  local case_dir home_abs marker rc
   case_dir=$(make_case secondmate-home-identity-drift)
   mkdir -p "$case_dir/data" "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" \
     "$case_dir/wt/projects"
@@ -3395,7 +3418,7 @@ SH
   assert_present "$case_dir/wt" "identity-drifted secondmate home was removed"
   assert_present "$case_dir/state/task-x1.meta" "identity-drifted secondmate metadata was removed"
   assert_grep "secondmate home repository identity does not match" "$case_dir/stderr" \
-    "secondmate home identity drift was not surfaced"
+    "secondmate home identity drift was not surfaced: $(cat "$case_dir/stderr")"
   pass "secondmate teardown proves its home repository identity"
 }
 
@@ -3653,23 +3676,24 @@ test_teardown_refuses_unsafe_tasktmp_metadata() {
   expect_code 1 "$rc" "unsafe tasktmp teardown exit"
   assert_present "$sentinel/marker" "teardown deleted a metadata-selected arbitrary directory"
   assert_present "$case_dir/state/task-x1.meta" "unsafe tasktmp refusal removed task metadata"
-  assert_grep 'task temp ownership is missing, malformed, or ambiguous' "$case_dir/stderr" \
+  assert_grep 'unsafe task temp path' "$case_dir/stderr" \
     "unsafe teardown tasktmp refusal was unclear"
   pass "teardown only removes its exact task temp root"
 }
 
 test_teardown_removes_safe_tasktmp_and_accepts_absence() {
-  local case_dir tasktmp generation=generation-task-x1
+  local case_dir tasktmp
   case_dir=$(make_case safe-tasktmp)
-  write_meta "$case_dir" local-only ship
-  # shellcheck source=bin/fm-account-routing-lib.sh
-  . "$ROOT/bin/fm-account-routing-lib.sh"
-  tasktmp=$(fm_tasktmp_path task-x1 "$generation")
-  assert_absent "$tasktmp" "safe tasktmp fixture collided with an existing task temp root"
-  fm_tasktmp_create "$case_dir/state" "$ROOT" task-x1 "$generation" "$tasktmp" \
-    || fail "could not create exact owned task temp fixture"
+  tasktmp="$case_dir/state/.task-tmp/fm-task-x1-safe-tasktmp"
+  mkdir -p "$tasktmp/gotmp"
   printf '%s\n' leftover > "$tasktmp/gotmp/build-artifact"
+
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^generation_id=.*/generation_id=spawn:safe-tasktmp/' \
+    "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
   printf 'tasktmp=%s\n' "$tasktmp" >> "$case_dir/state/task-x1.meta"
+  printf 'tasktmp_phase=created\n' >> "$case_dir/state/task-x1.meta"
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "teardown rejected its exact task temp root: $(cat "$case_dir/stderr")"
   assert_absent "$tasktmp" "teardown retained its exact task temp root"
@@ -3830,6 +3854,28 @@ SH
   assert_present "$case_dir/wt/.git" "retained direct-spawn teardown recycled the worktree without endpoint proof"
   assert_present "$case_dir/state/task-x1.meta" "retained direct-spawn teardown erased cleanup metadata without endpoint proof"
   pass "retained direct-spawn teardown requires confirmed endpoint quiescence"
+}
+
+test_missing_ship_worktree_retains_endpoint_and_metadata() {
+  local case_dir rc
+  case_dir=$(make_case missing-ship-worktree)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unlanded ship work"
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "missing ship worktree must block teardown before quiescence"
+  assert_present "$case_dir/fakebin/.tmux-live" \
+    "missing ship worktree teardown stopped the task endpoint without landing proof"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "missing ship worktree teardown erased task metadata without landing proof"
+  assert_grep 'not an exact inspectable repository root' "$case_dir/stderr" \
+    "missing ship worktree refusal did not identify the absent safety proof"
+  pass "a missing ship worktree cannot bypass landing proof or endpoint safety"
 }
 
 test_never_created_direct_spawn_endpoint_is_not_quiesced() {
@@ -4043,7 +4089,7 @@ test_secondmate_retirement_recurses_into_ignored_nested_repositories() {
   assert_present "$nested/unlanded.txt" "unpushed submodule repository work was discarded"
   assert_present "$case_dir/state/task-x1.meta" "nested repository work allowed metadata removal"
   assert_grep 'not proven on a live remote branch' "$case_dir/stderr" \
-    "unlanded nested repository ref was not surfaced"
+    "unlanded nested repository ref was not surfaced: $(cat "$case_dir/stderr")"
   pass "secondmate retirement recursively proves submodule repositories"
 }
 
@@ -4757,7 +4803,7 @@ test_surviving_object_storage_is_bound_through_graph_proof() {
 }
 
 test_secondmate_retirement_serializes_child_spawn() {
-  local case_dir child_project rc teardown_pid spawn_rc waited
+  local case_dir rc teardown_pid spawn_rc waited
   case_dir=$(make_case secondmate-retirement-child-race)
   prepare_secondmate_home_fixture "$case_dir"
   write_secondmate_meta "$case_dir"
@@ -4796,14 +4842,15 @@ SH
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
   teardown_pid=$!
   waited=0
-  while [ ! -f "$case_dir/fakebin/.retirement-started" ] && [ "$waited" -lt 200 ]; do
+  while [ ! -f "$case_dir/fakebin/.retirement-started" ] && [ "$waited" -lt 600 ]; do
+    kill -0 "$teardown_pid" 2>/dev/null || break
     sleep 0.05
     waited=$((waited + 1))
   done
   [ -f "$case_dir/fakebin/.retirement-started" ] || {
     : > "$case_dir/fakebin/.retirement-release"
     wait "$teardown_pid" || true
-    fail "secondmate retirement did not reach the serialized quiescence boundary"
+    fail "secondmate retirement did not reach the serialized quiescence boundary: $(cat "$case_dir/stderr")"
   }
   set +e
   FM_HOME="$case_dir/wt" \
@@ -4957,6 +5004,21 @@ if [ "${FM_TEST_FOCUSED:-}" = managed-endpoint-identity ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = managed-generation-lock ]; then
+  test_managed_teardown_locks_generation_before_endpoint_cleanup
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = managed-child-generation-lock ]; then
+  test_managed_child_teardown_locks_generation_before_snapshot
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = non-linked-index-lock ]; then
+  test_non_linked_index_lock_path_is_checked_from_worktree
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-34-report-required ]; then
   test_teardown_rejects_malformed_report_requirement
   exit 0
@@ -5015,6 +5077,28 @@ fi
 if [ "${FM_TEST_FOCUSED:-}" = review-round-10-treehouse-return ]; then
   test_forced_secondmate_retains_child_on_treehouse_failure
   test_forced_secondmate_retains_child_when_treehouse_unavailable
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = child-return-unverified ]; then
+  test_forced_secondmate_retains_unverified_process_group
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = herdr-marker ]; then
+  test_herdr_teardown_clears_escalation_marker
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = report-lifecycle ]; then
+  test_required_report_blocks_then_publishes_before_cleanup
+  test_required_report_restores_rollback_generation_before_publish
+  test_required_report_revalidates_after_quiescence
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = nested-repository ]; then
+  test_secondmate_retirement_recurses_into_ignored_nested_repositories
   exit 0
 fi
 
@@ -5117,6 +5201,11 @@ fi
 if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
   test_never_created_direct_spawn_endpoint_is_not_quiesced
   test_never_created_scout_without_report_cleans_bookkeeping
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = missing-ship-worktree ]; then
+  test_missing_ship_worktree_retains_endpoint_and_metadata
   exit 0
 fi
 
@@ -5231,6 +5320,7 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_secondmate_missing_treehouse_child_is_retained
   test_secondmate_registry_home_drift_blocks_removal
   test_retained_direct_spawn_requires_confirmed_endpoint_quiescence
+  test_missing_ship_worktree_retains_endpoint_and_metadata
   test_never_created_direct_spawn_endpoint_is_not_quiesced
   test_never_created_scout_without_report_cleans_bookkeeping
   test_squash_merged_branch_deleted_allows

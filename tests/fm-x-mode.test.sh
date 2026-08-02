@@ -19,7 +19,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 # not include. Prepended after the fakebin so the fake curl still wins.
 JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
 [ -n "$JQ_DIR" ] && BASE_PATH="$JQ_DIR:$BASE_PATH"
-TMP_ROOT=$(fm_test_tmproot fm-x-mode-tests)
+fm_test_tmproot_into TMP_ROOT fm-x-mode-tests
 
 # A fakebin `curl` that mimics the relay: it reads its behavior from env
 # (FAKE_POLL_CODE/FAKE_POLL_BODY/FAKE_ANSWER_CODE, and

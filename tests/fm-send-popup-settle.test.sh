@@ -36,7 +36,7 @@ set -u
 
 SEND="$ROOT/bin/fm-send.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-send-popup-settle)
+fm_test_tmproot_into TMP_ROOT fm-send-popup-settle
 
 # Same stub shape as fm-send-settle.test.sh: a fake tmux that drives the submit
 # path to a clean "empty" verdict on the first Enter, and a fake sleep that records
