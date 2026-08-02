@@ -206,6 +206,7 @@ containment_notice_record() {
 
 # Every allow path must carry the containment notice on the one channel Claude
 # reads, so no exit-0 route can drop the first announcement of an episode.
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
 allow_notice() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   containment_notice_due || return 0
