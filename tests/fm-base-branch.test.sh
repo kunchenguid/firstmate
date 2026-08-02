@@ -254,9 +254,10 @@ test_no_remote_stranded_on_a_feature_branch_still_resolves_the_default() {
   pass "a remote-less clone stranded on a feature branch still resolves its default branch"
 }
 
-# A remote-less clone that names no default branch at all resolves to nothing.
-# Reporting "none" keeps the caller's pre-existing behavior instead of inventing
-# a branch.
+# "none" is reserved for a clone that names no default branch anywhere: no remote,
+# no surviving default-branch ref, and no main/master. A detached HEAD alone is not
+# that case - the test above proves a detached or stranded clone still resolves its
+# default branch and the worker is placed there.
 test_no_resolvable_default_reports_none() {
   local rec out
   rec=$(make_case no-remote-no-default)
@@ -309,6 +310,90 @@ test_unresponsive_remote_is_bounded_and_refuses() {
   pass "an unresponsive remote is bounded and refuses loudly instead of hanging the spawn"
 }
 
+# A repository that configures remotes but not the one being resolved against is a
+# misconfiguration, not a remote-less project. Falling through to the local path
+# would read the cached refs/remotes/origin/HEAD this script exists to distrust and
+# report it as authoritative.
+test_misconfigured_remote_name_refuses() {
+  local rec out status
+  rec=$(make_case misconfigured-remote)
+  read_case "$rec"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_BASE_BRANCH_REMOTE=upstrem "$RESOLVE" "$PROJ" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a remote name the repository does not configure must refuse"
+  assert_contains "$out" 'project "project"' "refusal did not name the project"
+  assert_contains "$out" "upstrem" "refusal did not name the missing remote"
+  assert_contains "$out" "origin" "refusal did not name the remotes the repository does configure"
+  assert_not_contains "$out" "local-default" "a misconfigured remote must not resolve from the local cache"
+  pass "a remote name the repository does not configure refuses instead of silently resolving locally"
+}
+
+# The bounded runner must never report a command that did not complete as success.
+# A signal-killed `git fetch` reported as exit 0 would send bin/fm-spawn.sh on to
+# `checkout --detach FETCH_HEAD`, and a pooled worktree still holds FETCH_HEAD from
+# some earlier task's fetch - the silent wrong-code placement this branch exists to
+# eliminate. Nothing here touches the network.
+test_bounded_run_reports_signal_deaths_as_failure() {
+  local status out
+  set +e
+  ( . "$ROOT/bin/fm-git-net-lib.sh"; fm_git_net_run bash -c 'kill -TERM $$; sleep 30' )
+  status=$?
+  set -e
+  [ "$status" -eq 143 ] \
+    || fail "a signal-killed bounded command must report 128+signal, got: $status"
+
+  # The perl watchdog is the branch stock macOS actually takes, so it is exercised
+  # explicitly rather than only where coreutils happens to be absent.
+  set +e
+  ( . "$ROOT/bin/fm-git-net-lib.sh"
+    FM_GIT_NET_FORCE_FALLBACK=1 fm_git_net_run bash -c 'kill -TERM $$; sleep 30' )
+  status=$?
+  set -e
+  [ "$status" -eq 143 ] \
+    || fail "the perl watchdog must report a signal death as failure, got: $status"
+
+  out=$( . "$ROOT/bin/fm-git-net-lib.sh"; fm_git_net_reason 143 )
+  assert_contains "$out" "killed by signal 15" "the refusal reason did not name the signal"
+  pass "a bounded command killed by a signal is reported as a failure, not as success"
+}
+
+# The deadline itself, on every branch, with no remote involved at all.
+test_bounded_run_deadline_is_hard_on_every_branch() {
+  local status out
+  set +e
+  ( . "$ROOT/bin/fm-git-net-lib.sh"; FM_GIT_NET_TIMEOUT=1 fm_git_net_run sleep 30 )
+  status=$?
+  set -e
+  [ "$status" -eq 124 ] || fail "the deadline must report 124, got: $status"
+
+  # A command that ignores SIGTERM must still be killed at the deadline rather
+  # than left to hang past it.
+  set +e
+  ( . "$ROOT/bin/fm-git-net-lib.sh"
+    FM_GIT_NET_TIMEOUT=1 fm_git_net_run bash -c 'trap "" TERM; sleep 30' )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a SIGTERM-ignoring command must not be reported as success"
+
+  set +e
+  ( . "$ROOT/bin/fm-git-net-lib.sh"
+    FM_GIT_NET_TIMEOUT=1 FM_GIT_NET_FORCE_FALLBACK=1 fm_git_net_run sleep 30 )
+  status=$?
+  set -e
+  [ "$status" -eq 124 ] || fail "the perl watchdog must report the deadline as 124, got: $status"
+
+  out=$( . "$ROOT/bin/fm-git-net-lib.sh"; FM_GIT_NET_TIMEOUT=1 fm_git_net_reason 124 )
+  assert_contains "$out" "did not answer within 1s" "the deadline reason did not name the bound"
+  out=$( . "$ROOT/bin/fm-git-net-lib.sh"; fm_git_net_reason 125 )
+  assert_not_contains "$out" "could not start" \
+    "GNU timeout's own 125 must not be reported as a missing watchdog"
+  pass "the deadline is hard on every watchdog branch and each refusal reason is distinct"
+}
+
 # The registry name is the clone's basename by default and --name overrides it,
 # so a clone directory named differently from its registry entry still resolves.
 test_name_override_selects_the_registry_entry() {
@@ -340,6 +425,9 @@ test_no_remote_uses_the_local_default
 test_no_remote_declared_override_reports_no_remote
 test_no_remote_stranded_on_a_feature_branch_still_resolves_the_default
 test_no_resolvable_default_reports_none
+test_misconfigured_remote_name_refuses
+test_bounded_run_reports_signal_deaths_as_failure
+test_bounded_run_deadline_is_hard_on_every_branch
 test_name_override_selects_the_registry_entry
 
 echo "# all fm-base-branch tests passed"

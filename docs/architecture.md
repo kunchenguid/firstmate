@@ -139,6 +139,7 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 A pooled worktree starts on whatever commit the pool happened to warm itself from, and a clone's record of its remote's default branch is written once at clone time and never refreshed.
 So `fm-spawn.sh` places every ship and scout worktree on the project's base branch resolved by `fm-base-branch.sh`, which reads the remote's own current default at spawn time rather than the clone's cached copy of it, and honors a `base=<branch>` registry override for the rare project whose development branch is not its remote default.
 Resolution runs before any endpoint exists, so a base branch the remote does not have refuses the spawn instead of starting a worker on code nobody works on; the branch used and where it came from are recorded as `base_branch=` and `base_branch_source=`.
+Only a repository that names no default branch at all leaves the worktree where it was, and a clone sitting at a detached HEAD is not that case; [`bin/fm-base-branch.sh`](../bin/fm-base-branch.sh)'s header owns the full resolution contract.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.

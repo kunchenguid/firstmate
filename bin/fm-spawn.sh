@@ -1166,6 +1166,10 @@ PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_AB
 # changes its default branch and then silently hands every worker the wrong code.
 # Resolved HERE, before any backend endpoint exists, so a project that names a
 # branch its remote does not have refuses to launch instead of stranding a pane.
+# source=none means no default branch was resolvable at all, and only then is the
+# worktree left where it was; a clone at a detached HEAD still resolves to its
+# default branch and its worker IS moved there. bin/fm-base-branch.sh's header
+# owns that contract in full.
 PROJ_NAME=
 BASE_BRANCH=
 BASE_BRANCH_SOURCE=none
@@ -1970,7 +1974,8 @@ META_WINDOW=$T
   # Which branch this worker was actually placed on, and where that came from, so
   # a worker reading the wrong code is visible in the record instead of having to
   # be inferred from a report that says something impossible. Absent means no base
-  # branch was resolvable and the worktree was left exactly where it was.
+  # branch was resolvable at all (bin/fm-base-branch.sh's "none") and the worktree
+  # was left exactly where it was.
   if [ "$BASE_BRANCH_SOURCE" != none ]; then
     echo "base_branch=$BASE_BRANCH"
     echo "base_branch_source=$BASE_BRANCH_SOURCE"

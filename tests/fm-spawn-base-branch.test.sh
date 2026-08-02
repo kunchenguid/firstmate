@@ -259,8 +259,10 @@ test_no_remote_declared_base_branch_is_used() {
   pass "a remote-less project's declared base branch is checked out with no fetch attempted"
 }
 
-# Nothing resolvable at all leaves the worktree exactly where it was, with no base
-# branch claimed in the record - the pre-existing behavior, preserved.
+# Only a clone that names no default branch anywhere leaves the worktree exactly
+# where it was, with no base branch claimed in the record. The fixture has to strip
+# main as well as the remote: detaching HEAD alone still resolves to the default
+# branch and moves the worker there.
 test_unresolvable_base_leaves_the_worktree_alone() {
   local rec id out status before
   id=base-none-a6

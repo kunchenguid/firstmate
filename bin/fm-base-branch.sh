@@ -4,9 +4,28 @@
 #
 #   source=remote-default    the remote's OWN current default branch, read live
 #   source=project-override  a base=<branch> override declared in data/projects.md
-#   source=local-default     no remote is configured, so the clone's own default
-#   source=none              nothing could be resolved; the caller must leave the
-#                            worktree exactly where it already was
+#   source=local-default     the repository configures NO remote at all, so the
+#                            clone's own default branch is the answer
+#   source=none              no default branch is resolvable at all; the caller
+#                            must leave the worktree exactly where it already was
+#
+# THIS FILE OWNS THE RESOLUTION CONTRACT. Every other site states only what it
+# needs and points here rather than restating it.
+#
+# "none" means the repository names no default branch anywhere: no remote is
+# configured, no refs/remotes/<remote>/HEAD survives, and neither main nor master
+# exists locally. A detached HEAD alone does NOT mean "none". The local default is
+# read from the default-branch ref (bin/fm-ff-lib.sh's default_branch), never from
+# whatever HEAD happens to point at, so a clone left stranded on a feature branch
+# or at a detached HEAD still resolves to its real default branch and the worker
+# IS placed there. That stranded position is an accident of the clone, not an
+# instruction from anyone, and propagating it to every worker cut from that clone
+# is the same wrong-code failure this script exists to prevent.
+#
+# A repository that configures remotes but not THIS one is a misconfiguration, not
+# a remote-less project: it is a hard error, because falling through to the local
+# path there would read the very cached refs/remotes/origin/HEAD this script
+# exists to distrust and report it as authoritative.
 # For source=none the branch and remote fields are "-", so the line always has
 # three fields and a caller can `read -r branch source remote` unconditionally.
 # The remote field is "-" whenever no remote is configured at all, including the
@@ -104,6 +123,11 @@ DECLARED=$("$FM_ROOT/bin/fm-project-mode.sh" --base "$NAME") || exit 1
 export GIT_TERMINAL_PROMPT=0
 
 if ! git -C "$PROJ_ABS" remote get-url "$REMOTE" >/dev/null 2>&1; then
+  CONFIGURED_REMOTES=$(git -C "$PROJ_ABS" remote 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+  if [ -n "$CONFIGURED_REMOTES" ]; then
+    echo "error: project \"$NAME\" has no \"$REMOTE\" remote to resolve its base branch from; $PROJ_ABS configures: $CONFIGURED_REMOTES. Point FM_BASE_BRANCH_REMOTE at one of those rather than resolving from the clone's cached state" >&2
+    exit 1
+  fi
   # No remote to be stale against, and none to fetch from either, so the remote
   # field is reported as "-" and the caller reads the local ref directly.
   if [ -n "$DECLARED" ]; then
@@ -115,14 +139,10 @@ if ! git -C "$PROJ_ABS" remote get-url "$REMOTE" >/dev/null 2>&1; then
     exit 0
   fi
   # bin/fm-ff-lib.sh's default_branch owns this resolution fleet-wide: the
-  # default-branch ref first, then main/master. Deliberately NOT the checked-out
-  # HEAD, which would let a clone stranded on a feature branch propagate that
-  # stray branch to every worker cut from it.
+  # default-branch ref first, then main/master, never the checked-out HEAD (see
+  # the header's "none" contract).
   local_default=$(default_branch "$PROJ_ABS" || true)
   if [ -z "$local_default" ]; then
-    # A remote-less clone that names no default branch at all resolves to
-    # nothing. Report nothing rather than inventing one; the caller leaves the
-    # worktree where it already was, exactly as before this resolution existed.
     printf '%s %s %s\n' - none -
     exit 0
   fi
