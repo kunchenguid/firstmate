@@ -95,6 +95,7 @@ The final verification commands and their exact summarized outputs follow.
 $ bash tests/fm-decision-hold-lifecycle.test.sh
 ok - report-only unresolved decision is reproduced and completion refuses before loss
 ok - externally closed and archived decisions are durably resolved, recordless closure is not
+ok - a fold that cannot be recorded refuses instead of reporting success
 ok - a firstmate-decided closure is first-class and attributed honestly
 ok - a second pass cannot silently duplicate an open decision and can fold into it
 ok - an answer is recorded in one call and routing survives where dependent work exists
