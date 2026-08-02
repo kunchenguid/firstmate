@@ -652,7 +652,7 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
-    bin/fm-browser.sh|bin/fm-browser-lib.sh|bin/browser-engines/*|native/fm-window-helper/*)
+    bin/fm-browser.sh|bin/fm-browser-lib.sh|bin/fm-window-helper.sh|bin/browser-engines/*)
       printf '%s\n' pure-contract-unit
       printf '%s\n' session-bootstrap
       printf '%s\n' pr-forge

@@ -20,6 +20,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-decision-hold.sh`    | Create, verify, complete, and resolve durable captain-held decisions                 |
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, Herdr-lab, and browser-capability briefs   |
 | `fm-browser.sh`          | Sole public owner of Firstmate browser custody: policy, plans, mocked lifecycle, receipts, and cleanup (docs/browser-capability.md) |
+| `fm-window-helper.sh`    | Disabled visible-window helper contract: refuses every real action and returns a mock receipt only under `FM_WINDOW_HELPER_MOCK=1` |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |

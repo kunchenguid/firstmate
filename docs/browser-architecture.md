@@ -57,7 +57,8 @@ A future real engine must prove exact endpoint, process, window, profile, and le
 
 ## Visibility helper
 
-`native/fm-window-helper/fm-window-helper.sh` is a disabled helper contract and mock surface.
+`bin/fm-window-helper.sh` is a disabled helper contract and mock surface.
+It lives beside the other browser scripts in the governed `bin/` surface rather than in a separate native tree, because no signed native code exists yet to own one.
 It intentionally does not call AppKit, CoreGraphics, Apple Events, Accessibility, Screen Recording, keyboard, mouse, screenshots, or browser APIs.
 A later signed macOS helper may implement the same narrow value-safe receipt after no-TCC verification.
 Until then, real foreground support is not claimed.
