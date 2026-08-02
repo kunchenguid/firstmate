@@ -35,7 +35,7 @@ Optional:
 ```sh
 bin/fm-proplane-promote-full.sh cursor-2          # explicit agent branch
 bin/fm-proplane-promote-full.sh --no-production   # stop after main (Vercel Preview only)
-bin/fm-proplane-promote-full.sh --dry-run         # print steps only
+bin/fm-proplane-promote-full.sh --dry-run         # print the steps and preview the promotion record PR, opening nothing
 bin/fm-proplane-promote-full.sh --skip-agent-push # agent branch already pushed
 ```
 
