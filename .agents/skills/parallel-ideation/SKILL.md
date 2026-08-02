@@ -100,6 +100,7 @@ The cost is coordination, and this skill is that coordination written down.
 7. Seats are readonly for this use.
    Firstmate remains the only writer of the synthesis, and seats return findings only.
 8. Rank what comes back under the ranking rules `seats` owns, then fold surviving findings into the synthesis yourself.
+   This same step owns writing the record of the seats pass into the synthesis: which seats ran, and any seat that came back as a hole.
 9. The crews' attributed contradictions section must survive the seats pass.
    A seat finding may add to it, sharpen it, or add a new contradiction, but must never be used to collapse a minority crew position into a single agreed answer.
    Preserving that disagreement is the run's main deliverable and outranks a seat's tidier conclusion.
