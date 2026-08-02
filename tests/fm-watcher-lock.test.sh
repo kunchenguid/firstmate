@@ -735,6 +735,45 @@ test_arm_hup_cleans_child_and_temp_output() {
   pass "arm cleans child watcher and temp output on HUP"
 }
 
+test_arm_propagates_context_ceiling_wake() {
+  local dir state fakebin armout rc queue_count
+  dir=$(make_case arm-context-ceiling)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  cat > "$state/context-over.meta" <<EOF
+window=fake:fm-context-over
+endpoint_task_id=context-over
+worktree=$dir/worktree
+project=$dir/project
+harness=codex
+backend=tmux
+kind=ship
+mode=local-only
+yolo=off
+EOF
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=0 FM_HEARTBEAT_MAX=0 FM_ARM_CONFIRM_TIMEOUT=1 \
+    "$WATCH_ARM" > "$armout" || rc=$?
+
+  [ "$rc" -eq 0 ] \
+    || fail "arm mislabeled an actionable context-ceiling wake as failure (status $rc): $(cat "$armout")"
+  grep -F 'context-ceiling: CONTEXT_CEILING id=context-over status=over percent=unreadable' "$armout" >/dev/null \
+    || fail "arm omitted the actionable context-ceiling reason: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "arm printed FAILED after an actionable context-ceiling wake: $(cat "$armout")"
+  queue_count=$(grep -c "$(printf '\theartbeat\tcontext-ceiling\t')" "$state/.wake-queue" 2>/dev/null || true)
+  [ "$queue_count" -eq 1 ] \
+    || fail "context-ceiling cycle did not queue exactly one actionable heartbeat (got ${queue_count:-0})"
+  grep -q 'reason=actionable-context-ceiling' "$state/.watch-cycle-exits.log" \
+    || fail "arm did not classify the context-ceiling close in the lifecycle ledger"
+  pass "arm propagates a queued context-ceiling heartbeat as an actionable wake"
+}
+
 test_arm_propagates_immediate_wake_before_confirmation() {
   local dir state fakebin armout drain_out check_file rc
   dir=$(make_case arm-immediate-wake)
@@ -1084,6 +1123,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
+test_arm_propagates_context_ceiling_wake
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
