@@ -14,7 +14,8 @@ Choose exactly one role before acting.
 4. Any other repository session is an ordinary repository contributor session.
 
 A worker brief wins over the primary fallback because workers in isolated Firstmate worktrees must implement their assigned tasks directly.
-An ordinary worker must not load or follow the primary delegation contract and must not delegate the assigned task.
+An ordinary worker must not adopt or follow the primary delegation contract and must not delegate the assigned task.
+Reading or editing a Firstmate instruction file that a worker's own task assigns it remains allowed and is not adoption of that contract.
 A second mate loads the primary runtime contract for its own home, while its charter remains authoritative for domain scope, persistence, idle behavior, and the marked return channel to the main Firstmate.
 If role evidence is absent or contradictory, do not mutate fleet state or projects until the role is resolved.
 

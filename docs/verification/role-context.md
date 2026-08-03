@@ -9,20 +9,21 @@ Root [`AGENTS.md`](../../AGENTS.md) is the universal gateway, [`primary-runtime`
 
 The before measurement used commit `cf9511217d885cd2127d50993e672c2dfa0539cf`, which was equal to `origin/main` on 2026-08-03.
 The after measurement used the role-aware implementation and Pi 0.83.0's real `DefaultResourceLoader`, `formatSkillsForPrompt`, and `buildSystemPrompt` with the seven built-in Firstmate tools.
-Both measurements loaded the same inherited `/Users/tiago/AGENTS.md`, generated ship, scout, and project-less second-mate instructions through `bin/fm-brief.sh`, and used the executable output of `bin/fm-sessionstart-nudge.sh`.
+Both trees were exported to equal-length checkout paths and loaded with an empty user-scope Pi agent directory, so the graded surface is exactly the repository's own `AGENTS.md` and `.agents/skills/` rather than any operator's ancestor context files or personal skills.
+Both measurements generated ship, scout, and project-less second-mate instructions through `bin/fm-brief.sh` and used the executable output of `bin/fm-sessionstart-nudge.sh`.
 Character counts measure generated model instructions rather than only tracked file bytes.
 
 | Generated surface | Before | After | Saving |
 | --- | ---: | ---: | ---: |
-| Root repository instruction context | 62,128 | 8,277 | 53,851 (86.7%) |
-| Skill index | 13,559 | 11,268 | 2,291 (16.9%) |
-| Universal Pi system prompt | 78,949 | 22,807 | 56,142 (71.1%) |
-| Primary after startup instruction and primary-runtime load | 79,072 | 47,426 | 31,646 (40.0%) |
-| Ship worker system prompt plus generated brief | 85,301 | 29,461 | 55,840 (65.5%) |
-| Scout worker system prompt plus generated brief | 82,615 | 26,761 | 55,854 (67.6%) |
-| Second mate after generated charter and primary-runtime load | 84,497 | 53,304 | 31,193 (36.9%) |
+| Root repository instruction context | 62,128 | 8,416 | 53,712 (86.5%) |
+| Skill index | 11,395 | 9,048 | 2,347 (20.6%) |
+| Universal Pi system prompt | 75,418 | 19,359 | 56,059 (74.3%) |
+| Primary after startup instruction and primary-runtime load | 75,540 | 44,481 | 31,059 (41.1%) |
+| Ship worker system prompt plus generated brief | 81,656 | 26,073 | 55,583 (68.1%) |
+| Scout worker system prompt plus generated brief | 78,948 | 23,354 | 55,594 (70.4%) |
+| Second mate after generated charter and primary-runtime load | 80,912 | 50,312 | 30,600 (37.8%) |
 
-The after skill index contains 24 discovered skills in this installed environment, including `primary-runtime` and `validation-supervision`.
+The after skill index contains 21 repository-owned skills, including `primary-runtime` and `validation-supervision`, against 19 before.
 The generated root context remains below its 12,000-character regression budget, and the universal Pi system prompt remains below its 40,000-character regression budget.
 
 Current deterministic command:
@@ -34,9 +35,13 @@ tests/fm-role-context.test.sh
 Observed output on Pi 0.83.0:
 
 ```text
-ok - generated role contexts: root=8277 system=22807 skills=24 ship=6652 scout=3952 second=6165
+ok - generated role contexts: root=8416 system=20532 skills=21 ship=6863 scout=4140 second=6165
 ok - role-aware startup wrapper orders the runtime owner before primary mutation
 ```
+
+Pi embeds the absolute path of the repository context file, of every discovered skill, and of the working directory in each generated prompt.
+`root=` and `skills=` are therefore checkout-independent, while `system=`, `ship=`, `scout=`, and `second=` shift by the length of the checkout path in which the test runs.
+The test asserts the required content and the two regression budgets rather than those totals, so it reproduces on any checkout without byte-equality.
 
 ## Actual harness context checks
 
@@ -74,7 +79,7 @@ Neither standalone Grok nor Kimi was installed in the 2026-08-03 measurement env
 
 | Role or harness | Deterministic delivery |
 | --- | --- |
-| Ordinary ship or scout on every worker harness | The generated launch brief explicitly selects ordinary-worker precedence, requires direct work, and excludes primary-runtime loading and fleet operation. |
+| Ordinary ship or scout on every worker harness | The generated launch brief explicitly selects ordinary-worker precedence, requires direct work, and excludes adopting the primary runtime contract or operating the fleet, while still allowing an authorized edit to an instruction file the task assigns. |
 | Persistent second mate | The generated charter loads `primary-runtime` before session start and preserves charter scope, persistence, idle behavior, and marked return channel. |
 | Second-mate restart | The root marker selects the second-mate role, the native wrapper recognizes marked linked homes, and tracked update nudges require rereading both the root gateway and `primary-runtime`. |
 | Claude primary | Root fallback is always present, and native SessionStart delivery covers startup, resume, and clear. |

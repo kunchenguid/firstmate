@@ -238,6 +238,11 @@ A direct PR ship is ready when the worker reports the opened full PR URL.
 Run `bin/fm-pr-check.sh <id> <PR-url>` to bind the PR and monitor landing.
 Tell the captain the complete `https://...` URL, concise outcome, and no-mistakes risk level when applicable.
 
+For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when Firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.
+Then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
+The watcher refuses an unregistered or rewritten check without executing it, so monitoring stays silently inert until that binding exists.
+Register again after every edit to that file.
+
 Clean up a ship only after landing is confirmed.
 Treat any refusal caused by uncommitted or unlanded work as a stop-and-investigate result.
 Never force cleanup without explicit discard authority.

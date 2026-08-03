@@ -77,6 +77,10 @@
 #   session's exact active workspace and tab. A detected focus change restores
 #   only that exact tab id; an ambiguous pre-operation snapshot refuses the
 #   focus-sensitive presentation mutation.
+#   FM_HERDR_PRESENTATION_LOCK_ATTEMPTS sets that bounded wait's attempt count
+#   (default 50, one 0.1s sleep per attempt). Empty, non-numeric, and zero values
+#   fall back to 50. It exists so concurrency tests can widen the contention
+#   window; production runs should leave it unset.
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends.

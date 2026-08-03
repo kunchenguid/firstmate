@@ -212,8 +212,10 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "This launch brief establishes the ordinary worker role for this session." "$brief" \
       "$id: ship brief did not establish worker-role precedence"
-    assert_grep "do not load the Firstmate primary runtime, operate the fleet, or delegate this task" "$brief" \
+    assert_grep "do not adopt the Firstmate primary runtime contract, operate the fleet, or delegate this task" "$brief" \
       "$id: ship brief did not exclude primary-only behavior"
+    assert_grep "Reading or editing any file your task assigns you" "$brief" \
+      "$id: ship brief did not allow an authorized edit to an instruction file"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
@@ -709,8 +711,10 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "This launch brief establishes the ordinary worker role for this session." "$brief" \
     "scout brief did not establish worker-role precedence"
-  assert_grep "do not load the Firstmate primary runtime, operate the fleet, or delegate this task" "$brief" \
+  assert_grep "do not adopt the Firstmate primary runtime contract, operate the fleet, or delegate this task" "$brief" \
     "scout brief did not exclude primary-only behavior"
+  assert_grep "Reading or editing any file your task assigns you" "$brief" \
+    "scout brief did not allow an authorized edit to an instruction file"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
