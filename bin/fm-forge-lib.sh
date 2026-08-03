@@ -99,12 +99,13 @@ fm_forge_detect_provider() {
 # Output: one line, the resolved lowercase hostname, or empty on failure
 # Exit: 0 if resolved, 1 if the remote URL could not be parsed at all
 fm_forge_resolve_host() {
-  local remote_url=${1:-} host=""
+  local remote_url=${1:-} host="" resolve_ssh=0
 
   [ -n "$remote_url" ] || return 1
 
   case "$remote_url" in
     ssh://*)
+      resolve_ssh=1
       host=${remote_url#ssh://}
       host=${host#*@}
       host=${host%%/*}
@@ -120,6 +121,7 @@ fm_forge_resolve_host() {
       esac
       ;;
     *:*)
+      resolve_ssh=1
       host=${remote_url%%:*}
       host=${host##*@}
       ;;
@@ -134,7 +136,7 @@ fm_forge_resolve_host() {
   # retain the parsed host; provider classification will fail closed unless
   # it is explicitly listed in FM_GITLAB_HOSTS.
   local resolved
-  if command -v ssh >/dev/null 2>&1; then
+  if [ "$resolve_ssh" -eq 1 ] && command -v ssh >/dev/null 2>&1; then
     resolved=$(ssh -G -- "$host" 2>/dev/null | awk '$1=="hostname"{print $2; exit}')
     [ -n "$resolved" ] && host=$resolved
   fi
