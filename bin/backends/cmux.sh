@@ -501,14 +501,12 @@ fm_backend_cmux_send_key() {  # <target> <key> [expected-label]
   fm_backend_cmux_cli send-key --workspace "$FM_BACKEND_CMUX_WORKSPACE" --surface "$FM_BACKEND_CMUX_SURFACE" "$key" >/dev/null 2>&1
 }
 
-# fm_backend_cmux_send_text_line: send one line of TEXT then submit. cmux has
-# no single-call atomic "run and submit" primitive (like herdr's `pane run`),
-# so this composes send (literal) + send-key enter, exactly like zellij's
-# equivalent - used for the fixed spawn-time commands (treehouse get, the
-# GOTMPDIR export).
+# fm_backend_cmux_send_text_line: send one line of TEXT then submit.
 fm_backend_cmux_send_text_line() {  # <target> <text> [expected-label]
   fm_backend_cmux_send_literal "$1" "$2" "${3:-}" || return 1
-  fm_backend_cmux_send_key "$1" Enter "${3:-}"
+  fm_backend_cmux_send_key "$1" Enter "${3:-}" && return 0
+  fm_backend_cmux_send_key "$1" C-c "${3:-}" >/dev/null 2>&1 && return 1
+  return 2
 }
 
 # fm_backend_cmux_capture: bounded plain-text surface capture. No herdr-style

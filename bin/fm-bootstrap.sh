@@ -403,7 +403,7 @@ secondmate_sync() {
       fm_lock_release "$home_lock" || true
       continue
     }
-    if FM_CONFIG_INHERIT_REPORT="$report" \
+    if FM_CONFIG_INHERIT_REPORT="$report" FM_CONFIG_INHERIT_LIVE=1 \
       propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
       :
     else
