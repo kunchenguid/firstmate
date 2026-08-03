@@ -181,7 +181,8 @@ CREDENTIAL_PATTERNS = (
     (
         re.compile(
             r"\b(?:best(?:ä|ae)tigungs|sicherheits|verifizierungs|einmal(?:ig(?:e[nmrs]?)?)?|"
-            r"anmelde|zugangs)[- ]?(?:code|passcode|passwort|kennwort)\b",
+            r"anmelde|zugangs)[- ]?"
+            r"(?:codes?|passcodes?|passw(?:o|ö|oe)rt(?:er)?|kennw(?:o|ö|oe)rt(?:er)?)\b",
             re.IGNORECASE,
         ),
         "names a German verification code or password",

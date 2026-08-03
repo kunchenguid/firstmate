@@ -816,6 +816,10 @@ for subject, body in (
     ("Sign-in", "Use the single-use password below to finish signing in."),
     ("Anmeldebestaetigung", "Dein Einmalpasswort lautet ABCD-9932-XY, gueltig bis 18:45."),
     ("Zugang", "Ihr einmaliges Kennwort finden Sie unten."),
+    ("Sicherheit", "Ihre Einmalcodes finden Sie unten."),
+    ("Zugang", "Die neuen Zugangscodes gelten ab morgen."),
+    ("Bestaetigung", "Ihre Bestaetigungscodes wurden erneuert."),
+    ("Konto", "Ihre Einmalpasswoerter wurden erneuert."),
 ):
     reasons = fm.classify_credential_risk(subject, body)
     expect(reasons, "the classifier missed credential-shaped mail: %r" % subject)
