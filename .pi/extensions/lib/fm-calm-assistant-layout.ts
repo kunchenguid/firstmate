@@ -1,7 +1,7 @@
-// Verified against Pi 0.81.1 and 0.82.0, which export AssistantMessageComponent with an
-// updateContent method. installCalmAssistantLayout() probes that exact method and throws
-// if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
-// instead of blocking Calm or Pi.
+// Verified against the Pi versions recorded in docs/calm-mode-feasibility.md, which export
+// AssistantMessageComponent with an updateContent method. installCalmAssistantLayout()
+// probes that exact method and throws if it is missing; fm-calm.ts catches that and skips
+// only this adapter with a diagnostic instead of blocking Calm or Pi.
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";

@@ -1,8 +1,9 @@
-// Verified against Pi 0.82.1, which renders the queued "Steering:"/"Follow-up:" rows, their
-// leading spacer, and the dequeue hint from InteractiveMode.updatePendingMessagesDisplay,
-// reading the queue through InteractiveMode.getAllQueuedMessages. That display is a separate
-// path from the delivered-row path ./fm-calm-operational-user-layout.ts adapts, so a marked
-// notification delivered while a tool call is active is visible here before it is ever a chat
+// Verified against the Pi versions recorded in docs/calm-mode-feasibility.md, which render
+// the queued "Steering:"/"Follow-up:" rows, their leading spacer, and the dequeue hint from
+// InteractiveMode.updatePendingMessagesDisplay, reading the queue through
+// InteractiveMode.getAllQueuedMessages. That display is a separate path from the
+// delivered-row path ./fm-calm-operational-user-layout.ts adapts, so a marked notification
+// delivered while a tool call is active is visible here before it is ever a chat
 // row. This adapter probes both methods and throws if either is missing; fm-calm.ts catches
 // that and skips only this adapter with a diagnostic instead of blocking Calm or Pi.
 //

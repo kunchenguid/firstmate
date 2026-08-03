@@ -1,8 +1,8 @@
-// Verified against Pi 0.81.1, 0.82.0, and 0.82.1, which add the ordinary-user spacer and row
-// together via InteractiveMode.addMessageToChat. This adapter probes that exact method
-// and throws if it is missing; fm-calm.ts catches that and skips only this adapter with a
-// diagnostic instead of blocking Calm or Pi. It changes only that presentation and never
-// message delivery.
+// Verified against the Pi versions recorded in docs/calm-mode-feasibility.md, which add the
+// ordinary-user spacer and row together via InteractiveMode.addMessageToChat. This adapter
+// probes that exact method and throws if it is missing; fm-calm.ts catches that and skips
+// only this adapter with a diagnostic instead of blocking Calm or Pi. It changes only that
+// presentation and never message delivery.
 //
 // This covers a delivered row. A notification queued while a turn is still running is shown
 // by a different Pi path first; ./fm-calm-pending-operational-layout.ts adapts that one.
