@@ -1401,6 +1401,59 @@ SH
   pass "wedge_alarm_via_herdr: a shown=true herdr result succeeds without a spurious failure log"
 }
 
+# herdr's NotificationShowReason enum also allows rate_limited,
+# no_foreground_client, and busy - all transient, unlike disabled (a
+# structural host limitation). Naming the channel permanently broken on one
+# transient miss would send a captain chasing a channel that was actually
+# fine, so these two reasons get the "not this time" phrasing instead of the
+# "configure a command: channel" advice, while disabled and an unknown reason
+# keep it.
+test_wedge_alarm_herdr_transient_reason_avoids_permanent_advice() {
+  local dir fb daemon_log rc reason
+  command -v jq >/dev/null 2>&1 || { pass "herdr transient-reason verdict skipped without jq"; return; }
+  for reason in rate_limited no_foreground_client busy; do
+    dir="$TMP_ROOT/wedge-herdr-transient-$reason"; fb="$dir/fakebin"; mkdir -p "$fb"
+    daemon_log="$dir/daemon.log"
+    cat > "$fb/herdr" <<SH
+#!/usr/bin/env bash
+printf '{"result":{"reason":"$reason","shown":false}}\n'
+exit 0
+SH
+    chmod +x "$fb/herdr"
+    PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+      wedge_alarm_via_herdr "away-mode WEDGED 900s"
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "a transient reason ($reason) was treated as a successful delivery"
+    grep -F "not shown this time (reason: $reason, transient)" "$daemon_log" >/dev/null \
+      || fail "transient reason '$reason' did not get the transient phrasing: $(cat "$daemon_log" 2>/dev/null)"
+    grep -F 'configure a command: channel instead' "$daemon_log" >/dev/null \
+      && fail "transient reason '$reason' wrongly got the permanent-channel-broken advice"
+  done
+  pass "wedge_alarm_via_herdr: rate_limited, no_foreground_client, and busy log as transient, not permanently broken"
+}
+
+test_wedge_alarm_herdr_permanent_reason_keeps_command_channel_advice() {
+  local dir fb daemon_log rc reason
+  command -v jq >/dev/null 2>&1 || { pass "herdr permanent-reason verdict skipped without jq"; return; }
+  for reason in disabled something-new-and-unrecognized; do
+    dir="$TMP_ROOT/wedge-herdr-permanent-$reason"; fb="$dir/fakebin"; mkdir -p "$fb"
+    daemon_log="$dir/daemon.log"
+    cat > "$fb/herdr" <<SH
+#!/usr/bin/env bash
+printf '{"result":{"reason":"$reason","shown":false}}\n'
+exit 0
+SH
+    chmod +x "$fb/herdr"
+    PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+      wedge_alarm_via_herdr "away-mode WEDGED 900s"
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "permanent reason '$reason' was treated as a successful delivery"
+    grep -F 'configure a command: channel instead' "$daemon_log" >/dev/null \
+      || fail "permanent/unrecognized reason '$reason' lost the command-channel advice: $(cat "$daemon_log" 2>/dev/null)"
+  done
+  pass "wedge_alarm_via_herdr: disabled and unrecognized reasons keep the permanent-channel-broken advice"
+}
+
 test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code() {
   local dir fb daemon_log rc
   dir="$TMP_ROOT/wedge-herdr-unparseable"; fb="$dir/fakebin"; mkdir -p "$fb"
@@ -1996,6 +2049,8 @@ test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
 test_wedge_alarm_herdr_not_shown_is_a_failure
 test_wedge_alarm_herdr_shown_true_succeeds
+test_wedge_alarm_herdr_transient_reason_avoids_permanent_advice
+test_wedge_alarm_herdr_permanent_reason_keeps_command_channel_advice
 test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code
 test_wedge_alarm_herdr_notifier_pid_survives_capture
 test_wedge_alarm_command_channel_receives_summary

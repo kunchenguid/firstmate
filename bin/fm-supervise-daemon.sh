@@ -849,7 +849,20 @@ wedge_alarm_via_herdr() {  # <summary>
     ''|true) return 0 ;;
   esac
   reason=$(printf '%s' "$out" | jq -r '.result.reason // "unknown"' 2>/dev/null)
-  log "wedge alarm: herdr notification exited 0 but was not shown (reason: ${reason:-unknown}); this channel is not delivering on this host - configure a command: channel instead"
+  [ -n "$reason" ] || reason=unknown
+  # rate_limited, no_foreground_client, and busy are transient - herdr's own
+  # NotificationShowReason enum documents them as conditions that clear on
+  # their own, unlike disabled (a structural host limitation) or an unknown
+  # reason. Naming this channel permanently broken on a single transient miss
+  # would send a captain chasing a channel that was actually fine.
+  case "$reason" in
+    rate_limited|no_foreground_client|busy)
+      log "wedge alarm: herdr notification exited 0 but was not shown this time (reason: $reason, transient) - if this keeps recurring, the channel may not be delivering on this host"
+      ;;
+    *)
+      log "wedge alarm: herdr notification exited 0 but was not shown (reason: $reason); this channel is not delivering on this host - configure a command: channel instead"
+      ;;
+  esac
   return 1
 }
 

@@ -86,6 +86,25 @@ test_nbsp_only_content_is_judged_by_plain_content() {
   pass "fm_composer_classify_content: NBSP-only content falls through to the plain_content safety check"
 }
 
+test_nbsp_after_glyph_in_plain_content_is_resolved() {
+  local out
+  # The styled dim-glyph variant (task fm-afk-inject-pending, review round 1):
+  # the ghost-stripper removed the whole glyph+NBSP run (content is empty),
+  # but plain_content - the raw, unstripped row - still carries "❯"+NBSP
+  # itself. Before plain_content was also trimmed after normalization, this
+  # exact-matched nothing and fell to unknown (safe but permanently
+  # deferring); it must now resolve to empty.
+  out=$(classify 0 '' '' sensitive $'\xe2\x9d\xaf\xc2\xa0')
+  [ "$out" = empty ] \
+    || fail "a dim-rendered agent glyph plus NBSP in plain_content must read empty, got '$out'"
+  # The mirror dead-shell case must still read unknown: the fix must not also
+  # promote a dimmed dead-shell prompt into a safe injection target.
+  out=$(classify 0 '' '' sensitive $'$\xc2\xa0')
+  [ "$out" = unknown ] \
+    || fail "a dim-rendered shell glyph plus NBSP in plain_content must still read unknown, got '$out'"
+  pass "fm_composer_classify_content: an NBSP-trailed glyph inside plain_content now resolves (empty for agent, unknown for shell)"
+}
+
 test_bare_shell_prompt_with_command_is_not_empty() {
   local out
   # A dead shell showing a typed command must not read empty either.
@@ -593,6 +612,7 @@ test_bare_shell_glyphs_are_unknown
 test_bare_shell_glyph_with_only_a_separator_is_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_nbsp_only_content_is_judged_by_plain_content
+test_nbsp_after_glyph_in_plain_content_is_resolved
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
