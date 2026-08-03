@@ -228,7 +228,17 @@ def validate_command(args: argparse.Namespace) -> None:
             fail(f"destination content differs from manifest: {rel}")
     try:
         branch = subprocess.check_output(
-            ["git", "-C", str(root), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            [
+                "git",
+                "-c",
+                f"safe.directory={root}",
+                "-C",
+                str(root),
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "HEAD",
+            ],
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()

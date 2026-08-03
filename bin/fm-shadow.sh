@@ -12,6 +12,7 @@
 # The command never uses a forced Git operation, a stash, or a hard reset.
 # Existing destination output is removed only after a clean replacement is
 # validated and installed.
+# Every Git invocation binds safe.directory to the exact checkout path for that invocation.
 #
 # Usage:
 #   fm-shadow.sh [--source <path>] [--destination <path>]
@@ -75,6 +76,12 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command is missing: $1"
 }
 
+git_at() {
+  local repo=$1
+  shift
+  git -c "safe.directory=$repo" -C "$repo" "$@"
+}
+
 lowercase() {
   LC_ALL=C tr '[:upper:]' '[:lower:]'
 }
@@ -122,13 +129,13 @@ resolve_paths() {
 
 default_branch() {
   local repo=$1 ref branch
-  ref=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  ref=$(git_at "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     printf '%s\n' "$(printf '%s' "$ref" | sed 's#^origin/##')"
     return 0
   fi
   for branch in main master; do
-    if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+    if git_at "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
       printf '%s\n' "$branch"
       return 0
     fi
@@ -140,21 +147,21 @@ check_source() {
   local root branch
   require_command git
   require_command python3
-  root=$(git -C "$SOURCE" rev-parse --show-toplevel 2>/dev/null) \
+  root=$(git_at "$SOURCE" rev-parse --show-toplevel 2>/dev/null) \
     || die "source is not a Git worktree: $SOURCE"
   root=$(cd "$root" && pwd -P) || die "cannot resolve source Git root: $SOURCE"
   [ "$root" = "$SOURCE" ] || die "source must be the Git worktree root: $SOURCE"
-  branch=$(git -C "$SOURCE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  branch=$(git_at "$SOURCE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   [ -n "$branch" ] || die "source must be checked out on a named branch"
   DEFAULT_BRANCH=$(default_branch "$SOURCE") \
     || die "cannot determine source default branch from origin/HEAD, main, or master"
   [ "$branch" = "$DEFAULT_BRANCH" ] \
     || die "source branch '$branch' is not the default branch '$DEFAULT_BRANCH'"
-  [ -z "$(GIT_OPTIONAL_LOCKS=0 git -C "$SOURCE" status --porcelain=v1 --untracked-files=all)" ] \
+  [ -z "$(GIT_OPTIONAL_LOCKS=0 git_at "$SOURCE" status --porcelain=v1 --untracked-files=all)" ] \
     || die "source working tree is dirty; refusing to publish"
-  SOURCE_COMMIT=$(git -C "$SOURCE" rev-parse --verify HEAD 2>/dev/null) \
+  SOURCE_COMMIT=$(git_at "$SOURCE" rev-parse --verify HEAD 2>/dev/null) \
     || die "cannot resolve source HEAD"
-  git -C "$SOURCE" cat-file -e "$SOURCE_COMMIT^{commit}" \
+  git_at "$SOURCE" cat-file -e "$SOURCE_COMMIT^{commit}" \
     || die "source HEAD is not a commit: $SOURCE_COMMIT"
 }
 
@@ -172,7 +179,7 @@ acquire_lock() {
 
 check_destination_git_clean() {
   local status line
-  status=$(GIT_OPTIONAL_LOCKS=0 git -C "$DEST" status --porcelain=v1 --untracked-files=all) \
+  status=$(GIT_OPTIONAL_LOCKS=0 git_at "$DEST" status --porcelain=v1 --untracked-files=all) \
     || die "cannot inspect destination status"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -186,13 +193,13 @@ check_existing_destination() {
     [ ! -e "$CONTROL_DIR" ] || die "replica control metadata exists without a complete destination: $CONTROL_DIR"
     return 0
   fi
-  root=$(git -C "$DEST" rev-parse --show-toplevel 2>/dev/null) \
+  root=$(git_at "$DEST" rev-parse --show-toplevel 2>/dev/null) \
     || die "existing destination is not a Git worktree: $DEST"
   root=$(cd "$root" && pwd -P) || die "cannot resolve destination Git root: $DEST"
   [ "$root" = "$DEST" ] || die "destination must be the Git worktree root: $DEST"
-  head=$(git -C "$DEST" rev-parse --verify HEAD 2>/dev/null) \
+  head=$(git_at "$DEST" rev-parse --verify HEAD 2>/dev/null) \
     || die "destination has no commit"
-  git -C "$SOURCE" merge-base --is-ancestor "$head" "$SOURCE_COMMIT" \
+  git_at "$SOURCE" merge-base --is-ancestor "$head" "$SOURCE_COMMIT" \
     || die "destination commit $head diverges from source commit $SOURCE_COMMIT"
   python3 "$SCRIPT_DIR/fm-shadow.py" validate \
     --root "$DEST" --manifest "$CONTROL_DIR/manifest" --policy "$CONTROL_DIR/policy" \
@@ -210,11 +217,11 @@ build_stage() {
     || die "cannot create replica control staging directory"
   python3 "$SCRIPT_DIR/fm-shadow.py" copy --source "$SOURCE" --stage "$STAGE" \
     || die "cannot mirror source into the temporary replica"
-  clone_head=$(git -C "$STAGE" rev-parse --verify HEAD 2>/dev/null) \
+  clone_head=$(git_at "$STAGE" rev-parse --verify HEAD 2>/dev/null) \
     || die "staged replica has no commit"
   [ "$clone_head" = "$SOURCE_COMMIT" ] \
     || die "staged commit $clone_head differs from source commit $SOURCE_COMMIT"
-  [ "$(git -C "$STAGE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "$DEFAULT_BRANCH" ] \
+  [ "$(git_at "$STAGE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "$DEFAULT_BRANCH" ] \
     || die "staged replica is not on default branch $DEFAULT_BRANCH"
   cat >"$CONTROL_STAGE/policy" <<EOF
 shadow-policy-v1
@@ -235,11 +242,11 @@ EOF
 
 recheck_source() {
   local branch commit
-  branch=$(git -C "$SOURCE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  commit=$(git -C "$SOURCE" rev-parse --verify HEAD 2>/dev/null || true)
+  branch=$(git_at "$SOURCE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  commit=$(git_at "$SOURCE" rev-parse --verify HEAD 2>/dev/null || true)
   [ "$branch" = "$DEFAULT_BRANCH" ] && [ "$commit" = "$SOURCE_COMMIT" ] \
     || die "source changed while the replica was being built; no destination update was made"
-  [ -z "$(GIT_OPTIONAL_LOCKS=0 git -C "$SOURCE" status --porcelain=v1 --untracked-files=all)" ] \
+  [ -z "$(GIT_OPTIONAL_LOCKS=0 git_at "$SOURCE" status --porcelain=v1 --untracked-files=all)" ] \
     || die "source became dirty while the replica was being built; no destination update was made"
   python3 "$SCRIPT_DIR/fm-shadow.py" compare --source "$SOURCE" --replica "$STAGE" \
     || die "source tree changed while the replica was being built; no destination update was made"

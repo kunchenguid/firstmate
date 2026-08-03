@@ -54,7 +54,8 @@ new_fixture() {
 }
 
 run_shadow() {
-  "$SHADOW" --source "$1" --destination "$2"
+  # Git's test hook emulates a foreign-owned checkout without changing fixture ownership.
+  GIT_TEST_ASSUME_DIFFERENT_OWNER=1 "$SHADOW" --source "$1" --destination "$2"
 }
 
 test_first_replica_copies_identity_and_complete_tree() {

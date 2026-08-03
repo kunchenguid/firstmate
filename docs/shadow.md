@@ -32,6 +32,8 @@ The destination commit must be an ancestor of the source commit in the source re
 
 The final destination commit must have exactly the same identity as the source commit.
 
+Git's ownership trust is granted only per invocation for the exact absolute source, stage, or destination path.
+
 Each run stages the complete output beside the destination, validates its content, and swaps it into place only after the source is rechecked.
 
 The staging copier uses 9p-compatible content and symbolic-link operations and does not request POSIX metadata updates from the destination filesystem.
