@@ -88,17 +88,19 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case.
+# fm_session_lock_stale_owner is the shared owner of that one question, so this
+# script and bin/fm-turnend-guard.sh cannot drift on how the lock file is read.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
-# idle or away home remains byte-for-byte inert. Missing or malformed locks are
-# uncertainty rather than stale-owner evidence and remain inert.
+# idle or away home remains byte-for-byte inert. Anything short of proof that the
+# recorded owner is gone stays inert: a live owner, a missing lock, a malformed
+# lock, and an unreadable one are all uncertainty rather than stale-owner
+# evidence. That is deliberately NOT the guard's live-foreign-owner predicate,
+# which additionally requires this process's ancestry to resolve; an empty or
+# unresolvable lock must leave this script inert here, never send it down the
+# recovery path to claim a lock nobody proved was free.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
-  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$LOCK_PID" in
-    ''|*[!0-9]*) exit 0 ;;
-  esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_stale_owner "$STATE" || exit 0
   RECOVER_SESSION_LOCK=1
 fi
 

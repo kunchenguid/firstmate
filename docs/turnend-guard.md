@@ -60,7 +60,11 @@ The auto-arm itself rechecks the healthy watcher predicate and retries a bounded
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
 Claude mode also allows the stop, with an advisory rather than the repair banner, whenever a different live harness process holds this home's `state/.lock`.
 A session that does not own the session lock must not arm, drain, or repair supervision, and `bin/fm-claude-stop-autoarm.sh` refuses to arm from it on the same predicate, so blocking it would demand a repair it may never perform and would re-block every turn indefinitely.
-That allow requires positive proof of a live foreign owner; a missing, malformed, or stale lock keeps the ordinary blocking path.
+`fm_session_lock_live_foreign_owner` in `bin/fm-session-lock-lib.sh` is the single owner of that question, and both scripts read the lock through it so the two cannot drift.
+It requires the complete positive evidence: the lock holds a plain numeric pid, that pid is a live harness, this process's own harness ancestry resolves, and the lock pid is outside that ancestry.
+Ancestry resolution is part of the evidence rather than an implementation detail, because `fm_session_lock_owned_by_self` also reports "not mine" when the ancestry cannot be resolved, so negating it alone would read "this session cannot tell whose lock this is" as proof of a foreign owner.
+A missing lock, a malformed lock, a dead owner, and an unresolvable ancestry therefore all keep the ordinary blocking path.
+The advisory states only what was verified and never promises that the lock owner restores supervision, because an idle lock owner has no next turn and the away supervisor owns the watcher under away mode; its recovery step comes from `bin/fm-supervision-instructions.sh` with the same `--afk` and `--x-mode` inputs the repair banner uses.
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override).
 In Claude mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
 The one loud attended fail-open is available only when the auto-arm has recorded an exhausted failure, its one notice is already consumed, the block budget is exhausted, and a final check finds neither a healthy watcher nor an automatic continuation.

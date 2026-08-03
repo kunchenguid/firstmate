@@ -1557,6 +1557,51 @@ stop_fake_lock_owner() {
   FAKE_LOCK_OWNER_PID=''
 }
 
+# Run the guard under a harness-named parent so its ancestry RESOLVES, the same
+# fake-harness mechanism run_integrated_autoarm already uses. Without this the
+# walk depends on whoever launched the suite: under a real session it resolves,
+# and on a CI runner with no harness ancestor it does not, so a test meaning to
+# exercise positive foreign ownership would silently exercise the unresolvable
+# case instead and pass for the wrong reason.
+run_hook_claude_under_fake_harness() {
+  local dir=$1 home
+  home=$(cd "$dir" && pwd)
+  ln -sf /bin/bash "$dir/fake-claude"
+  # shellcheck disable=SC2016 # the fake harness expands FM_HOME inside its child shell.
+  printf '{"stop_hook_active":false,"session_id":"sess-claude-mode"}' \
+    | CLAUDECODE=1 FM_HOME="$home" "$dir/fake-claude" -c \
+      'bash "$FM_HOME/bin/fm-turnend-guard.sh" --claude' 2>&1
+}
+
+# Run the guard beneath more plain shells than the ancestry walk's 16-hop bound,
+# which makes fm_harness_ancestry_pids fail to resolve on every host and platform
+# rather than depending on the launching process tree. Each level runs its child
+# and waits, so the intervening shells stay alive as real ancestors.
+install_deep_shell() {
+  local dir=$1
+  cat > "$dir/deep-shell.sh" <<'SH'
+#!/usr/bin/env bash
+# Build <depth> live non-harness shell ancestors, then run the remaining args.
+# Never exec: replacing this process would collapse the chain being built.
+depth=$1
+shift
+if [ "$depth" -gt 0 ]; then
+  bash "$0" "$((depth - 1))" "$@"
+  exit $?
+fi
+"$@"
+SH
+  chmod +x "$dir/deep-shell.sh"
+}
+
+run_hook_claude_unresolvable_ancestry() {
+  local dir=$1 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":false,"session_id":"sess-claude-mode"}' \
+    | CLAUDECODE=1 FM_HOME="$home" bash "$dir/deep-shell.sh" 18 \
+      bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
+}
+
 # A session that does not hold the home's session lock is forbidden from arming,
 # draining, or repairing supervision, and the Stop-owned auto-arm refuses to arm
 # from it for the same reason. Blocking it demanded a repair it could never
@@ -1568,12 +1613,34 @@ test_hook_claude_mode_allows_when_another_live_session_owns_the_lock() {
   : > "$dir/state/task1.meta"
   start_fake_lock_owner "$dir"
   printf '%s\n' "$FAKE_LOCK_OWNER_PID" > "$dir/state/.lock"
-  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" false); status=$?
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_under_fake_harness "$dir"); status=$?
   stop_fake_lock_owner
   expect_code 0 "$status" "--claude mode must allow a stop it can never repair from a non-owning session"
   assert_contains "$out" 'SUPERVISION IS OWNED BY ANOTHER SESSION' "non-owning allow must name the owning session"
   assert_not_contains "$out" 'TURN WOULD END BLIND' "non-owning allow must not emit the repair banner"
+  assert_not_contains "$out" 'ends its next turn' "the advisory must not promise a recovery it cannot verify"
   pass "fm-turnend-guard --claude: a live foreign session-lock owner allows the stop with an advisory"
+}
+
+# The allow is evidence-driven, so "I cannot resolve my own ancestry" must not be
+# read as "someone else owns the lock". With the ancestry unresolvable and a live
+# harness in state/.lock, the guard cannot tell a foreign owner from ITSELF - and
+# reading that as foreign let the one session permitted to repair supervision end
+# a turn blind while the auto-arm, which stays inert on the same ambiguity, armed
+# nothing.
+test_hook_claude_mode_unresolvable_ancestry_still_blocks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-unresolvable-ancestry")
+  : > "$dir/state/task1.meta"
+  install_deep_shell "$dir"
+  start_fake_lock_owner "$dir"
+  printf '%s\n' "$FAKE_LOCK_OWNER_PID" > "$dir/state/.lock"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_unresolvable_ancestry "$dir"); status=$?
+  stop_fake_lock_owner
+  expect_code 2 "$status" "--claude mode must keep blocking when it cannot resolve whose lock this is"
+  assert_contains "$out" 'TURN WOULD END BLIND' "an unresolvable ancestry must take the ordinary blocking path"
+  assert_not_contains "$out" 'OWNED BY ANOTHER SESSION' "an unresolvable ancestry is not proof of a foreign owner"
+  pass "fm-turnend-guard --claude: an unresolvable harness ancestry keeps the ordinary blocking path"
 }
 
 # The allow above is scoped to positive proof of a DIFFERENT live owner. A lock
@@ -1678,5 +1745,6 @@ test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_claude_mode_allows_when_another_live_session_owns_the_lock
+test_hook_claude_mode_unresolvable_ancestry_still_blocks
 test_hook_claude_mode_stale_session_lock_still_blocks
 test_hook_claude_mode_frozen_epoch_still_exhausts_block_budget

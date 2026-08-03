@@ -138,6 +138,19 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# Print state dir $1's session-lock pid, but only when the lock file holds one
+# plain numeric value. A missing, empty, or malformed lock prints nothing and
+# fails, so every predicate below treats it as absence of evidence rather than
+# as an answer about ownership. This is the only reader of that file here.
+fm_session_lock_pid() {
+  local state=$1 lock_pid
+  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$lock_pid"
+}
+
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the
@@ -148,10 +161,7 @@ fm_harness_pid_alive() {
 # ancestry that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
   local state=$1 lock_pid pids pid
-  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
+  lock_pid=$(fm_session_lock_pid "$state") || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0
@@ -159,4 +169,38 @@ fm_session_lock_owned_by_self() {
 $pids
 EOF
   return 1
+}
+
+# True only on POSITIVE evidence that a DIFFERENT live harness process holds
+# state dir $1's session lock: the lock names a plain pid, that pid is a live
+# harness, this process's own harness ancestry RESOLVES, and the lock pid is
+# outside it. Ancestry resolution is part of that evidence rather than an
+# implementation detail. fm_session_lock_owned_by_self above also reports "not
+# mine" when fm_harness_ancestry_pids cannot resolve, so negating it alone would
+# read "I cannot tell who owns this" as "someone else owns it" and return a
+# false positive in exactly the ambiguous case. Callers that allow an action on
+# the strength of foreign ownership must not act on that ambiguity.
+fm_session_lock_live_foreign_owner() {
+  local state=$1 lock_pid pids pid
+  lock_pid=$(fm_session_lock_pid "$state") || return 1
+  fm_harness_pid_alive "$lock_pid" || return 1
+  pids=$(fm_harness_ancestry_pids) || return 1
+  while IFS= read -r pid; do
+    [ "$pid" = "$lock_pid" ] && return 1
+  done <<EOF
+$pids
+EOF
+  return 0
+}
+
+# True only on POSITIVE evidence that state dir $1's session lock names an owner
+# that is gone: the lock holds a plain pid and that pid is not a live harness.
+# A missing or malformed lock is absence of evidence rather than a dead owner,
+# so it fails here and callers stay inert instead of claiming a lock that only
+# looks unowned. This deliberately needs no ancestry, because a dead pid is not
+# this live process whether or not the ancestry walk succeeds.
+fm_session_lock_stale_owner() {
+  local state=$1 lock_pid
+  lock_pid=$(fm_session_lock_pid "$state") || return 1
+  ! fm_harness_pid_alive "$lock_pid"
 }

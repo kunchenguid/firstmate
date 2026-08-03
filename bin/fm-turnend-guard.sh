@@ -68,9 +68,14 @@
 # home's session lock must not arm, drain, or repair supervision (AGENTS.md
 # section 3), and bin/fm-claude-stop-autoarm.sh refuses to arm from it on the
 # same predicate. Blocking it would demand a repair it may never perform, so a
-# --claude stop is ALLOWED with an advisory whenever a different LIVE harness
-# process holds state/.lock. A missing, malformed, or stale lock keeps the
-# ordinary blocking path.
+# --claude stop is ALLOWED with an advisory whenever fm_session_lock_live_foreign_owner
+# reports positive evidence that a different LIVE harness process holds
+# state/.lock. Incomplete evidence is never that proof: a missing lock, a
+# malformed lock, a dead owner, or an ancestry this process cannot resolve all
+# keep the ordinary blocking path. The advisory states only what was verified
+# and takes its recovery step from fm-supervision-instructions.sh, because the
+# lock owner is not guaranteed to have a next turn and the away supervisor owns
+# the watcher under away mode.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -204,22 +209,32 @@ fi
 # bin/fm-claude-stop-autoarm.sh refuses to arm from it for the same reason.
 # Blocking such a session therefore demands a repair it may never perform: the
 # auto-arm never claims, its epoch never advances, and the guard re-blocks every
-# turn forever. Allow with an advisory instead, but only on positive proof that
-# a DIFFERENT live harness process owns the lock. A missing, malformed, or stale
-# lock keeps the ordinary blocking path, so this never widens into a general
-# fail-open.
-foreign_session_lock_owner() {
-  local lock_pid
-  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  fm_harness_pid_alive "$lock_pid" || return 1
-  ! fm_session_lock_owned_by_self "$STATE"
+# turn forever. Allow with an advisory instead, but only on the shared library's
+# positive evidence that a DIFFERENT live harness process owns the lock. That
+# predicate is the single owner of the decision, and it refuses whenever the
+# evidence is incomplete: a missing lock, a malformed lock, a dead owner, or an
+# unresolvable harness ancestry all keep the ordinary blocking path, because
+# "this is not my lock" and "I cannot tell whose lock this is" must not collapse
+# into the same answer when the second one would let a stop through.
+#
+# The advisory reports only what was verified. It must not promise that the lock
+# owner restores supervision: an idle lock owner has no next turn, which is the
+# incident this allow exists for, and under away mode the away supervisor owns
+# the watcher instead. The authoritative recovery step therefore comes from
+# fm-supervision-instructions.sh with the same --afk and --x-mode inputs
+# block_stop uses, rather than a second hand-written AFK-aware sentence.
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
 }
 
-if foreign_session_lock_owner; then
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER SESSION: this session does not hold this home'"'"'s session lock, so it must not arm, drain, or repair supervision. The lock-owning session restores supervision when it ends its next turn. Stay read-only here."}\n'
+if fm_session_lock_live_foreign_owner "$STATE"; then
+  afk=0
+  [ -e "$STATE/.afk" ] && afk=1
+  x_mode=0
+  [ -f "$CONFIG/x-mode.env" ] && x_mode=1
+  repair=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+    || printf '%s\n' 'repair missing watcher supervision according to the session-start operating block')
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER SESSION: this session does not hold this home'"'"'s session lock, so it must not arm, drain, or repair supervision. Supervision is not running for this home right now, and this turn is allowed to end only because this session is the one that cannot repair it. Stay read-only here. Recovery belongs to whoever holds the lock: %s"}\n' "$(json_escape "$repair")"
   exit 0
 fi
 
