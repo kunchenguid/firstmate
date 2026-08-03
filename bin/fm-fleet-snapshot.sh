@@ -232,7 +232,7 @@ crew_state_json() {  # <id>
   esac
   printf '%s\n%s\n%s\n%s\n' "$raw" "$state" "$source" "$detail" \
     | jq -Rn '[inputs] | {raw:.[0],state:.[1],source:.[2],detail:.[3]}' \
-    || { echo "fm-fleet-snapshot: crew state stream read failed for $id" >&2; return 1; }
+    || { echo "fm-fleet-snapshot: lifecycle state stream read failed for $id" >&2; return 1; }
 }
 
 status_event_json() {  # <status-log>
@@ -1291,11 +1291,11 @@ secondmate_current_json() {
       reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
       event_note_json=$(printf '%s\n' "$event_note" | jq -Rn '[inputs][0]') \
-        || { echo "fm-fleet-snapshot: secondmate event note stream read failed for $id" >&2; return 1; }
+        || { echo "fm-fleet-snapshot: registered-home event note stream read failed for $id" >&2; return 1; }
       terminal_contradiction=$(printf '%s\n%s\n' "$reconciliation" "$event_note_json" | jq -sr '
         .[0] as $reconciliation | .[1] as $note
         | any($reconciliation.activities[]; .verdict == "contradicts" and .summary == $note)') \
-        || { echo "fm-fleet-snapshot: secondmate event reconciliation stream failed for $id" >&2; return 1; }
+        || { echo "fm-fleet-snapshot: registered-home event reconciliation stream failed for $id" >&2; return 1; }
       if [ "$terminal_contradiction" = true ]; then
         terminal=$(terminal_evidence_json "$task" "$event_note" true)
       else
@@ -1304,9 +1304,9 @@ secondmate_current_json() {
       fi
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
       event_text=$(printf '%s\n%s\n' "$event_raw" "$event_note" | jq -Rn '[inputs] | {raw:.[0],note:.[1]}') \
-        || { echo "fm-fleet-snapshot: secondmate event stream read failed for $id" >&2; return 1; }
+        || { echo "fm-fleet-snapshot: registered-home event stream read failed for $id" >&2; return 1; }
       reason_text=$(printf '%s\n' "$current_reason" | jq -Rn '[inputs][0]') \
-        || { echo "fm-fleet-snapshot: secondmate current reason stream read failed for $id" >&2; return 1; }
+        || { echo "fm-fleet-snapshot: registered-home current reason stream read failed for $id" >&2; return 1; }
       record=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
         "$summary" "$decisions" "$activities" "$activity_scan" "$reconciliation" "$terminal" "$event_text" "$reason_text" | jq -s \
         --arg id "$id" --arg home "$home" --arg state "$state" --arg observed "$SNAPSHOT_NOW" \
@@ -1325,7 +1325,7 @@ secondmate_current_json() {
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event.raw,note:$event.note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}') \
-        || { echo "fm-fleet-snapshot: structured secondmate record stream failed for $id" >&2; return 1; }
+        || { echo "fm-fleet-snapshot: structured registered-home record stream failed for $id" >&2; return 1; }
     else
       if [ -n "$event_raw" ]; then
         provenance='parent-event-fallback'
@@ -1341,9 +1341,9 @@ secondmate_current_json() {
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
       event_text=$(printf '%s\n%s\n' "$event_raw" "$event_note" | jq -Rn '[inputs] | {raw:.[0],note:.[1]}') \
-        || { echo "fm-fleet-snapshot: secondmate event stream read failed for $id" >&2; return 1; }
+        || { echo "fm-fleet-snapshot: registered-home event stream read failed for $id" >&2; return 1; }
       reason_text=$(printf '%s\n' "$reason" | jq -Rn '[inputs][0]') \
-        || { echo "fm-fleet-snapshot: secondmate fallback reason stream read failed for $id" >&2; return 1; }
+        || { echo "fm-fleet-snapshot: registered-home fallback reason stream read failed for $id" >&2; return 1; }
       record=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
         "$activities" "$activity_scan" "$decisions" "$terminal" "$event_text" "$reason_text" | jq -s \
         --arg id "$id" --arg home "$home" --arg observed "$SNAPSHOT_NOW" \
@@ -1358,7 +1358,7 @@ secondmate_current_json() {
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event.raw,note:$event.note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}') \
-        || { echo "fm-fleet-snapshot: fallback secondmate record stream failed for $id" >&2; return 1; }
+        || { echo "fm-fleet-snapshot: fallback registered-home record stream failed for $id" >&2; return 1; }
     fi
     records=$(printf '%s\n%s\n' "$records" "$record" | jq -s '.[0] + [.[1]]')
   done <<EOF

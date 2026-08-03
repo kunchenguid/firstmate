@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-fleet-view.sh - narrow human side-panel over fm-fleet-snapshot.sh.
+# fm-fleet-view.sh - narrow status side-panel over fm-fleet-snapshot.sh.
 #
 # The view is read-only and does not parse fleet files itself.
 # Every task is classified exclusively from reconciled current state: working,
