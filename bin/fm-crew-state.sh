@@ -333,7 +333,8 @@ nm_ci_checks_state() {
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows or that
+# newest row's head does not bind to this worktree.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -349,11 +350,13 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+      # The newest same-branch row is the ONLY candidate: it is this branch's
+      # current attempt, and an older attempt can never supersede it. Same
+      # code-identity rule as axi status - when that row's short sha does not
+      # match this worktree (rewritten tip, or a pipeline-owned tip not
+      # synchronized here yet) the branch lookup yields nothing rather than
+      # attributing a stale earlier attempt whose head is still local.
+      nm_coarse_head_matches_worktree "$sha" || return 0
       printf '%s' "$st"
       return 0
     fi
@@ -365,6 +368,9 @@ nm_runs_status_for_branch() {  # <branch>
 # commits that the crew worktree has not synchronized yet. In that state the
 # run head may be absent from the worktree object database, so git ancestry is
 # unavailable even though the detailed run is authoritative for this branch.
+# The block carries sibling keys (`next_action`, `code`) in no guaranteed
+# order, so the nested form is read across the whole block, not the line after
+# the header.
 nm_branch_sync_state() {
   local state
   state=$(printf '%s\n' "$RUN_OUT" \
@@ -372,7 +378,7 @@ nm_branch_sync_state() {
     | head -1)
   if [ -z "$state" ]; then
     state=$(printf '%s\n' "$RUN_OUT" \
-      | sed -n '/^[[:space:]]*branch_sync:[[:space:]]*$/{n;s/^[[:space:]]*state:[[:space:]]*\(.*\)/\1/p;}' \
+      | sed -n '/^[[:space:]]*branch_sync:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]*state:[[:space:]]*\(.*\)/\1/p' \
       | head -1)
   fi
   strip_quotes "$state"

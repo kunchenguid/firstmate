@@ -702,8 +702,12 @@ test_live_retry_supersedes_failed_run() {
   # The detail lookup correctly reports the live retry, but its pipeline-owned
   # head is not in the unsynchronized worktree object database yet.
   FM_FAKE_RUN_HEAD=$pipeline_head
+  # `state` is deliberately NOT the first key of the block: the block carries
+  # `next_action`/`code` siblings in no guaranteed order.
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-retry)
 branch_sync:
+  next_action: none
+  code: in_sync
   state: pipeline_owned"
   # The newest row is that live retry. The older failed attempt still matches
   # local HEAD, which is why the old fallback incorrectly selected it.
@@ -771,6 +775,34 @@ EOF
   assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
   assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
   pass "cross-branch attribution picks the branch's most recent row"
+}
+
+# The newest same-branch row is the only candidate. When its head is not in
+# this worktree yet (a pipeline-owned tip the crew has not synchronized), the
+# lookup must yield nothing rather than attributing an older, still-local
+# failed attempt - the coarse sibling of the 2026-08-03 false-failure incident.
+test_coarse_unresolvable_newest_row_does_not_select_older_attempt() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-newest-unresolvable)
+  make_repo_on_branch "$d/wt" fm/feat-fr
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fr.meta" "window=fm:fm-feat-fr" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: retry pushed, validating\n' > "$d/state/feat-fr.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-fr ca7ad96  2026-08-03 16:42
+  failed     fm/feat-fr ${short}  2026-08-02 21:47
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-fr
+  out=$(run_crew_state "$d" feat-fr)
+  assert_not_contains "$out" "state: failed" "older failed attempt must not be attributed"
+  assert_not_contains "$out" "source: run-step" "an unresolvable newest row yields no coarse attribution"
+  assert_contains "$out" "source: status-log" "falls back to status-log instead of an older attempt"
+  pass "coarse lookup never falls back to an older same-branch attempt"
 }
 
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
@@ -1281,6 +1313,37 @@ test_historical_same_branch_rewritten_head_not_current() {
   pass "historical same-branch rewritten head is not attributed as current"
 }
 
+# Head-binding, negative direction: `pipeline_owned` is the ONLY branch-sync
+# state that may relax the diverged-head rejection. Any other value leaves the
+# rewritten-tip guard fully intact.
+test_non_pipeline_owned_branch_sync_keeps_head_binding() {
+  reset_fakes
+  local d old_head out
+  d=$(new_case rewritten-head-branch-sync)
+  make_repo_on_branch "$d/wt" fm/todo-flag
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q --orphan tmp-rewrite
+  git -C "$d/wt" commit -q --allow-empty -m 'rewritten tip'
+  git -C "$d/wt" branch -q -M fm/todo-flag
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/wishlist.meta" "window=fm:fm-wishlist" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 setup complete rebased onto merged #76\n' > "$d/state/wishlist.status"
+  FM_FAKE_RUN_HEAD="$old_head"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/todo-flag)
+branch_sync:
+  next_action: recover
+  code: recover_custody
+  state: crew_owned"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" wishlist
+  out=$(run_crew_state "$d" wishlist)
+  assert_not_contains "$out" "source: run-step" "non-pipeline_owned branch sync must not relax head binding"
+  assert_not_contains "$out" "parked at" "historical parked run must not mask current state"
+  assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "a non-pipeline_owned branch-sync state keeps the diverged-head rejection"
+}
+
 # Head-binding: an active pipeline whose run head is a descendant of the local
 # tip (fix commits on the same history) remains current.
 test_active_run_descendant_fix_head_remains_current() {
@@ -1367,6 +1430,7 @@ test_terminal_failed
 test_live_retry_supersedes_failed_run
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_coarse_unresolvable_newest_row_does_not_select_older_attempt
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
@@ -1391,6 +1455,7 @@ test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
+test_non_pipeline_owned_branch_sync_keeps_head_binding
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
