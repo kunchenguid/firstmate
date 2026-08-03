@@ -7,6 +7,11 @@
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
+#
+# A zero exit means the PR was confirmed merged at the forge, never merely that
+# the merge command was accepted. Exit 3 is the distinct "not merged" outcome,
+# including an auto-merge that is only queued, so a caller can never read a
+# queued or rejected merge as landed work.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -38,6 +43,14 @@ PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
 [ "${1:-}" = "--" ] && shift
+
+caller_requested_auto() {
+  local arg
+  for arg in "$@"; do
+    [ "$arg" = --auto ] && return 0
+  done
+  return 1
+}
 
 caller_has_merge_method() {
   local arg
@@ -82,3 +95,42 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+
+# The merge command exiting 0 is not proof the PR merged. gh-axi reports
+# "status: ok" as soon as gh accepts the request, and `gh pr merge --auto`
+# exits 0 after merely queueing an auto-merge that may never land. Firstmate's
+# lifecycle treats a completed merge here as ground truth that the work is live
+# and lets teardown discard the task's branch, so the merged state is confirmed
+# from the forge before this script reports success. The state read is the same
+# one bin/fm-pr-poll.sh uses as the watcher's merge authority, so both paths
+# agree on what merged means; gh is necessarily present because gh-axi shells
+# out to it, and an unreadable state is treated as not merged rather than
+# assumed landed.
+VERIFY_TIMEOUT=${FM_PR_MERGE_VERIFY_TIMEOUT:-30}
+VERIFY_INTERVAL=${FM_PR_MERGE_VERIFY_INTERVAL:-2}
+case "$VERIFY_TIMEOUT" in ''|*[!0-9]*) VERIFY_TIMEOUT=30 ;; esac
+case "$VERIFY_INTERVAL" in ''|*[!0-9]*|0) VERIFY_INTERVAL=2 ;; esac
+
+MERGED=
+ELAPSED=0
+while :; do
+  STATE=$(gh pr view "$URL" --json state -q .state 2>/dev/null) || STATE=
+  if [ "$STATE" = MERGED ]; then
+    MERGED=yes
+    break
+  fi
+  [ "$ELAPSED" -lt "$VERIFY_TIMEOUT" ] || break
+  sleep "$VERIFY_INTERVAL"
+  ELAPSED=$((ELAPSED + VERIFY_INTERVAL))
+done
+
+if [ -z "$MERGED" ]; then
+  if caller_requested_auto "$@"; then
+    echo "error: auto-merge was queued but $URL is not merged" >&2
+  else
+    echo "error: the merge was accepted but $URL is not merged" >&2
+  fi
+  echo "error: the task's work has not landed; do not tear it down" >&2
+  exit 3
+fi
+printf 'merged: %s\n' "$URL"

@@ -14,6 +14,9 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) a merge command that succeeds without the PR merging is not success
+#   (j) a queued auto-merge is its own non-merged outcome, never "done"
+#   (k) a merge that lands just after the command returns is still confirmed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -57,6 +60,68 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *state*) printf '%s\n' MERGED ; exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# gh-axi mock that reports a successful merge while the PR never reaches the
+# merged state, which is exactly what `gh-axi pr merge --auto` does when it
+# only queues an auto-merge. Args: case_dir reported_state
+add_gh_mocks_merge_not_landed() {
+  local case_dir=$1 state=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge") printf 'merged:\n  status: ok\n' ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *headRefOid*) printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ; exit 0 ;;
+      *state*) printf '%s\n' '$state' ; exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# gh mock whose PR is still open on the first state read and merged afterwards,
+# so a merge that lands a moment after the command returns is confirmed rather
+# than reported as a failure. Args: case_dir
+add_gh_mocks_merge_lands_late() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *headRefOid*) printf '%s\n' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ; exit 0 ;;
+      *state*)
+        if [ -f "$FM_TEST_STATE_PROBE" ]; then
+          printf '%s\n' MERGED
+        else
+          : > "$FM_TEST_STATE_PROBE"
+          printf '%s\n' OPEN
+        fi
+        exit 0
+        ;;
     esac
     ;;
 esac
@@ -86,9 +151,14 @@ SH
 
 run_pr_merge() {
   local case_dir=$1 rc; shift
+  # The merged-state confirmation is bounded so a queued or rejected merge
+  # cannot hang a test; one retry is enough to cover the late-landing case.
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_STATE_PROBE="$case_dir/state-probe" \
+  FM_PR_MERGE_VERIFY_TIMEOUT=1 \
+  FM_PR_MERGE_VERIFY_INTERVAL=1 \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -301,8 +371,74 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_unmerged_pr_is_not_reported_as_merged() {
+  local case_dir rc
+  case_dir=$(make_case merge-not-landed)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_not_landed "$case_dir" OPEN
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "merge-not-landed: fm-pr-merge should refuse to report an unmerged PR as merged"
+  assert_grep 'is not merged' "$case_dir/stderr" \
+    "merge-not-landed: refusal did not say the PR is not merged"
+  assert_grep 'has not landed' "$case_dir/stderr" \
+    "merge-not-landed: refusal did not warn against tearing the task down"
+  assert_no_grep 'merged: https://github.com/example/repo/pull/31' "$case_dir/stdout" \
+    "merge-not-landed: an unmerged PR was announced as merged"
+  pass "fm-pr-merge fails when the merge command succeeds but the PR never merges"
+}
+
+test_queued_auto_merge_is_its_own_outcome() {
+  local case_dir rc
+  case_dir=$(make_case auto-merge-queued)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_not_landed "$case_dir" OPEN
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/33 -- --squash --auto \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "auto-merge-queued: a queued auto-merge should not be reported as success"
+  assert_grep 'auto-merge was queued but' "$case_dir/stderr" \
+    "auto-merge-queued: refusal did not distinguish a queued auto-merge from a completed merge"
+  grep -qxF 'pr merge 33 --repo example/repo --squash --auto' "$case_dir/gh-axi.log" \
+    || fail "auto-merge-queued: --auto was not forwarded to gh-axi pr merge"
+  pass "fm-pr-merge reports a queued auto-merge as its own non-merged outcome"
+}
+
+test_merge_confirmed_when_it_lands_late() {
+  local case_dir rc
+  case_dir=$(make_case merge-lands-late)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_lands_late "$case_dir"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/35 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merge-lands-late: a merge confirmed on a later poll should succeed"
+  assert_grep 'merged: https://github.com/example/repo/pull/35' "$case_dir/stdout" \
+    "merge-lands-late: the confirmed merge was not announced"
+  pass "fm-pr-merge confirms a merge that lands shortly after the merge command returns"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
+test_unmerged_pr_is_not_reported_as_merged
+test_queued_auto_merge_is_its_own_outcome
+test_merge_confirmed_when_it_lands_late
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge

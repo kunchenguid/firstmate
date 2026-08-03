@@ -547,7 +547,10 @@ test_valid_recording_and_merge_derivation() {
   [ "$count" -eq 1 ] || fail "duplicate pr_head metadata was appended"
 
   : > "$dir/gh-axi.log"
-  run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
+  # The merge wrapper confirms the merged state from the forge before it
+  # reports success, so a valid merge fixture has to report a merged PR.
+  FM_TEST_GH_STATE=MERGED \
+    run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
   grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
     || fail "merge wrapper did not preserve repository derivation and method"
@@ -572,7 +575,7 @@ test_valid_recording_and_merge_derivation() {
 
   dir=$(make_case lifecycle-compatible-id)
   write_task_meta "$dir" Task_A.1
-  run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
+  FM_TEST_GH_STATE=MERGED run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
     > "$dir/stdout" 2> "$dir/stderr" \
     || fail "safe lifecycle-compatible task ID could not use the PR merge flow"
   fm_pr_poll_artifacts_valid "$dir/home/state" Task_A.1 "$POLL" \
@@ -626,7 +629,7 @@ SH
       --carry-count 0 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
       > "$dir/x-link.out" 2> "$dir/x-link.err" \
       || fail "path-safe legacy task ID could not link an X request"
-    run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
+    FM_TEST_GH_STATE=MERGED run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
       > "$dir/merge.out" 2> "$dir/merge.err" \
       || fail "path-safe legacy task ID could not use the PR merge flow"
     fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
