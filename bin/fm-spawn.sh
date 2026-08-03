@@ -135,6 +135,9 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # claude uses a per-task state/<task-id>.claude-settings.json passed with --settings,
 # so no file is written into the worktree and a project's own .claude settings still load.
+# A raw claude launch command cannot carry that argument, so it is warned about, left
+# unarmed (its busy state reads unknown, never a stranded busy), and given a hook file
+# holding only the turn-end touch, which works as soon as --settings is added by hand.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -1727,6 +1730,17 @@ TURNEND="$STATE_REAL/$ID.turn-ended"
 # the launch with --settings; fm-teardown removes it with the other per-task
 # state artifacts.
 CLAUDE_SETTINGS="$STATE/$ID.claude-settings.json"
+# Whether this launch can actually load that file. The templated claude launch
+# carries the __CLAUDESETTINGS__ placeholder; a raw launch command (the
+# unverified-adapter escape hatch) carries no placeholder, so it loads the hooks
+# only when the operator wrote the --settings argument themselves. This one
+# predicate drives every downstream decision - whether to arm the busy-state
+# contract, what the hook file may contain, and whether to warn - so those three
+# can never disagree about whether a hook writer exists.
+CLAUDE_HOOKS_LOADED=
+case "$LAUNCH" in
+  *__CLAUDESETTINGS__*|*"$CLAUDE_SETTINGS"*) CLAUDE_HOOKS_LOADED=1 ;;
+esac
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -1752,7 +1766,21 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*)
+      # A claude launch that cannot load the per-task hook file (a raw launch
+      # command with no --settings) has no writer that could ever close the
+      # seeded turn, so arming would strand a busy record nothing can clear.
+      # Such a spawn stays unarmed and classifies unknown, the same way codex
+      # and standalone Kimi decline rather than report a verdict they cannot
+      # back. The launch still happens; see the warning below.
+      if [ -n "$CLAUDE_HOOKS_LOADED" ]; then
+        BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+          echo "error: failed to arm the busy-state contract for $ID" >&2
+          exit 1
+        }
+      fi
+      ;;
+    opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -1791,16 +1819,30 @@ if [ "$KIND" != secondmate ]; then
       # project's own settings still load and its rules still apply to the
       # crewmate alongside these hooks. Nothing is written into the worktree,
       # so there is no project file to parse, merge, or unpick at teardown.
-      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
-      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
-      j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
-      j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
-      j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-      if ! cat > "$CLAUDE_SETTINGS" <<EOF
+      if [ -n "$BUSY_GEN" ]; then
+        busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+        busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
+        j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
+        j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+        j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
+        j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+        claude_hooks_json=$(cat <<EOF
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
-      then
+        )
+      else
+        # Unarmed spawn (see the arm above): no gen exists, so every busy-state
+        # event would be refused and the record stays unknown rather than a
+        # verdict nothing can clear. The plain turn-end touch needs no gen and
+        # IS the supervision wake, so it still ships - an operator who follows
+        # the warning below and adds --settings by hand gets the wake back.
+        j_stop=$(json_escape "touch $(shell_quote "$TURNEND")")
+        claude_hooks_json=$(cat <<EOF
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}]}}
+EOF
+        )
+      fi
+      if ! printf '%s\n' "$claude_hooks_json" > "$CLAUDE_SETTINGS"; then
         echo "error: failed to write the claude hook settings for $ID at $CLAUDE_SETTINGS" >&2
         exit 1
       fi
@@ -2079,16 +2121,14 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 # A raw launch command (the unverified-adapter escape hatch) carries no
 # placeholder, so a hand-written claude command reaches the pane without the
 # --settings argument that loads the hooks written above. Say so loudly rather
-# than launching a worker whose turn-end wake silently never fires.
-if [ "$KIND" != secondmate ]; then
+# than launching a worker whose turn-end wake silently never fires. The spawn
+# was left unarmed above, so its busy state reads unknown instead of a stranded
+# busy; the hook file still holds the turn-end touch, so adding the argument by
+# hand restores the wake.
+if [ "$KIND" != secondmate ] && [ -z "$CLAUDE_HOOKS_LOADED" ]; then
   case "$HARNESS" in
     claude*)
-      case "$LAUNCH" in
-        *--settings*) ;;
-        *)
-          echo "warning: this raw claude launch command carries no --settings argument, so $ID will run with no turn-end wake or busy-state reporting; add --settings $sq_claudesettings to the command" >&2
-          ;;
-      esac
+      echo "warning: this raw claude launch command carries no --settings argument, so $ID will run with no turn-end wake and its busy state stays unknown; add --settings $sq_claudesettings to the command to restore the turn-end wake" >&2
       ;;
   esac
 fi

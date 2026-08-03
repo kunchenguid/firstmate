@@ -401,7 +401,7 @@ test_claude_launch_loads_the_out_of_tree_hook_settings() {
 }
 
 test_raw_claude_launch_without_settings_warns_instead_of_going_quiet() {
-  local rec id=busy-cl-6 out settings
+  local rec id=busy-cl-6 out state settings
   rec=$(make_spawn_case claude-raw-launch claude "$id")
   read_case_record "$rec"
 
@@ -411,12 +411,36 @@ test_raw_claude_launch_without_settings_warns_instead_of_going_quiet() {
     "claude --dangerously-skip-permissions 'do the thing'")
   expect_code 0 $? "raw claude launch should still spawn: $out"
 
-  settings="$HOME_DIR/state/$id.claude-settings.json"
+  state="$HOME_DIR/state"
+  settings="$state/$id.claude-settings.json"
   assert_present "$settings" "the hook settings should still be written for a raw claude launch"
   assert_contains "$out" "carries no --settings argument" \
     "a raw claude launch that cannot load the hooks must say so, not go quietly unsupervised"
   assert_contains "$out" "$settings" "the warning must name the settings file to add"
-  pass "a raw claude launch command with no --settings warns loudly instead of losing the turn-end wake"
+
+  # Nothing can load those hooks, so nothing could ever close a seeded turn:
+  # the spawn must stay unarmed and classify unknown rather than report a busy
+  # verdict no writer can clear.
+  assert_absent "$state/$id.busy-gen" \
+    "a claude launch that cannot load the hooks must not arm the busy-state contract"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "unknown missing" ] \
+    || fail "an unarmed raw claude launch must classify unknown, got '$out'"
+
+  # The turn-end touch needs no gen, so it must survive for an operator who
+  # follows the warning and adds --settings by hand.
+  jq -e . "$settings" >/dev/null || fail "the raw-launch hook settings are not valid JSON"
+  if jq -e '.hooks.UserPromptSubmit' "$settings" >/dev/null 2>&1; then
+    fail "an unarmed spawn must not ship busy-state hooks whose gen every writer would refuse"
+  fi
+  rm -f "$state/$id.turn-ended"
+  run_claude_hook "$settings" Stop || fail "Stop hook command failed"
+  [ -f "$state/$id.turn-ended" ] \
+    || fail "the Stop hook must still touch the turn-end marker so a hand-added --settings restores the wake"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "unknown missing" ] \
+    || fail "the gen-free Stop hook must leave the classification unknown, got '$out'"
+  pass "a raw claude launch command with no --settings warns, stays unarmed, and classifies unknown"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
