@@ -133,16 +133,20 @@
 # .fm/brief.md, together with every firstmate-home or firstmate-repo file it
 # references under .fm/refs/<home|root|secondmate>/, and the brief's input paths
 # are rewritten to the absolute path of those copies, so no launch-visible input
-# needs a directory grant outside that checkout. Firstmate programs (anything
-# under a bin/, and any executable) are invoked rather than read, so they are
-# never copied into the writable worktree and keep their real path. Directory
-# references are bounded: a broad firstmate root (bin, data, state, ...) is never
-# staged, and depth/file-count/byte caps skip the rest with a warning. Each map
-# entry rewrites only the exact path it was recorded for, so a staged parent
-# directory can never redirect a longer path underneath it. The deliberate
-# external writes keep their real outside paths: state/<id>.status and a scout's
-# data/<id>/report.md. For opencode, the launch config additionally allows those
-# output directories plus the per-task temp root through
+# needs a directory grant outside that checkout. A trusted firstmate enforcement
+# script (an executable interpreter script under a firstmate root's own bin/) is
+# invoked rather than read, so it is never copied into the writable worktree and
+# keeps its real path; an ordinary input that merely carries mode 755 is still
+# staged. Directory references are bounded: a broad firstmate root (bin, data,
+# state, ...) is never staged, and depth/file-count/byte caps skip the rest with
+# a warning. A directory or glob reference is rewritten only when every file it
+# covers was staged, so a partial copy is reported rather than silently handed
+# over. Each map entry rewrites only the exact path it was recorded for, so a
+# staged parent directory can never redirect a longer path underneath it. The
+# deliberate external writes keep their real outside paths: state/<id>.status and
+# a scout's data/<id>/report.md. For opencode, the launch config additionally
+# allows those output directories plus the per-task temp root - in every spelling
+# the crewmate can reach them by - through
 # permission.external_directory (opencode 1.18.10), scoped to this launch so the
 # captain's own opencode config is never touched.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
@@ -1717,6 +1721,7 @@ STAGE_MAX_DIR_BYTES=${FM_STAGE_MAX_DIR_BYTES:-2097152}
 STAGE_MAX_FILES=${FM_STAGE_MAX_FILES:-256}
 STAGE_MAX_BYTES=${FM_STAGE_MAX_BYTES:-8388608}
 STAGE_MAX_SCAN_DEPTH=${FM_STAGE_MAX_SCAN_DEPTH:-4}
+STAGE_MISSING_NAMED=${FM_STAGE_MISSING_NAMED:-5}
 STAGE_FILE_COUNT=0
 STAGE_BYTE_COUNT=0
 STAGE_SCAN_DEPTH=0
@@ -1828,17 +1833,25 @@ stage_target_for_reference() {
   printf '%s/.fm/refs/%s/%s\n' "$WT" "$kind" "$rel"
 }
 
-# Firstmate helper programs are invoked, never read as input. Staging one would
-# hand the crewmate a writable copy of a trusted enforcement script such as
+# A trusted firstmate enforcement script is invoked, never read as input.
+# Staging one would hand the crewmate a writable copy of a script such as
 # bin/fm-herdr-lab.sh inside the very laboratory that script isolates, and would
 # repoint an invocation that has to work from any directory. Execution needs no
-# read grant, so a program reference keeps its real absolute path.
+# read grant, so such a reference keeps its real absolute path. The test is
+# deliberately narrow - an executable interpreter script under a firstmate root's
+# own bin/ - so that an ordinary brief input that merely carries mode 755, such
+# as a repro script a prior scout wrote under data/<task>/, is still staged.
 stage_is_program() {
-  local path=$1
-  case "$path" in
-    */bin/*) return 0 ;;
+  local path=$1 kind rel
+  kind=$(stage_kind_for_path "$path" 2>/dev/null || true)
+  [ -n "$kind" ] || return 1
+  rel=$(stage_rel_for_path "$kind" "$path" 2>/dev/null || true)
+  case "$rel" in
+    bin/*) ;;
+    *) return 1 ;;
   esac
-  [ -f "$path" ] && [ -x "$path" ]
+  [ -f "$path" ] && [ -x "$path" ] || return 1
+  [ "$(head -c 2 "$path" 2>/dev/null)" = '#!' ]
 }
 
 stage_path_within_root() {
@@ -2038,9 +2051,11 @@ stage_budget_allows() {
   return 0
 }
 
+# Exit status: 0 staged (or already staged), 2 deliberately not staged so the
+# caller keeps the real path, 1 a hard failure that must fail the spawn.
 stage_file() {
   local source=$1 kind=$2 source_real root_real target nested_reference size
-  stage_is_program "$source" && return 0
+  stage_is_program "$source" && return 2
   source_real=$(stage_resolve_file_real "$source") || {
     echo "error: cannot resolve staged firstmate reference: $source" >&2
     return 1
@@ -2058,7 +2073,7 @@ stage_file() {
     return 0
   fi
   size=$(stage_file_size "$source")
-  stage_budget_allows "$size" || return 0
+  stage_budget_allows "$size" || return 2
   stage_target_parent_safe "$target" || return 1
   mkdir -p "$(dirname "$target")" || {
     echo "error: cannot create the staged reference directory for: $source" >&2
@@ -2084,11 +2099,33 @@ stage_file() {
   return 0
 }
 
-# A reference is mapped only once the copy it points at actually exists, so a
-# skipped program, a refused directory, or an exhausted budget leaves the real
-# path in the brief instead of aiming it at a file that was never staged.
+# A reference is rewritten only when EVERY file it covers was staged. A skipped
+# enforcement script, a refused directory, or an exhausted budget leaves the real
+# path in the brief and says exactly what is missing, so the agent is never sent
+# to a staged copy that silently lacks the file it was sent for.
+stage_missing_reset() {
+  STAGE_MISSING_COUNT=0
+  STAGE_MISSING_LIST=
+}
+
+stage_missing_add() {
+  STAGE_MISSING_COUNT=$((STAGE_MISSING_COUNT + 1))
+  if [ "$STAGE_MISSING_COUNT" -le "$STAGE_MISSING_NAMED" ]; then
+    STAGE_MISSING_LIST=${STAGE_MISSING_LIST:+$STAGE_MISSING_LIST, }$1
+  fi
+}
+
+stage_missing_warn() {
+  local reference=$1 suffix=
+  [ "$STAGE_MISSING_COUNT" -gt "$STAGE_MISSING_NAMED" ] \
+    && suffix=" (and $((STAGE_MISSING_COUNT - STAGE_MISSING_NAMED)) more)"
+  echo "warning: keeping the real path for firstmate reference $reference; $STAGE_MISSING_COUNT file(s) under it were not staged: $STAGE_MISSING_LIST$suffix" >&2
+}
+
 stage_source() {
-  local source=$1 kind=$2 reference=$3 target base file file_target
+  local source=$1 kind=$2 reference=$3 target base file rc matched
+  local STAGE_MISSING_COUNT STAGE_MISSING_LIST
+  stage_missing_reset
   stage_is_program "$source" && return 0
   target=$(stage_target_for_reference "$kind" "$reference") || {
     echo "error: cannot map firstmate reference: $reference" >&2
@@ -2108,27 +2145,45 @@ stage_source() {
     fi
     stage_dir_within_caps "$source" || return 0
     while IFS= read -r file; do
-      stage_file "$file" "$kind" || return 1
+      stage_file "$file" "$kind"
+      rc=$?
+      case "$rc" in
+        0) ;;
+        2) stage_missing_add "$file" ;;
+        *) return 1 ;;
+      esac
     done < <(find "$source" -type f -print)
+    if [ "$STAGE_MISSING_COUNT" -gt 0 ]; then
+      stage_missing_warn "$reference"
+      return 0
+    fi
     [ -d "$target" ] && stage_add_map "$reference" "$target"
     return 0
   fi
   if [ -f "$source" ]; then
-    stage_file "$source" "$kind" || return 1
-    [ -f "$target" ] && stage_add_map "$reference" "$target"
+    stage_file "$source" "$kind"
+    rc=$?
+    [ "$rc" -eq 1 ] && return 1
+    [ "$rc" -eq 0 ] && [ -f "$target" ] && stage_add_map "$reference" "$target"
     return 0
   fi
   stage_path_has_glob "$source" || return 0
   base=$(stage_glob_base "$source")
   [ -d "$base" ] || return 0
-  local matched=0
+  matched=0
   while IFS= read -r file; do
-    stage_file "$file" "$kind" || return 1
-    file_target=$(stage_target_for_path "$kind" "$file" 2>/dev/null || true)
-    if [ -n "$file_target" ] && [ -f "$file_target" ]; then
-      matched=1
-    fi
+    stage_file "$file" "$kind"
+    rc=$?
+    case "$rc" in
+      0) matched=1 ;;
+      2) stage_missing_add "$file" ;;
+      *) return 1 ;;
+    esac
   done < <(find "$base" -type f -path "$source" -print)
+  if [ "$STAGE_MISSING_COUNT" -gt 0 ]; then
+    stage_missing_warn "$reference"
+    return 0
+  fi
   if [ "$matched" -eq 1 ]; then
     stage_add_map "$reference" "$target"
   fi
@@ -2604,11 +2659,23 @@ if [ "$HARNESS" = opencode ]; then
   # its report directory, and the per-task temp root this spawn creates and
   # exports as GOTMPDIR; all brief and report inputs have already been copied
   # under the task worktree.
-  opencode_state_rule=$(json_escape "$STATE_REAL/*")
-  opencode_output_rule=$(json_escape "$STAGE_OUTPUT_DIR_REAL/*")
-  opencode_tmp_rule=$(json_escape "$TASK_TMP_REAL/*")
-  opencode_config=$(printf '{"permission":{"*":"allow","external_directory":{"%s":"allow","%s":"allow","%s":"allow"}}}' \
-    "$opencode_state_rule" "$opencode_output_rule" "$opencode_tmp_rule")
+  # Every spelling the crewmate can reach a granted directory by is listed, not
+  # just the physically resolved one: /tmp is a symlink to /private/tmp on
+  # darwin and GOTMPDIR is exported with the logical /tmp spelling, and a
+  # firstmate home reached through a symlink hands out a logical status path the
+  # resolved rule would not match. Duplicates collapse, so the common case where
+  # the two agree still emits one rule per directory.
+  opencode_rules=
+  while IFS= read -r opencode_dir; do
+    [ -n "$opencode_dir" ] || continue
+    opencode_rule=$(json_escape "${opencode_dir%/}/*")
+    opencode_rules=${opencode_rules:+$opencode_rules,}$(printf '"%s":"allow"' "$opencode_rule")
+  done < <(printf '%s\n' \
+    "$STATE" "$STATE_REAL" "$FM_HOME/state" "$STAGE_HOME_REAL/state" \
+    "$DATA/$ID" "$STAGE_OUTPUT_DIR_REAL" "$FM_HOME/data/$ID" "$STAGE_HOME_REAL/data/$ID" \
+    "$TASK_TMP" "$TASK_TMP_REAL" \
+    | awk 'NF { sub(/\/+$/, "", $0); if (!seen[$0]++) print }')
+  opencode_config=$(printf '{"permission":{"*":"allow","external_directory":{%s}}}' "$opencode_rules")
   opencode_config_quoted=$(shell_quote "$opencode_config")
   LAUNCH=${LAUNCH//__OPENCODE_CONFIG__/$opencode_config_quoted}
 fi

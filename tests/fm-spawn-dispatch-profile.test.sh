@@ -485,9 +485,27 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   tmp_real=$(cd "/tmp/fm-$id" && pwd -P)
   assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch did not thread model"
-  config="OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\",\"external_directory\":{\"$home_real/state/*\":\"allow\",\"$home_real/data/$id/*\":\"allow\",\"$tmp_real/*\":\"allow\"}}}'"
+  config="OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\",\"external_directory\":{"
   assert_contains "$launch" "$config" \
-    "opencode launch did not scope external_directory to the task's output and temp paths"
+    "opencode launch did not scope permissions through external_directory"
+  # Every spelling the crewmate can reach an allowed directory by must be granted:
+  # the logical one it is handed and the physically resolved one.
+  assert_contains "$launch" "\"$HOME_DIR/state/*\":\"allow\"" \
+    "opencode launch did not grant the logical status directory"
+  assert_contains "$launch" "\"$home_real/state/*\":\"allow\"" \
+    "opencode launch did not grant the resolved status directory"
+  assert_contains "$launch" "\"$HOME_DIR/data/$id/*\":\"allow\"" \
+    "opencode launch did not grant the logical report directory"
+  assert_contains "$launch" "\"$home_real/data/$id/*\":\"allow\"" \
+    "opencode launch did not grant the resolved report directory"
+  assert_contains "$launch" "\"/tmp/fm-$id/*\":\"allow\"" \
+    "opencode launch did not grant the logical GOTMPDIR root the pane exports"
+  assert_contains "$launch" "\"$tmp_real/*\":\"allow\"" \
+    "opencode launch did not grant the resolved task temp root"
+  assert_not_contains "$launch" "\"$home_real/*\":\"allow\"" \
+    "opencode launch granted the whole firstmate home"
+  assert_not_contains "$launch" "\"/tmp/*\":\"allow\"" \
+    "opencode launch granted the whole temp root"
   assert_contains "$launch" "< '$WT_DIR/.fm/brief.md'" \
     "opencode launch did not read the staged brief"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
@@ -504,10 +522,13 @@ test_spawn_stages_firstmate_brief_and_references() {
   mkdir -p "$HOME_DIR/data/prior" "$HOME_DIR/data/plan-review/decisions"
   printf 'prior report; see data/prior/notes.md\n' > "$HOME_DIR/data/prior/report.md"
   printf 'prior notes\n' > "$HOME_DIR/data/prior/notes.md"
+  printf '#!/usr/bin/env bash\necho repro\n' > "$HOME_DIR/data/prior/repro.sh"
+  chmod +x "$HOME_DIR/data/prior/repro.sh"
   printf 'decision one\n' > "$HOME_DIR/data/plan-review/decisions/one.md"
   printf 'prior status\n' > "$HOME_DIR/state/prior.status"
   cat > "$HOME_DIR/data/$id/brief.md" <<EOF
 Read \`$HOME_DIR/data/prior/report.md\` and \`data/prior/notes.md\`.
+Reproduce with \`$HOME_DIR/data/prior/repro.sh\`.
 Read all decisions at \`$HOME_DIR/data/plan-review/decisions/*.md\`.
 Read prior status at \`$HOME_DIR/state/prior.status\` and \`state/prior.status\`.
 The helper is \`$ROOT/bin/fm-ensure-agents-md.sh\`.
@@ -530,8 +551,12 @@ EOF
   assert_present "$WT_DIR/.fm/refs/home/data/plan-review/decisions/one.md" "spawn did not expand the decision glob"
   assert_present "$WT_DIR/.fm/refs/home/state/prior.status" "spawn did not stage the prior status reference"
   [ -e "$WT_DIR/.fm/refs/root/bin/fm-ensure-agents-md.sh" ] \
-    && fail "spawn copied a firstmate program into the writable task worktree"
+    && fail "spawn copied a firstmate enforcement script into the writable task worktree"
+  assert_present "$WT_DIR/.fm/refs/home/data/prior/repro.sh" \
+    "spawn refused to stage an ordinary brief input that merely carries the exec bit"
   staged=$(cat "$WT_DIR/.fm/brief.md")
+  assert_contains "$staged" "$WT_DIR/.fm/refs/home/data/prior/repro.sh" \
+    "staged brief did not rewrite an executable data input to its staged copy"
   assert_not_contains "$staged" "$HOME_DIR/data/prior/report.md" "staged brief retained an absolute firstmate report input"
   assert_contains "$staged" "$ROOT/bin/fm-ensure-agents-md.sh" \
     "staged brief repointed a firstmate program away from its real path"
@@ -558,6 +583,30 @@ EOF
   ( cd "$WT_DIR" && git check-ignore -q .fm/brief.md ) \
     || fail "staged brief is not excluded from the task worktree"
   pass "spawn stages firstmate inputs, rewrites references, and preserves external outputs"
+}
+
+test_spawn_keeps_the_real_path_for_a_partially_staged_reference() {
+  local rec id out status staged
+  id=profile-staged-partial-z22
+  rec=$(make_spawn_case profile-staged-partial opencode "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/data/lab"
+  printf 'lab note one\n' > "$HOME_DIR/data/lab/one.md"
+  printf 'lab note two\n' > "$HOME_DIR/data/lab/two.md"
+  cat > "$HOME_DIR/data/$id/brief.md" <<EOF
+Everything you need is in \`$HOME_DIR/data/lab\`.
+Write findings to \`$HOME_DIR/data/$id/report.md\`.
+EOF
+
+  out=$(FM_STAGE_MAX_FILES=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn with a partially staged directory should succeed"
+  assert_contains "$out" "keeping the real path for firstmate reference $HOME_DIR/data/lab" \
+    "spawn did not name the reference whose files were not all staged"
+  staged=$(cat "$WT_DIR/.fm/brief.md")
+  assert_contains "$staged" "is in \`$HOME_DIR/data/lab\`" \
+    "spawn rewrote a reference to a directory copy that is missing files"
+  pass "a partially staged reference keeps its real path and reports what is missing"
 }
 
 test_crewmate_spawn_never_stages_from_the_project_checkout() {
@@ -792,6 +841,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_spawn_stages_firstmate_brief_and_references
+test_spawn_keeps_the_real_path_for_a_partially_staged_reference
 test_crewmate_spawn_never_stages_from_the_project_checkout
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
