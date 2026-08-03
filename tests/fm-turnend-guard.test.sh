@@ -10,8 +10,8 @@
 # All hermetic over temp dirs; no real agent session is invoked.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/pi-extension-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/pi-extension-helpers.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-supervision-lib.sh"
@@ -904,62 +904,77 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
-test_pi_extension_injects_once_per_logical_agent_run() {
-  local repo home ext log out status
-  repo="$TMP_ROOT/pi-logical-run-root"
-  home="$TMP_ROOT/pi-logical-run-home"
-  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
-  log="$TMP_ROOT/pi-logical-run-guard.log"
-  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
-  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
-  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+# --- .pi primary extension ---------------------------------------------------
+# The extension drives the same shared guard predicate, so these tests only cover
+# what the extension itself owns: one follow-up per logical agent run, delivery
+# from OUTSIDE the agent_settled frame, the Pi-side consecutive-block ceiling
+# (bin/fm-turnend-guard.sh bounds only --claude mode), and fail-open spawn
+# budgets. tests/pi-extension-helpers.sh owns the Pi session fake.
+
+pi_guard_script() {
+  local repo=$1
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 cat >/dev/null
-printf 'guard\n' >> "${FM_GUARD_LOG:?}"
-printf 'logical-run guard fired\n' >&2
+[ -z "${FM_GUARD_LOG:-}" ] || printf 'guard\n' >> "$FM_GUARD_LOG"
+if [ -n "${FM_GUARD_EXIT_FILE:-}" ] && [ -f "$FM_GUARD_EXIT_FILE" ]; then
+  read -r code < "$FM_GUARD_EXIT_FILE"
+else
+  code=2
+fi
+[ "$code" = 2 ] || exit "$code"
+printf 'pi guard fired\n' >&2
 exit 2
 SH
   cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+  cat > "$repo/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh" "$repo/bin/fm-cd-pretool-check.sh"
+}
+
+test_pi_extension_injects_once_per_logical_agent_run() {
+  local repo home log out status
+  repo="$TMP_ROOT/pi-logical-run-root"
+  home="$TMP_ROOT/pi-logical-run-home"
+  log="$TMP_ROOT/pi-logical-run-guard.log"
+  mkdir -p "$home/state"
+  fm_install_pi_guard_extension "$repo"
+  fm_install_pi_session_fake "$repo"
+  pi_guard_script "$repo"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-turnend-guard.ts" FAKE="$repo/pi-session-fake.mjs" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const handlers = new Map();
-let prompts = 0;
-const pi = {
-  on(event, handler) {
-    handlers.set(event, handler);
-  },
-  async sendUserMessage(message, options) {
-    prompts += 1;
-    if (!message.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) throw new Error(`untyped operational prompt: ${message}`);
-    if (!message.includes("TURN WOULD END BLIND")) throw new Error(`unexpected prompt: ${message}`);
-    if (!message.includes("watcher cycle is missing, failed, or unhealthy")) throw new Error(`guard prompt omitted recovery-only state: ${message}`);
-    if (message.includes("Resume supervision according to the session-start operating block")) throw new Error(`guard prompt used ordinary continuity: ${message}`);
-    if (options?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
-    await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
-  },
-};
+const { createPiSessionFake, quiesce } = await import(pathToFileURL(process.env.FAKE).href);
+const { pi, handlers, handler, session, runAgentPrompt } = createPiSessionFake();
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 if (handlers.has("turn_end")) throw new Error("guard still treats internal Pi turns as logical runs");
-const settled = handlers.get("agent_settled");
-if (!settled) throw new Error("agent_settled handler was not registered");
+if (!handlers.has("agent_settled")) throw new Error("agent_settled handler was not registered");
 
-await settled({ type: "agent_settled" }, {});
-if (prompts !== 1) throw new Error(`no-tool run injected ${prompts} follow-ups`);
+await runAgentPrompt();
+await quiesce(session);
+if (session.followUps.length !== 1) throw new Error(`no-tool run injected ${session.followUps.length} follow-ups`);
 
 for (let i = 0; i < 3; i += 1) {
-  await handlers.get("turn_end")?.({ type: "turn_end", turnIndex: i }, {});
+  await handler("turn_end")?.({ type: "turn_end", turnIndex: i }, {});
 }
-await settled({ type: "agent_settled" }, {});
-if (prompts !== 2) throw new Error(`multi-tool run produced ${prompts - 1} follow-ups`);
+await runAgentPrompt();
+await quiesce(session);
+if (session.followUps.length !== 2) throw new Error(`multi-tool run produced ${session.followUps.length - 1} follow-ups`);
+
+for (const [index, message] of session.followUps.entries()) {
+  if (!message.startsWith("⁣FIRSTMATE_OP: v1 turn-end-guard: ")) throw new Error(`untyped operational prompt: ${message}`);
+  if (!message.includes("TURN WOULD END BLIND")) throw new Error(`unexpected prompt: ${message}`);
+  if (!message.includes("watcher cycle is missing, failed, or unhealthy")) throw new Error(`guard prompt omitted recovery-only state: ${message}`);
+  if (message.includes("Resume supervision according to the session-start operating block")) throw new Error(`guard prompt used ordinary continuity: ${message}`);
+  if (session.followUpOptions[index]?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
+}
 
 const guardRuns = readFileSync(process.env.FM_GUARD_LOG, "utf8").trim().split("\n").length;
 if (guardRuns !== 2) throw new Error(`guard predicate ran ${guardRuns} times for two logical runs`);
@@ -971,53 +986,200 @@ EOF
   pass ".pi primary extension: no-tool and multi-tool runs each inject exactly one guard follow-up"
 }
 
-test_pi_extension_retries_after_followup_delivery_failure() {
-  local repo home ext out status
-  repo="$TMP_ROOT/pi-delivery-failure-root"
-  home="$TMP_ROOT/pi-delivery-failure-home"
-  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
-  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
-  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
-  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
-  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
-#!/usr/bin/env bash
-cat >/dev/null
-printf 'delivery failure guard\n' >&2
-exit 2
-SH
-  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+# The core regression: with tasks in flight and no healthy watcher, an ordinary
+# turn must still finish. Delivering the guard follow-up from inside the
+# agent_settled frame starts a nested agent run inside the parent run's open
+# frame, which is what wedged real Pi primaries on "Working..." forever.
+test_pi_extension_followup_never_re_enters_the_settled_frame() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-reentrancy-root"
+  home="$TMP_ROOT/pi-reentrancy-home"
+  mkdir -p "$home/state"
+  fm_install_pi_guard_extension "$repo"
+  fm_install_pi_session_fake "$repo"
+  pi_guard_script "$repo"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-turnend-guard.ts" FAKE="$repo/pi-session-fake.mjs" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
-const handlers = new Map();
+const { createPiSessionFake, quiesce } = await import(pathToFileURL(process.env.FAKE).href);
+const { pi, session, runAgentPrompt } = createPiSessionFake();
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+// The ordinary "hi" turn.
+await runAgentPrompt();
+if (session.activeRuns !== 0) throw new Error(`the ordinary turn never unwound: ${session.activeRuns} run frames still open`);
+if (session.reentrantRuns !== 0) throw new Error(`the ordinary turn started ${session.reentrantRuns} nested agent runs`);
+if (session.maxSettledDepth !== 1) throw new Error(`agent_settled re-entered to depth ${session.maxSettledDepth}`);
+if (session.followUps.length !== 0) throw new Error("guard follow-up was delivered inside the settled frame");
+
+await quiesce(session);
+if (session.followUps.length !== 1) throw new Error(`expected exactly one deferred follow-up, saw ${session.followUps.length}`);
+if (session.reentrantRuns !== 0) throw new Error(`deferred delivery started ${session.reentrantRuns} nested agent runs`);
+if (session.maxSettledDepth !== 1) throw new Error(`deferred delivery re-entered agent_settled to depth ${session.maxSettledDepth}`);
+if (session.activeRuns !== 0) throw new Error(`the follow-up turn never unwound: ${session.activeRuns} run frames still open`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi guard follow-up must be delivered outside the agent_settled frame"
+  [ -z "$out" ] || fail "Pi re-entrancy guard test printed output: $out"
+  pass ".pi primary extension: an unwatched turn completes and the follow-up is a fresh top-level turn"
+}
+
+test_pi_extension_retries_after_followup_delivery_failure() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-delivery-failure-root"
+  home="$TMP_ROOT/pi-delivery-failure-home"
+  mkdir -p "$home/state"
+  fm_install_pi_guard_extension "$repo"
+  fm_install_pi_session_fake "$repo"
+  pi_guard_script "$repo"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-turnend-guard.ts" FAKE="$repo/pi-session-fake.mjs" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const { createPiSessionFake, quiesce } = await import(pathToFileURL(process.env.FAKE).href);
+const { pi, session, runAgentPrompt } = createPiSessionFake();
+const deliver = pi.sendUserMessage;
 let attempts = 0;
-const pi = {
-  on(event, handler) {
-    handlers.set(event, handler);
-  },
-  async sendUserMessage() {
-    attempts += 1;
-    if (attempts === 1) throw new Error("synthetic delivery failure");
-    await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
-  },
+pi.sendUserMessage = async (content, options) => {
+  attempts += 1;
+  if (attempts === 1) throw new Error("synthetic delivery failure");
+  await deliver(content, options);
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-const settled = handlers.get("agent_settled");
-await settled({ type: "agent_settled" }, {});
-await settled({ type: "agent_settled" }, {});
+
+await runAgentPrompt();
+await quiesce(session);
+await runAgentPrompt();
+await quiesce(session);
 if (attempts !== 2) throw new Error(`expected delivery retry, saw ${attempts} attempts`);
+if (session.followUps.length !== 1) throw new Error(`expected one landed follow-up, saw ${session.followUps.length}`);
 EOF
 )
   status=$?
   expect_code 0 "$status" "Pi guard latch must reset after follow-up delivery failure"
   [ -z "$out" ] || fail "Pi delivery-failure guard test printed output: $out"
   pass ".pi primary extension: delivery failure resets the logical-run latch"
+}
+
+# bin/fm-turnend-guard.sh applies FM_CLAUDE_TURNEND_BLOCK_BUDGET only in --claude
+# mode; the Pi path blocks before any budget logic runs. Without the extension's
+# own ceiling an unrepairable watcher re-prompts every turn forever.
+test_pi_extension_bounds_consecutive_guard_followups() {
+  local repo home exits out status
+  repo="$TMP_ROOT/pi-block-budget-root"
+  home="$TMP_ROOT/pi-block-budget-home"
+  exits="$TMP_ROOT/pi-block-budget-exit"
+  mkdir -p "$home/state"
+  fm_install_pi_guard_extension "$repo"
+  fm_install_pi_session_fake "$repo"
+  pi_guard_script "$repo"
+  printf '2\n' > "$exits"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-turnend-guard.ts" FAKE="$repo/pi-session-fake.mjs" FM_HOME="$home" \
+    FM_GUARD_EXIT_FILE="$exits" FM_PI_TURNEND_BLOCK_BUDGET=2 node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { createPiSessionFake, quiesce } = await import(pathToFileURL(process.env.FAKE).href);
+const { pi, session, runAgentPrompt } = createPiSessionFake();
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+const guardExits = (code) => writeFileSync(process.env.FM_GUARD_EXIT_FILE, `${code}\n`);
+const turn = async () => {
+  await runAgentPrompt();
+  await quiesce(session);
+};
+
+await turn();
+await turn();
+if (session.followUps.length !== 2) throw new Error(`budget of 2 produced ${session.followUps.length} follow-ups`);
+if (session.customMessages.length !== 0) throw new Error("warned before the follow-up budget was spent");
+
+await turn();
+if (session.followUps.length !== 2) throw new Error(`follow-up ${session.followUps.length} was sent past the budget`);
+if (session.customMessages.length !== 1) throw new Error(`expected one ceiling warning, saw ${session.customMessages.length}`);
+const warning = session.customMessages[0];
+if (warning.customType !== "firstmate-turnend-guard-ceiling") throw new Error(`unexpected warning type: ${warning.customType}`);
+if (warning.display !== true) throw new Error("ceiling warning was not visible");
+if (!warning.content.includes("SUPERVISION IS STILL OFF")) throw new Error(`ceiling warning omitted the state: ${warning.content}`);
+if (!warning.content.includes("pi guard fired")) throw new Error(`ceiling warning dropped the guard detail: ${warning.content}`);
+
+await turn();
+if (session.followUps.length !== 2 || session.customMessages.length !== 1) {
+  throw new Error(`a spent budget kept prompting: ${session.followUps.length} follow-ups, ${session.customMessages.length} warnings`);
+}
+
+// A healthy turn clears both the count and the one-shot warning.
+guardExits(0);
+await turn();
+if (session.followUps.length !== 2 || session.customMessages.length !== 1) throw new Error("a healthy turn produced supervision output");
+
+guardExits(2);
+await turn();
+if (session.followUps.length !== 3) throw new Error("a healthy turn did not reset the follow-up budget");
+if (session.customMessages.length !== 1) throw new Error("the reset re-warned instead of re-prompting");
+if (session.reentrantRuns !== 0) throw new Error(`budget path started ${session.reentrantRuns} nested agent runs`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi guard must bound consecutive follow-ups and reset on a healthy turn"
+  [ -z "$out" ] || fail "Pi block-budget test printed output: $out"
+  pass ".pi primary extension: consecutive guard follow-ups are bounded and reset on a healthy turn"
+}
+
+# Every helper spawn is awaited inside a hook, so an unbounded one is the same
+# bug class: a wedged script would hang the turn or the tool call it runs in.
+test_pi_extension_spawn_timeouts_fail_open() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-spawn-timeout-root"
+  home="$TMP_ROOT/pi-spawn-timeout-home"
+  mkdir -p "$home/state"
+  fm_install_pi_guard_extension "$repo"
+  fm_install_pi_session_fake "$repo"
+  pi_guard_script "$repo"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+exec sleep 60
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exec sleep 60
+SH
+  cat > "$repo/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exec sleep 60
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh" "$repo/bin/fm-cd-pretool-check.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-turnend-guard.ts" FAKE="$repo/pi-session-fake.mjs" FM_HOME="$home" \
+    FM_PI_TURNEND_GUARD_TIMEOUT_MS=300 FM_PI_PRETOOL_CHECK_TIMEOUT_MS=300 node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const { createPiSessionFake, quiesce } = await import(pathToFileURL(process.env.FAKE).href);
+const { pi, handler, session, runAgentPrompt } = createPiSessionFake();
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+const started = Date.now();
+await runAgentPrompt();
+const turnMs = Date.now() - started;
+if (turnMs > 10000) throw new Error(`a wedged guard held the turn for ${turnMs}ms`);
+await quiesce(session);
+if (session.followUps.length !== 0) throw new Error("a timed-out guard blocked the turn instead of failing open");
+
+const toolStarted = Date.now();
+const decision = await handler("tool_call")({ type: "tool_call", toolName: "bash", input: { command: "echo hi" } }, {});
+const toolMs = Date.now() - toolStarted;
+if (toolMs > 10000) throw new Error(`a wedged checker held the tool call for ${toolMs}ms`);
+if (decision?.block) throw new Error(`a timed-out checker blocked the tool call: ${JSON.stringify(decision)}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension spawns must time out and fail open"
+  [ -z "$out" ] || fail "Pi spawn-timeout test printed output: $out"
+  pass ".pi primary extension: wedged guard and pretool spawns time out and fail open"
 }
 
 # --- --claude cooperative mode -----------------------------------------------
@@ -1579,7 +1741,10 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
+test_pi_extension_followup_never_re_enters_the_settled_frame
 test_pi_extension_retries_after_followup_delivery_failure
+test_pi_extension_bounds_consecutive_guard_followups
+test_pi_extension_spawn_timeouts_fail_open
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

@@ -106,6 +106,25 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 
+Pi's follow-up delivery path was re-verified on 2026-08-03 against the installed Pi 0.83.0 SDK, because a follow-up sent from inside an awaited `agent_settled` handler wedged a firstmate primary on every turn.
+
+```sh
+node -e "console.log(require('$(npm root -g)/@earendil-works/pi-coding-agent/package.json').version)"
+# 0.83.0
+```
+
+Observed in `dist/core/agent-session.js` at that version:
+
+- `_emitAgentSettled()` sets `_isAgentRunActive = false` and then awaits `_extensionRunner.emit({ type: "agent_settled" })`, so `isStreaming` (`return this._isAgentRunActive`) is already false inside a settled handler.
+- `prompt()` takes its follow-up queueing branch only inside `if (this.isStreaming)`, so a send from a settled handler skips queueing and falls through to `_runAgentPrompt()`.
+- `_runAgentPrompt()` awaits `_emitAgentSettled()` in its `finally`, so that new run starts inside the parent run's still-open frame.
+- `ExtensionRunner.emit()` awaits each extension's handler in turn, so one slow settled handler holds that frame open for every other extension.
+
+The predicate that fires this path is deterministic rather than intermittent: with tasks in flight and no healthy watcher holding the home lock, the guard returns 2 on every turn, so the re-entrant send fired on every turn too.
+`tests/fm-turnend-guard.test.sh` owns that predicate's regression coverage.
+
+`.pi/extensions/lib/fm-followup-delivery.ts` is the resulting owner: it holds a delivery until every Firstmate settled frame has closed and then sends from a fresh macrotask, so the follow-up is always a top-level turn.
+
 The Grok adaptive matrix ran on 2026-07-28 with separate scratch repositories and homes, dedicated tmux sockets, one target plus one control window, ambient tmux variables removed, and a socket-bound wrapper first in `PATH`.
 
 ```sh

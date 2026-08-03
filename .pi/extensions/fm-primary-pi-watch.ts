@@ -21,6 +21,8 @@ import {
   calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
+import { positiveInteger } from "./lib/fm-extension-env.ts";
+import { deliverOperationalFollowUp } from "./lib/fm-followup-delivery.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 type ArmResult = {
@@ -103,12 +105,6 @@ let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
-
-function positiveInteger(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
-  if (!Number.isFinite(value) || value <= 0) return fallback;
-  return Math.floor(value);
-}
 
 function parentPid(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
@@ -243,7 +239,11 @@ export default function (pi: ExtensionAPI) {
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    await pi.sendUserMessage(content, { deliverAs: "followUp" });
+    // A wake usually lands while the agent is genuinely idle, but an arm child
+    // can close inside the turn-end guard's still-open agent_settled frame. The
+    // deferred send keeps both cases a top-level turn instead of a nested run;
+    // lib/fm-followup-delivery.ts owns that contract.
+    await deliverOperationalFollowUp(pi, content);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {

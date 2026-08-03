@@ -2,8 +2,8 @@
 # Tests for the tracked Pi primary watcher extension and Pi secondmate wiring.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/pi-extension-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/pi-extension-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -21,6 +21,8 @@ install_pi_watch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-extension-env.ts" "$repo/.pi/extensions/lib/fm-extension-env.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-followup-delivery.ts" "$repo/.pi/extensions/lib/fm-followup-delivery.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
@@ -1176,6 +1178,113 @@ EOF
   pass "Pi process-exit cleanup stops the attached arm child"
 }
 
+# The turn-end guard's own helper spawn holds agent_settled open for hundreds of
+# milliseconds, and Pi clears its run flag before emitting that event. A watcher
+# close landing inside that window used to start a nested agent run inside the
+# still-open parent run frame - the same defect that wedged Pi primaries on the
+# turn-end guard path (.pi/extensions/lib/fm-followup-delivery.ts). Both tracked
+# extensions load into one fake session here because that is the real shape.
+test_pi_wake_never_re_enters_an_open_settled_frame() {
+  local repo home log out status
+  repo="$TMP_ROOT/pi-wake-reentrancy-root"
+  home="$TMP_ROOT/pi-wake-reentrancy-home"
+  log="$TMP_ROOT/pi-wake-reentrancy-order.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  fm_install_pi_guard_extension "$repo"
+  fm_install_pi_session_fake "$repo"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard-start\n' >> "${FM_ORDER_LOG:?}"
+sleep 1.2
+printf 'guard-end\n' >> "$FM_ORDER_LOG"
+exit 0
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$repo/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm-close\n' >> "${FM_ORDER_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh" \
+    "$repo/bin/fm-cd-pretool-check.sh" "$repo/bin/fm-watch-arm.sh"
+  out=$(GUARD_PLUGIN="$repo/.pi/extensions/fm-primary-turnend-guard.ts" \
+    WATCH_PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
+    FAKE="$repo/pi-session-fake.mjs" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ORDER_LOG="$log" \
+    FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 \
+    node --input-type=module 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { createPiSessionFake, quiesce, waitFor } = await import(pathToFileURL(process.env.FAKE).href);
+const { pi, handler, session, runAgentPrompt } = createPiSessionFake();
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+
+// Record what the session looked like at the instant each send happened.
+const deliver = pi.sendUserMessage;
+const sendState = [];
+pi.sendUserMessage = async (content, options) => {
+  sendState.push({ activeRuns: session.activeRuns, isStreaming: session.isStreaming });
+  await deliver(content, options);
+};
+
+// Load order matches the tracked pi launch flags: guard first, watcher second.
+const guard = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
+const watch = await import(pathToFileURL(process.env.WATCH_PLUGIN).href);
+guard.default(pi);
+watch.default(pi);
+const arm = handler("command:fm-watch-arm-pi");
+if (!arm) throw new Error("Pi watch command was not registered");
+
+const orderLog = () => {
+  try {
+    return readFileSync(process.env.FM_ORDER_LOG, "utf8").trim().split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+};
+
+const turn = runAgentPrompt();
+// Wait until the guard's spawn is genuinely running, i.e. the settled frame is open.
+await waitFor(() => orderLog().includes("guard-start"), "the turn-end guard spawn to start");
+if (session.isStreaming) throw new Error("fake does not reproduce Pi clearing its run flag before agent_settled");
+if (session.activeRuns !== 1) throw new Error("the agent run frame was not open during agent_settled");
+
+// The watcher arm cycle closes inside that window.
+await arm("", { ui: { notify() {} } });
+await waitFor(() => session.followUps.length > 0, "the watcher wake");
+await turn;
+await quiesce(session);
+
+const order = orderLog();
+const firstArm = order.indexOf("arm-close");
+const guardEnd = order.indexOf("guard-end");
+if (firstArm < 0 || guardEnd < 0 || firstArm > guardEnd) {
+  throw new Error(`the watcher close did not land inside the open settled frame: ${order.join(" | ")}`);
+}
+if (session.reentrantRuns !== 0) throw new Error(`the wake started ${session.reentrantRuns} nested agent runs`);
+if (session.maxSettledDepth !== 1) throw new Error(`agent_settled re-entered to depth ${session.maxSettledDepth}`);
+if (sendState[0].activeRuns !== 0) throw new Error(`the wake was sent with ${sendState[0].activeRuns} run frames still open`);
+if (session.followUps.length !== 1) throw new Error(`expected one wake, saw ${session.followUps.length}`);
+if (!session.followUps[0].startsWith("⁣FIRSTMATE_OP: v1 watcher: ")) throw new Error(`untyped operational follow-up: ${session.followUps[0]}`);
+if (!session.followUps[0].includes("FIRSTMATE WATCHER WAKE")) throw new Error(`missing wake prompt: ${session.followUps[0]}`);
+if (session.followUpOptions[0]?.deliverAs !== "followUp") throw new Error("watcher wake was not a follow-up");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi watcher wake must not re-enter an open agent_settled frame"
+  [ -z "$out" ] || fail "Pi wake re-entrancy test printed output: $out"
+  pass "Pi watcher wake landing inside the guard's settled frame stays a top-level turn"
+}
+
 test_opencode_plugin_package_boundary_is_explicit_esm() {
   local fixture plugin out status
   fixture="$TMP_ROOT/opencode-esm-boundary/.opencode"
@@ -2139,6 +2248,7 @@ test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
+test_pi_wake_never_re_enters_an_open_settled_frame
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
