@@ -219,11 +219,17 @@ In held mode, `bin/fm-update.sh` fast-forwards the pristine default-branch ref f
 An entry retires automatically when a verbatim patch id appears in the new upstream history or the candidate tree already contains its exact resulting content, so rebased or squashed upstream equivalents do not depend on the original commit id.
 Whitespace-different content is not equivalent.
 A conflict returns nonzero, leaves the previous effective revision running, and writes `state/.nightly-update-needs-attention` with the held id and title, each colliding upstream commit and subject, and the affected paths.
+An upstream commit that touched several of the held patch's paths is one collision and is named once.
+`bin/fm-bootstrap.sh` reports that file verbatim as a `NIGHTLY_UPDATE_ATTENTION:` line on every path including detect-only, so a stalled nightly update surfaces in the session-start digest instead of waiting to be looked for.
+Only the updater writes or clears the file.
 After inspecting both sides, an operator can replace the held entry or explicitly run `retire <id> <reason>` and rerun the updater.
+`add` and `retire` match an id exactly against the `<order>-<id>` stem, so an id that is a dash-suffix of another entry's id never selects it.
+`init` publishes the stack directory, the live ref, and the detached checkout together, and rolls the directory back if any of them fails, so a half-initialized stack is unreachable rather than merely escapable.
 
 Local secondmate homes leased as linked worktrees share the effective objects and `refs/firstmate/held/effective/*` known-good records with the primary.
 The normal spawn, locked bootstrap sweep, and update paths therefore move a clean detached home from any recorded effective revision to the primary's current effective revision even when replay changed commit identities.
 Dirty homes, named branches, and commits outside the known-effective set remain untouched.
+That record set is capped at the most recent `HELD_EFFECTIVE_RETAIN` registrations (20 by default) because an unpruned ref pins its commit and whole tree against `git gc` forever; the window only has to cover a home that missed a few updates.
 Standalone clones cannot import an unpushed primary-local effective commit through the no-fetch path, and remote routes do not receive the primary's private patches; held-mode update reports those routes as skipped instead of silently claiming parity.
 
 ## Harness support

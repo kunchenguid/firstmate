@@ -1146,7 +1146,35 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_nightly_update_attention_alarm_is_surfaced() {
+  local case_dir fakebin out alarm message
+  case_dir="$TMP_ROOT/nightly-attention"
+  mkdir -p "$case_dir/home/state"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  alarm="$case_dir/home/state/.nightly-update-needs-attention"
+  message='held improvement pr-1602 (PR 1602 push guard) collided with upstream change(s): abc123def456 replace push guard'
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F 'NIGHTLY_UPDATE_ATTENTION' >/dev/null \
+    && fail "bootstrap reported a nightly attention alarm while none was recorded"
+
+  printf '%s\n' "$message" > "$alarm"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -Fx "NIGHTLY_UPDATE_ATTENTION: $message" >/dev/null \
+    || fail "bootstrap did not surface the recorded alarm content (got: $out)"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -Fx "NIGHTLY_UPDATE_ATTENTION: $message" >/dev/null \
+    || fail "a read-only detect-only session hid the nightly attention alarm (got: $out)"
+  [ -f "$alarm" ] || fail "bootstrap cleared an alarm it only reports"
+  pass "bootstrap surfaces state/.nightly-update-needs-attention as a detect-only report"
+}
+
 test_bootstrap_reporting
+test_nightly_update_attention_alarm_is_surfaced
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version

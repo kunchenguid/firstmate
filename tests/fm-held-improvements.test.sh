@@ -278,11 +278,162 @@ test_conflict_stops_on_last_good_and_names_both_sides_then_recovers() {
   pass "held updater: conflict is RED and explicit resolution recovers both homes"
 }
 
+make_second_source() {
+  local w=$1 branch=$2 file=$3
+  git -C "$w/seed" checkout -qb "$branch" main
+  printf '#!/usr/bin/env bash\nprintf "%s\\n"\n' "$branch" > "$w/seed/$file"
+  git -C "$w/seed" add "$file"
+  git -C "$w/seed" commit -qm "held source $branch"
+  git -C "$w/seed" push -q origin "HEAD:$branch"
+  git -C "$w/seed" checkout -q main
+  git -C "$w/main" fetch -q origin "$branch"
+  git -C "$w/seed" rev-parse "$branch"
+}
+
+# An id that is a dash-suffix of another entry's id must never select it. Two
+# entries, ids 'pr-1602' and '1602', are the exact shape that made the recovery
+# path retire the wrong improvement and made add refuse a genuinely free id.
+test_id_matching_is_exact_across_dash_suffixed_ids() {
+  local w second listing out
+  w=$(new_world dash-suffix-ids)
+  make_pr_1602_source "$w"
+  second=$(make_second_source "$w" held-second bin/fm-second-guard.sh)
+
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$HELD" init main >/dev/null
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$HELD" add 010 pr-1602 "$HELD_BASE" "$HELD_HEAD" 'PR 1602 push guard' >/dev/null
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$HELD" add 020 1602 "$HELD_BASE" "$second" 'second held guard' 2>&1) \
+    || fail "add refused a free id that is a dash-suffix of an existing id: $out"
+
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$HELD" retire 1602 'operator chose the upstream side' >/dev/null
+  listing=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$HELD" list)
+
+  assert_contains "$listing" 'active 010 pr-1602' \
+    "retiring id 1602 also retired the unrelated pr-1602 entry"
+  assert_contains "$listing" 'retired 020 1602' \
+    "retiring id 1602 did not retire the entry the operator named"
+  assert_not_contains "$listing" 'retired 010 pr-1602' \
+    "the dash-suffixed id selected the wrong held improvement"
+  pass "held stack: add and retire match an id exactly, never as a dash-suffix"
+}
+
+# One upstream commit that touches several of a held patch's paths is one
+# collision, so the attention message must name it once rather than once per
+# path. The held patch spans bin/fm-guard-a.sh and bin/fm-guard-b.sh, and
+# upstream touches a twice and b once, so the repeat of the shared commit
+# arrives while two commits are already recorded. That is the shape the dedup
+# has to survive: a dedup that only works while it holds a single entry passes a
+# one-commit fixture and still repeats every commit in the real message.
+test_one_upstream_commit_across_several_paths_is_named_once() {
+  local w out status alarm mentions shared
+  w=$(new_world conflict-dedup)
+  HELD_BASE=$(git -C "$w/seed" rev-parse main)
+  git -C "$w/seed" checkout -qb held-multi main
+  printf '%s\n' "$HELD_CONTENT" > "$w/seed/bin/fm-guard-a.sh"
+  printf '%s\n' "$HELD_CONTENT" > "$w/seed/bin/fm-guard-b.sh"
+  chmod +x "$w/seed/bin/fm-guard-a.sh" "$w/seed/bin/fm-guard-b.sh"
+  git -C "$w/seed" add bin/fm-guard-a.sh bin/fm-guard-b.sh
+  git -C "$w/seed" commit -qm 'held push guard across two paths'
+  HELD_HEAD=$(git -C "$w/seed" rev-parse HEAD)
+  git -C "$w/seed" push -q origin HEAD:held-multi
+  git -C "$w/seed" checkout -q main
+  git -C "$w/main" fetch -q origin held-multi
+
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$HELD" init main >/dev/null
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$HELD" add 010 pr-1602 "$HELD_BASE" "$HELD_HEAD" 'PR 1602 push guard' >/dev/null
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" >/dev/null 2>&1
+
+  printf '#!/usr/bin/env bash\nprintf "incompatible upstream a\\n"\n' \
+    > "$w/seed/bin/fm-guard-a.sh"
+  printf '#!/usr/bin/env bash\nprintf "incompatible upstream b\\n"\n' \
+    > "$w/seed/bin/fm-guard-b.sh"
+  git -C "$w/seed" add bin/fm-guard-a.sh bin/fm-guard-b.sh
+  git -C "$w/seed" commit -qm 'one upstream commit replaces both guard paths'
+  shared=$(git -C "$w/seed" rev-parse HEAD)
+  printf '#!/usr/bin/env bash\nprintf "incompatible upstream a again\\n"\n' \
+    > "$w/seed/bin/fm-guard-a.sh"
+  git -C "$w/seed" add bin/fm-guard-a.sh
+  git -C "$w/seed" commit -qm 'a later upstream commit revisits only guard a'
+  git -C "$w/seed" push -q origin main
+
+  out=$(run_update "$w")
+  status=$?
+  [ "$status" -ne 0 ] || fail "multi-path held/upstream conflict unexpectedly passed"
+  alarm=$(cat "$w/home/state/.nightly-update-needs-attention")
+  mentions=$(printf '%s\n' "$alarm" | grep -c "$shared")
+  [ "$mentions" -eq 1 ] \
+    || fail "the shared colliding upstream commit was named $mentions time(s) in the attention message"
+  assert_contains "$alarm" 'a later upstream commit revisits only guard a' \
+    "deduplication dropped a distinct colliding upstream commit"
+  assert_contains "$out" 'bin/fm-guard-b.sh' \
+    "conflict output did not name every collided path"
+  pass "held updater: a colliding upstream commit is named once however many paths it touched"
+}
+
+# A stack directory without its live ref is a state no command can leave, so a
+# failure after the directory lands must roll it back rather than be escapable.
+test_failed_init_publication_rolls_the_stack_back() {
+  local w out status blocker
+  w=$(new_world init-rollback)
+  make_pr_1602_source "$w"
+  blocker=$(git -C "$w/main" rev-parse refs/heads/main)
+  git -C "$w/main" update-ref refs/firstmate/held/live/blocker "$blocker"
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$HELD" init main 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "init reported success although the live ref could not publish"
+  assert_contains "$out" 'nothing was changed' \
+    "failed init did not report that it left nothing behind"
+  [ ! -e "$w/home/config/held-improvements" ] \
+    || fail "failed init left a half-initialized stack directory behind"
+  git -C "$w/main" symbolic-ref -q HEAD >/dev/null \
+    || fail "failed init left the primary detached without a stack"
+
+  git -C "$w/main" update-ref -d refs/firstmate/held/live/blocker
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$HELD" init main >/dev/null \
+    || fail "init could not run again after its own rollback"
+  pass "held stack: a failed init publishes nothing and leaves init runnable"
+}
+
+# Known-effective refs pin their commit and tree against gc, so the set is
+# retained rather than accumulated for the life of the repository.
+test_known_effective_refs_stay_bounded_across_updates() {
+  local w n refs live
+  w=$(new_world effective-cap)
+  make_pr_1602_source "$w"
+  activate_pr_1602 "$w"
+
+  for n in 1 2 3 4 5; do
+    printf 'upstream v%s\n' "$n" > "$w/seed/README.md"
+    git -C "$w/seed" add README.md
+    git -C "$w/seed" commit -qm "upstream advance $n"
+    git -C "$w/seed" push -q origin main
+    HELD_EFFECTIVE_RETAIN=4 FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+      "$UPDATE" >/dev/null 2>&1 || fail "held update $n failed"
+  done
+
+  refs=$(git -C "$w/main" for-each-ref --format='%(refname)' refs/firstmate/held/effective \
+    | grep -c .)
+  [ "$refs" -le 4 ] || fail "known-effective refs grew unbounded: $refs retained under a cap of 4"
+  live=$(git -C "$w/main" rev-parse HEAD)
+  git -C "$w/main" show-ref --verify --quiet "refs/firstmate/held/effective/$live" \
+    || fail "pruning dropped the current effective revision from the known-effective set"
+  pass "held updater: the known-effective ref set stays bounded and keeps the live revision"
+}
+
 test_upstream_and_real_held_change_converge_across_primary_and_secondmate
 test_upstream_equivalent_retires_held_improvement_by_content
 test_whitespace_different_upstream_content_does_not_retire
 test_relative_home_resolves_patch_paths_before_candidate_checkout
 test_pristine_base_checked_out_elsewhere_fails_before_moving_any_ref
 test_conflict_stops_on_last_good_and_names_both_sides_then_recovers
+test_id_matching_is_exact_across_dash_suffixed_ids
+test_one_upstream_commit_across_several_paths_is_named_once
+test_failed_init_publication_rolls_the_stack_back
+test_known_effective_refs_stay_bounded_across_updates
 
 echo "# all held-improvement tests passed"

@@ -39,17 +39,21 @@ die() {
   exit 1
 }
 
-validate_order_id() {
+validate_id() {
   case "$1" in
-    [0-9][0-9][0-9]) ;;
-    *) die "order must be exactly three digits" ;;
-  esac
-  case "$2" in
     ''|[._-]*|*[!a-z0-9._-]*)
       die "id must start with a lowercase letter or digit and use only lowercase letters, digits, dots, underscores, or dashes"
       ;;
     *) ;;
   esac
+}
+
+validate_order_id() {
+  case "$1" in
+    [0-9][0-9][0-9]) ;;
+    *) die "order must be exactly three digits" ;;
+  esac
+  validate_id "$2"
 }
 
 validate_title() {
@@ -91,12 +95,22 @@ cmd_init() {
     [ -s "$tmp/active/$stem.patch" ] || die "captured improvement has an empty patch"
     printf '%s\n' "$title" > "$tmp/active/$stem.title"
   fi
+  # A stack directory without its live ref is a wedged state no command can
+  # leave: fm-update.sh fails closed on it while init reports it already exists
+  # and every other subcommand reports it uninitialized. So publish all of it or
+  # none of it, and roll the directory back rather than merely documenting a way
+  # out of the half state.
   mv "$tmp" "$config"
-  git -C "$FM_ROOT" update-ref "$HELD_LIVE_REF" "$head"
-  held_register_effective "$FM_ROOT" "$base"
-  held_register_effective "$FM_ROOT" "$head"
-  git -C "$FM_ROOT" checkout --quiet --detach "$head" \
-    || die "could not detach the primary at its effective revision"
+  if ! git -C "$FM_ROOT" update-ref "$HELD_LIVE_REF" "$head" \
+    || ! held_register_effective "$FM_ROOT" "$base" \
+    || ! held_register_effective "$FM_ROOT" "$head" \
+    || ! git -C "$FM_ROOT" checkout --quiet --detach "$head"; then
+    git -C "$FM_ROOT" update-ref -d "$HELD_LIVE_REF" >/dev/null 2>&1 || true
+    git -C "$FM_ROOT" update-ref -d "$HELD_REF_ROOT/effective/$base" >/dev/null 2>&1 || true
+    git -C "$FM_ROOT" update-ref -d "$HELD_REF_ROOT/effective/$head" >/dev/null 2>&1 || true
+    rm -rf -- "$config"
+    die "could not publish the held-improvement stack at $head; nothing was changed"
+  fi
   printf 'initialized: upstream=%s live=%s active=%s\n' \
     "$(printf '%.12s' "$base")" "$(printf '%.12s' "$head")" "${id:-none}"
 }
@@ -113,7 +127,8 @@ cmd_add() {
   for existing in "$config"/active/"$order"-*.patch "$config"/retired/"$order"-*.patch; do
     [ ! -e "$existing" ] || die "order $order is already in use"
   done
-  for existing in "$config"/active/*-"$id".patch "$config"/retired/*-"$id".patch; do
+  for existing in "$config"/active/[0-9][0-9][0-9]-"$id".patch \
+    "$config"/retired/[0-9][0-9][0-9]-"$id".patch; do
     [ ! -e "$existing" ] || die "id $id is already in use"
   done
   base=$(git -C "$FM_ROOT" rev-parse --verify "$base_ref^{commit}" 2>/dev/null) \
@@ -134,16 +149,21 @@ cmd_add() {
 }
 
 cmd_retire() {
-  local id=$1 reason=$2 config patch stem matches=0
+  local id=$1 reason=$2 config patch found= stem matches=0
   validate_title "$reason"
+  validate_id "$id"
   held_stack_active || die "held-improvement stack is not initialized"
   config=$(held_config_root)
-  for patch in "$config"/active/*-"$id".patch; do
+  # Anchored on the three-digit order prefix so an id that is a dash-suffix of
+  # another entry's id cannot select it. The conflict-recovery path must retire
+  # the entry the operator named and no other.
+  for patch in "$config"/active/[0-9][0-9][0-9]-"$id".patch; do
     [ -f "$patch" ] || continue
+    found=$patch
     matches=$((matches + 1))
   done
   [ "$matches" -eq 1 ] || die "active id '$id' matched $matches entries"
-  patch=$(printf '%s\n' "$config"/active/*-"$id".patch)
+  patch=$found
   stem=$(basename "$patch" .patch)
   mv "$patch" "$config/retired/$stem.patch"
   mv "$config/active/$stem.title" "$config/retired/$stem.title"

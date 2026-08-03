@@ -18,7 +18,15 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "NIGHTLY_UPDATE_ATTENTION: <recorded reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#          NIGHTLY_UPDATE_ATTENTION reports state/.nightly-update-needs-attention
+#          verbatim. bin/fm-update.sh writes it when the nightly update stopped
+#          instead of publishing, and clears it on a clean run; bootstrap only
+#          reads it, on every local path including detect-only (it is a local
+#          read, so it stays on the local pass rather than the deferred network
+#          one), so a stalled update is
+#          visible at session start rather than only to whoever remembered to look.
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
 #          purely local fast-forward and never an origin fetch. Remote routes
@@ -1168,6 +1176,17 @@ detect_local_config() {
       echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - read-only session must leave restore work to the session holding the fleet lock"
     else
       echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
+    fi
+  fi
+  nightly_attention="$STATE/.nightly-update-needs-attention"
+  if [ -f "$nightly_attention" ]; then
+    if [ -s "$nightly_attention" ]; then
+      while IFS= read -r attention_line; do
+        [ -n "$attention_line" ] || continue
+        echo "NIGHTLY_UPDATE_ATTENTION: $attention_line"
+      done < "$nightly_attention"
+    else
+      echo "NIGHTLY_UPDATE_ATTENTION: $nightly_attention is present but empty - the last nightly update stopped without recording a reason"
     fi
   fi
   crew=

@@ -6,9 +6,10 @@
 # ordered stack. Each <order>-<id>.patch has a sibling .title file. The default
 # branch remains a pristine upstream ref; refs/firstmate/held/live points at the
 # detached effective revision built from that base plus the active patches.
-# refs/firstmate/held/effective/<sha> records every known-good effective commit
-# so a clean detached linked secondmate can safely move between replayed
-# histories without treating the rewrite as unlanded work.
+# refs/firstmate/held/effective/<sha> records the recent known-good effective
+# commits so a clean detached linked secondmate can safely move between replayed
+# histories without treating the rewrite as unlanded work. That set is bounded,
+# because an unpruned ref pins its commit and tree forever.
 
 HELD_REF_ROOT=refs/firstmate/held
 HELD_LIVE_REF=$HELD_REF_ROOT/live
@@ -53,9 +54,44 @@ held_live_commit() {
   git -C "$root" rev-parse --verify --quiet "$HELD_LIVE_REF^{commit}" 2>/dev/null
 }
 
+# Each known-effective ref pins its commit and whole tree against gc, and every
+# successful update registers two, so the set is capped at the most recent
+# HELD_EFFECTIVE_RETAIN registrations. That window only has to be deep enough
+# for a linked secondmate that missed a few updates to still recognise its own
+# commit as known-effective, not to be a permanent archive. The registration
+# order lives in a log beside the stack because ref names carry no order and
+# replayed candidates are committed with synthetic dates.
+HELD_EFFECTIVE_RETAIN=${HELD_EFFECTIVE_RETAIN:-20}
+
 held_register_effective() {
-  local root=$1 commit=$2
-  git -C "$root" update-ref "$HELD_REF_ROOT/effective/$commit" "$commit"
+  local root=$1 commit=$2 config log tmp
+  git -C "$root" update-ref "$HELD_REF_ROOT/effective/$commit" "$commit" || return 1
+  config=$(held_config_root 2>/dev/null) || return 0
+  [ -d "$config" ] || return 0
+  log="$config/effective-log"
+  tmp="$log.tmp"
+  {
+    if [ -f "$log" ]; then
+      grep -v -x -F -e "$commit" "$log" || true
+    fi
+    printf '%s\n' "$commit"
+  } > "$tmp" || { rm -f "$tmp"; return 0; }
+  mv "$tmp" "$log" || { rm -f "$tmp"; return 0; }
+  held_prune_effective "$root" "$log"
+}
+
+held_prune_effective() {
+  local root=$1 log=$2 total drop stale tmp
+  total=$(wc -l < "$log" | tr -d ' ')
+  [ "$total" -gt "$HELD_EFFECTIVE_RETAIN" ] || return 0
+  drop=$((total - HELD_EFFECTIVE_RETAIN))
+  while IFS= read -r stale; do
+    [ -n "$stale" ] || continue
+    git -C "$root" update-ref -d "$HELD_REF_ROOT/effective/$stale" >/dev/null 2>&1 || true
+  done < <(head -n "$drop" "$log")
+  tmp="$log.tmp"
+  tail -n "$HELD_EFFECTIVE_RETAIN" "$log" > "$tmp" || { rm -f "$tmp"; return 0; }
+  mv "$tmp" "$log" || rm -f "$tmp"
 }
 
 held_commit_is_known_effective() {
@@ -149,15 +185,15 @@ held_patch_paths() {
 }
 
 held_conflicting_upstream_changes() {
-  local root=$1 old_base=$2 new_base=$3 paths_file=$4 path commit seen=""
+  local root=$1 old_base=$2 new_base=$3 paths_file=$4 path commit seen="" nl=$'\n'
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     while IFS= read -r commit; do
       [ -n "$commit" ] || continue
-      case "\n$seen\n" in
-        *"\n$commit\n"*) continue ;;
+      case "$nl$seen$nl" in
+        *"$nl$commit$nl"*) continue ;;
       esac
-      seen="$seen${seen:+$'\n'}$commit"
+      seen="$seen${seen:+$nl}$commit"
       printf '%s\n' "$commit"
     done < <(git -C "$root" log --reverse --format='%H %s' "$old_base..$new_base" -- "$path")
   done < "$paths_file"

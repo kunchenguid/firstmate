@@ -302,7 +302,8 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 When `config/held-improvements/` is initialized, the local default branch remains a pristine fast-forwarded upstream base and `refs/firstmate/held/live` identifies the detached effective revision the primary actually runs.
 The updater builds that revision in a scratch worktree by replaying the explicit ordered patches, publishes it only after every entry succeeds, and automatically retires an entry whose verbatim patch content or exact resulting content is already upstream.
 A replay conflict leaves the prior effective revision running and writes the existing `state/.nightly-update-needs-attention` alarm with the held id, upstream commit and subject, and collided paths.
-Known-good effective refs let clean detached linked secondmate worktrees move across replayed histories without weakening the refusal for dirty, feature-branch, or unknown commits.
+Bootstrap reads that alarm back as a detect-only `NIGHTLY_UPDATE_ATTENTION:` line, so the session-start digest is the active probe for a nightly update that stopped rather than published.
+A bounded set of known-good effective refs lets clean detached linked secondmate worktrees move across replayed histories without weakening the refusal for dirty, feature-branch, or unknown commits.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit; held mode does not send primary-local patches to a remote host and reports that route as skipped.
 The default update remains fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote default-mode updates delegate the same safety decision to the configured host through the generic transport.
