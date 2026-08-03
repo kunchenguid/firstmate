@@ -109,7 +109,7 @@ test_merged_task_cancels_exact_run_then_tears_down() {
   assert_contains "$out" "auto-reaped merged-run" "merged task reports reaping"
   assert_contains "$(cat "$FM_FAKE_NM_LOG")" "axi abort --run 01EXACT" "exact no-mistakes run canceled"
   assert_contains "$(cat "$FM_FAKE_TEARDOWN_LOG")" "merged-run" "ordinary teardown invoked"
-  pass "merged terminal task cancels its exact no-mistakes run before teardown"
+  pass "ordinary attached ship branch cancels its exact no-mistakes run before teardown"
 }
 
 test_open_pr_refuses_without_teardown() {
@@ -145,6 +145,102 @@ test_cross_branch_active_run_refuses_without_guessing_id() {
   [ ! -s "$FM_FAKE_TEARDOWN_LOG" ] || fail "cross-branch task invoked teardown"
   rm -f "$HOME_DIR/state/cross-run.meta" "$HOME_DIR/state/cross-run.status"
   pass "active cross-branch validation is retained when its exact run ID is unavailable"
+}
+
+test_detached_scout_skips_run_attribution_but_surfaces_teardown_refusal() {
+  local id worktree out rc
+  reset_logs
+  id=detached-scout
+  worktree="$TMP/$id"
+  fm_git_init_commit "$worktree"
+  git -C "$worktree" checkout -q --detach HEAD
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=fm:$id" "worktree=$worktree" "project=$worktree" \
+    "kind=scout" "mode=no-mistakes"
+  printf 'done: report written\n' > "$HOME_DIR/state/$id.status"
+
+  FM_FAKE_TEARDOWN_STATUS=1
+  export FM_FAKE_TEARDOWN_STATUS
+  out=$("$AUTO_REAP" task "$id" scout-done 2>&1); rc=$?
+  expect_code 1 "$rc" "detached scout teardown refusal"
+  assert_not_contains "$out" "no-mistakes run attribution" \
+    "detached scout used an inapplicable no-mistakes branch gate"
+  assert_contains "$out" "ordinary teardown refused" \
+    "genuine detached scout teardown refusal was hidden"
+  [ -f "$HOME_DIR/state/$id.meta" ] || fail "refused detached scout teardown lost metadata"
+
+  reset_logs
+  out=$("$AUTO_REAP" task "$id" scout-done 2>&1); rc=$?
+  expect_code 0 "$rc" "detached scout auto-reap"
+  assert_contains "$out" "auto-reaped $id" "detached scout did not report reaping"
+  assert_contains "$(cat "$FM_FAKE_TEARDOWN_LOG")" "$id" \
+    "detached scout did not invoke ordinary teardown"
+  pass "detached scouts skip run attribution while genuine teardown refusals stay visible"
+}
+
+test_scout_skip_requires_detached_head_and_complete_metadata() {
+  local id worktree caller_worktree out rc
+  caller_worktree="$TMP/explicit-detached-caller"
+  fm_git_init_commit "$caller_worktree"
+  git -C "$caller_worktree" checkout -q --detach HEAD
+
+  reset_logs
+  id=attached-scout
+  worktree="$TMP/$id"
+  fm_git_init_commit "$worktree"
+  git -C "$worktree" checkout -qb unexpected-scout-branch
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=fm:$id" "worktree=$worktree" "project=$worktree" \
+    "kind=scout" "mode=no-mistakes"
+  printf 'done: report written\n' > "$HOME_DIR/state/$id.status"
+
+  out=$("$AUTO_REAP" task "$id" scout-done 2>&1); rc=$?
+  expect_code 1 "$rc" "attached scout attribution refusal"
+  assert_contains "$out" "no-mistakes run attribution" \
+    "attached scout bypassed applicable no-mistakes branch attribution"
+  [ ! -s "$FM_FAKE_TEARDOWN_LOG" ] || fail "attached misbranched scout invoked teardown"
+  rm -f "$HOME_DIR/state/$id.meta" "$HOME_DIR/state/$id.status"
+
+  reset_logs
+  id=empty-worktree
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=fm:$id" "worktree=" "project=$TMP" "kind=scout" "mode=no-mistakes"
+  printf 'done: report written\n' > "$HOME_DIR/state/$id.status"
+
+  out=$(cd "$caller_worktree" && "$AUTO_REAP" task "$id" scout-done 2>&1); rc=$?
+  expect_code 1 "$rc" "empty scout worktree attribution refusal"
+  assert_contains "$out" "requires a recorded worktree" \
+    "empty scout worktree value reached git branch attribution"
+  [ ! -s "$FM_FAKE_TEARDOWN_LOG" ] || fail "scout with empty worktree value invoked teardown"
+  rm -f "$HOME_DIR/state/$id.meta" "$HOME_DIR/state/$id.status"
+
+  reset_logs
+  id=missing-worktree-key
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=fm:$id" "project=$TMP" "kind=scout" "mode=no-mistakes"
+  printf 'done: report written\n' > "$HOME_DIR/state/$id.status"
+
+  out=$(cd "$caller_worktree" && "$AUTO_REAP" task "$id" scout-done 2>&1); rc=$?
+  expect_code 1 "$rc" "missing scout worktree attribution refusal"
+  assert_contains "$out" "requires a recorded worktree" \
+    "missing scout worktree key reached git branch attribution"
+  [ ! -s "$FM_FAKE_TEARDOWN_LOG" ] || fail "scout with missing worktree metadata invoked teardown"
+  rm -f "$HOME_DIR/state/$id.meta" "$HOME_DIR/state/$id.status"
+
+  reset_logs
+  id=nonexistent-worktree
+  worktree="$TMP/does-not-exist"
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=fm:$id" "worktree=$worktree" "project=$TMP" "kind=scout" "mode=no-mistakes"
+  printf 'done: report written\n' > "$HOME_DIR/state/$id.status"
+
+  out=$(cd "$caller_worktree" && "$AUTO_REAP" task "$id" scout-done 2>&1); rc=$?
+  expect_code 1 "$rc" "nonexistent scout worktree attribution refusal"
+  assert_contains "$out" "no-mistakes run attribution" \
+    "nonexistent recorded worktree was mistaken for detached HEAD"
+  [ ! -s "$FM_FAKE_TEARDOWN_LOG" ] || fail "scout with nonexistent worktree invoked teardown"
+  rm -f "$HOME_DIR/state/$id.meta" "$HOME_DIR/state/$id.status"
+  pass "scout attribution is skipped only for detached HEAD with complete worktree metadata"
 }
 
 test_x_link_and_teardown_refusal_remain_visible() {
@@ -532,6 +628,8 @@ test_local_merge_immediately_auto_reaps() {
 test_merged_task_cancels_exact_run_then_tears_down
 test_open_pr_refuses_without_teardown
 test_cross_branch_active_run_refuses_without_guessing_id
+test_detached_scout_skips_run_attribution_but_surfaces_teardown_refusal
+test_scout_skip_requires_detached_head_and_complete_metadata
 test_x_link_and_teardown_refusal_remain_visible
 test_dead_acquisition_recovers_but_live_owner_is_untouched
 test_dirty_stranded_worktree_is_retained_by_real_teardown

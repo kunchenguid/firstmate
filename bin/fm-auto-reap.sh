@@ -154,10 +154,19 @@ pr_is_merged() {  # <meta>
 }
 
 reap_no_mistakes_run() {  # <meta>
-  local meta=$1 worktree branch nm captured run_branch run_id run_status outcome runs_output row status rest row_branch
+  local meta=$1 worktree branch branch_status nm captured run_branch run_id run_status outcome runs_output row status rest row_branch
   [ "$(meta_value "$meta" mode)" = no-mistakes ] || return 0
   worktree=$(meta_value "$meta" worktree)
-  branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$worktree" ] || {
+    refuse "no-mistakes run attribution requires a recorded worktree"
+    return 1
+  }
+  branch_status=0
+  branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch_status=$?
+  # git symbolic-ref exits 1 only for detached HEAD; a scout has no no-mistakes run to attribute.
+  if [ "$(meta_value "$meta" kind)" = scout ] && [ "$branch_status" -eq 1 ]; then
+    return 0
+  fi
   [ "$branch" = "fm/$AUTO_REAP_ID" ] || {
     refuse "no-mistakes run attribution requires exact branch fm/$AUTO_REAP_ID"
     return 1
