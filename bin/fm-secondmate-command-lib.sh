@@ -107,13 +107,31 @@ fm_secondmate_command_is_captain() {  # <id> [registry]
 # it), printing the blocking token; 1 when firstmate may act normally. Both
 # `captain` (deliberately transferred) and `invalid` (damaged record) block,
 # because the dangerous direction is acting on a lane firstmate does not
-# command.
+# command. An <id> with no registry line reads as "not a registered lane" here,
+# so callers that cannot tell a lane from an ordinary crewmate stay unchanged.
 fm_secondmate_command_blocks_firstmate_action() {  # <id> [registry]
   local state rc
   state=$(fm_secondmate_command_state "$@") && rc=0 || rc=$?
   case "${rc:-0}:$state" in
     0:captain) printf 'captain'; return 0 ;;
     2:*) printf 'invalid'; return 0 ;;
+  esac
+  return 1
+}
+
+# The same predicate for a caller that has ALREADY established, from its own
+# authoritative record, that <id> is a persistent secondmate. For such a caller
+# "no registry, or no line for this id" is not "not a lane" - it is a lost
+# authority for a lane that demonstrably exists - so it prints `unrecorded` and
+# blocks. An authority that cannot be read is not authority, and hard rule 4
+# must not become optional exactly when the record is missing.
+fm_secondmate_command_blocks_known_lane() {  # <id> [registry]
+  local state rc
+  state=$(fm_secondmate_command_state "$@") && rc=0 || rc=$?
+  case "${rc:-0}:$state" in
+    0:captain) printf 'captain'; return 0 ;;
+    2:*) printf 'invalid'; return 0 ;;
+    1:*) printf 'unrecorded'; return 0 ;;
   esac
   return 1
 }

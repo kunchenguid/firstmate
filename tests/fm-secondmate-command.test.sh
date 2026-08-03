@@ -372,6 +372,58 @@ test_onramp_transfers_registry_marker_and_position_record() {
   pass "onramp transfers the registry, the lane marker, and a written position"
 }
 
+test_both_directions_tell_the_running_lane() {
+  # The charter only makes a lane read its command record at session start, so a
+  # long-running agent that is never told keeps operating under the previous
+  # contract - the two-commanders state this whole feature removes.
+  local home log out report
+  home=$(make_fleet transfer-notice)
+  log="$home/send.log"
+  : > "$log"
+  out=$(FM_FAKE_SEND_LOG="$log" run_cmd "$home" onramp sm-alpha) \
+    || fail "onramp should succeed"$'\n'"$out"
+  assert_grep 're-read data/command.md' "$log" "the onramp must tell the live lane its command state changed"
+  assert_grep 'the captain now commands this lane' "$log" "the notice must name the new commander"
+
+  out=$(FM_FAKE_SEND_LOG="$log" run_cmd "$home" offramp-request sm-alpha)
+  report=$(printf '%s' "$out" | sed -n 's/^HANDBACK_REQUESTED: sm-alpha report=//p')
+  printf 'Nothing open.\n' > "$report"
+  : > "$log"
+  out=$(FM_FAKE_SEND_LOG="$log" run_cmd "$home" offramp-complete sm-alpha --report "$report") \
+    || fail "offramp-complete should succeed"$'\n'"$out"
+  assert_grep 're-read data/command.md' "$log" "the handback must tell the live lane too"
+  assert_grep 'main firstmate commands this lane again' "$log" "the notice must name the restored commander"
+  pass "both transfer directions tell the running lane to re-read its command state"
+}
+
+test_an_undelivered_notice_is_not_reported_as_a_finished_transfer() {
+  # The command record is the authority, so a failed notice never invalidates the
+  # transfer - but it must never be reported as a lane that already knows.
+  local home out rc lane report
+  home=$(make_fleet transfer-notice-failure)
+  lane=$(lane_of "$home")
+  rc=0
+  out=$(FM_FAKE_SEND_FAIL=1 run_cmd "$home" onramp sm-alpha) || rc=$?
+  [ "$rc" = 5 ] || fail "an undelivered notice must not exit as a plain success, got $rc"
+  assert_contains "$out" "TRANSFERRED_NOT_NOTIFIED: sm-alpha firstmate -> captain" \
+    "the output must say the transfer landed but the lane was not told"
+  assert_contains "$out" "still believes it is under firstmate command" \
+    "the output must say what the running agent still believes"
+  assert_grep '; command: captain)' "$(reg_of "$home")" "the recorded transfer must stand"
+  assert_grep 'command: captain' "$lane/data/command.md" "the lane's own copy must stand"
+
+  out=$(run_cmd "$home" offramp-request sm-alpha)
+  report=$(printf '%s' "$out" | sed -n 's/^HANDBACK_REQUESTED: sm-alpha report=//p')
+  printf 'Nothing open.\n' > "$report"
+  rc=0
+  out=$(FM_FAKE_SEND_FAIL=1 run_cmd "$home" offramp-complete sm-alpha --report "$report") || rc=$?
+  [ "$rc" = 5 ] || fail "an undelivered handback notice must not exit as a plain success, got $rc"
+  assert_contains "$out" "TRANSFERRED_NOT_NOTIFIED: sm-alpha captain -> firstmate" \
+    "the handback output must say the lane was not told"
+  assert_grep '; command: firstmate)' "$(reg_of "$home")" "the recorded handback must stand"
+  pass "an undelivered notice is reported as recorded-but-not-yet-read"
+}
+
 test_onramp_is_idempotent() {
   local home out rc before
   home=$(make_fleet onramp-idempotent)
@@ -568,6 +620,99 @@ test_fm_send_lets_infrastructure_messages_reach_the_lane() {
     "$SEND" sm-alpha "do the thing" >/dev/null 2>&1 || rc=$?
   [ "$rc" != 0 ] || fail "the exemption must name the exact lane, not any lane"
   pass "infrastructure messages still reach a captain-commanded lane, and only that lane"
+}
+
+test_fm_send_refuses_a_lane_whose_command_record_is_missing() {
+  # The target's own metadata already says this is a lane, so "no registry line"
+  # is a lost authority, not an ordinary crewmate. An authority that cannot be
+  # read is not authority, and hard rule 4 must not lapse exactly when the record
+  # is gone.
+  local home fb out rc
+  home=$(make_fleet send-lost-record)
+  fb=$(make_send_stubs "$home")
+  # A registry that exists but no longer carries this lane.
+  printf '# Secondmates\n\n' > "$(reg_of "$home")"
+  rc=0
+  out=$(env PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0 \
+    "$SEND" sm-alpha "do the thing" 2>&1) || rc=$?
+  [ "$rc" != 0 ] || fail "firstmate must not steer a lane whose command record it cannot read"
+  assert_contains "$out" "no readable command record" "the refusal must name the unreadable record"
+
+  # An absent registry is the same lost authority, not a free pass.
+  rm -f "$(reg_of "$home")"
+  rc=0
+  out=$(env PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0 \
+    "$SEND" sm-alpha "do the thing" 2>&1) || rc=$?
+  [ "$rc" != 0 ] || fail "an absent secondmate registry must refuse, not fall open"
+  assert_contains "$out" "no readable command record" "the refusal must name the unreadable record"
+
+  # An ordinary crewmate, whose meta is not kind=secondmate, is unaffected.
+  fm_write_meta "$home/state/crew-one.meta" "window=firstmate:fm-crew-one" "kind=ship" "mode=no-mistakes"
+  rc=0
+  env PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0 \
+    "$SEND" crew-one "do the thing" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "an ordinary crewmate must still be steerable with no registry, got $rc"
+  pass "firstmate refuses a lane whose command record is missing, and still steers ordinary crewmates"
+}
+
+test_the_handback_request_can_still_be_retried() {
+  # The handback request is the one message the offramp depends on, and it is the
+  # only expectation a captain-commanded lane can still hold. Its built-in retry
+  # has to carry the same infrastructure exemption, or firstmate reports a
+  # delivery failure for a lane it is forbidden to steer and the offramp stalls.
+  local home fb corr rec rc phase
+  home=$(make_fleet handback-retry)
+  fb=$(make_send_stubs "$home")
+  run_cmd "$home" onramp sm-alpha >/dev/null
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-pending-reply-lib.sh"
+    corr=$(fm_pending_reply_create "$home" "$home/state" sm-alpha "Command handback requested") \
+      || exit 1
+    rec=$(fm_pending_reply_path "$home/state" "$corr")
+    fm_pending_reply_set "$rec" delivered_epoch 1 || exit 1
+    fm_pending_reply_set "$rec" request_turn_completed_epoch 2 || exit 1
+    fm_pending_reply_set "$rec" grace_secs 0 || exit 1
+    printf '%s\n' "$corr" > "$home/corr"
+    export PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0
+    fm_pending_reply_send_recovery "$home/state" "$corr"
+  )
+  rc=$?
+  [ "$rc" = 0 ] || fail "the handback request's own retry must be deliverable to a captain-commanded lane, got $rc"
+  corr=$(cat "$home/corr")
+  rec="$home/state/pending-replies/$corr"
+  phase=$(grep '^phase=' "$rec" | cut -d= -f2-)
+  [ "$phase" = recovery_sent ] || fail "a retried handback request must record a delivered retry, got phase=$phase"
+  assert_no_grep 'recovery_delivery_outcome=failed' "$rec" "the retry must not be recorded as a delivery failure"
+  pass "the handback request's retry still reaches a captain-commanded lane"
+}
+
+test_a_completed_handback_closes_its_own_expectation() {
+  # The position report IS the answer, delivered as a document. Left open, the
+  # expectation the transfer machinery created itself would permanently refuse
+  # the next onramp at its open-request guard.
+  local home fb corr out report rc
+  home=$(make_fleet handback-expectation)
+  fb=$(make_send_stubs "$home")
+  run_cmd "$home" onramp sm-alpha >/dev/null
+  out=$(run_cmd "$home" offramp-request sm-alpha)
+  report=$(printf '%s' "$out" | sed -n 's/^HANDBACK_REQUESTED: sm-alpha report=//p')
+  # The real request path is stubbed in this file, so stand in its expectation.
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-pending-reply-lib.sh"
+    fm_pending_reply_create "$home" "$home/state" sm-alpha "Command handback requested" > "$home/corr"
+  ) || fail "could not stage the handback expectation"
+  corr=$(cat "$home/corr")
+  printf 'Nothing open.\n' > "$report"
+  run_cmd "$home" offramp-complete sm-alpha --report "$report" >/dev/null \
+    || fail "a fresh report should complete the handback"
+  assert_grep 'phase=resolved' "$home/state/pending-replies/$corr" \
+    "a completed handback must close the expectation its own request created"
+  rc=0
+  out=$(run_cmd "$home" onramp sm-alpha) || rc=$?
+  [ "$rc" = 0 ] || fail "the next onramp must not be refused by the transfer machinery's own leftovers: $out"
+  pass "a completed handback closes its own expectation instead of blocking the next transfer"
 }
 
 test_fm_send_refuses_to_interrupt_a_captain_commanded_lane() {
@@ -833,6 +978,8 @@ test_onramp_has_no_override_flag
 test_onramp_transfers_registry_marker_and_position_record
 test_onramp_is_idempotent
 test_onramp_keeps_every_other_registry_field
+test_both_directions_tell_the_running_lane
+test_an_undelivered_notice_is_not_reported_as_a_finished_transfer
 
 test_offramp_complete_refuses_without_a_position_report
 test_offramp_request_records_the_expected_report_and_asks_the_lane
@@ -845,7 +992,10 @@ test_offramp_complete_returns_the_lane_after_a_fresh_report
 test_fm_send_refuses_to_steer_a_captain_commanded_lane
 test_fm_send_still_steers_a_firstmate_commanded_lane
 test_fm_send_lets_infrastructure_messages_reach_the_lane
+test_fm_send_refuses_a_lane_whose_command_record_is_missing
 test_fm_send_refuses_to_interrupt_a_captain_commanded_lane
+test_the_handback_request_can_still_be_retried
+test_a_completed_handback_closes_its_own_expectation
 test_backlog_handoff_refuses_a_captain_commanded_lane
 test_teardown_refuses_to_retire_a_captain_commanded_lane
 

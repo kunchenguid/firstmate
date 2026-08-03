@@ -671,6 +671,12 @@ make_routine_bootstrap_fixture() {
     printf 'harness=codex\n'
     printf 'home=%s\n' "$sm"
   } > "$home/state/sm.meta"
+  # The command record every registered lane has: firstmate refuses to steer, and
+  # so refuses to nudge, a lane whose command state it cannot read.
+  mkdir -p "$home/data"
+  printf '# Secondmates\n\n' > "$home/data/secondmates.md"
+  printf -- '- sm - Lane. (home: %s; scope: test; projects: alpha; added 2026-01-01)\n' \
+    "$sm" >> "$home/data/secondmates.md"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
   cat > "$fakebin/tmux" <<'SH'

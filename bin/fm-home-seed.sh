@@ -47,6 +47,9 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 
+# shellcheck source=bin/fm-secondmate-command-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
+
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
   echo "       fm-home-seed.sh validate" >&2
@@ -808,8 +811,25 @@ validate_secondmate_label() {
   esac
 }
 
+# The command state a reseed of <id> must carry forward, or empty for a lane
+# that is not registered yet. A reseed is provisioning, never a command decision:
+# silently rewriting a captain-commanded lane back to firstmate command would be
+# a transfer nobody decided, and it would be invisible because the registry and
+# the home marker revert together so the divergence check stays silent.
+prior_registry_command() {  # <id>
+  local id=$1 state rc=0
+  [ -f "$REG" ] || return 0
+  state=$(fm_secondmate_command_state "$id" "$REG") || rc=$?
+  case "$rc" in
+    0) [ "$state" = "$FM_SECONDMATE_COMMAND_DEFAULT" ] || printf '%s' "$state" ;;
+    2) printf 'invalid' ;;
+  esac
+  return 0
+}
+
 write_registry() {
   local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today label label_suffix prior_line
+  local prior_command command_suffix
   mkdir -p "$DATA"
   scope=$(registry_scope_for_brief "$brief")
   summary=$(registry_summary_for_brief "$brief")
@@ -828,13 +848,22 @@ write_registry() {
     validate_secondmate_label "$label" || return 1
     label_suffix="; label: $label"
   fi
+  # A reseed preserves the recorded command state the same way it preserves the
+  # label; only bin/fm-secondmate-command.sh ever changes it.
+  prior_command=$(prior_registry_command "$id")
+  if [ "$prior_command" = invalid ]; then
+    echo "error: $id carries an unrecognized command value in $REG; repair that record before reseeding this home" >&2
+    return 1
+  fi
+  command_suffix=
+  [ -z "$prior_command" ] || command_suffix="; command: $prior_command"
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
     grep -vE "^- $id( |$)" "$REG" > "$tmp" || true
   else
     : > "$tmp"
   fi
-  printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s%s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" "$label_suffix" >> "$tmp"
+  printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s%s%s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" "$label_suffix" "$command_suffix" >> "$tmp"
   mv "$tmp" "$REG"
 }
 
@@ -894,7 +923,7 @@ refuse_projectful_projectless_charter() {
 
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
-  local no_projects=0 arg
+  local no_projects=0 arg command_token
   local filtered=()
   shift 2
   # A deliberate --no-projects signal (anywhere in the project position) seeds a
@@ -1038,17 +1067,29 @@ seed_home() {
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
   # Every seeded home starts under firstmate command, stated rather than implied,
   # so the charter's "read data/command.md" instruction always finds a record.
-  # bin/fm-secondmate-command.sh is the only thing that ever rewrites it.
-  {
-    printf '# Command state\n\n'
-    printf 'command: firstmate\n'
-    printf 'recorded: seed\n\n'
-    printf 'The primary firstmate writes this file; it is read-only here.\n'
-    printf 'The authority is the command field on this lane in the primary home secondmate registry.\n'
-    printf 'Never edit this file to change who commands this lane - a lane cannot transfer itself.\n'
-    printf 'Under command: firstmate there is no captain in this pane: never address the captain, and route every report to the main firstmate.\n'
-    printf 'Under command: captain the captain reads this pane himself: address him directly, and do not wait on the main firstmate for decisions that are now his.\n'
-  } > "$home/data/command.md"
+  # bin/fm-secondmate-command.sh is the only thing that ever rewrites it, so a
+  # reseed of a lane the captain already commands leaves the existing marker
+  # exactly as that transfer wrote it, position pointer and all.
+  command_token=$(prior_registry_command "$id")
+  if [ "$command_token" = invalid ]; then
+    echo "error: $id carries an unrecognized command value in $REG; repair that record before reseeding this home" >&2
+    return 1
+  fi
+  [ -n "$command_token" ] || command_token=firstmate
+  if [ "$command_token" = captain ] && [ -f "$home/data/command.md" ]; then
+    :
+  else
+    {
+      printf '# Command state\n\n'
+      printf 'command: %s\n' "$command_token"
+      printf 'recorded: seed\n\n'
+      printf 'The primary firstmate writes this file; it is read-only here.\n'
+      printf 'The authority is the command field on this lane in the primary home secondmate registry.\n'
+      printf 'Never edit this file to change who commands this lane - a lane cannot transfer itself.\n'
+      printf 'Under command: firstmate there is no captain in this pane: never address the captain, and route every report to the main firstmate.\n'
+      printf 'Under command: captain the captain reads this pane himself: address him directly, and do not wait on the main firstmate for decisions that are now his.\n'
+    } > "$home/data/command.md"
+  fi
 
   projects_csv=$(join_projects "$@")
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"

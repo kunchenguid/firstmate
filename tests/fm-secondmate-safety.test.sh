@@ -151,6 +151,53 @@ EOF
   pass "seed records the optional session label and refuses delimiter labels"
 }
 
+test_home_seed_preserves_recorded_command_state() {
+  # A reseed is provisioning, never a command decision. Silently rewriting a
+  # captain-commanded lane back to firstmate command would be a transfer nobody
+  # decided - and an invisible one, because the registry and the lane's own copy
+  # would revert together and the divergence check would stay silent.
+  local home sm
+  home="$TMP_ROOT/command-main"
+  sm="$TMP_ROOT/command-sm"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/seed-command-alpha.git"
+  cat > "$home/data/projects.md" <<EOF
+- alpha [direct-PR] - alpha project (added 2026-06-22)
+EOF
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='alpha work' FM_SECONDMATE_SCOPE='alpha work' \
+    "$ROOT/bin/fm-home-seed.sh" sm-cmd "$sm" alpha >/dev/null \
+    || fail "initial seed failed"
+  assert_grep 'command: firstmate' "$sm/data/command.md" "a fresh seed must state firstmate command"
+  assert_no_grep '; command:' "$home/data/secondmates.md" "a fresh seed must not write a command field"
+
+  # Stand in for a recorded transfer, then reseed the same home.
+  sed -i.bak 's/added \([0-9-]*\))/added \1; command: captain)/' "$home/data/secondmates.md"
+  rm -f "$home/data/secondmates.md.bak"
+  printf '# Command state\n\ncommand: captain\nposition: %s\n' "$home/data/sm-cmd/command-position.md" \
+    > "$sm/data/command.md"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='alpha work' FM_SECONDMATE_SCOPE='alpha work' \
+    "$ROOT/bin/fm-home-seed.sh" sm-cmd "$sm" alpha >/dev/null \
+    || fail "reseed of a captain-commanded lane failed"
+  assert_grep '; command: captain)' "$home/data/secondmates.md" \
+    "a reseed must not silently return a lane to firstmate command"
+  assert_grep 'command: captain' "$sm/data/command.md" "a reseed must not rewrite the lane's own copy"
+  assert_grep "$home/data/sm-cmd/command-position.md" "$sm/data/command.md" \
+    "a reseed must not drop the position pointer the transfer wrote"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
+    || fail "registry validation rejected the preserved command field"
+
+  # A damaged command record refuses rather than being silently normalized.
+  sed -i.bak 's/; command: captain)/; command: whoknows)/' "$home/data/secondmates.md"
+  rm -f "$home/data/secondmates.md.bak"
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='alpha work' FM_SECONDMATE_SCOPE='alpha work' \
+    "$ROOT/bin/fm-home-seed.sh" sm-cmd "$sm" alpha >/dev/null 2>&1; then
+    fail "a reseed must refuse an unrecognized command value instead of normalizing it"
+  fi
+  assert_grep '; command: whoknows)' "$home/data/secondmates.md" "a refused reseed must leave the damaged record intact"
+  pass "a reseed preserves recorded command state and refuses a damaged one"
+}
+
 test_home_seed_validate_rejects_duplicate_homes() {
   local home subhome subhome_abs err
   home="$TMP_ROOT/duplicate-home"
@@ -2210,6 +2257,7 @@ test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
 test_home_seed_records_optional_label_field
+test_home_seed_preserves_recorded_command_state
 test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes

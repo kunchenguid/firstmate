@@ -48,7 +48,8 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     elif $t.paths.worktree.path != null then $t.paths.worktree.path + " (absent)"
     else "-" end;
   def action_of($t):
-    if $t.kind == "secondmate" then "\($t.actions.send) - \($t.actions.watch)"
+    if $t.kind == "secondmate" then
+      "\($t.actions.send // "no steer (command: \($t.command // "unrecorded"))") - \($t.actions.watch)"
     else $t.actions.watch end;
   def task_row($t):
     "| \($t.id) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) |";

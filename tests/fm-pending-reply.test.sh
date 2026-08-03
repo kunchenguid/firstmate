@@ -77,8 +77,17 @@ SH
 
 setup_parent() {  # <name> -> home
   local home="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$home/data"
+  printf '# Secondmates\n\n' > "$home/data/secondmates.md"
   printf '%s\n' "$home"
+}
+
+# register_lane <home> <id>: the command record every real secondmate has.
+# fm-send refuses a kind=secondmate target whose command state it cannot read, so
+# a lane fixture that goes through fm-send needs its registry line.
+register_lane() {
+  printf -- '- %s - Lane. (home: %s; scope: test; projects: alpha; added 2026-01-01)\n' \
+    "$2" "$1" >> "$1/data/secondmates.md"
 }
 
 run_send() {
@@ -594,6 +603,7 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr() {
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_parent send-pending)
   fm_write_secondmate_meta "$home/state/hibit.meta" "$home/sm" "sess:fm-hibit"
+  register_lane "$home" hibit
   run_send "$fb" "$home" "$log" "hibit" "audit the build"; rc=$?
   expect_code 0 "$rc" "secondmate send should succeed"
   got=$(cat "$log")
@@ -821,6 +831,8 @@ test_correlations_reuse_only_for_matching_open_task() {
   state="$home/state"
   fm_write_secondmate_meta "$state/domain.meta" "$home/domain" "sess:fm-domain"
   fm_write_secondmate_meta "$state/other.meta" "$home/other" "sess:fm-other"
+  register_lane "$home" domain
+  register_lane "$home" other
   run_send "$fb" "$home" "$log" domain "first request" || fail "first marked send failed"
   got=$(cat "$log")
   corr1=$(fm_pending_reply_extract_corr "$got")

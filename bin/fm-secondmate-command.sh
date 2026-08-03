@@ -54,10 +54,21 @@
 # commander (inert, and reported by `status`) but never with two. Onramp writes
 # the registry first; offramp writes the home marker first.
 #
+# Telling the running lane: both directions finish by sending the lane a
+# re-read notice through the narrow FM_SECONDMATE_COMMAND_OPERATIONAL exemption
+# in bin/fm-send.sh, because the charter only makes a lane read data/command.md
+# at session start and a long-running agent would otherwise keep operating under
+# the previous contract until it restarts. The notice asks for no reply, so the
+# pending-reply expectation a marked send mints is retired immediately. The
+# command record is the authority, so a notice that is not delivered never
+# invalidates the transfer: it is reported as TRANSFERRED_NOT_NOTIFIED with exit
+# 5, meaning correctly recorded but not yet re-read by the live agent.
+#
 # Environment: FM_HOME (required in effect), FM_DATA_OVERRIDE, FM_STATE_OVERRIDE.
 # FM_SECONDMATE_COMMAND_CREW_STATE_BIN and FM_SECONDMATE_COMMAND_SEND_BIN
 # override the current-state reader and the steer path for tests.
-# Exit codes: 0 ok, 2 usage, 3 damaged or divergent record, 4 refusal.
+# Exit codes: 0 ok, 2 usage, 3 damaged or divergent record, 4 refusal,
+# 5 transferred on the record but the live lane was not notified.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,7 +93,7 @@ CREW_STATE_BIN="${FM_SECONDMATE_COMMAND_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-stat
 SEND_BIN="${FM_SECONDMATE_COMMAND_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 
 help_text() {
-  sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,71p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 usage() {
@@ -297,6 +308,45 @@ endpoint_note() {  # <id>
   return 0
 }
 
+# Deliver one infrastructure message to <id> through the exempted steer path.
+#
+# A marked secondmate send always creates a durable pending-reply expectation,
+# but a command-state notice asks for no reply, so the expectation it minted is
+# retired immediately. Left open it would be indistinguishable from a stranded
+# question: the watcher would chase it, and onramp guard 6 would refuse the next
+# transfer forever over an artifact the transfer machinery created itself.
+# Returns non-zero when delivery was not confirmed.
+send_operational_notice() {  # <id> <message>
+  local id=$1 msg=$2 before after corr rc=0
+  before=$(open_pending_replies_for "$id")
+  FM_SECONDMATE_COMMAND_OPERATIONAL="$id" "$SEND_BIN" "$id" "$msg" >/dev/null 2>&1 || rc=$?
+  after=$(open_pending_replies_for "$id")
+  for corr in $after; do
+    case " $before " in *" $corr "*) continue ;; esac
+    fm_pending_reply_retire_unanswered "$STATE" "$corr" notice || true
+  done
+  return "$rc"
+}
+
+# Tell the live lane its command state just changed, so a long-running agent
+# switches contract now instead of at its next session start. The command record
+# is the authority and is already written when this runs, so a failed nudge is
+# reported as "correctly recorded, not yet re-read" - never as a lane that
+# already knows.
+COMMAND_NUDGE_MESSAGE_PREFIX='Your command state changed - re-read data/command.md in your own home now and follow it from this message on'
+command_nudge_message() {  # <token>
+  case "$1" in
+    captain)
+      printf '%s: the captain now commands this lane, so address him directly in this pane and stop routing your reports through the main firstmate.' \
+        "$COMMAND_NUDGE_MESSAGE_PREFIX"
+      ;;
+    *)
+      printf '%s: the main firstmate commands this lane again, so never address the captain from this pane and route every report back through the main firstmate.' \
+        "$COMMAND_NUDGE_MESSAGE_PREFIX"
+      ;;
+  esac
+}
+
 # Open parent pending-reply expectations for <id>: created and not yet resolved.
 open_pending_replies_for() {  # <id>
   local id=$1 dir rec task resolved
@@ -418,8 +468,13 @@ cmd_onramp() {  # <id>
       "$id" "$(fm_secondmate_command_marker_path "$home")" >&2
     exit 3
   fi
-  printf 'TRANSFERRED: %s firstmate -> captain (position: %s)\n' "$id" "$record"
-  return 0
+  if send_operational_notice "$id" "$(command_nudge_message captain)"; then
+    printf 'TRANSFERRED: %s firstmate -> captain (position: %s)\n' "$id" "$record"
+    return 0
+  fi
+  printf 'TRANSFERRED_NOT_NOTIFIED: %s firstmate -> captain (position: %s) - the transfer is recorded and firstmate has stopped commanding this lane, but the running agent was not told and still believes it is under firstmate command until it re-reads %s. Deliver the notice, or restart the lane, before the captain relies on this pane.\n' \
+    "$id" "$record" "$(fm_secondmate_command_marker_path "$home")" >&2
+  return 5
 }
 
 # --- offramp ----------------------------------------------------------------
@@ -465,7 +520,7 @@ cmd_offramp_request() {  # <id>
 }
 
 cmd_offramp_complete() {  # <id> <report-path>
-  local id=$1 report=$2 rec expected requested mtime home
+  local id=$1 report=$2 rec expected requested mtime home corr
   require_registered "$id"
   fm_secondmate_command_is_captain "$id" "$REG" \
     || refuse "$id is not under captain command; there is nothing to hand back"
@@ -494,8 +549,20 @@ cmd_offramp_complete() {  # <id> <report-path>
     exit 3
   fi
   rm -f "$rec"
-  printf 'TRANSFERRED: %s captain -> firstmate (position report: %s)\n' "$id" "$report"
-  return 0
+  # The position report IS the answer to the handback request, delivered as a
+  # document rather than on the status channel. Close that expectation here:
+  # left open it would keep the watcher chasing an answered question and would
+  # permanently refuse the next onramp at guard 6.
+  for corr in $(open_pending_replies_for "$id"); do
+    fm_pending_reply_retire_unanswered "$STATE" "$corr" document || true
+  done
+  if send_operational_notice "$id" "$(command_nudge_message firstmate)"; then
+    printf 'TRANSFERRED: %s captain -> firstmate (position report: %s)\n' "$id" "$report"
+    return 0
+  fi
+  printf 'TRANSFERRED_NOT_NOTIFIED: %s captain -> firstmate (position report: %s) - firstmate commands this lane again on the record, but the running agent was not told and still believes the captain reads this pane until it re-reads %s. Deliver the notice, or restart the lane, before steering it.\n' \
+    "$id" "$report" "$(fm_secondmate_command_marker_path "$home")" >&2
+  return 5
 }
 
 # --- dispatch ---------------------------------------------------------------

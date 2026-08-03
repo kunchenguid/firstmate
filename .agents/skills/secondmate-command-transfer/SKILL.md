@@ -46,8 +46,10 @@ Two reasons, both about safety rather than tidiness:
 3. The script refuses, with no override flag, on any of the seven unsafe states its header defines - the lane is unregistered, its home does not validate, away mode is active, its endpoint is confirmed absent, a decision it opened is still unresolved, a request from firstmate is still owed an answer, or a task in its home is inside a live validation run.
    Every one of those is a stop-and-report: clear the named condition first, or tell the captain why the lane cannot be handed over yet.
    Never work around a refusal by editing the registry or the home marker by hand.
-4. On success the script writes the lane's position record under `data/<id>/`, flips the registry, and tells the lane.
+4. On success the script writes the lane's position record under `data/<id>/`, flips the registry, writes the lane's own copy of its command state, and sends the running agent a notice to re-read it now.
    Read that record and relay its substance to the captain in plain language: what the lane is in the middle of, what is queued, and anything he is inheriting mid-flight.
+   `TRANSFERRED_NOT_NOTIFIED` (exit 5) means the transfer is on the record but that notice was not delivered, so the running agent still believes firstmate commands it until it re-reads its own copy.
+   The transfer is real either way - the record is the authority - but tell the captain his pane is not live yet, and deliver the notice or restart the lane before he relies on it.
 5. Tell the captain, in one message: the lane is his, where to talk to it, and that firstmate will not steer it, route work into it, or retire it until he hands it back.
 
 Then stop supervising that lane's work.
@@ -56,7 +58,7 @@ That relaunch is never silent - it always reports, because the captain's convers
 
 ## While the captain holds a lane
 
-- Firstmate does not steer it. `bin/fm-send.sh` refuses; the only message that still reaches it is the handback request this skill issues.
+- Firstmate does not steer it. `bin/fm-send.sh` refuses; the only messages that still reach it are infrastructure - the handback request this skill issues, its retry, and the re-read notices that tell the lane about its own files.
 - Firstmate does not route work into it. `bin/fm-backlog-handoff.sh` refuses.
   In-scope work that arrives while the captain holds the lane stays in the main backlog as its own item, held with `tasks-axi hold <id> --reason "<reason>" --kind captain` naming the lane, and is re-evaluated at handback.
   That is the honest answer: the work is not silently misrouted into a queue nobody is reading, and it is not silently dropped either.
@@ -92,6 +94,8 @@ The offramp closes that gap explicitly, and refuses to resume supervision on ass
    Where the report and the records disagree, the records are evidence and the disagreement is worth raising with the captain, not smoothing over.
 5. `bin/fm-secondmate-command.sh offramp-complete <id> --report <path>` returns the lane.
    It refuses unless that exact report exists and postdates the request, so a stale or substituted document cannot stand in for one.
+   On success it writes the lane's own copy of its command state and sends the running agent a notice to re-read it now.
+   `TRANSFERRED_NOT_NOTIFIED` (exit 5) means the lane is firstmate's again on the record but that notice was not delivered, so the running agent still believes the captain reads its pane; deliver the notice or restart the lane before steering it.
 6. Resume ordinary supervision, and clear the captain-kind holds on work that was waiting for the lane.
 
 If the lane is dead and cannot report, that is a stop-and-report: relaunch it and re-request.

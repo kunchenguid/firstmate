@@ -86,8 +86,17 @@ run_send() {
 # setup_home <name> -> echoes a fresh home dir with an empty state/.
 setup_home() {
   local home="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$home/data"
+  printf '# Secondmates\n\n' > "$home/data/secondmates.md"
   printf '%s\n' "$home"
+}
+
+# register_lane <home> <id>: give the lane the command record every real
+# secondmate has. fm-send refuses a kind=secondmate target whose command state it
+# cannot read, so a registry line is part of a realistic lane fixture.
+register_lane() {
+  printf -- '- %s - Lane. (home: %s; scope: test; projects: alpha; added 2026-01-01)\n' \
+    "$2" "$1" >> "$1/data/secondmates.md"
 }
 
 test_secondmate_target_is_marked() {
@@ -96,6 +105,7 @@ test_secondmate_target_is_marked() {
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm)
   fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  register_lane "$home" domain
   run_send "$fb" "$home" "$log" "fm-domain" "audit the build"; rc=$?
   expect_code 0 "$rc" "send to a secondmate target should succeed"
   got=$(cat "$log")
@@ -121,6 +131,7 @@ test_exact_secondmate_task_id_is_marked() {
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm-exact)
   fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  register_lane "$home" domain
   run_send "$fb" "$home" "$log" "domain" "audit the build"; rc=$?
   expect_code 0 "$rc" "send to an exact secondmate task id should succeed"
   got=$(cat "$log")
@@ -172,6 +183,7 @@ test_explicit_window_is_not_marked() {
   # An explicit endpoint is not a task selector, so even matching secondmate
   # metadata must not make fm-send guess the caller's intent and mark it.
   fm_write_secondmate_meta "$home/state/win.meta" "$home" "other:win"
+  register_lane "$home" win
   run_send "$fb" "$home" "$log" "other:win" "ping"; rc=$?
   expect_code 0 "$rc" "send to an explicit window with matching meta should succeed"
   got=$(cat "$log")
@@ -193,6 +205,7 @@ test_key_path_is_not_marked() {
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home key)
   fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  register_lane "$home" domain
   run_send "$fb" "$home" "$log" "fm-domain" --key Escape; rc=$?
   expect_code 0 "$rc" "--key send to a secondmate should succeed"
   [ ! -s "$log" ] \
@@ -236,6 +249,7 @@ test_marked_send_preserves_trailing_newlines() {
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm-trailing-newlines)
   fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  register_lane "$home" domain
   payload=$'audit the build\n\n'
   run_send "$fb" "$home" "$log" "domain" "$payload"; rc=$?
   expect_code 0 "$rc" "marked send with trailing newlines should succeed"
