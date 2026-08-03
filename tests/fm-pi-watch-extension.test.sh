@@ -2543,6 +2543,189 @@ EOF
   pass "OpenCode cancels a pending continuity retry when away mode begins"
 }
 
+test_pi_away_mode_suppresses_wake_after_encoding() {
+  local repo home plugin log stop ready encoder_helper out status
+  repo="$TMP_ROOT/pi-afk-encoding-root"
+  home="$TMP_ROOT/pi-afk-encoding-home"
+  log="$TMP_ROOT/pi-afk-encoding.log"
+  stop="$TMP_ROOT/pi-afk-encoding.stop"
+  ready="$TMP_ROOT/pi-afk-encoding.ready"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+cycle=$(( $(wc -l < "${FM_ARM_LOG:?}" 2>/dev/null || printf 0) + 1 ))
+printf 'arm\n' >> "$FM_ARM_LOG"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "${FM_STOP_FILE:?}.$cycle" ] && [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+if [ -e "$FM_STOP_FILE.$cycle" ]; then
+  printf 'signal: demo.status done: fixture finished\n'
+fi
+SH
+  cat > "$repo/bin/held-operational-input.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = encode ] && [ "${2:-}" = watcher ]; then
+  : > "${FM_ENCODER_READY:?}"
+  while [ ! -e "$FM_HOME/state/.afk" ]; do sleep 0.02; done
+fi
+exec "${FM_REAL_OPERATIONAL_INPUT_SCRIPT:?}" "$@"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/held-operational-input.sh"
+  (
+    for _ in $(seq 1 250); do
+      if [ -e "$ready" ]; then
+        : > "$home/state/.afk"
+        exit 0
+      fi
+      sleep 0.02
+    done
+    exit 1
+  ) &
+  encoder_helper=$!
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_ENCODER_READY="$ready" FM_OPERATIONAL_INPUT_SCRIPT="$repo/bin/held-operational-input.sh" FM_REAL_OPERATIONAL_INPUT_SCRIPT="$repo/bin/fm-operational-input.sh" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+const armRows = () => {
+  try {
+    return readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+};
+const waitFor = async (predicate, ticks = 250) => {
+  for (let i = 0; i < ticks && !predicate(); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return predicate();
+};
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+try {
+  await tool.execute("tool-call-first", {}, undefined, undefined, {});
+  if (!(await waitFor(() => armRows() === 1))) throw new Error("first arm cycle never started");
+  writeFileSync(`${process.env.FM_STOP_FILE}.1`, "release\n");
+  if (!(await waitFor(() => existsSync(process.env.FM_ENCODER_READY)))) {
+    throw new Error("watcher delivery never reached the held encoder");
+  }
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  if (!existsSync(`${process.env.FM_HOME}/state/.afk`)) throw new Error("away mode did not begin during encoding");
+  if (prompt) throw new Error(`wake crossed the final away-mode boundary: ${prompt}`);
+} finally {
+  writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+}
+EOF
+)
+  status=$?
+  wait "$encoder_helper"
+  expect_code 0 "$status" "Pi must recheck away mode after encoding before wake delivery"
+  [ -z "$out" ] || fail "Pi held-encoder away-mode test printed output: $out"
+  pass "Pi suppresses watcher delivery when away mode begins during encoding"
+}
+
+test_opencode_away_mode_suppresses_wake_after_encoding() {
+  local plugin repo home log stop ready out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-afk-encoding-root"
+  home="$TMP_ROOT/opencode-afk-encoding-home"
+  log="$TMP_ROOT/opencode-afk-encoding.log"
+  stop="$TMP_ROOT/opencode-afk-encoding.stop"
+  ready="$TMP_ROOT/opencode-afk-encoding.ready"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+cycle=$(( $(wc -l < "${FM_ARM_LOG:?}" 2>/dev/null || printf 0) + 1 ))
+printf 'arm\n' >> "$FM_ARM_LOG"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "${FM_STOP_FILE:?}.$cycle" ] && [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+if [ -e "$FM_STOP_FILE.$cycle" ]; then
+  printf 'signal: demo.status done: fixture finished\n'
+fi
+SH
+  cat > "$repo/bin/fm-operational-input.sh" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_ENCODER_READY:?}"
+while [ ! -e "$FM_HOME/state/.afk" ]; do sleep 0.02; done
+printf '\u2063FIRSTMATE_OP: v1 watcher: held\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-operational-input.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_ENCODER_READY="$ready" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let prompt = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts.map((part) => part.text).join("");
+    },
+  },
+};
+const armRows = () => {
+  try {
+    return readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+};
+const waitFor = async (predicate, ticks = 250) => {
+  for (let i = 0; i < ticks && !predicate(); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return predicate();
+};
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const idle = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+
+try {
+  await hooks.event(idle);
+  if (!(await waitFor(() => armRows() === 1))) throw new Error("first arm cycle never started");
+  writeFileSync(`${process.env.FM_STOP_FILE}.1`, "release\n");
+  if (!(await waitFor(() => existsSync(process.env.FM_ENCODER_READY)))) {
+    throw new Error("watcher delivery never reached the held encoder");
+  }
+  writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  if (prompt) throw new Error(`wake crossed the final away-mode boundary: ${prompt}`);
+} finally {
+  writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must recheck away mode after encoding before prompt delivery"
+  [ -z "$out" ] || fail "OpenCode held-encoder away-mode test printed output: $out"
+  pass "OpenCode suppresses watcher delivery when away mode begins during encoding"
+}
+
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
@@ -2577,3 +2760,5 @@ test_pi_away_mode_stands_down_instead_of_arming
 test_pi_away_mode_suppresses_wake_from_live_arm_child
 test_opencode_away_mode_suppresses_wake_from_live_arm_child
 test_opencode_away_mode_cancels_pending_retry
+test_pi_away_mode_suppresses_wake_after_encoding
+test_opencode_away_mode_suppresses_wake_after_encoding
