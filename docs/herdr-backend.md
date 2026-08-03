@@ -210,8 +210,9 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
+The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked, or omp's own collapsed top/bottom-border pair admitted only when native identity is exactly omp and state is idle, done, or blocked.
+A working Pi or omp, pending middle row, missing identity, incomplete separator or border pair, or over-tall candidate remains pending or unknown.
+[`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) owns omp's collapsed-border composer shape and its native-identity gate.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
@@ -310,6 +311,7 @@ tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-omp-harness.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

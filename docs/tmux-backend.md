@@ -60,6 +60,8 @@ Scoping the second source to the foreground process group rather than to the pan
 The same scoping covers multi-process launchers without a special case, so the Pi Launcher path is attributed through its `pi-signed` wrapper and `pi` engine even though its title is the exact foreground command `pi-launcher`.
 Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
 
+A bare `bun` comm (omp's own process; bun renames its title only after tmux's window bookkeeping already captured the pre-rename name) is provisional, never `alive` on its own: it is confirmed by reading the pane's live child-process args for a script path ending in `/omp` before classifying `alive`, otherwise `ambiguous`, never a guessed `alive` or `dead`. [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) owns the full quirk.
+
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
 
@@ -101,6 +103,7 @@ tests/fm-tmux-agent-liveness.test.sh
 tests/fm-harness-liveness-drift-live-e2e.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
+tests/fm-omp-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-bootstrap.test.sh
 ```

@@ -100,6 +100,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
+- omp remains outside the primary guard integrations above; its `session_stop` event is the natural integration point, but building and verifying that guard was out of scope for the change that added omp as a crewmate/secondmate adapter. [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) owns the omp facts, and [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records why.
 
 ## Regression coverage
 
