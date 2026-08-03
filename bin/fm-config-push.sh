@@ -122,18 +122,22 @@ while IFS='|' read -r id home _window meta; do
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
     printf 'secondmate %s (%s:%s):\n' "$id" "$remote_host" "$home"
+    remote_marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id" 2>/dev/null || true)
+    remote_pending=0
+    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if ! fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
+      "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      echo "  config-reread: retry marker failed"
+      errors=1
+      continue
+    fi
     if remote_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" 2>&1); then
       printf '%s\n' "$remote_out" | sed 's/^/  /'
-      remote_marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id" 2>/dev/null || true)
       remote_nudge=0
       if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
-      if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_nudge=1; fi
+      [ "$remote_pending" -eq 0 ] || remote_nudge=1
       if [ "$remote_nudge" -eq 1 ]; then
-        if ! fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
-          "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
-          echo "  config-reread: retry marker failed"
-          errors=1
-        elif FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+        if FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
           "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1; then
           rm -f -- "$remote_marker"
           echo "  config-reread: sent"
@@ -141,6 +145,8 @@ while IFS='|' read -r id home _window meta; do
           echo "  config-reread: send failed; retry retained"
           errors=1
         fi
+      else
+        rm -f -- "$remote_marker"
       fi
     else
       [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'

@@ -139,7 +139,7 @@ cmd_arm() {
   read_cursor "$id"
   sid=$(source_id "$id")
   "$SCRIPT_DIR/fm-procevent.sh" register remote-reply "$sid" -- \
-    "$SCRIPT_DIR/fm-procevent-remote-reply.sh" source "$id"
+    "$SCRIPT_DIR/fm-procevent-remote-reply.sh" source "$id" || return 1
   printf 'armed: %s offset=%s\n' "$sid" "$CURSOR_OFFSET"
 }
 
@@ -284,10 +284,10 @@ cmd_handle() {
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
     return "$rc"
   fi
-  "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" || return 1
   if [ "$class" = delta ]; then
-    cmd_arm "$id"
+    cmd_arm "$id" || return 1
   fi
+  "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" || return 1
   return "$rc"
 }
 

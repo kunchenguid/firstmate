@@ -269,7 +269,6 @@ secondmate_sync() {
 
   secondmate_retry_pending_nudges() {
     local marker id selector home commit message remote expected_marker meta meta_home home_real head out
-    local registry_remote registry_home registry_host
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -306,6 +305,7 @@ secondmate_sync() {
           continue
           ;;
       esac
+      [ "$remote" -ne 1 ] || continue
       meta="$STATE/$id.meta"
       [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
@@ -313,24 +313,6 @@ secondmate_sync() {
       }
       meta_home=$(fm_meta_get "$meta" home)
       [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
-      if [ "$remote" -eq 1 ]; then
-        registry_remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
-        registry_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home 2>/dev/null || true)
-        registry_host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host 2>/dev/null || true)
-        [ "$registry_remote" = 1 ] && [ "$registry_home" = "$home" ] \
-          && [ "$registry_host" = "$(fm_meta_get "$meta" remote_host)" ] \
-          && [ "$meta_home" = "$home" ] || {
-          echo "NUDGE_SECONDMATES: secondmate $id: send failed: remote retry target route changed"
-          continue
-        }
-        if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$message" 2>&1); then
-          rm -f "$marker"
-          echo "BOOTSTRAP_INFO: nudged $selector with '$message'"
-        else
-          echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
-        fi
-        continue
-      fi
       if ! validate_secondmate_home "$id" "$meta_home"; then
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home unsafe: $VALIDATION_ERROR"
         continue
@@ -444,32 +426,43 @@ secondmate_sync() {
   # Remote routes converge through the generic transport. Their code root and
   # inherited files are authoritative on that host; no local path probe or
   # local fast-forward is attempted for them.
-  local remote_host sync_out inherit_out nudge_needed
+  local remote_host sync_out inherit_out nudge_needed remote_marker remote_pending converged out
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
+    remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
+    remote_pending=0
+    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
+      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
+      continue
+    fi
     nudge_needed=0
+    converged=1
     if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" 2>&1); then
       case "$sync_out" in synced:*) nudge_needed=1 ;; esac
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(first_line "$sync_out")"
+      converged=0
     fi
     if inherit_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" 2>&1); then
       if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
+      converged=0
     fi
-    if [ "$nudge_needed" -eq 1 ]; then
-      if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
-        "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
-      elif out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+    [ "$remote_pending" -eq 0 ] || nudge_needed=1
+    if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
+      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
         "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
-        rm -f "$(secondmate_nudge_marker_path "$id")"
+        rm -f "$remote_marker"
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
       else
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
       fi
+    elif [ "$converged" -eq 1 ]; then
+      rm -f "$remote_marker"
     fi
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0

@@ -94,8 +94,21 @@ SOURCE_AFTER="$TMP_ROOT/source-after"
 cp "$REMOTE/state/parent-replies.status" "$SOURCE_AFTER"
 pass "a blocking non-destructive remote delta reaches durable process-event capture"
 
+rm -rf "$PARENT/state/procevent"
+: > "$PARENT/state/procevent"
+set +e
+remote_env "$ADAPTER" handle ios 1 "$RESULT" > "$TMP_ROOT/handle-arm-fail.out" 2>&1
+handle_arm_rc=$?
+set -e
+[ "$handle_arm_rc" -ne 0 ] || fail "reply handling acknowledged a result whose re-arm failed"
+assert_grep 'done [corr=0123456789abcdef]' "$PARENT/state/ios.status" "failed re-arm lost the ingested reply"
+assert_grep 'ingested: ios appended=1' "$TMP_ROOT/handle-arm-fail.out" "failed re-arm did not commit the reply before retry"
+rm -f "$PARENT/state/procevent"
+mkdir "$PARENT/state/procevent"
+reconcile_out=$(remote_env "$ROOT/bin/fm-procevent.sh" reconcile)
+assert_contains "$reconcile_out" 'published=1' "failed re-arm did not leave the result eligible for retry"
 out=$(remote_env "$ADAPTER" handle ios 1 "$RESULT")
-assert_contains "$out" 'ingested: ios appended=1' "captured reply was not ingested"
+assert_contains "$out" 'ingested: ios appended=0' "retried reply ingest was not idempotent"
 assert_contains "$out" 'handled: remote-reply-ios 1' "captured generation was not acknowledged"
 assert_grep 'done [corr=0123456789abcdef]' "$PARENT/state/ios.status" "parent status did not receive the correlated reply"
 assert_grep 'data/remote-secondmates/ios/data/reply/report.md' "$PARENT/state/ios.status" "remote document pointer was not rewritten locally"

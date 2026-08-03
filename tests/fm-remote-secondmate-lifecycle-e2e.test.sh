@@ -113,6 +113,18 @@ entry=$2
 shift 2
 [ "$host" = remote-mac ] || exit 91
 [ "$entry" = fm-remote-entrypoint.sh ] || exit 92
+argv_b64=$4
+command_fields=$(perl -MMIME::Base64=decode_base64 -e '
+  my $data=decode_base64($ARGV[0]);
+  my @args=split(/\0/, $data);
+  print join("\t", map { defined $_ ? $_ : "" } @args[0..2]);
+' "$argv_b64")
+IFS=$'\t' read -r command_name _command_action command_rel <<EOF
+$command_fields
+EOF
+case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
+  inherit-partial:fm-remote-inherit.sh:config/crew-harness) exit 255 ;;
+esac
 case "${FM_FAKE_SSH_MODE:-normal}" in
   unreachable) exit 255 ;;
   ambiguous) "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"; exit 255 ;;
@@ -146,7 +158,7 @@ remote_env() {
 }
 
 REAL_GIT=$(command -v git)
-cat > "$REMOTE_ROOT/bin/git" <<SH
+cat > "$FAKEBIN/git" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = clone ] && [ "\${!#}" = "$TMP_ROOT/concurrent-home" ]; then
   printf 'clone\n' >> "$TMP_ROOT/provision-clones"
@@ -157,12 +169,12 @@ if [ "\${1:-}" = clone ] && [ "\${!#}" = "$TMP_ROOT/concurrent-home" ]; then
 fi
 exec "$REAL_GIT" "\$@"
 SH
-chmod +x "$REMOTE_ROOT/bin/git"
+chmod +x "$FAKEBIN/git"
 printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=0\n' \
   "$(printf ios | base64 | tr -d '\n')" \
   "$(printf 'Concurrent provisioning charter.\n' | base64 | tr -d '\n')" \
   > "$TMP_ROOT/provision.manifest"
-PATH="$REMOTE_ROOT/bin:$PATH" FM_HOME="$TMP_ROOT/concurrent-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+PATH="$FAKEBIN:$PATH" FM_HOME="$TMP_ROOT/concurrent-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/provision.manifest" \
   > "$TMP_ROOT/provision-one.out" 2>&1 &
 provision_one=$!
@@ -173,7 +185,7 @@ while [ ! -f "$TMP_ROOT/provision.entered" ]; do
   [ "$provision_wait" -le 250 ] || fail "first provisioning attempt never reached cloning"
   sleep 0.02
 done
-PATH="$REMOTE_ROOT/bin:$PATH" FM_HOME="$TMP_ROOT/concurrent-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+PATH="$FAKEBIN:$PATH" FM_HOME="$TMP_ROOT/concurrent-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/provision.manifest" \
   > "$TMP_ROOT/provision-two.out" 2>&1 &
 provision_two=$!
@@ -267,14 +279,40 @@ phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
 pass "marked send and routed reply complete through the existing parent correlation owner"
 rm -f "$PARENT/state/.wake-queue"
 
-# A failed live config reread keeps one durable nudge even though the bytes have
-# already converged, and a later unchanged push retries that exact route.
+printf '{"revision":2}\n' > "$PARENT/config/crew-dispatch.json"
+printf 'pi\n' > "$PARENT/config/crew-harness"
+set +e
+FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-config-push.sh" \
+  > "$TMP_ROOT/config-partial.out" 2>&1
+config_partial_rc=$?
+set -e
+[ "$config_partial_rc" -ne 0 ] || fail "partial remote inheritance claimed complete convergence"
+assert_grep '"revision":2' "$REMOTE_HOME/config/crew-dispatch.json" "partial inheritance did not apply its first file"
+[ "$(cat "$REMOTE_HOME/config/crew-harness")" != pi ] \
+  || fail "partial inheritance unexpectedly applied the failed file"
+NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
+assert_grep 'remote=1' "$NUDGE_MARKER" "partial inheritance left no durable remote reread marker"
+publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
+remote_env "$ROOT/bin/fm-bootstrap.sh" > "$TMP_ROOT/config-partial-retry.out" \
+  || fail "bootstrap did not converge partial remote inheritance"
+[ "$(cat "$REMOTE_HOME/config/crew-harness")" = pi ] \
+  || fail "bootstrap did not apply the remaining inherited file"
+assert_absent "$NUDGE_MARKER" "bootstrap cleared no remote reread marker after convergence"
+PARTIAL_CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$TMUX_LOG" | tail -1 | cut -d= -f2-)
+[ -n "$PARTIAL_CONFIG_CORR" ] || fail "bootstrap config reread did not carry a correlation token"
+printf 'done [corr=%s]: converged inherited config re-read\n' "$PARTIAL_CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "remote reply source did not capture the converged config acknowledgment"
+PARTIAL_CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.2.result"
+remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 2 "$PARTIAL_CONFIG_RESULT" >/dev/null \
+  || fail "converged remote config acknowledgment was not ingested"
+pass "partial remote inheritance retains reread intent through bootstrap convergence"
+
 printf 'codex\n' > "$PARENT/config/crew-harness"
 touch "$TMP_ROOT/tmux-send-fail"
 if remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-fail.out" 2>&1; then
   fail "remote config push claimed success after its reread send failed"
 fi
-NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
 if [ ! -f "$NUDGE_MARKER" ]; then
   printf 'config push failure output:\n%s\n' "$(cat "$TMP_ROOT/config-push-fail.out")" >&2
   fail "failed remote config reread did not retain a retry marker"
@@ -290,8 +328,8 @@ CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$TMUX_LOG" | tail -1 | cut -d= -f2-)
 printf 'done [corr=%s]: inherited config re-read\n' "$CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
   || fail "remote reply source did not capture the config reread acknowledgement"
-CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.2.result"
-remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 2 "$CONFIG_RESULT" >/dev/null \
+CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.3.result"
+remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 3 "$CONFIG_RESULT" >/dev/null \
   || fail "remote config reread acknowledgement was not ingested"
 pass "remote inherited config retains and retries a failed live reread nudge"
 
@@ -302,6 +340,8 @@ if ! printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "
   printf 'secondmate projection:\n%s\n' "$(printf '%s' "$SNAPSHOT" | jq '.secondmate_current')" >&2
   fail "fleet snapshot did not select the remote structured-home projection"
 fi
+printf '%s' "$SNAPSHOT" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == true' >/dev/null \
+  || fail "remote structured observation did not prove the remote home present"
 printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "local" and .remote == false)' >/dev/null \
   || fail "fleet snapshot lost the existing local secondmate route"
 pass "fleet snapshot projects mixed local and remote structured state"
@@ -334,6 +374,8 @@ assert_contains "$BOOT_UNAVAILABLE" 'SECONDMATE_LIVENESS: secondmate ios: skippe
 UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
 printf '%s' "$UNAVAILABLE" | jq -e '.secondmate_current.records | any(.id == "ios" and .current.state == "unknown")' >/dev/null \
   || fail "unreachable remote host was not projected unknown"
+printf '%s' "$UNAVAILABLE" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == null' >/dev/null \
+  || fail "unreachable remote home presence was not projected unknown"
 rm -f "$PARENT/state/.wake-queue"
 launches_after=$(grep -c '^new-window' "$TMUX_LOG" || true)
 [ "$launches_before" -eq "$launches_after" ] || fail "unreachable projection attempted a replacement launch"
@@ -352,6 +394,24 @@ assert_present "$REMOTE_HOME" "refused remote retirement removed the home"
 assert_present "$PARENT/state/ios.meta" "refused remote retirement removed parent metadata"
 assert_grep '- ios ' "$PARENT/data/secondmates.md" "refused remote retirement removed the route"
 rm -f "$REMOTE_HOME/state/child.meta"
+mkdir -p "$PARENT/data/handoff"
+ln -s "$TMP_ROOT/missing-outbox-target" "$PARENT/data/handoff/ios.outbox.md"
+if remote_env "$ROOT/bin/fm-teardown.sh" ios >/dev/null 2>&1; then
+  fail "remote retirement accepted an unsafe backlog outbox"
+fi
+assert_present "$REMOTE_HOME" "unsafe backlog outbox retirement removed the remote home"
+rm -f "$PARENT/data/handoff/ios.outbox.md"
+mkdir -p "$TMP_ROOT/external-pending"
+printf 'task_id=ios\nphase=resolved\n' > "$TMP_ROOT/external-pending/escape"
+mv "$PARENT/state/pending-replies" "$PARENT/state/pending-replies.safe"
+ln -s "$TMP_ROOT/external-pending" "$PARENT/state/pending-replies"
+if remote_env "$ROOT/bin/fm-teardown.sh" ios >/dev/null 2>&1; then
+  fail "remote retirement accepted a symlinked pending-replies directory"
+fi
+assert_present "$REMOTE_HOME" "unsafe pending-replies retirement removed the remote home"
+assert_present "$TMP_ROOT/external-pending/escape" "unsafe retirement removed an external pending reply"
+rm -f "$PARENT/state/pending-replies"
+mv "$PARENT/state/pending-replies.safe" "$PARENT/state/pending-replies"
 remote_env "$ROOT/bin/fm-teardown.sh" ios >/dev/null \
   || fail "safe remote retirement failed after child work cleared"
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"

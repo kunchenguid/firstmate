@@ -124,6 +124,91 @@ FM_LOCK_LOG_PREFIX=teardown
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
+REMOTE_HANDOFF_DIR_PRESENT=0
+REMOTE_HANDOFF_DIR_REAL=
+REMOTE_OUTBOX_PRESENT=0
+REMOTE_PENDING_DIR_PRESENT=0
+REMOTE_PENDING_DIR_REAL=
+
+remote_recovery_paths_validate() {
+  local mode=${1:-initial} handoff_dir outbox pending_dir real rec
+  handoff_dir="$DATA/handoff"
+  outbox="$handoff_dir/$ID.outbox.md"
+  pending_dir="$STATE/pending-replies"
+  if [ -e "$handoff_dir" ] || [ -L "$handoff_dir" ]; then
+    [ -d "$handoff_dir" ] && [ ! -L "$handoff_dir" ] \
+      || { echo "REFUSED: remote handoff recovery directory is unsafe" >&2; return 1; }
+    real=$(CDPATH='' cd -- "$handoff_dir" 2>/dev/null && pwd -P) || return 1
+    if [ "$mode" = initial ]; then
+      REMOTE_HANDOFF_DIR_PRESENT=1
+      REMOTE_HANDOFF_DIR_REAL=$real
+    elif [ "$REMOTE_HANDOFF_DIR_PRESENT" -ne 1 ] || [ "$REMOTE_HANDOFF_DIR_REAL" != "$real" ]; then
+      echo "REFUSED: remote handoff recovery directory changed during retirement" >&2
+      return 1
+    fi
+  elif [ "$mode" != initial ] && [ "$REMOTE_HANDOFF_DIR_PRESENT" -ne 0 ]; then
+    echo "REFUSED: remote handoff recovery directory changed during retirement" >&2
+    return 1
+  fi
+  if [ -e "$outbox" ] || [ -L "$outbox" ]; then
+    [ -f "$outbox" ] && [ ! -L "$outbox" ] \
+      || { echo "REFUSED: remote backlog outbox is unsafe" >&2; return 1; }
+    if [ "$mode" = initial ]; then
+      REMOTE_OUTBOX_PRESENT=1
+    elif [ "$REMOTE_OUTBOX_PRESENT" -ne 1 ]; then
+      echo "REFUSED: remote backlog outbox changed during retirement" >&2
+      return 1
+    fi
+  elif [ "$mode" != initial ] && [ "$REMOTE_OUTBOX_PRESENT" -ne 0 ]; then
+    echo "REFUSED: remote backlog outbox changed during retirement" >&2
+    return 1
+  fi
+  if [ -e "$pending_dir" ] || [ -L "$pending_dir" ]; then
+    [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] \
+      || { echo "REFUSED: pending-replies recovery directory is unsafe" >&2; return 1; }
+    real=$(CDPATH='' cd -- "$pending_dir" 2>/dev/null && pwd -P) || return 1
+    if [ "$mode" = initial ]; then
+      REMOTE_PENDING_DIR_PRESENT=1
+      REMOTE_PENDING_DIR_REAL=$real
+    elif [ "$REMOTE_PENDING_DIR_PRESENT" -ne 1 ] || [ "$REMOTE_PENDING_DIR_REAL" != "$real" ]; then
+      echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
+      return 1
+    fi
+    for rec in "$pending_dir"/*; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
+      [ -f "$rec" ] && [ ! -L "$rec" ] \
+        || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+    done
+  elif [ "$mode" != initial ] && [ "$REMOTE_PENDING_DIR_PRESENT" -ne 0 ]; then
+    echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
+    return 1
+  fi
+}
+
+remote_pending_replies_cleanup() {
+  local rec
+  [ "$REMOTE_PENDING_DIR_PRESENT" -eq 1 ] || return 0
+  (
+    CDPATH='' cd -- "$STATE/pending-replies" 2>/dev/null || exit 1
+    [ "$(pwd -P)" = "$REMOTE_PENDING_DIR_REAL" ] || exit 1
+    for rec in ./*; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
+      [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
+      [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
+    done
+  )
+}
+
+remote_outbox_cleanup() {
+  [ "$REMOTE_OUTBOX_PRESENT" -eq 1 ] || return 0
+  (
+    CDPATH='' cd -- "$DATA/handoff" 2>/dev/null || exit 1
+    [ "$(pwd -P)" = "$REMOTE_HANDOFF_DIR_REAL" ] || exit 1
+    [ -f "$ID.outbox.md" ] && [ ! -L "$ID.outbox.md" ] || exit 1
+    rm -f -- "$ID.outbox.md"
+  )
+}
+
 remote_secondmate_teardown() {
   local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp rec phase task_id
   remote_host=$(fm_meta_get "$META" remote_host)
@@ -141,7 +226,8 @@ remote_secondmate_teardown() {
   [ "$route_host" = "$remote_host" ] && [ "$route_root" = "$remote_root" ] && [ "$route_home" = "$remote_home" ] \
     || { echo "REFUSED: remote secondmate metadata does not match its registry route" >&2; return 1; }
   [ -z "$FORCE" ] || [ "$FORCE" = --force ] || { echo "error: invalid teardown option: $FORCE" >&2; return 2; }
-  if [ "$FORCE" != --force ] && [ -f "$DATA/handoff/$ID.outbox.md" ]; then
+  remote_recovery_paths_validate initial || return 1
+  if [ "$FORCE" != --force ] && [ "$REMOTE_OUTBOX_PRESENT" -eq 1 ]; then
     echo "REFUSED: remote secondmate $ID still has a pending backlog outbox; deliver it or explicitly discard with --force" >&2
     return 1
   fi
@@ -170,20 +256,22 @@ remote_secondmate_teardown() {
     fi
     return "$rc"
   fi
+  remote_recovery_paths_validate recheck || {
+    echo "error: remote home retired but local recovery paths changed; preserving the local route for retry" >&2
+    return 1
+  }
   "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire "$ID" >/dev/null 2>&1 || {
     echo "error: remote home retired but reply-source cleanup is incomplete; preserving the local route for retry" >&2
     return 1
   }
+  if [ "$FORCE" = --force ]; then
+    remote_outbox_cleanup || { echo "error: remote outbox cleanup failed; preserving the local route for retry" >&2; return 1; }
+  fi
+  remote_pending_replies_cleanup \
+    || { echo "error: remote pending-reply cleanup failed; preserving the local route for retry" >&2; return 1; }
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
-  if [ "$FORCE" = --force ]; then rm -f -- "$DATA/handoff/$ID.outbox.md"; fi
-  if [ -d "$STATE/pending-replies" ]; then
-    for rec in "$STATE/pending-replies"/*; do
-      [ -f "$rec" ] || continue
-      [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
-    done
-  fi
   rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
