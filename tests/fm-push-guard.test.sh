@@ -13,21 +13,19 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TMP_ROOT=$(fm_test_tmproot fm-push-guard)
 GUARD="$ROOT/bin/fm-push-guard.sh"
-CASE_N=0
 
 commit_file() {
   local repo=$1 file=$2 content=$3 subject=$4
   printf '%s\n' "$content" > "$repo/$file"
   git -C "$repo" add "$file"
-  git -C "$repo" commit -qm "$subject"
+  git -C "$repo" commit -qm "$subject" >/dev/null
 }
 
-# new_case echoes a directory containing a bare origin plus worker and reviewer
+# new_case <name> echoes a directory containing a bare origin plus worker and reviewer
 # clones. Both clones begin on the same one-commit main branch.
 new_case() {
-  local dir seed origin
-  CASE_N=$((CASE_N + 1))
-  dir="$TMP_ROOT/case-$CASE_N"
+  local name=$1 dir seed origin
+  dir="$TMP_ROOT/$name"
   seed="$dir/seed"
   origin="$dir/origin.git"
   mkdir -p "$seed"
@@ -48,7 +46,7 @@ track_remote_task_branch() {
 
 test_dropped_remote_commits_are_named() {
   local dir worker reviewer branch out status lost_one lost_two
-  dir=$(new_case)
+  dir=$(new_case dropped)
   worker="$dir/worker"
   reviewer="$dir/reviewer"
   branch=fm/task
@@ -66,11 +64,11 @@ test_dropped_remote_commits_are_named() {
 
   out=$(cd "$worker" && "$GUARD" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "history-dropping push guard unexpectedly passed"
-  assert_contains "$out" "${lost_one%${lost_one#????????????}}" \
+  assert_contains "$out" "$(printf '%.12s' "$lost_one")" \
     "refusal did not name the first lost commit"
   assert_contains "$out" "narrow-width heading truncation fix" \
     "refusal did not include the first lost commit subject"
-  assert_contains "$out" "${lost_two%${lost_two#????????????}}" \
+  assert_contains "$out" "$(printf '%.12s' "$lost_two")" \
     "refusal did not name the second lost commit"
   assert_contains "$out" "ledger conflict-list release" \
     "refusal did not include the second lost commit subject"
@@ -79,7 +77,7 @@ test_dropped_remote_commits_are_named() {
 
 test_clean_descendant_push_passes() {
   local dir worker branch out status
-  dir=$(new_case)
+  dir=$(new_case clean)
   worker="$dir/worker"
   branch=fm/task
   git -C "$dir/reviewer" push -q origin main:"$branch"
@@ -95,7 +93,7 @@ test_clean_descendant_push_passes() {
 
 test_patch_equivalent_rebase_passes() {
   local dir worker reviewer branch remote_commit rebased_commit out status
-  dir=$(new_case)
+  dir=$(new_case equivalent)
   worker="$dir/worker"
   reviewer="$dir/reviewer"
   branch=fm/task
@@ -108,7 +106,7 @@ test_patch_equivalent_rebase_passes() {
   git -C "$worker" checkout -qb "$branch"
   commit_file "$worker" local.txt local "local work before replay"
   track_remote_task_branch "$worker" "$branch"
-  git -C "$worker" cherry-pick -q "$remote_commit"
+  git -C "$worker" cherry-pick "$remote_commit" >/dev/null
   rebased_commit=$(git -C "$worker" rev-parse HEAD)
   [ "$rebased_commit" != "$remote_commit" ] \
     || fail "patch-equivalent fixture accidentally retained the original commit identity"
@@ -122,7 +120,7 @@ test_patch_equivalent_rebase_passes() {
 
 test_no_upstream_refuses() {
   local dir worker out status
-  dir=$(new_case)
+  dir=$(new_case no-upstream)
   worker="$dir/worker"
   git -C "$worker" checkout -qb fm/no-upstream
 
@@ -134,7 +132,7 @@ test_no_upstream_refuses() {
 
 test_offline_remote_refuses() {
   local dir worker branch out status
-  dir=$(new_case)
+  dir=$(new_case offline)
   worker="$dir/worker"
   branch=fm/task
   git -C "$dir/reviewer" push -q origin main:"$branch"
@@ -150,7 +148,7 @@ test_offline_remote_refuses() {
 
 test_explicit_new_remote_branch_passes() {
   local dir worker out status
-  dir=$(new_case)
+  dir=$(new_case new-branch)
   worker="$dir/worker"
   git -C "$worker" checkout -qb fm/new-task
   commit_file "$worker" new.txt new "first task change"

@@ -41,6 +41,8 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# They also require clean catch-up to the actual PR head before resumed edits,
+# step-sized commits, and bin/fm-push-guard.sh immediately before any push.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
@@ -264,6 +266,7 @@ exit 0
 fi
 
 REPO=${POS[1]}
+PUSH_GUARD=$(shell_quote "$FM_ROOT/bin/fm-push-guard.sh")
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -424,10 +427,18 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
+If this is resumed work on a branch that has been through a review round, BEFORE editing anything, fetch the actual PR head and fast-forward your local task branch to that exact commit.
+If that is not a clean fast-forward, stop and report instead of reconciling the histories by hand.
+
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+Commit after each real step: after the failing test exists and has been shown to fail, after the fix makes it pass, and after documentation is updated when documentation is part of the change.
+Do not wait and put every step into one final commit.
+This is not a per-file commit rule.
+If this delivery mode permits a push, run \`$PUSH_GUARD\` from the project worktree immediately before every push.
+For the first push of a new branch with no upstream, pass the exact configured remote and remote branch to the guard; never treat an unavailable remote as an empty one.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
