@@ -253,7 +253,8 @@ afk_active() {  # <state>
 
 # afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
 # skill (enter) and by firstmate on user return (exit). Durable: a plain file,
-# so recovery (§5) re-enters afk if it is present after a restart.
+# so primary-runtime's session-start recovery re-enters afk if it is present
+# after a restart.
 afk_enter() {  # <state>
   mkdir -p "$1"
   date '+%s' > "$1/$AFK_FLAG_NAME"

@@ -276,10 +276,11 @@ secondmate_sync() {
   # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
   # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
   # .agents/skills/) actually changed, so a secondmate already on the primary's
-  # version is never disturbed (AGENTS.md bootstrap + supervision). Unlike
-  # /updatefirstmate, startup owns the live-convergence send itself because it is
-  # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while
-  # preserving failed sends as NUDGE_SECONDMATES retry markers.
+  # version is never disturbed (primary-runtime session start and supervision).
+  # Unlike /updatefirstmate, startup owns the live-convergence send itself
+  # because it is a deterministic locked sweep and can report success as
+  # BOOTSTRAP_INFO while preserving failed sends as NUDGE_SECONDMATES retry
+  # markers.
   [ -d "$STATE" ] || return 0
   local primary_head
   if ! primary_head=$(primary_head_commit "$FM_ROOT"); then

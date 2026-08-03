@@ -1,7 +1,8 @@
 # Per-repo no-mistakes overrides.
 
-# firstmate is an agent-orchestration repo: its AGENTS.md installs a fleet-captain
-# identity. Disable project-level agent settings/instructions for gate agents so a
+# firstmate is an agent-orchestration repo: its role gateway plus the discoverable
+# .agents/skills/primary-runtime/SKILL.md can hand a session the fleet-captain
+# contract. Disable project-level agent settings/instructions for gate agents so a
 # no-mistakes review/fix/document/test/lint/pr/rebase/ci agent never adopts that
 # identity or drives the fleet. Trusted-only: a pushed branch cannot turn this off,
 # so it is honored only from the default-branch copy of this file. Layered above

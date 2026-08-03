@@ -155,7 +155,7 @@
 # STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
 # tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
 # may be. Both bounds are safe because the section prints every task's full
-# status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
+# status log path, and primary-runtime treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
 #
 # RUNTIME BOUND: the digest is now executed on a session-open hook (see

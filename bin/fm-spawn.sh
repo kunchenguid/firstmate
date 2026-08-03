@@ -1099,10 +1099,10 @@ effort_flag_for_harness() {
       # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
       # ultra is muse's max-CLASS level, so firstmate's max maps onto it - but
       # only ever as an EXPLICIT captain choice, never as a fallback, because
-      # AGENTS.md section 4 forbids selecting max without captain preference and
-      # the omitted effort here leaves muse on its own high default. muse's extra
-      # none/minimal levels sit below firstmate's shared vocabulary and are
-      # deliberately unreachable rather than remapped onto low.
+      # primary-runtime's dispatch contract forbids selecting max without captain
+      # preference, and the omitted effort here leaves muse on its own high
+      # default. muse's extra none/minimal levels sit below firstmate's shared
+      # vocabulary and are deliberately unreachable rather than remapped onto low.
       case "$effort" in
         low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
@@ -1285,11 +1285,12 @@ if [ "$KIND" = secondmate ]; then
   WT="$PROJ_ABS"
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
-  # recovery-respawned secondmate always runs the primary's version (AGENTS.md
-  # spawn section). Purely local - no fetch: the home is a worktree of this same
-  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
-  # wrong-branch home is left untouched and launches as-is. The agent reads the
-  # role gateway, charter, and primary runtime fresh on launch, so no nudge is needed here.
+  # recovery-respawned secondmate always runs the primary's version
+  # (primary-runtime spawn contract). Purely local - no fetch: the home is a
+  # worktree of this same repo and already holds the commit. ff-only and
+  # guarded; a dirty, diverged, or wrong-branch home is left untouched and
+  # launches as-is. The agent reads the role gateway, charter, and primary
+  # runtime fresh on launch, so no nudge is needed here.
   if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
     sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
     case "$sm_ff_out" in
