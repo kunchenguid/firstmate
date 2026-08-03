@@ -19,14 +19,18 @@ cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
+if [ -n "${FM_FAKE_HERDR_ARGV:-}" ]; then
+  : > "$FM_FAKE_HERDR_ARGV"
+  for recorded in "$@"; do printf '%s\n' "$recorded" >> "$FM_FAKE_HERDR_ARGV"; done
+fi
 state=$FM_FAKE_HERDR_STATE
-last=
-for arg in "$@"; do
-  previous=$last
-  last=$arg
-done
-[ "${previous:-}" = --session ] || { echo "fake herdr: missing trailing --session" >&2; exit 90; }
-session=$last
+# --session is a herdr GLOBAL option: it must arrive before the subcommand, so
+# that a subcommand ending in a `--` separator cannot swallow it into the inner
+# command's argv.
+[ "${1:-}" = --session ] || { echo "fake herdr: missing leading --session" >&2; exit 90; }
+session=${2:-}
+[ -n "$session" ] || { echo "fake herdr: --session without a value" >&2; exit 90; }
+shift 2
 default_socket=$(cat "$state/default-socket")
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
@@ -42,7 +46,7 @@ case "$1 ${2:-}" in
         '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
     fi
     ;;
-  "server --session")
+  "server ")
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
@@ -78,6 +82,7 @@ run_with_fake() {
   PATH="$FAKEBIN:$PATH" \
     FM_FAKE_HERDR_STATE="$FAKE_STATE" \
     FM_FAKE_HERDR_LOG="$FAKE_LOG" \
+    FM_FAKE_HERDR_ARGV="${FM_FAKE_HERDR_ARGV:-}" \
     FM_FAKE_HERDR_REAL_SLEEP="$REAL_SLEEP" \
     FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
@@ -139,19 +144,19 @@ test_provision_run_and_guarded_teardown() {
 
   while IFS= read -r line; do
     case "$line" in
-      *"--session $name") : ;;
-      *) fail "Herdr call lacks a trailing lab session: $line" ;;
+      "--session $name "*) : ;;
+      *) fail "Herdr call lacks a leading lab session: $line" ;;
     esac
   done < "$FAKE_LOG"
   line_count=$(wc -l < "$FAKE_LOG" | tr -d ' ')
-  stop_line=$(grep -n "^session stop $name --json --session $name$" "$FAKE_LOG" | cut -d: -f1)
-  delete_line=$(grep -n "^session delete $name --json --session $name$" "$FAKE_LOG" | cut -d: -f1)
+  stop_line=$(grep -n "^--session $name session stop $name --json$" "$FAKE_LOG" | cut -d: -f1)
+  delete_line=$(grep -n "^--session $name session delete $name --json$" "$FAKE_LOG" | cut -d: -f1)
   if [ -z "$stop_line" ] || [ -z "$delete_line" ] || [ "$line_count" -le "$delete_line" ]; then
     fail "teardown did not emit explicit stop/delete followed by the after tripwire"
   fi
-  sed -n "$((stop_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
+  sed -n "$((stop_line - 1))p" "$FAKE_LOG" | grep -F -e "--session $name session list --json" >/dev/null \
     || fail "stop was not immediately preceded by a fresh refuse-default session list"
-  sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
+  sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F -e "--session $name session list --json" >/dev/null \
     || fail "delete was not immediately preceded by a fresh refuse-default session list"
   pass "fm-herdr-lab: provisioning, scoped calls, guarded teardown, and fleet tripwire are deterministic"
 }
@@ -234,7 +239,43 @@ SH
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
+test_lab_session_never_lands_past_a_separator() {
+  local name="fm-lab-separator-$$" argv="$TMP_ROOT/argv-separator"
+  local line i=0 sep=-1 sess=-1 inner='' status=0
+  local -a tokens=()
+  : > "$FAKE_LOG"
+  # Assert on the recorded argv before the exit status, so a misplaced session
+  # flag is reported as the placement defect it is rather than as a bare failure.
+  FM_FAKE_HERDR_ARGV="$argv" run_with_fake fm_herdr_lab_cli "$name" \
+    agent start envcheck --cwd /tmp -- bash -lc 'echo hi' >/dev/null 2>&1 || status=$?
+
+  while IFS= read -r line; do
+    tokens+=("$line")
+    if [ "$line" = '--' ] && [ "$sep" -lt 0 ]; then
+      sep=$i
+    fi
+    if [ "$line" = '--session' ] && [ "$sess" -lt 0 ]; then
+      sess=$i
+    fi
+    i=$((i + 1))
+  done < "$argv"
+
+  [ "$sess" -ge 0 ] || fail "no --session flag reached Herdr at all"
+  [ "$sep" -ge 0 ] || fail "the -- separator did not survive to the Herdr argv"
+  [ "$sess" -eq 0 ] || fail "--session is not the leading Herdr global option (index $sess)"
+  [ "${tokens[1]}" = "$name" ] || fail "--session did not carry the lab session name: ${tokens[1]}"
+  [ "$sess" -lt "$sep" ] \
+    || fail "--session landed past the -- separator (index $sess vs separator $sep); the inner command would swallow it"
+
+  inner=$(printf '%s\n' "${tokens[@]:$((sep + 1))}" | tr '\n' ' ')
+  [ "$inner" = 'bash -lc echo hi ' ] \
+    || fail "the inner command after -- was not passed through untouched: $inner"
+  expect_code 0 "$status" "a correctly scoped --separated run command must succeed"
+  pass "fm-herdr-lab: the lab session is a leading global option, never past a -- separator"
+}
+
 test_refuses_unsafe_names
+test_lab_session_never_lands_past_a_separator
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown

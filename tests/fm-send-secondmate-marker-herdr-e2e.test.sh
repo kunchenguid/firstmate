@@ -12,7 +12,7 @@
 # Every Herdr call, including calls made inside the production backend adapter,
 # is routed through bin/fm-herdr-lab.sh. The PATH shim strips only the adapter's
 # already-validated trailing --session pair, then delegates to the lab helper,
-# which appends its own required trailing --session before invoking real Herdr.
+# which inserts its own required leading --session before invoking real Herdr.
 set -u
 
 # shellcheck source=tests/lib.sh
