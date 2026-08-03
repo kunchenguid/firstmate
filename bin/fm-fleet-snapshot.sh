@@ -59,7 +59,7 @@
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
-# Human views must render this output instead of parsing state files again.
+# Rendered views must consume this output instead of parsing state files again.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

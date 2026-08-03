@@ -108,7 +108,7 @@ state/               volatile runtime signals; gitignored
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
-  usage-cache/<id>.json   last successful live codeburn reading per task, written by fm-fleet-snapshot.sh; served (marked stale) when a fleet-snapshot usage call times out or fails (docs/task-usage.md)
+  usage-cache/<id>.json   existing volatile live-usage fallback, served (marked stale) but never written by fm-fleet-snapshot.sh; lifecycle details in docs/task-usage.md
   public-followup/   generated private transport for promised public replies: commitment registrations, typed terminal-result inbox, accepted/rejected ledgers (section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
