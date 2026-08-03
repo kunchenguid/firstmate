@@ -2679,6 +2679,116 @@ SH
   pass "returned custom check descendants are drained on installed and fallback timeout paths"
 }
 
+# Replace the default gh mock with one that also answers the forge view landing
+# identity is read from, so a released task's request can be resolved without a
+# task record. Args: dir forge_state head_sha
+add_forge_view_gh() {
+  local dir=$1 state=$2 head=$3
+  cat > "$dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+case " \$* " in
+  *"state,headRefOid"*) printf '%s\t%s\n' '$state' '$head' ; exit 0 ;;
+  *" headRefOid "*) printf '%s\n' '$head' ; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$dir/fakebin/gh"
+}
+
+# The captain's parked-completion ruling releases a worker before its PR lands,
+# so the merge watch must be rearmable against the durable landing record that
+# cleanup leaves behind, and rebuildable from the request itself for a task
+# released before landing records existed. A request that resolves to nothing
+# still refuses and arms nothing.
+test_released_task_rearms_merge_watch() {
+  local dir rc url=https://github.com/o/r/pull/20 other_url=https://github.com/o/r/pull/21
+
+  # No task record at all, and the default gh mock cannot answer the forge:
+  # nothing resolves, so this must refuse and leave no artifact behind.
+  dir=$(make_case released-unresolvable)
+  set +e
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "released-unresolvable: fm-pr-check accepted an unresolvable request"
+  assert_grep 'error: task metadata is unavailable' "$dir/stderr" \
+    "released-unresolvable: refusal did not explain the missing record"
+  assert_absent "$dir/home/state/task-a.check.sh" \
+    "released-unresolvable: a poll was armed with nothing to bind it to"
+  assert_absent "$dir/home/state/task-a.landing" \
+    "released-unresolvable: an unresolvable request left a landing record"
+
+  # A released task with its durable landing record rearms the watch, and the
+  # published poll validates against that record exactly as it would a meta.
+  dir=$(make_case released-with-record)
+  fm_pr_landing_record_write "$dir/home/state" task-a "$url" \
+    1111111111111111111111111111111111111111 "$dir/project" \
+    || fail "released-with-record: could not build the landing record fixture"
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "released-with-record: fm-pr-check refused a released task's landing record"
+  assert_grep 'armed: state/task-a.check.sh' "$dir/stdout" \
+    "released-with-record: the merge watch was not rearmed"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "released-with-record: the published poll does not validate against the landing record"
+  assert_grep "pr=$url" "$dir/home/state/task-a.landing" \
+    "released-with-record: the landing record does not carry the request"
+  assert_absent "$dir/home/state/task-a.meta" \
+    "released-with-record: a landing record must never be promoted to a meta"
+
+  # Released before landing records existed: the request itself is the only
+  # authority, so the record is rebuilt from a forge read.
+  dir=$(make_case released-rebuilt)
+  add_forge_view_gh "$dir" OPEN 2222222222222222222222222222222222222222
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "released-rebuilt: fm-pr-check could not rebuild the record from the request"
+  assert_grep 'rebuilt: state/task-a.landing' "$dir/stdout" \
+    "released-rebuilt: the rebuild was not reported"
+  assert_grep 'pr_head=2222222222222222222222222222222222222222' "$dir/home/state/task-a.landing" \
+    "released-rebuilt: the rebuilt record did not take its head from the forge"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "released-rebuilt: the rebuilt record did not publish a valid poll"
+
+  dir=$(make_case released-mismatched-record)
+  fm_pr_landing_record_write "$dir/home/state" task-a "$url" \
+    1111111111111111111111111111111111111111 "$dir/project" \
+    || fail "released-mismatched-record: could not build the landing record fixture"
+  add_forge_view_gh "$dir" OPEN 2222222222222222222222222222222222222222
+  set +e
+  run_check_entry "$dir" task-a "$other_url" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "released-mismatched-record: fm-pr-check accepted a different request"
+  assert_grep "$url" "$dir/stderr" \
+    "released-mismatched-record: refusal did not name the recorded URL"
+  assert_grep "$other_url" "$dir/stderr" \
+    "released-mismatched-record: refusal did not name the requested URL"
+  [ ! -s "$dir/gh.log" ] || fail "released-mismatched-record: the forge was read"
+  assert_absent "$dir/home/state/task-a.check.sh" \
+    "released-mismatched-record: a poll was armed"
+  assert_grep "pr=$url" "$dir/home/state/task-a.landing" \
+    "released-mismatched-record: the landing record was rebound"
+
+  dir=$(make_case released-malformed-record)
+  printf '%s\n' fm-landing-v1 'pr=not-a-url' > "$dir/home/state/task-a.landing"
+  chmod 0600 "$dir/home/state/task-a.landing"
+  add_forge_view_gh "$dir" OPEN 2222222222222222222222222222222222222222
+  set +e
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "released-malformed-record: fm-pr-check accepted malformed state"
+  assert_grep 'error: task landing record is invalid' "$dir/stderr" \
+    "released-malformed-record: refusal did not identify invalid state"
+  [ ! -s "$dir/gh.log" ] || fail "released-malformed-record: the forge was read"
+  assert_absent "$dir/home/state/task-a.check.sh" \
+    "released-malformed-record: a poll was armed"
+  assert_grep 'pr=not-a-url' "$dir/home/state/task-a.landing" \
+    "released-malformed-record: malformed state was reconstructed"
+
+  pass "released-task checks preserve landing identity and rebuild only absent records"
+}
+
 test_teardown_removes_poll_artifacts() {
   local dir fakebin kind artifact counterpart rc
   dir=$(make_case teardown-cleanup)
@@ -3600,4 +3710,5 @@ test_bootstrap_migrates_before_other_mutations
 test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
+test_released_task_rearms_merge_watch
 test_teardown_removes_poll_artifacts
