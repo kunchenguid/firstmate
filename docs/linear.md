@@ -95,12 +95,9 @@ Part of PSY-42
 
 After valid arguments are supplied, every operational outcome prints one `linear: ...` line and exits 0.
 
-> **Prerequisite on the GitHub side.** Linear only links pull requests in
-> repositories covered by its GitHub integration. If firstmate's PRs are opened
-> against a repository outside the connected organisation, the reference is
-> written correctly and Linear ignores it. See `docs/linear-verification.md`
-> section 8. Refresh's PR link attachment goes through the Linear API directly
-> and is unaffected.
+> **Prerequisite on the GitHub side.** Linear only links pull requests in repositories covered by its GitHub integration.
+> If firstmate's PRs are opened against a repository outside the connected organisation, the reference is written correctly and Linear ignores it.
+> Refresh's PR link attachment goes through the Linear API directly and is unaffected.
 
 ## Refreshing in place: `bin/fm-linear-refresh.sh`
 
