@@ -142,7 +142,8 @@ family_for_basename() {
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
-    fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
+    fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
+    fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;

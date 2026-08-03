@@ -908,7 +908,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   mkdir -p "$state" "$config"
   log="$TMP_ROOT/symlink-spawn-$label.log"
 
-  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   rc=$?
   expect_code 0 "$rc" "fm-spawn.sh should succeed for a project reached through a symlinked prefix when the backend reports $first_reply cwd"$'\n'"$out"
   assert_contains "$out" "worktree=$wt" \
@@ -1028,7 +1028,7 @@ test_spawn_refuses_unknown_backend_flag() {
   # graduated to real adapters and have their own spawn tests.
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" nope-backend-z1 projects/none claude --backend bogus 2>&1)
+    "$ROOT/bin/fm-spawn.sh" nope-backend-z1 projects/none claude --mode no-mistakes --yolo off --backend bogus 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "fm-spawn --backend bogus should refuse"
   assert_contains "$out" "unknown backend 'bogus'" "fm-spawn did not name the rejected backend"
@@ -1039,7 +1039,7 @@ test_spawn_refuses_codex_app_backend_flag() {
   local out status
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" nope-codex-app-z1 projects/none claude --backend codex-app 2>&1)
+    "$ROOT/bin/fm-spawn.sh" nope-codex-app-z1 projects/none claude --mode no-mistakes --yolo off --backend codex-app 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "fm-spawn --backend codex-app should refuse"
   assert_contains "$out" "unknown backend 'codex-app'" "fm-spawn did not preserve the blocked codex-app contract"
@@ -1050,7 +1050,7 @@ test_spawn_refuses_unknown_fm_backend_env() {
   local out status
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 FM_BACKEND=bogus \
-    "$ROOT/bin/fm-spawn.sh" nope-backend-z2 projects/none claude 2>&1)
+    "$ROOT/bin/fm-spawn.sh" nope-backend-z2 projects/none claude --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "FM_BACKEND=bogus should refuse"
   assert_contains "$out" "unknown backend 'bogus'" "fm-spawn did not name the rejected FM_BACKEND"
@@ -1072,7 +1072,7 @@ test_spawn_default_backend_writes_no_meta_field() {
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend tmux 2>&1)
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux (the default) must not write backend= to meta (P1 compatibility contract)"
@@ -1096,7 +1096,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend tmux 2>&1)
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully even with HERDR_ENV=1 set"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux must win over an ambient HERDR_ENV=1 auto-detect marker"
@@ -1123,7 +1123,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/nest.log" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1)
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   expect_code 0 $? "fm-spawn.sh should auto-detect tmux and spawn successfully for nested tmux-in-herdr"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "auto-detected nested tmux-in-herdr must resolve to tmux (missing backend= means tmux)"
