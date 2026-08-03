@@ -30,7 +30,10 @@
 #      tip or advanced beyond it with pipeline fix commits - is not such an
 #      advance: the branch was rewritten away from it after submission, so
 #      that abandoned nonterminal run is rejected as stale rather than
-#      masking the crew's current state.
+#      masking the crew's current state. When the advanced head's commits are
+#      unavailable to the crew worktree, that staleness judgment runs against
+#      the run's own gate worktree object database (located by run id under
+#      NM_HOME); without that database the run stays accepted.
 #      Terminal and coarse historical attribution stays
 #      strictly head-bound, and the coarse fallback stops at the newest row for
 #      the branch rather than searching older history after an identity miss.
@@ -398,17 +401,40 @@ nm_run_head_matches_worktree() {
 # (the branch-creation base, the current tip, ordinary ancestors) never
 # reject, so a legitimately rebased pipeline head stays accepted. A missing
 # or unreadable reflog yields no entries and never rejects on its own.
-nm_run_head_built_on_rewritten_tip() {  # <run-full-sha> <local-full-sha>
-  local run_full=$1 local_full=$2 tip
+# The run-side ancestry is judged in <run-odb-dir> because pipeline fix
+# commits may exist only in the run's own gate worktree, never fetched into
+# the crew worktree; the tip-vs-local test always uses the crew worktree,
+# whose reflog tips are local commits by construction. A tip unknown to the
+# run's object database simply never rejects.
+nm_run_head_built_on_rewritten_tip() {  # <run-full-sha> <local-full-sha> <run-odb-dir>
+  local run_full=$1 local_full=$2 run_odb=$3 tip
   [ -n "$CREW_BRANCH" ] || return 1
   while IFS= read -r tip; do
     [ -n "$tip" ] || continue
     git -C "$WT" merge-base --is-ancestor "$tip" "$local_full" 2>/dev/null && continue
-    if git -C "$WT" merge-base --is-ancestor "$tip" "$run_full" 2>/dev/null; then
+    if git -C "$run_odb" merge-base --is-ancestor "$tip" "$run_full" 2>/dev/null; then
       return 0
     fi
   done < <(git -C "$WT" reflog show --format=%H "refs/heads/$CREW_BRANCH" 2>/dev/null)
   return 1
+}
+
+# The primary run's own gate worktree under the no-mistakes home
+# (NM_HOME, default ~/.no-mistakes), located by the run id `axi status`
+# reported: worktrees/<repo-hash>/<run-id>. This is the object database that
+# actually holds a pipeline-advanced head the crew worktree cannot resolve.
+# Echoes nothing when the run id is missing or no such worktree exists (e.g.
+# already cleaned up), which keeps the caller on its lenient accept path.
+nm_gate_worktree_for_run() {
+  local run_id d
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] || return 0
+  for d in "${NM_HOME:-$HOME/.no-mistakes}/worktrees"/*/"$run_id"; do
+    [ -d "$d" ] || continue
+    printf '%s' "$d"
+    return 0
+  done
+  return 0
 }
 
 # Bare axi status selects the branch's current run. A clearly nonterminal run
@@ -417,9 +443,15 @@ nm_run_head_built_on_rewritten_tip() {  # <run-full-sha> <local-full-sha>
 # work strictly ahead of the run is still newer code and rejects attribution,
 # a divergent head built on a tip the branch's own reflog shows was rewritten
 # away rejects as stale, and terminal runs retain the strict historical head
-# binding above.
+# binding above. A head the crew worktree cannot resolve at all - the typical
+# shape once pipeline fix commits advance the run gate-side - is judged for
+# that same rewritten-tip staleness against the run's own gate worktree
+# object database; only when that database is unavailable too does the run
+# stay accepted, because staleness then genuinely cannot be judged. The
+# local-advanced rejection needs no gate-side twin: a run head that were an
+# ancestor of the local HEAD would be resolvable in the crew worktree.
 nm_primary_run_matches() {
-  local run_head status outcome local_full run_full
+  local run_head status outcome local_full run_full gate_odb
   run_head=$(strip_quotes "$(nm_field head)")
   [ -n "$run_head" ] || return 1
   nm_run_head_matches_worktree && return 0
@@ -431,9 +463,15 @@ nm_primary_run_matches() {
     *) return 1 ;;
   esac
   local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 0
-  git -C "$WT" merge-base --is-ancestor "$run_full" "$local_full" 2>/dev/null && return 1
-  nm_run_head_built_on_rewritten_tip "$run_full" "$local_full" && return 1
+  if run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null); then
+    git -C "$WT" merge-base --is-ancestor "$run_full" "$local_full" 2>/dev/null && return 1
+    nm_run_head_built_on_rewritten_tip "$run_full" "$local_full" "$WT" && return 1
+    return 0
+  fi
+  gate_odb=$(nm_gate_worktree_for_run)
+  [ -n "$gate_odb" ] || return 0
+  run_full=$(git -C "$gate_odb" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 0
+  nm_run_head_built_on_rewritten_tip "$run_full" "$local_full" "$gate_odb" && return 1
   return 0
 }
 

@@ -30,7 +30,10 @@
 #       a nonterminal head built on a tip the branch's own reflog shows was
 #       rewritten away - whether it still is that tip or advanced beyond it
 #       with pipeline fix commits (an abandoned run on a reused branch) - is
-#       rejected as stale.
+#       rejected as stale, including when those fix commits exist only in the
+#       run's gate worktree (NM_HOME) and the head is unresolvable in the crew
+#       worktree, while an unchanged branch's gate-advanced current run stays
+#       attributed.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -147,9 +150,23 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 }
 
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
-# from the caller's environment by the fakes above.
+# from the caller's environment by the fakes above. NM_HOME points at the case's
+# own (usually absent) no-mistakes home so the gate-worktree lookup for
+# unavailable run heads stays hermetic instead of reading ~/.no-mistakes.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" NM_HOME="$1/nm-home" "$CREW_STATE" "$2"
+}
+
+# A gate worktree for run id 01RUN (the fixtures' id) under the case's NM_HOME,
+# reproducing no-mistakes' <NM_HOME>/worktrees/<repo-id>/<run-id> topology as a
+# clone of the crew repo at its current tip. Pipeline fix commits created here
+# stay out of the crew repo's object database, exactly like real gate-side
+# advances the crew never fetched.
+make_gate_run_worktree() {  # <case-dir> <crew-repo> -> echoes gate worktree dir
+  local gate="$1/nm-home/worktrees/repo1/01RUN"
+  mkdir -p "$(dirname "$gate")"
+  git clone -q "$2" "$gate" 2>/dev/null
+  printf '%s\n' "$gate"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -1483,6 +1500,64 @@ test_stale_advanced_run_head_on_rewritten_branch_not_current() {
   pass "stale advanced run head on a rewritten branch is not attributed as current"
 }
 
+# The same stale shape as above, but with the pipeline fix commits living only
+# in the run's gate worktree (never fetched into the crew repo), so the run
+# head is UNRESOLVABLE in the crew worktree. The staleness judgment must run
+# against the gate worktree's own object database instead of accepting blindly.
+test_stale_unresolvable_advanced_head_on_rewritten_branch_not_current() {
+  reset_fakes
+  local d old_head gate run_head new_head out
+  d=$(new_case stale-unresolvable-advanced)
+  make_repo_on_branch "$d/wt" fm/todo-flag4
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  gate=$(make_gate_run_worktree "$d" "$d/wt")
+  git -C "$gate" commit -q --allow-empty -m 'pipeline fix on abandoned run'
+  run_head=$(git -C "$gate" rev-parse HEAD)
+  # Simulate a stage-2 rewrite that keeps the branch reflog: amend the tip.
+  git -C "$d/wt" commit -q --allow-empty --amend -m 'stage 2 rewritten tip'
+  new_head=$(git -C "$d/wt" rev-parse HEAD)
+  [ "$old_head" != "$new_head" ] || fail "rewrite did not produce a new head"
+  git -C "$d/wt" rev-parse --verify "${run_head}^{commit}" >/dev/null 2>&1 \
+    && fail "run head must be unresolvable in the crew worktree"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/stale-unresolvable.meta" "window=fm:fm-stale-unresolvable" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 setup complete rebased onto merged #76\n' > "$d/state/stale-unresolvable.status"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/todo-flag4)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" stale-unresolvable
+  out=$(run_crew_state "$d" stale-unresolvable)
+  assert_not_contains "$out" "source: run-step" "unavailable advanced head on a rewritten-away tip must not use run-step"
+  assert_not_contains "$out" "parked at" "abandoned parked run must not mask current state"
+  assert_contains "$out" "source: status-log" "falls back to status-log after gate-side reflog rejection"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "stale unresolvable advanced run head on a rewritten branch is not attributed as current"
+}
+
+# The legitimate twin of the stale case: the branch was NEVER rewritten, the
+# pipeline advanced the run head gate-side beyond the crew's unchanged tip,
+# and the head is unresolvable in the crew worktree. The gate-side judgment
+# must keep this current run attributed rather than rejecting it.
+test_current_unresolvable_advanced_head_on_unchanged_branch_stays_current() {
+  reset_fakes
+  local d gate run_head out
+  d=$(new_case current-unresolvable-advanced)
+  make_repo_on_branch "$d/wt" fm/feat-gate-advance
+  gate=$(make_gate_run_worktree "$d" "$d/wt")
+  git -C "$gate" commit -q --allow-empty -m 'pipeline fix on current run'
+  run_head=$(git -C "$gate" rev-parse HEAD)
+  git -C "$d/wt" rev-parse --verify "${run_head}^{commit}" >/dev/null 2>&1 \
+    && fail "run head must be unresolvable in the crew worktree"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/current-advance.meta" "window=fm:fm-current-advance" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-gate-advance)"
+  out=$(run_crew_state "$d" current-advance)
+  assert_contains "$out" "state: working" "gate-advanced current run remains working"
+  assert_contains "$out" "source: run-step" "gate-advanced current run keeps run-step detail"
+  pass "current unresolvable gate-advanced run head on an unchanged branch stays current"
+}
+
 test_cross_branch_fallback_stops_at_newest_target_branch_row() {
   reset_fakes
   local d local_short out
@@ -1564,6 +1639,8 @@ test_newer_divergent_ci_run_later_non_ready_marker_stays_working
 test_same_branch_terminal_mismatch_does_not_resurrect_older_run
 test_stale_parked_run_on_rewritten_branch_not_current
 test_stale_advanced_run_head_on_rewritten_branch_not_current
+test_stale_unresolvable_advanced_head_on_rewritten_branch_not_current
+test_current_unresolvable_advanced_head_on_unchanged_branch_stays_current
 test_cross_branch_fallback_stops_at_newest_target_branch_row
 
 echo "all fm-crew-state tests passed"
