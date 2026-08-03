@@ -106,6 +106,24 @@ test_first_replica_copies_identity_and_complete_tree() {
   pass 'first replica preserves commit identity and mirrors the complete source tree'
 }
 
+test_9p_content_fixture_ignores_source_metadata_restrictions() {
+  local root source destination out
+  root=$(fm_test_tmproot shadow-9p-content)
+  new_fixture "$root"
+  source="$root/source"
+  destination="$root/destination-parent/shadow"
+  chmod 0444 "$source/projects/alpha/config/private.txt"
+  ln -s ../src/app.txt "$source/projects/alpha/config/app-link"
+
+  out=$(run_shadow "$source" "$destination")
+  assert_contains "$out" 'replicated:' '9p content fixture was not published'
+  assert_grep 'private project config' "$destination/projects/alpha/config/private.txt" \
+    'content copy failed for a metadata-restricted source file'
+  [ -L "$destination/projects/alpha/config/app-link" ] \
+    || fail 'content fixture did not preserve the source symlink'
+  pass '9p content fixture copies bytes and symlinks without source metadata updates'
+}
+
 test_repeated_replica_is_idempotent_and_tracks_complete_working_tree() {
   local root source destination controls out manifest_before
   root=$(fm_test_tmproot shadow-repeat)
@@ -226,7 +244,7 @@ test_staging_failure_preserves_previous_replica() {
   if out=$(run_shadow "$source" "$destination" 2>&1); then
     fail 'unsupported source entry was accepted'
   fi
-  assert_contains "$out" 'cannot mirror source tree' \
+  assert_contains "$out" 'special file is not allowed in source tree' \
     'unsupported source entry did not stop the mirror'
   [ "$(git -C "$destination" rev-parse HEAD)" = "$before" ] \
     || fail 'staging failure changed destination history'
@@ -259,6 +277,7 @@ test_manifest_tamper_is_refused() {
 }
 
 test_first_replica_copies_identity_and_complete_tree
+test_9p_content_fixture_ignores_source_metadata_restrictions
 test_repeated_replica_is_idempotent_and_tracks_complete_working_tree
 test_dirty_destination_is_preserved
 test_divergent_destination_is_preserved

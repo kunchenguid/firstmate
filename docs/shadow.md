@@ -34,6 +34,8 @@ The final destination commit must have exactly the same identity as the source c
 
 Each run stages the complete output beside the destination, validates its content, and swaps it into place only after the source is rechecked.
 
+The staging copier uses 9p-compatible content and symbolic-link operations and does not request POSIX metadata updates from the destination filesystem.
+
 An unchanged source and unchanged complete tree returns already current without replacing the destination.
 
 ## Mirrored contents

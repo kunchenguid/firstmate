@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -37,12 +37,37 @@ def link_target(path: Path, rel: str) -> str:
     return target
 
 
+def copy_file_contents(source: Path, destination: Path) -> None:
+    with source.open("rb") as source_handle, destination.open("wb") as destination_handle:
+        while chunk := source_handle.read(1024 * 1024):
+            destination_handle.write(chunk)
+
+
+def copy_entry(source: Path, destination: Path, relative: str) -> None:
+    mode = os.lstat(source).st_mode
+    if stat.S_ISLNK(mode):
+        os.symlink(os.readlink(source), destination)
+        return
+    if stat.S_ISDIR(mode):
+        os.mkdir(destination)
+        with os.scandir(source) as iterator:
+            children = sorted(iterator, key=lambda entry: entry.name)
+        for child in children:
+            child_relative = f"{relative}/{child.name}" if relative else child.name
+            copy_entry(Path(child.path), destination / child.name, child_relative)
+        return
+    if stat.S_ISREG(mode):
+        copy_file_contents(source, destination)
+        return
+    fail(f"special file is not allowed in source tree: {relative}")
+
+
 def copy_tree(source: Path, destination: Path) -> None:
-    if not source.is_dir() or source.is_symlink():
+    if not stat.S_ISDIR(os.lstat(source).st_mode) or source.is_symlink():
         fail(f"source tree is not a directory: {source}")
     try:
-        shutil.copytree(source, destination, symlinks=True, copy_function=shutil.copy2)
-    except (OSError, shutil.Error) as exc:
+        copy_entry(source, destination, "")
+    except OSError as exc:
         fail(f"cannot mirror source tree: {exc}")
 
 
