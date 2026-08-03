@@ -214,6 +214,9 @@ Text is typed once; only Enter is retried.
 
 On an idle or done native baseline, submit confirmation waits for `working` or `blocked` across a bounded polling window.
 On an already active or unreadable baseline, it falls back to conservative composer clearance.
+A would-be success on either path is also checked for a numbered `#N [fm-from-firstmate]` item still in the pane's composer queue.
+That queued-unsubmitted proof keeps the Enter-only retry active and, on exhaustion, makes `fm-send.sh` exit non-zero with a named `queued-unsubmitted` diagnostic.
+A failed queue read reports unknown rather than assuming delivery.
 A fully unreadable target stops retrying and reports unknown.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.
 

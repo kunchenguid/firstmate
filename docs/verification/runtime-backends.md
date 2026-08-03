@@ -149,8 +149,8 @@ tests/fm-kimi-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
 ```
 
-Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
-Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
+The [tmux backend guide](../tmux-backend.md#current-behavior-and-safety) owns the current structural and submit semantics.
+The suite exercises empty, pending, ambiguous, busy, idle, numbered queue retry, queue-clear, retry-exhaustion, and unreadable queue cases against that contract.
 
 ### Cleanup endpoint identity
 
@@ -504,6 +504,8 @@ Real captures verified these active distinctions:
 - A bare shell prompt has no safe agent-composer container and is unknown.
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
+The [Herdr backend guide](../herdr-backend.md#current-transport-behavior) owns the current submit semantics.
+`tests/fm-backend-herdr.test.sh` and `tests/fm-send-strict.test.sh` exercise numbered queue retry, queue-clear, retry-exhaustion, unreadable queue, and the caller-facing failure diagnostic against that contract.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:
 
 ```sh

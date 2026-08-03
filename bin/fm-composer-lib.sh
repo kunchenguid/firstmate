@@ -189,6 +189,27 @@ fm_composer_idle_matches() {
   esac
 }
 
+# fm_composer_has_queued_unsubmitted: positive proof that a typed firstmate
+# steer is still sitting in a harness's numbered composer queue rather than
+# having been submitted. Reads plain pane text on stdin.
+#
+# Observed shape (grok on herdr, parked lane holding a foregrounded wait):
+# messages land as numbered pending items above an empty composer, e.g.
+#   #1 [fm-from-firstmate]<U+2063>corr=... <text>
+# and stay there until a later Enter actually submits them. The composer row
+# itself can read empty while the queue still holds the instruction, so a
+# submit path that only checks the composer (or a pre-existing busy agent
+# status) would falsely report delivery. Matching this shape is fail-closed
+# only on positive proof: absence of the pattern is never treated as delivery
+# by this helper alone; callers own the empty/pending/unknown contract.
+# Returns 0 when at least one matching item is present, 1 otherwise.
+fm_composer_has_queued_unsubmitted() {
+  # Looser than a full-line anchor so a bordered queue row (│ #1 [fm-from-...] │)
+  # still matches. The [fm-from-firstmate] label is the live charter marker and
+  # is distinctive enough not to collide with ordinary transcript text.
+  grep -qE '#[0-9]+[[:space:]]+\[fm-from-firstmate\]'
+}
+
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}

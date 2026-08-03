@@ -225,6 +225,52 @@ test_key_send_exit_status_follows_delivery() {
   pass "fm-send --key: exit status follows delivery, and an undelivered key never reports success"
 }
 
+# When the submit path reports queued-unsubmitted (numbered parked queue still
+# holding the steer), fm-send must exit non-zero and name that condition. A
+# still-queued message must never produce exit 0.
+test_queued_unsubmitted_exits_nonzero_with_diagnostic() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/queued-unsubmitted"; mkdir -p "$dir"
+  fb="$dir/fakebin"; mkdir -p "$fb"
+  home=$(setup_home queued); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/parked-lane.meta" "window=sess:fm-parked-lane" "kind=ship" "harness=grok"
+  # capture-pane always shows a numbered firstmate queue item above an empty
+  # composer so submit exhausts as queued-unsubmitted.
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    printf 'send-keys %s\n' "$*" >> "$FM_TMUX_LOG"
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    printf '%%1\n'; exit 0 ;;
+  capture-pane)
+    printf '#1 [fm-from-firstmate]corr=abc urgent steer\n╭────╮\n│ >  │\n╰────╯\n'
+    exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  cat > "$fb/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fb/sleep"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_SEND_RETRIES=2 FM_SEND_SLEEP=0.01 \
+    "$SEND" parked-lane "urgent steer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "queued-unsubmitted send must exit non-zero, got $rc"
+  assert_contains "$(cat "$err")" "queued-unsubmitted" \
+    "fm-send diagnostic must name the queued-unsubmitted condition"
+  assert_contains "$(cat "$err")" "numbered pending item" \
+    "fm-send diagnostic must describe the still-queued state"
+  pass "fm-send: queued-unsubmitted exits non-zero and names the condition"
+}
+
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
 test_unset_fm_home_fails
@@ -233,3 +279,4 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
+test_queued_unsubmitted_exits_nonzero_with_diagnostic

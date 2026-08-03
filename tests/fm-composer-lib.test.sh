@@ -133,6 +133,18 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+test_queued_unsubmitted_detector() {
+  printf '#1 [fm-from-firstmate]corr=abc do the work\n' | fm_composer_has_queued_unsubmitted \
+    || fail "plain numbered firstmate queue item should match"
+  printf '│ #2 [fm-from-firstmate] more\n' | fm_composer_has_queued_unsubmitted \
+    || fail "bordered numbered firstmate queue item should match"
+  printf 'just a transcript line about #1 something\n' | fm_composer_has_queued_unsubmitted \
+    && fail "unrelated #N text without the firstmate marker must not match"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' | fm_composer_has_queued_unsubmitted \
+    && fail "an empty composer without a queue item must not match"
+  pass "fm_composer_has_queued_unsubmitted: matches only numbered firstmate queue items"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -142,3 +154,4 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_queued_unsubmitted_detector

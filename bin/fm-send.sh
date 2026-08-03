@@ -14,7 +14,12 @@
 # retried (Enter only, never retyped) until the target backend confirms a
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction.
+# instead of silently leaving an unsubmitted instruction. The same loud refusal
+# applies when the steer lands as a numbered parked-lane queue item
+# (`#N [fm-from-firstmate] ...`) that never leaves the composer queue: the
+# submit path retries Enter within the budget and exits non-zero with a
+# `queued-unsubmitted` verdict if the item is still present - never exit 0 for
+# a positively queued-unsubmitted message.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -498,6 +503,13 @@ else
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+      ;;
+    queued-unsubmitted)
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: text not submitted to $T (queued-unsubmitted: numbered pending item still in the composer queue; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
     *)

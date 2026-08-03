@@ -3425,8 +3425,11 @@ test_send_text_submit_detects_landed_send() {
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''hello captain' "send_text_submit did not type the literal text first"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "send_text_submit should not need a second Enter for a plain message with no popup, sent $enter_count Enter(s)"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] || fail "send_text_submit must never read the composer/pane content for confirmation anymore"
-  pass "fm_backend_herdr_send_text_submit: reports 'empty' once agent_status reports working after one Enter, without ever reading the composer"
+  # Idle-baseline delivery still confirms via agent-state; the single pane read
+  # is only the post-success queued-unsubmitted scan (empty pane = no queue).
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] \
+    || fail "send_text_submit should make exactly one post-success queue scan pane read, got $(grep -c $'\x1f''pane'$'\x1f''read' "$log")"
+  pass "fm_backend_herdr_send_text_submit: reports 'empty' once agent_status reports working after one Enter"
 }
 
 test_send_text_submit_detects_swallowed_enter() {
@@ -3500,7 +3503,8 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 2 ] || fail "preexisting-working swallowed Enter should retry Enter up to the configured count, sent $enter_count Enter(s)"
   read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
-  [ "$read_count" -eq 2 ] || fail "preexisting-working confirmation should fall back to composer reads, made $read_count read(s)"
+  # Two composer-state reads during retries plus one final queued-unsubmitted scan.
+  [ "$read_count" -eq 3 ] || fail "preexisting-working confirmation should fall back to composer reads plus a final queue scan, made $read_count read(s)"
   pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
 }
 
@@ -3517,8 +3521,12 @@ test_send_text_submit_confirms_despite_codex_idle_tip_composer() {
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "reply with just OK" 3 0.01 0.01' "$ROOT" )
   [ "$out" = empty ] || fail "send_text_submit should confirm via agent_status alone even for a harness whose idle composer shows dynamic tip text, got '$out'"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] || fail "send_text_submit must never call 'pane read' - a codex-style dynamic idle-tip composer can never mislead a confirmation path that does not read it"
-  pass "fm_backend_herdr_send_text_submit: confirms submission via native agent-state alone, immune to a codex-style dynamic idle-tip composer that would have misread as 'pending' under the old composer-based confirmation"
+  # Delivery still keys off agent-state; the one pane read is only the
+  # post-success queued-unsubmitted scan and must not reintroduce composer-based
+  # confirmation (an empty/missing capture never turns a landed turn into pending).
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] \
+    || fail "send_text_submit should make exactly one post-success queue scan pane read, got $(grep -c $'\x1f''pane'$'\x1f''read' "$log")"
+  pass "fm_backend_herdr_send_text_submit: confirms submission via native agent-state, immune to a codex-style dynamic idle-tip composer"
 }
 
 # Companion regression for the pre-injection empty-box guard itself
@@ -3574,6 +3582,115 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter() {
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "a slow (but within-budget) transition must not provoke a needless extra Enter, sent $enter_count Enter(s)"
   pass "fm_backend_herdr_send_text_submit: a slow transition landing on a later sample within one Enter's budget is confirmed WITHOUT sending a needless extra Enter"
+}
+
+# Parked-lane regression: a pre-existing working agent (foregrounded wait) plus
+# an empty composer that still shows a numbered `#N [fm-from-firstmate]` queue
+# item must NOT report empty. Exhausted Enter retries report queued-unsubmitted.
+#
+# Counted herdr calls (status --json from target_ready is uncounted by the fake):
+#   1 send-text  2 agent-get baseline
+#   per attempt: send-keys Enter, pane-read (composer_state), pane-read (queue scan)
+#   final exhaust: one more queue-scan pane-read
+test_send_text_submit_queued_unsubmitted_fails_loud() {
+  local dir log resp fb out enter_count queue_pane
+  dir="$TMP_ROOT/submit-queued-unsubmitted"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  queue_pane='⠧ Responding… 1h18m
+#1 [fm-from-firstmate]corr=deadbeef steer me
+╭────────╮
+│ >      │
+╰────────╯
+'
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  # attempt 1: composer + queue scan
+  printf '%s' "$queue_pane" > "$resp/4.out"
+  printf '%s' "$queue_pane" > "$resp/5.out"
+  # attempt 2: composer + queue scan
+  printf '%s' "$queue_pane" > "$resp/7.out"
+  printf '%s' "$queue_pane" > "$resp/8.out"
+  # exhaust queue scan
+  printf '%s' "$queue_pane" > "$resp/9.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "[fm-from-firstmate]corr=deadbeef steer me" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = queued-unsubmitted ] \
+    || fail "send_text_submit must report queued-unsubmitted when a numbered queue item survives Enter retries, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "queued-unsubmitted should consume the Enter retry budget, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: parked numbered queue exhausts as queued-unsubmitted (never empty)"
+}
+
+# Same parked-lane shape, but a later Enter actually submits the queue item
+# (queue marker gone, empty composer) -> empty after bounded retry.
+test_send_text_submit_queued_unsubmitted_retry_succeeds() {
+  local dir log resp fb out enter_count queue_pane clear_pane
+  dir="$TMP_ROOT/submit-queued-retry-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  queue_pane='⠧ Responding…
+#1 [fm-from-firstmate]corr=abcd do the work
+╭────────╮
+│ >      │
+╰────────╯
+'
+  clear_pane='⠧ Responding…
+╭────────╮
+│ >      │
+╰────────╯
+'
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  # attempt 1 still queued
+  printf '%s' "$queue_pane" > "$resp/4.out"
+  printf '%s' "$queue_pane" > "$resp/5.out"
+  # attempt 2: queue cleared -> empty success after composer + queue scan
+  printf '%s' "$clear_pane" > "$resp/7.out"
+  printf '%s' "$clear_pane" > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "[fm-from-firstmate]corr=abcd do the work" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] \
+    || fail "send_text_submit should report empty once a later Enter clears the numbered queue, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "queued-unsubmitted retry-success should use a second Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: bounded Enter retry submits a parked numbered queue item"
+}
+
+test_send_text_submit_unreadable_queue_probe_never_reports_delivered() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-queue-probe-unreadable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  printf '1\n' > "$resp/5.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] \
+    || fail "an unreadable post-success queue probe must return unknown, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "an unreadable queue probe must not send another Enter, sent $enter_count"
+  pass "fm_backend_herdr_send_text_submit: unreadable queue verification never reports delivered"
+}
+
+test_send_text_submit_queue_clear_on_exhaustion_rescan_reports_empty() {
+  local dir log resp fb out queue_pane clear_pane
+  dir="$TMP_ROOT/submit-queue-clear-on-rescan"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  queue_pane='#1 [fm-from-firstmate]corr=abcd do the work
+╭────────╮
+│ >      │
+╰────────╯
+'
+  clear_pane='╭────────╮
+│ >      │
+╰────────╯
+'
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '%s' "$queue_pane" > "$resp/4.out"
+  printf '%s' "$queue_pane" > "$resp/5.out"
+  printf '%s' "$clear_pane" > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "[fm-from-firstmate]corr=abcd do the work" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] \
+    || fail "a queue cleared on the exhaustion rescan must return empty, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: exhaustion rescan preserves candidate-empty delivery proof"
 }
 
 test_send_text_submit_send_failed() {
@@ -4350,6 +4467,10 @@ test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
+test_send_text_submit_queued_unsubmitted_fails_loud
+test_send_text_submit_queued_unsubmitted_retry_succeeds
+test_send_text_submit_unreadable_queue_probe_never_reports_delivered
+test_send_text_submit_queue_clear_on_exhaustion_rescan_reports_empty
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_dispatch_routes_herdr_backend

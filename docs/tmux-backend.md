@@ -80,16 +80,17 @@ The submit acknowledgement and away-mode supervisor-pane busy guard below still 
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
-It types a message once and retries Enter only until the composer clears.
-Only a proven empty composer is a positive delivery acknowledgement.
+It types a message once and retries Enter only until the backend has a positive delivery acknowledgement.
+A proven empty composer is not enough while a numbered `#N [fm-from-firstmate]` item remains in the pane's composer queue.
+That queued-unsubmitted proof keeps the Enter-only retry active and, on exhaustion, makes `fm-send.sh` exit non-zero with a named `queued-unsubmitted` diagnostic.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 `fm-send.sh` reports every unconfirmed verdict as a failure instead of retyping or assuming delivery.
 
 OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
 After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
-Ambiguous pending text never receives the busy-queue conversion.
-`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
+Ambiguous pending text never receives the busy-queue conversion, and a numbered queued-unsubmitted item always overrides it.
+`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, cleared, and numbered queued-unsubmitted states.
 
 ## Limits and regression entry points
 

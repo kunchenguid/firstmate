@@ -2923,12 +2923,33 @@ EOF
 #     re-invokes this function from scratch with the same text after seeing
 #     an error, which is a human/escalation decision, not an automatic
 #     retry).
-# Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
-# submit vocabulary. Empty means confirmed submitted for every backend; how
-# each backend confirms it is an internal decision, and herdr's is no longer
-# literally "the composer read empty".
+# Echoes empty|pending|queued-unsubmitted|unknown|send-failed, a subset of the
+# proof-carrying submit vocabulary. Empty means confirmed submitted for every
+# backend; how each backend confirms it is an internal decision, and herdr's is
+# no longer literally "the composer read empty".
+#
+# Queued-unsubmitted (parked lane): when a harness accepts typed text into a
+# numbered composer queue (`#N [fm-from-firstmate] ...`) without starting a turn,
+# the composer row can read empty (and a pre-existing working agent_status can
+# never prove this Enter landed). After any candidate success (idle-baseline
+# busy, or non-idle composer empty), a pane scan for that positive queue marker
+# keeps retrying Enter only; exhaustion reports `queued-unsubmitted` so
+# fm-send exits non-zero instead of claiming delivery.
+fm_backend_herdr_queued_unsubmitted_state() {  # <target> -> queued|clear|unknown
+  local cap
+  # Generous enough to cover queue rows sitting just above the composer.
+  cap=$(fm_backend_herdr_capture "$1" "${FM_BACKEND_HERDR_COMPOSER_LINES:-20}" 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if printf '%s\n' "$cap" | fm_composer_has_queued_unsubmitted; then
+    printf 'queued'
+  else
+    printf 'clear'
+  fi
+}
+
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local queue_state candidate_empty=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -2940,17 +2961,46 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+      case "$verdict" in
+        busy) verdict=empty ;;
+        idle) verdict=pending ;;
+        unknown) printf 'unknown'; return 0 ;;
+      esac
     else
       sleep "$sleep_s"
       verdict=$(fm_backend_herdr_composer_state "$target")
+      case "$verdict" in
+        empty) verdict=empty ;;
+        unknown) printf 'unknown'; return 0 ;;
+        *) verdict=pending ;;
+      esac
     fi
-    case "$verdict" in
-      busy) printf 'empty'; return 0 ;;
-      empty) printf 'empty'; return 0 ;;
-      unknown) printf 'unknown'; return 0 ;;
-    esac
+    candidate_empty=0
+    if [ "$verdict" = empty ]; then
+      candidate_empty=1
+      queue_state=$(fm_backend_herdr_queued_unsubmitted_state "$target")
+      case "$queue_state" in
+        queued) verdict=pending ;;
+        clear) printf 'empty'; return 0 ;;
+        *) printf 'unknown'; return 0 ;;
+      esac
+    fi
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    [ "$i" -lt "$retries" ] || {
+      queue_state=$(fm_backend_herdr_queued_unsubmitted_state "$target")
+      case "$queue_state" in
+        queued) printf 'queued-unsubmitted' ;;
+        clear)
+          if [ "$candidate_empty" = 1 ]; then
+            printf 'empty'
+          else
+            printf 'pending'
+          fi
+          ;;
+        *) printf 'unknown' ;;
+      esac
+      return 0
+    }
   done
 }
 

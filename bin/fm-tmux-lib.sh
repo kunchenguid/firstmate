@@ -45,6 +45,17 @@
 # as a known gap in `docs/herdr-backend.md` rather than patched here, so the
 # tmux adapter does not paper over a herdr-specific shape.
 #
+# Queued-unsubmitted (parked lane / numbered composer queue): a different
+# failure shape from the opencode busy-queue exception. Some harnesses (observed
+# on grok) accept typed text into a numbered pending queue (`#N [fm-from-firstmate]
+# ...`) above an empty composer without submitting it. The composer row can
+# therefore read empty while the steer is still undelivered. After each Enter
+# that would otherwise report empty, the submit core scans the pane for that
+# positive queue marker via fm_composer_has_queued_unsubmitted; a match keeps
+# retrying Enter only, and exhaustion reports `queued-unsubmitted` rather than
+# empty. This never converts the opencode busy-queue case (text still pending
+# inside the composer box, no numbered queue marker).
+#
 # Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
 # structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
 # matching used here.
@@ -379,6 +390,18 @@ fm_pane_is_busy() {  # <target> [harness]
     | fm_busy_lines_match "$harness"
 }
 
+# fm_tmux_queued_unsubmitted_state: classify a numbered firstmate queue scan.
+fm_tmux_queued_unsubmitted_state() {  # <target> -> queued|clear|unknown
+  local pane
+  pane=$(tmux capture-pane -p -t "$1" -S -40 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if printf '%s\n' "$pane" | fm_composer_has_queued_unsubmitted; then
+    printf 'queued'
+  else
+    printf 'clear'
+  fi
+}
+
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
 # verifying the composer cleared. Retries Enter ONLY — never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate
@@ -392,24 +415,56 @@ fm_pane_is_busy() {  # <target> [harness]
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
 # never reaches this exception.
+# Queued-unsubmitted: a numbered `#N [fm-from-firstmate]` item still visible
+# after Enter means the steer landed in a parked queue, not that it was
+# delivered. That positive proof overrides an empty composer row, keeps
+# retrying Enter only, and exhausts as `queued-unsubmitted` (never as empty).
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
+  local target=$1 retries=$2 sleep_s=$3 i=0 state queue_state candidate_empty=0
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
+    candidate_empty=0
     case "$state" in
       pending|pending-unproven) ;;
-      *) printf '%s' "$state"; return 0 ;;
+      empty)
+        candidate_empty=1
+        queue_state=$(fm_tmux_queued_unsubmitted_state "$target")
+        case "$queue_state" in
+          queued) state=pending ;;
+          clear) printf 'empty'; return 0 ;;
+          *) printf 'unknown'; return 0 ;;
+        esac
+        ;;
+      *)
+        queue_state=$(fm_tmux_queued_unsubmitted_state "$target")
+        case "$queue_state" in
+          queued) state=pending ;;
+          clear) printf '%s' "$state"; return 0 ;;
+          *) printf 'unknown'; return 0 ;;
+        esac
+        ;;
     esac
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done
+  # Retries exhausted. A still-visible numbered queue is a loud undelivered
+  # state and must never be converted to empty by the busy-queue exception.
+  queue_state=$(fm_tmux_queued_unsubmitted_state "$target")
+  case "$queue_state" in
+    queued) printf 'queued-unsubmitted'; return 0 ;;
+    unknown) printf 'unknown'; return 0 ;;
+  esac
+  if [ "$candidate_empty" = 1 ]; then
+    printf 'empty'
+    return 0
+  fi
   if [ "$state" != pending ]; then
     printf '%s' "$state"
     return 0
   fi
-  # Retries exhausted, composer still shows proven pending.
+  # Retries exhausted, composer still shows proven pending (no numbered queue).
   # If the pane is busy (agent mid-turn), the harness accepted the Enter
   # and queued the message for processing when the current turn ends.
   # Treat it as submitted so the caller does not re-send.

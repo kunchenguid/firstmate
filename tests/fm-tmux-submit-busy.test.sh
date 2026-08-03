@@ -30,7 +30,21 @@ case "${1:-}" in
       case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac
     done
     exit 0 ;;
-  capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
+  capture-pane)
+    queue_probe=1
+    for a in "$@"; do [ "$a" = -e ] && queue_probe=0; done
+    if [ "$queue_probe" = 1 ] && [ "${FM_FAKE_QUEUE_PROBE_FAIL:-0}" = 1 ]; then
+      exit 1
+    fi
+    if [ "$queue_probe" = 1 ] && [ -n "${FM_FAKE_QUEUE_CLEAR_ON_RESCAN:-}" ]; then
+      count=$(( $(cat "$FM_FAKE_QUEUE_CLEAR_ON_RESCAN" 2>/dev/null || echo 0) + 1 ))
+      printf '%s\n' "$count" > "$FM_FAKE_QUEUE_CLEAR_ON_RESCAN"
+      if [ "$count" -gt 1 ]; then
+        printf '╭─────╮\n│ >   │\n╰─────╯\n'
+        exit 0
+      fi
+    fi
+    cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   send-keys)
     shift; is_enter=0
     while [ "$#" -gt 0 ]; do
@@ -257,6 +271,107 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
 }
 
+# Parked-lane numbered queue: empty composer + `#N [fm-from-firstmate]` must
+# never report empty. Exhaust reports queued-unsubmitted; a later clear succeeds.
+test_queued_unsubmitted_exhausted_fails_loud() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/queued-unsubmitted-fail"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  # Empty composer box with a numbered firstmate queue item still present.
+  printf '#1 [fm-from-firstmate]corr=abc do the work\n╭─────╮\n│ >   │\n╰─────╯\n' > "$composer"
+  : > "$sent"
+  # Persist: Enter never clears the queue in this scenario.
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = queued-unsubmitted ] \
+    || fail "numbered queue surviving Enter retries should be queued-unsubmitted, got '$(cat "$vfile")'"
+  [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
+    || fail "queued-unsubmitted should consume the Enter retry budget"
+  pass "fm_tmux_submit_enter_core: parked numbered queue exhausts as queued-unsubmitted"
+}
+
+test_queued_unsubmitted_retry_succeeds() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/queued-unsubmitted-retry"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '#1 [fm-from-firstmate]corr=abc do the work\n╭─────╮\n│ >   │\n╰─────╯\n' > "$composer"
+  : > "$sent"
+  # Swallow only the first Enter; later Enters clear the composer file to empty
+  # box without the queue marker (mock's default clear path).
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=0 FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "a later Enter that clears the numbered queue should return empty, got '$(cat "$vfile")'"
+  [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -ge 2 ] \
+    || fail "queued-unsubmitted retry-success should send more than one Enter"
+  pass "fm_tmux_submit_enter_core: bounded Enter retry clears a parked numbered queue"
+}
+
+test_queued_unsubmitted_blocks_busy_queue_conversion() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/queued-blocks-busy"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  # Proven pending in composer is the opencode busy-queue shape; a numbered
+  # queue marker must still win and fail loud rather than convert to empty.
+  printf '#1 [fm-from-firstmate]corr=abc fix it\n╭────────────╮\n│ > fix it   │\n╰────────────╯\n' > "$composer"
+  : > "$sent"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = queued-unsubmitted ] \
+    || fail "busy conversion must not hide a numbered queue item, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: numbered queue overrides opencode busy-queue empty conversion"
+}
+
+test_unreadable_queue_probe_never_reports_delivered() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/queued-probe-unreadable"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$composer"
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_QUEUE_PROBE_FAIL=1 FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = unknown ] \
+    || fail "an unreadable queue probe must return unknown, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: unreadable queue verification never reports delivered"
+}
+
+test_queue_clear_on_exhaustion_rescan_reports_empty() {
+  local dir fakebin composer sent vfile probe_count
+  dir="$TMP_ROOT/queued-clear-on-rescan"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  probe_count="$dir/probe-count"
+  printf '#1 [fm-from-firstmate]corr=abc do the work\n╭─────╮\n│ >   │\n╰─────╯\n' > "$composer"
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_QUEUE_CLEAR_ON_RESCAN="$probe_count" FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_enter_core "win" 1 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "a queue cleared on the exhaustion rescan must return empty, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: exhaustion rescan preserves candidate-empty delivery proof"
+}
+
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_busy_pane_composer_clears_first_try
@@ -265,3 +380,8 @@ test_busy_pane_unknown_stays_unknown
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
+test_queued_unsubmitted_exhausted_fails_loud
+test_queued_unsubmitted_retry_succeeds
+test_queued_unsubmitted_blocks_busy_queue_conversion
+test_unreadable_queue_probe_never_reports_delivered
+test_queue_clear_on_exhaustion_rescan_reports_empty
