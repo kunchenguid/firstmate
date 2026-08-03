@@ -84,7 +84,7 @@ EOF
 terminal_wake_present() {  # <annotations>
   local annotations=$1 event
   case "$annotations" in
-    *"annotations omitted"*) return 0 ;;
+    *"annotations omitted"*|*"[truncated]"*) return 0 ;;
   esac
   while IFS= read -r event; do
     [ -n "$event" ] || continue

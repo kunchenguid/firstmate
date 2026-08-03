@@ -501,7 +501,13 @@ SH
   append_wake "$state" signal task.status "signal: $state/task.status" || fail "terminal signal append failed"
   FM_STATE_OVERRIDE="$state" FM_RECORD_RECONCILE_BIN="$reconcile" "$DRAIN" > "$out" || fail "terminal drain failed"
   assert_present "$marker" "terminal signal bypassed record reconciliation"
-  pass "terminal signals reconcile records at the shared drain boundary"
+  rm -f "$marker"
+  awk 'BEGIN { printf "done: "; for (i = 0; i < 9000; i++) printf "x"; printf "\n" }' > "$state/task.status"
+  append_wake "$state" signal task.status "signal: $state/task.status" || fail "truncated terminal signal append failed"
+  FM_STATE_OVERRIDE="$state" FM_RECORD_RECONCILE_BIN="$reconcile" "$DRAIN" > "$out" || fail "truncated terminal drain failed"
+  assert_grep '[truncated]' "$out" "oversized terminal fixture did not exercise annotation truncation"
+  assert_present "$marker" "truncated terminal annotation bypassed record reconciliation"
+  pass "terminal signals reconcile records even when annotations truncate"
 }
 
 test_concurrent_append_and_drain
