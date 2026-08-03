@@ -13,5 +13,7 @@ When this session owns supervision and away mode is not active:
    The arm mechanism above is plugin-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`.opencode/plugins/fm-primary-pretool-check.js`, `bin/fm-arm-pretool-check.sh`).
 9. Do not rely on this plugin in headless `opencode run`; firstmate primary supervision targets persistent OpenCode TUI sessions.
 
+While away mode is active the plugin stands down instead: an idle event arms nothing, and a cycle still live when away mode begins is stood down without a wake prompt or a successor, because the away-mode daemon owns the watcher (`docs/watcher-continuity.md` "Away-mode stand-down").
+
 OpenCode's persistent TUI plugin runtime is the wake mechanism.
 The plugin applies in the main primary checkout and a secondmate's own home, and stays silent only in child crewmate and scout worktrees.

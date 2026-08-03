@@ -372,6 +372,34 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+### Away-mode stand-down
+
+Every primary with a watcher wake path was audited on 2026-08-02 for whether it can deliver an ordinary watcher wake to firstmate, bypassing the away-mode daemon, while `state/.afk` exists.
+[`../watcher-continuity.md`](../watcher-continuity.md) "Away-mode stand-down" owns the resulting contract.
+
+| Primary | Wake path | Away-mode result |
+| --- | --- | --- |
+| Pi, pi-signed | `.pi/extensions/fm-primary-pi-watch.ts` automatic re-arm and `pi.sendUserMessage` | Defect: every arm-cycle close delivered a wake and re-armed, taking the watcher singleton from the daemon. Fixed and covered below. |
+| OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` automatic re-arm and `client.session.promptAsync` | Partial defect: new arms were already gated, but a cycle live at away-mode entry still delivered its wake plus a spurious continuity failure. Fixed and covered below. |
+| Claude | `bin/fm-claude-stop-autoarm.sh` Stop `asyncRewake` | Already correct: the hook exits at its `state/.afk` gate before claiming the home, and re-checks the flag mid-cycle before any classification or rewake. |
+| Codex | Model-driven `bin/fm-watch-checkpoint.sh` foreground checkpoint | Already correct: `.codex/hooks.json` registers only the session-start nudge, the pre-tool seatbelts, and the turn-end guard, so no adapter can inject a wake. |
+| Grok | Model-driven tracked background `bin/fm-watch-arm.sh` task | Already correct at the adapter level (`.grok/hooks/` registers no arm hook), and now deterministic: the arm layer stands down rather than arming. |
+| kimi | None | Not applicable: kimi has no primary watcher adapter and follows the unknown-harness fallback protocol; its only tracked hook surface is the crewmate turn-end token hook. |
+
+Behavioral coverage, all real processes and real close handlers rather than source inspection:
+
+```sh
+tests/fm-watch-arm.test.sh
+tests/fm-pi-watch-extension.test.sh
+tests/fm-claude-stop-autoarm.test.sh
+```
+
+`tests/fm-watch-arm.test.sh` starts a real watcher as the daemon's singleton holder, runs a real `bin/fm-watch-arm.sh --restart` against it with `state/.afk` present, and proves the arm stands down, leaves the daemon's watcher process and lock untouched, and arms normally again once the flag is cleared.
+`tests/fm-pi-watch-extension.test.sh` drives the tracked Pi extension and OpenCode plugin with real arm children: an away-mode arm request starts no cycle and delivers no wake, a cycle already live when away mode begins is stood down without a wake or a successor, an away-mode OpenCode idle event arms nothing, and clearing the flag restores ordinary arming and wake delivery in the same run.
+`tests/fm-claude-stop-autoarm.test.sh` continues to cover Claude's unchanged away-mode boundary, including the flag appearing mid-cycle.
+
+Each new case was confirmed to fail against the pre-fix adapters and arm layer before the fix was applied.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

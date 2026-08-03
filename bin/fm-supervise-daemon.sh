@@ -17,6 +17,10 @@
 # the /afk skill sets that flag and starts this daemon; any real (unmarked)
 # user message clears it and firstmate resumes full responsiveness.
 # When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
+# While it is on, bin/fm-watch-arm.sh and every automatic primary adapter stand
+# down so this daemon keeps the watcher singleton and its wakes never reach the
+# primary pane; docs/watcher-continuity.md "Away-mode stand-down" owns that
+# contract.
 # Any buffered daemon escalations that remain while afk is off survive in
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.

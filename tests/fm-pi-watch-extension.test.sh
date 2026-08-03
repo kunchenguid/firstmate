@@ -2150,6 +2150,292 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_pi_away_mode_stands_down_instead_of_arming() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-afk-stand-down-root"
+  home="$TMP_ROOT/pi-afk-stand-down-home"
+  log="$TMP_ROOT/pi-afk-stand-down.log"
+  stop="$TMP_ROOT/pi-afk-stand-down.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  # Each cycle waits for its own numbered release file, so a released cycle ends
+  # exactly once instead of letting continuity restoration spin.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+cycle=$(( $(wc -l < "${FM_ARM_LOG:?}" 2>/dev/null || printf 0) + 1 ))
+printf 'arm\n' >> "$FM_ARM_LOG"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "${FM_STOP_FILE:?}.$cycle" ] && [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+if [ -e "$FM_STOP_FILE.$cycle" ]; then
+  printf 'signal: demo.status done: fixture finished\n'
+fi
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+try {
+  const away = await tool.execute("tool-call-away", {}, undefined, undefined, {});
+  const awayText = away.content[0]?.text ?? "";
+  if (!/^watcher: stood-down\b/.test(awayText)) {
+    throw new Error(`away-mode arm call did not stand down: ${awayText}`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  if (existsSync(process.env.FM_ARM_LOG)) {
+    throw new Error("away-mode arm call started a watcher cycle anyway");
+  }
+  if (prompt) {
+    throw new Error(`away-mode arm call delivered a wake: ${prompt}`);
+  }
+
+  // Away mode ends: the same call must arm normally again.
+  rmSync(`${process.env.FM_HOME}/state/.afk`);
+  const back = await tool.execute("tool-call-back", {}, undefined, undefined, {});
+  const backText = back.content[0]?.text ?? "";
+  if (!backText.includes("started Pi extension arm child")) {
+    throw new Error(`arm did not resume after away mode ended: ${backText}`);
+  }
+  for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!existsSync(process.env.FM_ARM_LOG)) {
+    throw new Error("arm never ran after away mode ended");
+  }
+  writeFileSync(`${process.env.FM_STOP_FILE}.1`, "release\n");
+  for (let i = 0; i < 250 && !prompt; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!prompt.includes("FIRSTMATE WATCHER WAKE") || !prompt.includes("signal: demo.status")) {
+    throw new Error(`normal wake delivery did not resume after away mode: ${prompt}`);
+  }
+  if (!readFileSync(process.env.FM_ARM_LOG, "utf8").includes("arm")) {
+    throw new Error("arm log is missing the post-away cycle");
+  }
+} finally {
+  // Release every remaining fixture cycle on every path so no child can
+  // outlive a failing assertion and hold this test open.
+  writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must stand down while away mode owns supervision and resume when it ends"
+  [ -z "$out" ] || fail "Pi away-mode stand-down test printed output: $out"
+  pass "Pi arms nothing and delivers no wake while away mode is active"
+}
+
+test_pi_away_mode_suppresses_wake_from_live_arm_child() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-afk-live-child-root"
+  home="$TMP_ROOT/pi-afk-live-child-home"
+  log="$TMP_ROOT/pi-afk-live-child.log"
+  stop="$TMP_ROOT/pi-afk-live-child.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  # Each cycle waits for its own numbered release file, so the test controls
+  # exactly which watcher cycle ends when.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+cycle=$(( $(wc -l < "${FM_ARM_LOG:?}" 2>/dev/null || printf 0) + 1 ))
+printf 'arm\n' >> "$FM_ARM_LOG"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "${FM_STOP_FILE:?}.$cycle" ] && [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+if [ -e "$FM_STOP_FILE.$cycle" ]; then
+  printf 'signal: demo.status done: fixture finished\n'
+fi
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+const armRows = () => {
+  try {
+    return readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+};
+const waitFor = async (predicate, ticks = 250) => {
+  for (let i = 0; i < ticks && !predicate(); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return predicate();
+};
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+try {
+  // A live watcher cycle already exists when the captain goes away.
+  await tool.execute("tool-call-first", {}, undefined, undefined, {});
+  if (!(await waitFor(() => armRows() === 1))) throw new Error("first arm cycle never started");
+  writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
+  writeFileSync(`${process.env.FM_STOP_FILE}.1`, "release\n");
+
+  // That cycle's ordinary wake belongs to the away-mode daemon: no delivery to
+  // the primary, and no successor cycle competing for the watcher singleton.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  if (prompt) throw new Error(`away mode still delivered an ordinary wake: ${prompt}`);
+  if (armRows() !== 1) throw new Error(`away mode re-armed the watcher: ${armRows()} cycles`);
+
+  // Away mode ends: ordinary supervision and wake delivery resume unchanged.
+  rmSync(`${process.env.FM_HOME}/state/.afk`);
+  await tool.execute("tool-call-back", {}, undefined, undefined, {});
+  if (!(await waitFor(() => armRows() === 2))) throw new Error("arm did not resume after away mode ended");
+  writeFileSync(`${process.env.FM_STOP_FILE}.2`, "release\n");
+  if (!(await waitFor(() => prompt.length > 0))) {
+    throw new Error("no wake was delivered after away mode ended");
+  }
+  if (!prompt.includes("FIRSTMATE WATCHER WAKE") || !prompt.includes("signal: demo.status")) {
+    throw new Error(`post-away wake delivery was malformed: ${prompt}`);
+  }
+  if (!existsSync(`${process.env.FM_STOP_FILE}.1`)) throw new Error("fixture release file vanished");
+} finally {
+  // Release every remaining fixture cycle on every path so no child can
+  // outlive a failing assertion and hold this test open.
+  writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must not deliver a live cycle's ordinary wake once away mode is active"
+  [ -z "$out" ] || fail "Pi away-mode live-child test printed output: $out"
+  pass "Pi stands a live watcher cycle down at away-mode entry without delivering its wake"
+}
+
+test_opencode_away_mode_suppresses_wake_from_live_arm_child() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-afk-live-child-root"
+  home="$TMP_ROOT/opencode-afk-live-child-home"
+  log="$TMP_ROOT/opencode-afk-live-child.log"
+  stop="$TMP_ROOT/opencode-afk-live-child.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+cycle=$(( $(wc -l < "${FM_ARM_LOG:?}" 2>/dev/null || printf 0) + 1 ))
+printf 'arm\n' >> "$FM_ARM_LOG"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "${FM_STOP_FILE:?}.$cycle" ] && [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+if [ -e "$FM_STOP_FILE.$cycle" ]; then
+  printf 'signal: demo.status done: fixture finished\n'
+fi
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let prompt = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts.map((part) => part.text).join("");
+    },
+  },
+};
+const armRows = () => {
+  try {
+    return readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+};
+const waitFor = async (predicate, ticks = 250) => {
+  for (let i = 0; i < ticks && !predicate(); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return predicate();
+};
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const idle = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+
+try {
+  await hooks.event(idle);
+  if (!(await waitFor(() => armRows() === 1))) throw new Error("first arm cycle never started");
+  writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
+  writeFileSync(`${process.env.FM_STOP_FILE}.1`, "release\n");
+
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  if (prompt) throw new Error(`away mode still delivered an ordinary wake: ${prompt}`);
+  if (armRows() !== 1) throw new Error(`away mode re-armed the watcher: ${armRows()} cycles`);
+
+  // An idle event while away mode is active must still arm nothing.
+  await hooks.event(idle);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  if (armRows() !== 1) throw new Error(`an away-mode idle event armed a cycle: ${armRows()}`);
+  if (prompt) throw new Error(`an away-mode idle event delivered a wake: ${prompt}`);
+
+  rmSync(`${process.env.FM_HOME}/state/.afk`);
+  await hooks.event(idle);
+  if (!(await waitFor(() => armRows() === 2))) throw new Error("arm did not resume after away mode ended");
+  writeFileSync(`${process.env.FM_STOP_FILE}.2`, "release\n");
+  if (!(await waitFor(() => prompt.length > 0))) {
+    throw new Error("no wake was delivered after away mode ended");
+  }
+  if (!prompt.includes("WATCHER FIRED") || !prompt.includes("signal: demo.status")) {
+    throw new Error(`post-away wake delivery was malformed: ${prompt}`);
+  }
+} finally {
+  // Release every remaining fixture cycle on every path so no child can
+  // outlive a failing assertion and hold this test open.
+  writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must not deliver a live cycle's ordinary wake once away mode is active"
+  [ -z "$out" ] || fail "OpenCode away-mode live-child test printed output: $out"
+  pass "OpenCode stands a live watcher cycle down at away-mode entry without delivering its wake"
+}
+
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
@@ -2180,3 +2466,6 @@ test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
+test_pi_away_mode_stands_down_instead_of_arming
+test_pi_away_mode_suppresses_wake_from_live_arm_child
+test_opencode_away_mode_suppresses_wake_from_live_arm_child

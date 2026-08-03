@@ -19,6 +19,8 @@ When this session owns supervision and away mode is not active:
 11. Never use shell `&` for watcher supervision.
    The arm mechanism above is extension-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at `__FM_PI_TURNEND_EXT__`).
 
+While away mode is active the extension stands down instead: it arms nothing, delivers no ordinary wake, and returns the same stand-down line for an explicit `fm_watch_arm_pi` call, because the away-mode daemon owns the watcher (`docs/watcher-continuity.md` "Away-mode stand-down").
+
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
 The watcher extension lives at `__FM_PI_EXT__`.
 Both are tracked, project-local `.pi/extensions/*.ts` files that Pi auto-discovers once the project is trusted; `bin/fm-session-start.sh` reports when the running Pi session has not loaded both required extensions.

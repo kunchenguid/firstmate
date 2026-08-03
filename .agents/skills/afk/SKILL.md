@@ -50,7 +50,12 @@ batched digest rather than per-wake injections.
    `state/.afk` exists, and stays quiet otherwise.
 
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
-   its child; the singleton lock no-ops a stray arm harmlessly.
+   its child, and `bin/fm-watch-arm.sh` stands down while `state/.afk` exists
+   instead of competing for the singleton, so a stray arm is a no-op.
+   The primary adapters that re-arm automatically (Pi's watcher extension,
+   OpenCode's watcher plugin) stand down the same way and deliver no ordinary
+   wake to the primary pane while away mode is on.
+   `docs/watcher-continuity.md` "Away-mode stand-down" owns that contract.
 
 4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 
@@ -151,6 +156,7 @@ It self-handles the routine majority without consuming a firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+That is also why the arm layer and every automatic primary adapter stand down while away mode is on: an adapter that kept the singleton would send those same one-shot wakes straight to the primary pane, defeating the classification above (`docs/watcher-continuity.md` "Away-mode stand-down").
 
 Classify each wake this way:
 

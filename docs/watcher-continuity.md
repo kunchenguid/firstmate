@@ -19,6 +19,26 @@ Only an exhausted failure with no verified watcher emits one last-resort notice 
 The Claude turn-end guard owns the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
+## Away-mode stand-down
+
+Continuity above transfers to the away-mode daemon while `state/.afk` exists, and this section is the single owner of that boundary.
+The daemon (`bin/fm-supervise-daemon.sh`) runs its own `bin/fm-watch.sh` child and classifies every wake in bash, so a primary adapter that keeps arming takes the watcher singleton away from it - and an arm run with `--restart` kills the daemon's watcher outright.
+A stolen singleton is worse than a duplicate: the watcher deliberately one-shots and forwards everything while away mode is on, so every routine wake then reaches the primary pane and spends the firstmate turn away mode exists to save.
+
+Three layers hold the boundary, and each is independently sufficient for the case it covers.
+
+`bin/fm-watch-arm.sh` is the deterministic layer: while `state/.afk` exists it arms nothing, prints one `watcher: stood-down` status line, and exits 0.
+That covers every arm path, including a Grok background task, a manual recovery probe, and any harness with no adapter of its own.
+
+Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` are the adapter layer: while away mode is active they start no arm child, deliver no ordinary wake, and start no continuity retry, whether away mode began before the decision or while a cycle was already live.
+An explicit Pi `fm_watch_arm_pi` call returns the same stand-down line as a successful no-op rather than arming.
+A `watcher: stood-down` close is classified as benign, never as a wake and never as a failure, which is what makes the race between an in-flight spawn and the arm's own gate safe.
+A genuine arm or spawn failure still surfaces once with no retry loop behind it, because the daemon owns the watcher and a retry storm would be the same wasted turn.
+Nothing is lost: the watcher enqueues each wake to `state/.wake-queue` before advancing its suppression markers, so the daemon and the next `bin/fm-wake-drain.sh` both still see it.
+
+Claude's Stop auto-arm (`bin/fm-claude-stop-autoarm.sh`) already exits before claiming the home while `state/.afk` exists, and Codex's foreground checkpoint protocol is model-driven with no adapter injection at all.
+Away mode ends by clearing the flag, after which the primary re-arms through its emitted supervision protocol and every layer above returns to ordinary behavior.
+
 ## Actionable wake ordering
 
 After an actionable Pi or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
