@@ -28,10 +28,11 @@ sha256_file() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
 }
 # Writable set, derived from the ONE declared inherited-material owner
-# (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh) so the receiver can
-# never accept less - or more - than the sender declares. This runs under the
-# remote entrypoint's fixed empty environment, so the declaration is this code
-# root's own, never something the caller can widen over SSH.
+# (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh), so this code root's
+# receiver and sender cannot drift silently. This runs under the remote
+# entrypoint's fixed empty environment, so the declaration is this code root's
+# own, never something the caller can widen over SSH; a caller from a different
+# revision must match it or the transfer fails closed.
 allowed() {
   local candidate
   while IFS= read -r candidate; do

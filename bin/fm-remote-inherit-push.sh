@@ -4,10 +4,11 @@
 #
 # The item set is derived from the ONE declared owner
 # (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh), the same declaration
-# the receiving bin/fm-remote-inherit.sh enforces, so sender and receiver cannot
-# drift apart. FM_CONFIG_INHERIT_LIVE=1 marks a live convergence push into an
-# already-running home and skips session-scoped items, exactly as the local
-# propagation path does.
+# the receiving bin/fm-remote-inherit.sh enforces, so the two implementations in
+# one code revision cannot drift silently. Different local and remote revisions
+# fail closed as documented by that owner. FM_CONFIG_INHERIT_LIVE=1 marks a live
+# convergence push into an already-running home and skips session-scoped items,
+# exactly as the local propagation path does.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

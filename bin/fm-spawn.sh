@@ -488,8 +488,9 @@ spawn_remote_secondmate() {
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
-  # when the remote host already had a live agent and reused its endpoint, and
-  # it writes nothing at all while trace context is off.
+  # when the remote host already had a live agent and reused its endpoint. An
+  # off decision delivers no carrier, but an endpoint already holding one still
+  # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
   tmp="$meta.tmp.$$"
