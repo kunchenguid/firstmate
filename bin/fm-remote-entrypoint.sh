@@ -12,23 +12,25 @@
 # The child receives an empty environment plus fixed PATH, HOME, FM_HOME, and
 # FM_ROOT_OVERRIDE. stdout, stderr, and exit status pass through unchanged.
 #
-# This file is the single owner of the child PATH. compose_child_path builds it
-# in a fixed order from <root>/bin, the account's ~/.local/bin, the common
+# This file is the single owner of the child PATH. compose_operator_path builds
+# its operator portion from the account's ~/.local/bin, the common
 # package-manager directories that exist on this host, and the always-present
-# system tail. No login or interactive shell is ever started, so a tool that
+# system tail. The tracked-command check resolves git from that portion before
+# <root>/bin is prepended for the child. No login or interactive shell is ever
+# started, so a tool that
 # lives outside those directories - anything installed by nvm, asdf, or mise -
 # needs a wrapper in ~/.local/bin. bin/fm-remote-doctor.sh reports this exact
 # PATH by inheriting it rather than recomposing it, so the two cannot drift.
 set -eu
 
 PROTOCOL=1
-CHILD_PATH=
+OPERATOR_PATH=
 
 die() { printf 'error: %s\n' "$1" >&2; exit "${2:-64}"; }
 
 path_append() { # <directory>
-  case ":$CHILD_PATH:" in *":$1:"*) return 0 ;; esac
-  CHILD_PATH="${CHILD_PATH:+$CHILD_PATH:}$1"
+  case ":$OPERATOR_PATH:" in *":$1:"*) return 0 ;; esac
+  OPERATOR_PATH="${OPERATOR_PATH:+$OPERATOR_PATH:}$1"
 }
 
 path_append_if_dir() { # <directory>
@@ -36,10 +38,21 @@ path_append_if_dir() { # <directory>
   path_append "$1"
 }
 
-compose_child_path() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 account_user
-  CHILD_PATH=
-  path_append "$root/bin"
+build_child_path() { # <remote-root-bin>
+  local root_bin=$1 directory old_ifs
+  CHILD_PATH=$root_bin
+  old_ifs=$IFS
+  IFS=:
+  for directory in $OPERATOR_PATH; do
+    case ":$CHILD_PATH:" in *":$directory:"*) continue ;; esac
+    CHILD_PATH="$CHILD_PATH:$directory"
+  done
+  IFS=$old_ifs
+}
+
+compose_operator_path() { # <account-home>
+  local account_home=$1 account_user
+  OPERATOR_PATH=
   path_append "$account_home/.local/bin"
   path_append_if_dir "$account_home/.nix-profile/bin"
   # env -i clears USER, so ask the password database rather than the environment.
@@ -159,11 +172,19 @@ COMMAND_PATH="$ROOT/bin/$COMMAND"
   || die "command is not a genuine executable in the configured remote root: $COMMAND"
 unset HOME
 ACCOUNT_HOME=$(CDPATH='' cd ~ 2>/dev/null && pwd -P) || die "cannot resolve the remote account home"
-compose_child_path "$ROOT" "$ACCOUNT_HOME"
-# Resolve the tracked-command check under the same PATH the child will use, so a
-# host whose non-interactive SSH PATH lacks git fails the doctor rather than here.
-PATH="$CHILD_PATH" git -C "$ROOT" ls-files --error-unmatch "bin/$COMMAND" >/dev/null 2>&1 \
+compose_operator_path "$ACCOUNT_HOME"
+GIT_BIN=$(PATH="$OPERATOR_PATH" command -v git 2>/dev/null || true)
+case "$GIT_BIN" in
+  /*)
+    [ -x "$GIT_BIN" ] || GIT_BIN=
+    case ":$OPERATOR_PATH:" in *":${GIT_BIN%/*}:"*) ;; *) GIT_BIN= ;; esac
+    ;;
+  *) GIT_BIN= ;;
+esac
+[ -n "$GIT_BIN" ] || die "required tool git does not resolve on the remote operator PATH; install git there or put a wrapper for it in ~/.local/bin using the recipe in docs/remote-secondmates.md"
+"$GIT_BIN" -C "$ROOT" ls-files --error-unmatch "bin/$COMMAND" >/dev/null 2>&1 \
   || die "command is not tracked by the configured remote root: $COMMAND"
+build_child_path "$ROOT/bin"
 
 trap - EXIT
 rm -rf -- "$TMP"

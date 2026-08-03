@@ -36,6 +36,8 @@ No login or interactive shell ever runs on the remote host, so `~/.profile`, `~/
 4. The system tail `/usr/bin:/bin:/usr/sbin:/sbin`.
 
 Repeated directories are collapsed to their first position, so the order above is exactly what a remote command sees.
+The entrypoint resolves `git` from the operator directories in steps 2 through 4 for tracked-command authorization, then prepends `<remote-root>/bin` only for the authorized child.
+A checkout-local `bin/git` therefore cannot authorize an untracked command, and a host with no operator `git` receives an install-or-wrapper diagnostic before command execution.
 
 A tool that only exists inside a version manager - nvm, asdf, or mise - never resolves under that contract, because those managers publish their shims through shell initialization.
 The supported escape hatch is a wrapper in `~/.local/bin` rather than special-casing a version manager inside the entrypoint:

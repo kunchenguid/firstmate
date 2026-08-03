@@ -179,6 +179,23 @@ for candidate in "${OPTIONAL_DIRS[@]}"; do
 done
 pass "the entrypoint composes a deduplicated child PATH (kept $PRESENT_CHECKED existing, omitted $ABSENT_CHECKED absent)"
 
+set +e
+out=$(
+  command() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = git ]; then return 1; fi
+    builtin command "$@"
+  }
+  export -f command
+  fm_on ios fm-remote-doctor.sh 2>&1
+)
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "the entrypoint passed when git did not resolve on its operator PATH"
+assert_contains "$out" 'required tool git does not resolve on the remote operator PATH' "the entrypoint did not name the missing prerequisite"
+assert_contains "$out" '~/.local/bin' "the entrypoint did not point at the wrapper escape hatch"
+assert_not_contains "$out" 'command is not tracked by the configured remote root' "missing git was misreported as an untracked command"
+pass "the entrypoint gives an actionable missing-git diagnostic"
+
 out=$(fm_on ios fm-remote-doctor.sh)
 rc=$?
 expect_code 0 "$rc" "the remote doctor failed through the transport"
@@ -230,9 +247,30 @@ cat > "$REMOTE_ROOT/bin/fm-untracked.sh" <<'SH'
 printf 'untracked command ran\n'
 SH
 chmod +x "$REMOTE_ROOT/bin/fm-untracked.sh"
-if fm_on ios fm-untracked.sh >/dev/null 2>&1; then
+GIT_SHADOW_LOG="$TMP_ROOT/git-shadow.log"
+cat > "$REMOTE_ROOT/bin/git" <<'SH'
+#!/usr/bin/env bash
+printf 'consulted\n' >> "$FM_GIT_SHADOW_LOG"
+exit 0
+SH
+chmod +x "$REMOTE_ROOT/bin/git"
+FM_GIT_SHADOW_LOG="$GIT_SHADOW_LOG" "$REMOTE_ROOT/bin/git" -C "$REMOTE_ROOT" ls-files --error-unmatch bin/fm-untracked.sh \
+  || fail "the checkout-local git shim did not demonstrate that it would authorize the untracked command"
+untracked_root_b64=$(printf '%s' "$REMOTE_ROOT" | base64 | tr -d '\n')
+untracked_home_b64=$(printf '%s' "$REMOTE_HOME" | base64 | tr -d '\n')
+untracked_argv_b64=$(printf '%s\0' fm-untracked.sh | base64 | tr -d '\n')
+set +e
+out=$(FM_GIT_SHADOW_LOG="$GIT_SHADOW_LOG" "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  1 "$untracked_root_b64" "$untracked_home_b64" "$untracked_argv_b64" 2>&1)
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then
   fail "an untracked fm-*.sh executable was accepted"
 fi
+assert_contains "$out" 'command is not tracked by the configured remote root' "the untracked command did not fail at tracked-command authorization"
+[ "$(wc -l < "$GIT_SHADOW_LOG" | tr -d ' ')" -eq 1 ] \
+  || fail "the tracked-command authorization consulted checkout-local git"
+pass "tracked-command authorization excludes checkout-local git"
 if FM_HOME="$LOCAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   "$ROOT/bin/fm-on.sh" '-oProxyCommand=bad' fm-probe-two.sh >/dev/null 2>&1; then
   fail "an option-shaped SSH route was accepted"
