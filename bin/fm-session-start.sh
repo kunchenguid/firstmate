@@ -655,7 +655,7 @@ data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
 
 Go to a source directly only when:
-  - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
+  - this digest flagged it ABSENT (then rebuild or create it per primary-runtime),
   - its contents looked unparseable or corrupt,
   - an individual full status log is needed for older wake-event history, or a
     status line was capped and its tail matters (each task's full log path is
