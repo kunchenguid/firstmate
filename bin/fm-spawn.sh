@@ -135,6 +135,14 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# Every actual spawn reads the variable names from ~/.secrets before any fleet
+# mutation and launches the worker through `/usr/bin/env -u <name> ...` so a
+# login shell's baseline secrets cannot reach the crew. Missing, unreadable,
+# empty, or unsupported baseline syntax refuses the spawn without printing
+# any secret content. This intentionally removes environment-token fallbacks:
+# harnesses and crew tools must use their managed auth/config stores or an
+# explicit scoped runner, while fm-spawn reapplies its required launch settings
+# after the scrub.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -149,6 +157,204 @@ usage() {
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
 esac
+
+# Print a shell-safe command prefix that removes every variable declared by the
+# approved baseline. The parser deliberately accepts only the baseline's
+# one-definition-per-line format plus comments, blanks, export-only names, and
+# safe unset directives. Unknown shell syntax is a refusal: silently skipping a
+# line could leave a baseline secret inherited by the worker.
+secret_env_assignment_tail_supported() {
+  local value=$1 state=plain trailing=0 char next i=0 length
+  length=${#value}
+
+  while [ "$i" -lt "$length" ]; do
+    char=${value:$i:1}
+    case "$state" in
+      single)
+        [ "$char" != "'" ] || state=plain
+        ;;
+      double)
+        case "$char" in
+          '"') state=plain ;;
+          \\)
+            i=$((i + 1))
+            [ "$i" -lt "$length" ] || return 1
+            ;;
+          '$')
+            i=$((i + 1))
+            [ "$i" -lt "$length" ] || return 1
+            next=${value:$i:1}
+            if [ "$next" = '{' ]; then
+              i=$((i + 1))
+              [ "$i" -lt "$length" ] || return 1
+              next=${value:$i:1}
+              [[ $next =~ ^[A-Za-z_]$ ]] || return 1
+              while :; do
+                i=$((i + 1))
+                [ "$i" -lt "$length" ] || return 1
+                next=${value:$i:1}
+                [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
+              done
+              [ "$next" = '}' ] || return 1
+            else
+              [[ $next =~ ^[A-Za-z_]$ ]] || return 1
+              while [ $((i + 1)) -lt "$length" ]; do
+                next=${value:$((i + 1)):1}
+                [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
+                i=$((i + 1))
+              done
+            fi
+            ;;
+          '`') return 1 ;;
+        esac
+        ;;
+      plain)
+        if [ "$trailing" -eq 1 ]; then
+          case "$char" in
+            ' '|$'\t') ;;
+            '#') return 0 ;;
+            *) return 1 ;;
+          esac
+        else
+          case "$char" in
+            "'") state=single ;;
+            '"') state=double ;;
+            ' '|$'\t') trailing=1 ;;
+            \\|'`'|';'|'&'|'|'|'<'|'>'|'('|')') return 1 ;;
+            '$')
+              i=$((i + 1))
+              [ "$i" -lt "$length" ] || return 1
+              next=${value:$i:1}
+              if [ "$next" = '{' ]; then
+                i=$((i + 1))
+                [ "$i" -lt "$length" ] || return 1
+                next=${value:$i:1}
+                [[ $next =~ ^[A-Za-z_]$ ]] || return 1
+                while :; do
+                  i=$((i + 1))
+                  [ "$i" -lt "$length" ] || return 1
+                  next=${value:$i:1}
+                  [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
+                done
+                [ "$next" = '}' ] || return 1
+              else
+                [[ $next =~ ^[A-Za-z_]$ ]] || return 1
+                while [ $((i + 1)) -lt "$length" ]; do
+                  next=${value:$((i + 1)):1}
+                  [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
+                  i=$((i + 1))
+                done
+              fi
+              ;;
+          esac
+        fi
+        ;;
+    esac
+    i=$((i + 1))
+  done
+
+  [ "$state" = plain ]
+}
+
+secret_env_scrub_prefix() {
+  local secrets_file line name read_status assignment_tail word_index
+  local assignment_re export_re blank_re unset_re
+  local -a line_names unset_words
+  local seen=' BASH_ENV ' prefix='/usr/bin/env -u BASH_ENV' count=0 line_no=0
+
+  if [ -z "${HOME:-}" ]; then
+    echo "error: HOME is unset; cannot locate approved secret baseline for crewmate environment scrub" >&2
+    return 1
+  fi
+  secrets_file=$HOME/.secrets
+
+  if [ ! -f "$secrets_file" ] || [ ! -r "$secrets_file" ]; then
+    echo "error: cannot read approved secret baseline for crewmate environment scrub" >&2
+    return 1
+  fi
+  if ! { exec 9< "$secrets_file"; } 2>/dev/null; then
+    echo "error: cannot read approved secret baseline for crewmate environment scrub" >&2
+    return 1
+  fi
+
+  assignment_re='^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)='
+  export_re='^[[:space:]]*export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*(#.*)?$'
+  blank_re='^[[:space:]]*(#.*)?$'
+  unset_re='^[[:space:]]*unset[[:space:]]+(-[fv][[:space:]]+|--[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*([[:space:]]+[A-Za-z_][A-Za-z0-9_]*)*[[:space:]]*(#.*)?$'
+
+  while :; do
+    line=
+    if IFS= read -r line <&9; then
+      read_status=0
+    else
+      read_status=$?
+    fi
+    if [ "$read_status" -ne 0 ] && [ -z "$line" ]; then
+      if [ "$read_status" -ne 1 ]; then
+        exec 9<&-
+        echo "error: could not finish reading approved secret baseline for crewmate environment scrub" >&2
+        return 1
+      fi
+      break
+    fi
+    line_no=$((line_no + 1))
+
+    line_names=()
+    if [[ $line =~ $assignment_re ]]; then
+      name=${BASH_REMATCH[2]}
+      line_names+=("$name")
+      assignment_tail=${line#*=}
+      if ! secret_env_assignment_tail_supported "$assignment_tail"; then
+        exec 9<&-
+        echo "error: approved secret baseline has unsupported syntax at line $line_no; refusing incomplete crewmate environment scrub" >&2
+        return 1
+      fi
+    elif [[ $line =~ $export_re ]]; then
+      name=${BASH_REMATCH[1]}
+      line_names+=("$name")
+    elif [[ $line =~ $unset_re ]]; then
+      unset_words=()
+      IFS=$' \t' read -r -a unset_words <<< "$line"
+      if [ "${unset_words[1]:-}" != -f ]; then
+        word_index=1
+        while [ "$word_index" -lt "${#unset_words[@]}" ]; do
+          name=${unset_words[$word_index]}
+          case "$name" in
+            -v|--) ;;
+            \#*) break ;;
+            *) line_names+=("$name") ;;
+          esac
+          word_index=$((word_index + 1))
+        done
+      fi
+    elif [[ $line =~ $blank_re ]]; then
+      :
+    else
+      exec 9<&-
+      echo "error: approved secret baseline has unsupported syntax at line $line_no; refusing incomplete crewmate environment scrub" >&2
+      return 1
+    fi
+
+    for name in "${line_names[@]+"${line_names[@]}"}"; do
+      count=$((count + 1))
+      case "$seen" in
+        *" $name "*) ;;
+        *)
+          prefix="$prefix -u $name"
+          seen="$seen$name "
+          ;;
+      esac
+    done
+    [ "$read_status" -eq 0 ] || break
+  done
+  exec 9<&-
+
+  if [ "$count" -eq 0 ]; then
+    echo "error: approved secret baseline exposed no variable names for scrub" >&2
+    return 1
+  fi
+  printf '%s' "$prefix"
+}
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -194,6 +400,9 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+# Resolve the scrub before the guard or any fleet mutation, while preserving the
+# gate-agent refusal as the first authority check.
+SECRET_ENV_SCRUB_PREFIX=$(secret_env_scrub_prefix) || exit 1
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -1834,6 +2043,7 @@ if [ "$KIND" = secondmate ]; then
   sq_primary_home=$(shell_quote "$FM_HOME")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home $LAUNCH"
 fi
+LAUNCH="$SECRET_ENV_SCRUB_PREFIX GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") /bin/bash -c $(shell_quote "$LAUNCH")"
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. The verified delivery routine
 # below then waits for that shell to round-trip a probe before staging the full

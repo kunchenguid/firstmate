@@ -111,6 +111,7 @@ phase_seed() {
 }
 
 phase_spawn() {
+  local launch
   : > "$LOG"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
@@ -123,7 +124,8 @@ phase_spawn() {
   assert_grep 'projects=alpha, beta, gamma' "$meta" "spawn meta did not record the project list"
   # Launch ran in the subhome, with the persistent charter and cleared overrides,
   # and never ran a project-style treehouse get.
-  assert_grep "FM_HOME='$SUB_ABS'" "$LOG" "secondmate launch did not set FM_HOME to the subhome"
+  launch=$(fm_test_normalize_nested_shell_quotes < "$LOG")
+  assert_contains "$launch" "FM_HOME='$SUB_ABS'" "secondmate launch did not set FM_HOME to the subhome"
   assert_grep 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$LOG" "launch did not clear operational overrides"
   assert_grep 'FM_CONFIG_OVERRIDE=' "$LOG" "launch did not clear the config override"
   assert_grep "$SUB_ABS/data/charter.md" "$LOG" "launch did not use the persistent charter"

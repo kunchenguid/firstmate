@@ -275,6 +275,12 @@ fm_write_secondmate_meta() {
 
 # --- common assertions ------------------------------------------------------
 
+# Normalize single quotes escaped for one enclosing shell string so assertions
+# can keep checking the inner launch command rather than its transport encoding.
+fm_test_normalize_nested_shell_quotes() {
+  sed "s/'\\\\''/'/g"
+}
+
 # assert_contains <haystack> <needle> <msg>
 assert_contains() {
   case "$1" in

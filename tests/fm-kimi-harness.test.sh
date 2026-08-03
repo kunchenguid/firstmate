@@ -71,7 +71,7 @@ case "${1:-}" in
     done
     if [ -n "$literal" ]; then
       case "$literal" in
-        *' --auto')
+        *' --auto'*)
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
           ;;
@@ -156,6 +156,7 @@ make_spawn_case() {
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$home/.kimi-code"
+  printf '%s\n' 'FM_TEST_BASELINE_SECRET=not-a-secret' > "$home/.secrets"
   printf '# Kimi test config\ndefault_model = "test"\n' > "$home/.kimi-code/config.toml"
   printf 'brief for kimi\n' > "$home/data/$id/brief.md"
   printf 'kimi\n' > "$home/config/crew-harness"
@@ -193,6 +194,13 @@ $1
 EOF
 }
 
+captured_launch_body() {
+  local encoded=${1#* /bin/bash -c }
+  eval "set -- $encoded"
+  [ "$#" -eq 1 ] || fail "captured launch did not contain one child-shell command"
+  printf '%s' "$1"
+}
+
 test_kimi_launch_then_send_is_verified() {
   local id rec out rc launch pointer brief_real meta task_tmp
   id="kimi-success-z1-$$"
@@ -208,9 +216,14 @@ test_kimi_launch_then_send_is_verified() {
   expect_code 0 "$rc" "verified kimi launch-then-send should succeed"
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
-  launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
-    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
+  launch_line=$(cat "$CASE_DIR/launch.log")
+  launch=$(captured_launch_body "$launch_line")
+  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u FM_TEST_BASELINE_SECRET GOTMPDIR='$task_tmp/gotmp' /bin/bash -c " \
+    "kimi launch did not enter the scrubbed child shell"
+  assert_contains "$launch" "$FAKEBIN_DIR/kimi" "kimi launch did not use the absolute binary"
+  assert_contains "$launch" "--model" "kimi launch omitted the requested model"
+  assert_contains "$launch" "kimi-code/k3" "kimi launch omitted the requested model value"
+  assert_contains "$launch" "--auto" "kimi launch omitted --auto"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
@@ -465,9 +478,12 @@ test_kimi_falls_back_to_expanded_home_binary() {
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
-  launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$fallback' --auto" ] \
-    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
+  launch_line=$(cat "$CASE_DIR/launch.log")
+  launch=$(captured_launch_body "$launch_line")
+  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u FM_TEST_BASELINE_SECRET GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
+    "Kimi fallback did not enter the scrubbed child shell"
+  assert_contains "$launch" "$fallback" \
+    "Kimi fallback did not expand HOME into an absolute executable"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
 

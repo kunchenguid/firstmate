@@ -685,7 +685,7 @@ test_spawn_bare_harness_no_model_effort_flag() {
   meta="$w/home/state/sm.meta"
   [ "$(meta_field "$meta" model)" = default ] || fail "bare-tokens: meta model not default (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "bare-tokens: meta effort not default (got '$(meta_field "$meta" effort)')"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_not_contains "$launch" "--model" "bare-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "bare-tokens: launch must not carry an --effort flag"
   pass "C2 spawn: a bare harness-only secondmate-harness file launches with no model/effort flag (backward-compat)"
@@ -708,7 +708,7 @@ test_spawn_secondmate_harness_model_token() {
   [ "$(meta_field "$meta" harness)" = claude ] || fail "model-token: meta harness not claude"
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-token: meta model not opus (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "model-token: meta effort not default (got '$(meta_field "$meta" effort)')"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus'" \
     "model-token: launch did not carry --model opus"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
@@ -730,7 +730,7 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   meta="$w/home/state/sm.meta"
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
   [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'high'" \
     "model-effort-tokens: launch did not carry both --model opus and --effort high"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
@@ -752,7 +752,7 @@ test_spawn_explicit_model_overrides_secondmate_harness_token() {
   [ "$(meta_field "$meta" model)" = sonnet ] \
     || fail "explicit-model: meta model not sonnet (got '$(meta_field "$meta" model)'), explicit flag did not win over file token"
   [ "$(meta_field "$meta" effort)" = high ] || fail "explicit-model: file's effort token should still apply"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "--model 'sonnet'" "explicit-model: launch did not use the explicit --model"
   assert_not_contains "$launch" "--model 'opus'" "explicit-model: launch leaked the file's model token"
   pass "C5 spawn: an explicit --model overrides config/secondmate-harness's model token; the file's effort token still applies"
@@ -774,7 +774,7 @@ test_spawn_explicit_effort_overrides_secondmate_harness_token() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "explicit-effort: file's model token should still apply"
   [ "$(meta_field "$meta" effort)" = low ] \
     || fail "explicit-effort: meta effort not low (got '$(meta_field "$meta" effort)'), explicit flag did not win over file token"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "--effort 'low'" "explicit-effort: launch did not use the explicit --effort"
   assert_not_contains "$launch" "--effort 'high'" "explicit-effort: launch leaked the file's effort token"
   pass "C6 spawn: an explicit --effort overrides config/secondmate-harness's effort token; the file's model token still applies"
@@ -795,7 +795,7 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   [ "$(meta_field "$meta" harness)" = codex ] || fail "explicit-harness-no-tokens: meta harness not codex"
   [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
   [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
     "explicit-harness-no-tokens: launch did not use codex"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
@@ -819,7 +819,7 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   [ "$(meta_field "$meta" harness)" = codex ] || fail "explicit-harness-explicit-axes: meta harness not codex"
   [ "$(meta_field "$meta" model)" = gpt-5.5 ] || fail "explicit-harness-explicit-axes: meta model did not use explicit value"
   [ "$(meta_field "$meta" effort)" = xhigh ] || fail "explicit-harness-explicit-axes: meta effort did not use explicit value"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "--model 'gpt-5.5'" \
     "explicit-harness-explicit-axes: launch did not use the explicit --model"
   assert_contains "$launch" "-c 'model_reasoning_effort=\"xhigh\"'" \
@@ -875,7 +875,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   [ "$(meta_field "$meta" harness)" = codex ] || fail "crew-unaffected: crew harness resolution changed"
   [ "$(meta_field "$meta" model)" = default ] || fail "crew-unaffected: crew task must not invent a model"
   [ "$(meta_field "$meta" effort)" = default ] || fail "crew-unaffected: crew task must not invent an effort"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_not_contains "$launch" "--model" "crew-unaffected: crew launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "crew-unaffected: crew launch must not carry an --effort flag"
   pass "C9 spawn: the harness fallback chain still resolves with no tokens; crew/scout launches are unaffected by this feature"
@@ -2184,7 +2184,7 @@ test_config_reread_bootstrap_path_and_spawn_flexibility() {
   spawn_secondmate_capture "$w" sm-flex "$sm" "$launchlog" --harness pi >/dev/null 2>&1
   assert_no_reread_pending "$sm"
   assert_no_reread_instructions "$sm"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "pi" \
     "explicit --harness pi must still win over configured codex defaults"
   pass "B18 bootstrap config reread path works; spawn flexibility remains defaults-only"

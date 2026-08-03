@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # fm-test-run.sh - single owner of Firstmate's behavior-test runner, lane
 # composition for portable CI shards, local --jobs for the proven-isolated set,
-# timing markers, and the complete-regression coverage guard.
+# per-script operator homes, timing markers, and the complete-regression
+# coverage guard.
 #
 # Selection modes (exactly one of: --all, --family, --changed, --lane,
 # --proven-isolated, or script paths):
@@ -114,6 +115,17 @@ now_ms() {
     # Second precision only when python3 is unavailable.
     echo $(($(date +%s) * 1000))
   fi
+}
+
+# Each behavior script gets a private operator HOME with the same real baseline
+# shape production requires. This keeps spawn coverage independent of the
+# runner account's secrets without adding a production-only test escape hatch.
+prepare_script_home() {
+  local home=$1
+  mkdir -p "$home"
+  chmod 0700 "$home"
+  printf '%s\n' 'FM_TEST_BASELINE_SECRET=not-a-secret' >"$home/.secrets"
+  chmod 0600 "$home/.secrets"
 }
 
 # Primary family for one tests/*.test.sh basename. Unmapped scripts are
@@ -1263,7 +1275,7 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family expected out begin_iso begin_ms end_ms end_iso duration rc
+  local base family expected out begin_iso begin_ms end_ms end_iso duration rc script_home
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
@@ -1274,10 +1286,12 @@ run_one_serial() {
   printf 'FM_TEST_BEGIN %s %s family=%s expected_gate_skip=%s\n' \
     "$begin_iso" "$script" "$family" "$expected"
 
+  script_home="$RUN_TMP/home.$TOTAL"
+  prepare_script_home "$script_home"
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
   # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
+  HOME="$script_home" bash "$script" 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
   set -e
   : "${rc:=1}"
@@ -1371,6 +1385,7 @@ else
     work="$RUN_TMP/w$worker_n"
     mkdir -p "$work/tmp"
     chmod 0700 "$work" "$work/tmp" || die "could not chmod 0700 worker root $work"
+    prepare_script_home "$work/home"
     base=$(basename "$script")
     family=$(family_for_basename "$base")
     expected=$(expected_gate_skip_for_family "$family")
@@ -1380,6 +1395,7 @@ else
       set +e
       export TMPDIR="$work/tmp"
       export TMP="$work/tmp"
+      export HOME="$work/home"
       unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1

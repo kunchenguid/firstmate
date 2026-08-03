@@ -252,6 +252,44 @@ assert "family" in doc["scripts"][0]
   pass "timing markers and JSON artifact are valid"
 }
 
+test_runner_provisions_private_operator_homes() {
+  local tmp first second first_home second_home
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-home.XXXXXX")
+  first="$tmp/first.test.sh"
+  second="$tmp/second.test.sh"
+  cat >"$first" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "$(uname)" = Darwin ]; then
+  home_mode=$(stat -f %Lp "$HOME")
+  baseline_mode=$(stat -f %Lp "$HOME/.secrets")
+else
+  home_mode=$(stat -c %a "$HOME")
+  baseline_mode=$(stat -c %a "$HOME/.secrets")
+fi
+[ "$home_mode" = 700 ]
+[ "$baseline_mode" = 600 ]
+[ -r "$HOME/.secrets" ]
+[ -s "$HOME/.secrets" ]
+[ "$(cat "$HOME/.secrets")" = 'FM_TEST_BASELINE_SECRET=not-a-secret' ]
+printf 'fixture-home=%s\n' "$HOME"
+SH
+  cp "$first" "$second"
+  chmod +x "$first" "$second"
+  "$RUNNER" "$first" "$second" >"$tmp/out" 2>"$tmp/err" \
+    || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "runner did not provision readable secret baselines"; }
+  first_home=$(grep '^fixture-home=' "$tmp/out" | sed -n '1s/^fixture-home=//p')
+  second_home=$(grep '^fixture-home=' "$tmp/out" | sed -n '2s/^fixture-home=//p')
+  [ -n "$first_home" ] && [ -n "$second_home" ] \
+    || { rm -rf "$tmp"; fail "fixtures did not report their operator homes"; }
+  [ "$first_home" != "$HOME" ] && [ "$second_home" != "$HOME" ] \
+    || { rm -rf "$tmp"; fail "runner reused the invoking account's HOME"; }
+  [ "$first_home" != "$second_home" ] \
+    || { rm -rf "$tmp"; fail "runner reused one operator HOME across scripts"; }
+  rm -rf "$tmp"
+  pass "runner provisions a private real secret baseline for each script"
+}
+
 test_aggregate_exit_behavior() {
   local tmp pass_f fail_f rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
@@ -578,6 +616,7 @@ test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_timing_markers_and_json
+test_runner_provisions_private_operator_homes
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_fail_on_gate_skip_token

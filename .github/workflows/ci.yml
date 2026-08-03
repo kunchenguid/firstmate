@@ -290,6 +290,11 @@ jobs:
           bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
           bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Provision spawn secret baseline
+        run: |
+          set -eu
+          umask 077
+          printf '%s\n' 'FM_TEST_BASELINE_SECRET=not-a-secret' > "$HOME/.secrets"
       - name: Start default Herdr session for fleet-state tripwire
         run: |
           set -eu
