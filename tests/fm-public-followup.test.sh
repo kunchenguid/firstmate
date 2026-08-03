@@ -586,7 +586,7 @@ test_delivery_requires_registration_before_posting() {
 }
 
 test_secondmate_teardown_requires_parent_binding() {
-  local parent child
+  local parent child registry_before marker_before
   parent=$(make_home teardown-parent)
   child=$(make_home teardown-child)
   printf '%s\n' mate > "$child/.fm-secondmate-home"
@@ -608,8 +608,12 @@ test_secondmate_teardown_requires_parent_binding() {
   parent=$(make_home teardown-valid-parent)
   child=$(make_home teardown-valid-child)
   printf '%s\n' mate > "$child/.fm-secondmate-home"
-  printf -- '- mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
+  printf -- '- mate - synthetic (id is legacy); preserve this (home: %s; scope: synthetic (child); semicolon remains meaningful; projects: ; added 2026-07-30)\n' \
     "$child" > "$parent/data/secondmates.md"
+  FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
+    || fail "home-seed validation rejected a punctuation-bearing operational registry record"
+  registry_before=$(cat "$parent/data/secondmates.md")
+  marker_before=$(cat "$child/.fm-secondmate-home")
   seed_commitment "$parent" pf-teardown-valid req-teardown-valid x secondmate:mate work-child
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
@@ -628,6 +632,10 @@ test_secondmate_teardown_requires_parent_binding() {
   esac
   assert_present "$child/state/work-child.meta" \
     "an owed parent commitment must preserve the child work metadata"
+  [ "$registry_before" = "$(cat "$parent/data/secondmates.md")" ] \
+    || fail "guarded cleanup refusal changed the parent registry"
+  [ "$marker_before" = "$(cat "$child/.fm-secondmate-home")" ] \
+    || fail "guarded cleanup refusal changed the child identity marker"
   pass "marked secondmate teardown resolves its parent and fails closed when unavailable"
 }
 

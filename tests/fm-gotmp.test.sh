@@ -70,6 +70,7 @@ make_fake_root() {
   # teardown now requires.
   ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
+  ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   # fm-admission-lib.sh: teardown sources it for the admission release reminder.
   ln -s "$ROOT/bin/fm-admission-lib.sh" "$fake/bin/fm-admission-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
@@ -144,6 +145,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # teardown now requires.
   ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
+  ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   # fm-admission-lib.sh: teardown sources it for the admission release reminder.
   ln -s "$ROOT/bin/fm-admission-lib.sh" "$fake/bin/fm-admission-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
