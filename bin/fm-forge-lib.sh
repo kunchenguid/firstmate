@@ -70,6 +70,11 @@ fm_forge_detect_provider() {
       echo "local"
       return 0
       ;;
+    *://*|*:*) ;;
+    *)
+      echo "local"
+      return 0
+      ;;
   esac
   host=$(fm_forge_resolve_host "$remote_url" 2>/dev/null) || host=""
   case "$host" in
