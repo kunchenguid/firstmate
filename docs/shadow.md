@@ -34,6 +34,8 @@ The final destination commit must have exactly the same identity as the source c
 
 Git's ownership trust is granted only per invocation for the exact absolute source, stage, or destination path.
 
+The destination status check also disables Git filemode comparison only for that invocation because 9p can normalize modes; the manifest still detects content, type, size, and hash changes.
+
 Each run stages the complete output beside the destination, validates its content, and swaps it into place only after the source is rechecked.
 
 The staging copier uses 9p-compatible content and symbolic-link operations and does not request POSIX metadata updates from the destination filesystem.

@@ -125,6 +125,23 @@ test_9p_content_fixture_ignores_source_metadata_restrictions() {
   pass '9p content fixture copies bytes and symlinks without source metadata updates'
 }
 
+test_mode_only_destination_drift_is_ignored_on_9p() {
+  local root source destination out
+  root=$(fm_test_tmproot shadow-mode-drift)
+  new_fixture "$root"
+  source="$root/source"
+  destination="$root/destination-parent/shadow"
+  run_shadow "$source" "$destination" >/dev/null
+  chmod 0777 "$destination/README.md"
+
+  out=$(run_shadow "$source" "$destination")
+  assert_contains "$out" 'already current:' \
+    '9p mode-only destination drift was treated as content drift'
+  assert_grep 'canonical Firstmate fixture' "$destination/README.md" \
+    'mode-only destination validation changed file content'
+  pass '9p mode-only destination drift is ignored while content remains validated'
+}
+
 test_repeated_replica_is_idempotent_and_tracks_complete_working_tree() {
   local root source destination controls out manifest_before
   root=$(fm_test_tmproot shadow-repeat)
@@ -279,6 +296,7 @@ test_manifest_tamper_is_refused() {
 
 test_first_replica_copies_identity_and_complete_tree
 test_9p_content_fixture_ignores_source_metadata_restrictions
+test_mode_only_destination_drift_is_ignored_on_9p
 test_repeated_replica_is_idempotent_and_tracks_complete_working_tree
 test_dirty_destination_is_preserved
 test_divergent_destination_is_preserved

@@ -13,6 +13,7 @@
 # Existing destination output is removed only after a clean replacement is
 # validated and installed.
 # Every Git invocation binds safe.directory to the exact checkout path for that invocation.
+# Destination status additionally disables filemode comparison only for that invocation.
 #
 # Usage:
 #   fm-shadow.sh [--source <path>] [--destination <path>]
@@ -80,6 +81,12 @@ git_at() {
   local repo=$1
   shift
   git -c "safe.directory=$repo" -C "$repo" "$@"
+}
+
+git_status_at() {
+  local repo=$1
+  shift
+  git -c "safe.directory=$repo" -c core.filemode=false -C "$repo" "$@"
 }
 
 lowercase() {
@@ -179,7 +186,7 @@ acquire_lock() {
 
 check_destination_git_clean() {
   local status line
-  status=$(GIT_OPTIONAL_LOCKS=0 git_at "$DEST" status --porcelain=v1 --untracked-files=all) \
+  status=$(GIT_OPTIONAL_LOCKS=0 git_status_at "$DEST" status --porcelain=v1 --untracked-files=all) \
     || die "cannot inspect destination status"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
