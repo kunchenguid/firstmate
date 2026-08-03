@@ -140,6 +140,7 @@ Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Duplicate refusal, folding, ageing, lightweight resolution, and externally closed recognition verification date: 2026-08-02.
+Sign-off-owned status accounting, with folding decoupled from it, verification date: 2026-08-04.
 Unrouted close-path verification date: 2026-08-13.
 Answer-time closure verification date: 2026-08-16.
 
