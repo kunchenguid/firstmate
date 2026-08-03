@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--source-tier <tier> --source-workload <key>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--source-tier <tier> --source-workload <key>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -18,10 +18,15 @@
 #   refused as a flag value.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
-#   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   --model <name> and --effort <off|minimal|low|medium|high|xhigh|max> are concrete
+#   profile axes chosen by firstmate at intake. They are only threaded into harnesses
+#   whose installed CLIs were verified to support that axis; unsupported axes are
+#   omitted from that harness's launch rather than guessed.
+#   --source-tier and --source-workload opt an ordinary ship/scout into live Pi
+#   subagent workload resolution. They are required together and require explicit
+#   --harness pi|pi-signed, --model, and --effort. Immediately before any endpoint
+#   or worktree mutation, the live source is resolved and the supplied model/effort
+#   must match exactly; stale or incompatible routing is refused.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -112,8 +117,8 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
-#   applies to every pair. A ship batch therefore carries one delivery contract, and each
+#   source of truth; shared --scout/--harness/--model/--effort/--source-tier/
+#   --source-workload/--backend/--mode/--yolo applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
@@ -203,12 +208,16 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+SOURCE_TIER=
+SOURCE_WORKLOAD=
 BACKEND_ARG=
 MODE=
 YOLO=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+SOURCE_TIER_SET=0
+SOURCE_WORKLOAD_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -223,6 +232,8 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      source-tier) SOURCE_TIER=$a; SOURCE_TIER_SET=1 ;;
+      source-workload) SOURCE_WORKLOAD=$a; SOURCE_WORKLOAD_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
@@ -240,6 +251,10 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --source-tier) want_value=source-tier ;;
+    --source-tier=*) SOURCE_TIER=${a#--source-tier=}; SOURCE_TIER_SET=1 ;;
+    --source-workload) want_value=source-workload ;;
+    --source-workload=*) SOURCE_WORKLOAD=${a#--source-workload=}; SOURCE_WORKLOAD_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --mode) want_value=mode ;;
@@ -253,12 +268,14 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$SOURCE_TIER_SET" -eq 0 ] || [ -n "$SOURCE_TIER" ] || { echo "error: --source-tier requires a non-empty value" >&2; exit 1; }
+[ "$SOURCE_WORKLOAD_SET" -eq 0 ] || [ -n "$SOURCE_WORKLOAD" ] || { echo "error: --source-workload requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
-  ''|low|medium|high|xhigh|max) ;;
-  *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
+  ''|off|minimal|low|medium|high|xhigh|max) ;;
+  *) echo "error: --effort must be one of off, minimal, low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
 
 # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
@@ -294,6 +311,39 @@ else
     echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
     exit 1
   }
+fi
+
+SOURCE_ROUTED=0
+if [ "$SOURCE_TIER_SET" -ne "$SOURCE_WORKLOAD_SET" ]; then
+  echo "error: --source-tier and --source-workload are required together" >&2
+  exit 1
+fi
+if [ "$SOURCE_TIER_SET" -eq 1 ]; then
+  [ "$KIND" != secondmate ] || { echo "error: --source-tier and --source-workload are not allowed on --secondmate spawns" >&2; exit 1; }
+  [ "$HARNESS_SET" -eq 1 ] || { echo "error: source-routed spawns require explicit --harness pi or --harness pi-signed" >&2; exit 1; }
+  case "$HARNESS_ARG" in
+    pi|pi-signed) ;;
+    *) echo "error: source-routed spawns require verified --harness pi or --harness pi-signed; got '$HARNESS_ARG'" >&2; exit 1 ;;
+  esac
+  [ "$MODEL_SET" -eq 1 ] || { echo "error: source-routed spawns require explicit --model from a fresh resolution" >&2; exit 1; }
+  [ "$EFFORT_SET" -eq 1 ] || { echo "error: source-routed spawns require explicit --effort from a fresh resolution" >&2; exit 1; }
+  if ! SOURCE_RESOLUTION=$("$FM_ROOT/bin/fm-subagent-dispatch.sh" resolve "$SOURCE_TIER" "$SOURCE_WORKLOAD"); then
+    echo "error: could not resolve live Pi subagent source for tier=$SOURCE_TIER workload=$SOURCE_WORKLOAD" >&2
+    exit 1
+  fi
+  SOURCE_MODEL=$(printf '%s' "$SOURCE_RESOLUTION" | jq -er '.model | select(type == "string")') || {
+    echo "error: live Pi subagent resolution returned invalid model JSON; re-resolve before spawning" >&2
+    exit 1
+  }
+  SOURCE_EFFORT=$(printf '%s' "$SOURCE_RESOLUTION" | jq -er '.effort | select(type == "string")') || {
+    echo "error: live Pi subagent resolution returned invalid effort JSON; re-resolve before spawning" >&2
+    exit 1
+  }
+  if [ "$MODEL" != "$SOURCE_MODEL" ] || [ "$EFFORT" != "$SOURCE_EFFORT" ]; then
+    echo "error: stale Pi subagent route for tier=$SOURCE_TIER workload=$SOURCE_WORKLOAD: supplied model=$MODEL effort=$EFFORT, fresh source requires model=$SOURCE_MODEL effort=$SOURCE_EFFORT; re-resolve and retry" >&2
+    exit 1
+  fi
+  SOURCE_ROUTED=1
 fi
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
@@ -392,6 +442,11 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            if [ "${SOURCE_ROUTED:-0}" = 1 ]; then
+              echo "dispatch_source=pi-subagents"
+              echo "dispatch_tier=$SOURCE_TIER"
+              echo "dispatch_workload=$SOURCE_WORKLOAD"
+            fi
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -456,6 +511,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ "$SOURCE_TIER_SET" -eq 0 ] || shared_args+=(--source-tier "$SOURCE_TIER" --source-workload "$SOURCE_WORKLOAD")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -626,8 +682,8 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
     if [ -n "$SM_EFFORT" ]; then
       case "$SM_EFFORT" in
-        low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
-        *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
+        off|minimal|low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
+        *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of off, minimal, low, medium, high, xhigh, max; ignoring" >&2 ;;
       esac
     fi
   fi
@@ -704,10 +760,9 @@ effort_flag_for_harness() {
       esac
       ;;
     pi|pi-signed)
-      # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
-      # its --thinking flag.
+      # Pi accepts its full thinking vocabulary through --thinking.
       case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+        off|minimal|low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
@@ -1717,6 +1772,11 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ "$SOURCE_ROUTED" = 1 ]; then
+    echo "dispatch_source=pi-subagents"
+    echo "dispatch_tier=$SOURCE_TIER"
+    echo "dispatch_workload=$SOURCE_WORKLOAD"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -1827,4 +1887,6 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+SPAWN_SOURCE=
+[ "$SOURCE_ROUTED" = 0 ] || SPAWN_SOURCE=" source=pi-subagents tier=$SOURCE_TIER workload=$SOURCE_WORKLOAD"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_SOURCE"

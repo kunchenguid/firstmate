@@ -72,6 +72,18 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
+write_subagent_config() {
+  local path=$1 model=$2 effort=$3
+  jq -n --arg model "$model" --arg effort "$effort" '{
+    maxConcurrency: 3,
+    modelTiers: {
+      cheap: {workloads: [{key:"w1", description:"cheap", model:"openai/gpt-cheap", thinkingLevel:"minimal"}]},
+      balanced: {workloads: [{key:"w2", description:"balanced", model:$model, thinkingLevel:$effort}]},
+      strong: {workloads: [{key:"w3", description:"strong", model:"openai/gpt-strong", thinkingLevel:"max"}]}
+    }
+  }' > "$path"
+}
+
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -93,6 +105,8 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    PI_CODING_AGENT_DIR="${FM_TEST_PI_CODING_AGENT_DIR:-}" \
+    FM_SUBAGENTS_CONFIG="${FM_TEST_SUBAGENTS_CONFIG:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -606,6 +620,213 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_pi_source_route_uses_live_resolution() {
+  local rec id config out status launch meta current
+  id=profile-source-valid-z20
+  rec=$(make_spawn_case profile-source-valid pi "$id")
+  read_case_record "$rec"
+  config="$CASE_DIR/subagents.json"
+  write_subagent_config "$config" openai/gpt-balanced high
+
+  out=$(FM_TEST_SUBAGENTS_CONFIG="$config" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model openai/gpt-balanced --effort high \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 0 "$status" "valid live Pi source route should spawn"
+  assert_contains "$out" "source=pi-subagents tier=balanced workload=w2" \
+    "source-routed spawn output omitted its source identity"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep 'dispatch_source=pi-subagents' "$meta" "source route meta omitted dispatch_source"
+  assert_grep 'dispatch_tier=balanced' "$meta" "source route meta omitted dispatch_tier"
+  assert_grep 'dispatch_workload=w2' "$meta" "source route meta omitted dispatch_workload"
+  [ "$(grep -c '^dispatch_source=' "$meta")" -eq 1 ] || fail "source route meta duplicated dispatch_source"
+  [ "$(grep -c '^dispatch_tier=' "$meta")" -eq 1 ] || fail "source route meta duplicated dispatch_tier"
+  [ "$(grep -c '^dispatch_workload=' "$meta")" -eq 1 ] || fail "source route meta duplicated dispatch_workload"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_PI_HARNESS=pi pi --model 'openai/gpt-balanced' --thinking 'high'" \
+    "live Pi source route did not reach launch construction"
+  fm_fake_exit0 "$FAKEBIN_DIR" no-mistakes
+  current=$(FM_STATE_OVERRIDE="$HOME_DIR/state" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-crew-state.sh" "$id")
+  assert_contains "$current" "state: working · source: pane" \
+    "public crew-state parser did not accept generated source-route metadata"
+  pass "live Pi source routes launch, record source identity, and remain parser-compatible"
+}
+
+test_pi_source_route_rejects_stale_args_then_accepts_fresh_args() {
+  local rec id config out status
+  id=profile-source-fresh-z21
+  rec=$(make_spawn_case profile-source-fresh pi "$id")
+  read_case_record "$rec"
+  config="$CASE_DIR/subagents.json"
+  write_subagent_config "$config" openai/old-model medium
+  write_subagent_config "$config" openai/new-model xhigh
+
+  out=$(FM_TEST_SUBAGENTS_CONFIG="$config" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model openai/old-model --effort medium \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 1 "$status" "stale concrete source args should be refused"
+  assert_contains "$out" "fresh source requires model=openai/new-model effort=xhigh; re-resolve and retry" \
+    "stale route refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "stale source args wrote metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "stale source args launched an endpoint"
+
+  out=$(FM_TEST_SUBAGENTS_CONFIG="$config" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model openai/new-model --effort xhigh \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 0 "$status" "fresh concrete source args should spawn"
+  pass "source routes re-read live configuration and refuse stale concrete args"
+}
+
+test_source_route_invalid_source_stops_before_metadata() {
+  local rec id config out status
+  id=profile-source-invalid-z22
+  rec=$(make_spawn_case profile-source-invalid pi "$id")
+  read_case_record "$rec"
+  config="$CASE_DIR/malformed.json"
+  printf '{bad json\n' > "$config"
+
+  out=$(FM_TEST_SUBAGENTS_CONFIG="$config" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model openai/model --effort high \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 1 "$status" "malformed source should stop spawn"
+  assert_contains "$out" "SUBAGENTS_CONFIG: invalid" "malformed source diagnostic was lost"
+  assert_absent "$HOME_DIR/state/$id.meta" "malformed source wrote metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "malformed source launched an endpoint"
+
+  out=$(FM_TEST_SUBAGENTS_CONFIG="$CASE_DIR/absent.json" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model openai/model --effort high \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 1 "$status" "missing explicit source should stop spawn"
+  assert_contains "$out" "FM_SUBAGENTS_CONFIG is not a regular file" "missing source diagnostic was lost"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing source wrote metadata"
+  pass "invalid and missing live sources stop before metadata or launch"
+}
+
+test_legacy_explicit_profile_bypasses_malformed_source() {
+  local rec id config out status
+  id=profile-source-bypass-z23
+  rec=$(make_spawn_case profile-source-bypass pi "$id")
+  read_case_record "$rec"
+  config="$CASE_DIR/malformed.json"
+  printf '{bad json\n' > "$config"
+
+  out=$(FM_TEST_SUBAGENTS_CONFIG="$config" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model openai/captain --effort high)
+  status=$?
+  expect_code 0 "$status" "legacy explicit profile should not read malformed source"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai/captain high
+  assert_not_contains "$out" "SUBAGENTS_CONFIG" "legacy explicit profile unexpectedly read source"
+  pass "explicit legacy harness/model/effort bypass live source resolution"
+}
+
+test_source_route_requires_paired_flags_and_verified_pi_harness() {
+  local rec id sm out status
+  id=profile-source-contract-z24
+  rec=$(make_spawn_case profile-source-contract pi "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model openai/model --effort high --source-tier balanced)
+  status=$?
+  expect_code 1 "$status" "unpaired source flags should fail"
+  assert_contains "$out" "--source-tier and --source-workload are required together" "paired-flag refusal missing"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model openai/model --effort high \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 1 "$status" "source route without explicit harness should fail"
+  assert_contains "$out" "require explicit --harness pi or --harness pi-signed" "explicit harness requirement missing"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --effort high \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 1 "$status" "source route without explicit model should fail"
+  assert_contains "$out" "require explicit --model" "explicit model requirement missing"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness pi --model openai/model \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 1 "$status" "source route without explicit effort should fail"
+  assert_contains "$out" "require explicit --effort" "explicit effort requirement missing"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model openai/model --effort high \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 1 "$status" "non-Pi source harness should fail"
+  assert_contains "$out" "require verified --harness pi or --harness pi-signed" "incompatible harness refusal missing"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness 'custom-agent --raw' --model openai/model --effort high \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 1 "$status" "raw source route should fail"
+  assert_contains "$out" "require verified --harness pi or --harness pi-signed" "raw route refusal missing"
+
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" --secondmate --harness pi --model openai/model --effort high \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 1 "$status" "secondmate source route should fail"
+  assert_contains "$out" "not allowed on --secondmate spawns" "secondmate source-route refusal missing"
+  assert_absent "$HOME_DIR/state/$id.meta" "invalid source route contract wrote metadata"
+  pass "source route flags are paired and restricted to explicit verified Pi harnesses"
+}
+
+test_pi_off_and_minimal_thinking_propagate() {
+  local rec off_id minimal_id out status launch
+  off_id=profile-pi-off-z25
+  minimal_id=profile-pi-minimal-z26
+  rec=$(make_spawn_case profile-pi-low-vocab pi "$off_id" "$minimal_id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$off_id" "$PROJ_DIR" --harness pi --model openai/model --effort off)
+  status=$?
+  expect_code 0 "$status" "Pi off thinking should parse and spawn"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--thinking 'off'" "Pi off thinking was not propagated"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$minimal_id" "$PROJ_DIR" --harness pi --model openai/model --effort minimal)
+  status=$?
+  expect_code 0 "$status" "Pi minimal thinking should parse and spawn"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--thinking 'minimal'" "Pi minimal thinking was not propagated"
+  pass "Pi propagates off and minimal through its full thinking vocabulary"
+}
+
+test_batch_forwards_live_source_flags() {
+  local rec id1 id2 config out status
+  id1=profile-source-batch-a-z27
+  id2=profile-source-batch-b-z28
+  rec=$(make_spawn_case profile-source-batch pi "$id1" "$id2")
+  read_case_record "$rec"
+  config="$CASE_DIR/subagents.json"
+  write_subagent_config "$config" openai/batch medium
+
+  out=$(FM_TEST_SUBAGENTS_CONFIG="$config" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model openai/batch --effort medium \
+    --source-tier balanced --source-workload w2)
+  status=$?
+  expect_code 0 "$status" "batch source route should spawn every task"
+  assert_grep 'dispatch_source=pi-subagents' "$HOME_DIR/state/$id1.meta" "first batch task lost source flags"
+  assert_grep 'dispatch_source=pi-subagents' "$HOME_DIR/state/$id2.meta" "second batch task lost source flags"
+  assert_contains "$out" "spawned $id1 harness=pi" "first source batch task did not spawn"
+  assert_contains "$out" "spawned $id2 harness=pi" "second source batch task did not spawn"
+  pass "batch dispatch forwards both live source flags"
+}
+
 test_claude_forwards_firstmate_config_dir_when_set() {
   local rec id out status launch
   id=profile-claude-cfgdir-z17
@@ -695,6 +916,13 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_pi_source_route_uses_live_resolution
+test_pi_source_route_rejects_stale_args_then_accepts_fresh_args
+test_source_route_invalid_source_stops_before_metadata
+test_legacy_explicit_profile_bypasses_malformed_source
+test_source_route_requires_paired_flags_and_verified_pi_harness
+test_pi_off_and_minimal_thinking_propagate
+test_batch_forwards_live_source_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir

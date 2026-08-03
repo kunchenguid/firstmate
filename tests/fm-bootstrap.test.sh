@@ -809,8 +809,22 @@ unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harn
 unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
+pi off effort is accepted^{"rules":[{"when":"direct coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"off"}}]}^empty^
+pi minimal effort is accepted^{"rules":[{"when":"light coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"minimal"}}]}^empty^
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
+pi-signed off effort is accepted^{"rules":[{"when":"direct signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"off"}}]}^empty^
+pi-signed minimal effort is accepted^{"rules":[{"when":"light signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"minimal"}}]}^empty^
 pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
+unsupported claude off effort is flagged^{"rules":[{"when":"claude work","use":{"harness":"claude","effort":"off"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: claude:off
+unsupported claude minimal effort is flagged^{"rules":[{"when":"claude work","use":{"harness":"claude","effort":"minimal"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: claude:minimal
+unsupported codex off effort is flagged^{"rules":[{"when":"codex work","use":{"harness":"codex","effort":"off"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:off
+unsupported codex minimal effort is flagged^{"rules":[{"when":"codex work","use":{"harness":"codex","effort":"minimal"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:minimal
+unsupported grok off effort is flagged^{"rules":[{"when":"grok work","use":{"harness":"grok","effort":"off"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:off
+unsupported grok minimal effort is flagged^{"rules":[{"when":"grok work","use":{"harness":"grok","effort":"minimal"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:minimal
+unsupported opencode off effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","effort":"off"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:off
+unsupported opencode minimal effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","effort":"minimal"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:minimal
+unsupported kimi off effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","effort":"off"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:off
+unsupported kimi minimal effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","effort":"minimal"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:minimal
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high

@@ -226,12 +226,14 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
-When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
+The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under `pi-workload-dispatch` and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+Any concrete per-task captain override on harness, model, or effort bypasses profile selection for that dispatch, preserves every explicit axis, and resolves unspecified axes through the existing static harness path and `harness-adapters` generic fallback as applicable.
+This avoids composing a partial captain override with a potentially incompatible profile tuple and also bypasses live Pi workload routing.
+When the file exists, `fm-spawn.sh` enforces the profile contract for dispatches governed by that file by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.
-`AGENTS.md` section 4 owns the always-loaded dispatch intake boundary, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
+`pi-workload-dispatch` owns intake precedence, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
 
 ```json
 {
@@ -256,7 +258,7 @@ The single-object form stays fully backward-compatible, and every profile needs 
 Profile `model` and `effort` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
-If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
+If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before `pi-workload-dispatch` decides whether live Pi workload intake or the legacy `config/crew-harness` path applies.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
@@ -264,6 +266,71 @@ Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstr
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+## Live Pi workload source
+
+The agent-only [`pi-workload-dispatch` skill](../.agents/skills/pi-workload-dispatch/SKILL.md) owns when this source is consulted and how a workload is selected.
+This section and the header of [`bin/fm-subagent-dispatch.sh`](../bin/fm-subagent-dispatch.sh) own source resolution, schema, helper output, failure behavior, and spawn wiring.
+
+`bin/fm-subagent-dispatch.sh` evaluates source candidates fresh on every invocation without writing the source or persisting a model list.
+It snapshots the selected source exactly once into a private temporary file, removes that file on exit, and validates and renders only from the snapshot so malformed bytes are not transformed and a concurrent source edit cannot separate validation from output.
+It first uses `$PI_CODING_AGENT_DIR/extensions/subagents/config.json` when `PI_CODING_AGENT_DIR` is nonempty and that candidate is a regular file.
+It next uses nonempty `FM_SUBAGENTS_CONFIG`, which must name an absolute regular file and fails as invalid when explicitly set otherwise instead of falling through.
+It finally uses `$HOME/.pi/agent/extensions/subagents/config.json` when that candidate is a regular file.
+When no candidate is available, it writes an observable `SOURCE_ABSENT` result to stderr and exits 4 so intake can retain that result before using the legacy static harness path.
+An invalid selected file writes `SUBAGENTS_CONFIG: invalid ...` to stderr and exits 3, and a source-routed dispatch must stop instead of falling back.
+
+`FM_SUBAGENTS_CONFIG` is an environment pointer, not inherited local material.
+Each secondmate home resolves the same live source procedure from its own current `PI_CODING_AGENT_DIR`, `FM_SUBAGENTS_CONFIG`, and `HOME` environment.
+The inherited `config/crew-dispatch.json` and `config/crew-harness` values retain their normal higher-precedence roles in that home.
+
+The selected JSON root allows only `maxConcurrency` and `modelTiers`, with `modelTiers` required.
+`maxConcurrency` is optional and must be a positive integer when present; when omitted, `list` exposes the extension default `4`.
+`modelTiers` contains exactly `cheap`, `balanced`, and `strong`.
+Each tier contains exactly `workloads`, which is a nonempty array of objects containing exactly `key`, `description`, `model`, and `thinkingLevel`.
+A workload key matches `^w[1-9][0-9]*$` and is unique within its tier, while its description is a nonempty string.
+A model matches the extension validator's `/^[^/\s]+\/.+\S$/`: the provider contains no slash or whitespace, while the model suffix may contain additional slashes or internal spaces, has the regex's same minimum length, ends in a non-whitespace character, and contains no newline.
+The exact thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+The helper renames `thinkingLevel` to `effort` in its output without changing the value.
+
+`bin/fm-subagent-dispatch.sh path` prints the selected path.
+`bin/fm-subagent-dispatch.sh list` prints compact JSON with `source`, `maxConcurrency`, and `tiers`, where each workload exposes `workload`, `description`, `model`, and `effort`.
+`bin/fm-subagent-dispatch.sh resolve <cheap|balanced|strong> <workload-key>` prints compact JSON with `source`, `tier`, `workload`, `model`, `effort`, and `description`.
+Usage errors exit 2, malformed JSON or schema and an explicitly invalid source exit 3, source absence exits 4, and unknown tiers or workload keys exit 5.
+
+The following commands demonstrate fresh resolution with opaque keys discovered from the live list rather than copied model identifiers.
+
+```bash
+listing=$(bin/fm-subagent-dispatch.sh list)
+cheap_key=$(printf '%s' "$listing" | jq -r '.tiers.cheap[0].workload')
+balanced_key=$(printf '%s' "$listing" | jq -r '.tiers.balanced[0].workload')
+strong_key=$(printf '%s' "$listing" | jq -r '.tiers.strong[0].workload')
+bin/fm-subagent-dispatch.sh resolve cheap "$cheap_key"
+bin/fm-subagent-dispatch.sh resolve balanced "$balanced_key"
+bin/fm-subagent-dispatch.sh resolve strong "$strong_key"
+```
+
+For a selected workload, resolve it again immediately before spawning and pass the returned axes with the same opaque source coordinates.
+
+```bash
+route=$(bin/fm-subagent-dispatch.sh resolve balanced "$balanced_key")
+bin/fm-spawn.sh <task-id> <project-dir> \
+  --scout \
+  --harness pi \
+  --model "$(printf '%s' "$route" | jq -r '.model')" \
+  --effort "$(printf '%s' "$route" | jq -r '.effort')" \
+  --source-tier "$(printf '%s' "$route" | jq -r '.tier')" \
+  --source-workload "$(printf '%s' "$route" | jq -r '.workload')"
+```
+
+`--source-tier` and `--source-workload` are required together for an ordinary ship or scout and are forbidden for secondmate launches.
+A source-routed spawn also requires explicit `--harness pi` or `--harness pi-signed`, `--model`, and `--effort` values.
+Immediately before endpoint or isolated-copy mutation, `fm-spawn.sh` resolves the live tier and workload again and refuses stale supplied model or effort values.
+A successful source-routed task records the normal `harness=`, `model=`, and `effort=` fields plus `dispatch_source=pi-subagents`, `dispatch_tier=<tier>`, and `dispatch_workload=<opaque-key>`.
+The source file path and a generated or copied model list are not recorded.
+
+A model selected from the live source must be established in the selected Pi-family executable's current authoritative catalog through `harness-adapters` before spawn.
+If that catalog proves the selected model unsupported, the dispatch is blocked and no alternate model or workload is chosen silently.
 
 ## Toolchain
 
