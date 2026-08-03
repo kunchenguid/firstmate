@@ -335,6 +335,10 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
+
+nm_ci_state_is_green() {
+  [ "${1:-}" = green ]
+}
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -507,19 +511,21 @@ if [ "$HAVE_RUN" = 1 ]; then
         # green head, and a task whose checks never ran needs firstmate rather
         # than a place in the ready-for-review queue.
         checks-passed)
-          case "$(nm_ci_checks_state)" in
-            green)
-              RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"
-              ;;
-            not-ready)
+          CI_LOG_STATE=$(nm_ci_checks_state)
+          if nm_ci_state_is_green "$CI_LOG_STATE"; then
+            RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"
+          else
+            case "$CI_LOG_STATE" in
+              not-ready)
               RUN_STATE=blocked
               RUN_DETAIL="run reported a passing result its own CI log does not record: nothing verified this head"
-              ;;
-            unknown)
+                ;;
+              unknown|"")
               RUN_STATE=unknown
               RUN_DETAIL="run reported checks-passed, but its CI log is unavailable: claim could not be corroborated"
-              ;;
-          esac
+                ;;
+            esac
+          fi
           ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
@@ -555,7 +561,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         case "$CI_STEP_STATUS" in
           running)
             CI_LOG_STATE=$(nm_ci_checks_state)
-            if [ "$CI_LOG_STATE" = green ]; then
+            if nm_ci_state_is_green "$CI_LOG_STATE"; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
             fi
@@ -570,18 +576,23 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      RUN_STATE=unknown
+      RUN_DETAIL="status log reported readiness, but coarse run data cannot corroborate the claim"
+    else
+      [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
+      if [ "$RUN_STATUS" = fixing ]; then
+        CI_LOG_STATE=not-ready
+      elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
+        CI_LOG_STATE=$(nm_ci_checks_state)
+      elif [ "$CI_STEP_STATUS" = fixing ]; then
+        CI_LOG_STATE=not-ready
+      fi
+      if nm_ci_state_is_green "$CI_LOG_STATE"; then
+        emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      elif [ -z "$CI_LOG_STATE" ] || [ "$CI_LOG_STATE" = unknown ]; then
+        RUN_STATE=unknown
+        RUN_DETAIL="status log reported readiness, but CI evidence is unavailable: claim could not be corroborated"
+      fi
     fi
   fi
 

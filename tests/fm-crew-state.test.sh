@@ -355,6 +355,27 @@ run:
 EOF
 }
 
+run_ci_step_state() {  # <branch> <step-status-or-absent>
+  local step_row=""
+  if [ "$2" != absent ]; then
+    step_row="    ci,$2,0,0"
+  fi
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    push,completed,0,0
+$step_row
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # (a) active run-step is authoritative
 test_active_run_is_authoritative() {
@@ -454,7 +475,7 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
-test_ci_ready_done_log_beats_monitoring_run() {
+test_ci_ready_done_log_agrees_with_corroborated_run() {
   reset_fakes
   local d; d=$(new_case ci-ready)
   make_repo_on_branch "$d/wt" fm/feat-ci
@@ -462,12 +483,13 @@ test_ci_ready_done_log_beats_monitoring_run() {
   fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship"
   printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-ci)
   assert_contains "$out" "state: done" "ci-ready status log -> done"
-  assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
-  assert_contains "$out" "checks green" "ci-ready detail preserves the report"
+  assert_contains "$out" "source: run-step" "corroborated ci-ready state comes from the run"
+  assert_contains "$out" "checks green" "ci-ready detail reports corroborated green checks"
   assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
+  pass "ci-ready status log agrees with the corroborated run"
 }
 
 # Regression for the PR #252 incident: the crew's own status log never got a
@@ -602,6 +624,45 @@ test_terminal_checks_passed_claim_survives_unreadable_log() {
   assert_not_contains "$out" "state: blocked" "an unreadable CI log must not manufacture a refusal"
   assert_not_contains "$out" "state: failed" "an unreadable CI log must not manufacture a failure"
   pass "an unreadable CI log leaves the terminal claim uncorroborated"
+}
+
+test_unavailable_ci_never_corroborates_green_claims() {
+  local source step claim case_name d branch id out short
+  for source in full coarse terminal; do
+    for step in running fixing completed absent; do
+      for claim in claim no-claim; do
+        reset_fakes
+        case_name="ci-unavailable-${source}-${step}-${claim}"
+        d=$(new_case "$case_name")
+        id=${case_name#ci-unavailable-}
+        branch="fm/$id"
+        make_repo_on_branch "$d/wt" "$branch"
+        make_fakebin "$d" >/dev/null
+        fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship"
+        if [ "$claim" = claim ]; then
+          printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/$id.status"
+        fi
+        case "$source" in
+          full)
+            FM_FAKE_AXI_STATUS=$(run_ci_step_state "$branch" "$step")
+            ;;
+          coarse)
+            short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+            FM_FAKE_AXI_STATUS=$(run_ci_step_state fm/other-crew "$step")
+            FM_FAKE_RUNS_LIST="running    $branch $short  2026-08-03 12:00"
+            ;;
+          terminal)
+            FM_FAKE_AXI_STATUS=$(run_checks_passed "$branch")
+            ;;
+        esac
+        FM_FAKE_CI_LOGS=""
+        out=$(run_crew_state "$d" "$id")
+        assert_not_contains "$out" "state: done" "$source/$step/$claim unavailable CI must not read done"
+        assert_not_contains "$out" "checks green" "$source/$step/$claim unavailable CI must not read green"
+      done
+    done
+  done
+  pass "unavailable CI never corroborates green claims across run mappings"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -829,7 +890,7 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
+test_coarse_run_does_not_corroborate_ready_status() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
   make_repo_on_branch "$d/wt" fm/feat-coarseready
@@ -845,10 +906,11 @@ EOF
 )"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
+  assert_contains "$out" "state: unknown" "coarse ready status remains uncorroborated"
+  assert_contains "$out" "source: run-step" "coarse ready status remains run-step sourced"
+  assert_not_contains "$out" "checks green" "coarse run data cannot corroborate checks green"
+  assert_not_contains "$out" "state: done" "coarse run data must not produce done"
+  pass "coarse run does not corroborate a ready status"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -1406,7 +1468,7 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
-test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_done_log_agrees_with_corroborated_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_is_not_green
@@ -1414,6 +1476,7 @@ test_ci_monitoring_all_checks_passed_still_green
 test_terminal_checks_passed_claim_without_evidence_is_not_green
 test_terminal_checks_passed_claim_with_evidence_stays_green
 test_terminal_checks_passed_claim_survives_unreadable_log
+test_unavailable_ci_never_corroborates_green_claims
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
@@ -1426,7 +1489,7 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_coarse_run_does_not_corroborate_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
