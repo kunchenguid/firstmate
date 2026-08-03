@@ -123,12 +123,18 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#     __CLAUDESETTINGS__ absolute path to state/<task-id>.claude-settings.json (claude
+#                  turn-end and busy-state hooks, written by this script; outside the
+#                  worktree so a project that tracks .claude/settings.local.json is
+#                  never modified, and additive to the project's own settings)
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# claude uses a per-task state/<task-id>.claude-settings.json passed with --settings,
+# so no file is written into the worktree and a project's own .claude settings still load.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -769,7 +775,17 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # --settings loads the per-task hook file written OUTSIDE the worktree (see the
+    # claude branch of the turn-end/busy-state installer below). A secondmate gets no
+    # per-task hooks - its own home's tracked .claude/settings.json owns them - so it
+    # launches without the flag.
+    claude)
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings __CLAUDESETTINGS__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1707,6 +1723,10 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+# Claude's per-task hook file. Written here, outside the worktree, and passed to
+# the launch with --settings; fm-teardown removes it with the other per-task
+# state artifacts.
+CLAUDE_SETTINGS="$STATE/$ID.claude-settings.json"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -1760,17 +1780,30 @@ if [ "$KIND" != secondmate ]; then
       # turn-ended NOTIFICATION touch for the watcher. Every hook command
       # tolerates a refused event (|| true) so a stale-gen writer can never
       # break Claude's own lifecycle.
-      mkdir -p "$WT/.claude"
+      #
+      # Written OUTSIDE the worktree and loaded with `claude --settings <file>`,
+      # for the same reason pi's extension lives in state/: a project may TRACK
+      # .claude/settings.local.json, and writing that path wholesale destroyed
+      # the project's committed content in the worktree, left every claude
+      # crewmate starting on a modified tracked file, and could make teardown
+      # refuse on a dirty worktree. --settings is ADDITIVE (verified live on
+      # Claude Code 2.1.220, docs/verification/supervision.md), so a
+      # project's own settings still load and its rules still apply to the
+      # crewmate alongside these hooks. Nothing is written into the worktree,
+      # so there is no project file to parse, merge, or unpick at teardown.
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-      cat > "$WT/.claude/settings.local.json" <<EOF
+      if ! cat > "$CLAUDE_SETTINGS" <<EOF
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
-      exclude_path '.claude/settings.local.json'
+      then
+        echo "error: failed to write the claude hook settings for $ID at $CLAUDE_SETTINGS" >&2
+        exit 1
+      fi
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -2027,6 +2060,7 @@ META_WINDOW=$T
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
+sq_claudesettings=$(shell_quote "$CLAUDE_SETTINGS")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
@@ -2037,10 +2071,27 @@ LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$sq_claudesettings}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+# A raw launch command (the unverified-adapter escape hatch) carries no
+# placeholder, so a hand-written claude command reaches the pane without the
+# --settings argument that loads the hooks written above. Say so loudly rather
+# than launching a worker whose turn-end wake silently never fires.
+if [ "$KIND" != secondmate ]; then
+  case "$HARNESS" in
+    claude*)
+      case "$LAUNCH" in
+        *--settings*) ;;
+        *)
+          echo "warning: this raw claude launch command carries no --settings argument, so $ID will run with no turn-end wake or busy-state reporting; add --settings $sq_claudesettings to the command" >&2
+          ;;
+      esac
+      ;;
+  esac
+fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

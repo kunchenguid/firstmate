@@ -86,6 +86,24 @@ Firstmate-written project hooks under `<worktree>/.codex/hooks.json` fired for n
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
+Claude's per-task hooks reach the crewmate through `claude --settings <file>` rather than a file written into the worktree, because a project may track `.claude/settings.local.json` and a wholesale write destroyed its committed content.
+The two vendor behaviors that design depends on were live-verified on 2026-08-03 with Claude Code 2.1.220 against an isolated scratch repository that tracks that path.
+
+```sh
+claude --version
+FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-settings-hook-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+2.1.220 (Claude Code)
+ok - Claude 2.1.220 (Claude Code): --settings hooks fired the turn-end wake, loaded additively beside the project's own tracked settings, and left that tracked file unmodified
+```
+
+Hooks supplied through `--settings` fire in a real interactive pane, so the turn-end wake still reaches firstmate, and they load in addition to the project's own settings rather than replacing them, so the project's committed rules still apply to the crewmate.
+That guard is the command that refreshes this evidence after a Claude Code upgrade.
+
 Deterministic entry points:
 
 ```sh

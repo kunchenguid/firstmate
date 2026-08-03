@@ -514,6 +514,29 @@ test_spawn_bare_backward_compat() {
   pass "B4 spawn: no config at all -> own harness and no propagation side effects"
 }
 
+# A claude crewmate's per-task hooks ride --settings on the launch command, but a
+# secondmate gets no per-task hooks at all (its own home's tracked .claude/settings.json
+# owns them), so its launch must NOT carry a --settings flag pointing at a file that
+# was never written.
+test_spawn_claude_secondmate_launches_without_per_task_settings() {
+  local w sm launchlog out status
+  w="$TMP_ROOT/spawn-claude-secondmate-settings"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" claude 2>&1); status=$?
+  expect_code 0 "$status" "claude secondmate spawn should succeed"$'\n'"$out"
+
+  assert_grep 'claude --dangerously-skip-permissions' "$launchlog" \
+    "the claude secondmate launch command was not captured"
+  assert_no_grep '--settings' "$launchlog" \
+    "a secondmate launch must not reference a per-task settings file"
+  [ -e "$w/home/state/sm.claude-settings.json" ] \
+    && fail "a secondmate spawn must not write per-task claude hook settings"
+  pass "B5c spawn: a claude secondmate launches with no per-task --settings file"
+}
+
 # An explicit per-spawn harness arg wins over config/secondmate-harness.
 test_spawn_explicit_harness_wins() {
   local w sm meta
@@ -2346,6 +2369,7 @@ test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
+test_spawn_claude_secondmate_launches_without_per_task_settings
 test_spawn_unverified_secondmate_harness_refused
 test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config

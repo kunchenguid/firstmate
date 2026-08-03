@@ -30,7 +30,11 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  send-keys)
+    [ -z "${FM_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TMUX_LOG"
+    exit 0
+    ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -263,7 +267,7 @@ test_claude_hooks_semantic_lifecycle() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  settings="$HOME_DIR/state/$id.claude-settings.json"
   assert_present "$settings" "claude spawn did not write hook settings"
   jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
@@ -301,13 +305,118 @@ test_claude_hooks_stale_incarnation_harmless() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  settings="$HOME_DIR/state/$id.claude-settings.json"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
   run_claude_hook "$settings" UserPromptSubmit \
     || fail "a stale-gen hook must still exit 0 so Claude's lifecycle is never broken"
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+# seed_project_claude_settings <proj> <wt> <tracked|untracked> <content>: put a
+# .claude/settings.local.json into the case's worktree, either committed in the
+# project (the shape that made fm-spawn destroy real committed content) or left
+# untracked in the worktree.
+seed_project_claude_settings() {
+  local proj=$1 wt=$2 kind=$3 content=$4
+  if [ "$kind" = tracked ]; then
+    mkdir -p "$proj/.claude"
+    printf '%s\n' "$content" > "$proj/.claude/settings.local.json"
+    # -f because a host or repo ignore rule for .claude/ must not decide whether
+    # this fixture is tracked.
+    git -C "$proj" add -f .claude/settings.local.json
+    git -C "$proj" commit -qm "track claude settings"
+    git -C "$wt" reset -q --hard "$(git -C "$proj" rev-parse HEAD)"
+  else
+    mkdir -p "$wt/.claude"
+    printf '%s\n' "$content" > "$wt/.claude/settings.local.json"
+  fi
+}
+
+test_claude_hooks_leave_a_tracked_project_settings_file_untouched() {
+  local rec id=busy-cl-3 out state settings content before after status
+  rec=$(make_spawn_case claude-tracked-settings claude "$id")
+  read_case_record "$rec"
+  content='{"permissions":{"allow":["Bash(npm run test:*)","Bash(gh pr view:*)"]}}'
+  seed_project_claude_settings "$PROJ_DIR" "$WT_DIR" tracked "$content"
+  before=$(cat "$WT_DIR/.claude/settings.local.json")
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+
+  after=$(cat "$WT_DIR/.claude/settings.local.json")
+  [ "$before" = "$after" ] \
+    || fail "spawn rewrote the project's tracked .claude/settings.local.json"
+  status=$(git -C "$WT_DIR" status --porcelain)
+  [ -z "$status" ] || fail "spawn left the worktree dirty: $status"
+
+  state="$HOME_DIR/state"
+  settings="$state/$id.claude-settings.json"
+  assert_present "$settings" "claude spawn must still install its own hook settings"
+  jq -e '.hooks.Stop' "$settings" >/dev/null || fail "the out-of-tree hook settings lack Stop"
+  pass "a claude spawn into a project that tracks .claude/settings.local.json leaves it unmodified"
+}
+
+test_claude_hooks_preserve_an_untracked_project_settings_file() {
+  local rec id=busy-cl-4 out content before after
+  rec=$(make_spawn_case claude-untracked-settings claude "$id")
+  read_case_record "$rec"
+  content='{"permissions":{"allow":["Bash(ls:*)"]}}'
+  seed_project_claude_settings "$PROJ_DIR" "$WT_DIR" untracked "$content"
+  before=$(cat "$WT_DIR/.claude/settings.local.json")
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+
+  after=$(cat "$WT_DIR/.claude/settings.local.json")
+  [ "$before" = "$after" ] \
+    || fail "spawn rewrote an untracked .claude/settings.local.json that was already there"
+  pass "a claude spawn preserves an existing untracked .claude/settings.local.json"
+}
+
+test_claude_launch_loads_the_out_of_tree_hook_settings() {
+  local rec id=busy-cl-5 out settings log
+  rec=$(make_spawn_case claude-launch-settings claude "$id")
+  read_case_record "$rec"
+  log="$CASE_DIR/tmux.log"
+  : > "$log"
+
+  out=$(FM_TMUX_LOG="$log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+
+  settings="$HOME_DIR/state/$id.claude-settings.json"
+  assert_present "$settings" "claude spawn did not write its hook settings"
+  assert_grep "--settings '$settings'" "$log" \
+    "the launch command must load the out-of-tree hook settings, or the turn-end wake never arms"
+  assert_absent "$WT_DIR/.claude/settings.local.json" \
+    "claude spawn must write nothing into the worktree"
+  assert_absent "$WT_DIR/.claude" "claude spawn must not create a .claude directory in the worktree"
+
+  rm -f "$HOME_DIR/state/$id.turn-ended"
+  run_claude_hook "$settings" Stop || fail "Stop hook command failed"
+  assert_present "$HOME_DIR/state/$id.turn-ended" \
+    "the Stop hook loaded by --settings must still touch the turn-end marker"
+  pass "the claude launch command loads the out-of-tree settings whose Stop hook wakes firstmate"
+}
+
+test_raw_claude_launch_without_settings_warns_instead_of_going_quiet() {
+  local rec id=busy-cl-6 out settings
+  rec=$(make_spawn_case claude-raw-launch claude "$id")
+  read_case_record "$rec"
+
+  # The unverified-adapter escape hatch: a hand-written command carries no
+  # placeholder, so nothing can insert --settings for it.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
+    "claude --dangerously-skip-permissions 'do the thing'")
+  expect_code 0 $? "raw claude launch should still spawn: $out"
+
+  settings="$HOME_DIR/state/$id.claude-settings.json"
+  assert_present "$settings" "the hook settings should still be written for a raw claude launch"
+  assert_contains "$out" "carries no --settings argument" \
+    "a raw claude launch that cannot load the hooks must say so, not go quietly unsupervised"
+  assert_contains "$out" "$settings" "the warning must name the settings file to add"
+  pass "a raw claude launch command with no --settings warns loudly instead of losing the turn-end wake"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -349,6 +458,10 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_hooks_leave_a_tracked_project_settings_file_untouched
+test_claude_hooks_preserve_an_untracked_project_settings_file
+test_claude_launch_loads_the_out_of_tree_hook_settings
+test_raw_claude_launch_without_settings_warns_instead_of_going_quiet
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

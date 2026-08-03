@@ -515,6 +515,82 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
 }
 
+# Firstmate's own per-task claude hooks now live in state/<id>.claude-settings.json,
+# so cleanup must retire that artifact and must never delete a project's committed
+# .claude/settings.local.json - the file whose wholesale rewrite caused the incident.
+test_teardown_retires_claude_hooks_and_keeps_tracked_project_settings() {
+  local case_dir rc project_settings before after
+  case_dir=$(make_case claude-settings-cleanup)
+  write_meta "$case_dir" local-only ship
+  project_settings='{"permissions":{"allow":["Bash(npm run test:*)"]}}'
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' "$project_settings" > "$case_dir/wt/.claude/settings.local.json"
+  # -f so a host ignore rule for .claude/ cannot decide whether the fixture is tracked.
+  git -C "$case_dir/wt" add -f -- .claude/settings.local.json
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "track claude settings"
+  add_fork_with_pushed_branch "$case_dir"
+  before=$(cat "$case_dir/wt/.claude/settings.local.json")
+  printf '%s\n' '{"hooks":{}}' > "$case_dir/state/task-x1.claude-settings.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "claude-settings-cleanup: teardown should succeed on a clean worktree"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "claude-settings-cleanup: teardown refused on a clean worktree"
+  assert_absent "$case_dir/state/task-x1.claude-settings.json" \
+    "cleanup left firstmate's own claude hook settings behind"
+  after=$(cat "$case_dir/wt/.claude/settings.local.json" 2>/dev/null || printf 'MISSING')
+  [ "$before" = "$after" ] \
+    || fail "cleanup changed or removed the project's tracked .claude/settings.local.json"
+  pass "cleanup retires firstmate's claude hook settings and leaves a tracked project file intact"
+}
+
+# A task launched before the hooks moved out of the worktree can still carry the old
+# firstmate-written file. Cleanup removes that one, and only that one.
+test_teardown_removes_a_legacy_firstmate_hook_file_but_not_a_foreign_one() {
+  local case_dir rc foreign before after
+  case_dir=$(make_case claude-settings-legacy)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work"
+  add_fork_with_pushed_branch "$case_dir"
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' \
+    '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '"'"'/s/task-x1.turn-ended'"'"'"}]}]}}' \
+    > "$case_dir/wt/.claude/settings.local.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "claude-settings-legacy: teardown should succeed"
+  assert_absent "$case_dir/wt/.claude/settings.local.json" \
+    "cleanup left a legacy firstmate hook file in the worktree"
+
+  case_dir=$(make_case claude-settings-foreign)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work"
+  add_fork_with_pushed_branch "$case_dir"
+  mkdir -p "$case_dir/wt/.claude"
+  foreign='{"permissions":{"allow":["Bash(ls:*)"]}}'
+  printf '%s\n' "$foreign" > "$case_dir/wt/.claude/settings.local.json"
+  before=$(cat "$case_dir/wt/.claude/settings.local.json")
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "claude-settings-foreign: teardown should succeed"
+  after=$(cat "$case_dir/wt/.claude/settings.local.json" 2>/dev/null || printf 'MISSING')
+  [ "$before" = "$after" ] \
+    || fail "cleanup removed an untracked .claude/settings.local.json that firstmate never wrote"
+  pass "cleanup removes only a legacy firstmate hook file, never someone else's settings"
+}
+
 test_teardown_prompts_tasks_axi_done_when_compatible() {
   local case_dir out
   case_dir=$(make_case tasks-axi-reminder)
@@ -1825,6 +1901,8 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
 }
 
 test_local_only_fork_remote_allows
+test_teardown_retires_claude_hooks_and_keeps_tracked_project_settings
+test_teardown_removes_a_legacy_firstmate_hook_file_but_not_a_foreign_one
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
