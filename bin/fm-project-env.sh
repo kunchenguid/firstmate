@@ -107,7 +107,7 @@ files_differ() {  # <a> <b>
 # offer it for staging.
 apply_one() {  # <store-project-dir> <target-dir> <rel>
   local store=$1 target=$2 rel=$3
-  local src="$store/$rel" dst="$target/$rel" status
+  local src="$store/$rel" dst="$target/$rel" status rc
 
   if git -C "$target" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
     warn "refused $rel: the project TRACKS this path; a local env file must be gitignored, and this script will not hide a tracked file"
@@ -130,14 +130,24 @@ apply_one() {  # <store-project-dir> <target-dir> <rel>
   # temp file in the worktree: a stray temp name would be untracked AND
   # unignored, which is exactly the dirty state teardown refuses on.
   mkdir -p -- "$(dirname -- "$dst")" || return 1
+  # `>` truncates before cat runs, so any failure here leaves a truncated file
+  # that looks valid; it is removed rather than left to fail at runtime.
   if ! (umask 077; cat -- "$src" > "$dst") || ! chmod 0600 "$dst"; then
-    warn "refused $rel: could not write it into $target"
+    rm -f -- "$dst"
+    warn "refused $rel: could not write it into $target; removed the partial copy"
     return 1
   fi
 
   # The proof, taken from real repository state rather than assumed from the
-  # .gitignore read above: after the write, git must still have nothing to say.
+  # .gitignore read above: after the write, git must still have nothing to say,
+  # and must actually answer - an unanswered query is not a clean answer.
   status=$(git -C "$target" status --porcelain -- "$rel" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f -- "$dst"
+    warn "refused $rel: git could not report its status in $target (exit $rc), so the never-committed guarantee is unproven; removed it"
+    return 1
+  fi
   if [ -n "$status" ]; then
     rm -f -- "$dst"
     warn "refused $rel: git reported it as committable after the copy ($status); removed it from $target"
@@ -149,7 +159,7 @@ apply_one() {  # <store-project-dir> <target-dir> <rel>
 cmd_apply() {  # <project> <target-dir>
   [ "$#" -eq 2 ] || usage
   local project=$1 target_in=$2
-  local target store rel templates applied=0 failed=0
+  local target store rel files templates applied=0 failed=0
   project_name_valid "$project" || { warn "refused: invalid project name"; return 1; }
 
   target=$(resolved_dir "$target_in") || { warn "refused: no such directory $target_in"; return 1; }
@@ -159,7 +169,9 @@ cmd_apply() {  # <project> <target-dir>
   fi
 
   store="$STORE_ROOT/$project"
-  if [ ! -d "$store" ] || [ -z "$(store_files "$store")" ]; then
+  files=''
+  [ -d "$store" ] && files=$(store_files "$store")
+  if [ -z "$files" ]; then
     templates=$(tracked_env_templates "$target")
     if [ -n "$templates" ]; then
       note "no local env file stored for $project, but the project ships $(printf '%s' "$templates" | tr '\n' ' ')- this working copy may fail at runtime until one is stored under $store (see docs/configuration.md)"
@@ -175,7 +187,7 @@ cmd_apply() {  # <project> <target-dir>
       failed=$((failed + 1))
     fi
   done <<EOF
-$(store_files "$store")
+$files
 EOF
 
   if [ "$failed" -gt 0 ]; then
@@ -215,7 +227,7 @@ EOF
 }
 
 cmd_adopt() {  # [--force] <project> <source-dir> <rel>...
-  local force=0 project source_in source rel src dst
+  local force=0 project source_in source rel src dst tmp
   if [ "${1:-}" = --force ]; then
     force=1
     shift
@@ -244,8 +256,14 @@ cmd_adopt() {  # [--force] <project> <source-dir> <rel>...
       return 1
     fi
     mkdir -p -- "$(dirname -- "$dst")" || return 1
-    if ! (umask 077; cat -- "$src" > "$dst") || ! chmod 0600 "$dst"; then
-      warn "refused $rel: could not write it into the store"
+    # Written through a temp file and renamed into place: the store is the
+    # fleet's source of truth and lives outside every repo, so unlike a
+    # worktree it can hold a temp name, and a failed write must never leave a
+    # truncated file that every later apply would propagate.
+    tmp="$dst.fm-adopt.$$"
+    if ! (umask 077; cat -- "$src" > "$tmp") || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$dst"; then
+      rm -f -- "$tmp"
+      warn "refused $rel: could not write it into the store; left $dst unchanged"
       return 1
     fi
     note "stored $project/$rel at $dst"
