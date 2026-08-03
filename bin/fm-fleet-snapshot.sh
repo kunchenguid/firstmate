@@ -812,7 +812,7 @@ else
 fi
 
 registry_secondmates_json() {
-  local reg="$DATA/secondmates.md" out rc reason mode script parse_filter output_filter
+  local reg="$DATA/secondmates.md" registry_lib out rc reason mode script output_filter
   if [ ! -f "$reg" ]; then
     jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
       '{present:false,available:true,complete:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
@@ -832,8 +832,9 @@ registry_secondmates_json() {
     max_records=$4
     path=$5
     observed=$6
-    parse_filter=$7
+    registry_lib=$7
     output_filter=$8
+    . "$registry_lib" || exit 3
     content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f" || exit 3; printf "\036") || exit 3
     content=${content%$'\036'}
     bytes=$(printf "%s" "$content" | LC_ALL=C wc -c | tr -d " ")
@@ -861,7 +862,33 @@ registry_secondmates_json() {
     else
       lines_in_window=0
     fi
-    records=$(printf "%s\n" "$window" | jq -Rn "$parse_filter") || exit 3
+    records=$(
+      printf "%s\n" "$window" | (
+        while IFS= read -r line || [ -n "$line" ]; do
+          [[ "$line" == "- "* ]] || continue
+          if secondmate_registry_parse_line "$line"; then
+            printf '%s\000%s\000%s\000%s\000%s\000%s\000' \
+              valid "$SECONDMATE_REGISTRY_ID" "$SECONDMATE_REGISTRY_HOME" \
+              "$SECONDMATE_REGISTRY_HOST" "$SECONDMATE_REGISTRY_ROOT" "$SECONDMATE_REGISTRY_REMOTE"
+          elif secondmate_registry_parse_id "$line"; then
+            printf '%s\000%s\000%s\000%s\000%s\000%s\000' \
+              invalid "$SECONDMATE_REGISTRY_ID" '' '' '' 0
+          fi
+        done
+      ) | jq -Rsc '
+        split("\u0000") as $parts
+        | [range(0; (($parts | length) - 1); 6) as $i
+           | {id:$parts[$i + 1],
+              home:(if $parts[$i] == "valid" then $parts[$i + 2] else null end),
+              host:(if $parts[$i] == "valid" and $parts[$i + 5] == "1" then $parts[$i + 3] else null end),
+              root:(if $parts[$i] == "valid" and $parts[$i + 5] == "1" then $parts[$i + 4] else null end),
+              remote:($parts[$i] == "valid" and $parts[$i + 5] == "1"),
+              registered:true,
+              registry_error:(if $parts[$i] == "valid" then null else "registry entry has no home" end)}]
+        | group_by(.id)
+        | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
+      '
+    ) || exit 3
     records_in_window=$(printf "%s" "$records" | jq "length") || exit 3
     records_truncated=false
     if [ "$records_in_window" -gt "$max_records" ]; then records_truncated=true; fi
@@ -875,22 +902,7 @@ registry_secondmates_json() {
       --argjson max_records "$max_records" "$output_filter"
 BASH
   )
-  parse_filter=$(cat <<'JQ'
-      [ inputs
-        | select(startswith("- "))
-        | (capture("^- (?<id>[^[:space:]]+)")?) as $id
-        | select($id != null)
-        | ([capture("^.*\\(host:[[:space:]]*(?<host>[^;)]*);[[:space:]]*root:[[:space:]]*(?<root>[^;)]*);[[:space:]]*home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $remote
-        | ([capture("^.*\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $local
-        | ($local // $remote) as $route
-        | (($local == null) and ($remote != null)) as $is_remote
-        | {id:$id.id,home:($route.home // null),host:(if $is_remote then $remote.host else null end),root:(if $is_remote then $remote.root else null end),
-           remote:$is_remote,registered:true,
-           registry_error:(if $route == null or ($route.home | length) == 0 then "registry entry has no home" else null end)} ]
-      | group_by(.id)
-      | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
-JQ
-  )
+  registry_lib="$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
   output_filter=$(cat <<'JQ'
       {present:true,available:true,reason:null,provenance:"registered-table",path:$path,
        freshness:{status:"fresh",observed_at:$observed},
@@ -907,7 +919,7 @@ JQ
   out=$(run_timed "$FM_SNAPSHOT_REGISTRY_TIMEOUT" bash -c "$script" \
     fm-secondmate-registry "$reg" "$FM_SNAPSHOT_REGISTRY_LINES" \
     "$FM_SNAPSHOT_REGISTRY_BYTES" "$FM_SNAPSHOT_REGISTRY_RECORDS" "$reg" "$SNAPSHOT_NOW" \
-    "$parse_filter" "$output_filter" 2>/dev/null)
+    "$registry_lib" "$output_filter" 2>/dev/null)
   rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e '
     .available == true and (.records | type) == "array"

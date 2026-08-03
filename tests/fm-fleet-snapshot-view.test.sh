@@ -151,6 +151,41 @@ test_empty_fleet_json() {
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
+test_snapshot_registry_records_follow_strict_shared_parser() {
+  local home out valid_home invalid_home remote_home ids
+  home=$(make_home registry-owner)
+  valid_home="$home/valid-home"
+  invalid_home="$home/invalid-home"
+  remote_home=/srv/firstmate-secondmates/remote
+  cat > "$home/data/secondmates.md" <<EOF
+- valid - summary with punctuation (kept) (home: $valid_home; scope: route (one); projects: alpha; added 2026-08-03)
+- remote - remote route (host: build-mac; root: /opt/firstmate; home: $remote_home; scope: remote route; projects: gamma; added 2026-08-03)
+- bad/id - invalid id (home: $invalid_home; scope: route; projects: beta; added 2026-08-03)
+- malformed - missing structured suffix
+EOF
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  ids=$(printf '%s' "$out" | jq -r '.secondmate_current.registry.records | map(.id) | sort | join(",")')
+  [ "$ids" = "malformed,remote,valid" ] \
+    || fail "snapshot registry parser diverged from the strict owner: ids='$ids'"
+  printf '%s' "$out" | jq -e --arg home "$valid_home" '
+    .secondmate_current.registry.records[]
+    | select(.id == "valid")
+    | .home == $home and .registry_error == null
+  ' >/dev/null || fail "snapshot registry parser lost a valid punctuated strict-owner row"
+  printf '%s' "$out" | jq -e --arg home "$remote_home" '
+    .secondmate_current.registry.records[]
+    | select(.id == "remote")
+    | .home == $home and .host == "build-mac" and .root == "/opt/firstmate"
+      and .remote == true and .registry_error == null
+  ' >/dev/null || fail "snapshot registry parser lost strict-owner remote route fields"
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.registry.records[]
+    | select(.id == "malformed")
+    | .home == null and .registry_error == "registry entry has no home"
+  ' >/dev/null || fail "snapshot registry parser did not preserve a malformed-row diagnostic"
+  pass "snapshot registry records follow the strict shared parser"
+}
+
 test_fixture_snapshot_json() {
   local home fakebin out ids
   home=$(make_home fixture)
@@ -780,6 +815,7 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_snapshot_registry_records_follow_strict_shared_parser
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness

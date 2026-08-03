@@ -31,6 +31,17 @@ SECONDMATE_REGISTRY_ERROR=
 secondmate_registry_lock_path() { printf '%s/.secondmate-registry.lock\n' "$1"; }
 secondmate_reply_lifecycle_lock_path() { printf '%s/.remote-reply-lifecycle-%s.lock\n' "$1" "$2"; }
 
+secondmate_registry_parse_id() {
+  local line=$1
+  local id_re='^- ([A-Za-z0-9._-]+)([[:space:]]|$)'
+  SECONDMATE_REGISTRY_ID=
+  if [[ "$line" =~ $id_re ]]; then
+    SECONDMATE_REGISTRY_ID=${BASH_REMATCH[1]}
+  else
+    return 1
+  fi
+}
+
 secondmate_registry_parse_line() {
   local line=$1
   local local_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
