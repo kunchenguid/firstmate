@@ -181,6 +181,8 @@ pass "the entrypoint composes a deduplicated child PATH (kept $PRESENT_CHECKED e
 
 set +e
 out=$(
+  # The entrypoint's subprocess invokes this indirectly through export -f.
+  # shellcheck disable=SC2329
   command() {
     if [ "${1:-}" = -v ] && [ "${2:-}" = git ]; then return 1; fi
     builtin command "$@"
