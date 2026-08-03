@@ -81,6 +81,25 @@ Mark an axis not applicable only after inspecting its integration surface, and u
 For critical safety, routing, startup, and supervision infrastructure, prefer deterministic and idempotent enforcement over relying on agent memory alone.
 Keep instructions as the authority and discovery layer, but make repeated execution converge safely and make invalid or unsafe states fail closed wherever the runtime can enforce them.
 
+### Harness-dependent checks
+
+`AGENTS.md` section 4 states the standing rule; this is how to satisfy it.
+
+A check is harness-dependent when its verdict comes from something the vendor emits: a process name, rendered output, a spinner or keybind glyph, a banner, or a key the harness binds.
+Build it on the most structural signal that answers the question, and prefer a kernel or protocol fact over anything a release note could change.
+When a rendered surface is genuinely the only source, read more than one independent signal and let any of them carry a positive verdict, so no single vendor string is load-bearing.
+
+Every such check needs two tests, because they fail for different reasons:
+
+- A portable regression in `tests/` that pins the logic with real processes and no harness, so CI catches a code regression everywhere.
+  Drive the signals apart deliberately and assert the verdict survives losing one; assert the divergence itself so the case cannot go quietly vacuous.
+- A live guard in the `live-harness-optin` family (`bin/fm-test-run.sh`), env-gated and self-skipping, that exercises every INSTALLED harness for real and fails naming the harness and version.
+  Report an absent harness explicitly rather than passing silently over it, and refuse a pass that checked nothing.
+
+A stubbed or fake-agent test is not evidence for a harness-dependent verdict; it can only confirm the assumption already written into the stub.
+Spending tokens on the live proof is authorized and expected.
+Record the dated per-harness result in `docs/verification/runtime-backends.md`, and point at the live guard as the command that refreshes it, rather than leaving a version-scoped observation to rot into a false claim.
+
 ## Documentation change review
 
 For every changed maintained prose surface, identify its inventory audience, authoritative owner, current-behavior relevance, destination for supporting evidence, and any unique safety fact that removal could lose.

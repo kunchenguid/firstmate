@@ -148,6 +148,57 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
+# fm_backend_tmux_classify_process_name: the single owner of the process-name
+# vocabulary shared by every liveness signal below - `agent` for a verified
+# harness, `shell` for an idle login/interactive shell, `other` for anything
+# else. Keeping one classifier means the two independent name sources can never
+# drift into disagreeing about what a given name means.
+fm_backend_tmux_classify_process_name() {  # <name> -> agent|shell|other
+  case "$1" in
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
+    *) printf 'other' ;;
+  esac
+}
+
+# fm_backend_tmux_foreground_comms: the kernel-side names of every process in
+# <target>'s pane tty foreground process group, one per line, normalized to a
+# bare basename with any login-shell dash stripped. Empty on any failure.
+#
+# This is the title-INDEPENDENT half of the liveness probe, and it exists
+# because `#{pane_current_command}` is a rewritable process title, not a
+# structural fact: tmux reads the same 16-byte kernel name field a harness
+# overwrites when it sets its own process title, so a harness that displays its
+# version there (Claude Code 2.1.220 reports `2.1.220`) becomes unattributable
+# on a signal firstmate never controls. `ps -o comm=` reads a different name
+# source on both supported platforms, so the two disagree only when one of them
+# has been rewritten - which is exactly when the other is needed.
+#
+# Scoping to the foreground process group rather than to the pane's descendants
+# is what keeps the probe honest in the other direction: a harness-named process
+# left running in the background of an otherwise idle pane is deliberately NOT
+# reported, so a genuinely agent-free pane still classifies `dead`. It also
+# reports every member of a multi-process launcher (the Pi Launcher path runs a
+# `pi-signed` wrapper and a `pi` engine in one group), so no launcher needs its
+# own special case here.
+#
+# Like fm_backend_tmux_current_command this is a RAW pane read: tmux answers an
+# absent target from the client's active window rather than failing, so callers
+# must confirm exact window membership first, exactly as the classifier below
+# does, or they will describe some other pane entirely.
+fm_backend_tmux_foreground_comms() {  # <target>
+  local target=$1 tty pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        comm=${comm##*/}
+        printf '%s\n' "${comm#-}"
+      done
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
@@ -157,8 +208,16 @@ fm_backend_tmux_current_command() {  # <target>
 # An omitted window or a definitive missing-session/server response is
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
 # transient tmux problem never licenses a duplicate.
+#
+# The verdict combines two independent name sources rather than trusting either
+# alone. Either source naming a verified harness is enough for `alive`, because
+# a false `dead` is the one outcome that can launch a duplicate agent onto a
+# live worktree, while the foreground process group - when it is readable - is
+# authoritative for the negative verdicts, since it is the only source that can
+# distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
+  local foreground name fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -187,15 +246,46 @@ fm_backend_tmux_agent_state() {  # <target>
     return 0
   fi
 
+  foreground=$(fm_backend_tmux_foreground_comms "$target")
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    fg_seen=1
+    case "$(fm_backend_tmux_classify_process_name "$name")" in
+      agent) printf 'alive'; return 0 ;;
+      shell) fg_shell=1 ;;
+      *) fg_other=1 ;;
+    esac
+  done <<EOF
+$foreground
+EOF
+
   comm=$(fm_backend_tmux_current_command "$target") || {
     printf 'unreadable'
     return 0
   }
+  comm=${comm##*/}
   comm=${comm#-}
+  if [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
+    printf 'alive'
+    return 0
+  fi
+
+  # A readable foreground process group settles the negative verdicts: only a
+  # group that is nothing but shells is confidently agent-free.
+  if [ "$fg_seen" -eq 1 ]; then
+    if [ "$fg_other" -eq 0 ] && [ "$fg_shell" -eq 1 ]; then
+      printf 'dead'
+    else
+      printf 'ambiguous'
+    fi
+    return 0
+  fi
+
   case "$comm" in
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
-    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
-    '') printf 'unreadable' ;;
+    '') printf 'unreadable'; return 0 ;;
+  esac
+  case "$(fm_backend_tmux_classify_process_name "$comm")" in
+    shell) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac
 }

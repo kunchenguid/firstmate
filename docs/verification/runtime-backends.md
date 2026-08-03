@@ -28,9 +28,56 @@ zsh
 ```
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
-Claude, Codex, OpenCode, and Grok were observed under their own process names.
-Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
+
+### Agent liveness name sources
+
+The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
+That reading is a process TITLE, not a structural fact, so it is now one of two independent name sources rather than the sole basis of a verdict.
+
+All seven verified adapters were relaunched on 2026-08-03 with tmux 3.6a on macOS 26.5.2 arm64, each on a private socket in an isolated lab.
+
+```sh
+tmux -L "$socket" new-window -d -t "$session:" -n "$harness" -c "$wt" -- "$bin"
+tmux -L "$socket" display-message -p -t "$session:$harness" '#{pane_current_command}'
+ps -t "${tty#/dev/}" -o pgid=,tpgid=,comm=      # rows where pgid = tpgid
+```
+
+Observed identities, and the resulting verdict:
+
+| Harness | Version | `#{pane_current_command}` | Foreground `comm` | Verdict |
+| --- | --- | --- | --- | --- |
+| claude | 2.1.220 | `2.1.220` | `claude` | alive |
+| codex | codex-cli 0.146.0 | `codex` | `codex` | alive |
+| opencode | 1.18.11 | `opencode` | `opencode` | alive |
+| pi | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
+| pi-signed | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
+| grok | 0.2.118 | `grok-0.2.118-ma` | `grok` | alive |
+| kimi | 0.31.1 | `kimi` | `kimi` | alive |
+
+Claude Code is the harness whose title no longer attributes it at all; every other adapter is currently attributed by both sources.
+Codex reported `codex-aarch64-a` at 0.145.0 and `codex` at 0.146.0, and Kimi Code reported `kimi-code` as its foreground `comm` at 0.29.1 and `kimi` at 0.31.1, so these identities move between ordinary patch releases in both directions.
+That is the evidence for treating any single process name as a surface under vendor control rather than a stable contract.
+
+The two sources are independent because they read different fields.
+On macOS `#{pane_current_command}` resolves to the 16-byte kernel name a process rewrites when it sets its own title, while `ps -o comm=` reports the executable identity it was launched with; a title rewrite moves one and not the other.
+On Linux the two fields are read the other way round, which is why the classifier requires only that SOME source attributes the pane and never depends on a specific one.
+
+Both are still process names, so neither is drift-proof on its own.
+`tests/fm-harness-liveness-drift-live-e2e.test.sh` is the guard: it relaunches every installed harness, refuses a pass unless the title-independent source attributes it, and names the harness and version in the failure.
+Re-run it after any harness upgrade and refresh the table above from its output:
+
+```sh
+FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
+Bounded output from the run that produced the table:
+
+```text
+ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive, attributed by a name source independent of its process title
+# claude 2.1.220 (Claude Code): title='2.1.220' foreground=[claude ] attributed by the kernel foreground names only (its process title does not attribute it)
+# checked 7 installed harness(es)
+```
 
 Installed-wrapper checks:
 
