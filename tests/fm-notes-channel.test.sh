@@ -323,9 +323,9 @@ python3 "$FIXTURE_TOOL" add "$base/fake.json" ops
 channel 100 "$base/home" init-fake --fixture "$base/fake.json" >/dev/null
 result=$(capture_ready "$base") || fail "operations fixture capture failed"
 mid=$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["captured"][0])')
-[ "$(stat -f %Lp "$base/home/data/apple-notes-channel" 2>/dev/null || stat -c %a "$base/home/data/apple-notes-channel")" = 700 ] \
+[ "$(stat -c %a "$base/home/data/apple-notes-channel" 2>/dev/null || stat -f %Lp "$base/home/data/apple-notes-channel")" = 700 ] \
   || fail "channel data directory must be mode 0700"
-[ "$(stat -f %Lp "$base/home/data/apple-notes-channel/captures/$mid.json" 2>/dev/null || stat -c %a "$base/home/data/apple-notes-channel/captures/$mid.json")" = 600 ] \
+[ "$(stat -c %a "$base/home/data/apple-notes-channel/captures/$mid.json" 2>/dev/null || stat -f %Lp "$base/home/data/apple-notes-channel/captures/$mid.json")" = 600 ] \
   || fail "capture must be mode 0600"
 pass "Notes private state: channel directories and captures use owner-only modes"
 
