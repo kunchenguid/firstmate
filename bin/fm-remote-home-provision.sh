@@ -38,8 +38,17 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-provision.XXXXXX") || die "cannot cre
 CREATED_HOME=0
 CREATED_BACKLOG=0
 EXISTING_HOME=0
+PUBLISHED=0
+PROVISION_LOCK=
+PROVISION_LOCK_HELD=0
 CREATED_PROJECTS="$TMP/created-projects"
 : > "$CREATED_PROJECTS"
+release_provision_lock() {
+  if [ "$PROVISION_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$PROVISION_LOCK"
+    PROVISION_LOCK_HELD=0
+  fi
+}
 restore_owned_file() { # <relative-path>
   local rel=$1 dest="$FM_HOME/$1" backup="$TMP/before/$1"
   if [ -f "$backup.present" ]; then
@@ -52,7 +61,7 @@ restore_owned_file() { # <relative-path>
 }
 rollback() {
   local status=$? project
-  if [ "$status" -ne 0 ]; then
+  if [ "$status" -ne 0 ] && [ "$PUBLISHED" -eq 0 ]; then
     if [ "$CREATED_HOME" -eq 1 ]; then
       rm -rf -- "$FM_HOME"
     elif [ "$EXISTING_HOME" -eq 1 ]; then
@@ -65,10 +74,12 @@ rollback() {
       [ "$CREATED_BACKLOG" -eq 0 ] || rm -f -- "$FM_HOME/data/backlog.md"
     fi
   fi
+  release_provision_lock
   rm -rf -- "$TMP"
   exit "$status"
 }
 trap rollback EXIT
+trap 'exit 1' HUP INT TERM
 head -c "$((MAX_MANIFEST_BYTES + 1))" > "$TMP/manifest" || die "cannot read provisioning manifest"
 MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
 [ "$MANIFEST_BYTES" -le "$MAX_MANIFEST_BYTES" ] || die "provisioning manifest exceeds its byte bound"
@@ -86,6 +97,33 @@ case "$COUNT" in ''|*[!0-9]*) die "manifest project count is invalid" ;; esac
 [ -z "$(LC_ALL=C tr -cd '\000' < "$TMP/charter")" ] || die "manifest charter contains NUL bytes"
 RECORDS=$(grep -c '^project=' "$TMP/manifest" 2>/dev/null || true)
 [ "$RECORDS" -eq "$COUNT" ] || die "manifest project count does not match its records"
+
+HOME_PARENT=$(dirname "$FM_HOME")
+HOME_PARENT_REAL=$(CDPATH='' cd -- "$HOME_PARENT" 2>/dev/null && pwd -P) \
+  || die "remote home parent is unavailable"
+[ "$HOME_PARENT_REAL" = "$HOME_PARENT" ] || die "remote home parent is not canonical"
+PROVISION_LOCK_STATE="$HOME_PARENT/.firstmate-provision-locks"
+if [ -e "$PROVISION_LOCK_STATE" ] || [ -L "$PROVISION_LOCK_STATE" ]; then
+  [ -d "$PROVISION_LOCK_STATE" ] && [ ! -L "$PROVISION_LOCK_STATE" ] \
+    || die "remote provisioning lock root is unsafe"
+else
+  mkdir "$PROVISION_LOCK_STATE" 2>/dev/null || true
+  [ -d "$PROVISION_LOCK_STATE" ] && [ ! -L "$PROVISION_LOCK_STATE" ] \
+    || die "cannot create remote provisioning lock root"
+fi
+if command -v shasum >/dev/null 2>&1; then
+  HOME_LOCK_KEY=$(printf '%s' "$FM_HOME" | shasum -a 256 | awk '{print $1}')
+elif command -v sha256sum >/dev/null 2>&1; then
+  HOME_LOCK_KEY=$(printf '%s' "$FM_HOME" | sha256sum | awk '{print $1}')
+else
+  die "no SHA-256 tool is available for provisioning serialization"
+fi
+FM_STATE_OVERRIDE="$PROVISION_LOCK_STATE"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+PROVISION_LOCK="$STATE/.remote-home-provision-$HOME_LOCK_KEY.lock"
+fm_lock_acquire_wait "$PROVISION_LOCK"
+PROVISION_LOCK_HELD=1
 
 if [ -e "$FM_HOME" ] || [ -L "$FM_HOME" ]; then
   [ -d "$FM_HOME" ] && [ ! -L "$FM_HOME" ] || die "remote home exists but is not a safe directory"
@@ -187,6 +225,8 @@ cp "$PROJECT_REG" "$FM_HOME/data/projects.md.tmp.$$"
 mv -f -- "$FM_HOME/data/projects.md.tmp.$$" "$FM_HOME/data/projects.md"
 printf '%s\n' "$ID" > "$FM_HOME/.fm-secondmate-home.tmp.$$"
 mv -f -- "$FM_HOME/.fm-secondmate-home.tmp.$$" "$FM_HOME/.fm-secondmate-home"
+PUBLISHED=1
+release_provision_lock
 trap - EXIT
 rm -rf -- "$TMP"
 printf 'provisioned: %s projects=%s\n' "$FM_HOME" "$COUNT"

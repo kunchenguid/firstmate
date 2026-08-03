@@ -20,7 +20,7 @@ TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
-trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'touch "$TMP_ROOT/provision.release" 2>/dev/null || true; FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT
 
 # Materialize the current branch as the remote host's tracked code root. The
 # fixture is a real git repository because provisioning and guarded sync exercise
@@ -144,6 +144,54 @@ remote_env() {
   FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
   "$@"
 }
+
+REAL_GIT=$(command -v git)
+cat > "$REMOTE_ROOT/bin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = clone ] && [ "\${!#}" = "$TMP_ROOT/concurrent-home" ]; then
+  printf 'clone\n' >> "$TMP_ROOT/provision-clones"
+  if mkdir "$TMP_ROOT/provision-first" 2>/dev/null; then
+    touch "$TMP_ROOT/provision.entered"
+    while [ ! -f "$TMP_ROOT/provision.release" ]; do sleep 0.02; done
+  fi
+fi
+exec "$REAL_GIT" "\$@"
+SH
+chmod +x "$REMOTE_ROOT/bin/git"
+printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=0\n' \
+  "$(printf ios | base64 | tr -d '\n')" \
+  "$(printf 'Concurrent provisioning charter.\n' | base64 | tr -d '\n')" \
+  > "$TMP_ROOT/provision.manifest"
+PATH="$REMOTE_ROOT/bin:$PATH" FM_HOME="$TMP_ROOT/concurrent-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/provision.manifest" \
+  > "$TMP_ROOT/provision-one.out" 2>&1 &
+provision_one=$!
+provision_wait=0
+while [ ! -f "$TMP_ROOT/provision.entered" ]; do
+  kill -0 "$provision_one" 2>/dev/null || fail "first provisioning attempt exited before cloning"
+  provision_wait=$((provision_wait + 1))
+  [ "$provision_wait" -le 250 ] || fail "first provisioning attempt never reached cloning"
+  sleep 0.02
+done
+PATH="$REMOTE_ROOT/bin:$PATH" FM_HOME="$TMP_ROOT/concurrent-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/provision.manifest" \
+  > "$TMP_ROOT/provision-two.out" 2>&1 &
+provision_two=$!
+sleep 0.2
+[ "$(grep -cF clone "$TMP_ROOT/provision-clones")" -eq 1 ] \
+  || fail "overlapping provisioning reached home classification concurrently"
+touch "$TMP_ROOT/provision.release"
+wait "$provision_one" || fail "first serialized provisioning attempt failed"
+wait "$provision_two" || fail "reconciled provisioning attempt failed"
+[ "$(cat "$TMP_ROOT/concurrent-home/.fm-secondmate-home")" = ios ] \
+  || fail "serialized provisioning lost the published home"
+[ "$(grep -cF clone "$TMP_ROOT/provision-clones")" -eq 1 ] \
+  || fail "reconciled provisioning cloned the already-published home"
+pass "overlapping remote home provisioning serializes through publication and rollback"
+if [ "${FM_TEST_PROVISION_ONLY:-0}" = 1 ]; then
+  echo "ALL TESTS PASSED"
+  exit 0
+fi
 
 # Provision and register the remote route from the captain-facing primary.
 out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
