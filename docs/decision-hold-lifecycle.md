@@ -24,7 +24,9 @@ It appends `Also raised by <origin>: <note>` to the target's body through `tasks
 It refuses a target that is not an actively held captain decision and refuses an origin folding into its own decision namespace.
 It also refuses, before writing anything to the target, an origin with no `state/<origin>.meta` to record the fold in, because a fold that cannot be recorded would report success and then be rejected by `complete --folded`.
 It transfers the origin's open keyed status decision to the target with the same `captain-held [key=<key>]: ...` event `complete` writes, because that live copy would otherwise stay open waiting for a key this origin never registers, and `complete --folded` would dead-end on it.
-`--key` names which open status decision the fold covers and is required while several are open, so one fold satisfies exactly the question it folded and never blanket-closes the rest; a key already transferred to the same target is skipped, which keeps repeating a fold idempotent.
+`--key` names which open status decision the fold covers and is required whenever the origin has any open status decision, so one fold satisfies exactly the question it folded and never blanket-closes the rest.
+A sole open decision does not relax that: an unqualified fold has said nothing about which question it covers, and transferring the only one on offer would mark a question as owned by a decision that never mentions it.
+Repeated keys collapse, and a key already transferred to the same target is skipped, so neither a repeated key nor a repeated fold writes a second transfer event.
 Coverage is resolved before any write, so a fold that cannot name it refuses with the target untouched.
 Reading the target body decodes the JSON string literal tasks-axi emits, so `jq` is required for `fold` and `resolve`.
 

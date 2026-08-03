@@ -20,7 +20,7 @@ Apply `ask-user-authority`'s bar for asking to every candidate first; a question
 Give each remaining distinct unresolved decision a stable privacy-safe key, register it through `bin/fm-decision-hold.sh hold`, and use the same key on retry so registration is idempotent while different decisions retain different durable identities.
 Before a new identity is created the script puts the home's open captain decisions in front of you and refuses, because a second key covering an already-open question is how this queue compounds.
 Read that listing and judge it semantically: an earlier review of the same pull request, subsystem, or policy question usually already owns the decision under a different key.
-When it does, use `bin/fm-decision-hold.sh fold` to add this pass's finding to the existing decision instead of opening a second one, then complete against that fold.
+When it does, use `bin/fm-decision-hold.sh fold` to add this pass's finding to the existing decision instead of opening a second one, naming the origin's open decision key with `--key` so the fold states which question it covers, then complete against that fold.
 Re-run with `--distinct` only when the question is genuinely different from every decision in that listing; the attestation is recorded in the new decision.
 After inventorying the whole report and review surface, run `bin/fm-decision-hold.sh complete` with every unresolved key, or with `--none` only when the reviewed surface contains no unresolved captain decision.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.
@@ -49,7 +49,7 @@ Bearings reads the resulting structured state and must never compensate by scrap
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
 2. Inventory only genuine unresolved choices that pass `ask-user-authority`'s bar for asking; decide the rest yourself.
-3. Read the open captain decisions the script prints, and for each surviving choice either `fold` it into the decision that already owns the question or register it with `hold` under a stable key, using `--distinct` only when it is genuinely a different question.
+3. Read the open captain decisions the script prints, and for each surviving choice either `fold` it into the decision that already owns the question, naming the covered decision key with `--key`, or register it with `hold` under a stable key, using `--distinct` only when it is genuinely a different question.
 4. Run the script's `complete` command with the full unresolved-key inventory for that review pass, or `--folded` when every finding went into an existing decision.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. When the captain authorizes dependent work, record it with normal tasks-axi commands and block it by the hold identity.

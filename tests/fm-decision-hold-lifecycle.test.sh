@@ -905,7 +905,22 @@ test_folded_status_decision_satisfies_completion() {
   printf 'working: auditing retention\nneeds-decision: how long are sample records retained\n' \
     > "$home/state/$origin.status"
 
+  # An unqualified fold has said nothing about which question it covers, so it must
+  # not claim the sole open decision on the strength of it being the only one there.
+  set +e
   run_decisions "$home" fold "$origin" --into "$hold" \
+    --note "the audit pass reaches the same question" \
+    > "$home/sole.out" 2> "$home/sole.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unqualified fold claimed the origin's sole open status decision"
+  assert_grep "--key" "$home/sole.err" "the refusal must ask which decision the fold covers"
+  assert_grep "1 open structured decision;" "$home/sole.err" \
+    "the single-open refusal must read as one decision, not several"
+  assert_no_grep "captain-held" "$home/state/$origin.status" \
+    "a refused fold must not transfer any status decision"
+
+  run_decisions "$home" fold "$origin" --into "$hold" --key default \
     --note "the audit pass reaches the same question" >/dev/null \
     || fail "could not fold the audit finding into the owning decision"
   assert_grep "captain-held [key=default]: tracked by $hold" "$home/state/$origin.status" \
@@ -916,7 +931,7 @@ test_folded_status_decision_satisfies_completion() {
     || fail "teardown verification must accept a folded status decision"
   [ "$(grep -cE '^- \[ \] .*-decision-.* -' "$home/data/backlog.md")" = 1 ] \
     || fail "satisfying the gate required a second captain decision"
-  run_decisions "$home" fold "$origin" --into "$hold" \
+  run_decisions "$home" fold "$origin" --into "$hold" --key default \
     --note "the audit pass reaches the same question" >/dev/null \
     || fail "repeating the fold must stay idempotent"
   [ "$(grep -cF "captain-held [key=default]: tracked by $hold" "$home/state/$origin.status")" = 1 ] \
@@ -933,12 +948,16 @@ test_folded_status_decision_satisfies_completion() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "one unqualified fold blanket-satisfied several open status decisions"
+  assert_grep "2 open structured decisions;" "$home/blanket.err" \
+    "the several-open refusal wording must be unchanged"
   assert_grep "--key" "$home/blanket.err" "the refusal must ask which decision the fold covers"
-  run_decisions "$home" fold "$origin" --into "$hold" --key purge-cadence \
+  run_decisions "$home" fold "$origin" --into "$hold" --key purge-cadence --key purge-cadence \
     --note "the purge cadence is the same retention question" >/dev/null \
     || fail "a keyed fold must cover the decision it names"
   assert_grep "captain-held [key=purge-cadence]: tracked by $hold" "$home/state/$origin.status" \
     "the keyed fold must transfer the decision it named"
+  [ "$(grep -cF "captain-held [key=purge-cadence]: tracked by $hold" "$home/state/$origin.status")" = 1 ] \
+    || fail "a key repeated within one invocation wrote the transfer line twice"
   assert_no_grep "captain-held [key=export-shape]" "$home/state/$origin.status" \
     "a keyed fold must not close a decision it did not cover"
   if run_decisions "$home" complete "$origin" --folded \

@@ -62,8 +62,9 @@
 # keyed status decision to the decision that now owns it, the same
 # `captain-held [key=...]` event `complete` writes, so a folded status decision is
 # not left open for a key this origin will never register. `--key` names which
-# open status decision this fold covers; it is required while several are open, so
-# one fold can never blanket-satisfy more than the question it folded.
+# open status decision this fold covers and is required whenever the origin has
+# any open status decision, so a fold can never claim a question it was not told
+# about, nor blanket-satisfy more than the question it folded.
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -518,14 +519,18 @@ status_transfer_recorded() {  # <status-file> <key> <owner-hold-id>
 
 # The origin's open structured decision keys this fold covers, one per line.
 # A fold closes the live status copy of the question it folded and nothing else,
-# so an explicit --key must name a decision that is open here, and an unqualified
-# fold covers a single open decision but refuses while several are open rather
-# than blanket-satisfying all of them. A key this fold already transferred to the
-# same owner is silently skipped, which keeps repeating a fold idempotent.
+# so `--key` must name a decision that is open here, and it is required whenever
+# any decision is open at all. An unqualified fold has said nothing about which
+# question it covers, and a sole open decision is not evidence that it is the one
+# folded: silently transferring it would mark a question as owned by a decision
+# that never mentions it, which is the loss this gate exists to prevent. Repeated
+# keys collapse, and a key this fold already transferred to the same owner is
+# skipped, so neither a repeated key nor a repeated fold writes a second transfer.
 fold_covered_keys() {  # <origin-id> <open-set> <requested-keys> <owner-hold-id>
   local origin=$1 open=$2 requested=$3 into=$4 status_file="$STATE/$1.status" key open_keys count covered=''
   open_keys=$(printf '%s' "$open" | awk -F'\t' 'NF { print $1 }')
   if [ -n "$requested" ]; then
+    requested=$(sorted_key_union '' "$requested" | tr ',' ' ')
     for key in $requested; do
       if printf '%s\n' "$open_keys" | grep -Fxq -- "$key"; then
         covered="${covered}${key}"$'\n'
@@ -540,9 +545,8 @@ fold_covered_keys() {  # <origin-id> <open-set> <requested-keys> <owner-hold-id>
   fi
   count=0
   [ -z "$open_keys" ] || count=$(printf '%s\n' "$open_keys" | grep -c . || true)
-  [ "$count" -le 1 ] \
-    || fail "origin $origin has $count open structured decisions; name the one this fold covers with --key <decision-key>"
-  [ -z "$open_keys" ] || printf '%s\n' "$open_keys"
+  [ "$count" -eq 0 ] \
+    || fail "origin $origin has $count open structured decision$([ "$count" = 1 ] || printf s); name the one this fold covers with --key <decision-key>"
 }
 
 body_has_resolution_record() {  # <hold-body>
