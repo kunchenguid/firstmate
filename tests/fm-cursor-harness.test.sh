@@ -211,7 +211,7 @@ make_cursor_case() {
   wt="$case_dir/wt"
   fakebin=$(make_cursor_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for cursor\n' > "$home/data/$id/brief.md"
+  printf 'brief for cursor\n\nDelivery contract: mode=no-mistakes\n' > "$home/data/$id/brief.md"
   printf 'cursor\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -228,7 +228,7 @@ run_cursor_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness cursor "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness cursor --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 read_cursor_record() {
@@ -257,6 +257,8 @@ test_cursor_spawn_writes_turnend_hook_and_meta() {
   meta="$HOME_DIR/state/$id.meta"
   grep -qx 'harness=cursor' "$meta" || fail "meta did not record harness=cursor"
   grep -qx 'kind=ship' "$meta" || fail "meta did not record kind=ship"
+  grep -qx 'mode=no-mistakes' "$meta" || fail "meta did not record mode=no-mistakes"
+  grep -qx 'yolo=off' "$meta" || fail "meta did not record yolo=off"
   launch=$(cat "$CASE_DIR/launch.log")
   assert_contains "$launch" "cursor-agent --force --trust" "launch command did not include cursor autonomy flags"
   [ -f "$WT_DIR/.cursor/hooks.json" ] || fail "cursor turn-end hooks.json was not written"
