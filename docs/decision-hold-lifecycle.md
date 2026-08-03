@@ -22,21 +22,29 @@ The `open` subcommand prints the same listing on demand, with `--aging-only` for
 The `fold` subcommand is the alternative path when the finding belongs to a decision that is already open.
 It appends `Also raised by <origin>: <note>` to the target's body through `tasks-axi update --body-file`, skipping the write when the same marker is already present, and unions the target identity into the origin's `decision_folds=` metadata.
 It refuses a target that is not an actively held captain decision and refuses an origin folding into its own decision namespace.
-It also refuses, before writing anything to the target, an origin with no `state/<origin>.meta` to record the fold in, because a fold that cannot be recorded would report success and then be rejected by `complete --folded`.
-It transfers the origin's open keyed status decision to the target with the same `captain-held [key=<key>]: ...` event `complete` writes, because that live copy would otherwise stay open waiting for a key this origin never registers, and `complete --folded` would dead-end on it.
-`--key` names which open status decision the fold covers and is required whenever the origin has any open status decision, so one fold satisfies exactly the question it folded and never blanket-closes the rest.
-A sole open decision does not relax that: an unqualified fold has said nothing about which question it covers, and transferring the only one on offer would mark a question as owned by a decision that never mentions it.
-Repeated keys collapse, and a key already transferred to the same target is skipped, so neither a repeated key nor a repeated fold writes a second transfer event.
-Coverage is resolved before any write, so a fold that cannot name it refuses with the target untouched.
+It also refuses, before writing anything to the target, an origin with no `state/<origin>.meta` to record the fold in, because a fold that cannot be recorded would report success and then be rejected at sign-off.
 Reading the target body decodes the JSON string literal tasks-axi emits, so `jq` is required for `fold` and `resolve`.
 
-The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
+## Where folding ends and accounting begins
+
+`fold` does not touch the origin's status log and takes no decision key.
+Which live question a fold answers for is a judgement about the reviewed surface, and a fold cannot be trusted to imply it: a fold about one question, applied to whichever entry happened to be open, would mark that entry as owned by a decision that never mentions it.
+So folding records only two facts - the finding is on the target decision, and the origin folded into it - and `complete` owns every statement about the live status log.
+
+`complete` requires every structured decision still open in the origin's status log to be explicitly accounted for.
+An entry is accounted for when its decision key is supplied, so this origin's own captain hold carries it, or when that exact key is named with `--folded-key`, so a recorded fold carries it.
+Nothing is inferred from how many entries are open, and no path satisfies an entry the caller did not name, so a question can only leave the live log by someone saying which durable decision now holds it.
+`--folded-key` is refused for a key that is not open, was not already accounted for, and has no recorded transfer, so an entry that never existed cannot be attested away; the three tolerances exist so re-running sign-off stays idempotent.
+This makes the mixed pass expressible in one call: register the genuinely new question with its own key, fold the duplicate finding, then `complete <origin> <new-key> --folded-key <folded-entry-key>`.
+
+The `complete` subcommand unions the reviewed keys into `decision_keys=`, the accounted-for folded keys into `decision_folded_keys=`, and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
-It accepts `--none` as an explicit semantic inventory result, not as inferred absence.
-It accepts `--folded` when every unresolved decision the pass found is already owned by a hold the origin folded into, and refuses `--none` while any fold is recorded, so folding cannot become a way to attest an empty surface.
-It verifies every listed identity and every recorded fold identity against tasks-axi before recording completion; `verify` applies the same check, so the teardown gate is strictly stronger than before folds existed.
-For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
+It accepts `--none` as an explicit semantic inventory result, not as inferred absence, and refuses it while any fold is recorded or any status entry is open, so neither folding nor a live question can become a way to attest an empty surface.
+It accepts `--folded` when every unresolved decision the pass found is already owned by a hold the origin folded into.
+It verifies every listed identity and every recorded fold identity against tasks-axi before recording completion.
+`complete` is the only subcommand that appends a `captain-held [key=<key>]: ...` transfer event, and it names the durable owner that carries the entry - this origin's hold for a supplied key, the recorded folds for a key named as folded.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
+`verify` applies the identical accounting check through the same helper, reading the keys and folded keys sign-off recorded, so the completion gate and the teardown gate cannot drift.
 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
@@ -159,7 +167,8 @@ The final verification commands and their exact summarized outputs follow.
 $ bash tests/fm-decision-hold-lifecycle.test.sh
 ok - report-only unresolved decision is reproduced and completion refuses before loss
 ok - externally closed and archived decisions are durably resolved, recordless closure is not
-ok - a folded status decision satisfies completion without a second captain decision
+ok - sign-off owns status accounting and the mixed fold-and-register pass works
+ok - folding a finished investigation needs no status accounting
 ok - a decision at exactly the ageing threshold is ageing and one below it is not
 ok - a fold that cannot be recorded refuses instead of reporting success
 ok - a firstmate-decided closure is first-class and attributed honestly

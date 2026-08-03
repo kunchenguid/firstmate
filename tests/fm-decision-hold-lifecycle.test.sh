@@ -653,7 +653,8 @@ test_second_pass_cannot_silently_duplicate_an_open_decision() {
   if run_decisions "$home" complete "$second" --none > "$home/none.out" 2> "$home/none.err"; then
     fail "--none passed while the origin had folded a real unresolved decision"
   fi
-  assert_grep "use --folded" "$home/none.err" "the refusal must name the honest attestation"
+  assert_grep "contradicts the folds" "$home/none.err" \
+    "the refusal must name the folds it contradicts"
   run_decisions "$home" complete "$second" --folded >/dev/null \
     || fail "--folded must satisfy the gate for a fully folded review pass"
   run_decisions "$home" verify "$second" >/dev/null \
@@ -881,12 +882,13 @@ test_firstmate_decided_closure_is_first_class() {
   pass "a firstmate-decided closure is first-class and attributed honestly"
 }
 
-# A finding folded into the decision that already owns the question must also close
-# that question's live status copy. Otherwise the origin's own keys never cover it,
-# `complete --folded` dead-ends, and the only way forward is the second captain
-# decision this whole path exists to prevent.
-test_folded_status_decision_satisfies_completion() {
-  local home owner origin hold rc
+# Folding records a finding against the decision that already owns the question and
+# says nothing about the live status log. Sign-off is the single owner of that
+# accounting: every open entry must be named, either by its own key or as carried by
+# a recorded fold, and the mixed pass - one genuinely new question plus one folded
+# duplicate - must be expressible without inverting the documented order.
+test_status_accounting_is_owned_by_sign_off() {
+  local home owner origin hold
   home=$(make_home folded-status)
   owner=sample-policy-review
   origin=sample-policy-audit
@@ -900,72 +902,111 @@ test_folded_status_decision_satisfies_completion() {
     --reason "policy the captain owns" --repo sample) \
     || fail "could not register the owning decision"
 
-  # The later pass's crewmate raised the same question as a structured status
-  # decision, which is the shape that used to make the fold path a dead end.
-  printf 'working: auditing retention\nneeds-decision: how long are sample records retained\n' \
-    > "$home/state/$origin.status"
-
-  # An unqualified fold has said nothing about which question it covers, so it must
-  # not claim the sole open decision on the strength of it being the only one there.
-  set +e
-  run_decisions "$home" fold "$origin" --into "$hold" \
-    --note "the audit pass reaches the same question" \
-    > "$home/sole.out" 2> "$home/sole.err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "an unqualified fold claimed the origin's sole open status decision"
-  assert_grep "--key" "$home/sole.err" "the refusal must ask which decision the fold covers"
-  assert_grep "1 open structured decision;" "$home/sole.err" \
-    "the single-open refusal must read as one decision, not several"
-  assert_no_grep "captain-held" "$home/state/$origin.status" \
-    "a refused fold must not transfer any status decision"
-
-  run_decisions "$home" fold "$origin" --into "$hold" --key default \
-    --note "the audit pass reaches the same question" >/dev/null \
-    || fail "could not fold the audit finding into the owning decision"
-  assert_grep "captain-held [key=default]: tracked by $hold" "$home/state/$origin.status" \
-    "the fold must transfer the live status decision to the decision that now owns it"
-  run_decisions "$home" complete "$origin" --folded >/dev/null \
-    || fail "--folded must satisfy the gate for an origin whose status decision was folded"
-  run_decisions "$home" verify "$origin" >/dev/null \
-    || fail "teardown verification must accept a folded status decision"
-  [ "$(grep -cE '^- \[ \] .*-decision-.* -' "$home/data/backlog.md")" = 1 ] \
-    || fail "satisfying the gate required a second captain decision"
-  run_decisions "$home" fold "$origin" --into "$hold" --key default \
-    --note "the audit pass reaches the same question" >/dev/null \
-    || fail "repeating the fold must stay idempotent"
-  [ "$(grep -cF "captain-held [key=default]: tracked by $hold" "$home/state/$origin.status")" = 1 ] \
-    || fail "repeating the fold duplicated the status transfer"
-
-  # One fold covers exactly the question it folded, never the rest of the open set.
-  printf 'needs-decision [key=purge-cadence]: how often should the purge run\n' \
+  # The audit's crewmate left two live questions: one this pass judges a duplicate
+  # of the open decision, one that is genuinely its own new captain question.
+  printf 'working: auditing retention\n' > "$home/state/$origin.status"
+  printf 'needs-decision [key=retention-span]: how long are sample records retained\n' \
     >> "$home/state/$origin.status"
   printf 'needs-decision [key=export-shape]: which export shape is authoritative\n' \
     >> "$home/state/$origin.status"
-  set +e
-  run_decisions "$home" fold "$origin" --into "$hold" --note "both open questions at once" \
-    > "$home/blanket.out" 2> "$home/blanket.err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "one unqualified fold blanket-satisfied several open status decisions"
-  assert_grep "2 open structured decisions;" "$home/blanket.err" \
-    "the several-open refusal wording must be unchanged"
-  assert_grep "--key" "$home/blanket.err" "the refusal must ask which decision the fold covers"
-  run_decisions "$home" fold "$origin" --into "$hold" --key purge-cadence --key purge-cadence \
-    --note "the purge cadence is the same retention question" >/dev/null \
-    || fail "a keyed fold must cover the decision it names"
-  assert_grep "captain-held [key=purge-cadence]: tracked by $hold" "$home/state/$origin.status" \
-    "the keyed fold must transfer the decision it named"
-  [ "$(grep -cF "captain-held [key=purge-cadence]: tracked by $hold" "$home/state/$origin.status")" = 1 ] \
-    || fail "a key repeated within one invocation wrote the transfer line twice"
-  assert_no_grep "captain-held [key=export-shape]" "$home/state/$origin.status" \
-    "a keyed fold must not close a decision it did not cover"
+
+  run_decisions "$home" fold "$origin" --into "$hold" \
+    --note "the audit pass reaches the same retention question" >/dev/null \
+    || fail "could not fold the duplicate finding into the owning decision"
+  assert_no_grep "captain-held" "$home/state/$origin.status" \
+    "folding must not touch the origin status log"
+  assert_grep "decision_folds=$hold" "$home/state/$origin.meta" \
+    "the fold must be recorded in the origin metadata"
+  run_decisions "$home" fold "$origin" --into "$hold" \
+    --note "the audit pass reaches the same retention question" >/dev/null \
+    || fail "repeating the fold must stay idempotent"
+  [ "$(grep -cF "decision_folds=$hold" "$home/state/$origin.meta")" = 1 ] \
+    || fail "repeating the fold recorded the same fold twice"
+
+  # The genuinely new question gets its own captain decision.
+  run_decisions "$home" hold "$origin" export-shape \
+    --title "Which export shape is authoritative" \
+    --reason "format the captain owns" --repo sample --distinct >/dev/null \
+    || fail "could not register the genuinely new question"
+
+  # Sign-off that leaves either entry unnamed is refused, whatever else it names.
   if run_decisions "$home" complete "$origin" --folded \
-    > "$home/rest.out" 2> "$home/rest.err"; then
-    fail "a status decision no fold covered passed the completion gate"
+    > "$home/unnamed.out" 2> "$home/unnamed.err"; then
+    fail "a fold attestation alone accounted for entries the caller never named"
   fi
-  assert_grep "export-shape" "$home/rest.err" "the refusal must name the decision still open"
-  pass "a folded status decision satisfies completion without a second captain decision"
+  assert_grep "unaccounted for" "$home/unnamed.err" \
+    "the refusal must say the entry is unaccounted for"
+  if run_decisions "$home" complete "$origin" export-shape \
+    > "$home/half.out" 2> "$home/half.err"; then
+    fail "an entry carried only by a fold passed without being named"
+  fi
+  assert_grep "retention-span" "$home/half.err" "the refusal must name the unaccounted entry"
+  if run_decisions "$home" complete "$origin" --none \
+    > "$home/none.out" 2> "$home/none.err"; then
+    fail "--none passed while a fold was recorded"
+  fi
+  assert_grep "contradicts the folds" "$home/none.err" \
+    "--none must stay refused while any fold is recorded"
+  if run_decisions "$home" complete "$origin" --folded-key not-a-live-question \
+    > "$home/ghost.out" 2> "$home/ghost.err"; then
+    fail "a key that was never open was attested away as folded"
+  fi
+  assert_grep "no open structured decision under key not-a-live-question" \
+    "$home/ghost.err" "the refusal must name the key that was never open"
+  assert_no_grep "captain-held" "$home/state/$origin.status" \
+    "a refused sign-off must not transfer any status decision"
+
+  # The mixed pass in one call: own key for the new question, --folded-key for the
+  # entry the recorded fold carries.
+  run_decisions "$home" complete "$origin" export-shape --folded-key retention-span >/dev/null \
+    || fail "the mixed pass must be expressible in one sign-off"
+  assert_grep "captain-held [key=export-shape]: tracked by $origin-decision-export-shape" \
+    "$home/state/$origin.status" "a supplied key must be transferred to this origin's own hold"
+  assert_grep "captain-held [key=retention-span]: tracked by $hold" \
+    "$home/state/$origin.status" "a folded key must be transferred to the decision that carries it"
+  assert_grep "decision_folded_keys=retention-span" "$home/state/$origin.meta" \
+    "sign-off must record which entries a fold accounted for"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "teardown verification must accept the accounted-for inventory"
+  run_decisions "$home" complete "$origin" export-shape --folded-key retention-span >/dev/null \
+    || fail "re-running the same sign-off must stay idempotent"
+  [ "$(grep -cF "captain-held [key=retention-span]: tracked by $hold" "$home/state/$origin.status")" = 1 ] \
+    || fail "re-running sign-off duplicated the folded transfer"
+  [ "$(grep -cE '^- \[ \] .*-decision-.* -' "$home/data/backlog.md")" = 2 ] \
+    || fail "accounting for the folded entry created an extra captain decision"
+  pass "sign-off owns status accounting and the mixed fold-and-register pass works"
+}
+
+# The shape this policy is most often invoked on: the investigation has finished, so
+# its status stream ends in a terminal event and no entry is open. Folding must work
+# there with nothing to name, and sign-off must accept the fold attestation alone.
+test_fold_on_a_finished_investigation_needs_no_accounting() {
+  local home owner origin hold
+  home=$(make_home finished-fold)
+  owner=sample-owning-pass
+  origin=sample-finished-pass
+  mkdir -p "$home/data/$owner" "$home/data/$origin"
+  printf '# owner\n' > "$home/data/$owner/report.md"
+  printf '# finished\n' > "$home/data/$origin/report.md"
+  write_origin_meta "$home" "$owner"
+  write_origin_meta "$home" "$origin"
+  hold=$(run_decisions "$home" hold "$owner" ordering-rule \
+    --title "Which ordering rule is authoritative" \
+    --reason "policy the captain owns" --repo sample) \
+    || fail "could not register the owning decision"
+  printf 'needs-decision: which ordering rule is authoritative\ndone: report complete\n' \
+    > "$home/state/$origin.status"
+
+  run_decisions "$home" fold "$origin" --into "$hold" \
+    --note "the finished pass reaches the same ordering question" >/dev/null \
+    || fail "folding on a finished investigation must not require anything to name"
+  run_decisions "$home" complete "$origin" --folded >/dev/null \
+    || fail "a fold attestation must satisfy sign-off when no entry is open"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "teardown verification must accept a finished folded pass"
+  assert_no_grep "captain-held" "$home/state/$origin.status" \
+    "nothing was open, so nothing may be transferred"
+  pass "folding a finished investigation needs no status accounting"
 }
 
 # The threshold is inclusive, and both day-boundary reads are anchored at midnight,
@@ -1552,7 +1593,8 @@ SH
 
 test_uninventoried_report_decision_refuses_completion
 test_externally_closed_decisions_are_durably_resolved
-test_folded_status_decision_satisfies_completion
+test_status_accounting_is_owned_by_sign_off
+test_fold_on_a_finished_investigation_needs_no_accounting
 test_decision_at_exactly_the_ageing_threshold_is_ageing
 test_unrecordable_fold_refuses_rather_than_reporting_success
 test_firstmate_decided_closure_is_first_class

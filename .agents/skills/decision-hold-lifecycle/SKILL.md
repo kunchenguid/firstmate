@@ -20,9 +20,11 @@ Apply `ask-user-authority`'s bar for asking to every candidate first; a question
 Give each remaining distinct unresolved decision a stable privacy-safe key, register it through `bin/fm-decision-hold.sh hold`, and use the same key on retry so registration is idempotent while different decisions retain different durable identities.
 Before a new identity is created the script puts the home's open captain decisions in front of you and refuses, because a second key covering an already-open question is how this queue compounds.
 Read that listing and judge it semantically: an earlier review of the same pull request, subsystem, or policy question usually already owns the decision under a different key.
-When it does, use `bin/fm-decision-hold.sh fold` to add this pass's finding to the existing decision instead of opening a second one, naming the origin's open decision key with `--key` so the fold states which question it covers, then complete against that fold.
+When it does, use `bin/fm-decision-hold.sh fold` to add this pass's finding to the existing decision instead of opening a second one, then account for that fold at sign-off.
 Re-run with `--distinct` only when the question is genuinely different from every decision in that listing; the attestation is recorded in the new decision.
 After inventorying the whole report and review surface, run `bin/fm-decision-hold.sh complete` with every unresolved key, or with `--none` only when the reviewed surface contains no unresolved captain decision.
+Sign-off is where every structured decision still open in the originating work's status log is accounted for: supply its key when this work's own hold carries it, or name that exact key with `--folded-key` when a fold you recorded carries it.
+Say which entries a fold covers rather than leaving it to be inferred, because nothing else in the flow can state it and an entry nobody named is refused.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.
 Run the command in the originating work's authoritative `FM_HOME`; main-home work creates main-home holds, and secondmate-owned work creates holds in that secondmate home's backlog rather than copying them into the main backlog.
 Do not close a hold merely because the originating investigation completed, its report was archived, its visual review ended, or its task was torn down.
@@ -49,8 +51,8 @@ Bearings reads the resulting structured state and must never compensate by scrap
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
 2. Inventory only genuine unresolved choices that pass `ask-user-authority`'s bar for asking; decide the rest yourself.
-3. Read the open captain decisions the script prints, and for each surviving choice either `fold` it into the decision that already owns the question, naming the covered decision key with `--key`, or register it with `hold` under a stable key, using `--distinct` only when it is genuinely a different question.
-4. Run the script's `complete` command with the full unresolved-key inventory for that review pass, or `--folded` when every finding went into an existing decision.
+3. Read the open captain decisions the script prints, and for each surviving choice either `fold` it into the decision that already owns the question or register it with `hold` under a stable key, using `--distinct` only when it is genuinely a different question.
+4. Run the script's `complete` command with the full unresolved-key inventory for that review pass, or `--folded` when every finding went into an existing decision, and name every open status entry a fold covers with `--folded-key` so nothing on the live surface is left unaccounted for.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. When the captain authorizes dependent work, record it with normal tasks-axi commands and block it by the hold identity.
 7. When the captain answers, run `resolve` in that same turn with `--decision` and either `--routed-to` for dependent work or `--no-routed-work` when none exists, creating and blocking dependent work first where it applies. When the answer routes no follow-up work at all, `decline` is the same one-turn recording without inventing a `--no-routed-work` resolve; `answer` records that same one-turn closure when the hold has no routed work behind it yet; when a hold was already closed outside this owner, `repair` records the decision it closed with.
