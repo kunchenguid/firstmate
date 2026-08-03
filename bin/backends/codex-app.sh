@@ -19,6 +19,9 @@ FM_BACKEND_CODEX_APP_CLIENT="$FM_BACKEND_CODEX_APP_DIR/codex-app-client.mjs"
 # Portable lock and process-identity helpers.
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_BACKEND_CODEX_APP_DIR/../fm-wake-lib.sh"
+# Status-line vocabulary for return-channel verification.
+# shellcheck source=bin/fm-classify-lib.sh
+. "$FM_BACKEND_CODEX_APP_DIR/../fm-classify-lib.sh"
 
 fm_backend_codex_app_codex_bin() {
   if [ -n "${FM_BACKEND_CODEX_APP_CODEX_BIN:-}" ]; then
@@ -175,6 +178,7 @@ fm_backend_codex_app_create_task() {  # <title> <cwd> <model> <effort>
 
 fm_backend_codex_app_capture() {  # <thread-id> <lines>
   local thread=$1 lines=${2:-40}
+  fm_backend_codex_app_server_ensure || return 1
   fm_backend_codex_app_client capture "$thread" "$lines"
 }
 
@@ -198,9 +202,28 @@ fm_backend_codex_app_kill() {  # <thread-id>
 }
 
 fm_backend_codex_app_busy_state() {  # <thread-id>
+  fm_backend_codex_app_server_ensure >/dev/null 2>&1 || { printf 'unknown'; return 0; }
   fm_backend_codex_app_client state "$1" 2>/dev/null || printf 'unknown'
 }
 
 fm_backend_codex_app_target_exists() {  # <thread-id>
+  fm_backend_codex_app_server_ensure || return 1
   fm_backend_codex_app_client state "$1" >/dev/null 2>&1
+}
+
+fm_backend_codex_app_status_channel_confirmed() {  # <status-file> <first-new-line>
+  local status_file=$1 first_new_line=$2 new_lines line verb
+  [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 1
+  new_lines=$(tail -n "+$first_new_line" -- "$status_file" 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      working|needs-decision|blocked|done|failed|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+        return 0
+        ;;
+    esac
+  done <<EOF
+$new_lines
+EOF
+  return 1
 }

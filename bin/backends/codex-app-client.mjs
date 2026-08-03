@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// bin/backends/codex-app-client.mjs - Codex app-server WebSocket client.
+// Usage: codex-app-client.mjs <absolute-socket> <ping|create|send|capture|state|interrupt|archive> [args]
 
 import { createHash, randomBytes } from "node:crypto";
 import { createConnection } from "node:net";
@@ -249,6 +251,7 @@ async function initialize() {
   await request("initialize", {
     clientInfo: { name: "firstmate", title: "Firstmate", version: "1" },
     capabilities: {
+      experimentalApi: true,
       requestAttestation: false,
       optOutNotificationMethods: [
         "command/exec/outputDelta",
@@ -313,11 +316,29 @@ async function main() {
       const params = { cwd, approvalPolicy: "never", sandbox: "danger-full-access", threadSource: "firstmate" };
       if (model && model !== "default") params.model = model;
       if (effort && effort !== "default") params.config = { model_reasoning_effort: effort };
-      const result = await request("thread/start", params);
-      const threadId = result?.thread?.id;
-      if (!validThreadId(threadId)) throw new Error("thread/start returned an invalid thread id");
-      await request("thread/name/set", { threadId, name: title });
-      process.stdout.write(threadId);
+      let threadId;
+      try {
+        const result = await request("thread/start", params);
+        threadId = result?.thread?.id;
+        if (!validThreadId(threadId)) throw new Error("thread/start returned an invalid thread id");
+        if (result.cwd !== cwd || result.thread?.cwd !== cwd) {
+          throw new Error("thread/start returned an unexpected working directory");
+        }
+        if (!["idle", "notLoaded"].includes(result.thread?.status?.type)) {
+          throw new Error("thread/start returned an unexpected initial state");
+        }
+        await request("thread/name/set", { threadId, name: title });
+        process.stdout.write(threadId);
+      } catch (error) {
+        if (validThreadId(threadId)) {
+          try {
+            await request("thread/archive", { threadId });
+          } catch {
+            throw new Error(`${error.message}; created thread ${threadId} also could not be archived`);
+          }
+        }
+        throw error;
+      }
       return;
     }
     case "send": {
@@ -339,9 +360,16 @@ async function main() {
     case "capture": {
       const [threadId, rawLines = "40"] = args;
       const count = Number.parseInt(rawLines, 10);
+      if (!validThreadId(threadId)) throw new Error("invalid Codex App thread id");
       if (!Number.isInteger(count) || count < 1 || count > 1000) throw new Error("capture lines must be 1..1000");
-      const thread = await readThread(threadId, true);
-      const text = (thread.turns || []).flatMap((turn) => turn.items || []).map(itemText).filter(Boolean).join("\n");
+      const result = await request("thread/turns/list", {
+        threadId,
+        limit: Math.min(count, 100),
+        sortDirection: "desc",
+        itemsView: "full",
+      });
+      const turns = Array.isArray(result?.data) ? [...result.data].reverse() : [];
+      const text = turns.flatMap((turn) => turn.items || []).map(itemText).filter(Boolean).join("\n");
       process.stdout.write(text.split("\n").slice(-count).join("\n"));
       return;
     }

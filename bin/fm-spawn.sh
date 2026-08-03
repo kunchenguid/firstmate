@@ -2152,6 +2152,15 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 if [ "$BACKEND" = codex-app ]; then
+  CODEX_APP_STATUS_FILE="$STATE/$ID.status"
+  [ ! -L "$CODEX_APP_STATUS_FILE" ] || {
+    echo "error: Codex App status return path is a symbolic link; refusing launch" >&2
+    exit 1
+  }
+  CODEX_APP_STATUS_LINES_BEFORE=0
+  if [ -f "$CODEX_APP_STATUS_FILE" ]; then
+    CODEX_APP_STATUS_LINES_BEFORE=$(wc -l < "$CODEX_APP_STATUS_FILE")
+  fi
   INITIAL_PROMPT=$("$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief < "$BRIEF")
   CODEX_APP_SUBMIT_VERDICT=$(fm_backend_send_text_submit "$BACKEND" "$T" "$INITIAL_PROMPT" 1 0 0 "$W") || {
     echo "error: Codex App launch brief could not be submitted; task metadata was preserved for recovery" >&2
@@ -2159,6 +2168,19 @@ if [ "$BACKEND" = codex-app ]; then
   }
   [ "$CODEX_APP_SUBMIT_VERDICT" = empty ] || {
     echo "error: Codex App launch brief delivery was not confirmed; task metadata was preserved for recovery" >&2
+    exit 1
+  }
+  CODEX_APP_STATUS_CONFIRMED=0
+  for _ in $(seq 1 60); do
+    if fm_backend_codex_app_status_channel_confirmed \
+      "$CODEX_APP_STATUS_FILE" "$((CODEX_APP_STATUS_LINES_BEFORE + 1))"; then
+      CODEX_APP_STATUS_CONFIRMED=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$CODEX_APP_STATUS_CONFIRMED" = 1 ] || {
+    echo "error: Codex App worker did not prove its status return channel within 60s; task metadata was preserved for recovery" >&2
     exit 1
   }
 else

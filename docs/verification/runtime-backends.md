@@ -562,7 +562,29 @@ The host-tool sequence was:
 8. read the archived transcript with state `notLoaded`.
 
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
-The shell-callable backend bridge was verified on 2026-08-02 against `codex-cli 0.146.0`.
+The shell-callable backend bridge was reverified on 2026-08-03 against `codex-cli 0.146.0` in an isolated Firstmate home backed by a disposable local Git remote.
 Firstmate started a private Unix-socket app-server, created a Desktop-visible thread in a real leased worktree, submitted and steered turns, observed native busy then idle lifecycle, read the bounded transcript, restarted the app-server and resumed the same durable thread, archived the exact thread, and returned the worktree through normal teardown.
 The app-server is detached with `setsid` when available so it survives the command that started it.
+The exact operator path was:
+
+```sh
+FM_HOME="$SMOKE_HOME" FM_SPAWN_NO_GUARD=1 bin/fm-spawn.sh "$SMOKE_ID" "$SMOKE_REPO" --harness codex --backend codex-app --scout
+FM_HOME="$SMOKE_HOME" bin/fm-peek.sh "$SMOKE_ID" 80
+FM_HOME="$SMOKE_HOME" bin/fm-send.sh "$SMOKE_ID" "Append 'Firstmate steering channel confirmed' to the report, run the completion gate, report done, and stop."
+FM_HOME="$SMOKE_HOME" bin/fm-crew-state.sh "$SMOKE_ID"
+FM_HOME="$SMOKE_HOME" bin/fm-teardown.sh "$SMOKE_ID"
+```
+
+Bounded observed output, with temporary paths and identifiers removed:
+
+```text
+spawned <id> harness=codex kind=scout mode=local-only yolo=off window=<thread-id> worktree=<leased-worktree>
+working: Codex App status channel confirmed
+state: working · source: pane · harness busy (codex-appserver)
+done: Codex App status and steering channels confirmed
+old_pid=<pid> new_pid=<different-pid> thread_id=<same-thread-id>
+teardown <id> complete (window <thread-id>, worktree <leased-worktree>)
+```
+
+The restart check killed only the identity-bound per-home app-server process after `fm_pid_identity` matched its recorded identity; the next bounded capture started a different process and read the same durable thread.
 Deterministic backend selection and lifecycle classification are pinned by `tests/fm-backend.test.sh` and `tests/fm-busy-state.test.sh`.

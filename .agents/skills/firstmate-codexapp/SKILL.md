@@ -28,6 +28,7 @@ bin/fm-spawn.sh <task-id> <project> --harness codex --backend codex-app
 
 The adapter leases an isolated worktree, creates a durable Codex thread, submits the marked brief, and records the thread id in task metadata.
 The brief must retain the normal absolute `state/<id>.status` instructions.
+Treat spawn as successful only after the adapter observes a new valid lifecycle line from that thread.
 
 ## Supervision
 
@@ -38,7 +39,7 @@ Treat a missing or unreadable thread as unknown or dead through the shared backe
 
 ## Recovery and retirement
 
-The per-home app-server restarts automatically on the next active operation.
+The per-home app-server restarts automatically on the next create, send, read, lifecycle, interruption, or archive operation.
 The durable thread id remains the endpoint authority across that restart.
 Never invent a replacement thread while recorded metadata still identifies a readable endpoint.
 

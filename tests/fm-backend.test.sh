@@ -1131,6 +1131,42 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+test_codex_app_restarts_read_paths_and_proves_status_channel() {
+  local log status out ensure_count
+  log="$TMP_ROOT/codex-app-read-paths.log"
+  status="$TMP_ROOT/codex-app.status"
+  grep -F 'experimentalApi: true' "$ROOT/bin/backends/codex-app-client.mjs" >/dev/null \
+    || fail "Codex App capture requires the negotiated experimental API capability"
+  fm_backend_source codex-app
+
+  fm_backend_codex_app_server_ensure() { printf 'ensure\n' >> "$log"; }
+  fm_backend_codex_app_client() {
+    printf 'client:%s\n' "$*" >> "$log"
+    [ "$1" != state ] || printf 'idle'
+  }
+
+  fm_backend_codex_app_capture thread-1 10 >/dev/null
+  out=$(fm_backend_codex_app_busy_state thread-1)
+  [ "$out" = idle ] || fail "Codex App busy-state read should return the restarted server's lifecycle"
+  fm_backend_codex_app_target_exists thread-1
+  ensure_count=$(grep -c '^ensure$' "$log")
+  [ "$ensure_count" = 3 ] || fail "every Codex App read/liveness path must ensure the server, got $ensure_count calls"
+
+  printf 'working: old line\nnot-a-status-line\n' > "$status"
+  if fm_backend_codex_app_status_channel_confirmed "$status" 2; then
+    fail "an invalid new line must not prove the Codex App status channel"
+  fi
+  printf 'working [key=desktop-start]: new worker confirmed\n' >> "$status"
+  fm_backend_codex_app_status_channel_confirmed "$status" 2 \
+    || fail "a new keyed lifecycle line should prove the Codex App status channel"
+  ln -s "$status" "$TMP_ROOT/codex-app-link.status"
+  if fm_backend_codex_app_status_channel_confirmed "$TMP_ROOT/codex-app-link.status" 1; then
+    fail "a symlinked Codex App status path must never prove the return channel"
+  fi
+
+  pass "Codex App read paths restart the server and only a new regular-file lifecycle line proves the status channel"
+}
+
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
@@ -1158,3 +1194,4 @@ test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently
+test_codex_app_restarts_read_paths_and_proves_status_channel

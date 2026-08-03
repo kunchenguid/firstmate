@@ -46,11 +46,14 @@ FM_HOME="$PWD" bin/fm-teardown.sh <task-id>
 ```
 
 The brief remains responsible for the normal `state/<id>.status` lifecycle lines.
+Spawn waits for a new valid lifecycle line before accepting the worker, proving that the thread can report through the required status channel.
 Busy and idle come directly from the app-server thread lifecycle, not terminal text.
+The client opts into the app-server's experimental API because bounded transcript paging uses `thread/turns/list`.
+Transcript capture requests only a bounded page of recent turns before applying the requested line limit.
 Teardown interrupts any active turn, archives the exact thread, and only then returns the leased worktree.
 
 Task metadata records `backend=codex-app`, `window=<thread-id>`, and `codex_app_thread_id=<thread-id>`.
-If the app-server stops, the next active backend operation restarts it and resumes the durable thread.
+If the app-server stops, the next create, send, read, lifecycle, interrupt, or archive operation restarts it and resumes the durable thread.
 
 ## Current limits
 
