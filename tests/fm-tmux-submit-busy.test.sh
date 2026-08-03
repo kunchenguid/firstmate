@@ -74,11 +74,11 @@ test_busy_pane_pending_returns_empty() {
   # Now test the submit - write verdict to file to avoid nested $().
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
-    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+    fm_tmux_submit_enter_core "win" 3 0.05 opencode > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] || fail "busy-pane pending should return empty, got '$(cat "$vfile")'"
   [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
     || fail "proven pending should consume the configured Enter retry budget"
-  pass "fm_tmux_submit_enter_core: busy pane + pending composer returns empty (message queued)"
+  pass "fm_tmux_submit_enter_core: OpenCode busy pane + pending composer returns empty"
 }
 
 test_idle_pane_pending_returns_pending() {
@@ -342,33 +342,47 @@ test_claude_busy_shapes_cover_every_live_form() {
   pass "fm_pane_is_busy: Claude busy shapes match without the timer false-positive"
 }
 
-test_submit_fallback_uses_recorded_claude_harness() {
-  local dir fakebin composer home unknown_home rc
-  dir="$TMP_ROOT/claude-submit-fallback"
-  fakebin=$(make_submit_mock "$dir")
-  composer="$dir/composer"
-  home="$dir/home"
-  unknown_home="$dir/unknown-home"
-  mkdir -p "$home/state" "$unknown_home/state"
-  fm_write_meta "$home/state/claude-submit.meta" "window=sess:win" "kind=ship" "harness=claude"
-  printf '✻ Churned for 53s · 1 shell still running\n╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
-  touch "$dir/.swallow"
-  env PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
-    FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=2 \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
-    FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" fm-claude-submit fix >/dev/null 2>/dev/null
-  rc=$?
-  [ "$rc" -eq 0 ] || fail "recorded Claude harness must select the tool-wait signature"
+test_submit_fallback_respects_harness_capability() {
+  local root
+  root="$TMP_ROOT/submit-capability"
 
-  env PATH="$fakebin:$PATH" FM_HOME="$unknown_home" FM_ROOT_OVERRIDE="$unknown_home" \
-    FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=2 \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
-    FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" sess:win fix >/dev/null 2>/dev/null
-  rc=$?
-  [ "$rc" -ne 0 ] || fail "unknown harness must retain the shared compatibility signature"
-  pass "fm-send: submit fallback uses the recorded Claude busy signature"
+  submit_case() {
+    local name=$1 harness=$2 footer=$3 expected=$4
+    local dir fakebin composer home target swallow err rc
+    dir="$root/$name"
+    fakebin=$(make_submit_mock "$dir")
+    composer="$dir/composer"
+    home="$dir/home"
+    swallow="$dir/.swallow"
+    err="$dir/stderr"
+    mkdir -p "$home/state"
+    if [ -n "$harness" ]; then
+      fm_write_meta "$home/state/$name.meta" "window=sess:win" "kind=ship" "harness=$harness"
+      target="fm-$name"
+    else
+      target="sess:win"
+    fi
+    printf '%s\n╭────────────╮\n│ > fix      │\n╰────────────╯\n' "$footer" > "$composer"
+    touch "$swallow"
+    env PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+      FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=2 \
+      FM_FAKE_SWALLOW="$swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+      FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+      "$ROOT/bin/fm-send.sh" "$target" fix >/dev/null 2>"$err"
+    rc=$?
+    if [ "$expected" = empty ]; then
+      [ "$rc" -eq 0 ] || fail "$name must convert its verified busy footer to empty"
+    else
+      [ "$rc" -ne 0 ] || fail "$name must not convert rendered activity to empty"
+      assert_contains "$(cat "$err")" "verdict=pending" "$name must preserve the pending verdict"
+    fi
+  }
+
+  submit_case claude-submit claude '✻ Churned for 53s · 1 shell still running' empty
+  submit_case opencode-submit opencode 'esc interrupt' empty
+  submit_case kimi-submit kimi '🌑 · Working' pending
+  submit_case unknown-submit '' 'esc interrupt' pending
+  pass "fm-send: busy-queued conversion is restricted to verified harnesses"
 }
 
 test_busy_pane_pending_returns_empty
@@ -380,4 +394,4 @@ test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
 test_claude_busy_shapes_cover_every_live_form
-test_submit_fallback_uses_recorded_claude_harness
+test_submit_fallback_respects_harness_capability
