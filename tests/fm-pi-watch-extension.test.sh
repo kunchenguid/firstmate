@@ -59,6 +59,111 @@ export const Type = {
 JS
 }
 
+# While state/.afk exists, bin/fm-supervise-daemon.sh owns wake triage and
+# delivers batched digests, so a per-wake model handoff is the firehose away mode
+# exists to prevent (bin/fm-claude-stop-autoarm.sh enforces the same rule for a
+# Claude primary). Watcher CONTINUITY is a separate concern and must survive: the
+# daemon reads the durable queue this extension-owned watcher keeps filling.
+# Asserted both ways from one fixture so the guard cannot silently become
+# unconditional in either direction.
+test_pi_away_mode_afk_probe() {  # <case-name> <afk: on|off>
+  local name=$1 afk=$2 repo home plugin count release out status
+  repo="$TMP_ROOT/$name-root"
+  home="$TMP_ROOT/$name-home"
+  count="$TMP_ROOT/$name.count"
+  release="$TMP_ROOT/$name.release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  [ "$afk" = on ] && printf '%s\n' "$(date +%s)" > "$home/state/.afk"
+  # First arm closes actionable. Its successor reports itself established and then
+  # parks, so continuity is observable while the case runs. The park is
+  # self-limiting and prints nothing on exit, so it can neither loop the extension
+  # into endless re-arms nor outlive the suite as an unbounded orphan.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+n=$(cat "${FM_ARM_COUNT:?}" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FM_ARM_COUNT"
+if [ "$n" -eq 1 ]; then
+  printf 'signal: afk probe wake\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+i=0
+while [ ! -e "${FM_RELEASE_FILE:?}" ] && [ "$i" -lt 40 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" \
+    FM_RELEASE_FILE="$release" FM_AFK_MODE="$afk" \
+    FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 \
+    node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-afk", {}, undefined, undefined, {});
+
+const armCount = () =>
+  existsSync(process.env.FM_ARM_COUNT)
+    ? Number(readFileSync(process.env.FM_ARM_COUNT, "utf8").trim() || 0)
+    : 0;
+// Wait for the successor: continuity must be restored in BOTH modes.
+for (let i = 0; i < 400 && armCount() < 2; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (armCount() < 2) throw new Error("no successor arm was started after the actionable close");
+
+if (process.env.FM_AFK_MODE === "on") {
+  // Give delivery a generous window to prove the wake is genuinely suppressed
+  // rather than merely slower than the assertion.
+  for (let i = 0; i < 60 && !prompt; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (prompt) throw new Error(`away mode still woke the model: ${prompt}`);
+} else {
+  for (let i = 0; i < 400 && !prompt.includes("afk probe wake"); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (!prompt.includes("FIRSTMATE WATCHER WAKE")) throw new Error(`no wake delivered off away mode: ${prompt}`);
+  if (!prompt.includes("afk probe wake")) throw new Error(`wake lost its reason: ${prompt}`);
+}
+// Release the parked successor and let it exit, so this case leaves no child
+// running into the cases that follow. It exits silently, so the bounded retry
+// budget above settles the extension rather than looping it into fresh arms.
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await new Promise((resolve) => setTimeout(resolve, 300));
+EOF
+  )
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi away-mode wake probe ($afk) failed: $out"
+  [ -z "$out" ] || fail "Pi away-mode wake probe ($afk) printed output: $out"
+}
+
+test_pi_away_mode_suppresses_wake_but_keeps_continuity() {
+  test_pi_away_mode_afk_probe pi-afk-on on
+  pass "Pi away mode suppresses the per-wake model handoff while still restoring watcher continuity"
+  test_pi_away_mode_afk_probe pi-afk-off off
+  pass "Pi delivers the actionable wake normally when away mode is off"
+}
+
 test_pi_extension_reports_external_healthy_watcher() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-external-healthy-root"
@@ -2154,3 +2259,7 @@ test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
+# Runs last: this case deliberately parks a live successor arm to observe that
+# continuity is restored, so keeping it after the timing-sensitive arm and retry
+# cases above leaves those a quiet machine.
+test_pi_away_mode_suppresses_wake_but_keeps_continuity

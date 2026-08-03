@@ -49,8 +49,10 @@ batched digest rather than per-wake injections.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
-3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
-   its child; the singleton lock no-ops a stray arm harmlessly.
+3. **Do not separately arm `fm-watch.sh`.** Either the daemon manages the watcher
+   as its child, or the runtime's own supervision already owns it (see the
+   ownership contract referenced under "Classification policy"); the singleton
+   lock no-ops a stray arm harmlessly either way.
 
 4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 
@@ -146,12 +148,15 @@ behavior but needs a separate fix; the gap is recorded in
 
 ## Classification policy
 
-The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
-wake reason in bash, and self-handles the routine majority without consuming a
-firstmate turn.
+The daemon classifies each wake reason in bash and self-handles the routine
+majority without consuming a firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
-While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+While `state/.afk` exists the daemon owns triage, so `fm-watch.sh` reverts to one-shot and never triages at the same time.
+
+Which component owns the WATCHER while the daemon owns triage depends on the runtime, and `docs/architecture.md` "Away-mode watcher ownership" is the single owner of that contract.
+In short: where nothing else arms a watcher (claude/tmux, whose Stop auto-arm stands down during away mode) the daemon runs `fm-watch.sh` as its own child and reads that child's reasons; where the runtime owns watcher continuity (Pi, whose tracked extension keeps arming but suppresses the per-wake model handoff) the daemon instead classifies from the durable `state/.wake-queue` that same watcher fills, through a forward-only cursor that never consumes a record firstmate's own drain still needs.
+The daemon detects which case it is in from the singleton lock's health, so neither shape needs a separate away-mode mechanism.
 
 Classify each wake this way:
 

@@ -71,7 +71,8 @@ It leads with a prominent bordered tangle banner, while `bin/fm-guard.sh` owns t
 On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work, a process-event source, or X-mode relay polling needs supervision and no identity-matched watcher lock with a fresh beacon is live, direct Stop hooks block and passive turn-end hooks force one bounded follow-up.
 The guard covers the main primary and genuinely marked secondmate homes, exempts child crewmate/scout worktrees, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
 
-A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill starts it through the tracked foreground helper `bin/fm-afk-start.sh`, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
+A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill starts it through the tracked foreground helper `bin/fm-afk-start.sh`, after which the watcher reverts to one-shot mode and the daemon self-handles routine wakes in bash.
+Which component runs that watcher depends on the runtime; [Away-mode watcher ownership](#away-mode-watcher-ownership) is the single owner of that contract.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-external-wait vocabulary, and status-scan primitives.
 Terminal verbs remain captain-relevant, while a nonterminal progress verb cannot become terminal merely because its prose contains a legacy free-text token such as `merged`; bare legacy free-text lines remain compatible.
 The always-on watcher also uses that library's absorb classification on no-verb signals and first-sighting stale panes before status-log terminality is trusted, while the daemon maintains distinct wedge and declared-pause recheck cadences.
@@ -86,6 +87,29 @@ Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
+
+## Away-mode watcher ownership
+
+Away mode always has exactly one watcher and exactly one triage owner, but which component holds the watcher depends on the runtime, so the daemon detects its situation rather than assuming it.
+
+Where nothing else arms a watcher for the home, the daemon OWNS the cycle: it runs `bin/fm-watch.sh` as its own child and classifies the reasons that child prints.
+This is the claude and tmux shape, and it holds because `bin/fm-claude-stop-autoarm.sh` stands its rewake down entirely while `state/.afk` exists.
+
+Where the runtime owns watcher continuity itself, the daemon CONSUMES instead.
+Under Pi, `.pi/extensions/fm-primary-pi-watch.ts` arms `bin/fm-watch-arm.sh` and keeps that child attached to the live Pi process, so the extension holds the home singleton and the daemon's own child would exit immediately with `watcher: already running`.
+The extension keeps arming through away mode, because its continuity guarantees (bounded retry, session-lock verification, verified successor) are worth keeping during the unattended stretch, but it suppresses the per-wake model handoff while `state/.afk` exists so away mode is not a firehose of turns.
+A continuity FAILURE still reaches the captain: away mode batches routine notifications, it never hides a broken supervision chain.
+
+Both shapes produce the same durable record, which is what makes one classifier enough.
+`bin/fm-watch.sh` appends every actionable wake to `state/.wake-queue` before advancing any suppression marker, whoever started it, so the queue is a complete owner-independent log.
+The daemon decides between the two paths from the singleton lock's health through the shared `fm_watcher_healthy` predicate in `bin/fm-wake-lib.sh`: a lock held by a live process whose recorded identity still matches, for this home and this watcher path, with a liveness beacon inside the guard grace window.
+A lock left by a dead, reused, or stale-beaconed process is not healthy, so the daemon takes the cycle back rather than reading a queue nothing is filling.
+Because an external owner swaps watcher generations on every actionable close, the daemon requires a sustained absence (`FM_EXTERNAL_WATCHER_GRACE`) before taking over, so a momentary handover gap cannot make ownership flap.
+
+Consumption is non-destructive by contract, and that is what lets the daemon and firstmate read the same queue without a coordination protocol.
+The destructive drain (`bin/fm-wake-drain.sh`) stays firstmate's alone; the daemon only advances a forward-only cursor over the sequence the queue already assigns.
+A record the daemon classified is never reclassified, a record a concurrent drain removed is simply never seen because firstmate handled it in that turn, and a record stays queued until firstmate drains it so the return catch-up still sees the raw history.
+The cursor advances only after classification has run, so a crash mid-batch replays that batch rather than dropping it - the same at-least-once boundary the drain already documents - and the seen-status markers stop a replay from double-escalating one status line.
 
 ## Busy state is semantic, per adapter
 

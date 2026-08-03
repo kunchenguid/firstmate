@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-supervise-daemon.sh — presence-gated sub-supervisor (closes #27's P2).
 #
-# Wraps bin/fm-watch.sh: runs it as a child, classifies each wake reason, and
+# Takes its wakes from bin/fm-watch.sh, classifies each wake reason, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
 # captain-relevant events plus bounded declared-pause rechecks. This is the
@@ -10,6 +10,18 @@
 # needs-decision/blocked/failed/persistent-wedge/check-output events and a
 # declared-pause recheck reach the LLM, and even then as one pre-read digest per
 # batch window.
+#
+# WATCHER OWNERSHIP (two input paths, one classifier). Where nothing else arms a
+# watcher for this home - the claude/tmux shape, whose Stop auto-arm stands down
+# while state/.afk exists - the daemon OWNS the cycle: it runs fm-watch.sh as its
+# own child and classifies that child's printed reasons. Where the runtime owns
+# watcher continuity itself - Pi, whose tracked extension arms fm-watch-arm.sh
+# and holds the home singleton - the daemon instead CONSUMES the durable wake
+# queue that same watcher fills. It detects which case it is in from the
+# singleton lock's health and adapts; see daemon_external_watcher_owns and
+# consume_wake_queue below, and docs/architecture.md "Away-mode watcher
+# ownership". Both paths run the identical handle_wake classification, so away
+# mode behaves the same way whoever owns the watcher.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
@@ -33,11 +45,13 @@
 #
 # Reliability model (see the /afk skill):
 #   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
-#     to daemon-owned one-shot behavior and enqueues every wake to
-#     state/.wake-queue BEFORE advancing its suppression markers, so a
-#     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
-#     The daemon does not touch the queue; it only reads the watcher's stdout
-#     reason.
+#     to one-shot behavior and enqueues every wake to state/.wake-queue BEFORE
+#     advancing its suppression markers, so a crash/restart/missed injection is
+#     recovered on the next fm-wake-drain.sh. The daemon never REMOVES a queue
+#     record: on the owner path it reads only the watcher child's stdout, and on
+#     the consumer path it reads the queue through a forward-only cursor. The
+#     destructive drain stays firstmate's alone, so neither reader can consume an
+#     event out from under the other.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
@@ -96,6 +110,13 @@
 #                                   (default 300)
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
+#          FM_EXTERNAL_WATCHER_GRACE seconds a healthy external watcher must be
+#                                   CONTINUOUSLY absent before this daemon takes
+#                                   the cycle back and owns its own child again
+#                                   (default 20). An external owner swaps watcher
+#                                   generations on every actionable close, so a
+#                                   single missed observation is a handover gap,
+#                                   not a departure.
 #          FM_BUSY_REGEX            optional rendered busy-signature override
 #                                   for delivery guards and Grok's fallback
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
@@ -644,12 +665,18 @@ escalate_flush() {  # <state>
   local state=$1 buf item n msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
-  n=$(wc -l < "$buf" 2>/dev/null || echo 0)
+  # BSD wc pads its count, which would render as "(       3 event(s))" in the
+  # digest the captain actually reads, so strip the padding.
+  n=$(wc -l < "$buf" 2>/dev/null | tr -d '[:space:]' || echo 0)
+  [ -n "$n" ] || n=0
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
-  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
+  # The re-arm note stays owner-neutral: supervision may be owned by this daemon's
+  # own watcher child or by the runtime's (see the watcher-ownership contract at
+  # the top of this file), and firstmate must not re-arm in either case.
+  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed - supervision is already owned)' "$n" "$msg")
   if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1
 }
@@ -1184,11 +1211,13 @@ should_force_self() {  # <reason>
 
 # A real watcher WAKE reason starts with one of these prefixes. Anything else on
 # the watcher child's stdout (e.g. "watcher: already running" on a singleton-lock
-# collision, reachable if the daemon was SIGKILL'd and its orphaned watcher child
-# still holds the #29 singleton lock) is a STATUS line, not a wake: handling it
-# as an unknown wake would flood the escalation buffer and restart the child with
-# no crash backoff. The main loop treats a non-wake line as idle (log + sleep +
-# continue), so a singleton collision cannot hot-loop escalations.
+# collision, reachable when another supervision owner holds the #29 singleton
+# lock) is a STATUS line, not a wake: handling it as an unknown wake would flood
+# the escalation buffer and restart the child with no crash backoff. The main
+# loop treats a non-wake line as idle (log + sleep + continue) whenever this
+# daemon is still the rightful cycle owner, so a transient collision cannot
+# hot-loop escalations; a non-wake close backed by a HEALTHY external owner
+# instead switches the daemon to queue-consumer mode below.
 is_wake_reason() {  # <reason>
   local reason=$1
   case "$reason" in
@@ -1276,6 +1305,118 @@ handle_wake() {  # <reason> <state>
       log "self-handle: $reason -> $distilled"
       ;;
   esac
+}
+
+# --- watcher ownership and durable-queue consumption ------------------------
+# This daemon normally OWNS the supervision cycle: it runs fm-watch.sh as its own
+# child and classifies the wake reasons that child prints. That holds wherever
+# nothing else arms a watcher for this home - notably the claude/tmux shape,
+# where bin/fm-claude-stop-autoarm.sh stands down entirely while state/.afk
+# exists so the daemon is the uncontested owner.
+#
+# Some runtimes own watcher continuity themselves. Under Pi,
+# .pi/extensions/fm-primary-pi-watch.ts arms bin/fm-watch-arm.sh and keeps that
+# child attached to the live Pi process, so the EXTENSION - not this daemon -
+# holds the home singleton lock. This daemon's own child then exits immediately
+# with "watcher: already running pid N", which is not a wake reason, and a daemon
+# that only knew the owner path would idle on that indefinitely while every
+# actionable event went unclassified.
+#
+# Both shapes write the SAME durable record: fm-watch.sh appends every actionable
+# wake to state/.wake-queue BEFORE advancing any suppression marker, whoever
+# started it. So when a healthy external watcher owns the cycle, this daemon
+# reads that queue and feeds each record's payload through the identical
+# handle_wake classifier. One classifier and one policy, two input paths.
+#
+# The cursor file records the highest wake sequence this daemon has classified.
+WAKE_CURSOR_NAME=".subsuper-wake-cursor"
+
+# How long a healthy external watcher must be CONTINUOUSLY absent before this
+# daemon takes the cycle back. An external owner hands over between its own
+# watcher generations, so the singleton is legitimately unheld for a moment on
+# every actionable close; taking over on a single observation makes the daemon
+# spawn a child that immediately loses the lock again, and the mode flaps. The
+# grace sits above bin/fm-watch-arm.sh's own 10s confirm timeout for a fresh
+# watcher to acquire the lock and beat, and far below the beacon grace, so a
+# genuinely dead external owner is still taken over promptly.
+EXTERNAL_WATCHER_GRACE_DEFAULT=20
+
+# 0 when a HEALTHY watcher that this daemon did not start holds the home
+# singleton. "Healthy" is the shared definition in bin/fm-wake-lib.sh
+# (fm_watcher_healthy): the lock is held by a live pid whose recorded process
+# identity still matches, for THIS home and THIS watcher path, with a liveness
+# beacon inside the guard grace window. A lock left by a dead, reused, or
+# stale-beaconed process is therefore NOT healthy, and this daemon falls back to
+# owning its own watcher rather than trusting a corpse and going silent.
+daemon_external_watcher_owns() {  # <state> <watch-path> [own-child-pid]
+  local state=$1 watch_path=$2 own=${3:-}
+  fm_watcher_healthy "$state" "$watch_path" || return 1
+  [ -n "$FM_WATCHER_HEALTHY_PID" ] || return 1
+  [ "$FM_WATCHER_HEALTHY_PID" != "$own" ] || return 1
+  return 0
+}
+
+# Classify every durable wake record newer than this daemon's cursor, exactly as
+# the owner path would.
+#
+# NON-DESTRUCTIVE BY CONTRACT. The destructive drain (bin/fm-wake-drain.sh) stays
+# firstmate's alone; this reader never removes a record. That is what makes the
+# two readers safe to run concurrently without a coordination protocol:
+#   - a record this daemon has classified is never reclassified, because the
+#     cursor only moves forward over the queue's own monotonic seq;
+#   - a record a concurrent drain removed is simply never seen here, because
+#     firstmate consumed and handled it in that turn;
+#   - a record stays queued until firstmate drains it, so the away-mode
+#     "while you were out" catch-up still sees the raw history.
+# The cursor advances only AFTER handle_wake has run, so a crash mid-batch
+# replays that batch rather than dropping it - the same at-least-once boundary
+# fm-wake-drain.sh already documents for its print-before-delete gap. The
+# seen-status markers then suppress a duplicate digest entry for the same line.
+consume_wake_queue() {  # <state>
+  local state=$1 cursor cursor_file highest batch epoch seq kind key payload
+  cursor_file="$state/$WAKE_CURSOR_NAME"
+  # Cheap idle short-circuit: an empty queue costs one stat and never takes the
+  # append lock, so a quiet fleet does not contend with the watcher's writes.
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  cursor=$(cat "$cursor_file" 2>/dev/null || true)
+  case "$cursor" in ''|*[!0-9]*) cursor=0 ;; esac
+
+  batch="$state/.subsuper-wake-batch.$$"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  highest=$(awk -F '\t' 'NF >= 5 && $2 + 0 > m { m = $2 + 0 } END { print m + 0 }' \
+    "$FM_WAKE_QUEUE" 2>/dev/null || echo 0)
+  case "$highest" in ''|*[!0-9]*) highest=0 ;; esac
+  # A non-empty queue whose highest sequence sits BELOW the cursor means the
+  # sequence counter was reset (state rebuilt by hand, a home restored from a
+  # copy). Trust the queue over the stale cursor, or every later record would be
+  # suppressed forever.
+  if [ "$highest" -gt 0 ] && [ "$highest" -lt "$cursor" ]; then
+    cursor=0
+  fi
+  awk -F '\t' -v c="$cursor" 'NF >= 5 && $2 + 0 > c' "$FM_WAKE_QUEUE" > "$batch" 2>/dev/null \
+    || : > "$batch"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+
+  if [ ! -s "$batch" ]; then
+    rm -f "$batch" 2>/dev/null || true
+    return 0
+  fi
+
+  # Two collapses, so one chatty task cannot turn a single digest window into a
+  # firehose. fm_wake_print_deduped is the queue library's own owner of
+  # per-kind/key collapsing (latest record wins, all heartbeats fold into one);
+  # the second pass then drops payloads that are already byte-identical, because
+  # one watcher signal legitimately enqueues the SAME reason string under one key
+  # per changed file and this consumer classifies reasons rather than keys.
+  while IFS=$(printf '\t') read -r epoch seq kind key payload; do
+    [ -n "$payload" ] || continue
+    is_wake_reason "$payload" || continue
+    log "wake (queued): $payload"
+    handle_wake "$payload" "$state"
+  done < <(fm_wake_print_deduped "$batch" | awk -F '\t' 'NF >= 5 && !seen[$5]++')
+
+  printf '%s\n' "$highest" > "$cursor_file" 2>/dev/null || true
+  rm -f "$batch" 2>/dev/null || true
 }
 
 # --- log --------------------------------------------------------------------
@@ -1457,7 +1598,8 @@ fm_super_main() {
     WATCHER_PID=$!
   }
 
-  local rc reason
+  local rc reason consumer_mode=0 pending_non_wake="" external_absent_since=0
+  local own_cycle=1 external_grace
   while true; do
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
@@ -1486,28 +1628,80 @@ fm_super_main() {
           rm -f "${CUR_TMP}" 2>/dev/null || true
         fi
         CUR_TMP=""
+        WATCHER_PID=""
         if [ "$rc" -ne 0 ] || [ -z "$reason" ]; then
           record_crash
           log "watcher exited rc=$rc reason='$reason'; restarting after ${backoff_secs}s"
-          WATCHER_PID=""
           sleep "$backoff_secs"
           continue
         fi
-        # Non-wake stdout (e.g. a watcher singleton-collision "already running"
-        # status line) is NOT a wake: idling here prevents an escalation flood
-        # and a backoff-less child restart. record_crash is intentionally
-        # skipped (rc=0, this is normal idle, not a crash).
-        if ! is_wake_reason "$reason"; then
-          log "watcher non-wake stdout, idling: $reason"
-          WATCHER_PID=""
+        if is_wake_reason "$reason"; then
+          log "wake: $reason"
+          handle_wake "$reason" "$STATE"
+          trim_log
+        else
+          # Non-wake stdout (e.g. a watcher singleton-collision "already running"
+          # status line) is NOT a wake. Defer the verdict to the ownership
+          # decision below: with no healthy external owner this stays the
+          # historical idle (which prevents an escalation flood and a
+          # backoff-less child restart), while a healthy external owner means the
+          # collision is permanent and this daemon must read the queue instead.
+          # record_crash is intentionally skipped either way (rc=0, normal idle).
+          pending_non_wake=$reason
+        fi
+      fi
+
+      # --- watcher-ownership decision ---------------------------------------
+      # Evaluated only when this daemon has no live watcher child, so the owner
+      # path pays nothing for it once its own child is running.
+      external_grace=${FM_EXTERNAL_WATCHER_GRACE:-$EXTERNAL_WATCHER_GRACE_DEFAULT}
+      if daemon_external_watcher_owns "$STATE" "$WATCH"; then
+        external_absent_since=0
+        own_cycle=0
+      elif [ "$consumer_mode" -eq 1 ]; then
+        # The external owner swaps watcher generations on every actionable close,
+        # so the singleton is legitimately unheld for a moment. Only a SUSTAINED
+        # absence means it is really gone; taking over on a single observation
+        # would spawn a child that immediately loses the lock again, and the mode
+        # would flap.
+        [ "$external_absent_since" -ne 0 ] || external_absent_since=$(_now)
+        if [ $(( $(_now) - external_absent_since )) -lt "$external_grace" ]; then
+          own_cycle=0
+        else
+          own_cycle=1
+        fi
+      else
+        own_cycle=1
+      fi
+
+      if [ "$own_cycle" -eq 0 ]; then
+        if [ "$consumer_mode" -eq 0 ]; then
+          consumer_mode=1
+          log "queue-consumer mode ON: watcher singleton held by healthy external pid $FM_WATCHER_HEALTHY_PID; classifying from the durable wake queue instead of competing for the lock"
+        fi
+        pending_non_wake=""
+      else
+        if [ "$consumer_mode" -eq 1 ]; then
+          consumer_mode=0
+          log "queue-consumer mode OFF: no healthy external watcher for ${external_grace}s; this daemon owns the cycle again"
+        fi
+        external_absent_since=0
+        if [ -n "$pending_non_wake" ]; then
+          log "watcher non-wake stdout, idling: $pending_non_wake"
+          pending_non_wake=""
           sleep "${HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}"
           continue
         fi
-        log "wake: $reason"
-        handle_wake "$reason" "$STATE"
-        trim_log
+        start_watcher || continue
       fi
-      start_watcher || continue
+    fi
+
+    # In queue-consumer mode the durable queue, not a child's stdout, is this
+    # daemon's wake input. Classification, batching, and injection below are
+    # untouched.
+    if [ "$consumer_mode" -eq 1 ]; then
+      consume_wake_queue "$STATE"
+      trim_log
     fi
 
     # --- one housekeeping tick (gated to HOUSEKEEPING_TICK), then poll -------

@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -146,6 +146,23 @@ function markLoaded(): void {
   if (lockOwnership() === "other") return;
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+}
+
+// While the durable away-mode flag exists, bin/fm-supervise-daemon.sh owns wake
+// triage: it classifies every wake in bash and delivers only batched, pre-read
+// digests, so waking the model per wake is exactly the firehose /afk exists to
+// prevent. bin/fm-claude-stop-autoarm.sh enforces the same rule for a Claude
+// primary by standing its rewake down entirely.
+//
+// This extension keeps ARMING through away mode rather than standing down, and
+// the difference is deliberate: watcher continuity here is extension-owned
+// (bounded retry, session-lock verification, verified successor per
+// docs/watcher-continuity.md), which is worth keeping during the exact stretch
+// nobody is watching. The daemon reads the durable wake queue this
+// extension-owned watcher fills, so triage still reaches the captain as digests.
+// See docs/architecture.md "Away-mode watcher ownership".
+function awayModeActive(): boolean {
+  return existsSync(`${state}/.afk`);
 }
 
 function actionableLine(output: string): string {
@@ -428,6 +445,11 @@ export default function (pi: ExtensionAPI) {
           const failure = await restoreAfterActionableClose(owner, predecessor);
           if (generationIsLive(owner)) owner.restoring = false;
           if (!generationIsLive(owner)) return;
+          // Continuity is restored above whether or not away mode is active; only
+          // the model handoff is suppressed. An ordinary wake belongs to the away
+          // daemon, but a continuity FAILURE still surfaces: away mode batches
+          // routine notifications, it never hides a broken supervision chain.
+          if (!failure && awayModeActive()) return;
           const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
           await sendWake(owner, message);
         })().catch(() => {
