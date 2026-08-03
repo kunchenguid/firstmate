@@ -281,6 +281,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/statusline.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/subagent-guard.md",
       "audience": "maintainer-architecture"
     },
