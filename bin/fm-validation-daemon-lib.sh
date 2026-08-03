@@ -91,9 +91,21 @@ fm_validation_daemon_age() {
 # CALLER's own process group and would answer for a daemon that is not there.
 fm_validation_daemon_pid() {
   local pid
-  pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1" 2>/dev/null | head -1)
+  pid=$(node - "$1" <<'NODE'
+const fs = require('fs');
+
+try {
+  const record = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+  if (!Number.isSafeInteger(record.pid) || record.pid <= 0) {
+    process.exit(1);
+  }
+  process.stdout.write(String(record.pid));
+} catch {
+  process.exit(1);
+}
+NODE
+  )
   [ -n "$pid" ] || return 1
-  [ "$pid" -gt 0 ] 2>/dev/null || return 1
   printf '%s\n' "$pid"
 }
 

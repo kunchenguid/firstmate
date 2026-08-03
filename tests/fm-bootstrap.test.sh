@@ -181,10 +181,12 @@ make_dead_pid() {
 
 # run_bootstrap_nm <case dir> <NM_HOME> [verbose 0/1]
 run_bootstrap_nm() {
-  local case_dir=$1 nm_home=$2 verbose=${3:-0} fakebin
+  local case_dir=$1 nm_home=$2 verbose=${3:-0} fakebin node_bin
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  fakebin=$(make_fake_toolchain "$case_dir")
+  node_bin=$(command -v node)
+  fakebin=$(make_fake_toolchain "$case_dir/toolchain-$verbose")
+  ln -sf "$node_bin" "$fakebin/node"
   PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_VERBOSE_FACTS="$verbose" \
     NM_HOME="$nm_home" "$ROOT/bin/fm-bootstrap.sh"
@@ -992,8 +994,11 @@ test_validation_daemon_malformed_pid_file_is_unknown_not_down() {
   done <<'ROWS'
 truncated json^{"pid":
 non-numeric pid^{"pid":"cafe","started_at":"2026-08-02T23:25:46Z"}
+non-integer pid^{"pid":123.4,"started_at":"2026-08-02T23:25:46Z"}
+negative pid^{"pid":-123,"started_at":"2026-08-02T23:25:46Z"}
 empty file^
 unrelated text^not a pid file at all
+pid substring in non-json text^not-json "pid":123
 zero pid^{"pid":0,"started_at":"2026-08-02T23:25:46Z"}
 ROWS
   pass "bootstrap keeps an unreadable pid file distinct from a down daemon"
