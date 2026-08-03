@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Push the declared inherited-material allowlist to one remote secondmate route.
 # Usage: fm-remote-inherit-push.sh <secondmate-id> <generation>
+#
+# The item set is derived from the ONE declared owner
+# (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh), the same declaration
+# the receiving bin/fm-remote-inherit.sh enforces, so sender and receiver cannot
+# drift apart. FM_CONFIG_INHERIT_LIVE=1 marks a live convergence push into an
+# already-running home and skips session-scoped items, exactly as the local
+# propagation path does.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,6 +18,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 sha256_file() {
@@ -42,15 +51,19 @@ EMPTY="$TMP/empty"
 : > "$EMPTY"
 EMPTY_HASH=$(sha256_file "$EMPTY") || die "cannot hash empty inheritance payload"
 
-ITEMS='config/crew-dispatch.json
-config/crew-harness
-config/backlog-backend
-config/backend
-config/herdr-presentation-spaces
-config/startup-memory-budget
-data/captain-shared.md'
+ITEMS=$(fm_config_inherit_items)
 while IFS= read -r rel; do
   [ -n "$rel" ] || continue
+  if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ]; then
+    case "$rel" in
+      config/*)
+        if fm_config_inherit_item_session_scoped "${rel#config/}"; then
+          printf 'unchanged: %s\n' "$rel"
+          continue
+        fi
+        ;;
+    esac
+  fi
   case "$rel" in
     config/*) source="$CONFIG/${rel#config/}" ;;
     data/*) source="$DATA/${rel#data/}" ;;

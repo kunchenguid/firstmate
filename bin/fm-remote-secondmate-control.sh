@@ -2,7 +2,7 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> <backend|->
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> <backend|-> [traceparent]
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh send <id> <message>
 #   fm-remote-secondmate-control.sh key <id> <key>
@@ -17,6 +17,13 @@
 # owning those local endpoint mechanics. A private parent-route state directory
 # stores only the remote secondmate agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
+#
+# The optional launch traceparent is the per-task W3C trace-context carrier the
+# PARENT home resolved for this secondmate; this host only delivers it to the
+# pane, and fm-spawn validates it (bin/fm-trace-context-lib.sh). Omitting it is
+# the default-off path. print_route echoes the carrier the endpoint actually
+# holds, including for an already-alive endpoint that was not relaunched, so the
+# parent records the identity the agent really received rather than an intent.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,19 +65,22 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local meta=$1 backend target harness
+  local meta=$1 backend target harness traceparent
   meta=$(meta_path "$meta")
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   harness=$(fm_meta_get "$meta" harness)
+  traceparent=$(fm_meta_get "$meta" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$backend"
   printf 'target=%s\n' "$target"
   printf 'harness=%s\n' "$harness"
+  [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
 cmd_launch() {
-  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 current meta out backend target
+  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
+  local current meta out backend target
 
   validate_id "$id"
   validate_home "$id"
@@ -95,6 +105,7 @@ cmd_launch() {
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
   [ "$selected_backend" = - ] || ARGS+=(--backend "$selected_backend")
+  [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
   if ! out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
@@ -226,7 +237,7 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -eq 5 ] || usage; cmd_launch "$@" ;;
+  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   send) shift; [ "$#" -eq 2 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
