@@ -221,6 +221,9 @@ The verified adapter evidence - each harness's busy-state source, interrupt and 
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 Pi and pi-signed crew launches explicitly pass `--tui-mode regular` so fullscreen mode cannot rewrite scrollback and bury steers.
+Before creating any worker endpoint, `fm-spawn.sh` reads the variable names in the operator's `~/.secrets` baseline and refuses a missing, unreadable, empty, or unsupported file.
+Every harness, raw launch command, and secondmate launch runs under an `/usr/bin/env -u` prefix for those names, clears `BASH_ENV` so the child shell cannot reintroduce them, and then reapplies Firstmate's explicit non-secret settings required by that launch.
+This intentionally removes environment-token fallbacks, including provider API keys and GitHub token variables: crews use harness-managed credential stores and `gh auth login`, while a task that genuinely requires an environment-only credential must receive it through an explicit scoped runner instead of the baseline.
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
