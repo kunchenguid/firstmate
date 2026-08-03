@@ -514,7 +514,7 @@ test_invalid_entrypoints_have_zero_side_effects() {
 }
 
 test_valid_recording_and_merge_derivation() {
-  local dir expected sidecar count rc
+  local dir expected sidecar count rc snapshot
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
   expected=0123456789abcdef0123456789abcdef01234567
@@ -561,6 +561,11 @@ test_valid_recording_and_merge_derivation() {
     || fail "guarded merge retirement removed pr metadata"
   grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" \
     || fail "guarded merge retirement removed pr_head metadata"
+  snapshot=$(find "$dir/home/data/specgraph" -maxdepth 1 -type f \
+    -name '*-milestone-pr-merged-task-a-*.json' -print | head -1)
+  [ -n "$snapshot" ] || fail "exact merged receipt did not produce a SpecGraph milestone snapshot"
+  jq -e '.trigger.type == "milestone-pr-merged" and .trigger.subjectId == "task-a"' \
+    "$snapshot" >/dev/null || fail "merged milestone snapshot lost its trigger identity"
 
   dir=$(make_case newline-head)
   write_task_meta "$dir"
@@ -2965,6 +2970,9 @@ test_merged_poll_retires_once() {
     || fail "retired merged poll executed a second time"
   [ "$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$state/.wake-queue" 2>/dev/null || true)" -eq 1 ] \
     || fail "merged poll did not queue exactly one terminal notification"
+  [ "$(find "$dir/home/data/specgraph" -maxdepth 1 -type f \
+    -name '*-milestone-pr-merged-task-a-*.json' | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "merged poll retry duplicated or lost its milestone snapshot"
   pass "validated merged polls notify once and retire before the next watcher cycle"
 }
 

@@ -72,7 +72,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/config" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -493,15 +493,19 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
 
 test_local_only_fork_remote_allows() {
-  local case_dir rc
+  local case_dir rc snapshot framework_snapshot
   case_dir=$(make_case fork-allow)
   write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/data/task-x1"
+  printf '# Captain decisions\n\nUse the synthetic framework.\n' \
+    > "$case_dir/data/task-x1/captain-decisions-batch1.md"
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
 
@@ -512,6 +516,18 @@ test_local_only_fork_remote_allows() {
 
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
+  snapshot=$(find "$case_dir/data/specgraph" -maxdepth 1 -type f \
+    -name '*-task-completed-task-x1-*.json' -print | head -1)
+  [ -n "$snapshot" ] || fail "successful teardown did not produce a task completion snapshot"
+  jq -e '.trigger.type == "task-completed" and .trigger.subjectId == "task-x1"' \
+    "$snapshot" >/dev/null || fail "teardown snapshot lost its trigger identity"
+  framework_snapshot=$(find "$case_dir/data/specgraph" -maxdepth 1 -type f \
+    -name '*-captain-framework-correction-task-x1-*.json' -print | head -1)
+  [ -n "$framework_snapshot" ] \
+    || fail "task-local captain framework decision did not produce its own snapshot"
+  jq -e '.trigger.type == "captain-framework-correction"
+    and (.nodes | any(.type == "Decision" and .authority == "CAPTAIN"))' \
+    "$framework_snapshot" >/dev/null || fail "framework correction snapshot lost captain authority"
   pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
 }
 

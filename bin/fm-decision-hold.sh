@@ -51,6 +51,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-specgraph-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-specgraph-lib.sh"
 
 usage() {
   awk '
@@ -221,6 +224,16 @@ verify_resolution_identity() {
     || fail "captain hold $id records a different captain decision"
   [ "$recorded_routes" = "$routed_csv" ] \
     || fail "captain hold $id records different routed work"
+}
+
+capture_decision_resolution() {
+  local origin=$1 key=$2 decision_file=$3 routed=$4 dep
+  local -a args
+  args=(--event decision-resolved --subject "$(hold_id "$origin" "$key")" --source "$decision_file")
+  for dep in $routed; do
+    args+=(--related "$dep")
+  done
+  fm_specgraph_capture_best_effort "$STATE" "${args[@]}"
 }
 
 command_id() {
@@ -397,6 +410,7 @@ command_resolve() {
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
+    capture_decision_resolution "$origin" "$key" "$decision_file" "$routed"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
@@ -450,6 +464,7 @@ command_resolve() {
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  capture_decision_resolution "$origin" "$key" "$decision_file" "$routed"
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 

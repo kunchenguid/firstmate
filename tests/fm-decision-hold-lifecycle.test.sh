@@ -251,6 +251,17 @@ EOF
   run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
     --routed-to sample-route-implementation --routed-to sample-route-followup >/dev/null \
     || fail "identical resolution retry was not idempotent"
+  [ "$(find "$home/data/specgraph" -maxdepth 1 -type f \
+    -name '*-decision-resolved-sample-systems-review-decision-route-*.json' \
+    | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "decision resolution retry duplicated or lost its semantic snapshot"
+  FM_SPECGRAPH_CAPTURE_BIN=/usr/bin/false run_decisions "$home" resolve "$id" route \
+    --decision-file "$home/route-decision.txt" \
+    --routed-to sample-route-implementation --routed-to sample-route-followup \
+    > "$home/fail-open-resolve.out" 2> "$home/fail-open-resolve.err" \
+    || fail "capture failure blocked an already valid decision resolution"
+  assert_grep 'event=decision-resolved' "$home/state/specgraph-capture.failures.log" \
+    "decision capture failure was not recorded"
   if run_decisions "$home" resolve "$id" route --decision-file "$home/changed-route-decision.txt" \
     --routed-to sample-route-implementation --routed-to sample-route-followup \
     > "$home/drifted-decision.out" 2> "$home/drifted-decision.err"; then

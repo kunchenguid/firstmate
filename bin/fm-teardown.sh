@@ -110,6 +110,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-specgraph-lib.sh
+. "$SCRIPT_DIR/fm-specgraph-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1452,6 +1454,26 @@ remove_secondmate_registry_entry() {
   mv "$tmp" "$SECONDMATE_REG"
 }
 
+capture_task_completion() {
+  local report readback decision_file
+  local -a args
+  [ "$FORCE" != "--force" ] || return 0
+  [ "$KIND" != secondmate ] || return 0
+
+  args=(--event task-completed --subject "$ID" --source "$META")
+  report="$DATA/$ID/report.md"
+  readback="$DATA/$ID/supervisor-readback.md"
+  [ ! -f "$report" ] || args+=(--source "$report")
+  [ ! -f "$readback" ] || args+=(--source "$readback")
+  fm_specgraph_capture_best_effort "$STATE" "${args[@]}"
+
+  for decision_file in "$DATA/$ID"/captain-decision*.md; do
+    [ -e "$decision_file" ] || [ -L "$decision_file" ] || continue
+    fm_specgraph_capture_best_effort "$STATE" \
+      --event captain-framework-correction --subject "$ID" --source "$decision_file"
+  done
+}
+
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
 if [ "$KIND" = secondmate ]; then
@@ -1685,6 +1707,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+capture_task_completion
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token"

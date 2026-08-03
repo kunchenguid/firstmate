@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kunchenguid/firstmate/docs/specgraph-snapshot-v0.1.schema.json",
+  "title": "Firstmate SpecGraph Snapshot v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "sequence",
+    "snapshotId",
+    "baselineId",
+    "parent",
+    "effectiveAt",
+    "capturedAt",
+    "setHashes",
+    "authorityCompleteness",
+    "status",
+    "incompleteReasons",
+    "actor",
+    "trigger",
+    "nodes",
+    "edges"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "specgraph.snapshot.v0.1" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "snapshotId": { "$ref": "#/$defs/nonEmptyString" },
+    "baselineId": { "$ref": "#/$defs/nonEmptyString" },
+    "parent": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonEmptyString" },
+        { "type": "null" }
+      ]
+    },
+    "effectiveAt": { "$ref": "#/$defs/nonEmptyString" },
+    "capturedAt": { "$ref": "#/$defs/nonEmptyString" },
+    "setHashes": { "$ref": "#/$defs/setHashes" },
+    "authorityCompleteness": {
+      "enum": ["COMPLETE", "PARTIAL", "UNKNOWN"]
+    },
+    "status": { "enum": ["COMPLETE", "INCOMPLETE"] },
+    "incompleteReasons": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonEmptyString" },
+      "uniqueItems": true
+    },
+    "actor": { "$ref": "#/$defs/actor" },
+    "trigger": { "$ref": "#/$defs/trigger" },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/edge" }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "const": "INCOMPLETE" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": { "incompleteReasons": { "minItems": 1 } }
+      },
+      "else": {
+        "properties": { "incompleteReasons": { "maxItems": 0 } }
+      }
+    }
+  ],
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "authority": {
+      "enum": ["CAPTAIN", "FILED_EVIDENCE", "ADVISORY", "UNKNOWN"]
+    },
+    "epistemicLevel": {
+      "enum": ["CONFIRMED", "INFERRED", "UNKNOWN"]
+    },
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "locator", "sha256"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/nonEmptyString" },
+        "locator": { "$ref": "#/$defs/nonEmptyString" },
+        "sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "lineStart": { "type": "integer", "minimum": 1 },
+        "lineEnd": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "epistemic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "sourceRefs"],
+      "properties": {
+        "level": { "$ref": "#/$defs/epistemicLevel" },
+        "sourceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/sourceRef" }
+        }
+      }
+    },
+    "setHashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeSetSha256",
+        "edgeSetSha256",
+        "decisionSetSha256",
+        "specSetSha256",
+        "artifactSetSha256"
+      ],
+      "properties": {
+        "nodeSetSha256": { "$ref": "#/$defs/sha256" },
+        "edgeSetSha256": { "$ref": "#/$defs/sha256" },
+        "decisionSetSha256": { "$ref": "#/$defs/sha256" },
+        "specSetSha256": { "$ref": "#/$defs/sha256" },
+        "artifactSetSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "harness",
+        "model",
+        "effort",
+        "role",
+        "authority",
+        "independence"
+      ],
+      "properties": {
+        "kind": { "enum": ["human", "model", "unknown"] },
+        "harness": {
+          "oneOf": [
+            { "$ref": "#/$defs/nonEmptyString" },
+            { "type": "null" }
+          ]
+        },
+        "model": {
+          "oneOf": [
+            { "$ref": "#/$defs/nonEmptyString" },
+            { "type": "null" }
+          ]
+        },
+        "effort": {
+          "oneOf": [
+            { "$ref": "#/$defs/nonEmptyString" },
+            { "type": "null" }
+          ]
+        },
+        "role": { "$ref": "#/$defs/nonEmptyString" },
+        "authority": { "$ref": "#/$defs/authority" },
+        "independence": {
+          "enum": ["INDEPENDENT", "NOT_INDEPENDENT", "UNKNOWN"]
+        }
+      }
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "subjectId", "idempotencyKey", "sourceRefs"],
+      "properties": {
+        "type": {
+          "enum": [
+            "task-completed",
+            "decision-resolved",
+            "captain-framework-correction",
+            "milestone-pr-merged"
+          ]
+        },
+        "subjectId": { "$ref": "#/$defs/nonEmptyString" },
+        "idempotencyKey": { "$ref": "#/$defs/sha256" },
+        "sourceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/sourceRef" }
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "revision",
+        "label",
+        "status",
+        "scope",
+        "authority",
+        "epistemic",
+        "properties"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "type": {
+          "enum": [
+            "Goal",
+            "Decision",
+            "Spec",
+            "Component",
+            "WorkflowMap",
+            "Task",
+            "Artifact",
+            "Evidence",
+            "Assumption",
+            "Claim",
+            "ReviewAssertion",
+            "Capability",
+            "Gate",
+            "Gap",
+            "Snapshot"
+          ]
+        },
+        "revision": { "type": "integer", "minimum": 1 },
+        "label": { "$ref": "#/$defs/nonEmptyString" },
+        "status": { "$ref": "#/$defs/nonEmptyString" },
+        "scope": { "$ref": "#/$defs/nonEmptyString" },
+        "authority": { "$ref": "#/$defs/authority" },
+        "epistemic": { "$ref": "#/$defs/epistemic" },
+        "properties": { "type": "object" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "from",
+        "predicate",
+        "to",
+        "scope",
+        "authority",
+        "epistemic",
+        "supersession"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "from": { "$ref": "#/$defs/nonEmptyString" },
+        "predicate": {
+          "enum": [
+            "motivated",
+            "defines",
+            "decomposes_to",
+            "implemented_by",
+            "verified_by",
+            "supersedes",
+            "blocked_by",
+            "blocks",
+            "belongs_to",
+            "supports",
+            "refutes",
+            "reviews",
+            "challenges",
+            "validates",
+            "adopts",
+            "rejects",
+            "invalidates",
+            "governs",
+            "guards",
+            "derived_from",
+            "valid_in",
+            "preserved_as_lineage"
+          ]
+        },
+        "to": { "$ref": "#/$defs/nonEmptyString" },
+        "scope": { "$ref": "#/$defs/nonEmptyString" },
+        "authority": { "$ref": "#/$defs/authority" },
+        "epistemic": { "$ref": "#/$defs/epistemic" },
+        "supersession": {
+          "oneOf": [
+            { "$ref": "#/$defs/supersession" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "predicate": { "const": "supersedes" } },
+            "required": ["predicate"]
+          },
+          "then": {
+            "properties": {
+              "supersession": { "$ref": "#/$defs/supersession" }
+            }
+          },
+          "else": {
+            "properties": { "supersession": { "type": "null" } }
+          }
+        }
+      ]
+    },
+    "supersession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "reason"],
+      "properties": {
+        "mode": { "enum": ["full", "partial"] },
+        "reason": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    }
+  }
+}
