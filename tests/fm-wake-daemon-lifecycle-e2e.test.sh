@@ -99,9 +99,20 @@ test_routine_then_terminal_after_restart() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "escalate_flush failed for the buffered digest"
-  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "buffered digest was not submitted exactly once"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "wake nudge was not submitted exactly once"
   [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after a successful flush"
-  pass "lifecycle: routine self-handles, terminal survives a watcher restart, buffers once, no dup, injects once"
+  # Delivery contract: the digest content is a durable escalation record; the
+  # composer only ever carried the static nudge.
+  awk -F '\t' '$3=="escalation"' "$state/.wake-queue" | grep -F 'https://example.test/pr/900' >/dev/null \
+    || fail "queued escalation record missing the digest content"
+  grep -F 'https://example.test/pr/900' "$sent" >/dev/null \
+    && fail "digest body leaked into the composer instead of riding the queue"
+  # The drain surfaces the record to firstmate.
+  : > "$drain_out"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after escalation enqueue failed"
+  grep "$(printf '\tescalation\t')" "$drain_out" | grep -F 'https://example.test/pr/900' >/dev/null \
+    || fail "drain did not surface the queued escalation record"
+  pass "lifecycle: routine self-handles, terminal survives a watcher restart, buffers once, no dup, queues digest + nudges once"
 }
 
 # --- Phase 2: stale working-pane transient -> persistent -> resumed ----------

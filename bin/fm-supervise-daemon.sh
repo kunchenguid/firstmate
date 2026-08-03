@@ -16,9 +16,10 @@
 # the /afk skill sets that flag and starts this daemon; any real (unmarked)
 # user message clears it and firstmate resumes full responsiveness.
 # When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
-# Any buffered daemon escalations that remain while afk is off survive in
-# state/.subsuper-escalations and are flushed on the next "while you were out"
-# catch-up or when afk is re-entered.
+# Delivered escalation digests live in the durable wake queue until drained;
+# any still-buffered items (batch window open, or a failed queue append)
+# survive in state/.subsuper-escalations and are flushed on the next "while
+# you were out" catch-up or when afk is re-entered.
 #
 # IN-BAND OPERATIONAL INPUT. bin/fm-operational-input.sh constructs every
 # current daemon injection as the typed away-supervisor kind after the stable
@@ -36,8 +37,11 @@
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
-#     The daemon does not touch the queue; it only reads the watcher's stdout
-#     reason.
+#   - Escalation digests are DELIVERED through that same durable queue (kind
+#     "escalation", appended via the shared fm-wake-lib.sh owner); the pane
+#     injection is only a short static nudge pointing at bin/fm-wake-drain.sh.
+#     A busy or wedged composer can therefore defer only the WAKE - it can
+#     never strand escalation content in the composer.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
@@ -47,10 +51,12 @@
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
-#     Buffered escalation delivery also has a max-defer alarm: if a digest stays
-#     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
-#     writes state/.subsuper-inject-wedged and attempts a configurable active
-#     alert if submit still cannot be confirmed.
+#     Wake-nudge delivery also has a max-defer alarm: if a queued escalation
+#     stays un-nudged past FM_MAX_DEFER_SECS (or a buffered digest could not
+#     even be appended to the queue), the daemon retries delivery and writes
+#     state/.subsuper-inject-wedged and attempts a configurable active alert if
+#     submit still cannot be confirmed. The digest itself stays safe in the
+#     durable queue throughout.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -101,10 +107,13 @@
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
 #                                   and structural border stripping (default:
 #                                   bare prompt glyphs plus busy footers)
-#          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
-#                                   undelivered before one normal flush attempt;
-#                                   if that cannot confirm a submit, a wedge
-#                                   alarm fires (default 300; 0 disables)
+#          FM_MAX_DEFER_SECS        max seconds a queued escalation may sit
+#                                   without a confirmed wake nudge (or a
+#                                   buffered digest without a queue append)
+#                                   before one retry; if that cannot confirm a
+#                                   submit, a wedge alarm fires (default 300;
+#                                   0 disables). Content stays durable in the
+#                                   wake queue either way.
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
@@ -179,6 +188,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # (fm_busy_classify).
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
+
+# The single owner of the durable wake queue record format and its append lock
+# (fm_wake_append, fm_wake_queued_keys, fm_wake_oldest_epoch). Escalation
+# digests are DELIVERED through this queue; the pane only ever receives a short
+# static nudge.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$FM_DAEMON_DIR/fm-wake-lib.sh"
 
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
@@ -637,20 +653,65 @@ escalate_add() {  # <state> <distilled-item>
   printf '%s\n' "$item" >> "$buf"
 }
 
-# Flush the escalation buffer as ONE batched, single-line digest to the
-# supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
-# inject failure (buffer preserved for retry / catch-up).
+# Pin fm-wake-lib.sh's queue globals to this call's state dir. The lib resolves
+# STATE once at source time, but the daemon (and its sourced-function tests)
+# address state dirs per call via _state_root()/arguments, so every queue
+# operation goes through this wrapper.
+_wake_lib_env() {  # <state> <fn> [args...]
+  local state=$1; shift
+  STATE="$state" FM_WAKE_QUEUE="$state/.wake-queue" \
+    FM_WAKE_QUEUE_LOCK="$state/.wake-queue.lock" "$@"
+}
+
+ESCALATE_ENQUEUE_SEQ=0
+
+# Static wake nudge: tells firstmate queued escalation record(s) exist and to
+# drain them. The digest body NEVER rides the composer, so a busy or wedged
+# pane can defer only the wake, never strand the content. A confirmed submit
+# records its epoch in .subsuper-nudge-epoch so the tick retry re-nudges only
+# for records that arrived after the last delivered wake (one nudge covers
+# every record queued at its submit time); the max-defer path stays the
+# throttled safety net for anything older.
+escalate_nudge() {  # <state>
+  local state=$1
+  if inject_msg 'Supervisor escalate queued: durable record(s) in state/.wake-queue. Run bin/fm-wake-drain.sh first and handle them; re-arm not needed - watcher daemon-managed.' "$state"; then
+    _now > "$state/.subsuper-nudge-epoch"
+    return 0
+  fi
+  return 1
+}
+
+# Deliver the escalation buffer durably, then nudge the supervisor pane.
+# Delivery = ONE batched, single-line digest appended to the durable wake queue
+# (kind "escalation", unique key so records never dedupe-collapse); the pane
+# injection is only the short static nudge above. Returns 0 when the digest is
+# durably queued AND the nudge submit is confirmed (or the buffer was empty);
+# 1 when the digest is safely queued but the nudge could not be confirmed;
+# 2 when even the queue append failed (buffer preserved for retry / catch-up).
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf n msg key
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
+  # Presence-gated like the nudge itself: while afk is OFF the captain is
+  # present and firstmate drives normal triage, so the buffer survives intact
+  # for the catch-up flush or afk re-entry instead of entering the queue.
+  afk_active "$state" || return 1
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
-  # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
-  # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  ESCALATE_ENQUEUE_SEQ=$((ESCALATE_ENQUEUE_SEQ + 1))
+  key="away-digest-$(_now)-$$-$ESCALATE_ENQUEUE_SEQ"
+  if ! _wake_lib_env "$state" fm_wake_append escalation "$key" "$msg"; then
+    log "escalate enqueue FAILED (queue append error); buffer preserved for retry"
+    return 2
+  fi
+  : > "$buf"
+  rm -f "${buf}.since"
+  if escalate_nudge "$state"; then
+    rm -f "$state/.subsuper-inject-wedged"
+    return 0
+  fi
   return 1
 }
 
@@ -905,12 +966,17 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode wake nudge undelivered ${age}s; escalation content is safe in the durable wake queue; inject could not confirm a submit (supervisor pane busy or wedged). Alarm marker written."
   fi
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
-    cat "$state/.subsuper-escalations" 2>/dev/null
+    printf 'The supervisor pane could not accept the wake nudge. Escalation content is durable in state/.wake-queue (kind "escalation"); run bin/fm-wake-drain.sh to read it.\n'
+    printf 'Queued escalation record key(s):\n'
+    _wake_lib_env "$state" fm_wake_queued_keys escalation 2>/dev/null
+    if [ -s "$state/.subsuper-escalations" ]; then
+      printf 'Additionally still buffered (queue append failed):\n'
+      cat "$state/.subsuper-escalations" 2>/dev/null
+    fi
   } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
@@ -961,7 +1027,10 @@ housekeeping() {  # <state>
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
-  # (1) batch flush
+  # (1) batch flush + nudge retry. Flush moves buffered items into the durable
+  # queue when the batch window closes. While escalation records remain queued
+  # (a prior nudge could not be confirmed), retry the cheap static nudge each
+  # tick - content is already safe, only the wake is outstanding.
   if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
     escalate_flush "$state" || true
   else
@@ -970,23 +1039,51 @@ housekeeping() {  # <state>
       escalate_flush "$state" || true
     fi
   fi
-
-  # (1b) max-defer escape. If anything is still buffered past MAX_DEFER_SECS,
-  # retry the normal delivery path. If that still cannot confirm, raise a loud
-  # wedge alarm while preserving the buffer.
-  max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
-  if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
-    oldest=$(_oldest_line_age "$state/.subsuper-escalations")
-    # Throttle the alarm to once per max-defer window (the wedge marker doubles
-    # as the throttle). A successful flush clears the buffer; a failed one alarms
-    # and waits.
-    if [ "$oldest" -ge "$max_defer" ] \
-       && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
-      if escalate_flush "$state"; then
-        log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
+  if [ ! -s "$state/.subsuper-escalations" ]; then
+    local q_newest last_nudge
+    q_newest=$(_wake_lib_env "$state" fm_wake_newest_epoch escalation 2>/dev/null || true)
+    last_nudge=$(cat "$state/.subsuper-nudge-epoch" 2>/dev/null || echo 0)
+    case "$last_nudge" in ''|*[!0-9]*) last_nudge=0 ;; esac
+    if [ -n "$q_newest" ] && [ "$q_newest" -gt "$last_nudge" ]; then
+      if escalate_nudge "$state"; then
         rm -f "$state/.subsuper-inject-wedged"
-      else
-        inject_wedge_alarm "$state" "$oldest"
+      fi
+    fi
+  fi
+
+  # (1b) max-defer escape. Two cases, alarm throttled by the wedge marker:
+  #   - buffer still non-empty past MAX_DEFER_SECS: the queue append itself
+  #     failed, so retry the whole flush (enqueue + nudge);
+  #   - escalation records queued past MAX_DEFER_SECS with no confirmed nudge:
+  #     content is durable, but firstmate has not been woken - retry the nudge
+  #     and alarm if it still cannot confirm. Never silently defer forever.
+  max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
+  if afk_active "$state" && [ "$max_defer" -gt 0 ]; then
+    if [ -s "$state/.subsuper-escalations" ]; then
+      oldest=$(_oldest_line_age "$state/.subsuper-escalations")
+      if [ "$oldest" -ge "$max_defer" ] \
+         && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
+        if escalate_flush "$state"; then
+          log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
+          rm -f "$state/.subsuper-inject-wedged"
+        else
+          inject_wedge_alarm "$state" "$oldest"
+        fi
+      fi
+    else
+      local q_epoch
+      q_epoch=$(_wake_lib_env "$state" fm_wake_oldest_epoch escalation 2>/dev/null || true)
+      if [ -n "$q_epoch" ]; then
+        oldest=$(( now - q_epoch ))
+        if [ "$oldest" -ge "$max_defer" ] \
+           && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
+          if escalate_nudge "$state"; then
+            log "nudge recovered: wake delivered after ${oldest}s queued"
+            rm -f "$state/.subsuper-inject-wedged"
+          else
+            inject_wedge_alarm "$state" "$oldest"
+          fi
+        fi
       fi
     fi
   fi
@@ -1092,11 +1189,13 @@ window_for_task() {  # <task-key> [state]
 }
 
 # --- injection --------------------------------------------------------------
-# inject_msg: send one escalation digest to the supervisor pane.
-# Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
-# be confirmed after bounded retries. On non-zero the caller preserves
-# the buffer so the escalation survives for the next cycle or the catch-up flush.
+# inject_msg: send one short operational message (normally the static
+# escalation nudge) to the supervisor pane.
+# Returns 0 on successful inject, non-zero if the pane is gone, the supervisor
+# is busy, afk is inactive, or the verified submit cannot be confirmed after
+# bounded retries. Escalation content is durable in the wake queue before any
+# nudge is attempted, so a non-zero return defers only the wake; the caller
+# retries the nudge on later ticks or the max-defer path.
 #
 # Submit model:
 #   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed

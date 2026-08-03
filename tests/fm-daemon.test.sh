@@ -596,17 +596,21 @@ test_escalate_batches_into_one_digest() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "escalate_flush failed"
+  # Delivery contract: the digest content rides the durable wake queue, and the
+  # pane receives only the short static nudge.
   grep -F 'FIRSTMATE_OP: v1 away-supervisor: ' "$sent" >/dev/null \
-    || fail "batch digest lacks the exact current away-supervisor kind"
-  grep -F "event A" "$sent" >/dev/null || fail "batch digest missing event A"
-  grep -F "event B" "$sent" >/dev/null || fail "batch digest missing event B"
-  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
-    || fail "batch digest did not join events with literal ' | '"
+    || fail "nudge lacks the exact current away-supervisor kind"
+  grep -F 'fm-wake-drain.sh' "$sent" >/dev/null || fail "nudge does not point at the drain"
+  grep -F "event A" "$sent" >/dev/null && fail "digest body leaked into the composer (event A typed)"
+  awk -F '\t' '$3=="escalation"' "$state/.wake-queue" | grep -F 'event A: done: PR 1 | event B: done: PR 2' >/dev/null \
+    || fail "queue record missing the joined digest content"
+  [ "$(awk -F '\t' '$3=="escalation"' "$state/.wake-queue" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "expected exactly one queued escalation record"
   [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after flush"
   [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
   n=$(grep -c '\[ENTER\]' "$sent")
-  [ "$n" -eq 1 ] || fail "expected one injected digest, got $n send-keys submits"
-  pass "multiple escalations flush as a single batched digest"
+  [ "$n" -eq 1 ] || fail "expected one injected nudge, got $n send-keys submits"
+  pass "multiple escalations flush as one queued digest plus one static nudge"
 }
 
 test_escalate_batch_age_uses_first_append() {
@@ -623,8 +627,8 @@ test_escalate_batch_age_uses_first_append() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=90 FM_HOUSEKEEPING_TICK=0 \
     housekeeping "$state"
-  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
-    || fail "backdated batch did not flush as a joined digest (max-delay measured from last append)"
+  awk -F '\t' '$3=="escalation"' "$state/.wake-queue" | grep -F 'event A: done: PR 1 | event B: done: PR 2' >/dev/null \
+    || fail "backdated batch did not flush as a joined queued digest (max-delay measured from last append)"
   [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after backdated flush"
   [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
   pass "batch flush measures max-delay from the first append, not the last"
@@ -759,8 +763,9 @@ test_busy_guard_defers_when_supervisor_busy() {
     fail "escalate_flush should defer when supervisor pane busy"
   fi
   [ -s "$sent" ] && fail "daemon injected into a busy pane"
-  [ -s "$state/.subsuper-escalations" ] || fail "buffer not preserved when deferred"
-  pass "busy-guard defers injection when supervisor pane is busy"
+  awk -F '\t' '$3=="escalation"' "$state/.wake-queue" | grep -F 'done: PR 1' >/dev/null \
+    || fail "escalation content not preserved durably in the queue when the nudge deferred"
+  pass "busy-guard defers the nudge when supervisor pane is busy; content stays durable in the queue"
 }
 
 test_marker_detection() {
@@ -1136,12 +1141,14 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
   [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 1 ] \
-    || fail "max-defer typed the digest more than once"
+    || fail "max-defer typed the nudge more than once"
+  grep -F 'needs-decision: pick A' "$sent" >/dev/null \
+    && fail "digest body leaked into the composer on the max-defer path"
   [ -s "$state/.subsuper-inject-wedged" ] \
     || fail "stuck max-defer inject did not raise a wedge alarm marker"
-  [ -s "$state/.subsuper-escalations" ] \
-    || fail "buffer lost after a failed max-defer inject (must be preserved)"
-  pass "max-defer on an empty stuck pane types once, alarms, and preserves the buffer"
+  awk -F '\t' '$3=="escalation"' "$state/.wake-queue" | grep -F 'needs-decision: pick A' >/dev/null \
+    || fail "escalation content lost after a failed max-defer nudge (must stay durable in the queue)"
+  pass "max-defer on an empty stuck pane nudges once, alarms, and keeps content durable in the queue"
 }
 
 test_max_defer_flushes_empty_idle_pane() {
@@ -1175,7 +1182,8 @@ test_max_defer_pending_composer_alarms_without_typing() {
     housekeeping "$state"
   [ ! -s "$sent" ] || fail "max-defer typed into a pending composer"
   [ -s "$state/.subsuper-inject-wedged" ] || fail "pending composer did not raise a wedge alarm marker"
-  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while composer was pending"
+  awk -F '\t' '$3=="escalation"' "$state/.wake-queue" | grep -F 'needs-decision: pick B' >/dev/null \
+    || fail "escalation content lost while composer was pending (must stay durable in the queue)"
   grep -F 'human draft' "$dir/composer" >/dev/null || fail "pending composer content changed"
   pass "max-defer on a pending composer alarms without typing"
 }
@@ -1559,7 +1567,7 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge marker unexpectedly persisted in an unwritable state directory"
   alerts=$(grep -c 'osascript' "$log" 2>/dev/null || true)
   [ "$alerts" -eq 1 ] || fail "unwritable marker emitted $alerts active alerts instead of one"
-  errors=$(grep -c 'ERROR: away-mode escalation undelivered' "$daemon_log" 2>/dev/null || true)
+  errors=$(grep -c 'ERROR: away-mode wake nudge undelivered' "$daemon_log" 2>/dev/null || true)
   [ "$errors" -eq 1 ] || fail "unwritable marker logged $errors wedge errors instead of one"
   pass "in-process wedge throttle prevents alert spam when the marker cannot persist"
 }

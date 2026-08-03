@@ -507,8 +507,8 @@ test_scenario_d_max_defer() {
 
   [ -s "$STATE_DIR/.subsuper-inject-wedged" ] \
     || fail "Scenario D: a persistently pending real herdr composer never raised the max-defer wedge alarm"
-  [ -s "$STATE_DIR/.subsuper-escalations" ] \
-    || fail "Scenario D: the buffered escalation was lost instead of preserved during the wedge"
+  awk -F '\t' '$3=="escalation"' "$STATE_DIR/.wake-queue" 2>/dev/null | grep -F 'needs-decision' >/dev/null \
+    || fail "Scenario D: the escalation was lost instead of preserved durably in the wake queue during the wedge"
   if grep -q 'Supervisor escalate' "$LOG_FILE" 2>/dev/null; then
     fail "Scenario D: a digest was somehow logged as submitted despite the composer never clearing"
   fi
