@@ -126,7 +126,10 @@
 #     __CLAUDESETTINGS__ absolute path to state/<task-id>.claude-settings.json (claude
 #                  turn-end and busy-state hooks, written by this script; outside the
 #                  worktree so a project that tracks .claude/settings.local.json is
-#                  never modified, and additive to the project's own settings)
+#                  never modified, and additive to the project's own settings).
+#                  A claude secondmate launch omits the flag: no per-task hooks are
+#                  written for it, since its own home's tracked .claude/settings.json
+#                  owns them
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
