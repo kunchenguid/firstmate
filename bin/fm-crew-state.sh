@@ -24,10 +24,11 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      A run matches when its head equals the worktree HEAD, the worktree HEAD
+#      is an ancestor of the run head, or its detailed branch-sync state says
+#      the pipeline owns commits not synchronized into the worktree yet. Local
+#      work that advanced past the run head, or diverged from it without that
+#      explicit pipeline ownership, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -307,10 +308,9 @@ nm_ci_checks_state() {
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
-# display (verified empirically: querying a worktree with its own active run
-# reliably returns that run, even under concurrent load from several other
-# validating crews on the same underlying repo). A crew whose branch genuinely
-# has no run yet therefore sees another branch's answer here.
+# display. A crew whose branch genuinely has no run yet therefore sees another
+# branch's answer here. The explicit pipeline-owned continuity state is
+# accepted before this fallback because its run head may not exist locally yet.
 #
 # This fallback used to shell out to `no-mistakes axi` (bare, no subcommand)
 # expecting a `runs[N]{id,branch,status,...}:` TOON table and re-query the
@@ -361,12 +361,30 @@ nm_runs_status_for_branch() {  # <branch>
   return 0
 }
 
+# `axi status` exposes this explicit continuity state while the pipeline owns
+# commits that the crew worktree has not synchronized yet. In that state the
+# run head may be absent from the worktree object database, so git ancestry is
+# unavailable even though the detailed run is authoritative for this branch.
+nm_branch_sync_state() {
+  local state
+  state=$(printf '%s\n' "$RUN_OUT" \
+    | sed -n 's/^[[:space:]]*branch_sync\.state:[[:space:]]*\(.*\)/\1/p' \
+    | head -1)
+  if [ -z "$state" ]; then
+    state=$(printf '%s\n' "$RUN_OUT" \
+      | sed -n '/^[[:space:]]*branch_sync:[[:space:]]*$/{n;s/^[[:space:]]*state:[[:space:]]*\(.*\)/\1/p;}' \
+      | head -1)
+  fi
+  strip_quotes "$state"
+}
+
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
 # 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
+# identity. Branch match is a precondition (caller), which separately accepts
+# the explicit pipeline-owned continuity state. Rule owned by
 # fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
 nm_run_head_matches_worktree() {
   local run_head
@@ -394,7 +412,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
+       && { nm_run_head_matches_worktree || [ "$(nm_branch_sync_state)" = pipeline_owned ]; }; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with

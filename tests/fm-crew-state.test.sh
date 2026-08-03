@@ -13,13 +13,14 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
-#   (e) cross-branch attribution: this branch's own run found via list lookup
-#   (f) no run + semantic busy                                    -> pane
-#   (g) no run + semantic idle falls to the status-log verb       -> status-log
-#   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
-#   (i) kind=scout skips the run lookup                           -> pane/status-log
-#   (j) torn-down worktree / missing meta                         -> unknown/none
-#   (k) crew_is_provably_working end-to-end over the REAL helper (not a canned
+#   (e) superseded terminal run + newer live retry                -> run-step
+#   (f) cross-branch attribution: this branch's own run found via list lookup
+#   (g) no run + semantic busy                                    -> pane
+#   (h) no run + semantic idle falls to the status-log verb       -> status-log
+#   (i) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
+#   (j) kind=scout skips the run lookup                           -> pane/status-log
+#   (k) torn-down worktree / missing meta                         -> unknown/none
+#   (l) crew_is_provably_working end-to-end over the REAL helper (not a canned
 #       fake fm-crew-state.sh verdict): cross-branch attribution via the runs
 #       list -> absorbed; genuinely no run anywhere + idle pane -> surfaced.
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
@@ -684,7 +685,41 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
-# (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
+# (e) A live retry can own pipeline commits that the crew worktree has not
+# synchronized yet. Rejecting that detailed `axi status` object on ancestry
+# alone makes the runs-list fallback skip the live row, then select an older
+# failed attempt whose head is still local. This reproduces the 2026-08-03
+# foliade-m4-t0-queryset incident and its false recovery signal.
+test_live_retry_supersedes_failed_run() {
+  reset_fakes
+  local d local_short pipeline_head out
+  d=$(new_case live-retry-after-failure)
+  make_repo_on_branch "$d/wt" fm/feat-retry
+  local_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  pipeline_head=ca7ad9633d2e5493adde8188bf4a513697611dbd
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-retry.meta" "window=fm:fm-feat-retry" "worktree=$d/wt" "kind=ship"
+  # The detail lookup correctly reports the live retry, but its pipeline-owned
+  # head is not in the unsynchronized worktree object database yet.
+  FM_FAKE_RUN_HEAD=$pipeline_head
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-retry)
+branch_sync:
+  state: pipeline_owned"
+  # The newest row is that live retry. The older failed attempt still matches
+  # local HEAD, which is why the old fallback incorrectly selected it.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-retry ${pipeline_head:0:7}  2026-08-03 16:42
+  failed     fm/feat-retry ${local_short}  2026-08-02 21:47
+EOF
+)"
+  out=$(run_crew_state "$d" feat-retry)
+  assert_contains "$out" "state: working" "newer live retry supersedes the failed attempt"
+  assert_contains "$out" "source: run-step" "live retry remains run-step sourced"
+  assert_not_contains "$out" "state: failed" "superseded failed attempt must not trigger recovery"
+  pass "a live retry supersedes an earlier failed run on the same branch and code"
+}
+
+# (f) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
 # routine case once more than one crew validates the same underlying repo
 # concurrently - they share ONE no-mistakes repo registration), so the helper
 # falls back to the real top-level `no-mistakes runs` listing to learn whether
@@ -1329,6 +1364,7 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_live_retry_supersedes_failed_run
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
