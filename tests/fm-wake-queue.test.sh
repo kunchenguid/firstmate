@@ -481,6 +481,29 @@ test_interruption_before_and_after_raw_commit() {
   pass "interruptions restore before custody commitment and never replay after receipt-bound retirement"
 }
 
+test_terminal_signal_invokes_record_reconciliation() {
+  local dir state reconcile marker out
+  dir=$(make_case terminal-reconcile)
+  state="$dir/state"
+  reconcile="$dir/reconcile"
+  marker="$dir/reconciled"
+  out="$dir/drain.out"
+  cat > "$reconcile" <<SH
+#!/usr/bin/env bash
+: > '$marker'
+SH
+  chmod +x "$reconcile"
+  printf 'working: still active\n' > "$state/task.status"
+  append_wake "$state" signal task.status "signal: $state/task.status" || fail "nonterminal signal append failed"
+  FM_STATE_OVERRIDE="$state" FM_RECORD_RECONCILE_BIN="$reconcile" "$DRAIN" > "$out" || fail "nonterminal drain failed"
+  assert_absent "$marker" "nonterminal signal invoked record reconciliation"
+  printf 'done: producer complete\n' >> "$state/task.status"
+  append_wake "$state" signal task.status "signal: $state/task.status" || fail "terminal signal append failed"
+  FM_STATE_OVERRIDE="$state" FM_RECORD_RECONCILE_BIN="$reconcile" "$DRAIN" > "$out" || fail "terminal drain failed"
+  assert_present "$marker" "terminal signal bypassed record reconciliation"
+  pass "terminal signals reconcile records at the shared drain boundary"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -494,3 +517,4 @@ test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_interruption_before_and_after_raw_commit
+test_terminal_signal_invokes_record_reconciliation

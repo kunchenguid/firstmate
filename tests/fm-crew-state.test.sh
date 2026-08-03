@@ -408,7 +408,13 @@ test_dead_or_suspended_pipeline_worker_is_not_recorded_working() {
   assert_not_contains "$out" 'state: working' "suspended step worker inherited the stale running row"
   assert_contains "$out" 'headless pipeline worker suspended pid=4242' \
     "suspended step worker was not distinguished from a live worker"
-  pass "dead and suspended headless workers never inherit a stale running verdict"
+
+  FM_FAKE_WORKER_PS_STATE='Z+'
+  out=$(run_crew_state "$d" headless-dead)
+  assert_not_contains "$out" 'state: working' "zombie step worker inherited the stale running row"
+  assert_contains "$out" 'headless pipeline worker dead pid=4242' \
+    "zombie step worker was not classified as dead"
+  pass "dead, suspended, and zombie workers never inherit a stale running verdict"
 }
 
 # (b) needs-decision log + a resumed (running/fixing) run = SUPERSEDED

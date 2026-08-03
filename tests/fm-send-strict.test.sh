@@ -217,6 +217,40 @@ test_stale_composer_refuses_before_typing() {
   pass "fm-send strict: stale composer text refuses before any typing or Enter"
 }
 
+test_remote_send_uses_host_local_composer_check() {
+  local dir fb home err log rc decoded
+  dir="$TMP_ROOT/remote"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home remote); err="$dir/send.err"; log="$dir/ssh.log"; decoded="$dir/decoded.log"
+  mkdir -p "$home/data"
+  cat > "$home/data/secondmates.md" <<'EOF'
+- ios - iOS delivery (host: remote-mac; root: /remote/root; home: /remote/home; scope: iOS work; projects: alpha; added 2026-08-02)
+EOF
+  fm_write_meta "$home/state/ios.meta" "remote_host=remote-mac" "kind=ship" "harness=codex"
+  cat > "$fb/ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+printf '%s\n' "$*" > "$FM_SSH_LOG"
+perl -MMIME::Base64=decode_base64 -e '
+  my $data = decode_base64($ARGV[0]);
+  $data =~ s/\0/\n/g;
+  print $data;
+' "$6" > "$FM_SSH_DECODED"
+SH
+  chmod +x "$fb/ssh"
+
+  rc=0
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fb/ssh" \
+    FM_SSH_LOG="$log" FM_SSH_DECODED="$decoded" FM_SEND_SETTLE=0 \
+    "$SEND" fm-ios "remote order" >/dev/null 2>"$err" || rc=$?
+  expect_code 0 "$rc" "remote task selector should delegate the composer check to the remote host"
+  assert_contains "$(cat "$decoded")" "fm-remote-secondmate-control.sh" "remote send did not use the host-local control path"
+  assert_contains "$(cat "$decoded")" "remote order" "remote send lost the requested text"
+  pass "fm-send strict: remote text reaches the host-local guarded sender"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
@@ -225,3 +259,4 @@ test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
 test_stale_composer_refuses_before_typing
+test_remote_send_uses_host_local_composer_check

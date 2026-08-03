@@ -20,6 +20,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 BACKLOG="$DATA/backlog.md"
 RECEIPT_DIR="$DATA/record-reconciliation"
+FM_CREW_STATE_BIN=${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
@@ -76,6 +77,14 @@ if fm_tasks_axi_compatible; then
     [ "$kind" != secondmate ] || continue
     last=$(last_status_line "$STATE/$id.status")
     status_is_done "$last" || status_is_awaiting_captain "$last" || continue
+    current=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null || true)
+    case "$current" in
+      'state: done '*|'state: awaiting-captain '*) ;;
+      *)
+        append_event terminal-unreconciled "$id" "terminal event retained in flight because current state is ${current:-unavailable}"
+        continue
+        ;;
+    esac
     if ! terminal_tree_is_clean "$meta"; then
       append_event terminal-unreconciled "$id" 'terminal status retained in flight because worktree identity or clean-tree evidence is unavailable'
       continue

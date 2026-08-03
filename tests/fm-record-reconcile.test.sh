@@ -9,7 +9,7 @@ TMP_ROOT=$(fm_test_tmproot fm-record-reconcile)
 RECONCILE="$ROOT/bin/fm-record-reconcile.sh"
 
 test_terminal_row_reconciles_while_unlanded_work_remains() {
-  local home wt dirty_wt receipt head
+  local home wt dirty_wt receipt head crew_state
   home="$TMP_ROOT/home"
   wt="$home/projects/sample-terminal"
   mkdir -p "$home/data" "$home/state" "$home/projects" "$wt"
@@ -51,8 +51,17 @@ EOF
   fm_write_meta "$home/state/orphan-meta.meta" \
     'window=test:fm-orphan-meta' "worktree=$home/projects/orphan" 'project=sample' 'kind=ship'
   printf 'done: historical status with no metadata row\n' > "$home/state/orphan-status.status"
+  crew_state="$home/crew-state"
+  cat > "$crew_state" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  captain-wait) printf 'state: awaiting-captain · source: status-log\n' ;;
+  *) printf 'state: done · source: status-log\n' ;;
+esac
+SH
+  chmod +x "$crew_state"
 
-  FM_HOME="$home" "$RECONCILE" >/dev/null || fail "record reconciliation failed"
+  FM_HOME="$home" FM_CREW_STATE_BIN="$crew_state" "$RECONCILE" >/dev/null || fail "record reconciliation failed"
   ! sed -n '/^## In flight/,/^## /p' "$home/data/backlog.md" | grep -F -- '- [ ] sample-terminal -' >/dev/null \
     || fail "terminal report still reads in flight"
   sed -n '/^## Done/,$p' "$home/data/backlog.md" | grep -F -- '- [x] sample-terminal -' >/dev/null \
@@ -82,4 +91,40 @@ EOF
   pass "terminal row reconciles without cleaning unlanded work or erasing drift evidence"
 }
 
+test_resumed_worker_overrides_stale_terminal_event() {
+  local home wt crew_state receipt
+  home="$TMP_ROOT/resumed"
+  wt="$home/projects/resumed"
+  mkdir -p "$home/data" "$home/state" "$wt"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] resumed - Producer resumed after an earlier terminal event (repo: sample) (kind: ship) (since 2026-07-31)
+
+## Queued
+
+## Done
+EOF
+  git -C "$wt" init -q
+  git -C "$wt" config user.email test@example.com
+  git -C "$wt" config user.name Test
+  git -C "$wt" commit -q --allow-empty -m base
+  fm_write_meta "$home/state/resumed.meta" "window=test:fm-resumed" "worktree=$wt" "project=sample" "kind=ship"
+  printf 'done: earlier completion event\n' > "$home/state/resumed.status"
+  crew_state="$home/crew-state"
+  cat > "$crew_state" <<'SH'
+#!/usr/bin/env bash
+printf 'state: working · source: run-step · validating (running)\n'
+SH
+  chmod +x "$crew_state"
+
+  FM_HOME="$home" FM_CREW_STATE_BIN="$crew_state" "$RECONCILE" >/dev/null || fail "resumed-worker reconciliation failed"
+  grep -F -- '- [ ] resumed -' "$home/data/backlog.md" >/dev/null \
+    || fail "stale terminal event retired a worker that had resumed"
+  receipt=$(find "$home/data/record-reconciliation" -type f -name '*.receipt' | head -1)
+  assert_grep $'terminal-unreconciled\tresumed' "$receipt" "receipt omitted the authoritative active-state refusal"
+  pass "active current state overrides a stale terminal event"
+}
+
 test_terminal_row_reconciles_while_unlanded_work_remains
+test_resumed_worker_overrides_stale_terminal_event
