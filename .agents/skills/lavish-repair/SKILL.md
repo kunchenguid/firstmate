@@ -2,8 +2,8 @@
 name: lavish-repair
 description: >-
   Agent-only recovery playbook for diagnosing and repairing served Lavish Editor boards that remain loading, lose live feedback, report that the agent is not listening, or prompt consideration of a Lavish or browser process restart.
-  Use before touching Lavish, Chrome, or chrome-devtools-axi processes during a surface incident.
-  Do not use it to design or revise a working decision; use `lavish-decisions` for that.
+  Use before touching Lavish, Chrome, or chrome-devtools-axi processes during a served-board surface incident.
+  Do not use it for Firstmate's self-contained store-forward board or to design or revise a working decision; use `lavish-decisions` for those cases.
 user-invocable: false
 metadata:
   internal: true
@@ -12,6 +12,8 @@ metadata:
 # lavish-repair
 
 Prove the failing layer before changing any process.
+This playbook applies only after proving the affected surface is an upstream served board with a `/session/` URL.
+For a self-contained board opened by `bin/fm-lavish-board.sh`, use `lavish-decisions` and `tools/lavish/README.md`; that path has no HTTP server or long-poll listener to repair.
 Use `lavish-axi --help` and its command help as the authority for current serving and polling mechanics.
 Consult the `data/learnings.md` content already included in the session-start digest for relevant prior incidents without violating the digest's read-once rule.
 

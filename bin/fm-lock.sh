@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID and start time found by walking the
-# shell's ancestry, which lives as long as the firstmate session - unlike the
-# transient subshell PID of any one tool call, which is dead moments after it is
-# written.
+# Writes the harness process identity and, when discoverable, the terminal
+# endpoint bound to this canonical FM_HOME. The shared lock format and liveness
+# rules live in bin/fm-session-lock-lib.sh.
 # Usage: fm-lock.sh           acquire; exit 1 if another live session holds it
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -13,49 +12,35 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
 mkdir -p "$STATE"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "error: unsafe state directory at $STATE" >&2; exit 1; }
 
-# Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
-
-process_start_time() {
-  local pid=$1 out
-  out=$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null) || return 1
-  out=$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-  [ -n "$out" ] || return 1
-  printf '%s\n' "$out"
-}
-
-process_command_text() {
-  local pid=$1 comm args
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null || true)
-  printf '%s %s\n' "$(basename "$comm")" "$args"
-}
-
-command_is_app_server() {
-  printf '%s' "$1" | grep -qE '(^|[[:space:]/])app-server([[:space:]]|$)'
-}
-
-lock_pid() {
-  sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;q;}' "$1" 2>/dev/null
-}
-
-lock_start_time() {
-  sed -n '2{s/^[[:space:]]*//;s/[[:space:]]*$//;p;q;}' "$1" 2>/dev/null
-}
-
 write_lock() {
-  local pid=$1 start tmp
-  start=$(process_start_time "$pid") || return 1
+  local pid=$1 start tmp canonical_home backend='' target=''
+  start=$(fm_session_lock_process_start_time "$pid") || return 1
+  canonical_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+  if ! target=$(discover_supervisor_target) \
+    || ! backend=$(discover_supervisor_backend) \
+    || ! fm_session_lock_supervisor_target_owns_pid "$backend" "$target" "$pid"; then
+    backend=
+    target=
+  fi
   tmp=$(mktemp "$STATE/.lock.XXXXXX") || return 1
   {
     printf '%s\n' "$pid"
     printf '%s\n' "$start"
+    printf 'home=%s\n' "$canonical_home"
+    if [ -n "$backend" ] && [ -n "$target" ]; then
+      printf 'backend=%s\n' "$backend"
+      printf 'target=%s\n' "$target"
+    fi
   } > "$tmp" || return 1
   if [ -L "$LOCK" ] || { [ -e "$LOCK" ] && [ ! -f "$LOCK" ]; }; then
     rm -f "$tmp"
@@ -70,13 +55,13 @@ harness_pid() {
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     command="$(basename "$comm") $args"
-    if ! command_is_app_server "$command" && printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
+    if ! fm_session_lock_command_is_app_server "$command" && printf '%s' "$(basename "$comm")" | grep -qE "$FM_SESSION_LOCK_HARNESS_RE"; then
       echo "$pid"; return 0
     fi
     # Bare interpreter (e.g. node): match the harness name in its script path.
     case "$comm" in
       *node*|*python*)
-        if ! command_is_app_server "$command" && printf '%s' "$args" | grep -qE "$HARNESS_RE"; then
+        if ! fm_session_lock_command_is_app_server "$command" && printf '%s' "$args" | grep -qE "$FM_SESSION_LOCK_HARNESS_RE"; then
           echo "$pid"; return 0
         fi
         ;;
@@ -87,32 +72,17 @@ harness_pid() {
   return 1
 }
 
-holder_alive() {
-  local lock=$1 pid recorded_start current_start command
-  pid=$(lock_pid "$lock")
-  [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
-  recorded_start=$(lock_start_time "$lock")
-  if [ -n "$recorded_start" ]; then
-    current_start=$(process_start_time "$pid") || return 1
-    [ "$current_start" = "$recorded_start" ] || return 1
-  fi
-  command=$(process_command_text "$pid") || return 1
-  command_is_app_server "$command" && return 1
-  printf '%s' "$command" | grep -qE "$HARNESS_RE"
-}
-
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
-  old=$(lock_pid "$LOCK")
-  if holder_alive "$LOCK"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  old=$(fm_session_lock_pid "$LOCK")
+  if fm_session_lock_holder_alive "$LOCK"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
   exit 0
 fi
 
 me=$(harness_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
 if [ -f "$LOCK" ]; then
-  old=$(lock_pid "$LOCK")
-  if [ "$old" != "$me" ] && holder_alive "$LOCK"; then
+  old=$(fm_session_lock_pid "$LOCK")
+  if [ "$old" != "$me" ] && fm_session_lock_holder_alive "$LOCK"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi

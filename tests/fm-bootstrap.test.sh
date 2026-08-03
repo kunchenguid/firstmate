@@ -987,13 +987,31 @@ SH
   chmod +x "$fakebin/lavish-axi"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: lavish-axi" \
+    "bootstrap accepted Lavish 1.0 without destination-aware wakes"
+
+  cat > "$fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'lavish-axi 1.1.0 (store-forward protocol 1)'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/lavish-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: lavish-axi" \
-    "bootstrap rejected the firstmate-owned store-and-forward Lavish fork"
-  pass "bootstrap rejects browser-era Lavish and installs the fork with its wake adapter"
+    "bootstrap rejected destination-aware Lavish 1.1"
+  pass "bootstrap requires the destination-aware Lavish fork"
 }
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-22 ]; then
   test_python3_is_required_for_descriptor_relative_artifact_reads
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = lavish-version ]; then
+  test_lavish_requires_store_forward_fork
   exit 0
 fi
 

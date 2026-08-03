@@ -18,13 +18,22 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { decode } from '@toon-format/toon';
+import vm from 'node:vm';
+import { decode, encode } from '@toon-format/toon';
+import { parseHTML } from 'linkedom';
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_ROOT = resolve(PACKAGE_ROOT, '../..');
 const CLI = join(PACKAGE_ROOT, 'src/cli.mjs');
+const BOARD_ADAPTER = join(REPO_ROOT, 'bin/fm-lavish-board.sh');
 const WAKE_ADAPTER = join(REPO_ROOT, 'bin/fm-lavish-wake.sh');
+const QUEUE_ADAPTER = join(REPO_ROOT, 'bin/fm-lavish-queue.sh');
 const WAKE_DRAIN = join(REPO_ROOT, 'bin/fm-wake-drain.sh');
+const FAKE_BROWSER = join(PACKAGE_ROOT, 'test-support/fake-browser.mjs');
+const ONE_PIXEL_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+);
 
 async function exists(path) {
   try {
@@ -62,6 +71,7 @@ async function fixture(name) {
 function processGroupMembers(pgid) {
   const output = execFileSync('ps', ['-axo', 'pid=,pgid=,command='], {
     encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
   });
   return output
     .trim()
@@ -69,6 +79,123 @@ function processGroupMembers(pgid) {
     .map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/))
     .filter((match) => match !== null && Number(match[2]) === pgid)
     .map((match) => ({ pid: Number(match[1]), command: match[3] }));
+}
+
+function processDescendants(rootPid) {
+  const output = execFileSync('ps', ['-axo', 'pid=,ppid=,command='], {
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  const processes = output
+    .trim()
+    .split('\n')
+    .map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/))
+    .filter((match) => match !== null)
+    .map((match) => ({
+      pid: Number(match[1]),
+      ppid: Number(match[2]),
+      command: match[3],
+    }));
+  const descendants = new Set([rootPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const processInfo of processes) {
+      if (
+        !descendants.has(processInfo.pid)
+        && descendants.has(processInfo.ppid)
+      ) {
+        descendants.add(processInfo.pid);
+        changed = true;
+      }
+    }
+  }
+  descendants.delete(rootPid);
+  return processes.filter((processInfo) => descendants.has(processInfo.pid));
+}
+
+function executeBoardSubmission(html, { storageFailure = false } = {}) {
+  const { window, document } = parseHTML(html);
+  const storage = new Map();
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem(key) {
+        return storage.get(key) ?? null;
+      },
+      setItem(key, value) {
+        if (storageFailure) throw new Error('durable browser storage unavailable');
+        storage.set(key, String(value));
+      },
+    },
+  });
+  window.Blob = globalThis.Blob;
+  window.URL = {
+    createObjectURL: () => 'blob:lavish-test',
+    revokeObjectURL: () => {},
+  };
+  window.scrollTo = () => {};
+  window.setTimeout = (callback) => {
+    callback();
+    return 1;
+  };
+  const script = document.querySelector('script').textContent;
+  vm.runInContext(script, vm.createContext(window));
+  const selected = document.querySelector('input[type="radio"]');
+  selected.checked = true;
+  selected.setAttribute('checked', '');
+  document.querySelector('#review-button').click();
+  document.querySelector('#submit-button').click();
+  return { document, storage };
+}
+
+async function fakeTmux(fx) {
+  const bin = join(fx.root, 'fake-bin');
+  const log = join(fx.root, 'tmux.log');
+  await mkdir(bin);
+  const tmux = join(bin, 'tmux');
+  await writeFile(
+    tmux,
+    `#!/bin/sh
+case "$1" in
+  display-message)
+    case "$*" in
+      *pane_pid*) printf '%s\\n' "\${LAVISH_FAKE_TMUX_PANE_PID:?}" ;;
+      *pane_current_command*) printf 'claude\\n' ;;
+      *cursor_y*) printf '0\\n' ;;
+      *) printf '@1\\n' ;;
+    esac
+    ;;
+  capture-pane) printf '│ > │\\n' ;;
+  send-keys) printf '%s\\n' "$*" >> '${log}' ;;
+  *) exit 1 ;;
+esac
+`,
+  );
+  await chmod(tmux, 0o700);
+  return { bin, log };
+}
+
+async function writeSupervisorLock(fx, target, stateDirectory = join(fx.home, 'state')) {
+  const holderPath = join(fx.root, 'fake-bin/codex-lock-holder');
+  await symlink('/bin/sleep', holderPath);
+  const holder = spawn(holderPath, ['30'], { stdio: 'ignore' });
+  await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  const started = execFileSync(
+    'ps',
+    ['-o', 'lstart=', '-p', String(holder.pid)],
+    { encoding: 'utf8' },
+  ).trim();
+  const canonicalHome = execFileSync('/bin/pwd', ['-P'], {
+    cwd: fx.home,
+    encoding: 'utf8',
+  }).trim();
+  await mkdir(stateDirectory, { recursive: true });
+  await writeFile(
+    join(stateDirectory, '.lock'),
+    `${holder.pid}\n${started}\nhome=${canonicalHome}\nbackend=tmux\ntarget=${target}\n`,
+  );
+  return holder;
 }
 
 async function listeningSockets(pid) {
@@ -120,6 +247,8 @@ function runCli(args, {
       env: {
         ...process.env,
         LAVISH_WAKE_COMMAND: WAKE_ADAPTER,
+        LAVISH_SCAN_HOME_DOWNLOADS: '0',
+        FM_LAVISH_QUEUE_DISABLE: '1',
         ...env,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -152,7 +281,12 @@ function runExecutable(executable, args, {
   unsetEnv = [],
 } = {}) {
   return new Promise((resolveRun, rejectRun) => {
-    const childEnv = { ...process.env, ...env };
+    const childEnv = {
+      ...process.env,
+      LAVISH_SCAN_HOME_DOWNLOADS: '0',
+      FM_LAVISH_QUEUE_DISABLE: '1',
+      ...env,
+    };
     for (const key of unsetEnv) delete childEnv[key];
     const child = spawn(executable, args, {
       detached: true,
@@ -186,6 +320,7 @@ async function createRequest(fx, {
   destination = 'data/replies/release-choice.toon',
   createdAt = undefined,
   returnResult = false,
+  visuals = undefined,
 } = {}) {
   const args = [
     'create',
@@ -201,9 +336,33 @@ async function createRequest(fx, {
     destination,
   ];
   if (createdAt !== undefined) args.push('--created-at', createdAt);
+  if (visuals !== undefined) args.push('--visuals', visuals);
   const result = await runCli(args, { home: fx.home });
   assert.equal(result.code, 0, result.stderr);
   return returnResult ? { id, result } : id;
+}
+
+async function manifestFor(fx, id) {
+  return decode(
+    await readFile(join(fx.home, 'data/decisions', id, 'manifest.toon'), 'utf8'),
+    { strict: true },
+  );
+}
+
+function browserPayload(manifest, overrides = {}) {
+  return {
+    schema_version: 2,
+    decision_id: manifest.decision_id,
+    request_sha256: manifest.request_sha256,
+    answers: manifest.questions.map((question) => ({
+      key: question.key,
+      value: question.options[0].value,
+      question_note: '',
+      option_comments: {},
+    })),
+    note: '',
+    ...overrides,
+  };
 }
 
 async function answer(fx, id, {
@@ -217,6 +376,51 @@ async function answer(fx, id, {
     env,
   });
 }
+
+test('answer has no child process or listening socket while waiting and leaves none', async () => {
+  const fx = await fixture('resources');
+  const id = await createRequest(fx);
+  const child = spawn(CLI, ['answer', id, '--home', fx.home], {
+    detached: true,
+    env: {
+      ...process.env,
+      LAVISH_WAKE_COMMAND: WAKE_ADAPTER,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  const completion = new Promise((resolveCompletion, rejectCompletion) => {
+    child.on('error', rejectCompletion);
+    child.on('close', (code, signal) => {
+      resolveCompletion({ code, signal, stderr });
+    });
+  });
+  const deadline = Date.now() + 5_000;
+  while (
+    !stdout.includes('Choose 1-2 for rollout: ')
+    && child.exitCode === null
+    && Date.now() < deadline
+  ) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  assert.match(stdout, /Choose 1-2 for rollout:/, stderr);
+  assert.equal(child.exitCode, null, stderr);
+  assert.deepEqual(processDescendants(child.pid), []);
+  assert.deepEqual(await listeningSockets(child.pid), []);
+
+  child.stdin.end('1\nresource proof\ny\n');
+  const result = await completion;
+  assert.equal(result.signal, null);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(processDescendants(child.pid), []);
+});
 
 test('a seven-day-old request remains answerable with no firstmate process', async () => {
   const fx = await fixture('seven-day');
@@ -409,7 +613,635 @@ test('configured wake adapter works from an installed-style CLI location', async
     { input: '1\nconfigured path\ny\n' },
   );
   assert.equal(answered.code, 0, answered.stderr);
-  assert.match(await readFile(adapterLog, 'utf8'), /--decision release-choice/);
+  const adapterArgs = await readFile(adapterLog, 'utf8');
+  assert.match(adapterArgs, /--decision release-choice/);
+  assert.match(adapterArgs, /--destination data\/replies\/release-choice\.toon/);
+});
+
+test('board renders the manifest, annotations, Markdown context, visuals, and submit contract', async () => {
+  const fx = await fixture('board');
+  const visuals = join(fx.root, 'visuals');
+  await mkdir(visuals);
+  await writeFile(
+    join(visuals, 'rollout.png'),
+    ONE_PIXEL_PNG,
+  );
+  await writeFile(
+    fx.questions,
+    `${JSON.stringify([
+      {
+        key: 'rollout',
+        prompt: 'Which rollout should we use?',
+        visuals: ['rollout.png'],
+        options: [
+          { value: 'blue', label: 'Blue rollout' },
+          { value: 'green', label: 'Green rollout' },
+        ],
+      },
+      {
+        key: 'timing',
+        prompt: 'When should it begin?',
+        options: [
+          { value: 'now', label: 'Begin now' },
+          { value: 'later', label: 'Wait until later' },
+        ],
+      },
+    ])}\n`,
+  );
+  const id = await createRequest(fx, { visuals });
+  const output = join(fx.root, 'board.html');
+  const result = await runCli(['board', id, '--out', output], { home: fx.home });
+  assert.equal(result.code, 0, result.stderr);
+
+  const html = await readFile(output, 'utf8');
+  const { document } = parseHTML(html);
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  assert.equal(document.querySelector('[data-request-context] h1').textContent, 'Release choice');
+  const questionNodes = [...document.querySelectorAll('[data-question-key].question')];
+  assert.equal(questionNodes.length, 2);
+  for (const [index, question] of (await manifestFor(fx, id)).questions.entries()) {
+    const node = questionNodes[index];
+    assert.equal(node.dataset.questionKey, question.key);
+    assert.equal(node.querySelector('h2').textContent, question.prompt);
+    assert.deepEqual(
+      [...node.querySelectorAll('input[type="radio"]')].map((input) => input.value),
+      question.options.map((option) => option.value),
+    );
+    assert.equal(node.querySelectorAll('textarea[data-option-comment]').length, question.options.length);
+    assert.ok(node.querySelector('textarea[data-question-note]'));
+  }
+  const evidence = document.querySelector('figure[data-visual-file="rollout.png"] img');
+  assert.ok(evidence);
+  assert.match(evidence.getAttribute('src'), /^data:image\/png;base64,/);
+  assert.equal(document.querySelectorAll('link[rel="stylesheet"]').length, 0);
+  const payloadBackup = document.querySelector('#submitted-payload');
+  assert.ok(payloadBackup);
+  assert.equal(payloadBackup.hasAttribute('readonly'), true);
+  const script = document.querySelector('script').textContent;
+  assert.match(script, /window\.__lavishPayload = payload/);
+  assert.match(script, /new Blob\(\[payloadJson\]/);
+  assert.match(script, /URL\.createObjectURL\(blob\)/);
+  assert.match(script, /anchor\.download = downloadFilename/);
+  assert.match(script, /anchor\.click\(\)/);
+  assert.match(script, /submittedPayload\.value = payloadJson/);
+  assert.match(script, /document\.title = SUBMIT_MARKER/);
+  assert.match(script, /LAVISH-SUBMIT v2/);
+});
+
+test('B1 board submit persists the payload before showing durable confirmation', async () => {
+  const fx = await fixture('board-durable-submit');
+  const id = await createRequest(fx);
+  const output = join(fx.root, 'board.html');
+  const result = await runCli(['board', id, '--out', output], { home: fx.home });
+  assert.equal(result.code, 0, result.stderr);
+
+  const submitted = executeBoardSubmission(await readFile(output, 'utf8'));
+  assert.equal(submitted.storage.size, 1, 'submit did not persist a browser record');
+  const durableRecord = JSON.parse([...submitted.storage.values()][0]);
+  assert.equal(durableRecord.marker, 'LAVISH-SUBMIT v2');
+  assert.equal(durableRecord.payload.decision_id, id);
+  const confirmation = submitted.document.querySelector('#confirmation');
+  assert.equal(confirmation.hidden, false);
+  assert.match(confirmation.textContent, /durably saved/i);
+
+  const rejected = executeBoardSubmission(await readFile(output, 'utf8'), {
+    storageFailure: true,
+  });
+  assert.equal(
+    rejected.document.querySelector('#confirmation').hidden,
+    true,
+    'a failed durable write still showed success',
+  );
+  assert.equal(rejected.document.querySelector('#submit-button').disabled, false);
+  assert.equal(rejected.storage.size, 0);
+});
+
+test('B5 fm-lavish-board executes submit and recovers after immediate browser close', async () => {
+  const fx = await fixture('board-shell-e2e');
+  const id = await createRequest(fx);
+  const downloads = join(fx.root, 'Downloads');
+  const fakeBin = join(fx.root, 'browser-bin');
+  const fakeState = join(fx.root, 'fake-browser-state.json');
+  const effectiveState = join(fx.root, 'effective-state');
+  await mkdir(downloads);
+  await mkdir(fakeBin);
+  const chrome = join(fakeBin, 'chrome-devtools-axi');
+  await writeFile(
+    chrome,
+    `#!/bin/sh\nexec '${process.execPath}' '${FAKE_BROWSER}' "$@"\n`,
+  );
+  await chmod(chrome, 0o700);
+  const fake = await fakeTmux(fx);
+  const holder = await writeSupervisorLock(fx, 'home:0', effectiveState);
+  const environment = {
+    PATH: `${fake.bin}:${fakeBin}:${process.env.PATH}`,
+    FM_LAVISH_BIN: CLI,
+    FM_LAVISH_QUEUE_DISABLE: '0',
+    FM_STATE_OVERRIDE: effectiveState,
+    LAVISH_FAKE_CHROME_STATE: fakeState,
+    LAVISH_FAKE_TMUX_PANE_PID: String(holder.pid),
+    LAVISH_WAKE_COMMAND: WAKE_ADAPTER,
+  };
+
+  try {
+    const opened = await runExecutable(
+      BOARD_ADAPTER,
+      [id, '--home', fx.home, '--downloads', downloads],
+      { env: environment },
+    );
+    assert.equal(opened.code, 0, opened.stderr);
+    const checkPath = join(effectiveState, `lavish-board-${id}.check.sh`);
+    assert.equal(await exists(checkPath), true);
+    assert.equal(
+      await exists(join(fx.home, 'state', `lavish-board-${id}.check.sh`)),
+      false,
+    );
+    const openedAtMatch = (await readFile(checkPath, 'utf8')).match(/--opened-at ([0-9]+)/);
+    assert.ok(openedAtMatch);
+    const openedAt = Number(openedAtMatch[1]);
+    const manifest = await manifestFor(fx, id);
+    const staleDownload = join(downloads, `lavish-answer-${id}.json`);
+    await writeFile(
+      staleDownload,
+      `${JSON.stringify(browserPayload(manifest, {
+        answers: [{
+          key: 'rollout',
+          value: 'green',
+          question_note: 'Stale answer from the prior board.',
+          option_comments: {},
+        }],
+      }))}\n`,
+    );
+    const staleTime = new Date(openedAt + 500);
+    await utimes(staleDownload, staleTime, staleTime);
+    const staleInfo = await stat(staleDownload);
+    assert.ok(staleInfo.mtimeMs > openedAt);
+
+    const stopped = await runExecutable(chrome, ['stop'], { env: environment });
+    assert.equal(stopped.code, 0, stopped.stderr);
+    const checked = await runExecutable(checkPath, [], {
+      env: environment,
+      unsetEnv: ['FM_STATE_OVERRIDE'],
+    });
+    assert.equal(checked.code, 0, checked.stderr);
+    assert.match(checked.stdout, new RegExp(`lavish-submit: ${id}`));
+    assert.match(checked.stdout, /lavish-delivery: prompt queued/);
+    assert.equal(
+      await exists(join(fx.home, 'data/decisions', id, 'answer.toon')),
+      true,
+    );
+    const stored = decode(
+      await readFile(join(fx.home, 'data/decisions', id, 'answer.toon'), 'utf8'),
+      { strict: true },
+    );
+    assert.equal(stored.answers[0].value, 'blue');
+    assert.equal(
+      await exists(join(fx.home, 'data/decisions', id, 'receipt.toon')),
+      true,
+    );
+    assert.equal(await exists(join(fx.home, 'data/replies/release-choice.toon')), true);
+    assert.match(await readFile(fake.log, 'utf8'), /-t home:0 /);
+    assert.equal(
+      await exists(join(effectiveState, 'lavish-deliveries', `${id}.digest`)),
+      true,
+    );
+    assert.equal(await exists(checkPath), false);
+  } finally {
+    const closed = new Promise((resolveClose) => holder.once('close', resolveClose));
+    holder.kill();
+    await closed;
+  }
+});
+
+test('B5 watcher check leaves a live unsubmitted board open and pending', async () => {
+  const fx = await fixture('board-live-pending');
+  const id = await createRequest(fx);
+  const downloads = join(fx.root, 'Downloads');
+  const fakeBin = join(fx.root, 'browser-bin');
+  const fakeState = join(fx.root, 'fake-browser-state.json');
+  await mkdir(downloads);
+  await mkdir(fakeBin);
+  const chrome = join(fakeBin, 'chrome-devtools-axi');
+  await writeFile(
+    chrome,
+    `#!/bin/sh\nexec '${process.execPath}' '${FAKE_BROWSER}' "$@"\n`,
+  );
+  await chmod(chrome, 0o700);
+  const environment = {
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    FM_LAVISH_BIN: CLI,
+    LAVISH_FAKE_CHROME_STATE: fakeState,
+    LAVISH_FAKE_CHROME_AUTO_SUBMIT: '0',
+    LAVISH_WAKE_COMMAND: WAKE_ADAPTER,
+  };
+
+  const opened = await runExecutable(
+    BOARD_ADAPTER,
+    [id, '--home', fx.home, '--downloads', downloads],
+    { env: environment },
+  );
+  assert.equal(opened.code, 0, opened.stderr);
+  const checkPath = join(fx.home, 'state', `lavish-board-${id}.check.sh`);
+  const checked = await runExecutable(checkPath, [], { env: environment });
+  assert.equal(checked.code, 0, checked.stderr);
+  const browserState = JSON.parse(await readFile(fakeState, 'utf8'));
+  assert.equal(browserState.open, true);
+  assert.equal(Object.keys(browserState.storage).length, 0);
+  assert.equal(
+    await exists(join(fx.home, 'data/decisions', id, 'answer.toon')),
+    false,
+  );
+  assert.equal(await exists(checkPath), true);
+});
+
+test('board renders a conventional visuals directory on an existing manifest', async () => {
+  const fx = await fixture('board-existing-visual');
+  const id = await createRequest(fx);
+  const visualDirectory = join(fx.home, 'data/decisions', id, 'visuals');
+  await mkdir(visualDirectory);
+  await writeFile(join(visualDirectory, 'existing.png'), ONE_PIXEL_PNG);
+  const output = join(fx.root, 'board.html');
+  const result = await runCli(['board', id, '--out', output], { home: fx.home });
+  assert.equal(result.code, 0, result.stderr);
+
+  const { document } = parseHTML(await readFile(output, 'utf8'));
+  const evidence = document.querySelector('figure[data-visual-file="existing.png"] img');
+  assert.ok(evidence);
+  assert.match(evidence.getAttribute('src'), /^data:image\/png;base64,/);
+});
+
+test('collect validates and persists structured annotations through the normal wake path', async () => {
+  const fx = await fixture('collect');
+  const id = await createRequest(fx);
+  const manifest = await manifestFor(fx, id);
+  const payloadPath = join(fx.root, 'payload.json');
+  await writeFile(
+    payloadPath,
+    `${JSON.stringify(browserPayload(manifest, {
+      answers: [{
+        key: 'rollout',
+        value: 'green',
+        question_note: 'Prefer the faster path after one health check.',
+        option_comments: {
+          blue: 'Safe, but too slow for this release.',
+          green: 'Use this with the rollback guard.',
+        },
+      }],
+      note: 'Proceed after the current deploy completes.',
+    }))}\n`,
+  );
+  const result = await runCli(['collect', id, '--payload', payloadPath], { home: fx.home });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /Collected answer.*wake queued/);
+
+  const answerPath = join(fx.home, 'data/decisions', id, 'answer.toon');
+  const stored = decode(await readFile(answerPath, 'utf8'), { strict: true });
+  assert.equal(stored.schema_version, 2);
+  assert.equal(stored.answers[0].value, 'green');
+  assert.equal(stored.answers[0].label, 'Green rollout');
+  assert.equal(
+    stored.answers[0].question_note,
+    'Prefer the faster path after one health check.',
+  );
+  assert.deepEqual(stored.answers[0].option_comments, {
+    blue: 'Safe, but too slow for this release.',
+    green: 'Use this with the rollback guard.',
+  });
+  assert.equal(stored.note, 'Proceed after the current deploy completes.');
+  assert.match(await readFile(join(fx.home, 'state/.wake-queue'), 'utf8'), /lavish:release-choice/);
+});
+
+test('intake recovers a browser download payload without manual copy', async () => {
+  const fx = await fixture('download-intake');
+  const id = await createRequest(fx, {
+    destination: 'data/lavish-answers/release-choice.json',
+  });
+  const manifest = await manifestFor(fx, id);
+  const downloads = join(fx.root, 'Downloads');
+  await mkdir(downloads);
+  const payloadPath = join(downloads, 'lavish-answer-release-choice.json');
+  const payload = browserPayload(manifest, {
+    answers: [{
+      key: 'rollout',
+      value: 'green',
+      question_note: 'This landed through the browser download path.',
+      option_comments: { green: 'Ship this route.' },
+    }],
+    note: 'No manual copy was involved.',
+  });
+  await writeFile(payloadPath, `${JSON.stringify(payload, null, 2)}\n`);
+
+  const intake = await runCli(['intake'], {
+    home: fx.home,
+    env: { LAVISH_DOWNLOADS_DIR: downloads },
+  });
+  assert.equal(intake.code, 0, intake.stderr);
+  assert.match(intake.stdout, /release-choice,payload-collected/);
+  assert.match(intake.stdout, /release-choice,consumed/);
+
+  const destinationPath = join(fx.home, 'data/lavish-answers/release-choice.json');
+  assert.deepEqual(JSON.parse(await readFile(destinationPath, 'utf8')), payload);
+  assert.equal(manifest.destination_format, 'payload-json-v2');
+  assert.equal(
+    await exists(join(fx.home, 'data/decisions', id, 'answer.toon')),
+    true,
+  );
+  assert.equal(
+    await exists(join(fx.home, 'data/decisions', id, 'receipt.toon')),
+    true,
+  );
+  assert.match(await readFile(join(fx.home, 'state/.wake-queue'), 'utf8'), /lavish:release-choice/);
+
+  const again = await runCli(['intake'], {
+    home: fx.home,
+    env: { LAVISH_DOWNLOADS_DIR: downloads },
+  });
+  assert.equal(again.code, 0, again.stderr);
+  assert.equal(again.stdout, '');
+});
+
+test('intake recovers landed payloads only from the effective state root', async () => {
+  const fx = await fixture('state-override-intake');
+  const id = await createRequest(fx);
+  const manifest = await manifestFor(fx, id);
+  const effectiveState = join(fx.root, 'effective-state');
+  const defaultState = join(fx.home, 'state');
+  await mkdir(effectiveState);
+  await mkdir(defaultState);
+  await writeFile(
+    join(effectiveState, `lavish-board-${id}.payload.json`),
+    `${JSON.stringify(browserPayload(manifest))}\n`,
+  );
+  await writeFile(
+    join(defaultState, `lavish-board-${id}.payload.json`),
+    `${JSON.stringify(browserPayload(manifest, {
+      answers: [{
+        key: 'rollout',
+        value: 'green',
+        question_note: 'Stale default-state answer.',
+        option_comments: {},
+      }],
+    }))}\n`,
+  );
+
+  const intake = await runCli(['intake'], {
+    home: fx.home,
+    env: { FM_STATE_OVERRIDE: effectiveState },
+  });
+  assert.equal(intake.code, 0, intake.stderr);
+  assert.match(intake.stdout, /release-choice,payload-collected/);
+  assert.match(intake.stdout, /release-choice,consumed/);
+  const stored = decode(
+    await readFile(join(fx.home, 'data/decisions', id, 'answer.toon'), 'utf8'),
+    { strict: true },
+  );
+  assert.equal(stored.answers[0].value, 'blue');
+});
+
+test('protocol-1 JSON destinations recover byte-for-byte before receipt', async () => {
+  const fx = await fixture('legacy-json-intake');
+  const id = await createRequest(fx, {
+    destination: 'data/lavish-answers/release-choice.json',
+  });
+  const manifestPath = join(fx.home, 'data/decisions', id, 'manifest.toon');
+  const manifest = await manifestFor(fx, id);
+  delete manifest.destination_format;
+  await writeFile(manifestPath, `${encode(manifest)}\n`);
+
+  const payloadPath = join(fx.root, 'payload.json');
+  await writeFile(
+    payloadPath,
+    `${JSON.stringify(browserPayload(manifest))}\n`,
+  );
+  const collected = await runCli(['collect', id, '--payload', payloadPath], { home: fx.home });
+  assert.equal(collected.code, 0, collected.stderr);
+
+  const answerPath = join(fx.home, 'data/decisions', id, 'answer.toon');
+  const answerBytes = await readFile(answerPath);
+  const destinationDirectory = join(fx.home, 'data/lavish-answers');
+  const destinationPath = join(destinationDirectory, 'release-choice.json');
+  await mkdir(destinationDirectory, { recursive: true });
+  await writeFile(destinationPath, answerBytes);
+
+  const intake = await runCli(['intake'], { home: fx.home });
+  assert.equal(intake.code, 0, intake.stderr);
+  assert.match(intake.stdout, /release-choice,consumed/);
+  assert.deepEqual(await readFile(destinationPath), answerBytes);
+  assert.equal(
+    await exists(join(fx.home, 'data/decisions', id, 'receipt.toon')),
+    true,
+  );
+});
+
+test('create retries preserve field-less protocol-1 manifests', async () => {
+  const fx = await fixture('legacy-create-retry');
+  const destination = 'data/lavish-answers/release-choice.json';
+  const id = await createRequest(fx, { destination });
+  const manifestPath = join(fx.home, 'data/decisions', id, 'manifest.toon');
+  const legacyManifest = await manifestFor(fx, id);
+  delete legacyManifest.destination_format;
+  const legacyText = `${encode(legacyManifest)}\n`;
+  await writeFile(manifestPath, legacyText);
+
+  const retry = await createRequest(fx, { destination, returnResult: true });
+  assert.match(retry.result.stdout, /Already exists: release-choice/);
+  assert.equal(await readFile(manifestPath, 'utf8'), legacyText);
+});
+
+test('collect fails closed with named errors for count, key, option, and request drift', async () => {
+  const fx = await fixture('collect-invalid');
+  const id = await createRequest(fx);
+  const manifest = await manifestFor(fx, id);
+  const payloadPath = join(fx.root, 'payload.json');
+  const cases = [
+    {
+      name: 'payload_count_mismatch',
+      payload: browserPayload(manifest, { answers: [] }),
+    },
+    {
+      name: 'payload_unknown_key',
+      payload: browserPayload(manifest, {
+        answers: [{ key: 'missing', value: 'blue', question_note: '', option_comments: {} }],
+      }),
+    },
+    {
+      name: 'payload_unknown_option',
+      payload: browserPayload(manifest, {
+        answers: [{ key: 'rollout', value: 'purple', question_note: '', option_comments: {} }],
+      }),
+    },
+    {
+      name: 'payload_stale_request',
+      payload: browserPayload(manifest, { request_sha256: `sha256:${'0'.repeat(64)}` }),
+    },
+  ];
+  for (const failure of cases) {
+    await writeFile(payloadPath, `${JSON.stringify(failure.payload)}\n`);
+    const result = await runCli(['collect', id, '--payload', payloadPath], { home: fx.home });
+    assert.equal(result.code, 2, `${failure.name}: ${result.stderr}`);
+    assert.match(result.stderr, new RegExp(failure.name));
+    assert.equal(
+      await exists(join(fx.home, 'data/decisions', id, 'answer.toon')),
+      false,
+    );
+  }
+});
+
+test('B4 collect rejects explicit null annotations without committing an answer', async () => {
+  const cases = [
+    {
+      name: 'question-note',
+      mutate(payload) {
+        payload.answers[0].question_note = null;
+      },
+    },
+    {
+      name: 'option-comments',
+      mutate(payload) {
+        payload.answers[0].option_comments = null;
+      },
+    },
+    {
+      name: 'overall-note',
+      mutate(payload) {
+        payload.note = null;
+      },
+    },
+  ];
+  for (const failure of cases) {
+    const fx = await fixture(`null-${failure.name}`);
+    const id = await createRequest(fx);
+    const payload = browserPayload(await manifestFor(fx, id));
+    failure.mutate(payload);
+    const payloadPath = join(fx.root, 'payload.json');
+    await writeFile(payloadPath, `${JSON.stringify(payload)}\n`);
+    const result = await runCli(['collect', id, '--payload', payloadPath], { home: fx.home });
+    assert.equal(result.code, 2, `${failure.name}: ${result.stderr}`);
+    assert.match(result.stderr, /payload_invalid_annotation/);
+    assert.equal(
+      await exists(join(fx.home, 'data/decisions', id, 'answer.toon')),
+      false,
+    );
+  }
+});
+
+test('B2 visible queue refuses an ambient target not bound to the answer home', async () => {
+  const fx = await fixture('queue-wrong-home');
+  await mkdir(join(fx.home, 'state'), { recursive: true });
+  const fake = await fakeTmux(fx);
+  const result = await runExecutable(
+    QUEUE_ADAPTER,
+    [
+      '--home', fx.home,
+      '--decision', 'release-choice',
+      '--answer', join(fx.home, 'data/decisions/release-choice/answer.toon'),
+      '--digest', `sha256:${'0'.repeat(64)}`,
+    ],
+    {
+      env: {
+        PATH: `${fake.bin}:${process.env.PATH}`,
+        FM_SUPERVISOR_BACKEND: 'tmux',
+        FM_SUPERVISOR_TARGET: 'ambient:0',
+      },
+    },
+  );
+  assert.equal(result.code, 4, result.stderr);
+  assert.match(result.stderr, /home-bound supervisor/i);
+  assert.equal(await exists(fake.log), false, 'queue wrote into the ambient pane');
+});
+
+test('B2 visible queue revalidates the target against the lock holder', async () => {
+  const fx = await fixture('queue-unbound-lock');
+  const fake = await fakeTmux(fx);
+  const holder = await writeSupervisorLock(fx, 'ambient:0');
+  try {
+    const result = await runExecutable(
+      QUEUE_ADAPTER,
+      [
+        '--home', fx.home,
+        '--decision', 'release-choice',
+        '--answer', join(fx.home, 'data/decisions/release-choice/answer.toon'),
+        '--digest', `sha256:${'0'.repeat(64)}`,
+        '--destination', 'data/replies/release-choice.toon',
+      ],
+      {
+        env: {
+          PATH: `${fake.bin}:${process.env.PATH}`,
+          LAVISH_FAKE_TMUX_PANE_PID: '999999999',
+        },
+      },
+    );
+    assert.equal(result.code, 4, result.stderr);
+    assert.match(result.stderr, /home-bound supervisor/i);
+    assert.equal(await exists(fake.log), false, 'queue wrote into an unowned pane');
+  } finally {
+    const closed = new Promise((resolveClose) => holder.once('close', resolveClose));
+    holder.kill();
+    await closed;
+  }
+});
+
+test('B3 visible queue uses the manifest destination and home-bound target', async () => {
+  const fx = await fixture('queue-destination');
+  const id = await createRequest(fx);
+  const payloadPath = join(fx.root, 'payload.json');
+  await writeFile(
+    payloadPath,
+    `${JSON.stringify(browserPayload(await manifestFor(fx, id)))}\n`,
+  );
+  const fake = await fakeTmux(fx);
+  const holder = await writeSupervisorLock(fx, 'home:0');
+  try {
+    const result = await runExecutable(
+      CLI,
+      [
+        'collect', id,
+        '--payload', payloadPath,
+        '--home', fx.home,
+      ],
+      {
+        env: {
+          PATH: `${fake.bin}:${process.env.PATH}`,
+          LAVISH_WAKE_COMMAND: WAKE_ADAPTER,
+          FM_LAVISH_QUEUE_DISABLE: '0',
+          FM_SUPERVISOR_BACKEND: 'tmux',
+          FM_SUPERVISOR_TARGET: 'ambient:0',
+          LAVISH_FAKE_TMUX_PANE_PID: String(holder.pid),
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.stderr);
+    const log = await readFile(fake.log, 'utf8');
+    assert.match(log, /-t home:0 /);
+    assert.match(log, /ingested at data\/replies\/release-choice\.toon/);
+    assert.doesNotMatch(log, /data\/lavish-answers\/release-choice\.json/);
+  } finally {
+    const closed = new Promise((resolveClose) => holder.once('close', resolveClose));
+    holder.kill();
+    await closed;
+  }
+});
+
+test('schema version 1 answers remain readable', async () => {
+  const fx = await fixture('answer-v1');
+  const id = await createRequest(fx);
+  const manifest = await manifestFor(fx, id);
+  const answer = {
+    kind: 'lavish-decision-answer',
+    schema_version: 1,
+    decision_id: id,
+    request_sha256: manifest.request_sha256,
+    submitted_at: '2026-08-01T00:00:00.000Z',
+    answers: [{ key: 'rollout', value: 'blue', label: 'Blue rollout' }],
+    note: 'Existing schema one answer.',
+  };
+  await writeFile(
+    join(fx.home, 'data/decisions', id, 'answer.toon'),
+    `${encode(answer)}\n`,
+  );
+  const shown = await runCli(['show', id], { home: fx.home });
+  assert.equal(shown.code, 0, shown.stderr);
+  assert.match(shown.stdout, /Status: answered at 2026-08-01T00:00:00.000Z/);
 });
 
 test('strict TOON count validation rejects a malformed manifest before showing it', async () => {
@@ -591,46 +1423,4 @@ test('an explicit reconciled map migrates only the named unanswered session', as
     await exists(join(fx.home, 'data/decisions/irrelevant/manifest.toon')),
     false,
   );
-});
-
-test('answer has no child process or listening socket while waiting and leaves none', async () => {
-  const fx = await fixture('resources');
-  const id = await createRequest(fx);
-  const child = spawn(CLI, ['answer', id, '--home', fx.home], {
-    detached: true,
-    env: {
-      ...process.env,
-      LAVISH_WAKE_COMMAND: WAKE_ADAPTER,
-    },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  let stdout = '';
-  child.stdout.on('data', (chunk) => {
-    stdout += chunk;
-  });
-  const deadline = Date.now() + 5_000;
-  while (!stdout.includes('Choose 1-2 for rollout: ') && Date.now() < deadline) {
-    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
-  }
-  assert.match(stdout, /Choose 1-2 for rollout:/);
-  assert.deepEqual(processGroupMembers(child.pid), [
-    { pid: child.pid, command: processGroupMembers(child.pid)[0]?.command },
-  ]);
-  assert.deepEqual(await listeningSockets(child.pid), []);
-
-  const completion = new Promise((resolveCompletion, rejectCompletion) => {
-    let stderr = '';
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk;
-    });
-    child.on('error', rejectCompletion);
-    child.on('close', (code, signal) => {
-      resolveCompletion({ code, signal, stderr });
-    });
-  });
-  child.stdin.end('1\nresource proof\ny\n');
-  const result = await completion;
-  assert.equal(result.signal, null);
-  assert.equal(result.code, 0, result.stderr);
-  assert.deepEqual(processGroupMembers(child.pid), []);
 });

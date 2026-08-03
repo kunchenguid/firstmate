@@ -69,8 +69,11 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-process-tree-lib.sh` | Shared bounded command runner that terminates and reaps complete process trees         |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inheritable-config propagation                        |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
+| `fm-lavish-board.sh`     | Open a self-contained decision board and arm its profile-first bounded submission check |
 | `fm-lavish-intake.sh`    | Invoke compatible store-and-forward Lavish intake at an existing turn boundary       |
-| `fm-lavish-wake.sh`      | Append one durable Lavish answer pointer through the canonical wake queue lock        |
+| `fm-lavish-queue.sh`     | Queue redundant visible delivery only to a session-lock-proven home-bound supervisor |
+| `fm-lavish-version-lib.sh` | Shared Lavish store-forward minimum-version compatibility check                    |
+| `fm-lavish-wake.sh`      | Append a durable answer pointer, then attempt proven home-bound visible delivery      |
 | `fm-wake-drain.sh`       | Intake Lavish answers, atomically drain queued wakes, then assert watcher liveness    |
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |
 | `fm-classify-lib.sh`     | Shared captain-relevant and declared-external-wait wake classification vocabulary    |
@@ -87,6 +90,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-teardown.sh`         | Fail-closed teardown of worktrees, endpoints, secondmate homes, and managed account leases |
 | `fm-harness.sh`          | Detect the running harness and resolve crewmate or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
+| `fm-session-lock-lib.sh` | Shared session-lock format, holder liveness, and home-bound supervisor route proof    |
 | `fm-lint.sh`             | Single owner of the shell-lint definition that CI and the no-mistakes gate both run  |
 | `fm-install-shellcheck.sh` | Install CI's pinned, checksum-verified ShellCheck build                            |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |

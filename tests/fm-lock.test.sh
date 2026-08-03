@@ -57,6 +57,12 @@ esac
 exit 1
 SH
   chmod +x "$fakebin/ps"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = display-message ] || exit 1
+printf '%s\n' "${FM_FAKE_TMUX_PANE_PID:?}"
+SH
+  chmod +x "$fakebin/tmux"
 }
 
 start_live_holder() {
@@ -114,7 +120,7 @@ test_live_same_identity_blocks_another_session() {
 }
 
 test_same_session_reacquire_succeeds() {
-  local home fakebin holder out status
+  local home home_physical fakebin holder out status
   home="$TMP_ROOT/reacquire-home"
   fakebin="$TMP_ROOT/reacquire-fakebin"
   mkdir -p "$home/state"
@@ -131,12 +137,50 @@ test_same_session_reacquire_succeeds() {
     FM_FAKE_OTHER_COMM=/bin/bash \
     FM_FAKE_OTHER_ARGS=bash \
     FM_FAKE_OTHER_PPID="$holder" \
+    FM_SUPERVISOR_BACKEND=tmux \
+    FM_SUPERVISOR_TARGET=bound:0 \
+    FM_FAKE_TMUX_PANE_PID="$holder" \
     PATH="$fakebin:$PATH" \
     "$LOCK" 2>&1) || status=$?
 
   expect_code 0 "$status" "same-session re-acquire should succeed"
   assert_contains "$out" "lock acquired: harness pid $holder" "same-session re-acquire did not retain the holder pid"
+  home_physical=$(cd "$home" && pwd -P)
+  assert_grep "home=$home_physical" "$home/state/.lock" "lock did not bind its canonical FM_HOME"
+  assert_grep 'backend=tmux' "$home/state/.lock" "lock did not bind the supervisor backend"
+  assert_grep 'target=bound:0' "$home/state/.lock" "lock did not bind the supervisor target"
   pass "fm-lock still allows a genuine same-session re-acquire"
+}
+
+test_unbound_supervisor_target_is_not_recorded() {
+  local home fakebin holder out status
+  home="$TMP_ROOT/unbound-home"
+  fakebin="$TMP_ROOT/unbound-fakebin"
+  mkdir -p "$home/state"
+  make_fake_ps "$fakebin"
+
+  start_live_holder
+  holder=$FM_LOCK_TEST_HOLDER
+  printf '%s\n%s\n' "$holder" 'Mon Jan  1 00:00:00 2024' > "$home/state/.lock"
+
+  status=0
+  out=$(FM_HOME="$home" \
+    FM_FAKE_HOLDER_PID="$holder" \
+    FM_FAKE_HOLDER_START='Mon Jan  1 00:00:00 2024' \
+    FM_FAKE_OTHER_COMM=/bin/bash \
+    FM_FAKE_OTHER_ARGS=bash \
+    FM_FAKE_OTHER_PPID="$holder" \
+    FM_SUPERVISOR_BACKEND=tmux \
+    FM_SUPERVISOR_TARGET=ambient:0 \
+    FM_FAKE_TMUX_PANE_PID=999999 \
+    PATH="$fakebin:$PATH" \
+    "$LOCK" 2>&1) || status=$?
+
+  expect_code 0 "$status" "same-session acquisition should not depend on visible delivery"
+  assert_contains "$out" "lock acquired: harness pid $holder" "same-session lock was not acquired"
+  assert_no_grep '^backend=' "$home/state/.lock" "lock recorded an unbound supervisor backend"
+  assert_no_grep '^target=' "$home/state/.lock" "lock recorded an unbound supervisor target"
+  pass "fm-lock omits supervisor routes not owned by the holder process"
 }
 
 test_app_server_holder_is_stale() {
@@ -189,5 +233,6 @@ test_legacy_one_line_lock_live_holder_blocks() {
 test_pid_reuse_with_mismatched_start_time_acquires
 test_live_same_identity_blocks_another_session
 test_same_session_reacquire_succeeds
+test_unbound_supervisor_target_is_not_recorded
 test_app_server_holder_is_stale
 test_legacy_one_line_lock_live_holder_blocks
