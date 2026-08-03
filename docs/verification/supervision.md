@@ -420,6 +420,23 @@ Observed output after the away-mode cycle remained parked with no `Task complete
 ok - grok 0.2.118 (1e1687c1cf6a) [stable] live E2E suppressed away-mode completion and restored normal wake delivery
 ```
 
+The equivalent adapter-owned boundaries were reverified live on 2026-08-03 with Pi 0.82.0 and OpenCode 1.18.11. Both runs entered away mode with a real watcher cycle already live, observed an actionable close with no model delivery or successor, confirmed that the wake remained in `state/.wake-queue`, cleared away mode, observed automatic re-arm without replay, and then delivered and handled an ordinary away-mode-off control wake.
+
+```sh
+FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+FM_OPENCODE_LIVE_E2E=1 \
+  FM_OPENCODE_LIVE_E2E_WATCH_ONLY=1 \
+  FM_OPENCODE_LIVE_E2E_MODEL=opencode/big-pickle \
+  tests/fm-opencode-primary-live-e2e.test.sh
+```
+
+OpenCode's stored OpenAI token was expired, so the watcher-only live path used OpenCode's bundled `opencode/big-pickle` provider rather than claiming the unrelated Ahoy model-behavior matrix passed on that provider. Exact observed outputs:
+
+```text
+ok - Pi 0.82.0 live E2E covered away-mode parking plus Calm, Ahoy, near misses, and watcher continuity
+ok - OpenCode 1.18.11 live E2E covered away-mode parking and watcher continuity
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

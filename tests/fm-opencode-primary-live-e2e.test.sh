@@ -27,6 +27,9 @@ LAB="$ROOT/.opencode-live-e2e.$$"
 PROJECT="$LAB/project"
 HOME_DIR="$LAB/fmhome"
 OPENCODE_VERSION=$(opencode --version)
+OPENCODE_LIVE_MODEL=${FM_OPENCODE_LIVE_E2E_MODEL:-}
+MODEL_ARGS=()
+[ -z "$OPENCODE_LIVE_MODEL" ] || MODEL_ARGS=(-m "$OPENCODE_LIVE_MODEL")
 AHOY_PROJECT="$LAB/ahoy-project"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
@@ -101,6 +104,12 @@ cleanup() {
   local watcher_pid arm_pid
   watcher_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
   arm_pid=$(ps -p "$watcher_pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
+  if [ -n "${FM_OPENCODE_LIVE_E2E_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_OPENCODE_LIVE_E2E_EVIDENCE_DIR"
+    capture > "$FM_OPENCODE_LIVE_E2E_EVIDENCE_DIR/opencode-pane-final.txt"
+    cp "$HOME_DIR/state/.watch-cycle-exits.log" "$FM_OPENCODE_LIVE_E2E_EVIDENCE_DIR/opencode-cycle-ledger.txt" 2>/dev/null || true
+    cp "$HOME_DIR/state/.wake-queue" "$FM_OPENCODE_LIVE_E2E_EVIDENCE_DIR/opencode-wake-queue.txt" 2>/dev/null || true
+  fi
   "$TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
   sleep 0.1
   if [ -n "$watcher_pid" ] && lab_pid_is_safe "$watcher_pid"; then
@@ -120,7 +129,7 @@ run_ahoy_case() {
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$db" OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
         OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --pure --format json "$preceding"
+        opencode run "${MODEL_ARGS[@]}" --pure --format json "$preceding"
   ) || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode Ahoy $label setup exited $status: $first_out"
   session_id=$(printf '%s\n' "$first_out" | jq -r 'select(.sessionID != null) | .sessionID' | head -1)
@@ -131,7 +140,7 @@ run_ahoy_case() {
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$db" OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
         OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --pure --format json --session "$session_id" "/ahoy"
+        opencode run "${MODEL_ARGS[@]}" --pure --format json --session "$session_id" "/ahoy"
   ) || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode Ahoy $label case exited $status: $second_out"
   assistant_text=$(printf '%s\n' "$second_out" | jq -r 'select(.type == "text") | .part.text' | tail -1)
@@ -233,7 +242,7 @@ run_native_ahoy_regressions() {
       OPENCODE_DB="$first_db" FM_HOME="$first_home" \
         OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
         OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --format json --auto "/ahoy"
+        opencode run "${MODEL_ARGS[@]}" --format json --auto "/ahoy"
   ) >/dev/null || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode native first-message Ahoy exited $status"
   session_id=$(sqlite3 "$first_db" 'select id from session order by time_created desc limit 1;')
@@ -253,7 +262,7 @@ run_native_ahoy_regressions() {
   [ "$session_count" = 1 ] || fail "OpenCode native first-message Ahoy left the original session"
 
   "$TMUX" -L "$SOCKET" new-session -d -s "$native_session" -c "$AHOY_PROJECT" \
-    "env OPENCODE_DB='$later_db' FM_HOME='$later_home' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --auto"
+    "env OPENCODE_DB='$later_db' FM_HOME='$later_home' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --auto ${OPENCODE_LIVE_MODEL:+-m '$OPENCODE_LIVE_MODEL'}"
   i=0
   while [ "$i" -lt 120 ]; do
     "$TMUX" -L "$SOCKET" capture-pane -p -t "$native_session" 2>/dev/null | grep -Fq "$OPENCODE_VERSION" && break
@@ -277,7 +286,7 @@ run_native_ahoy_regressions() {
       OPENCODE_DB="$later_db" FM_HOME="$later_home" \
         OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
         OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --format json --auto --session "$session_id" "/ahoy"
+        opencode run "${MODEL_ARGS[@]}" --format json --auto --session "$session_id" "/ahoy"
   ) >/dev/null || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode native later-message Ahoy exited $status"
   assistant_text=$(sqlite3 -json "$later_db" \
@@ -292,8 +301,10 @@ run_native_ahoy_regressions() {
 }
 
 mkdir -p "$LAB"
-run_ahoy_transcript_regressions
-run_native_ahoy_regressions
+if [ "${FM_OPENCODE_LIVE_E2E_WATCH_ONLY:-0}" != 1 ]; then
+  run_ahoy_transcript_regressions
+  run_native_ahoy_regressions
+fi
 git clone -q "$ROOT" "$PROJECT"
 mkdir -p "$PROJECT/.opencode/plugins/lib"
 cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$PROJECT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -307,7 +318,7 @@ printf 'project=fixture\n' > "$HOME_DIR/state/opencode-e2e.meta"
 # shellcheck disable=SC2016 # The model, not this test shell, expands FM_HOME.
 PROMPT='Use the terminal to run `printf ready > "$FM_HOME/state/opencode-model-initial"`, then respond briefly. If a later watcher wake arrives, run bin/fm-wake-drain.sh, then run `printf handled > "$FM_HOME/state/opencode-model-handled"`. Never run or request any watcher arm command.'
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --auto; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
+  "env OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --auto ${OPENCODE_LIVE_MODEL:+-m '$OPENCODE_LIVE_MODEL'}; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
 
 # Send the initial prompt through the ready composer so this exercises the same
 # persistent TUI path as a primary session.
@@ -336,6 +347,46 @@ if [ -z "${watcher_pid:-}" ] || ! kill -0 "$watcher_pid" 2>/dev/null; then
   fail "OpenCode idle event did not start the initial watcher"
 fi
 
+initial_watcher_pid=$watcher_pid
+date '+%s' > "$HOME_DIR/state/.afk"
+printf 'done: opencode away-mode live e2e watcher fire\n' > "$HOME_DIR/state/opencode-e2e.status"
+i=0
+while [ "$i" -lt 240 ]; do
+  grep -Eq 'reason=actionable-signal.*successor=none' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null && break
+  sleep 0.5
+  i=$((i + 1))
+done
+grep -Eq 'reason=actionable-signal.*successor=none' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null \
+  || fail "OpenCode away-mode cycle did not close without a successor"
+sleep 3
+[ ! -f "$HOME_DIR/state/opencode-model-handled" ] \
+  || fail "OpenCode delivered the away-mode watcher wake to the model"
+grep -q 'opencode-e2e.status' "$HOME_DIR/state/.wake-queue" 2>/dev/null \
+  || fail "OpenCode away-mode wake was not preserved in the durable queue"
+if [ -n "${FM_OPENCODE_LIVE_E2E_EVIDENCE_DIR:-}" ]; then
+  mkdir -p "$FM_OPENCODE_LIVE_E2E_EVIDENCE_DIR"
+  capture > "$FM_OPENCODE_LIVE_E2E_EVIDENCE_DIR/opencode-pane-away.txt"
+fi
+
+rm -f "$HOME_DIR/state/.afk"
+i=0
+resumed_watcher_pid=
+while [ "$i" -lt 240 ]; do
+  resumed_watcher_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -n "$resumed_watcher_pid" ] && [ "$resumed_watcher_pid" != "$initial_watcher_pid" ] \
+    && kill -0 "$resumed_watcher_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+  i=$((i + 1))
+done
+[ -n "$resumed_watcher_pid" ] && [ "$resumed_watcher_pid" != "$initial_watcher_pid" ] \
+  && kill -0 "$resumed_watcher_pid" 2>/dev/null \
+  || fail "OpenCode plugin did not resume supervision after away mode"
+sleep 2
+[ ! -f "$HOME_DIR/state/opencode-model-handled" ] \
+  || fail "OpenCode replayed the suppressed away-mode wake after return"
+
 printf 'done: opencode live e2e watcher fire\n' > "$HOME_DIR/state/opencode-e2e.status"
 i=0
 while [ "$i" -lt 240 ]; do
@@ -354,4 +405,8 @@ if printf '%s\n' "$pane" | grep -Fq '$ bin/fm-watch-arm.sh'; then
   fail "OpenCode model attempted to re-arm instead of leaving continuity to the plugin"
 fi
 
-printf 'ok - OpenCode %s live E2E covered native Ahoy first/later messages, near misses, and watcher continuity\n' "$OPENCODE_VERSION"
+if [ "${FM_OPENCODE_LIVE_E2E_WATCH_ONLY:-0}" = 1 ]; then
+  printf 'ok - OpenCode %s live E2E covered away-mode parking and watcher continuity\n' "$OPENCODE_VERSION"
+else
+  printf 'ok - OpenCode %s live E2E covered away-mode parking plus native Ahoy, near misses, and watcher continuity\n' "$OPENCODE_VERSION"
+fi

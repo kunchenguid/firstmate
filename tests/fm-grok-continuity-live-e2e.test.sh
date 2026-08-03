@@ -59,6 +59,19 @@ cleanup() {
   local watcher_pid arm_pid
   watcher_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
   arm_pid=$(ps -p "$watcher_pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
+  if [ -n "${FM_GROK_LIVE_E2E_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_GROK_LIVE_E2E_EVIDENCE_DIR"
+    capture > "$FM_GROK_LIVE_E2E_EVIDENCE_DIR/grok-pane.txt"
+    {
+      printf 'grok_version=%s\n' "$GROK_VERSION"
+      printf 'watcher_pid=%s\n' "$watcher_pid"
+      printf 'arm_pid=%s\n' "$arm_pid"
+      printf '%s\n' 'cycle_ledger:'
+      cat "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null || true
+      printf '%s\n' 'wake_queue:'
+      cat "$HOME_DIR/state/.wake-queue" 2>/dev/null || true
+    } > "$FM_GROK_LIVE_E2E_EVIDENCE_DIR/grok-state.txt"
+  fi
   "$TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
   sleep 0.1
   if [ -n "$watcher_pid" ] && lab_pid_is_safe "$watcher_pid"; then
@@ -83,7 +96,7 @@ printf 'project=fixture\n' > "$HOME_DIR/state/grok-e2e.meta"
 wait_for_text "Grok Build" 180 || fail "Grok did not reach its ready composer"
 sleep 1
 # shellcheck disable=SC2016 # Backticks are literal prompt markup.
-PROMPT='Use run_terminal_command with background=true to run exactly `bin/fm-watch-arm.sh`. Never use a shell ampersand. Once it reports started, respond briefly.'
+PROMPT='Use run_terminal_command with background=true to run exactly `bin/fm-watch-arm.sh`. Never use a shell ampersand. Once it reports started, respond exactly FM_GROK_ARMED_READY.'
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" -l "$PROMPT"
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" Enter
 
@@ -98,6 +111,7 @@ done
 if [ -z "$initial_watcher" ] || ! kill -0 "$initial_watcher" 2>/dev/null; then
   fail "Grok did not start the tracked background watcher"
 fi
+wait_for_text "FM_GROK_ARMED_READY" 240 || fail "Grok did not settle the arming turn before the away-mode transition"
 
 arm_pid=$(ps -p "$initial_watcher" -o ppid= 2>/dev/null | tr -d ' ' || true)
 [ -n "$arm_pid" ] && kill -0 "$arm_pid" 2>/dev/null \

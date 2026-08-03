@@ -89,6 +89,12 @@ cleanup() {
     watcher_pid=$(sed -n '1p' "$pid_file" 2>/dev/null || true)
     arm_pid=$(ps -p "$watcher_pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
   fi
+  if [ -n "${FM_PI_LIVE_E2E_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_PI_LIVE_E2E_EVIDENCE_DIR"
+    capture > "$FM_PI_LIVE_E2E_EVIDENCE_DIR/pi-pane-final.txt"
+    cp "$HOME_DIR/state/.watch-cycle-exits.log" "$FM_PI_LIVE_E2E_EVIDENCE_DIR/pi-cycle-ledger.txt" 2>/dev/null || true
+    cp "$HOME_DIR/state/.wake-queue" "$FM_PI_LIVE_E2E_EVIDENCE_DIR/pi-wake-queue.txt" 2>/dev/null || true
+  fi
   "$TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
   sleep 0.1
   if [ -n "$watcher_pid" ] && lab_pid_is_safe "$watcher_pid"; then
@@ -304,8 +310,59 @@ send_prompt "/calm"
 sleep 0.2
 
 : > "$HOME_DIR/state/pi-e2e.meta"
-send_prompt "Start supervision with fm_watch_arm_pi and never use bash to arm supervision. After the watcher wake arrives, run bin/fm-wake-drain.sh and reply exactly HANDLED."
+send_prompt "Start supervision with fm_watch_arm_pi and never use bash to arm supervision, then reply exactly PI_ARMED_READY. If a later watcher wake arrives, run bin/fm-wake-drain.sh and reply exactly HANDLED."
 wait_for_text "watcher: started Pi extension arm child 1" || fail "Pi did not render the initial watcher tool result"
+wait_for_exact_line "PI_ARMED_READY" 120 || fail "Pi did not settle the arming turn before the away-mode transition"
+
+i=0
+initial_pid_file=
+initial_watcher_pid=
+while [ "$i" -lt 120 ]; do
+  initial_pid_file=$(find "$HOME_DIR/state" -maxdepth 3 -type f -name pid | head -1)
+  initial_watcher_pid=$(sed -n '1p' "$initial_pid_file" 2>/dev/null || true)
+  [ -n "$initial_watcher_pid" ] && kill -0 "$initial_watcher_pid" 2>/dev/null && break
+  sleep 0.5
+  i=$((i + 1))
+done
+[ -n "$initial_watcher_pid" ] && kill -0 "$initial_watcher_pid" 2>/dev/null \
+  || fail "initial Pi watcher pid was not recorded live"
+date '+%s' > "$HOME_DIR/state/.afk"
+printf 'done: pi away-mode live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
+i=0
+while [ "$i" -lt 240 ]; do
+  grep -Eq 'reason=actionable-signal.*successor=none' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null && break
+  sleep 0.5
+  i=$((i + 1))
+done
+grep -Eq 'reason=actionable-signal.*successor=none' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null \
+  || fail "Pi away-mode cycle did not close without a successor"
+sleep 3
+capture | grep -Fxq ' HANDLED' && fail "Pi delivered the away-mode watcher wake to the model"
+grep -q 'pi-e2e.status' "$HOME_DIR/state/.wake-queue" 2>/dev/null \
+  || fail "Pi away-mode wake was not preserved in the durable queue"
+if [ -n "${FM_PI_LIVE_E2E_EVIDENCE_DIR:-}" ]; then
+  mkdir -p "$FM_PI_LIVE_E2E_EVIDENCE_DIR"
+  capture > "$FM_PI_LIVE_E2E_EVIDENCE_DIR/pi-pane-away.txt"
+fi
+
+rm -f "$HOME_DIR/state/.afk"
+i=0
+resumed_watcher_pid=
+while [ "$i" -lt 240 ]; do
+  pid_file=$(find "$HOME_DIR/state" -maxdepth 3 -type f -name pid | head -1)
+  resumed_watcher_pid=$(sed -n '1p' "$pid_file" 2>/dev/null || true)
+  if [ -n "$resumed_watcher_pid" ] && [ "$resumed_watcher_pid" != "$initial_watcher_pid" ] \
+    && kill -0 "$resumed_watcher_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+  i=$((i + 1))
+done
+[ -n "$resumed_watcher_pid" ] && [ "$resumed_watcher_pid" != "$initial_watcher_pid" ] \
+  && kill -0 "$resumed_watcher_pid" 2>/dev/null \
+  || fail "Pi extension did not resume supervision after away mode"
+sleep 2
+capture | grep -Fxq ' HANDLED' && fail "Pi replayed the suppressed away-mode wake after return"
 
 printf 'done: pi live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
 i=0
@@ -341,4 +398,4 @@ wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E covered the Calm working ship, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E covered away-mode parking plus Calm, Ahoy, near misses, and watcher continuity\n' "$PI_VERSION"
