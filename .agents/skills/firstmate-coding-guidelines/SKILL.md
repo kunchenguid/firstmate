@@ -118,6 +118,8 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
+- Never let bash restore `LC_ALL` inside a forked child: an `LC_ALL=C <cmd>` prefix or a `local LC_ALL=C` in a command substitution, pipeline stage, or subshell can segfault that child on macOS, silently turning a correct result into a signal status.
+  Use `env LC_ALL=C <cmd>` when only the external command needs the locale, and an exported pin in a subshell that never restores it when bash itself needs C semantics; the locale convention comment in `bin/fm-wake-lib.sh` owns the full rationale.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - Tests must exercise behavior through an executable or public interface and must never assert implementation-source bytes, including through parsers, regexes, snapshots, or indirect wrappers.
