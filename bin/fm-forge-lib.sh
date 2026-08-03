@@ -111,7 +111,11 @@ fm_forge_resolve_host() {
     https://*|http://*)
       host=${remote_url#*://}
       host=${host%%/*}
-      host=${host%%@*}
+      host=${host##*@}
+      case "$host" in
+        \[*\]*) host=${host#\[}; host=${host%%\]*} ;;
+        *:*) host=${host%%:*} ;;
+      esac
       ;;
     *)
       return 1
@@ -155,8 +159,12 @@ fm_forge_require_cli() {
         missing=1
       fi
       ;;
-    local|unknown)
+    local)
       : # no forge CLI required
+      ;;
+    unknown)
+      echo "FORGE_UNSUPPORTED"
+      return 1
       ;;
     *)
       return 2
@@ -196,8 +204,12 @@ fm_forge_check_auth() {
         glab auth status >/dev/null 2>&1 || { echo "NEEDS_GLAB_AUTH"; return 1; }
       fi
       ;;
-    local|unknown)
+    local)
       return 0
+      ;;
+    unknown)
+      echo "FORGE_UNSUPPORTED"
+      return 1
       ;;
     *)
       return 2
@@ -228,10 +240,8 @@ fm_forge_scan_registered_projects() {
     project_id=$(basename "$entry")
     provider=$(fm_forge_detect_provider "$entry")
     host=""
-    if [ "$provider" = "github" ] || [ "$provider" = "gitlab" ]; then
-      remote_url=$(fm_forge_checkout_remote "$entry" 2>/dev/null) || remote_url=""
-      [ -n "$remote_url" ] && host=$(fm_forge_resolve_host "$remote_url" 2>/dev/null || true)
-    fi
+    remote_url=$(fm_forge_checkout_remote "$entry" 2>/dev/null) || remote_url=""
+    [ -n "$remote_url" ] && host=$(fm_forge_resolve_host "$remote_url" 2>/dev/null || true)
     printf '%s %s %s\n' "$project_id" "$provider" "${host:-}"
   done
 }
