@@ -27,7 +27,7 @@ A stolen singleton is worse than a duplicate: the watcher deliberately one-shots
 
 Three layers hold the boundary, and each is independently sufficient for the case it covers.
 
-`bin/fm-watch-arm.sh` is the deterministic layer: while `state/.afk` exists it arms nothing, prints one `watcher: stood-down` status line, and exits 0.
+`bin/fm-watch-arm.sh` is the deterministic layer: it rechecks `state/.afk` before restart signaling or lock cleanup, attachment, and the watcher fork; while the flag exists it arms nothing, prints one `watcher: stood-down` status line, and exits 0.
 That covers every arm path, including a Grok background task, a manual recovery probe, and any harness with no adapter of its own.
 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` are the adapter layer: while away mode is active they start no arm child, deliver no ordinary wake, and start no continuity retry, whether away mode began before the decision or while a cycle was already live.
