@@ -81,7 +81,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -557,6 +557,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -2003,6 +2004,85 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
+# Write a meta carrying the dispatch profile, so the ledger's terminal line has
+# a harness/model/effort join to capture before teardown deletes it.
+write_profiled_meta() {  # <case_dir> <mode>
+  local case_dir=$1 mode=$2
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=$mode" \
+    "harness=pi" \
+    "model=openai-codex/gpt-5.6-sol" \
+    "effort=medium"
+}
+
+test_teardown_records_the_terminal_ledger_line() {
+  local case_dir ledger
+  case_dir=$(make_case ledger-terminal)
+  write_profiled_meta "$case_dir" local-only
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-terminal: teardown should succeed"
+
+  ledger="$case_dir/data/wake-ledger.tsv"
+  [ -f "$ledger" ] || fail "ledger-terminal: teardown wrote no terminal record"
+  grep -q "task=task-x1" "$ledger" || fail "ledger-terminal: task id missing"
+  grep -q "outcome=landed" "$ledger" || fail "ledger-terminal: terminal outcome missing"
+  # The model join must be captured BEFORE the meta is deleted; this is the last
+  # moment those facts exist anywhere.
+  grep -q "harness=pi" "$ledger" || fail "ledger-terminal: harness not captured from the meta"
+  grep -q "model=openai-codex/gpt-5.6-sol" "$ledger" || fail "ledger-terminal: model not captured"
+  grep -q "effort=medium" "$ledger" || fail "ledger-terminal: effort not captured"
+  grep -q "mode=local-only" "$ledger" || fail "ledger-terminal: delivery mode not captured"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "ledger-terminal: meta should be gone after teardown"
+  pass "teardown records the terminal ledger line with the meta's profile before deleting it"
+}
+
+test_teardown_force_records_abandoned() {
+  local case_dir
+  case_dir=$(make_case ledger-abandoned)
+  write_profiled_meta "$case_dir" local-only
+  wt_commit "$case_dir" "unpushed work"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-abandoned: --force teardown should succeed"
+
+  grep -q "outcome=abandoned" "$case_dir/data/wake-ledger.tsv" \
+    || fail "ledger-abandoned: discarded work should record an abandoned outcome"
+  pass "a --force teardown records the task as abandoned rather than landed"
+}
+
+test_unwritable_ledger_never_fails_teardown() {
+  local case_dir rc
+  case_dir=$(make_case ledger-unwritable)
+  write_profiled_meta "$case_dir" local-only
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_WAKE_LEDGER="/dev/null/impossible/wake-ledger.tsv" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ledger-unwritable: a telemetry write must never fail a teardown"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "ledger-unwritable: cleanup did not complete"
+  grep -q "wake ledger terminal line not recorded" "$case_dir/stderr" \
+    || fail "ledger-unwritable: teardown should warn that the record was lost"
+  pass "an unwritable ledger warns but never fails or halts a teardown"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2046,3 +2126,6 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_teardown_records_the_terminal_ledger_line
+test_teardown_force_records_abandoned
+test_unwritable_ledger_never_fails_teardown

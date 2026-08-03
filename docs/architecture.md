@@ -41,6 +41,22 @@ For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
 
+### Wake-outcome ledger
+
+`data/wake-ledger.tsv` is the durable record of what supervision actually costs, so coordinator attention is measured rather than estimated.
+`bin/fm-wake-ledger.sh` is its single owner: record format, the closed outcome vocabulary, and append semantics all live in that script's header and `--help`.
+It carries three record kinds - one `wake` record per drained wake, one `outcome` record per handled wake joined to it on the (seq, queued) pair, and one terminal `task` record per finished task.
+It lives under `data/` rather than `state/` because teardown clears `state/<id>.*` and this evidence must outlive the tasks it describes.
+
+The wake half is written deterministically by `bin/fm-wake-drain.sh` and the outcome half by the first mate.
+That split is the point rather than an accident: a single coordinator-written line would make measured attention cost fall whenever the recording step was skipped, so the metric would move without the underlying quantity moving.
+Splitting it gives a denominator that is stable under no change and turns missing coverage into a reported number instead of a silent undercount.
+
+The ledger can never block, delay, alter, or fail a wake.
+The drain calls it only after its authoritative print-and-delete boundary, with stdout discarded and failure ignored, and the ledger itself takes no lock and writes one capped line per record.
+`bin/fm-teardown.sh` writes the terminal record immediately before deleting the task metadata, which is the last moment that task's harness, model, and effort are recoverable.
+Watcher-absorbed wakes stay out of the ledger by design: they never reach the coordinator, so they are not part of the quantity being measured, and `state/.watch-triage.log` remains their disposable debug record.
+
 ### Registered secondmate current state
 
 A registered secondmate's validated home is the authority for bearings current state because it owns the child metadata inventory, each child's current-state result, endpoint observations, backlog holds and dependencies, keyed unresolved decisions, and recent Done baseline.

@@ -1759,6 +1759,34 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 write_landing_record_if_unlanded
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# The wake-outcome ledger's terminal line, written while the task metadata still
+# exists: the removal just below deletes it, and this is the last moment the
+# harness/model/effort join for this task is available anywhere.
+# bin/fm-wake-ledger.sh owns the record format. Best effort by design - a
+# telemetry write must never stand between the fleet and cleanup.
+LEDGER_OUTCOME=landed
+if [ "$FORCE" = "--force" ]; then
+  LEDGER_OUTCOME=abandoned
+fi
+LEDGER_ESCALATED=$(meta_value "$META" escalated)
+case "$LEDGER_ESCALATED" in
+  yes|no) ;;
+  *) LEDGER_ESCALATED=unknown ;;
+esac
+FM_WAKE_LEDGER="${FM_WAKE_LEDGER:-$DATA/wake-ledger.tsv}" \
+"$SCRIPT_DIR/fm-wake-ledger.sh" task "$ID" \
+  --outcome "$LEDGER_OUTCOME" \
+  --harness "$(meta_value "$META" harness)" \
+  --model "$(meta_value "$META" model)" \
+  --effort "$(meta_value "$META" effort)" \
+  --mode "$MODE" \
+  --kind "$KIND" \
+  --project "$PROJ" \
+  --backend "$BACKEND" \
+  --route "$(meta_value "$META" route)" \
+  --escalated "$LEDGER_ESCALATED" \
+  --pr "$PR_URL" >/dev/null \
+  || echo "warning: wake ledger terminal line not recorded for $ID" >&2
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token"

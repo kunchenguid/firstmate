@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Atomically drain durable watcher wake records, optionally annotate validated
-# signal status keys after raw consumption commits, then assert liveness.
+# Atomically drain durable watcher wake records, then after raw consumption
+# commits: optionally annotate validated signal status keys, record the
+# wake-outcome ledger's wake half (bin/fm-wake-ledger.sh), and assert liveness.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +25,17 @@ RAW_ROWS=
 # drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
+}
+
+# The deterministic half of the wake-outcome ledger: one durable wake record per
+# deduped row this drain handed to the coordinator, so measured attention cost
+# has a denominator that moves only when wakes actually happen.
+# bin/fm-wake-ledger.sh owns the format. Its one call site sits below the
+# authoritative print-and-delete boundary, with stdout discarded and failure
+# ignored, so the ledger can never block, delay, alter, or fail a wake.
+record_wake_ledger() {
+  [ -n "$RAW_ROWS" ] || return 0
+  printf '%s\n' "$RAW_ROWS" | "$SCRIPT_DIR/fm-wake-ledger.sh" drain-record >/dev/null || true
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
@@ -75,5 +87,6 @@ DRAIN_LOCK_HELD=false
 # Raw output and queue deletion are authoritative. Everything below is
 # best-effort and cannot restore, duplicate, hide, or fail the consumed rows.
 (fm_wake_print_annotations "$RAW_ROWS") || true
+record_wake_ledger
 assert_watcher_liveness
 exit 0
