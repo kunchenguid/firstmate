@@ -10,7 +10,7 @@ the watcher-arm PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, `docs/arm-pr
 
 ## Purpose and boundary
 
-The primary firstmate shell persists its working directory across tool calls (AGENTS.md section 2: "The shell working directory persists between commands").
+The primary firstmate shell persists its working directory across tool calls.
 A stray persistent top-level `cd projects/<clone>` therefore silently relocates the shell, so the next firstmate-owned command - a backlog write, an `fm-*` lifecycle call, `tasks-axi` - runs inside a project clone instead of the home.
 That has actually happened: a persistent top-level `cd` caused a firstmate-owned backlog write to execute inside a project clone rather than the home.
 The seatbelt denies exactly that command shape - a cwd change that persists to the primary shell - before it runs.
@@ -19,19 +19,19 @@ This guard is not a general sandbox.
 It classifies shell command positions only; it never evaluates, expands, sources, or runs any byte of the submitted command.
 Its threat model is agent mistakes, the same as the watcher-arm seatbelt: an accidental bare `cd projects/foo`, not a deliberately obfuscated bypass.
 
-## Scope: the real primary checkout only
+## Scope: plain firstmate checkouts only
 
-The guard fires only in the actual primary firstmate checkout.
+The guard fires only in a plain firstmate checkout where git-dir equals git-common-dir.
 It is a silent no-op (exit 0, no output) everywhere else, so it never interferes with a crewmate or scout that legitimately works inside its own project or firstmate task worktree.
 
-`bin/fm-cd-pretool-check.sh` reuses the turn-end guard's primary detection (`docs/turnend-guard.md`).
+`bin/fm-cd-pretool-check.sh` owns its checkout detection; the turn-end guard's marker-aware scope is a separate contract (`docs/turnend-guard.md`).
 A plain, non-worktree checkout has `git rev-parse --git-dir` equal to `git rev-parse --git-common-dir`.
 A crewmate or scout task worktree - the shape `bin/fm-spawn.sh` always hands out - is a linked git worktree where the two differ, so the guard is inert there.
 The checkout must also carry `AGENTS.md` and `bin/`, and any failure to confirm the primary is treated as inert, never as a block.
 
-The one deliberate difference from the turn-end guard: the cd-guard does **not** exclude secondmate homes.
-A secondmate is a firstmate in its own home, so its own primary session is a primary and its firstmate-owned commands must stay in its home too; the guard applies there.
-Only a secondmate's child crew and scout worktrees are exempt, and they are exempt automatically by the same linked-worktree test.
+The cd-guard does not inspect `.fm-secondmate-home`.
+It therefore applies in a git-cloned secondmate home where git-dir equals git-common-dir, but remains inert in a treehouse-leased secondmate home that is itself a linked worktree.
+Secondmate child crew and scout worktrees are likewise inert under the linked-worktree test.
 
 ## Block vs allow
 
@@ -74,13 +74,13 @@ It does not permit `cd /home/project`, because an absolute-path `cd` remains a p
 
 ## Transport and fail-open behavior
 
-`bin/fm-cd-pretool-check.sh` supports all five harness entry shapes used by the tracked adapters:
+`bin/fm-cd-pretool-check.sh` supports all five harness-engine entry shapes used by the tracked adapters, with pi-signed sharing Pi's shape:
 
 - Claude sends stdin JSON at `.tool_input.command` and adds `--claude` to preserve Claude's stderr-only deny requirement.
 - Codex sends stdin JSON at `.tool_input.command` without `--claude`.
 - Grok sends stdin JSON at `.toolInput.command`.
 - OpenCode sends the exact command string through `--command <exact string>`.
-- Pi sends the exact command string through `--command <exact string>`.
+- Pi and pi-signed send the exact command string through `--command <exact string>`.
 
 Processing order is cheapest-first: a strict-superset prefilter, then the primary-checkout scope, then the Node policy owner.
 The prefilter removes ordinary single quotes, double quotes, backslashes, carriage returns, and newlines before fast-allowing any command that carries no `cd`, `pushd`, or `popd` substring and no quoting-decoder marker (`$'` ANSI-C or `$"` locale), so quoted or escaped command-word fragments delegate to the policy while most commands never pay for the git scoping calls or the Node process.
@@ -99,7 +99,7 @@ Identical in shape to `docs/arm-pretool-check.md`:
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
-- Pi returns `{block: true}` only when the checker exits 2.
+- Pi and pi-signed return `{block: true}` only when the checker exits 2.
 
 ## Shared classifier ownership
 
@@ -125,7 +125,7 @@ Every shell variable reference in the Grok hook command carries an inline defaul
 
 `tests/fm-cd-pretool-check.test.sh` owns the acceptance matrix.
 Every block and allow case runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the primary-checkout scoping (fires in a secondmate home, inert in a crewmate/scout linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
+The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the checkout scoping (fires in a git-cloned secondmate fixture, inert in a crewmate/scout linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
 
 Run:
 

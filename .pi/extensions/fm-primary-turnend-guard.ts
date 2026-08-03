@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 let guardFollowupActive = false;
 
@@ -50,9 +51,14 @@ function lockOwnership(): LockOwnership {
 }
 
 function markLoaded(): void {
-  if (lockOwnership() === "other") return;
-  mkdirSync(state, { recursive: true });
+  if (!existsSync(state) || lockOwnership() === "other") return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+}
+
+function runSessionstartNudge(): string {
+  const result = spawnSync(`${root}/bin/fm-sessionstart-nudge.sh`, [], { encoding: "utf8" });
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
 }
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
@@ -100,8 +106,20 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", () => {
+  pi.on?.("session_start", (event) => {
+    const reason = String((event as { reason?: unknown }).reason ?? "");
+    const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";
     markLoaded();
+    if (!nudge) return;
+    try {
+      pi.sendMessage({
+        customType: "firstmate-sessionstart-nudge",
+        content: nudge,
+        display: false,
+        details: { kind: "session-start" },
+      });
+    } catch {
+    }
   });
 
   pi.on("tool_call", async (event) => {
@@ -128,12 +146,13 @@ export default function (pi: ExtensionAPI) {
 
     guardFollowupActive = true;
     try {
-      await pi.sendUserMessage(
+      const content = encodeFirstmateOperationalInput(
+        "turn-end-guard",
         "TURN WOULD END BLIND - supervision is off. " +
-          "Resume supervision according to the session-start operating block before ending the turn.\n\n" +
+          "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
           result.stderr,
-        { deliverAs: "followUp" },
       );
+      await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {
       guardFollowupActive = false;
     }

@@ -53,17 +53,19 @@ REG="$DATA/secondmates.md"
 MAIN_BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 [ $# -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
 ID=$1
 shift
 
 secondmate_home() {
-  local id=$1 line
+  local id=$1 home
   [ -f "$REG" ] || { echo "error: no secondmate registry at $REG" >&2; return 1; }
-  line=$(grep -E "^- $id( |$)" "$REG" | tail -1 || true)
-  [ -n "$line" ] || { echo "error: secondmate $id is not registered in $REG" >&2; return 1; }
-  printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
+  home=$(secondmate_registry_field "$REG" "$id" home || true)
+  [ -n "$home" ] || { echo "error: secondmate $id has no home in $REG" >&2; return 1; }
+  printf '%s\n' "$home"
 }
 
 path_is_ancestor_of() {

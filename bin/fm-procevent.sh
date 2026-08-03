@@ -1,0 +1,724 @@
+#!/usr/bin/env bash
+# Generic process-to-event runner: supervise a registered long-polling child
+# outside the agent's foreground turn and turn completed results into normalized
+# durable wakes.
+#
+# Usage:
+#   fm-procevent.sh register <adapter> <source-id> -- <argv>...
+#   fm-procevent.sh start <source-id>
+#   fm-procevent.sh reconcile
+#   fm-procevent.sh handled <source-id> <sequence>
+#   fm-procevent.sh retire <source-id>
+#   fm-procevent.sh sweep-home [--preflight]
+#   fm-procevent.sh list
+#
+# register   Record a source: its adapter, its canonical id, and the exact argv
+#            to execute. argv is stored one argument per line and executed
+#            directly, so there is no shell surface and no argument splitting.
+#            Adapters register sources; nothing here parses user text.
+# start      Claim the source, run its child to completion, durably capture the
+#            output, publish normalized wakes for pending results, then release
+#            the claim. It blocks for as long as the source blocks and is meant
+#            to run as a supervised background process, never in a conversational
+#            turn. After publishing, it asks the source's own adapter whether the
+#            captured result ends the source and retires the registration when it
+#            says so, so a source that has ended stops being restarted.
+# reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
+#            republish every durably captured result with no handled
+#            acknowledgement yet - regardless of any earlier publication - and
+#            start a runner for any registered source that has no live owner.
+#            This is liveness repair only - it never discovers results by
+#            polling the source, because the child blocks on the source itself.
+# handled    Durably and idempotently record that a captured result has been
+#            fully handled: <source-id> <sequence>. Prints "handled: id seq"
+#            the first time for that exact source-and-sequence generation and
+#            "already-handled: id seq" on every repeat call, atomically
+#            deduplicated so a paired external effect is never authorized
+#            twice. Until this is called, the result stays eligible for
+#            bounded re-announcement on every reconcile. Marking a result
+#            handled does not retire its source registration or claim.
+# retire     Drop a registration, stop a runner this home owns, release the claim.
+#            Idempotent, and still the supported explicit path after a source has
+#            already retired itself on its adapter's terminal verdict.
+# sweep-home Retire a bounded snapshot of this home's registrations and owned
+#            claims, then refuse unless no registration, runner record, or owned
+#            claim remains. Used by supported Firstmate home retirement.
+# list       Show registered sources, owners, and pending captured results.
+#
+# Terminal knowledge is adapter-owned. This runner never inspects a result and
+# never names an adapter-specific status: it calls
+# `bin/fm-procevent-<adapter>.sh terminal <result-file>` and treats exit 0 as the
+# only terminal verdict. A missing command, an error, or any other exit keeps the
+# registration armed, so an adapter that has no notion of ending needs no change.
+#
+# Ownership is machine-wide per canonical source, because separate Firstmate
+# homes can share one underlying source store. A live owner is never displaced;
+# only a claim whose whole generation is gone is reclaimed. A runner leads its
+# own process group, so a crashed leader whose group still has members is not
+# stale: reconcile stops that surviving group and releases its generation before
+# any replacement starts, and keeps the claim for a later retry when it cannot.
+#
+# Durability boundary: see bin/fm-procevent-lib.sh. This runner proves capture
+# before publication and bounded re-announcement until handled, and nothing
+# about the source side of the handoff.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-procevent-lib.sh
+. "$SCRIPT_DIR/fm-procevent-lib.sh"
+
+REG=$(fm_procevent_registry_dir "$STATE")
+MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
+
+die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+usage() { sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+
+adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
+
+# Ask the source's own adapter whether a captured result ends the source. Exit 0
+# is the only terminal verdict; everything else - including a missing adapter
+# command - keeps the registration armed. See the terminal-knowledge note in the
+# header: no adapter-specific condition may appear in this runner.
+adapter_result_is_terminal() {  # <adapter> <result-file>
+  local script
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  "$script" terminal "$2" >/dev/null 2>&1
+}
+
+source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
+runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
+staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
+
+read_adapter() {  # <source-id>
+  local f; f=$(source_file "$1")
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  sed -n 's/^adapter=//p' "$f" | head -1
+}
+
+# Read the stored argv into the ARGV array. One argument per line after the
+# argv= count, so an argument containing spaces is not re-split.
+read_argv() {  # <source-id>
+  local f n; f=$(source_file "$1")
+  ARGV=()
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  n=$(sed -n 's/^argc=//p' "$f" | head -1)
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  local i=0 line
+  while IFS= read -r line; do
+    i=$((i + 1))
+    [ "$i" -le "$n" ] && ARGV+=("$line")
+  done < <(sed -n '/^argv:$/,$p' "$f" | tail -n +2)
+  [ "${#ARGV[@]}" -eq "$n" ]
+}
+
+cmd_register() {
+  local adapter=${1-} id=${2-} sep=${3-}
+  shift 3 2>/dev/null || usage
+  fm_procevent_adapter_valid "$adapter" || die "adapter name must be lowercase alphanumeric or dash: $adapter"
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
+  [ "$sep" = -- ] || usage
+  [ "$#" -ge 1 ] || die "register needs at least one argv element after --"
+  local arg
+  for arg in "$@"; do
+    case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
+  done
+  [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
+  (umask 077; mkdir -p "$REG") || die "cannot create the source registry"
+  local tmp dest
+  dest=$(source_file "$id")
+  tmp=$(umask 077; mktemp "$REG/.source.XXXXXX") || die "cannot stage the registration"
+  {
+    printf 'adapter=%s\n' "$adapter"
+    printf 'argc=%s\n' "$#"
+    printf 'argv:\n'
+    printf '%s\n' "$@"
+  } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the registration"; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; die "cannot secure the registration"; }
+  fm_procevent_source_lock_acquire "$id" || { rm -f -- "$tmp"; die "cannot lock the source"; }
+  if ! mv -f -- "$tmp" "$dest"; then
+    fm_procevent_source_lock_release "$id"
+    rm -f -- "$tmp"
+    die "cannot publish the registration"
+  fi
+  fm_procevent_source_lock_release "$id"
+  printf 'registered: %s (%s)\n' "$id" "$adapter"
+}
+
+# Publish every durably captured result with no handled acknowledgement yet.
+# Capture already happened, so this only turns durable state into durable
+# events - and it republishes on every call regardless of any earlier
+# publication, so a result stays eligible for re-announcement across restarts
+# and drains until `fm_procevent_mark_handled` records it.
+publish_pending() {
+  local result id seq adapter line published=0
+  while IFS= read -r result; do
+    [ -n "$result" ] || continue
+    id=$(fm_procevent_result_source_id "$result")
+    seq=$(fm_procevent_result_sequence "$result")
+    fm_procevent_source_id_valid "$id" || continue
+    adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+    [ -n "$adapter" ] || continue
+    line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || continue
+    fm_procevent_source_lock_acquire "$id" || continue
+    if ! fm_procevent_is_handled "$STATE" "$id" "$seq" \
+      && fm_wake_append check "procevent:$id:$seq" "check: $line"; then
+      published=$((published + 1))
+    fi
+    fm_procevent_source_lock_release "$id"
+  done < <(fm_procevent_pending "$STATE")
+  printf '%s\n' "$published"
+}
+
+isolate_runner() {  # <wait|detach> <source-id>
+  local mode=$1 id=$2 program
+  # shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
+  program='my $mode = shift @ARGV;
+    defined(my $pid = fork) or exit 125;
+    if ($pid == 0) {
+      setpgrp(0, 0) or exit 125;
+      $ENV{FM_PROCEVENT_RUNNER_GROUP} = $$;
+      exec @ARGV;
+      exit 125;
+    }
+    exit 0 if $mode eq "detach";
+    waitpid($pid, 0) == $pid or exit 125;
+    my $status = $?;
+    exit(128 + ($status & 127)) if $status & 127;
+    exit($status >> 8);'
+  if [ "$mode" = wait ]; then
+    exec perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id"
+  fi
+  perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id" >/dev/null 2>&1 &
+}
+
+require_runner_group() {
+  local pgid
+  [ "${FM_PROCEVENT_RUNNER_GROUP:-}" = "$$" ] \
+    || die "runner process group was not isolated"
+  pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') \
+    || die "cannot inspect runner process group"
+  [ -n "$pgid" ] || die "cannot inspect runner process group"
+  [ "$pgid" = "$$" ] || die "runner does not lead its process group"
+  unset FM_PROCEVENT_RUNNER_GROUP
+}
+
+cmd_start_public() {
+  local id=${1-}
+  [ "$#" -eq 1 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  isolate_runner wait "$id"
+}
+
+cmd_start() {
+  local id=${1-} adapter out rc claimed bound_rc
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  require_runner_group
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
+    fm_procevent_source_lock_release "$id"
+    die "source is not registered: $id"
+  fi
+  if ! adapter=$(read_adapter "$id"); then
+    fm_procevent_source_lock_release "$id"
+    die "registration is unreadable: $id"
+  fi
+  if ! fm_procevent_adapter_valid "$adapter"; then
+    fm_procevent_source_lock_release "$id"
+    die "registration names an invalid adapter"
+  fi
+  if ! read_argv "$id"; then
+    fm_procevent_source_lock_release "$id"
+    die "registration argv is unreadable: $id"
+  fi
+  fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")"
+  claimed=$?
+  fm_procevent_source_lock_release "$id"
+  case "$claimed" in
+    0) ;;
+    2) printf 'already owned: %s\n' "$id"; exit 0 ;;
+    *) die "cannot claim source: $id" ;;
+  esac
+  CLAIM_ID=$id
+  CLAIM_HOME=$FM_HOME
+  CLAIM_PID=$$
+  CLAIM_TOKEN=$FM_PROCEVENT_CLAIM_TOKEN
+  CLAIM_REG_IDENTITY=$FM_PROCEVENT_CLAIM_REG_IDENTITY
+  STAGED_OUTPUT=
+  release_start_claim() {
+    [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
+    fm_procevent_source_lock_acquire "$CLAIM_ID" 2>/dev/null || return 0
+    if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
+      && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
+      && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
+      && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ] \
+      && [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ]; then
+      fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
+      return 0
+    fi
+    fm_procevent_claim_release_locked "$CLAIM_ID" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" 2>/dev/null || true
+    fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
+  }
+  trap release_start_claim EXIT
+  printf '%s\n' "$$" > "$(runner_file "$id")" 2>/dev/null || true
+  chmod 0600 "$(runner_file "$id")" 2>/dev/null || true
+
+  case "$MAX_OUTPUT_BYTES" in ''|*[!0-9]*) die "FM_PROCEVENT_MAX_OUTPUT_BYTES must be a nonnegative integer" ;; esac
+  out=$(staging_file "$id" "$CLAIM_TOKEN")
+  [ ! -e "$out" ] && [ ! -L "$out" ] || die "cannot safely stage output"
+  (umask 077; : > "$out") || die "cannot stage output"
+  STAGED_OUTPUT=$out
+  "${ARGV[@]}" 2>/dev/null | perl -e '
+    use strict;
+    use warnings;
+    my $limit = shift;
+    my ($written, $truncated) = (0, 0);
+    while (1) {
+      my $count = sysread(STDIN, my $buffer, 65536);
+      exit 2 unless defined $count;
+      last if $count == 0;
+      my $take = $written < $limit ? $limit - $written : 0;
+      $take = $count if $take > $count;
+      if ($take > 0) {
+        my $offset = 0;
+        while ($offset < $take) {
+          my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
+          exit 2 unless defined $count_written;
+          $offset += $count_written;
+        }
+        $written += $take;
+      }
+      $truncated = 1 if $take < $count;
+    }
+    exit($truncated ? 3 : 0);
+  ' "$MAX_OUTPUT_BYTES" > "$out"
+  local pipe_status=("${PIPESTATUS[@]}") truncated=0
+  rc=${pipe_status[0]}
+  bound_rc=${pipe_status[1]}
+  case "$bound_rc" in
+    0) ;;
+    3) truncated=1 ;;
+    *) die "cannot bound source output" ;;
+  esac
+
+  if [ "$rc" -ne 0 ] && [ ! -s "$out" ]; then
+    # No usable result. Leave the registration armed; the adapter decides
+    # whether a nonzero exit is terminal when it handles the next result.
+    rm -f -- "$out" "$(runner_file "$id")"
+    printf 'no-result: %s (exit %s)\n' "$id" "$rc"
+    exit 0
+  fi
+
+  local durable
+  durable=$(fm_procevent_capture "$STATE" "$id" "$adapter" "$out") || { rm -f -- "$out"; die "cannot durably capture the result"; }
+  rm -f -- "$out"
+  STAGED_OUTPUT=
+  [ "$truncated" -eq 1 ] && printf 'truncated: %s at %s bytes\n' "$id" "$MAX_OUTPUT_BYTES" >&2
+
+  publish_pending >/dev/null
+  rm -f -- "$(runner_file "$id")"
+  # Publication is already durable, so retiring an ended source here can never
+  # cost the result or its wake; leaving it armed, by contrast, lets every later
+  # reconcile restart a source that will only return empty ended results.
+  if adapter_result_is_terminal "$adapter" "$durable"; then
+    if retire_owned_terminal_source "$id"; then
+      printf 'retired: %s (adapter classified the captured result terminal)\n' "$id"
+    else
+      printf 'cannot retire terminal source; it remains registered: %s\n' "$id" >&2
+    fi
+  fi
+  printf 'captured: %s\n' "$durable"
+}
+
+# Retire a source this runner owns because its adapter classified the captured
+# result terminal. Ownership is re-proved, the registration is dropped, and this
+# runner's own claim is released under ONE source-lock hold, so no concurrent
+# reconcile can observe a registered source with no owner (and start a
+# replacement) or an owned claim with no registration (and signal this runner
+# mid-exit), and a generation this runner no longer owns is never unregistered.
+# The EXIT trap's own release then no-ops, because the generation is already gone.
+retire_owned_terminal_source() {  # <source-id>
+  local id=$1 status=0 registration current_identity
+  registration=$(source_file "$id")
+  fm_procevent_source_lock_acquire "$id" || return 1
+  if fm_procevent_claim_load_locked "$id" 2>/dev/null \
+    && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
+    && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
+    && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ] \
+    && [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" = "$CLAIM_REG_IDENTITY" ] \
+    && current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) \
+    && [ "$current_identity" = "$CLAIM_REG_IDENTITY" ] \
+    && fm_procevent_claim_mark_terminal_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN"; then
+    if rm -f -- "$registration" && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
+      fm_procevent_claim_release_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
+    else
+      status=1
+    fi
+  else
+    status=1
+  fi
+  fm_procevent_source_lock_release "$id"
+  return "$status"
+}
+
+# Start a runner outside the watcher cycle that noticed it was missing. The
+# public start boundary establishes its own process group before claiming.
+detach_runner() {  # <source-id>
+  isolate_runner detach "$1"
+}
+
+cmd_reconcile() {
+  local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
+  published=$(publish_pending)
+
+  # Stop a runner this home owns whose source is no longer registered. Without
+  # this, unregistering a source that never completes leaves its child blocked
+  # forever with nothing left to reap it.
+  for claim in "$(fm_procevent_claim_root)"/*.claim; do
+    [ -e "$claim" ] || continue
+    id=${claim##*/}; id=${id%.claim}
+    fm_procevent_source_id_valid "$id" || continue
+    fm_procevent_source_lock_acquire "$id" || continue
+    if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
+      fm_procevent_source_lock_release "$id"
+      continue
+    fi
+    if ! fm_procevent_claim_load_locked "$id" 2>/dev/null; then
+      uncertain=$((uncertain + 1))
+      fm_procevent_source_lock_release "$id"
+      continue
+    fi
+    owner=$FM_PROCEVENT_CLAIM_HOME
+    pid=$FM_PROCEVENT_CLAIM_PID
+    token=$FM_PROCEVENT_CLAIM_TOKEN
+    identity=$FM_PROCEVENT_CLAIM_IDENTITY
+    if [ "$owner" != "$FM_HOME" ]; then
+      fm_procevent_source_lock_release "$id"
+      continue
+    fi
+    stop_runner_pid "$pid" "$identity"
+    stop_state=$?
+    case "$stop_state" in
+      0|1)
+        if fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+          rm -f -- "$(staging_file "$id" "$token")"
+          rm -f -- "$(runner_file "$id")"
+          stopped=$((stopped + 1))
+        else
+          uncertain=$((uncertain + 1))
+        fi
+        ;;
+      *) uncertain=$((uncertain + 1)) ;;
+    esac
+    fm_procevent_source_lock_release "$id"
+  done
+
+  if [ -d "$REG" ]; then
+    for rec in "$REG"/*.source; do
+      [ -e "$rec" ] || continue
+      id=${rec##*/}; id=${id%.source}
+      fm_procevent_source_id_valid "$id" || continue
+      fm_procevent_source_lock_acquire "$id" || continue
+      if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
+        fm_procevent_claim_state_locked "$id"
+        claim_state=$?
+        if [ "$claim_state" -eq 1 ]; then
+          fm_procevent_source_lock_release "$id"
+          detach_runner "$id"
+          started=$((started + 1))
+          continue
+        elif [ "$claim_state" -eq 4 ]; then
+          owner=$FM_PROCEVENT_CLAIM_HOME
+          pid=$FM_PROCEVENT_CLAIM_PID
+          token=$FM_PROCEVENT_CLAIM_TOKEN
+          if [ "$owner" = "$FM_HOME" ] \
+            && rm -f -- "$(source_file "$id")" \
+            && [ ! -e "$(source_file "$id")" ] \
+            && [ ! -L "$(source_file "$id")" ] \
+            && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+            stopped=$((stopped + 1))
+          else
+            uncertain=$((uncertain + 1))
+          fi
+        elif [ "$claim_state" -eq 3 ]; then
+          # The leader crashed but its owned group is still consuming the
+          # source. Never start a replacement alongside it: stop that group and
+          # release its generation first, and if either cannot be proved, keep
+          # the claim and retry on a later cycle rather than adding a second
+          # poller. Only the owning home may signal its own group.
+          owner=$FM_PROCEVENT_CLAIM_HOME
+          pid=$FM_PROCEVENT_CLAIM_PID
+          token=$FM_PROCEVENT_CLAIM_TOKEN
+          identity=$FM_PROCEVENT_CLAIM_IDENTITY
+          stop_state=2
+          if [ "$owner" = "$FM_HOME" ]; then
+            stop_runner_pid "$pid" "$identity"
+            stop_state=$?
+          fi
+          if [ "$stop_state" -eq 0 ] \
+            && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+            rm -f -- "$(staging_file "$id" "$token")"
+            rm -f -- "$(runner_file "$id")"
+            fm_procevent_source_lock_release "$id"
+            detach_runner "$id"
+            started=$((started + 1))
+            continue
+          fi
+          uncertain=$((uncertain + 1))
+        elif [ "$claim_state" -eq 2 ]; then
+          uncertain=$((uncertain + 1))
+        fi
+      fi
+      fm_procevent_source_lock_release "$id"
+    done
+  fi
+  printf 'reconciled: published=%s started=%s stopped=%s uncertain=%s\n' "$published" "$started" "$stopped" "$uncertain"
+}
+
+# Stop a runner and the child it is blocked on. A runner started by reconcile is
+# its own process group leader, so the group signal is what actually reaches the
+# blocking child - signalling only the runner would leave that child alive and
+# reparented, which is exactly how a source that never completes leaks.
+stop_runner_pid() {  # <pid> <identity>
+  local pid=${1-} identity=${2-} state pgid i=0
+  case "$pid" in ''|*[!0-9]*) return 2 ;; esac
+  [ -n "$identity" ] || return 2
+  fm_procevent_pid_state "$pid" "$identity"
+  state=$?
+  case "$state" in
+    0)
+      # A live identity-matched leader still owns its group, so prove the group
+      # really is the one this pid leads before signalling it.
+      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
+      [ "$pgid" = "$pid" ] || return 2
+      ;;
+    3)
+      # The leader crashed but its owned group is still running. Its pgid cannot
+      # be read from the dead leader, and it does not need to be: only an absent
+      # leader reaches this state, so the group cannot belong to a reused pid.
+      ;;
+    *) return "$state" ;;
+  esac
+  kill -TERM -"$pid" 2>/dev/null || return 2
+  while [ "$i" -lt 20 ]; do
+    kill -0 -"$pid" 2>/dev/null || return 0
+    if kill -0 "$pid" 2>/dev/null; then
+      fm_procevent_pid_state "$pid" "$identity"
+      state=$?
+      [ "$state" -eq 2 ] && return 2
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -KILL -"$pid" 2>/dev/null || return 2
+  i=0
+  while [ "$i" -lt 20 ]; do
+    kill -0 -"$pid" 2>/dev/null || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 2
+}
+
+# The owned handling interface: durably and idempotently record that a
+# captured result has been fully handled, keyed by the exact source id and
+# sequence generation. Serialized under the same per-source boundary as every
+# other mutation here, on top of the marker's own atomic O_EXCL create, so a
+# caller can trust the reported first-time/repeat distinction to authorize a
+# paired external effect at most once.
+cmd_handled() {
+  local id=${1-} seq=${2-} status
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  fm_procevent_mark_handled "$STATE" "$id" "$seq"
+  status=$?
+  fm_procevent_source_lock_release "$id"
+  case "$status" in
+    0) printf 'handled: %s %s\n' "$id" "$seq" ;;
+    1) printf 'already-handled: %s %s\n' "$id" "$seq" ;;
+    *) die "cannot durably record handling: $id $seq" ;;
+  esac
+}
+
+cmd_retire() {
+  local id=${1-} owner='' pid='' token='' identity='' stop_state
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if [ -e "$(fm_procevent_claim_path "$id")" ]; then
+    if ! fm_procevent_claim_load_locked "$id" 2>/dev/null; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot safely read source ownership: $id"
+    fi
+    if [ "$FM_PROCEVENT_CLAIM_HOME" = "$FM_HOME" ]; then
+      owner=$FM_PROCEVENT_CLAIM_HOME
+      pid=$FM_PROCEVENT_CLAIM_PID
+      token=$FM_PROCEVENT_CLAIM_TOKEN
+      identity=$FM_PROCEVENT_CLAIM_IDENTITY
+      stop_runner_pid "$pid" "$identity"
+      stop_state=$?
+      if [ "$stop_state" -eq 2 ]; then
+        fm_procevent_source_lock_release "$id"
+        die "cannot confirm runner identity; source remains registered: $id"
+      fi
+      if ! fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token"; then
+        fm_procevent_source_lock_release "$id"
+        die "cannot release source ownership: $id"
+      fi
+      rm -f -- "$(staging_file "$id" "$token")"
+    fi
+  fi
+  rm -f -- "$(source_file "$id")"
+  rm -f -- "$(runner_file "$id")"
+  fm_procevent_source_lock_release "$id"
+  printf 'retired: %s\n' "$id"
+}
+
+sweep_add_id() {
+  local id=$1
+  case "$SWEEP_IDS" in
+    *$'\n'"$id"$'\n'*) ;;
+    *) SWEEP_IDS+="$id"$'\n' ;;
+  esac
+}
+
+sweep_relevant_state() {
+  local path owner
+  for path in "$REG"/*.source "$REG"/*.runner; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      return 0
+    fi
+  done
+  for path in "$(fm_procevent_claim_root)"/*.claim; do
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    IFS= read -r owner < "$path" 2>/dev/null || continue
+    [ "$owner" = "$FM_HOME" ] && return 0
+  done
+  return 1
+}
+
+sweep_source_preflight() {
+  local id=$1 state
+  fm_procevent_source_lock_acquire "$id" || return 1
+  if [ -e "$(fm_procevent_claim_path "$id")" ] || [ -L "$(fm_procevent_claim_path "$id")" ]; then
+    if ! fm_procevent_claim_load_locked "$id" 2>/dev/null; then
+      fm_procevent_source_lock_release "$id"
+      return 1
+    fi
+    if [ "$FM_PROCEVENT_CLAIM_HOME" = "$FM_HOME" ]; then
+      fm_procevent_pid_state "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_IDENTITY"
+      state=$?
+      if [ "$state" -eq 2 ]; then
+        fm_procevent_source_lock_release "$id"
+        return 1
+      fi
+    fi
+  fi
+  fm_procevent_source_lock_release "$id"
+}
+
+cmd_sweep_home() {
+  local preflight_only=${1-} path id owner attempted=0 failed=0
+  [ -z "$preflight_only" ] || [ "$preflight_only" = --preflight ] || usage
+  SWEEP_IDS=$'\n'
+  for path in "$REG"/*.source; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      id=${path##*/}; id=${id%.source}
+      if fm_procevent_source_id_valid "$id"; then
+        sweep_add_id "$id"
+      else
+        failed=$((failed + 1))
+      fi
+    fi
+  done
+  for path in "$(fm_procevent_claim_root)"/*.claim; do
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    IFS= read -r owner < "$path" 2>/dev/null || continue
+    [ "$owner" = "$FM_HOME" ] || continue
+    id=${path##*/}; id=${id%.claim}
+    if fm_procevent_source_id_valid "$id"; then
+      sweep_add_id "$id"
+    else
+      failed=$((failed + 1))
+    fi
+  done
+  for path in "$REG"/*.runner; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      id=${path##*/}; id=${id%.runner}
+      if ! fm_procevent_source_id_valid "$id"; then
+        failed=$((failed + 1))
+      else
+        case "$SWEEP_IDS" in
+          *$'\n'"$id"$'\n'*) ;;
+          *) failed=$((failed + 1)) ;;
+        esac
+      fi
+    fi
+  done
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    sweep_source_preflight "$id" || failed=$((failed + 1))
+  done <<< "$SWEEP_IDS"
+  if [ "$failed" -ne 0 ]; then
+    printf 'error: process-event home sweep preflight failed: attempted=0 failed=%s\n' "$failed" >&2
+    return 1
+  fi
+  if [ "$preflight_only" = --preflight ]; then
+    printf 'sweep preflight: ready\n'
+    return 0
+  fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    attempted=$((attempted + 1))
+    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-procevent.sh" retire "$id"; then
+      failed=$((failed + 1))
+    fi
+  done <<< "$SWEEP_IDS"
+  if [ "$failed" -ne 0 ] || sweep_relevant_state; then
+    printf 'error: process-event home sweep incomplete: attempted=%s failed=%s\n' "$attempted" "$failed" >&2
+    return 1
+  fi
+  printf 'swept: attempted=%s\n' "$attempted"
+}
+
+cmd_list() {
+  local rec id adapter owner pending
+  if ! fm_procevent_any_registered "$STATE"; then
+    printf 'no sources registered\n'
+    return 0
+  fi
+  printf '%-28s %-12s %-10s %s\n' SOURCE ADAPTER OWNER PENDING
+  for rec in "$REG"/*.source; do
+    [ -e "$rec" ] || continue
+    id=${rec##*/}; id=${id%.source}
+    adapter=$(read_adapter "$id" 2>/dev/null || echo '?')
+    fm_procevent_source_lock_acquire "$id" || continue
+    fm_procevent_claim_state_locked "$id"
+    case "$?" in 0) owner=live ;; 1) owner=none ;; 3) owner=orphaned ;; *) owner=uncertain ;; esac
+    fm_procevent_source_lock_release "$id"
+    pending=$(fm_procevent_pending "$STATE" | grep -c "/$id\." || true)
+    printf '%-28s %-12s %-10s %s\n' "$id" "$adapter" "$owner" "$pending"
+  done
+}
+
+case "${1-}" in
+  register)  shift; cmd_register "$@" ;;
+  start)     shift; cmd_start_public "$@" ;;
+  _start)    shift; cmd_start "$@" ;;
+  reconcile) shift; cmd_reconcile "$@" ;;
+  handled)   shift; cmd_handled "$@" ;;
+  retire)    shift; cmd_retire "$@" ;;
+  sweep-home) shift; cmd_sweep_home "$@" ;;
+  list)      shift; cmd_list "$@" ;;
+  ''|-h|--help|help) usage ;;
+  *) die "unknown command: $1" ;;
+esac

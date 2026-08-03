@@ -48,6 +48,28 @@ set -u
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_AFK_LAUNCH_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+case "$FM_HOME" in
+  /*) ;;
+  *)
+    FM_AFK_LAUNCH_HOME_INPUT=$FM_HOME
+    FM_HOME=$(CDPATH='' cd -- "$FM_AFK_LAUNCH_HOME_INPUT" 2>/dev/null && pwd -P) || {
+      echo "error: FM_HOME directory cannot be resolved: $FM_AFK_LAUNCH_HOME_INPUT" >&2
+      exit 1
+    }
+    ;;
+esac
+if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+  case "$FM_STATE_OVERRIDE" in
+    /*) ;;
+    *)
+      FM_AFK_LAUNCH_STATE_INPUT=$FM_STATE_OVERRIDE
+      FM_STATE_OVERRIDE=$(CDPATH='' cd -- "$FM_AFK_LAUNCH_STATE_INPUT" 2>/dev/null && pwd -P) || {
+        echo "error: FM_STATE_OVERRIDE directory cannot be resolved: $FM_AFK_LAUNCH_STATE_INPUT" >&2
+        exit 1
+      }
+      ;;
+  esac
+fi
 FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
@@ -77,9 +99,10 @@ fm_afk_launch_lock_owned() {
 }
 
 fm_afk_launch_lock_acquire() {
-  local i incomplete=0 identity
+  local attempt=0 incomplete=0 identity
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
-  for i in $(seq 1 200); do
+  while [ "$attempt" -lt 200 ]; do
+    attempt=$((attempt + 1))
     if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
       if ! printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"; then
         rm -rf "$FM_AFK_LAUNCH_LOCK"
@@ -257,12 +280,13 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
 }
 
 fm_afk_launch_wait_ready() {  # <backend> <target>
-  local backend=$1 target=$2 i
+  local backend=$1 target=$2 attempt=0
   if [ -n "${FM_AFK_LAUNCH_ENTRY:-}" ]; then
     fm_afk_launch_terminal_alive "$backend" "$target"
     return
   fi
-  for i in $(seq 1 100); do
+  while [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
     daemon_lock_held_by_live_daemon && return 0
     fm_afk_launch_terminal_alive "$backend" "$target" || return 1
     sleep 0.05
@@ -287,8 +311,9 @@ fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorde
 }
 
 fm_afk_launch_herdr_recover_created() {  # <session> <label>
-  local session=$1 label=$2 workspaces ws_count wsid panes pane_count pane i
-  for i in $(seq 1 20); do
+  local session=$1 label=$2 workspaces ws_count wsid panes pane_count pane attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    attempt=$((attempt + 1))
     workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || { sleep 0.05; continue; }
     ws_count=$(printf '%s' "$workspaces" | jq --arg want "$label" \
       '[.result.workspaces[]? | select(.label == $want)] | length' 2>/dev/null) || { sleep 0.05; continue; }
@@ -437,6 +462,10 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
 
 fm_afk_launch_start() {
   local captain_target captain_backend backup artifact had_afk=0 result
+  if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
+    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
+    return 1
+  fi
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
     fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
@@ -503,6 +532,10 @@ fm_afk_launch_start() {
 fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
+    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
+    return 1
+  fi
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
@@ -595,10 +628,15 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
-  fm_afk_launch_lock_acquire || return 1
+  # Traps first, lock second. Acquiring before the handlers exist leaves a
+  # window where a signal terminates this process by default action and leaks
+  # the lock directory, which then blocks the next away-mode launch until the
+  # stale-owner reclaim path clears it. fm_afk_launch_lock_release only removes
+  # a lock this process owns, so arming it before acquisition is safe.
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  fm_afk_launch_lock_acquire || return 1
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;

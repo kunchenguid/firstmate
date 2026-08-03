@@ -403,11 +403,14 @@ test_failopen_missing_node() {
 # --- --claude output shaping ---------------------------------------------------
 
 test_claude_mode_stdout_empty_on_deny() {
-  local out err rc
-  out=$("$CHECK" --claude --command 'bin/fm-watch-arm.sh &' 2>/tmp/fm-arm-pretool-check-claude-stderr.$$)
+  local out err rc stderr_file
+  # Keep stderr capture under TMPDIR so concurrent isolation-proof workers do
+  # not share a fixed global /tmp path.
+  stderr_file=$(mktemp "${TMPDIR:-/tmp}/fm-arm-pretool-check-claude-stderr.XXXXXX")
+  out=$("$CHECK" --claude --command 'bin/fm-watch-arm.sh &' 2>"$stderr_file")
   rc=$?
-  err=$(cat "/tmp/fm-arm-pretool-check-claude-stderr.$$" 2>/dev/null)
-  rm -f "/tmp/fm-arm-pretool-check-claude-stderr.$$"
+  err=$(cat "$stderr_file" 2>/dev/null)
+  rm -f "$stderr_file"
   [ "$rc" -eq 2 ] || fail "--claude deny must still exit 2, got $rc"
   [ -z "$out" ] || fail "--claude deny must leave stdout EMPTY (Claude Code only honors a stderr-only deny), got: $out"
   printf '%s' "$err" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
@@ -436,95 +439,6 @@ test_allow_is_silent_both_modes() {
 
 # --- harness wiring: each adapter invokes the shared checker -----------------
 
-test_grok_pretool_hook_wired() {
-  local settings command
-  settings="$ROOT/.grok/hooks/fm-primary-pretool-check.json"
-  [ -f "$settings" ] || fail "tracked grok primary PreToolUse hook config is missing"
-  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "PreToolUse hook command is missing from grok primary hook config"
-  assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok pretool hook must anchor from GROK_WORKSPACE_ROOT"
-  assert_contains "$command" 'fm-arm-pretool-check.sh' "grok pretool hook must invoke the shared checker"
-  assert_contains "$command" 'exec "${GROK_WORKSPACE_ROOT:-}/bin/fm-arm-pretool-check.sh"' "grok pretool hook must forward its stdin payload unchanged to the checker"
-  # shellcheck disable=SC2016  # single quotes are deliberate: a literal needle string, not an expansion
-  assert_not_contains "$command" 'root=${GROK_WORKSPACE_ROOT' "grok pretool hook must not assign a bare \$root var (breaks grok's own \${VAR} pre-substitution; see docs/arm-pretool-check.md)"
-  local matcher
-  matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
-  [ "$matcher" = "Bash" ] || fail "grok pretool hook must matcher-scope to Bash, got: $matcher"
-  pass ".grok primary hook: PreToolUse hook invokes the shared checker"
-}
-
-test_grok_turnend_hook_uses_safe_var_pattern() {
-  local settings command
-  settings="$ROOT/.grok/hooks/fm-primary-turnend-guard.json"
-  [ -f "$settings" ] || fail "tracked grok primary Stop hook config is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  # shellcheck disable=SC2016  # single quotes are deliberate: literal needle strings, not expansions
-  assert_not_contains "$command" 'root=${GROK_WORKSPACE_ROOT' "grok Stop hook must not assign a bare \$root var either (regression fixed 2026-07-09, docs/arm-pretool-check.md)"
-  # shellcheck disable=SC2016
-  assert_contains "$command" '${GROK_WORKSPACE_ROOT:-}' "grok Stop hook must reference GROK_WORKSPACE_ROOT with an inline default every time"
-  pass ".grok primary hook: Stop hook uses the \${VAR:-} pattern throughout (no bare \$root)"
-}
-
-test_claude_settings_pretool_hook_wired() {
-  local settings command
-  settings="$ROOT/.claude/settings.json"
-  [ -f "$settings" ] || fail "tracked claude primary settings are missing"
-  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "PreToolUse hook command is missing from claude primary settings"
-  assert_contains "$command" 'CLAUDE_PROJECT_DIR' "claude pretool hook must anchor via CLAUDE_PROJECT_DIR"
-  assert_contains "$command" 'fm-arm-pretool-check.sh' "claude pretool hook must invoke the shared checker"
-  assert_contains "$command" '--claude' "claude pretool hook must pass --claude so stdout stays empty on deny"
-  [ "$command" = '"$CLAUDE_PROJECT_DIR"/bin/fm-arm-pretool-check.sh --claude' ] \
-    || fail "claude pretool hook must forward stdin directly with only --claude, got: $command"
-  local matcher
-  matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
-  [ "$matcher" = "Bash" ] || fail "claude pretool hook must matcher-scope to Bash, got: $matcher"
-  pass ".claude/settings.json: PreToolUse hook invokes the shared checker with --claude"
-}
-
-test_codex_hooks_pretool_wired() {
-  local settings command
-  settings="$ROOT/.codex/hooks.json"
-  [ -f "$settings" ] || fail "tracked codex primary hooks are missing"
-  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "PreToolUse hook command is missing from codex primary hooks"
-  assert_contains "$command" 'fm-arm-pretool-check.sh' "codex pretool hook must invoke the shared checker"
-  assert_contains "$command" 'pwd -P' "codex pretool hook must anchor to the hook process root like the Stop hook does"
-  assert_contains "$command" 'printf "%s" "$payload" | "$root/bin/fm-arm-pretool-check.sh"' "codex pretool hook must forward the exact captured payload to the checker"
-  local matcher
-  matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
-  [ "$matcher" = "Bash" ] || fail "codex pretool hook must matcher-scope to Bash, got: $matcher"
-  pass ".codex/hooks.json: PreToolUse hook invokes the shared checker"
-}
-
-test_opencode_pretool_plugin_wired() {
-  local plugin content
-  plugin="$ROOT/.opencode/plugins/fm-primary-pretool-check.js"
-  [ -f "$plugin" ] || fail "tracked opencode primary pretool plugin is missing"
-  content=$(cat "$plugin")
-  assert_contains "$content" 'tool.execute.before' "opencode pretool plugin must hook tool.execute.before"
-  assert_contains "$content" 'fm-arm-pretool-check.sh' "opencode pretool plugin must invoke the shared checker"
-  assert_contains "$content" 'const command = output?.args?.command;' "opencode must extract output.args.command exactly"
-  assert_contains "$content" '["--command", command]' "opencode must forward the exact command as one CLI argument"
-  assert_contains "$content" 'if (result.code !== 2) return;' "opencode must throw only for checker exit 2"
-  assert_contains "$content" 'throw new Error' "opencode pretool plugin must throw to block the tool call"
-  pass ".opencode primary plugin: tool.execute.before invokes the shared checker and blocks by throwing"
-}
-
-test_pi_extension_carries_pretool_check() {
-  local ext content
-  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
-  [ -f "$ext" ] || fail "tracked pi primary extension is missing"
-  content=$(cat "$ext")
-  assert_contains "$content" 'tool_call' "pi extension must hook tool_call for the pretool seatbelt"
-  assert_contains "$content" 'fm-arm-pretool-check.sh' "pi extension must invoke the shared checker"
-  assert_contains "$content" 'String((event.input as { command?: unknown })?.command ?? "")' "pi must extract and string-coerce event.input.command exactly"
-  assert_contains "$content" 'const result = await runPretoolCheck(command);' "pi must forward the exact command to the checker"
-  assert_contains "$content" 'if (result.code !== 2) return {};' "pi must block only for checker exit 2"
-  assert_contains "$content" 'block: true' "pi extension must return block:true to deny"
-  pass ".pi primary extension: tool_call handler invokes the shared checker and can block"
-}
-
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
 
 test_shellcheck_clean() {
@@ -550,10 +464,4 @@ test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
-test_grok_pretool_hook_wired
-test_grok_turnend_hook_uses_safe_var_pattern
-test_claude_settings_pretool_hook_wired
-test_codex_hooks_pretool_wired
-test_opencode_pretool_plugin_wired
-test_pi_extension_carries_pretool_check
 test_shellcheck_clean

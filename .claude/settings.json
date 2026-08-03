@@ -3,6 +3,17 @@
     "FM_PROJECTS_OVERRIDE": "C:\\Users\\kiman\\firstmate\\armada"
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-sessionstart-nudge.sh"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -16,6 +27,15 @@
             "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --claude"
           }
         ]
+      },
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-subagent-pretool-check.sh --claude"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -23,7 +43,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh"
+            "command": "[ -z \"${GROK_AGENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --claude"
+          },
+          {
+            "type": "command",
+            "command": "[ -z \"${GROK_AGENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-claude-stop-autoarm.sh",
+            "asyncRewake": true,
+            "timeout": 28800
           }
         ]
       }

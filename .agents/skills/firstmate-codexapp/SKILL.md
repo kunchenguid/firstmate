@@ -91,6 +91,7 @@ For Firstmate reconciliation, prefer concrete evidence:
 
 Avoid repeating long transcripts into Firstmate docs or PR bodies.
 Summarize only the host-tool calls, the status-file result, and the archive result.
+When reporting a Desktop-thread result to the captain, translate status prefixes and return-channel evidence through `AGENTS.md` section 9.
 
 ## Archive
 

@@ -5,6 +5,13 @@
 #        fm-x-reply.sh <request_id> [--image <path>] --text-file <path>
 #        fm-x-reply.sh <request_id> [--image <path>] -
 #        fm-x-reply.sh <request_id> --followup [--image <path>] ...
+#        fm-x-reply.sh <request_id> ... --receipt-file <path>
+#
+# --receipt-file <path> writes {request_id, endpoint, chunks, dry_run} to <path>
+# after the reply lands, so a caller that must record HOW MANY messages were
+# posted (bin/fm-public-followup.sh, building a typed delivery receipt) does not
+# have to re-derive the split. Omitted by default and never written on failure,
+# so stdout, exit codes, and every existing caller stay unchanged.
 #
 # The --text-file / stdin forms exist so a caller never has to inline reply text
 # (which may be influenced by a public mention) into a shell command, where shell
@@ -40,6 +47,19 @@
 # relay-side 409 is secondary: after the relay's own cleanup sweep, a very-late
 # call can instead see a benign no-op 200, so fm-x-followup.sh's local
 # window/cap pruning remains the primary guard.
+#
+# Reply platform + split budget are resolved per axis: an explicit
+# FMX_REPLY_PLATFORM / FMX_REPLY_MAX_CHARS env override wins (fm-x-followup passes
+# recorded task-link context this way); otherwise resolution runs the durable
+# per-request context registry -> the still-present inbox payload -> an
+# authoritative relay lookup by request_id (fm-x-lib.sh:fmx_resolve_reply_context).
+# The relay step is confined to a live follow-up so the answer path and every
+# dry-run stay network-free. This is what keeps a delayed request-id follow-up on
+# the ORIGINAL platform's budget even after the inbox is drained and with no task
+# link surviving. FAIL-SAFE: if a --followup reply's platform/budget cannot be
+# authoritatively resolved, this REFUSES with exit 8 (distinct from the 409 exit
+# 9) rather than posting with a locally defaulted budget - firstmate holds and
+# retries it.
 #
 # Long replies auto-split into a numbered thread. X stays within
 # FMX_X_REPLY_MAX_CHARS, default 280. Discord uses
@@ -89,21 +109,35 @@ reply_make_tmp_file() {
   printf -v "$var_name" '%s' "$file"
 }
 
+# write_reply_receipt <chunks> <dry-run-0|1>: record what this reply actually
+# sent, for a caller that has to build a typed delivery receipt. Only ever called
+# on success. A write failure is reported but never changes the exit status: the
+# reply already landed, and claiming otherwise would invite a duplicate post.
+write_reply_receipt() {
+  [ -n "$RECEIPT_FILE" ] || return 0
+  if ! (umask 077; jq -n --arg r "$REQ" --arg e "$ENDPOINT" --argjson c "$1" --argjson d "$2" \
+      '{request_id:$r, endpoint:$e, chunks:$c, dry_run:($d == 1)}' > "$RECEIPT_FILE"); then
+    echo "fm-x-reply: warning: posted but could not write the receipt to $RECEIPT_FILE" >&2
+  fi
+}
+
 usage() {
-  echo "usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] <text> | [--followup] [--image <path>] --text-file <path> | [--followup] [--image <path>] -" >&2
+  echo "usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] <text> | ... --text-file <path> | ... -" >&2
 }
 
 help() {
   cat <<'EOF'
-usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] <text>
-       fm-x-reply.sh <request_id> [--followup] [--image <path>] --text-file <path>
-       fm-x-reply.sh <request_id> [--followup] [--image <path>] -
+usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] <text>
+       fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] --text-file <path>
+       fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] -
 
 Post a public-safe X-mode answer to the relay, or a completion follow-up with --followup.
 
 Options:
   --followup       POST to /connector/followup instead of /connector/answer.
   --image <path>   Attach one local image file; threaded replies attach it to the opener tweet or message.
+  --receipt-file <path>
+                   After a successful reply, write {request_id, endpoint, chunks, dry_run} to <path>.
   --text-file <path>
                    Read reply text from a file instead of the command line.
   -                Read reply text from stdin.
@@ -128,6 +162,7 @@ shift
 # the answer path always has.
 FOLLOWUP=0
 IMAGE_PATH=
+RECEIPT_FILE=
 ARGS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -140,6 +175,15 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       IMAGE_PATH=$1
+      ;;
+    --receipt-file)
+      shift
+      if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+        echo "fm-x-reply: missing --receipt-file path" >&2
+        usage
+        exit 2
+      fi
+      RECEIPT_FILE=$1
       ;;
     *) ARGS+=("$1") ;;
   esac
@@ -189,17 +233,50 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-x-reply: jq not found" >&2; exit 1; }
 
-INBOX_CONTEXT=$(fmx_request_inbox_context "$STATE" "$REQ") || {
-  echo "fm-x-reply: failed to inspect request platform context" >&2
-  exit 1
-}
-REQ_PLATFORM=${FMX_REPLY_PLATFORM:-$(printf '%s' "$INBOX_CONTEXT" | jq -r '.platform // ""')}
-REQ_EXPLICIT_MAX=${FMX_REPLY_MAX_CHARS:-$(printf '%s' "$INBOX_CONTEXT" | jq -r '.reply_max_chars // ""')}
+# Resolve the reply platform + split budget. An explicit env override wins per
+# axis (fm-x-followup passes recorded task-link context this way); otherwise
+# resolve through the durable per-request context registry, then the still-present
+# inbox payload, then - for a follow-up posted live by request_id after the inbox
+# has been drained - an AUTHORITATIVE relay lookup. The relay step is confined to
+# the follow-up path so the answer path and every dry-run stay network-free
+# (fm-x-lib.sh owns the resolution-order contract).
+ALLOW_RELAY=0
+if [ -n "${FMX_REPLY_PLATFORM:-}" ] && [ -n "${FMX_REPLY_MAX_CHARS:-}" ]; then
+  REQ_PLATFORM=${FMX_REPLY_PLATFORM}
+  REQ_EXPLICIT_MAX=${FMX_REPLY_MAX_CHARS}
+else
+  if [ "$FOLLOWUP" = 1 ] && [ -z "$FMX_DRY" ] && [ -n "$FMX_TOKEN" ]; then
+    ALLOW_RELAY=1
+  fi
+  REPLY_CONTEXT=$(fmx_resolve_reply_context "$STATE" "$REQ" "$ALLOW_RELAY") || {
+    echo "fm-x-reply: failed to resolve request platform context" >&2
+    exit 1
+  }
+  REQ_PLATFORM=${FMX_REPLY_PLATFORM:-$(printf '%s' "$REPLY_CONTEXT" | jq -r '.platform // ""')}
+  REQ_EXPLICIT_MAX=${FMX_REPLY_MAX_CHARS:-$(printf '%s' "$REPLY_CONTEXT" | jq -r '.reply_max_chars // ""')}
+fi
 case "$REQ_PLATFORM" in
   discord|x|'') ;;
   twitter) REQ_PLATFORM=x ;;
   *) REQ_PLATFORM= ;;
 esac
+case "$REQ_EXPLICIT_MAX" in
+  ''|*[!0-9]*) REQ_EXPLICIT_MAX= ;;
+esac
+# Was the platform/budget authoritatively resolved by any source (override,
+# registry, inbox, or relay)? Drives the follow-up fail-safe below.
+CONTEXT_RESOLVED=0
+if [ -n "$REQ_PLATFORM" ] && [ -n "$REQ_EXPLICIT_MAX" ]; then
+  CONTEXT_RESOLVED=1
+fi
+
+if [ "$FOLLOWUP" = 1 ] && [ "$CONTEXT_RESOLVED" = 0 ]; then
+  relay_note=
+  [ "$ALLOW_RELAY" = 1 ] && relay_note=", and the relay did not supply the missing value by request_id"
+  printf 'fm-x-reply: refusing follow-up for %s: could not authoritatively determine both the reply platform and explicit budget (local per-request context was incomplete%s). Hold and retry once both values are recoverable.\n' \
+    "$REQ" "$relay_note" >&2
+  exit 8
+fi
 REPLY_MAX=$(fmx_reply_limit_for_platform "$REQ_PLATFORM" "$REQ_EXPLICIT_MAX")
 
 IMAGE_PAYLOAD_FILE=
@@ -242,18 +319,14 @@ fi
 # Preview / dry-run: surface what we WOULD post and stop, without auth or network.
 if [ -n "$FMX_DRY" ]; then
   outbox_dir="$STATE/x-outbox"
-  outbox_file="$outbox_dir/$REQ.json"
-  mkdir -p "$outbox_dir" 2>/dev/null || {
-    echo "fm-x-reply: cannot create dry-run outbox: $outbox_dir" >&2
-    exit 1
-  }
   # The recorded body is the would-be POST body, except image bytes are replaced
   # by a compact marker. A follow-up preview additionally carries an
   # "endpoint":"followup" marker so an outbox record is self-describing.
   OUTREC=$(fmx_reply_outbox_json "$REQ" "$CHUNKS" "$N" "$FOLLOWUP" "$IMAGE_PREVIEW") || {
     echo "fm-x-reply: failed to build dry-run outbox record" >&2; exit 1; }
-  printf '%s\n' "$OUTREC" > "$outbox_file" 2>/dev/null || {
-    echo "fm-x-reply: cannot write dry-run outbox: $outbox_file" >&2
+  printf '%s\n' "$OUTREC" \
+    | fmx_private_artifact_publish_stdin "$outbox_dir" "$REQ.json" 600 || {
+    echo "fm-x-reply: cannot write dry-run outbox: $outbox_dir/$REQ.json" >&2
     exit 1
   }
   if [ "$N" -le 1 ]; then
@@ -264,6 +337,7 @@ if [ -n "$FMX_DRY" ]; then
       "$N" "$FMX_RELAY" "$ENDPOINT" "$REQ" >&2
     printf '%s' "$CHUNKS" | jq -r '.[]' | while IFS= read -r __chunk; do printf '  %s\n' "$__chunk" >&2; done
   fi
+  write_reply_receipt "$N" 1
   printf '%s\n' "$REQ"
   exit 0
 fi
@@ -284,7 +358,14 @@ case "$post_rc" in
 esac
 
 case "$code" in
-  2[0-9][0-9]) printf '%s\n' "$REQ" ;;
+  2[0-9][0-9])
+    if [ "$FOLLOWUP" = 0 ]; then
+      fmx_context_registry_set "$STATE" "$REQ" "$REQ_PLATFORM" "$REQ_EXPLICIT_MAX" 1 2>/dev/null \
+        || echo "fm-x-reply: warning: could not retain reply context for $REQ" >&2
+    fi
+    write_reply_receipt "$N" 0
+    printf '%s\n' "$REQ"
+    ;;
   409)
     if [ "$FOLLOWUP" = 1 ]; then
       if [ -s "$RESPONSE_BODY_FILE" ] && {

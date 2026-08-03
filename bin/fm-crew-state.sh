@@ -8,8 +8,9 @@
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crew's branch, else the pane
-# busy-signature) and reconciles the possibly-stale log against it.
+# no-mistakes run-step attributed to this crew's branch and current code
+# identity, else the pane busy-signature) and reconciles the possibly-stale log
+# against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -19,8 +20,14 @@
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
-#   2. Matching no-mistakes run for this crew's branch, active or terminal
-#      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
+#   2. Matching no-mistakes run for this crew's branch AND current code identity,
+#      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
+#      fallback)? Branch name alone is not enough: a historical run on a reused
+#      branch whose head was rewritten or diverged must not be attributed.
+#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
+#      is an ancestor of the run head (pipeline fix commits advanced the run on
+#      the same line of history). Local work that advanced past the run head, or
+#      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -55,6 +62,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -89,6 +98,7 @@ meta_value() {  # <key>
 
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
+HARNESS=$(meta_value harness)
 [ -n "$KIND" ] || KIND=ship
 
 # A torn-down (or never-created) worktree has no current state to read.
@@ -141,46 +151,19 @@ pane_readable() {  # <target>
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
-# crew_pane_is_busy: the busy-signature fallback, backend-aware the same way -
-# fm_backend_busy_state's native semantic state (herdr's agent.get) when
-# available, else the shared tmux pane-regex reader (fm_pane_is_busy,
-# bin/fm-tmux-lib.sh) unchanged for tmux/unknown.
-#
-# `busy` alone is trusted outright. Both `idle` and unknown/unparseable fall
-# through to the shared tail-regex corroboration, NOT just unknown: herdr's
-# agent.get reports generation state ("working" while the model is streaming
-# a turn, "done"/"idle" once it is not - docs/herdr-backend.md "Busy state"),
-# which is a narrower signal than "this crew's turn/tool call is still in
-# progress". A crew blocked on its own long-running foreground tool call (e.g.
-# `no-mistakes axi run` without --yes, which blocks synchronously until a gate
-# or outcome - AGENTS.md section 11) is not generating for that whole span, so
-# agent.get can read idle/blocked (bin/backends/herdr.sh maps both to `idle`)
-# while the pane's own rendered text still shows the harness's busy banner
-# (BUSY_REGEX, e.g. "esc to interrupt") for the entire tool call, exactly like
-# tmux's regex-only reader would correctly report. Trusting herdr's `idle`
-# outright (skipping that corroboration) is what let a still-working crew read
-# as not-busy here, and - combined with a no-mistakes run-step lookup that also
-# missed attribution (see nm_runs_status_for_branch) - as not provably working in
-# fm-classify-lib.sh, triggering an immediate (non-wedge) stale wake instead of
-# the absorb-then-escalate path. A genuinely human-blocked agent (a permission
-# dialog, not mid-tool-call) does not render the busy banner, so this
-# corroboration does not mask that case: it stays correctly not-busy.
-crew_pane_is_busy() {  # <target>
-  case "$TASK_BACKEND" in
-    tmux) fm_pane_is_busy "$1" ;;
-    *)
-      local bs tail40
-      bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" 2>/dev/null)
-      case "$bs" in
-        busy) return 0 ;;
-        *)
-          tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
-          printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-            | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
-          ;;
-      esac
-      ;;
+# crew_busy_verdict: the crew's semantic busy state from the one contract
+# owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
+# adapter answers from its own lifecycle record; Grok answers from its
+# isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
+# when no record exists, but its native `idle` is NOT, because agent.get
+# reports generation state (idle while a crew blocks on its own long-running
+# foreground tool call) rather than turn state.
+crew_busy_verdict() {  # <target>
+  local tail40=''
+  case "$HARNESS" in
+    grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
+  fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -371,7 +354,7 @@ nm_ci_checks_state() {
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br
+  local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -381,7 +364,15 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${row#* }
     rest=$(trim "$rest")
     br=${rest%% *}
+    rest=${rest#* }
+    rest=$(trim "$rest")
+    sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
+      # Same code-identity rule as axi status: skip a same-branch row whose
+      # short-sha does not match this worktree (rewritten or advanced tip).
+      if ! nm_coarse_head_matches_worktree "$sha"; then
+        continue
+      fi
       printf '%s' "$st"
       return 0
     fi
@@ -392,6 +383,43 @@ nm_runs_status_for_branch() {  # <branch>
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+
+# 0 if the active axi-status run's head field matches this worktree's code
+# identity. Branch match is a precondition (caller). Rules:
+#   - missing/empty head field: cannot bind; reject the run
+#   - equal commits (short or full SHA): match
+#   - worktree HEAD is an ancestor of run head: match (pipeline fix commits on
+#     the same history advanced the run tip)
+#   - run head is a strict ancestor of worktree HEAD: no match (local work
+#     advanced outside the run)
+#   - diverged / run head not in this worktree: no match (rewritten branch tip)
+nm_run_head_matches_worktree() {
+  local run_head local_full run_full
+  run_head=$(strip_quotes "$(nm_field head)")
+  [ -n "$run_head" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  [ "$run_full" = "$local_full" ] && return 0
+  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
+# sha for this branch row matches the worktree head under the same rules as
+# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
+nm_coarse_head_matches_worktree() {  # <short-sha>
+  local run_head=$1 local_full run_full
+  [ -n "$run_head" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  [ "$run_full" = "$local_full" ] && return 0
+  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
 
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
@@ -406,11 +434,12 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
     else
-      # The active-or-most-recent run is for another branch (the CLI is alive
-      # and answered; only the attribution missed) - try the coarse fallback.
+      # The active-or-most-recent run is for another branch, or same branch with
+      # a rewritten/diverged head (the CLI is alive and answered; only the
+      # attribution missed) - try the coarse fallback.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
@@ -477,7 +506,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       fcount=$(nm_gate_findings_count)
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
       if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
-        RUN_DETAIL="$RUN_DETAIL (ask-user: captain decision)"
+        RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
       fi
     else
       case "$status" in
@@ -551,9 +580,17 @@ fi
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
-# signature is not meaningful for them; read their state from the status log only.
-if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
-  emit working pane "harness busy"
+# state is not meaningful for them; read their state from the status log only.
+# Only an exact busy verdict reports working here, and only an exact idle
+# verdict permits the status-log fallback below. Missing, malformed, stale, or
+# unverified semantic state remains unknown.
+if [ "$KIND" != secondmate ]; then
+  BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+  case "${BUSY_VERDICT%% *}" in
+    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    idle) ;;
+    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+  esac
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real
