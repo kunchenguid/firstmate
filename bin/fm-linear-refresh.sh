@@ -122,7 +122,10 @@ while :; do
   ' "$TMP/page.json" >> "$TMP/linear.tsv"
   [ "$(jq -r '.data.issues.pageInfo.hasNextPage' "$TMP/page.json")" = "true" ] || break
   cursor=$(jq -c '.data.issues.pageInfo.endCursor' "$TMP/page.json")
-  [ "$page" -lt 50 ] || { echo "linear: stopped paginating after 50 pages" >&2; break; }
+  if [ "$page" -ge 50 ]; then
+    echo "linear: could not read the existing issues (Linear unreachable, unauthenticated, or too slow); refresh did not run" >&2
+    exit 3
+  fi
 done
 
 # Scope to one team when asked, so a workspace mirroring several backlogs stays

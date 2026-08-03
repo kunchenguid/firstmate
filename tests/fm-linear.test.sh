@@ -475,6 +475,23 @@ pass "refresh treats success:false as failure and continues remaining items"
 
 # --- 10. refresh degrades quietly -------------------------------------------
 
+new_home refreshbound
+printf 'LINEAR_API_KEY=lin_api_test\nLINEAR_TEAM_KEY=PSY\n' > "$HOME_DIR/.env"
+cat > "$HOME_DIR/data/backlog.md" <<'MD'
+# Backlog
+
+## Queued
+- [ ] 099-brandnew - Must not be created from an incomplete listing (repo: p)
+MD
+: > "$HOME_DIR/data/done-archive.md"
+jq -cn '{data:{issues:{pageInfo:{hasNextPage:true,endCursor:"next"},nodes:[]}}}' > "$FAKE_DIR/fmList.json"
+out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-linear-refresh.sh" --dry-run 2>&1); rc=$?
+expect_code 3 "$rc" "a bounded incomplete listing is unavailable"
+assert_contains "$out" "refresh did not run" "a bounded incomplete listing aborts refresh"
+n=$(grep -c '^fmCreate\|^fmUpdate\|^fmState\|^fmAttach' "$FAKE_DIR/calls.log" || true)
+[ "$n" = 0 ] || fail "an incomplete listing issued $n mutations"
+pass "refresh aborts without mutations when listing pagination reaches its bound"
+
 new_home refreshdown
 : > "$HOME_DIR/.env"
 mkdir -p "$HOME_DIR/data"; printf '# Backlog\n' > "$HOME_DIR/data/backlog.md"
