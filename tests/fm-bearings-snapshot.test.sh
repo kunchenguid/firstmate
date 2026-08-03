@@ -44,6 +44,19 @@ SH
 echo "gh $*" >> "$NET_LOG"
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
 if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
+if [ "${FAKE_GH_OVERSIZED:-0}" = 1 ]; then
+  padding=$(printf '%01500d' 0 | tr 0 x)
+  printf '['
+  i=1
+  while [ "$i" -le 100 ]; do
+    [ "$i" -eq 1 ] || printf ','
+    printf '{"number":%s,"title":"Synthetic %s","url":"https://example.invalid/%s/%s","headRefName":"fm/synthetic-%s","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}' \
+      "$i" "$i" "$padding" "$i" "$i"
+    i=$((i + 1))
+  done
+  printf ']\n'
+  exit 0
+fi
 if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
   cat <<'JSON'
 [{"number":1,"title":"One","url":"https://github.com/acme/repo/pull/1","headRefName":"fm/one","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":2,"title":"Two","url":"https://github.com/acme/repo/pull/2","headRefName":"fm/two","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":3,"title":"Three","url":"https://github.com/acme/repo/pull/3","headRefName":"fm/three","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}]
@@ -1084,6 +1097,24 @@ test_pr_repository_cap_and_expansion() {
   pass "live PR enrichment caps repositories with counted expansion"
 }
 
+test_oversized_pr_aggregates_stream_through_model() {
+  local home fakebin json bytes
+  home=$(make_home oversized-pr-aggregate)
+  write_large_fixture "$home" 2
+  fakebin=$(make_fakebin "$home")
+  : > "$home/net.log"
+  json=$(FM_BEARINGS_PR_LIMIT=100 FAKE_GH_OVERSIZED=1 \
+    run "$home" "$fakebin" --include-prs --all-pr-repos --json)
+  [ "$(grep -c '^gh pr list ' "$home/net.log")" = 2 ] \
+    || fail "expanded repository set was not queried"
+  bytes=$(printf '%s' "$json" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$bytes" -gt 131072 ] \
+    || fail "synthetic PR aggregate did not cross the single-argument ceiling: $bytes bytes"
+  printf '%s' "$json" | jq -e '.candidate_prs | length == 200' >/dev/null \
+    || fail "oversized PR aggregate lost rows during projection"
+  pass "oversized PR aggregates stream through enrichment and projection"
+}
+
 test_per_repository_pr_cap_is_disclosed() {
   local home fakebin json toon
   home=$(make_home pr-row-cap); write_fixture "$home"
@@ -1928,5 +1959,6 @@ test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags
 test_pr_repository_cap_and_expansion
+test_oversized_pr_aggregates_stream_through_model
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
