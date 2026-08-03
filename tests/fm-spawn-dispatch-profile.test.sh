@@ -471,7 +471,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
-  local rec id out status launch config home_real
+  local rec id out status launch config home_real tmp_real
   id=profile-opencode-z7
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
@@ -482,11 +482,12 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
   launch=$(cat "$LAUNCH_LOG")
   home_real=$(cd "$HOME_DIR" && pwd -P)
+  tmp_real=$(cd "/tmp/fm-$id" && pwd -P)
   assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch did not thread model"
-  config="OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\",\"external_directory\":{\"$home_real/state/*\":\"allow\",\"$home_real/data/$id/*\":\"allow\"}}}'"
+  config="OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\",\"external_directory\":{\"$home_real/state/*\":\"allow\",\"$home_real/data/$id/*\":\"allow\",\"$tmp_real/*\":\"allow\"}}}'"
   assert_contains "$launch" "$config" \
-    "opencode launch did not scope external_directory to the task's output paths"
+    "opencode launch did not scope external_directory to the task's output and temp paths"
   assert_contains "$launch" "< '$WT_DIR/.fm/brief.md'" \
     "opencode launch did not read the staged brief"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
@@ -511,13 +512,15 @@ Read all decisions at \`$HOME_DIR/data/plan-review/decisions/*.md\`.
 Read prior status at \`$HOME_DIR/state/prior.status\` and \`state/prior.status\`.
 The helper is \`$ROOT/bin/fm-ensure-agents-md.sh\`.
 The task directory is \`$HOME_DIR/data/$id\` and the prior directory is \`$HOME_DIR/data/prior\`.
+Append your decision to \`$HOME_DIR/data/prior/new-decision.md\`.
+The whole home data root is \`$HOME_DIR/data\` and must never be staged.
 The sibling \`$HOME_DIR/data/prior-two/missing.md\` is not staged.
 Write findings to \`$HOME_DIR/data/$id/report.md\`.
 Append status to \`$HOME_DIR/state/$id.status\`.
 Relative output aliases are \`data/$id/report.md\` and \`state/$id.status\`.
 EOF
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "spawn with firstmate-home references should succeed"
   assert_contains "$out" "spawned $id harness=opencode" "staged-reference spawn did not report opencode"
@@ -526,15 +529,21 @@ EOF
   assert_present "$WT_DIR/.fm/refs/home/data/prior/notes.md" "spawn did not stage the transitive report reference"
   assert_present "$WT_DIR/.fm/refs/home/data/plan-review/decisions/one.md" "spawn did not expand the decision glob"
   assert_present "$WT_DIR/.fm/refs/home/state/prior.status" "spawn did not stage the prior status reference"
-  assert_present "$WT_DIR/.fm/refs/root/bin/fm-ensure-agents-md.sh" "spawn did not stage the firstmate helper reference"
+  [ -e "$WT_DIR/.fm/refs/root/bin/fm-ensure-agents-md.sh" ] \
+    && fail "spawn copied a firstmate program into the writable task worktree"
   staged=$(cat "$WT_DIR/.fm/brief.md")
   assert_not_contains "$staged" "$HOME_DIR/data/prior/report.md" "staged brief retained an absolute firstmate report input"
-  assert_not_contains "$staged" "$ROOT/bin/fm-ensure-agents-md.sh" "staged brief retained an absolute firstmate helper input"
-  assert_contains "$staged" '.fm/refs/home/data/prior/report.md' "staged brief did not rewrite the absolute report input"
-  assert_contains "$staged" '.fm/refs/home/data/prior/notes.md' "staged brief did not rewrite the relative report input"
-  assert_contains "$staged" '.fm/refs/home/data/plan-review/decisions/*.md' "staged brief did not rewrite the decision glob"
-  assert_contains "$staged" '.fm/refs/home/state/prior.status' "staged brief did not rewrite the prior status input"
-  assert_contains "$staged" ".fm/refs/home/data/$id" "staged brief did not rewrite the task directory input"
+  assert_contains "$staged" "$ROOT/bin/fm-ensure-agents-md.sh" \
+    "staged brief repointed a firstmate program away from its real path"
+  assert_contains "$staged" "$WT_DIR/.fm/refs/home/data/prior/report.md" "staged brief did not rewrite the absolute report input to an absolute staged path"
+  assert_contains "$staged" "$WT_DIR/.fm/refs/home/data/prior/notes.md" "staged brief did not rewrite the relative report input"
+  assert_contains "$staged" "$WT_DIR/.fm/refs/home/data/plan-review/decisions/*.md" "staged brief did not rewrite the decision glob"
+  assert_contains "$staged" "$WT_DIR/.fm/refs/home/state/prior.status" "staged brief did not rewrite the prior status input"
+  assert_contains "$staged" "$WT_DIR/.fm/refs/home/data/$id" "staged brief did not rewrite the task directory input"
+  assert_contains "$staged" "decision to \`$HOME_DIR/data/prior/new-decision.md\`" \
+    "a staged parent directory redirected a not-yet-created file underneath it"
+  assert_contains "$staged" "data root is \`$HOME_DIR/data\`" \
+    "spawn staged and rewrote a broad firstmate root"
   assert_contains "$staged" "$HOME_DIR/data/$id/report.md" "scout report output path was not preserved"
   assert_not_contains "$staged" ".fm/refs/home/data/$id/report.md" \
     "a staged parent directory redirected the external scout report output"
@@ -565,7 +574,7 @@ Read \`data/generated/notes.md\` before you start.
 Write findings to \`$HOME_DIR/data/$id/report.md\`.
 EOF
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "crewmate spawn with a project-only data reference should succeed"
   assert_contains "$out" "spawned $id harness=opencode" "project-reference spawn did not report opencode"
