@@ -994,7 +994,7 @@ test_no_run_herdr_unknown_uses_backend_capture() {
 
 # Regression (2026-07 herdr false-surface incident, now solved semantically):
 # herdr's agent.get reports generation state ("working" only while the model is
-# actively streaming - docs/herdr-backend.md "Busy state"), not "this crew's
+# actively streaming - docs/herdr-backend.md "Current transport behavior"), not "this crew's
 # turn is still in progress". A crew blocked on its own long-running foreground
 # `no-mistakes axi run` (no --yes; blocks until a gate or outcome) is not
 # generating for that whole span, so agent.get reads idle. The crew's own

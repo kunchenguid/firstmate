@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-backend-herdr-workspace-per-home-e2e.test.sh - mandatory ISOLATED
-# end-to-end real-herdr test for the P3 "workspace-per-home" pass (AGENTS.md
-# task herdr-sm-spaces-k4). Drives the REAL bin/fm-spawn.sh and
+# end-to-end real-herdr test for the per-home workspace behavior documented in
+# docs/herdr-backend.md "Watching and task containers". Drives the REAL bin/fm-spawn.sh and
 # bin/fm-teardown.sh (not just adapter primitives), because the requirement
 # under test - a --secondmate spawn's tab landing in the secondmate's OWN
 # herdr workspace, and a crewmate spawned FROM a secondmate home landing there
@@ -136,7 +136,7 @@ pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmat
 
 # --- 2. the PRIMARY spawns a secondmate: its tab lands in the SECONDMATE's own space ---
 # (fm-spawn.sh's herdr case arm shadows FM_HOME to the secondmate's home for
-# exactly this call - AGENTS.md task herdr-sm-spaces-k4, requirement 3.)
+# exactly this call.)
 
 SM_OUT="$TMP_ROOT/sm.out"; SM_ERR="$TMP_ROOT/sm.err"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \

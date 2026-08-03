@@ -149,7 +149,7 @@ fm_backend_tmux_current_command() {  # <target>
 
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
-# shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
+# shared state vocabulary and docs/tmux-backend.md "Current behavior and safety" for
 # the empirical basis. Tmux silently falls back to the active window when a
 # named target is absent, so the exact recorded window must appear in a
 # successful session inventory before its foreground command can be trusted.

@@ -2828,7 +2828,7 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
 
 # --- composer_state: unbordered (bare) composer rows -------------------------
 # Regression coverage for the away-mode redelivery-loop incident
-# (docs/herdr-backend.md "Incident (2026-07-07)"): real claude and codex
+# (docs/herdr-backend.md "Current transport behavior"): real claude and codex
 # composer rows carry NO border glyph at all - the fixtures below are captured
 # verbatim (character-for-character) from a real herdr session running real
 # `claude`/`codex` (see the dated evidence entry). Before the fix these all
@@ -2984,7 +2984,7 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
 # Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
 # fm_backend_herdr_send_text_submit now uses instead of composer scraping
-# (docs/herdr-backend.md "Native agent-state submit confirmation").
+# (docs/herdr-backend.md "Current transport behavior").
 
 test_wait_for_working_returns_busy_on_first_poll() {
   local dir log resp fb out calls
@@ -3461,7 +3461,7 @@ EOF
 #
 # Root cause and fix are documented at
 # fm_backend_herdr_workspace_prune_seeded_default_tab in bin/backends/herdr.sh
-# and docs/herdr-backend.md's "Default-tab prune" section. These three tests
+# and docs/herdr-backend.md's "Default-tab prune safety" section. These three tests
 # cover the acceptance bar directly: an ADOPTED workspace's tab is never a
 # prune candidate (regardless of label or count), a freshly CREATED
 # workspace's seeded default tab IS pruned (already covered above by

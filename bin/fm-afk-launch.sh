@@ -3,7 +3,7 @@
 # launch it in a NON-VISIBLE tracked terminal per backend, record its exact id,
 # tear it down by that exact id, and reconcile a leaked one after a crash.
 #
-# Why this exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
+# Why this exists (docs/herdr-backend.md "Away-mode supervisor support"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
 # terminal it is already in. Harnesses with a native in-pane tracked-background
 # tool (claude, grok) run it there directly and it is fine. A harness with NO

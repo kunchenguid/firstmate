@@ -310,7 +310,7 @@ fm_backend_cmux_container_ensure() {
 # relocation is already outside the supported recovery contract. Derivation
 # itself lives in bin/fm-backend-hometag-lib.sh, shared with zellij's
 # identical shared-namespace collision fix (docs/zellij-backend.md
-# "Home-scoped tab titles").
+# "Task shape and home isolation").
 fm_backend_cmux_home_label() {
   fm_backend_hometag
 }
@@ -579,7 +579,7 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
 # classifying the composer row specifically avoids that false positive, so
 # the retry loop correctly sends a second Enter when needed. Herdr's adapter
 # has since moved its own confirmation to a native agent-state read instead
-# (docs/herdr-backend.md "Native agent-state submit confirmation"); cmux has
+# (docs/herdr-backend.md "Current transport behavior"); cmux has
 # no analogous native primitive, so this composer-row approach remains
 # cmux's own confirmation strategy. Echoes empty|pending|unknown|send-failed, a
 # subset of the proof-carrying submit vocabulary.
@@ -624,7 +624,8 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
 # every other backend's `kill` `|| true` contract). A cmux task owns one
 # workspace, so teardown reclaims that workspace and all of its surfaces.
 #
-# The selected-workspace teardown bug (docs/cmux-backend.md "Closing the last
+# The selected-workspace teardown bug (docs/cmux-backend.md "Current operation
+# and safety": closing the last
 # workspace in a window"): cmux keeps every window at >=1 workspace, so
 # `close-workspace` on the ONLY workspace in its window silently no-ops - it
 # still returns `OK`, but the workspace stays, which is exactly what left a

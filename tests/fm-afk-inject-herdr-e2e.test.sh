@@ -27,7 +27,7 @@
 # idle/working/idle cycle around each submission, because
 # fm_backend_herdr_send_text_submit's confirmation is native agent-state
 # (agent get), not composer content, since the 2026-07-07 incident fix
-# (docs/herdr-backend.md "Native agent-state submit confirmation") - a pane
+# (docs/herdr-backend.md "Current transport behavior") - a pane
 # that only draws composer text without being a registered agent would read
 # agent_not_found forever and never confirm a submission.
 set -u
@@ -139,7 +139,7 @@ EOF
 # pane report-agent` and reports idle/working transitions around each
 # submission: fm_backend_herdr_send_text_submit's confirmation is now native
 # agent-state (agent get), not composer content (docs/herdr-backend.md
-# "Native agent-state submit confirmation"), so a synthetic pane that only
+# "Current transport behavior"), so a synthetic pane that only
 # draws composer TEXT but is never registered as an agent would report
 # agent_not_found forever - every confirmation attempt would read 'unknown',
 # never 'empty', and the daemon would treat every injection as unconfirmed and

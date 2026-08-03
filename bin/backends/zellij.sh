@@ -20,7 +20,7 @@
 # embedded colon, so splitting on the FIRST colon is trivially correct and
 # mirrors herdr's target-string convention).
 #
-# Home-scoped tab titles (closes a cross-home collision gap): because every
+# Task shape and home isolation (closes a cross-home collision gap): because every
 # task in every firstmate home - primary or secondmate - shares this ONE
 # session's tab bar with no per-home split, and zellij enforces no tab-name
 # uniqueness at all, two firstmate homes whose task ids happen to collide
@@ -35,7 +35,7 @@
 # "fm-<id>" title; target_ready, kill, and ad hoc selector fallback still
 # match it, but ONLY when that bare title is unambiguous (exactly one live tab
 # in the session carries it) - see fm_backend_zellij_tab_matches_label and
-# docs/zellij-backend.md "Home-scoped tab titles" for the full migration
+# docs/zellij-backend.md "Task shape and home isolation" for the full migration
 # posture. Moving/relocating a firstmate installation changes its tag
 # (acceptable - recorded worktree paths do not survive a move either).
 #
@@ -62,7 +62,7 @@
 #      contradicts the design report's assumption ("acceptable for tmux and
 #      zellij") and required a different implementation strategy - see
 #      fm_backend_zellij_current_path below and docs/zellij-backend.md
-#      "Worktree-path discovery: pane_cwd does not track a subshell".
+#      "Current operation and safety".
 #   5. `new-tab` DOES steal focus from an attached client with NO flag to
 #      suppress it (unlike herdr's --no-focus and tmux's new-window -d).
 #      Mitigated (fm_backend_zellij_create_task): capture the previously
@@ -292,7 +292,7 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
 # same-named tab from a different firstmate home sharing this one zellij
 # session) refuses rather than silently trusting whichever one happened to
 # match - the migration posture documented in docs/zellij-backend.md
-# "Home-scoped tab titles". One list-tabs call serves every check here (the
+# "Task shape and home isolation". One list-tabs call serves every check here (the
 # scoped check, the bare check, and the ambiguity count all read the SAME
 # already-fetched JSON), so a caller whose fake-CLI fixture supplies exactly
 # one list-tabs response keeps working unchanged.
@@ -314,7 +314,7 @@ fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
 # check is ours, mirroring both tmux's and herdr's adapters. The tab is
 # always created with the home-scoped, tagged title
 # (fm_backend_zellij_scoped_title), never the bare caller-facing label - see
-# the file header's "Home-scoped tab titles" note.
+# the file header's "Task shape and home isolation" note.
 #
 # Focus-steal mitigation (verified real finding, no upstream suppression
 # flag exists): `new-tab` unconditionally focuses the created tab for every
@@ -385,7 +385,7 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 # Mirrors tmux's pane_current_path poll used for worktree-path discovery after
 # `treehouse get`.
 #
-# Verified pitfall (docs/zellij-backend.md "Worktree-path discovery: pane_cwd
+# Verified pitfall (docs/zellij-backend.md "Current operation and safety": pane_cwd
 # does not track a subshell"): `list-panes --json`'s `pane_cwd` DOES reflect a
 # `cd` run directly in the pane's own top-level shell, but stays FROZEN at
 # whatever directory the pane's shell was in when it launched `treehouse get`
@@ -564,8 +564,8 @@ fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
 # fm_backend_zellij_tab_matches_label uses for a single already-known tab:
 # telling apart "our own pre-migration tab" from "another home's same-shaped
 # bare title" in a bulk, no-numeric-id-in-hand sweep is not something this
-# adapter can do safely - see docs/zellij-backend.md "Home-scoped tab
-# titles"). A pre-migration task is still reachable through its recorded
+# adapter can do safely - see docs/zellij-backend.md "Task shape and home
+# isolation"). A pre-migration task is still reachable through its recorded
 # window= meta, which target_ready/kill DO accept via that bare-title
 # fallback. One "<session>:<pane_id>\t<plain fm-<id> label>" line per live,
 # in-home task tab (the home tag is stripped back off before printing, so

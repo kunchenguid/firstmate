@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-backend-herdr-smoke.test.sh - real herdr smoke test for the herdr
 # session-provider adapter (bin/backends/herdr.sh), P2 of
-# data/fm-backend-design-d7 (herdr-addendum.md), extended for the P3
-# workspace-per-home pass (AGENTS.md task herdr-sm-spaces-k4). Mirrors
+# data/fm-backend-design-d7 (herdr-addendum.md), extended with per-home
+# workspace coverage. Mirrors
 # tests/fm-backend-tmux-smoke.test.sh's structure: every other suite fakes the
 # CLI, this one talks to a REAL herdr server - but ALWAYS on a private, named,
 # throwaway HERDR_SESSION (never the default session), so it never touches a
@@ -54,7 +54,7 @@ pass "real herdr: version_check accepts the installed binary's protocol"
 # fm_backend_herdr_container_ensure now echoes
 # "<session>:<workspace_id>\t<seeded_default_tab_id>" (the second field empty
 # when the call ADOPTED a pre-existing workspace rather than creating a fresh
-# one - docs/herdr-backend.md "Default-tab prune"). Split on the guaranteed
+# one - docs/herdr-backend.md "Default-tab prune safety"). Split on the guaranteed
 # single tab character; only fm_backend_herdr_create_task is ever allowed to
 # act on the seeded tab id, and only for the container that just created it.
 CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "container_ensure failed"
@@ -69,8 +69,8 @@ pass "real herdr: container_ensure starts the isolated session's server, creates
 
 # A second container_ensure must reuse (ADOPT) the same workspace (idempotent)
 # and report an EMPTY seeded tab id - the created-vs-adopted gate that fixes
-# the 2026-07-02 self-kill incident (docs/herdr-backend.md "Default-tab
-# prune"): only the call that actually just created a workspace may identify
+# the 2026-07-02 self-kill incident (docs/herdr-backend.md "Default-tab prune
+# safety"): only the call that actually just created a workspace may identify
 # a tab as prunable.
 CONTAINER2_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "second container_ensure failed"
 CONTAINER2=${CONTAINER2_RAW%%$'\t'*}
@@ -111,10 +111,10 @@ pass "real herdr: create_task prunes the freshly-created workspace's seeded defa
 # each against its own independent throwaway tab.
 
 # --- restored-layout husk close-and-replace, against the REAL binary --------
-# (docs/herdr-backend.md "Known gaps" / "ID stability across a server
-# restart"). herdr persists and restores its whole session layout across a
+# (docs/herdr-backend.md "Restart and liveness behavior"). herdr persists and
+# restores its whole session layout across a
 # server restart, and a restored fm-<id> task tab comes back a HUSK: a dead
-# pane, or (verified above and empirically in "ID stability") a plain
+# pane, or (verified above and empirically in "Restart and liveness behavior") a plain
 # agent-less shell. Both throwaway tabs below are independent of $TAB_ID/
 # $PANE_ID/$TARGET (this suite's primary task, which the rest of the file
 # still depends on) so neither scenario disturbs it.
@@ -169,9 +169,9 @@ printf '%s' "$HUSK_WS_TABS" | jq -e --arg t "$NEW_HUSK_TAB_ID" '.result.tabs[] |
 pass "real herdr: create_task closes and replaces a same-labeled tab whose pane hosts no registered agent (the restored-husk shape), leaving the workspace intact"
 fm_backend_herdr_kill "$SESSION:$NEW_HUSK_PANE_ID"
 
-# --- workspace-per-home: a secondmate-shaped home gets its OWN space --------
-# (docs/herdr-backend.md "Task container shape", AGENTS.md task
-# herdr-sm-spaces-k4). Reuses this suite's own isolated $SESSION - a SECOND,
+# --- home isolation: a secondmate-shaped home gets its OWN space ------------
+# (docs/herdr-backend.md "Watching and task containers"). Reuses this suite's
+# own isolated $SESSION - a SECOND,
 # distinct workspace inside the SAME session, never a second session. Placed
 # here (both workspaces' tabs still alive) so the restart-stability check
 # right after it exercises the true multi-workspace shape, not a
@@ -224,7 +224,7 @@ esac
 pass "real herdr: list_live stays scoped to each home's own workspace - neither home sees the other's tasks"
 
 # --- restart stability in the MULTI-workspace shape --------------------------
-# P2 (herdr-verification-p2.md "ID stability") verified this for a single
+# P2 (docs/herdr-backend.md "Restart and liveness behavior") verified this for a single
 # workspace only. Both this suite's workspaces (and their tabs/panes) must
 # still resolve, unchanged, after a `session stop` + fresh server restart, all
 # scoped to this suite's OWN isolated $SESSION - never the default session.

@@ -36,7 +36,7 @@
 # spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
 # carries an explicit `backend=` line.
 #
-# Event-source framing (herdr-addendum "Events as the core abstraction"): a
+# Event-source framing (docs/architecture.md "Event-driven supervision"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
 # task events (status-changed, went-stale, exited) that map onto firstmate's
 # existing signal/stale/check/heartbeat wake vocabulary. The tmux adapter has
@@ -114,7 +114,7 @@ fm_backend_is_known() {  # <name>
 # marker set alongside CMUX_WORKSPACE_ID always means that multiplexer is the
 # innermost, currently-executing layer and must win.
 #
-# cmux FALLBACK signals (docs/cmux-backend.md "Runtime auto-detection" owns
+# cmux FALLBACK signals (docs/cmux-backend.md "Runtime detection" owns
 # the empirical record): cmux's bundled `claude` PATH shim routes through
 # cmux-claude-wrapper, whose passthrough path unsets every CMUX_* variable
 # before exec'ing the real binary - so a claude-harness firstmate launched in
@@ -777,7 +777,8 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 }
 
 # fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
-# native agent-state (herdr-addendum "busy state" row - the first backend
+# native agent-state (docs/herdr-backend.md "Current transport behavior" - the
+# first backend
 # where this gets real semantics beyond pane-regex). Backends with no such
 # primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
 # uses unknown as the cue for harness-scoped pane-tail detection, while
@@ -842,7 +843,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       pane=${target#*:}
       [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
       # fm_backend_herdr_cli (not a raw HERDR_SESSION-only call): verified
-      # empirically (docs/herdr-backend.md "Session targeting") that the bare
+      # empirically (docs/herdr-backend.md "Current transport behavior") that the bare
       # env var alone is NOT reliably honored once another herdr server is
       # already bound on the machine - it silently queries whatever server IS
       # running instead. fm_backend_herdr_cli appends the required --session
@@ -912,8 +913,8 @@ fm_backend_agent_alive() {  # <backend> <target>
 # and for those backends replaces its blind `sleep POLL` with a bounded wait on
 # fm_backend_wait_transition. Every push-capable backend reuses the shared
 # normalized-transition shape and policy table (bin/fm-transition-lib.sh); today
-# only herdr implements the surface (docs/herdr-backend.md "Native
-# pane.agent_status_changed push escalation"). A backend with no native push
+# only herdr implements the surface (docs/herdr-backend.md "Push events and
+# polling fallback"). A backend with no native push
 # reports has-push false and returns 2 from the dispatchers below, so the
 # watcher falls back to its poll loop - the permanent fail-closed backstop.
 

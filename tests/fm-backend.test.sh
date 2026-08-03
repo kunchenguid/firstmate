@@ -39,7 +39,7 @@ fm_git_identity fmtest fmtest@example.invalid
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
 
 # fm_backend_detect's cmux fallback (bundle id + process ancestry,
-# docs/cmux-backend.md "Runtime auto-detection") consults uname, lsappinfo,
+# docs/cmux-backend.md "Runtime detection") consults uname, lsappinfo,
 # and ps. FAKE_NONDARWIN_BIN pins uname to Linux so the whole fallback is
 # deterministically inert for every assertion that expects NO detection,
 # regardless of the ambient runtime this suite itself executes inside (a real
@@ -248,7 +248,7 @@ test_backend_detect_precedence() {
 }
 
 # fm_backend_detect's cmux FALLBACK signals (docs/cmux-backend.md "Runtime
-# auto-detection"): cmux's bundled claude wrapper strips every CMUX_* env var
+# detection"): cmux's bundled claude wrapper strips every CMUX_* env var
 # on its passthrough path, so a claude-under-cmux firstmate has no
 # CMUX_WORKSPACE_ID; detection then falls back to __CFBundleIdentifier and,
 # after that, a process-ancestry walk - macOS-only, and never outranking the
@@ -844,7 +844,7 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 
 # --- symlinked project prefix must not false-refuse the isolation guard -----
 #
-# docs/herdr-backend.md "Known gaps": a real backend's pane_current_path read
+# docs/herdr-backend.md "Active limits": a real backend's pane_current_path read
 # (tmux, herdr) reports the OS-level PHYSICALLY-resolved cwd. When the project
 # itself lives under a symlinked prefix (e.g. macOS's /tmp -> /private/tmp),
 # fm-spawn.sh's PROJ_ABS - a logical `cd && pwd` - differs string-for-string
