@@ -2254,7 +2254,7 @@ test_retention_binds_manifests_to_entry_directories() {
 }
 
 test_watcher_periodically_owns_idle_report_retention() {
-  local old_id=report-retention-watch-old-k2i fresh_id=report-retention-watch-fresh-k2j old_entry fresh_entry
+  local old_id=report-retention-watch-old-k2i fresh_id=report-retention-watch-fresh-k2j old_entry fresh_entry wait_seconds
   write_task "$old_id" ship
   write_required_report "$HOME_DIR/data/$old_id/completion.md" "Watcher-expired report."
   run_stack publish "$old_id" >/dev/null || fail "watch retention old publication failed"
@@ -2264,8 +2264,9 @@ test_watcher_periodically_owns_idle_report_retention() {
   run_stack publish "$fresh_id" >/dev/null || fail "watch retention fresh publication failed"
   fresh_entry=$(run_stack path "$fresh_id") || fail "watch retention fresh path failed"
   old_entry=$(expire_report_entry "$old_entry") || fail "watcher retention fixture could not be aged"
+  wait_seconds=$(fm_test_load_scaled_timeout_seconds 30 150)
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_REPORT_STACK_ROOT="$STACK" \
-    FM_REPORT_RETENTION_INTERVAL=86400 FM_REPORT_RETENTION_TIMEOUT=5 bash -c '
+    FM_REPORT_RETENTION_INTERVAL=86400 FM_REPORT_RETENTION_TIMEOUT="$wait_seconds" bash -c '
       . "$1/bin/fm-watch.sh"
       prune_reports_if_due
       prune_reports_if_due
@@ -3772,7 +3773,7 @@ test_retention_fresh_handoff_is_cohort_bounded_and_continuous() {
 }
 
 test_report_publication_restores_swapped_staging_generation() {
-  local id=report-publish-generation-race-k2t entry ready proceed output pid status staged saved
+  local id=report-publish-generation-race-k2t entry ready proceed output pid status staged saved wait_seconds
   write_task "$id" ship
   write_required_report "$HOME_DIR/data/$id/completion.md" "Original published report."
   run_stack publish "$id" >/dev/null || fail "report generation-race precondition failed"
@@ -3786,7 +3787,8 @@ test_report_publication_restores_swapped_staging_generation() {
   FM_CONTAINED_REPORT_RENAME_TEST_READY="$ready" FM_CONTAINED_REPORT_RENAME_TEST_PROCEED="$proceed" \
     run_stack publish "$id" > "$output" 2>&1 &
   pid=$!
-  if ! IFS= read -r -t 10 staged <&7; then
+  wait_seconds=$(fm_test_load_scaled_timeout_seconds 30 150)
+  if ! IFS= read -r -t "$wait_seconds" staged <&7; then
     kill -TERM "$pid" 2>/dev/null || true
     fail "report generation rename gate did not open: $(cat "$output")"
   fi

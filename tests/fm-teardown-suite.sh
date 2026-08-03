@@ -4760,7 +4760,7 @@ SH
 }
 
 test_surviving_object_storage_is_bound_through_graph_proof() {
-  local case_dir source objects pack redirected marker release teardown_pid rc waited
+  local case_dir source objects pack redirected marker release teardown_pid rc wait_seconds
   case_dir=$(make_case secondmate-object-storage-toctou)
   prepare_secondmate_home_fixture "$case_dir"
   write_secondmate_meta "$case_dir"
@@ -4778,12 +4778,9 @@ test_surviving_object_storage_is_bound_through_graph_proof() {
   FM_TEARDOWN_TEST_OBJECT_SCAN_RELEASE="$release" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
   teardown_pid=$!
-  waited=0
-  while [ ! -f "$marker" ] && [ "$waited" -lt 200 ]; do
-    sleep 0.05
-    waited=$((waited + 1))
-  done
-  if [ ! -f "$marker" ]; then
+  wait_seconds=$(fm_test_load_scaled_timeout_seconds 30 150)
+  if ! FM_TEST_LIVENESS_TIMEOUT_SECONDS="$wait_seconds" \
+    fm_test_wait_for_file "$marker" "$teardown_pid" 0.05; then
     : > "$release"
     wait "$teardown_pid" || true
     fail "object-storage graph proof did not expose its retained-identity boundary"

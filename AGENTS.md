@@ -533,7 +533,7 @@ During the `ci` monitor phase, `bin/fm-crew-state.sh` also reads the ci step log
 - `running`/`fixing`/`ci` - the pipeline is working (a fix round, a test, or CI monitoring); `ci` stays working until the ci log's most recent recognized marker says checks passed or no checks are terminally ready, and a later re-arm or issue marker returns it to working.
 - `awaiting_approval`/`fix_review` - the run is parked waiting on the agent, surfaced as a top-level `awaiting_agent: parked <duration>` line right after `status:` in `axi status`.
   The crewmate owes a response; if it is idle-waiting for the run to advance on its own, steer it to follow no-mistakes' active-gate help.
-- `outcome: passed` or `checks-passed` - the helper reports `done`; for `passed`, it cross-checks the actual GitHub PR state and reports merged, open, closed-without-merge, or unavailable rather than deriving PR state from the pipeline outcome, while `checks-passed` means it is ready for PR review.
+- `outcome: passed` or `checks-passed` - an open PR reports `done` only when the remote-currentness contract owned by `bin/fm-crew-state.sh`'s header succeeds; `unknown` or `stale` always means `do not merge`.
 - `outcome: failed` or `cancelled` - the helper reports `failed`; inspect the run details and recover or report failure with evidence.
 - Red flag - self-fix duplication: a validating crewmate making fresh hand-commits, aborting the run, or re-running it mid-validation is re-doing work the pipeline already owns.
   Steer it back to no-mistakes' respond flow; the pipeline, not the crewmate, applies validation fixes.
@@ -541,6 +541,7 @@ During the `ci` monitor phase, `bin/fm-crew-state.sh` also reads the ci step log
 ### PR ready
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
+Before treating a no-mistakes ready signal as merge input, confirm `bin/fm-crew-state.sh <id>` reports `state: done`; a status-log PR URL alone is not currentness evidence, and `state: unknown` or `state: stale` with `do not merge` blocks this stage.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and GitHub's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
@@ -706,6 +707,7 @@ Inline facts that must survive without a loaded skill:
 ### Stuck-crewmate recovery
 
 On `stale`, `permission-prompt detected`, `permission/system-dialog suspected`, looping, repeated confusion, an answered-by-brief question, an unresponsive pane, or a failed steer, load `stuck-crewmate-recovery`.
+Also load it when no-mistakes reattach reports `drive run: reconcile run ... read response ... socket: i/o timeout`; its home-scoped helper owns the retry and forbids shared-daemon lifecycle changes.
 That playbook escalates from peek, to one-line steer, to harness-specific interrupt, to relaunch with a progress note, to `failed` with evidence.
 
 ## 9. Escalation and captain etiquette

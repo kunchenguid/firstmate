@@ -3427,7 +3427,7 @@ test_failed_continuation_cleanup_restores_predecessor_for_retry() {
 }
 
 test_concurrent_continuations_serialize_before_mutation() {
-  local id rec marker gate first_pid second_pid first_rc second_rc lease_count endpoint_count second_lock_waiter
+  local id rec marker gate first_pid second_pid first_rc second_rc lease_count endpoint_count second_lock_waiter wait_seconds
   id=account-continuation-race-z21d
   rec=$(make_case continuation-race claude "$id")
   read_case "$rec"
@@ -3451,7 +3451,9 @@ test_concurrent_continuations_serialize_before_mutation() {
     fail "first continuation never reached endpoint creation: $(cat "$CASE_DIR/first.out")"
   }
   second_lock_waiter="$CASE_DIR/second-lock-wait-observed"
+  wait_seconds=$(fm_test_load_scaled_timeout_seconds 30 150)
   FM_FAKE_AF_PROFILE=claude-3 FM_FAKE_AF_POOL=explicit \
+    FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS="$wait_seconds" \
     FM_ACCOUNT_TEST_HOOKS=firstmate-account-tests-v1 FM_ACCOUNT_LOCK_WAIT_TEST_OBSERVED="$second_lock_waiter" \
     run_spawn "$id" --continue-account --account-profile claude-3 > "$CASE_DIR/second.out" 2>&1 &
   second_pid=$!

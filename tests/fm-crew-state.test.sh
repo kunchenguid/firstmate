@@ -95,16 +95,51 @@ SH
 #!/usr/bin/env bash
 set -u
 [ "${FM_FAKE_GH_AXI_FAIL:-0}" = 0 ] || exit 1
-[ "${1:-}" = pr ] || exit 2
-[ "${2:-}" = view ] || exit 2
-[ "${3:-}" = 1 ] || exit 2
-[ "${4:-}" = --repo ] || exit 2
-[ "${5:-}" = o/r ] || exit 2
-cat <<EOF
+case "${1:-}" in
+pr)
+  [ "${2:-}" = view ] || exit 2
+  [ "${3:-}" = 1 ] || exit 2
+  [ "${4:-}" = --repo ] || exit 2
+  [ "${5:-}" = o/r ] || exit 2
+  cat <<EOF
 pull_request:
   number: 1
   state: ${FM_FAKE_PR_STATE:-merged}
 EOF
+  ;;
+api)
+  case "${2:-}" in
+  /repos/o/r/pulls/[0-9]*) cat <<EOF
+state: open
+head:
+  ref: fm/test
+  sha: ${FM_FAKE_PR_HEAD:-abc1234deadbeef}
+base:
+  ref: main
+EOF
+    ;;
+  /repos/o/r/commits/*)
+    [ "${FM_FAKE_REMOTE_COMMIT_FAIL:-0}" = 0 ] || exit 1
+    cat <<EOF
+sha: ${FM_FAKE_REMOTE_COMMIT_HEAD:-abc1234cafebabeabc1234cafebabeabc1234caf}
+commit:
+  tree:
+    sha: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+EOF
+    ;;
+  *) exit 2 ;;
+  esac
+  ;;
+*) exit 2 ;;
+esac
+SH
+  cat > "$fb/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${FM_FAIL_ON_LOCAL_COMMIT_LOOKUP:-0}" = 1 ] && [ "${3:-}" = rev-parse ] && [ "${4:-}" = --verify ]; then
+  exit 99
+fi
+exec /usr/bin/git "$@"
 SH
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
@@ -150,7 +185,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh-axi" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh-axi" "$fb/git" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -195,10 +230,15 @@ reset_fakes() {
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   FM_FAKE_PR_STATE=merged
+  FM_FAKE_PR_HEAD=abc1234cafebabeabc1234cafebabeabc1234caf
   FM_FAKE_GH_AXI_FAIL=0
+  FM_FAKE_REMOTE_COMMIT_HEAD=abc1234cafebabeabc1234cafebabeabc1234caf
+  FM_FAKE_REMOTE_COMMIT_FAIL=0
+  FM_FAIL_ON_LOCAL_COMMIT_LOOKUP=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_PR_STATE FM_FAKE_GH_AXI_FAIL
+  export FM_FAKE_PR_STATE FM_FAKE_PR_HEAD FM_FAKE_GH_AXI_FAIL
+  export FM_FAKE_REMOTE_COMMIT_HEAD FM_FAKE_REMOTE_COMMIT_FAIL FM_FAIL_ON_LOCAL_COMMIT_LOOKUP
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -305,6 +345,19 @@ outcome: passed
 EOF
 }
 
+run_checks_passed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "abc1234"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+outcome: checks-passed
+EOF
+}
+
 run_failed() {  # <branch>
   cat <<EOF
 run:
@@ -315,6 +368,18 @@ run:
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+run_completed_without_outcome() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "abc1234"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
 EOF
 }
 
@@ -484,6 +549,28 @@ test_ci_ready_done_log_beats_monitoring_run() {
   pass "ci-ready status log beats monitoring run"
 }
 
+# A status-log URL is an event-log detail, not evidence that it belongs to the
+# current no-mistakes run. Without a PR URL on the exact run object, currentness
+# is unknown even when the log claims checks are green.
+test_ci_ready_log_pr_url_does_not_supply_run_identity() {
+  reset_fakes
+  local d out
+  d=$(new_case ci-ready-log-pr-only)
+  make_repo_on_branch "$d/wt" fm/feat-ci-log-pr-only
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ci-log-pr-only.meta" \
+    "window=fm:fm-feat-ci-log-pr-only" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci-log-pr-only.status"
+  FM_FAKE_AXI_STATUS=$(run_ci_monitoring fm/feat-ci-log-pr-only | sed 's#pr: "https://github.com/o/r/pull/2"#pr: ""#')
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  out=$(run_crew_state "$d" feat-ci-log-pr-only)
+  assert_contains "$out" "state: unknown" "log-only PR URL -> unknown"
+  assert_contains "$out" "currentness is unavailable" "log-only PR URL names missing run evidence"
+  assert_contains "$out" "do not merge" "log-only PR URL is merge-safe"
+  assert_not_contains "$out" "state: done" "event-log PR URL must not authorize done"
+  pass "status-log PR URL is never promoted to current run identity"
+}
+
 # Regression for the PR #252 incident: the crewmate's own status log never got a
 # "done: ... checks green" line (log_reports_ci_ready above does not apply),
 # but the ci step's log tail shows CI is actually green and only waiting on
@@ -524,6 +611,164 @@ test_top_level_ci_checks_green_surfaces_done() {
   assert_contains "$out" "checks green" "top-level ci green detail mentions checks green"
   assert_not_contains "$out" "state: working" "top-level ci green must not stay working"
   pass "top-level ci status uses ci log green marker"
+}
+
+# A completed run is not current merely because it is the most recent run for
+# the branch. If the open PR moved to another head after that run completed,
+# calling the old run "checks green" would authorize a merge of unvalidated
+# code. The PR head is the live publication authority for this decision.
+test_checks_passed_for_older_pr_head_is_stale() {
+  reset_fakes
+  local d; d=$(new_case stale-run-head)
+  make_repo_on_branch "$d/wt" fm/feat-stale-head
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stale-head.meta" "window=fm:fm-feat-stale-head" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-stale-head)"
+  FM_FAKE_RUNS_LIST='completed fm/feat-stale-head abc1234 2026-08-01 23:58 https://github.com/o/r/pull/2'
+  FM_FAKE_PR_HEAD=def5678cafebabedef5678cafebabedef5678caf
+  local out; out=$(run_crew_state "$d" feat-stale-head)
+  assert_contains "$out" "state: stale" "older completed run -> stale"
+  assert_contains "$out" "source: run-step" "stale verdict identifies the run-step"
+  assert_contains "$out" "validated head abc1234" "stale verdict names the validated head"
+  assert_contains "$out" "PR head def5678" "stale verdict names the live PR head"
+  assert_contains "$out" "do not merge" "stale verdict is merge-safe"
+  assert_not_contains "$out" "state: done" "older completed run must not read done"
+  pass "checks-passed run whose PR head moved is reported stale"
+}
+
+test_checks_passed_for_current_pr_head_is_done() {
+  reset_fakes
+  local d; d=$(new_case current-run-head)
+  make_repo_on_branch "$d/wt" fm/feat-current-head
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-current-head.meta" "window=fm:fm-feat-current-head" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-current-head)"
+  FM_FAKE_RUNS_LIST='completed fm/feat-current-head abc1234 2026-08-01 23:58 https://github.com/o/r/pull/2'
+  FM_FAKE_PR_HEAD=abc1234cafebabeabc1234cafebabeabc1234caf
+  local out; out=$(run_crew_state "$d" feat-current-head)
+  assert_contains "$out" "state: done" "current completed run -> done"
+  assert_contains "$out" "checks green" "current completed run retains ready detail"
+  assert_not_contains "$out" "state: stale" "matching PR head is not stale"
+  pass "checks-passed run whose PR head matches remains done"
+}
+
+test_checks_passed_requires_remote_head_resolution() {
+  reset_fakes
+  local d; d=$(new_case unresolved-run-head)
+  make_repo_on_branch "$d/wt" fm/feat-unresolved-head
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unresolved-head.meta" "window=fm:fm-feat-unresolved-head" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-unresolved-head)"
+  FM_FAKE_RUNS_LIST='completed fm/feat-unresolved-head abc1234 2026-08-01 23:58 https://github.com/o/r/pull/2'
+  FM_FAKE_REMOTE_COMMIT_FAIL=1
+  local out; out=$(run_crew_state "$d" feat-unresolved-head)
+  assert_contains "$out" "state: unknown" "unresolved validated head -> unknown"
+  assert_contains "$out" "through GitHub" "resolution failure names the missing remote proof"
+  assert_contains "$out" "do not merge" "resolution failure is merge-safe"
+  assert_not_contains "$out" "state: done" "unresolved validated head must not read done"
+  pass "checks-passed run fails closed when GitHub cannot resolve its head"
+}
+
+test_checks_passed_rejects_same_prefix_different_full_head() {
+  reset_fakes
+  local d; d=$(new_case prefix-collision-head)
+  make_repo_on_branch "$d/wt" fm/feat-prefix-collision
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-prefix-collision.meta" "window=fm:fm-feat-prefix-collision" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-prefix-collision)"
+  FM_FAKE_RUNS_LIST='completed fm/feat-prefix-collision abc1234 2026-08-01 23:58 https://github.com/o/r/pull/2'
+  FM_FAKE_PR_HEAD=abc1234fffffffffffffffffffffffffffffffff
+  local out; out=$(run_crew_state "$d" feat-prefix-collision)
+  assert_contains "$out" "state: stale" "same short prefix with different full head -> stale"
+  assert_contains "$out" "do not merge" "exact-identity mismatch is merge-safe"
+  assert_not_contains "$out" "state: done" "prefix similarity must not authorize done"
+  pass "checks-passed run requires exact full-head equality"
+}
+
+# Regression for PR #71's adversarial review: publication currentness is a
+# remote fact. The exact same remote run and PR state must produce the exact
+# same verdict before and after the worktree happens to fetch that commit.
+test_remote_currentness_is_independent_of_local_fetch() {
+  reset_fakes
+  local d remote_head before after
+  d=$(new_case remote-currentness)
+  make_repo_on_branch "$d/wt" fm/feat-remote-currentness
+  git init -q --bare "$d/remote.git"
+  git -C "$d/wt" remote add origin "$d/remote.git"
+  git -C "$d/wt" push -q -u origin fm/feat-remote-currentness
+  git clone -q --branch fm/feat-remote-currentness "$d/remote.git" "$d/publisher"
+  git -C "$d/publisher" commit -q --allow-empty -m remote-head
+  git -C "$d/publisher" push -q origin fm/feat-remote-currentness
+  remote_head=$(git -C "$d/publisher" rev-parse HEAD)
+  git -C "$d/wt" cat-file -e "$remote_head^{commit}" 2>/dev/null \
+    && fail "remote-only fixture commit unexpectedly exists locally before fetch"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-remote-currentness.meta" \
+    "window=fm:fm-feat-remote-currentness" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS=$(run_checks_passed fm/feat-remote-currentness | sed "s/head: \"abc1234\"/head: \"${remote_head:0:7}\"/")
+  FM_FAKE_RUNS_LIST="completed fm/feat-remote-currentness ${remote_head:0:7} 2026-08-01 23:58 https://github.com/o/r/pull/2"
+  FM_FAKE_PR_HEAD=$remote_head
+  FM_FAKE_REMOTE_COMMIT_HEAD=$remote_head
+  FM_FAIL_ON_LOCAL_COMMIT_LOOKUP=1
+  before=$(run_crew_state "$d" feat-remote-currentness)
+  assert_contains "$before" "state: done" "remote current head is done before local fetch"
+  git -C "$d/wt" fetch -q origin fm/feat-remote-currentness
+  git -C "$d/wt" cat-file -e "$remote_head^{commit}" \
+    || fail "remote fixture commit still absent locally after fetch"
+  after=$(run_crew_state "$d" feat-remote-currentness)
+  [ "$before" = "$after" ] \
+    || fail "local fetch changed remote currentness verdict: before=[$before] after=[$after]"
+  pass "PR-ready currentness depends on remote identity, not incidental local fetch state"
+}
+
+test_earlier_completed_run_is_stale_while_newer_run_active() {
+  reset_fakes
+  local d; d=$(new_case stale-earlier-run)
+  make_repo_on_branch "$d/wt" fm/feat-earlier-run
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-earlier-run.meta" "window=fm:fm-feat-earlier-run" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-earlier-run)"
+  FM_FAKE_PR_HEAD=abc1234cafebabeabc1234cafebabeabc1234caf
+  FM_FAKE_RUNS_LIST='running fm/feat-earlier-run abc1234 2026-08-01 23:59 https://github.com/o/r/pull/2'
+  local out; out=$(run_crew_state "$d" feat-earlier-run)
+  assert_contains "$out" "state: stale" "earlier completed run -> stale"
+  assert_contains "$out" "newer active run exists" "stale verdict names the newer run"
+  assert_contains "$out" "do not merge" "newer-run verdict is merge-safe"
+  assert_not_contains "$out" "state: done" "earlier completed run must not read done"
+  pass "an earlier completed run is stale while a newer branch run is active"
+}
+
+test_completed_run_fails_closed_when_newest_run_is_unavailable() {
+  reset_fakes
+  local d; d=$(new_case unavailable-newest-run)
+  make_repo_on_branch "$d/wt" fm/feat-unavailable-newest
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unavailable-newest.meta" "window=fm:fm-feat-unavailable-newest" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-unavailable-newest)"
+  FM_FAKE_PR_HEAD=abc1234cafebabeabc1234cafebabeabc1234caf
+  FM_FAKE_RUNS_LIST=""
+  local out; out=$(run_crew_state "$d" feat-unavailable-newest)
+  assert_contains "$out" "state: unknown" "unverifiable newest run -> unknown"
+  assert_contains "$out" "could not verify the newest branch run" "unknown verdict names its missing proof"
+  assert_contains "$out" "do not merge" "unverifiable newest-run verdict is merge-safe"
+  assert_not_contains "$out" "state: done" "unverifiable completed run must not read done"
+  pass "a completed run fails closed when newest-run currentness is unavailable"
+}
+
+test_completed_run_without_outcome_fails_closed() {
+  reset_fakes
+  local d; d=$(new_case completed-without-outcome)
+  make_repo_on_branch "$d/wt" fm/feat-no-outcome
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-no-outcome.meta" "window=fm:fm-feat-no-outcome" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_completed_without_outcome fm/feat-no-outcome)"
+  FM_FAKE_RUNS_LIST='completed fm/feat-no-outcome abc1234 2026-08-01 23:58 https://github.com/o/r/pull/2'
+  local out; out=$(run_crew_state "$d" feat-no-outcome)
+  assert_contains "$out" "state: unknown" "outcome-less completed run -> unknown"
+  assert_contains "$out" "no terminal outcome" "unknown verdict names missing terminal evidence"
+  assert_contains "$out" "do not merge" "outcome-less completion is merge-safe"
+  assert_not_contains "$out" "state: done" "outcome-less completion must not authorize done"
+  pass "completed run without a terminal outcome fails closed"
 }
 
 test_ci_monitoring_no_checks_terminal_surfaces_done() {
@@ -708,6 +953,7 @@ test_terminal_passed_does_not_claim_open_pr_merged() {
   fm_write_meta "$d/state/feat-do.meta" "window=fm:fm-feat-do" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-do)"
   FM_FAKE_PR_STATE=open
+  FM_FAKE_RUNS_LIST='completed fm/feat-do abc1234 2026-08-01 23:58 https://github.com/o/r/pull/1'
   local out; out=$(run_crew_state "$d" feat-do)
   assert_contains "$out" "state: done" "passed run with open PR remains terminal"
   assert_contains "$out" "PR open (not merged)" "open PR is reported from GitHub state"
@@ -836,6 +1082,23 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
+test_coarse_completed_run_without_identity_fails_closed() {
+  reset_fakes
+  local d; d=$(new_case coarse-completed-stale)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-completed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-coarse-completed.meta" "window=fm:fm-feat-coarse-completed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST='completed fm/feat-coarse-completed abc1234 2026-08-01 23:58 https://github.com/o/r/pull/2'
+  FM_FAKE_PR_HEAD=def5678cafebabedef5678cafebabedef5678caf
+  local out; out=$(run_crew_state "$d" feat-coarse-completed)
+  assert_contains "$out" "state: unknown" "coarse completed run without exact identity -> unknown"
+  assert_contains "$out" "lacks exact current run identity" "coarse completion names the missing proof"
+  assert_contains "$out" "do not merge" "coarse currentness failure is merge-safe"
+  assert_not_contains "$out" "state: done" "coarse completion alone must not authorize done"
+  pass "coarse completed run without identity fails closed"
+}
+
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
   reset_fakes
   local d; d=$(new_case coarse-ready-other-log)
@@ -849,12 +1112,15 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
   running    fm/feat-coarseready bbbbbbb  2026-07-02 22:05
 EOF
 )"
+  FM_FAKE_PR_HEAD=bbbbbbbcafebabebbbbbbbcafebabebbbbbbbcaf
+  FM_FAKE_REMOTE_COMMIT_HEAD=bbbbbbbcafebabebbbbbbbcafebabebbbbbbbcaf
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
+  assert_contains "$out" "state: unknown" "coarse ready status without run identity -> unknown"
   assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
+  assert_contains "$out" "do not merge" "coarse ready status is merge-safe"
+  assert_not_contains "$out" "state: done" "coarse ready status must not authorize done"
+  pass "coarse checks-green status without identity fails closed"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -980,6 +1246,41 @@ test_no_run_idle_pane_uses_log() {
   assert_contains "$out" "state: parked" "needs-decision log -> parked"
   assert_contains "$out" "source: status-log" "idle pane -> status-log source"
   pass "no run + idle pane uses the status-log verb"
+}
+
+test_empty_run_lookup_rejects_checks_green_log() {
+  reset_fakes
+  local d; d=$(new_case empty-run-ready-log)
+  make_repo_on_branch "$d/wt" fm/feat-empty-ready
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-empty-ready.meta" "window=fm:fm-feat-empty-ready" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-empty-ready.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-empty-ready)
+  assert_contains "$out" "state: unknown" "empty run lookup with ready log -> unknown"
+  assert_contains "$out" "currentness is unavailable" "unknown verdict names missing currentness"
+  assert_contains "$out" "do not merge" "missing run identity is merge-safe"
+  assert_not_contains "$out" "state: done" "stale ready log must not authorize done"
+  pass "empty run lookup rejects a stale checks-green log"
+}
+
+test_skipped_run_lookup_rejects_checks_green_log() {
+  reset_fakes
+  local d; d=$(new_case skipped-run-ready-log)
+  make_repo_on_branch "$d/wt" fm/feat-detached-ready
+  git -C "$d/wt" checkout -q --detach
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-detached-ready.meta" "window=fm:fm-feat-detached-ready" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-detached-ready.status"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-detached-ready)"
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-detached-ready)
+  assert_contains "$out" "state: unknown" "skipped run lookup with ready log -> unknown"
+  assert_contains "$out" "currentness is unavailable" "skipped lookup names missing currentness"
+  assert_contains "$out" "do not merge" "skipped lookup is merge-safe"
+  assert_not_contains "$out" "state: done" "skipped lookup must not authorize done"
+  pass "skipped run lookup rejects a stale checks-green log"
 }
 
 test_no_run_idle_pane_uses_keyed_log() {
@@ -1253,8 +1554,17 @@ test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_log_pr_url_does_not_supply_run_identity
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
+test_checks_passed_for_older_pr_head_is_stale
+test_checks_passed_for_current_pr_head_is_done
+test_checks_passed_requires_remote_head_resolution
+test_checks_passed_rejects_same_prefix_different_full_head
+test_remote_currentness_is_independent_of_local_fetch
+test_earlier_completed_run_is_stale_while_newer_run_active
+test_completed_run_fails_closed_when_newest_run_is_unavailable
+test_completed_run_without_outcome_fails_closed
 test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
@@ -1272,6 +1582,7 @@ test_terminal_passed_clamps_invalid_gh_timeouts_and_fails_closed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_coarse_completed_run_without_identity_fails_closed
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
@@ -1279,6 +1590,8 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
 test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle
 test_no_run_idle_pane_uses_log
+test_empty_run_lookup_rejects_checks_green_log
+test_skipped_run_lookup_rejects_checks_green_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb

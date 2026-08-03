@@ -318,7 +318,7 @@ test_managed_steering_intent_precedes_external_submission() {
 }
 
 test_concurrent_managed_steering_is_serialized_and_atomic() {
-  local dir fb home log trail lock pid rc=0 i count
+  local dir fb home log trail lock pid rc=0 i count wait_seconds
   local pids=()
   dir="$TMP_ROOT/managed-concurrent"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home managed-concurrent)
@@ -330,9 +330,10 @@ test_concurrent_managed_steering_is_serialized_and_atomic() {
     "window=sess:fm-managed-concurrent" "kind=ship" "harness=codex" \
     "generation_id=account:managed-concurrent:attempt-1" "account_profile=codex-2"
 
+  wait_seconds=$(fm_test_load_scaled_timeout_seconds 30 150)
   for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
     PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
-      FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=30 \
+      FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS="$wait_seconds" \
       "$SEND" managed-concurrent "Concurrent managed steer $i." >"$dir/send-$i.out" 2>"$dir/send-$i.err" &
     pids+=("$!")
   done
