@@ -269,6 +269,14 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
+  assert_grep "After committing the implementation, invoke /no-mistakes yourself to validate and ship the PR." "$brief" \
+    "no-mistakes DOD must require the worker to start its own validation run"
+  assert_grep "Do not append \`done:\` or end your turn merely because the pipeline is running." "$brief" \
+    "no-mistakes DOD must forbid ending the turn while the pipeline is active"
+  assert_grep "Poll the run's own status and keep driving it until it reaches a gate that requires firstmate or a terminal outcome." "$brief" \
+    "no-mistakes DOD must require polling through a gate or terminal outcome"
+  assert_grep '"Waiting for the next decision point" is not a valid resting state while the run is active.' "$brief" \
+    "no-mistakes DOD must reject waiting for a decision while the pipeline runs"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
@@ -276,6 +284,26 @@ test_no_mistakes_dod_wording() {
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+}
+
+test_faster_delivery_modes_do_not_wait_for_firstmate() {
+  local home id brief
+  home="$TMP_ROOT/faster-delivery-self-drive-home"
+  write_registry "$home"
+
+  id="brief-direct-self-drive-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Do not end your turn waiting for firstmate to tell you to push or open the PR - those delivery steps are yours." "$brief" \
+    "direct-PR brief must make the worker drive its own push and PR creation"
+
+  id="brief-local-self-drive-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Do not end your turn waiting for firstmate to tell you to rebase or report the ready branch - those delivery steps are yours." "$brief" \
+    "local-only brief must make the worker drive its own rebase and ready report"
+
+  pass "fm-brief.sh: each faster delivery mode owns its steps without waiting for firstmate"
 }
 
 test_ship_project_memory_wording() {
@@ -638,6 +666,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_faster_delivery_modes_do_not_wait_for_firstmate
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

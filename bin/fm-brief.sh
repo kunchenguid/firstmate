@@ -311,6 +311,7 @@ case "$MODE" in
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Do not end your turn waiting for firstmate to tell you to push or open the PR - those delivery steps are yours.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -323,6 +324,7 @@ This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+Do not end your turn waiting for firstmate to tell you to rebase or report the ready branch - those delivery steps are yours.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -333,8 +335,10 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+After committing the implementation, invoke /no-mistakes yourself to validate and ship the PR.
+Do not append \`done:\` or end your turn merely because the pipeline is running.
+Poll the run's own status and keep driving it until it reaches a gate that requires firstmate or a terminal outcome.
+"Waiting for the next decision point" is not a valid resting state while the run is active.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
