@@ -262,6 +262,27 @@ test_agy_spawn_refuses_when_all_hook_roots_are_owned() {
   pass "Agy spawn refuses instead of mutating existing hook configuration"
 }
 
+test_agy_delivery_accepts_fast_completed_turn() {
+  # Secondmate spawns skip task-local turn-end hook creation, so delivery
+  # confirmation cannot rely on the $TURNEND marker, and a brief that starts
+  # and finishes between two polls leaves no transient busy footer to catch.
+  # A returned-to-idle composer whose transcript shows the pointer text must
+  # still count as delivered (PRRT_kwDOS4Me3c6Vfkn6 on PR 1408).
+  local id rec out rc
+  id="agy-fastturn-z7-$$"
+  rec=$(make_spawn_case fastturn "$id")
+  read_spawn_record "$rec"
+  out=$(FM_FAKE_AGY_TURN=complete \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "fast-completed Agy turn should still count as delivered"
+  assert_contains "$out" "spawned $id harness=agy" \
+    "fast-completed Agy delivery was reported as a failure"
+  [ "$(cat "$CASE_DIR/agy.state")" = complete ] \
+    || fail "fake harness never reached the completed-turn state"
+  pass "Agy delivery accepts a turn that completed between polls"
+}
+
 test_agy_omits_unsupported_explicit_effort() {
   local id rec out rc launch
   id="agy-effort-z4-$$"
@@ -388,6 +409,7 @@ test_agy_busy_signature_is_harness_scoped
 test_plain_backends_share_agy_composer_contract
 test_agy_spawn_delivers_after_trust_and_registers_hook
 test_agy_spawn_refuses_when_all_hook_roots_are_owned
+test_agy_delivery_accepts_fast_completed_turn
 test_agy_omits_unsupported_explicit_effort
 test_agy_teardown_removes_task_hook_and_auth
 test_agy_primary_guard_bounds_continuation

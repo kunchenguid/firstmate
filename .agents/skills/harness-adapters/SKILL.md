@@ -566,6 +566,8 @@ Bare launch before prompt delivery is load-bearing.
 On a fresh trusted-path decision, Agy starts with zero project hooks, shows the trust dialog, then loads the project hooks after trust is accepted.
 An initial `--prompt-interactive` turn can therefore finish before the newly loaded Stop hook participates.
 Firstmate launches with no prompt, accepts only the exact verified trust dialog, waits for the complete empty composer, then sends `Read the brief at <absolute-path> and follow it exactly.`.
+Delivery is confirmed by the task turn-end marker, or by the echoed pointer text plus either the `esc to cancel` busy footer or a returned-to-idle empty composer.
+The idle-composer branch is load-bearing: secondmate spawns create no task-local turn-end hook, and a brief turn that starts and finishes between two polls leaves no busy footer to observe (`agy_wait_for_delivery` in `bin/fm-spawn.sh`, regression `tests/fm-agy-harness.test.sh`).
 
 The shared composer owner recognizes Agy's bare `>` only inside its complete separator pair with a verified footer.
 A bare unstructured `>` remains an unsafe shell prompt and returns `unknown`.

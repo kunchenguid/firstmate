@@ -37,6 +37,14 @@ fake_screen() {
         '────────────────────────────────────────────────────────────────' \
         'esc to cancel                               Gemini 3.6 Flash · low'
       ;;
+    complete)
+      printf '%s\n' \
+        "Read the brief at $FM_FAKE_BRIEF_REAL and follow it exactly." \
+        '────────────────────────────────────────────────────────────────' \
+        '>' \
+        '────────────────────────────────────────────────────────────────' \
+        '? for shortcuts                              Gemini 3.6 Flash · low'
+      ;;
     *)
       printf '%s\n' 'shell starting' '$ '
       ;;
@@ -78,7 +86,7 @@ case "${1:-}" in
         case "$state" in
           launched) printf 'trust\n' > "$FM_FAKE_AGY_STATE" ;;
           trust) printf 'ready\n' > "$FM_FAKE_AGY_STATE" ;;
-          pointer-typed) printf 'busy\n' > "$FM_FAKE_AGY_STATE" ;;
+          pointer-typed) printf '%s\n' "${FM_FAKE_AGY_TURN:-busy}" > "$FM_FAKE_AGY_STATE" ;;
         esac
         ;;
     esac
