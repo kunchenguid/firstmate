@@ -379,12 +379,18 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+# Single owner of the wake-kind vocabulary. Every entry point validates
+# through here so adding a kind is a one-line change, never a four-case hunt.
+_fm_wake_kind_valid() {  # <caller> <kind>
+  case "$2" in
+    signal|stale|check|heartbeat|escalation) return 0 ;;
+    *) printf '%s: invalid wake kind: %s\n' "$1" "$2" >&2; return 2 ;;
+  esac
+}
+
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
-  case "$kind" in
-    signal|stale|check|heartbeat|escalation) ;;
-    *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
-  esac
+  _fm_wake_kind_valid fm_wake_append "$kind" || return 2
 
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
@@ -413,10 +419,7 @@ fm_wake_append() {
 # for it is queued and unconsumed, and disappears when a drain consumes it.
 fm_wake_queued_keys() {
   local kind=$1
-  case "$kind" in
-    signal|stale|check|heartbeat|escalation) ;;
-    *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
-  esac
+  _fm_wake_kind_valid fm_wake_queued_keys "$kind" || return 2
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fm_wake_queued_keys_locked "$kind"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -426,27 +429,22 @@ fm_wake_queued_keys() {
 # Print the epoch of the oldest / newest queued record for <kind>, or nothing
 # when none is queued. Append order makes the first match the oldest and the
 # last match the newest; read under the append lock like fm_wake_queued_keys.
-fm_wake_oldest_epoch() {
-  local kind=$1
-  case "$kind" in
-    signal|stale|check|heartbeat|escalation) ;;
-    *) printf 'fm_wake_oldest_epoch: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
+_fm_wake_epoch() {  # <caller> <oldest|newest> <kind>
+  local caller=$1 bound=$2 kind=$3 prog
+  _fm_wake_kind_valid "$caller" "$kind" || return 2
+  # shellcheck disable=SC2016  # single quotes are deliberate: awk expands its own variables.
+  case "$bound" in
+    oldest) prog='NF >= 5 && $3 == kind { print $1; exit }' ;;
+    *)      prog='NF >= 5 && $3 == kind { e = $1 } END { if (e != "") print e }' ;;
   esac
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  awk -F '\t' -v kind="$kind" 'NF >= 5 && $3 == kind { print $1; exit }' "$FM_WAKE_QUEUE" 2>/dev/null || true
+  awk -F '\t' -v kind="$kind" "$prog" "$FM_WAKE_QUEUE" 2>/dev/null || true
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
-fm_wake_newest_epoch() {
-  local kind=$1
-  case "$kind" in
-    signal|stale|check|heartbeat|escalation) ;;
-    *) printf 'fm_wake_newest_epoch: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
-  esac
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  awk -F '\t' -v kind="$kind" 'NF >= 5 && $3 == kind { e = $1 } END { if (e != "") print e }' "$FM_WAKE_QUEUE" 2>/dev/null || true
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-}
+fm_wake_oldest_epoch() { _fm_wake_epoch fm_wake_oldest_epoch oldest "$1"; }
+
+fm_wake_newest_epoch() { _fm_wake_epoch fm_wake_newest_epoch newest "$1"; }
 
 fm_wake_queued_keys_locked() {
   local kind=$1

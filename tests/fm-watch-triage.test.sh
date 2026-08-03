@@ -1848,14 +1848,11 @@ test_afk_paused_changed_pane_hands_off_plain_stale
 
 # --- quiet stall, seat death, refill heartbeat, captain pulse ---------------
 
-# A churning idle pane (every capture differs, e.g. a ticking token counter)
-# never yields two identical hashes, so the stability path cannot see it.
-# quiet_stall_check must key on engagement signals instead and surface it.
-test_quiet_stall_churning_idle_pane_surfaced() {
-  local dir state fakebin out drain_out old pid
-  dir=$(make_case quiet-stall-churn); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; drain_out="$dir/drain.out"
-  cat > "$fakebin/tmux" <<'SH'
+# Shims the stock make_case fake cannot express: a pane whose capture churns
+# every read (defeats hash stability), and a pane whose capture fails with the
+# window absent from the inventory (a confidently dead agent).
+install_churn_tmux() {  # <fakebin>
+  cat > "$1/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
@@ -1865,14 +1862,37 @@ case "${1:-}" in
 esac
 exit 1
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$1/tmux"
+}
+
+install_dead_tmux() {  # <fakebin>
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) exit 0 ;;
+  capture-pane) exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$1/tmux"
+}
+
+# A churning idle pane (every capture differs, e.g. a ticking token counter)
+# never yields two identical hashes, so the stability path cannot see it.
+# quiet_stall_check must key on engagement signals instead and surface it.
+test_quiet_stall_churning_idle_pane_surfaced() {
+  local dir state fakebin out drain_out old pid
+  dir=$(make_case quiet-stall-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  install_churn_tmux "$fakebin"
   printf 'window=default:w9\nkind=ship\nharness=claude\n' > "$state/qs.meta"
   printf 'working: chewing\n' > "$state/qs.status"
   old=$(( $(date +%s) - 1800 ))
   set_mtime "$old" "$state/qs.meta"
   set_mtime "$old" "$state/qs.status"
   printf '%s' "$(seen_sig "$state/qs.status")" > "$state/.seen-qs_status"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'  \
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_QUIET_STALL_SECS=5 "$WATCH" > "$out" &
   pid=$!
@@ -1890,17 +1910,7 @@ test_quiet_stall_fresh_commit_absorbed() {
   local dir state fakebin out old wt pid
   dir=$(make_case quiet-stall-commit); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; wt="$dir/wt"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  list-windows) printf 'w9\n'; exit 0 ;;
-  capture-pane) printf 'churn %s\n' "$(date +%s%N)"; exit 0 ;;
-  display-message) printf 'claude\n'; exit 0 ;;
-esac
-exit 1
-SH
-  chmod +x "$fakebin/tmux"
+  install_churn_tmux "$fakebin"
   git init -q "$wt" && git -C "$wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
   printf 'window=default:w9\nkind=ship\nharness=claude\nworktree=%s\n' "$wt" > "$state/qs.meta"
   printf 'working: chewing\n' > "$state/qs.status"
@@ -1908,7 +1918,7 @@ SH
   set_mtime "$old" "$state/qs.meta"
   set_mtime "$old" "$state/qs.status"
   printf '%s' "$(seen_sig "$state/qs.status")" > "$state/.seen-qs_status"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'  \
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_QUIET_STALL_SECS=5 "$WATCH" > "$out" &
   pid=$!
@@ -1927,20 +1937,11 @@ test_seat_death_capture_failed_dead_agent_surfaced() {
   local dir state fakebin out drain_out pid
   dir=$(make_case seat-death); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  list-windows) exit 0 ;;
-  capture-pane) exit 1 ;;
-esac
-exit 1
-SH
-  chmod +x "$fakebin/tmux"
+  install_dead_tmux "$fakebin"
   printf 'window=default:w8\nkind=ship\nharness=claude\n' > "$state/sd.meta"
   printf 'working: mid-flight\n' > "$state/sd.status"
   printf '%s' "$(seen_sig "$state/sd.status")" > "$state/.seen-sd_status"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'  \
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 120 || { reap "$pid"; fail "dead endpoint behind a non-terminal status was not surfaced: $(cat "$out")"; }
@@ -1957,21 +1958,12 @@ test_seat_death_terminal_status_keeps_signal_owner() {
   local dir state fakebin out pid
   dir=$(make_case seat-death-terminal); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  list-windows) exit 0 ;;
-  capture-pane) exit 1 ;;
-esac
-exit 1
-SH
-  chmod +x "$fakebin/tmux"
+  install_dead_tmux "$fakebin"
   printf 'window=default:w8\nkind=ship\nharness=claude\n' > "$state/sd.meta"
   printf 'done: PR https://example.test/pr/9\n' > "$state/sd.status"
   printf '%s' "$(seen_sig "$state/sd.status")" > "$state/.seen-sd_status"
   printf 'done: PR https://example.test/pr/9' > "$state/.hb-surfaced-sd"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'  \
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then

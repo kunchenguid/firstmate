@@ -80,6 +80,10 @@ if [ "$(uname)" = Darwin ]; then
 else
   _stat_file_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
+# Deliberate copies of fm_path_mtime/fm_path_age (bin/fm-wake-lib.sh): this
+# monitor must stay standalone and never source the stack it watches, so the
+# stat-portability rule is restated here on purpose. Keep the three copies
+# (this, fm-wake-lib.sh, fm-watch.sh age_of) behaviorally identical.
 _file_age() {  # seconds since mtime; very large if missing
   local f=$1 m
   m=$(_stat_file_mtime "$f") || { echo 999999; return; }
@@ -137,15 +141,10 @@ _alert_visible() {  # <condition> <summary>
   esac
   if command -v powershell.exe >/dev/null 2>&1; then
     safe=$(printf '%s' "$summary" | tr -cd 'A-Za-z0-9 ._:()/-')
-    if command -v timeout >/dev/null 2>&1; then
-      timeout 12 powershell.exe -NoProfile -NonInteractive -Command \
-        "(New-Object -ComObject WScript.Shell).Popup('$safe',10,'firstmate watchdog',48) | Out-Null" \
-        >/dev/null 2>&1 || true
-    else
-      powershell.exe -NoProfile -NonInteractive -Command \
-        "(New-Object -ComObject WScript.Shell).Popup('$safe',10,'firstmate watchdog',48) | Out-Null" \
-        >/dev/null 2>&1 || true
-    fi
+    set -- powershell.exe -NoProfile -NonInteractive -Command \
+      "(New-Object -ComObject WScript.Shell).Popup('$safe',10,'firstmate watchdog',48) | Out-Null"
+    command -v timeout >/dev/null 2>&1 && set -- timeout 12 "$@"
+    "$@" >/dev/null 2>&1 || true
     return 0
   fi
   if command -v notify-send >/dev/null 2>&1; then

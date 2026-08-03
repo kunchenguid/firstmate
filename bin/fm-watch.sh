@@ -68,9 +68,10 @@
 #                          config/refill-target is set, the backlog has ready
 #                          work, and live lanes are under target - wakes an
 #                          idle fleet to refill instead of absorbing forever
-# Every poll also overwrites state/.captain-pulse with a one-line liveness
-# summary (live lanes, queued wakes, last crew event age) so healthy quiet
-# stays distinguishable from a dead loop without reading watcher internals.
+# The poll loop also refreshes state/.captain-pulse (at most once a minute)
+# with a one-line liveness summary (live lanes, queued wakes, last crew event
+# age) so healthy quiet stays distinguishable from a dead loop without
+# reading watcher internals.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -338,6 +339,25 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
+# Canonical state-marker key for a window. Must stay byte-identical wherever a
+# marker written under one call site is cleared or aged under another (e.g.
+# .seatdeath-* written in seat_death_check, cleared in the poll loop).
+window_key() {  # <window>
+  printf '%s' "$1" | tr ':/.' '___'
+}
+
+# One definition of a live lane: a recorded non-secondmate task. The refill
+# gate and the captain pulse must agree on this number.
+count_live_lanes() {
+  local live=0 meta
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    grep -q '^kind=secondmate$' "$meta" 2>/dev/null && continue
+    live=$((live + 1))
+  done
+  printf '%s' "$live"
+}
+
 # Seconds since the newest commit on <task>'s recorded worktree HEAD, 999999
 # when the worktree or its git history cannot be read. A fresh commit is an
 # engagement signal even when the harness writes no status and ends no turn.
@@ -355,27 +375,28 @@ task_commit_age() {  # <task>
 # hashes, so the stability path below cannot see it idling; this keys on the
 # task's own engagement signals instead and fires independently of hashing.
 # Declared pauses, captain holds, secondmate endpoints, and provably-working
-# crews keep their existing owners. Re-fires on the bounded
-# PAUSE_RESURFACE_SECS cadence, never every poll.
-quiet_stall_check() {  # <window> <task> <busy_now> <kind>
-  local win=$1 task=$2 busy_now=$3 kind=$4 key qsf last idle te st reason
+# crews keep their existing owners. The .quietstall-* marker stamps every
+# decision past the idle gate - fire or provably-working absorb - so the
+# costly commit and crew-state reads run once per PAUSE_RESURFACE_SECS window,
+# never every poll of a long validation.
+quiet_stall_check() {  # <window> <task> <busy_now> <kind> <last-status-line>
+  local win=$1 task=$2 busy_now=$3 kind=$4 last=$5 key qsf f idle st reason
   [ "$kind" = secondmate ] && return 0
   [ -n "$task" ] || return 0
-  key=$(printf '%s' "$win" | tr ':/.' '___')
+  key=$(window_key "$win")
   qsf="$STATE/.quietstall-$key"
   if [ "$busy_now" -eq 0 ]; then
     rm -f "$qsf"
     return 0
   fi
-  last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     rm -f "$qsf"
     return 0
   fi
-  te=$(age_of "$STATE/$task.turn-ended")
-  [ -e "$STATE/$task.turn-ended" ] || te=$(age_of "$STATE/$task.meta")
+  f="$STATE/$task.turn-ended"
+  [ -e "$f" ] || f="$STATE/$task.meta"
+  idle=$(age_of "$f")
   st=$(age_of "$STATE/$task.status")
-  idle=$te
   [ "$st" -lt "$idle" ] && idle=$st
   if [ "$idle" -lt "$QUIET_STALL_SECS" ]; then
     rm -f "$qsf"
@@ -387,7 +408,8 @@ quiet_stall_check() {  # <window> <task> <busy_now> <kind>
     return 0
   fi
   if crew_is_provably_working "$task"; then
-    triage_log "absorbed quiet stall (provably working): $win"
+    date +%s > "$qsf"
+    triage_log "absorbed quiet stall (provably working, recheck in ${PAUSE_RESURFACE_SECS}s): $win"
     return 0
   fi
   reason="stale: $win (quiet stall: not busy, no completed turn, status write, or new commit for ${idle}s - inspect and re-engage)"
@@ -409,8 +431,11 @@ seat_death_check() {  # <window> <task> <kind>
   local win=$1 task=$2 kind=$3 key sdf last alive reason
   [ "$kind" = secondmate ] && return 0
   [ -n "$task" ] || return 0
-  key=$(printf '%s' "$win" | tr ':/.' '___')
+  key=$(window_key "$win")
   sdf="$STATE/.seatdeath-$key"
+  # Throttle first: inside the re-fire window nothing below can act, so skip
+  # the status read and the backend liveness round-trip entirely.
+  [ "$(age_of "$sdf")" -lt "$PAUSE_RESURFACE_SECS" ] && return 0
   last=$(last_status_line "$STATE/$task.status")
   if [ -n "$last" ]; then
     status_is_captain_relevant "$last" && return 0
@@ -418,7 +443,6 @@ seat_death_check() {  # <window> <task> <kind>
   fi
   alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || alive=unknown
   [ "$alive" = dead ] || return 0
-  [ "$(age_of "$sdf")" -lt "$PAUSE_RESURFACE_SECS" ] && return 0
   reason="stale: $win (endpoint dead: worker gone with non-terminal status - provider or process exit suspected; recover or tear down)"
   fm_wake_append stale "$win" "$reason" || exit 1
   date +%s > "$sdf"
@@ -739,36 +763,32 @@ heartbeat_scan_finds_actionable() {
 # (2026-08-02: 11.5h idle with ready work queued). Counts only this home's
 # non-secondmate lanes. Sets FM_REFILL_REASON on a 0 return.
 heartbeat_refill_due() {
-  local target ready live meta
+  local target ready live
   [ -f "$FM_HOME/config/refill-target" ] || return 1
   target=$(tr -d '[:space:]' < "$FM_HOME/config/refill-target" 2>/dev/null || true)
   case "$target" in ''|*[!0-9]*) return 1 ;; esac
   [ "$target" -gt 0 ] || return 1
+  # Local lane count before the tasks-axi (node) spawn: a full fleet - the
+  # common state during an active push - answers without paying it.
+  live=$(count_live_lanes)
+  [ "$live" -lt "$target" ] || return 1
   command -v tasks-axi >/dev/null 2>&1 || return 1
   ready=$( (cd "$FM_HOME" 2>/dev/null && tasks-axi ready 2>/dev/null) | awk -F': ' '/^count: [0-9]+$/ { print $2; exit }')
   case "$ready" in ''|*[!0-9]*) return 1 ;; esac
   [ "$ready" -gt 0 ] || return 1
-  live=0
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    grep -q '^kind=secondmate$' "$meta" 2>/dev/null && continue
-    live=$((live + 1))
-  done
-  [ "$live" -lt "$target" ] || return 1
   FM_REFILL_REASON="heartbeat (refill: $ready ready backlog item(s), $live live lane(s) under target $target - dispatch from the queue)"
 }
 
 # Captain-facing liveness pulse: one overwritten line in state/.captain-pulse
 # so healthy quiet stays distinguishable from a dead loop without reading
 # watcher internals (2026-08-02: a fully-working 7-lane fleet read as
-# inactive from outside). Best-effort; never blocks or fails the cycle.
+# inactive from outside). Refreshed at most once a minute - a human reads it
+# at minute granularity, and a per-poll refresh forks per state file for
+# nothing. Best-effort; never blocks or fails the cycle.
 write_captain_pulse() {
-  local live=0 meta q=0 newest=999999 f a evt
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    grep -q '^kind=secondmate$' "$meta" 2>/dev/null && continue
-    live=$((live + 1))
-  done
+  local live q=0 newest=999999 f a evt
+  [ "$(age_of "$STATE/.captain-pulse")" -lt 60 ] && return 0
+  live=$(count_live_lanes)
   if [ -s "$FM_WAKE_QUEUE" ]; then
     q=$(wc -l < "$FM_WAKE_QUEUE" 2>/dev/null | tr -d '[:space:]')
     case "$q" in ''|*[!0-9]*) q=0 ;; esac
@@ -1121,7 +1141,7 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
-    quiet_stall_check "$w" "$task" "$busy_now" "$kind"
+    quiet_stall_check "$w" "$task" "$busy_now" "$kind" "$last"
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
