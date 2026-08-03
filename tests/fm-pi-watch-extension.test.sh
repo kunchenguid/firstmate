@@ -2272,7 +2272,7 @@ if [ -e "$FM_STOP_FILE.$cycle" ]; then
 fi
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_DAEMON="$ROOT/bin/fm-supervise-daemon.sh" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_DAEMON="$ROOT/bin/fm-supervise-daemon.sh" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_AFK_RESUME_POLL_MS=20 node --input-type=module 2>&1 <<'EOF'
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -2338,7 +2338,6 @@ try {
 
   // Away mode ends: ordinary supervision and wake delivery resume unchanged.
   rmSync(`${process.env.FM_HOME}/state/.afk`);
-  await tool.execute("tool-call-back", {}, undefined, undefined, {});
   if (!(await waitFor(() => armRows() === 2))) throw new Error("arm did not resume after away mode ended");
   writeFileSync(`${process.env.FM_STOP_FILE}.2`, "release\n");
   if (!(await waitFor(() => prompt.length > 0))) {
@@ -2389,7 +2388,7 @@ if [ -e "$FM_STOP_FILE.$cycle" ]; then
 fi
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_DAEMON="$ROOT/bin/fm-supervise-daemon.sh" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_DAEMON="$ROOT/bin/fm-supervise-daemon.sh" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_AFK_RESUME_POLL_MS=20 node 2>&1 <<'EOF'
 import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -2458,7 +2457,6 @@ try {
   if (prompt) throw new Error(`an away-mode idle event delivered a wake: ${prompt}`);
 
   rmSync(`${process.env.FM_HOME}/state/.afk`);
-  await hooks.event(idle);
   if (!(await waitFor(() => armRows() === 2))) throw new Error("arm did not resume after away mode ended");
   writeFileSync(`${process.env.FM_STOP_FILE}.2`, "release\n");
   if (!(await waitFor(() => prompt.length > 0))) {
@@ -2480,25 +2478,118 @@ EOF
   pass "OpenCode stands a live watcher cycle down at away-mode entry without delivering its wake"
 }
 
-test_opencode_away_mode_cancels_pending_retry() {
-  local plugin repo home log out status
+test_pi_away_mode_parks_pending_retry() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-afk-pending-retry-root"
+  home="$TMP_ROOT/pi-afk-pending-retry-home"
+  log="$TMP_ROOT/pi-afk-pending-retry.log"
+  stop="$TMP_ROOT/pi-afk-pending-retry.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+cycle=$(( $(wc -l < "${FM_ARM_LOG:?}" 2>/dev/null || printf 0) + 1 ))
+printf 'arm\n' >> "$FM_ARM_LOG"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$cycle" -eq 1 ]; then exit 0; fi
+trap 'exit 0' TERM INT
+while [ ! -e "${FM_STOP_FILE:?}.$cycle" ] && [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+if [ -e "$FM_STOP_FILE.$cycle" ]; then
+  printf 'signal: demo.status done: fixture finished\n'
+fi
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=250 FM_WATCH_REARM_RETRY_MAX_MS=250 FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_AFK_RESUME_POLL_MS=20 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const handlers = new Map();
+const pi = {
+  on(name, handler) {
+    handlers.set(name, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+const armRows = () => {
+  try {
+    return readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+};
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+try {
+  await tool.execute("tool-call-first", {}, undefined, undefined, {});
+  for (let i = 0; i < 100 && armRows() !== 1; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (armRows() !== 1) throw new Error("initial arm cycle never started");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  if (armRows() !== 1) throw new Error(`pending retry launched ${armRows()} arm cycles during away mode`);
+  if (prompt) throw new Error(`pending retry injected during away mode: ${prompt}`);
+  if (!existsSync(`${process.env.FM_HOME}/state/.afk`)) throw new Error("away marker vanished");
+  rmSync(`${process.env.FM_HOME}/state/.afk`);
+  for (let i = 0; i < 250 && armRows() !== 2; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (armRows() !== 2) throw new Error("parked pending retry did not resume after away mode");
+  if (prompt) throw new Error(`parked pending retry delivered a suppressed wake: ${prompt}`);
+  writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
+  writeFileSync(`${process.env.FM_STOP_FILE}.2`, "release\n");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  if (prompt) throw new Error(`entry-window close delivered a suppressed wake: ${prompt}`);
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+  rmSync(`${process.env.FM_HOME}/state/.afk`);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  if (armRows() !== 2) throw new Error("retired generation resumed its parked watcher");
+} finally {
+  writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must park a pending continuity retry when away mode begins"
+  [ -z "$out" ] || fail "Pi pending-retry away-mode test printed output: $out"
+  pass "Pi pending retry resumes automatically without reviving retired generations"
+}
+
+test_opencode_away_mode_parks_pending_retry() {
+  local plugin repo home log stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
   repo="$TMP_ROOT/opencode-afk-pending-retry-root"
   home="$TMP_ROOT/opencode-afk-pending-retry-home"
   log="$TMP_ROOT/opencode-afk-pending-retry.log"
+  stop="$TMP_ROOT/opencode-afk-pending-retry.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+cycle=$(( $(wc -l < "${FM_ARM_LOG:?}" 2>/dev/null || printf 0) + 1 ))
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-exit 0
+if [ "$cycle" -eq 1 ]; then exit 0; fi
+trap 'exit 0' TERM INT
+while [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=250 FM_WATCH_REARM_RETRY_MAX_MS=250 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=250 FM_WATCH_REARM_RETRY_MAX_MS=250 FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_AFK_RESUME_POLL_MS=20 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let prompt = "";
@@ -2524,23 +2615,33 @@ const hooks = await mod.FmPrimaryWatchArm({
   worktree: process.env.WORKTREE,
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 100 && armRows() !== 1; i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 10));
+try {
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+  for (let i = 0; i < 100 && armRows() !== 1; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (armRows() !== 1) throw new Error("initial arm cycle never started");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  if (armRows() !== 1) throw new Error(`pending retry launched ${armRows()} arm cycles during away mode`);
+  if (prompt) throw new Error(`pending retry injected during away mode: ${prompt}`);
+  if (!existsSync(`${process.env.FM_HOME}/state/.afk`)) throw new Error("away marker vanished");
+  rmSync(`${process.env.FM_HOME}/state/.afk`);
+  for (let i = 0; i < 250 && armRows() !== 2; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (armRows() !== 2) throw new Error("parked pending retry did not resume after away mode");
+  if (prompt) throw new Error(`parked pending retry delivered a suppressed wake: ${prompt}`);
+} finally {
+  writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 }
-if (armRows() !== 1) throw new Error("initial arm cycle never started");
-await new Promise((resolve) => setTimeout(resolve, 50));
-writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
-await new Promise((resolve) => setTimeout(resolve, 400));
-if (armRows() !== 1) throw new Error(`pending retry launched ${armRows()} arm cycles during away mode`);
-if (prompt) throw new Error(`pending retry injected during away mode: ${prompt}`);
-if (!existsSync(`${process.env.FM_HOME}/state/.afk`)) throw new Error("away marker vanished");
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode must cancel a pending continuity retry when away mode begins"
+  expect_code 0 "$status" "OpenCode must park a pending continuity retry when away mode begins"
   [ -z "$out" ] || fail "OpenCode pending-retry away-mode test printed output: $out"
-  pass "OpenCode cancels a pending continuity retry when away mode begins"
+  pass "OpenCode pending retry parks during away mode and resumes automatically"
 }
 
 test_pi_away_mode_suppresses_wake_after_encoding() {
@@ -2759,6 +2860,7 @@ test_opencode_healthy_arm_output_does_not_suppress_guard
 test_pi_away_mode_stands_down_instead_of_arming
 test_pi_away_mode_suppresses_wake_from_live_arm_child
 test_opencode_away_mode_suppresses_wake_from_live_arm_child
-test_opencode_away_mode_cancels_pending_retry
+test_pi_away_mode_parks_pending_retry
+test_opencode_away_mode_parks_pending_retry
 test_pi_away_mode_suppresses_wake_after_encoding
 test_opencode_away_mode_suppresses_wake_after_encoding

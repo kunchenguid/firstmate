@@ -34,9 +34,11 @@ The parked process remains interruptible, and after the flag clears it replaces 
 Those checks cover every established-away-state case, but one deliberately accepted Grok-only AFK-entry race remains.
 If `state/.afk` is created inside the millisecond window after either final flag check and before the arm completes, Grok can inject at most one `task_completed` wake because its notification is triggered by background-task completion rather than arm output.
 Point-in-time checks cannot close that transition race by construction; fully closing it requires the deferred cross-component AFK-transition handshake or a Grok notification-suppression hook that does not exist.
-Pi, OpenCode, Claude, Codex, and kimi do not use this completion-triggered path and are unaffected by the residual.
+Pi and OpenCode retain watcher continuity across this entry window through their parked resumes, while Claude, Codex, and kimi do not use the completion-triggered path.
 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` are the adapter layer: while away mode is active they start no arm child, deliver no ordinary wake, and start no continuity retry, whether away mode began before the decision or while a cycle was already live.
+If a close or pending retry observes away mode during the AFK-entry window, the adapter records an owner-scoped parked resume and polls with an unreferenced timer until the flag clears.
+The live generation or lock owner then re-arms automatically without replaying the suppressed wake; a retired Pi generation and an OpenCode session that no longer owns the lock discard their parked resume.
 An explicit Pi `fm_watch_arm_pi` call returns a successful stand-down message rather than arming.
 An adapter that observes away mode before spawning still returns its own benign `watcher: stood-down` result, while an arm process that reaches its own gate parks instead of closing.
 A genuine arm or spawn failure still surfaces once with no retry loop behind it, because the daemon owns the watcher and a retry storm would be the same wasted turn.
