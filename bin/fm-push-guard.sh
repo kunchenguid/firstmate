@@ -12,7 +12,7 @@
 # The guard contacts the remote immediately before the push and fetches the
 # exact target ref into a temporary private ref. It passes when that remote tip
 # is an ancestor of HEAD. If histories diverged, it also passes when every
-# remote-only single-parent commit has a stable patch-equivalent commit in the
+# remote-only single-parent commit has a verbatim patch-equivalent commit in the
 # local-only history, which permits a content-preserving rebase or cherry-pick.
 # A merge, empty patch, unreachable remote, missing upstream, malformed target,
 # or any other result that cannot prove preservation fails closed.
@@ -22,6 +22,8 @@
 # remote as an empty one. This script has no bypass: discarding remote work is a
 # captain-level operation and must not be normalized as a worker escape hatch.
 set -u
+GIT_TERMINAL_PROMPT=0
+export GIT_TERMINAL_PROMPT
 
 usage() {
   sed -n '2,24{s/^# \{0,1\}//;p;}' "$0"
@@ -77,7 +79,10 @@ cleanup() {
   git update-ref -d "$guard_ref" >/dev/null 2>&1 || true
   rm -rf "$tmp_root"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if git ls-remote --exit-code --heads "$remote" "$target_ref" \
     > "$tmp_root/ls-remote.out" 2> "$tmp_root/ls-remote.err"; then
@@ -133,7 +138,7 @@ while IFS= read -r commit; do
   parent_count=$(git rev-list --parents -n 1 "$commit" | awk '{ print NF - 1 }')
   [ "$parent_count" -eq 1 ] || continue
   patch_id=$(git show --no-ext-diff --pretty=format: --binary "$commit" \
-    | git patch-id --stable | awk 'NR == 1 { print $1 }')
+    | git patch-id --verbatim | awk 'NR == 1 { print $1 }')
   [ -n "$patch_id" ] && printf '%s\n' "$patch_id" >> "$local_patches"
 done < <(git rev-list "$remote_head..$local_head")
 
@@ -148,7 +153,7 @@ while IFS= read -r commit; do
   patch_id=
   if [ "$parent_count" -eq 1 ]; then
     patch_id=$(git show --no-ext-diff --pretty=format: --binary "$commit" \
-      | git patch-id --stable | awk 'NR == 1 { print $1 }')
+      | git patch-id --verbatim | awk 'NR == 1 { print $1 }')
   fi
   if [ -n "$patch_id" ] && grep -Fqx -- "$patch_id" "$local_patches"; then
     reproduced_count=$((reproduced_count + 1))
