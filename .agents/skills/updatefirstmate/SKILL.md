@@ -1,9 +1,9 @@
 ---
 name: updatefirstmate
 description: >-
-  Self-update a running firstmate and its secondmates to the latest from origin.
+  Self-update a running firstmate and its secondmates to the latest effective revision.
   Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
-  Fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
+  Fast-forwards the pristine upstream base and publishes either that base or its configured held-improvement effective revision through guarded update paths, then re-reads AGENTS.md and nudges each updated secondmate.
 user-invocable: true
 metadata:
   internal: true
@@ -16,10 +16,14 @@ Firstmate is its own repo, behind the same no-mistakes gate as any project, so n
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running firstmate instruction surface; public `skills/` is installer-facing and is not loaded by firstmate.
 This skill performs that pull for the running main firstmate and every secondmate, without disturbing any in-flight work.
 
-The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
-For a remote route, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
-It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, or on the wrong branch is skipped and reported.
-A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
+Without a held stack, the update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
+With `config/held-improvements/` initialized, the default branch still fast-forwards only, while a scratch worktree transactionally reapplies the explicit patches and publishes a detached effective revision after the complete stack succeeds.
+Content already present upstream retires automatically by verbatim patch or exact resulting content, independent of commit identity.
+A genuine replay conflict keeps the last known-good effective revision live and writes the existing nightly attention alarm naming the held improvement, the upstream change, and the paths.
+For a remote route in default mode, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
+Held mode does not send primary-private patches to a remote host and reports that route as skipped.
+It never creates a merge commit or stashes; anything dirty, diverged, offline, on the wrong branch, or outside the held stack's known-effective set is skipped and reported.
+Tracked-file updates leave the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
 ## What it does
@@ -28,7 +32,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```sh
    bin/fm-update.sh
    ```
-   It fast-forwards this firstmate repo's default branch from origin, then updates every registered local or remote secondmate home through its placement-specific guarded path.
+   It fast-forwards this firstmate repo's pristine default branch from origin, publishes the configured held-stack candidate when active, then updates every registered secondmate home through its placement-specific guarded path.
    It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
@@ -54,11 +58,14 @@ This touches only the firstmate repo and its own worktrees, never anything under
 
 ## Safety
 
-- **Fast-forward only.**
-  A target that has diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
+- **Pristine upstream plus transactional effective revision.**
+  The default branch only fast-forwards.
+  Held patches are explicit local configuration, are tested in a scratch worktree, and never change the live detached revision until the full candidate succeeds.
+  Without held mode, a target that has diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
   Nothing with unlanded work is ever discarded - this is prime directive #3.
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.
 - **Secondmates are never disrupted.**
-  A local or remote secondmate gets a tracked-files fast-forward only when its own checkout is safe to advance, plus a gentle re-read nudge when it changed.
+  A linked local secondmate in held mode moves only from a clean detached known-effective commit to the primary's current effective commit.
+  Other local or remote targets get their existing guarded fast-forward only when safe, plus a gentle re-read nudge when changed.
   It is never torn down, interrupted, or forced.

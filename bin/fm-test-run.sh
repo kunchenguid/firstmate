@@ -174,6 +174,7 @@ family_for_basename() {
       printf '%s\n' secondmate
       ;;
     fm-bootstrap.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
+    fm-held-improvements.test.sh|\
     fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-network.test.sh|\
     fm-tangle-guard.test.sh|fm-update.test.sh)
       printf '%s\n' session-bootstrap
@@ -397,6 +398,7 @@ tests/fm-fleet-sync.test.sh 16417
 tests/fm-gate-refuse.test.sh 2839
 tests/fm-gitignore-config.test.sh 28
 tests/fm-gotmp.test.sh 308
+tests/fm-held-improvements.test.sh 15300
 tests/fm-grok-continuity-live-e2e.test.sh 19
 tests/fm-grok-stop-live-e2e.test.sh 19
 tests/fm-guard-stale-banner.test.sh 2917
@@ -898,7 +900,8 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
-    bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
+    bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|\
+    bin/fm-update.sh|bin/fm-held-*|\
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
       ;;

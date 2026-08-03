@@ -1,32 +1,36 @@
 # shellcheck shell=bash
-# Shared fast-forward machinery for firstmate self-sync.
+# Shared guarded revision-sync machinery for firstmate self-sync.
 # Usage: . bin/fm-ff-lib.sh   (after FM_ROOT and FM_HOME are set)
 #
-# This is the one implementation of "advance a firstmate checkout to a base by a
-# clean fast-forward, never forcing, merging, or stashing" used by every sync
-# path:
+# This is the one implementation of "advance a firstmate checkout to the
+# primary's effective revision without touching unlanded work" used by every
+# sync path:
 #   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
-#   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
-#     on startup) follows the PRIMARY checkout's current default-branch commit:
-#     base_mode is that local commit, with NO fetch and no origin dependency.
+#   - the local secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
+#     on startup) follows the PRIMARY checkout's current effective commit:
+#     normally the default branch, or the explicit held-stack live ref. base_mode
+#     is that local commit, with NO fetch and no origin dependency.
 #
 # A linked-worktree secondmate home already holds the primary's commit in the
-# shared object store, so its local-HEAD sync is a purely local fast-forward that
-# never touches the network. A standalone clone moves through that path only when
-# it already has the target; otherwise it is skipped until the origin path updates it.
+# shared object store, so its local sync never touches the network. Normally it
+# fast-forwards. With a held stack, a clean detached home at a recorded
+# known-effective commit can switch to the current known-effective commit even
+# when patch replay changed ancestry. A standalone clone moves only when it
+# already has the target; otherwise it is skipped.
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
 # The seeded .fm-secondmate-home identity marker is gitignored too; the local
 # sync tolerates only that marker during the one-time upgrade of pre-ignore
 # linked-worktree homes.
-# Homes are leased at a detached HEAD on the
-# default branch, so the fast-forward advances HEAD only and never moves the
-# shared default branch or any other worktree's checkout.
+# Homes are leased at detached HEAD, so synchronization advances only that
+# checkout and never moves the shared default branch or another worktree.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-held-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-held-lib.sh"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -50,13 +54,16 @@ default_branch() {
   return 1
 }
 
-# Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD
-# sync target every secondmate follows. Reads the default branch *ref* rather than
-# HEAD, so even a primary stranded on a feature branch (the worktree tangle of
-# section 8) still yields the true default-branch tip instead of propagating a
-# stray feature branch to the fleet. Echoes the commit SHA, or returns 1.
+# Resolve the PRIMARY checkout's effective commit - the local sync target every
+# secondmate follows. A configured held stack owns an explicit detached live ref;
+# otherwise this reads the default branch ref, so a primary stranded on a stray
+# feature branch is never propagated to the fleet. Echoes a commit SHA or fails.
 primary_head_commit() {
   local root=$1 default
+  if held_stack_active "$root"; then
+    held_live_commit "$root"
+    return
+  fi
   default=$(default_branch "$root") || return 1
   git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || return 1
 }
@@ -253,21 +260,22 @@ live_secondmate_meta_records() {
   done
 }
 
-# Fast-forward one target to a base. Prints its status line. Sets globals for the
+# Advance one target to a base. Prints its status line. Sets globals for the
 # caller:
 #   FF_STATUS = updated|current|skipped
 #   FF_INSTR  = comma list of changed instruction paths (only when updated)
 #
-# base_mode selects where the fast-forward base comes from:
+# base_mode selects where the target comes from:
 #   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
 #                  path); requires an origin remote and network reachability.
 #   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
-#                  dependency (the local-HEAD secondmate sync). The commit must
-#                  already exist in the target's object store, which it always does
-#                  for a worktree of this same repo; a standalone clone that lacks
-#                  it is skipped rather than fetched.
-# Guards are identical in both modes: ff-only (never force/merge/stash); skip a
-# dirty, diverged, or wrong-branch target and leave its work untouched.
+#                  dependency (the local secondmate sync). The commit must
+#                  already exist in the target's object store. This is a normal
+#                  fast-forward unless the target and current HEAD are both
+#                  explicit known-effective held-stack commits, where a clean
+#                  detached checkout may switch across replayed ancestry.
+# Every mode skips a dirty or wrong-branch target. Unknown divergence is always
+# left untouched, and no mode merges, stashes, or guesses about unlanded work.
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
@@ -284,7 +292,7 @@ ff_target() {
     return 0
   fi
 
-  local default base cur instr local_rev base_rev before after out
+  local default base cur instr local_rev base_rev before after out effective_rewrite=no
   default=$(default_branch "$dir") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -338,16 +346,30 @@ ff_target() {
     echo "$label: already current"
     return 0
   fi
-  if ! git -C "$dir" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
+  if [ "$base_mode" != origin ] \
+    && [ -n "${FM_ROOT:-}" ] \
+    && held_target_is_live "$FM_ROOT" "$base_rev" \
+    && held_commit_is_known_effective "$FM_ROOT" "$local_rev"; then
+    effective_rewrite=yes
+  fi
+  if [ "$effective_rewrite" != yes ] \
+    && ! git -C "$dir" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
     echo "$label: skipped: diverged from $base"
     return 0
   fi
 
   instr=$(changed_instr "$dir" "$base")
   before=$(git -C "$dir" rev-parse --short HEAD)
-  if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
-    echo "$label: skipped: fast-forward failed: $(first_line "$out")"
-    return 0
+  if [ "$effective_rewrite" = yes ]; then
+    if ! out=$(git -C "$dir" checkout --quiet --detach "$base" 2>&1); then
+      echo "$label: skipped: effective-revision switch failed: $(first_line "$out")"
+      return 0
+    fi
+  else
+    if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
+      echo "$label: skipped: fast-forward failed: $(first_line "$out")"
+      return 0
+    fi
   fi
   after=$(git -C "$dir" rev-parse --short HEAD)
   FF_STATUS="updated"

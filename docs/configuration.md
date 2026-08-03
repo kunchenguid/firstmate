@@ -204,6 +204,28 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+## Held improvements (config/held-improvements)
+
+`bin/fm-held-improvements.sh init` enables an explicit local patch stack for improvements that must run before upstream merges them.
+Initialization requires a clean checkout, records the pristine local default-branch commit as the upstream base, registers the current effective commit, and detaches the primary so the default branch remains free to fast-forward.
+When the current checkout already differs from that base, the capture form records the whole difference as a named first entry so the stack machinery can bootstrap itself without inferring work from later working-tree state.
+Read the command header or `--help` output for the exact `init`, `add`, `retire`, and `list` syntax.
+
+The active set is the ordered `config/held-improvements/active/<order>-<id>.patch` files and their one-line `.title` siblings.
+The three-digit order, stable id, complete binary patch, and title make every held improvement inspectable without relying on the live working tree or transient commit ids.
+`list` prints active and retired entries, while retired patches, titles, and reasons remain under `config/held-improvements/retired/` for inspection.
+
+In held mode, `bin/fm-update.sh` fast-forwards the pristine default-branch ref from `origin`, constructs the complete candidate in a scratch worktree, and changes the detached live checkout only after every active entry applies.
+An entry retires automatically when a verbatim patch id appears in the new upstream history or the candidate tree already contains its exact resulting content, so rebased or squashed upstream equivalents do not depend on the original commit id.
+Whitespace-different content is not equivalent.
+A conflict returns nonzero, leaves the previous effective revision running, and writes `state/.nightly-update-needs-attention` with the held id and title, each colliding upstream commit and subject, and the affected paths.
+After inspecting both sides, an operator can replace the held entry or explicitly run `retire <id> <reason>` and rerun the updater.
+
+Local secondmate homes leased as linked worktrees share the effective objects and `refs/firstmate/held/effective/*` known-good records with the primary.
+The normal spawn, locked bootstrap sweep, and update paths therefore move a clean detached home from any recorded effective revision to the primary's current effective revision even when replay changed commit identities.
+Dirty homes, named branches, and commits outside the known-effective set remain untouched.
+Standalone clones cannot import an unpushed primary-local effective commit through the no-fetch path, and remote routes do not receive the primary's private patches; held-mode update reports those routes as skipped instead of silently claiming parity.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.

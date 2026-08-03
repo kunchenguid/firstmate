@@ -140,7 +140,7 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
-The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
+The primary checkout is normally healthy on its default branch and is deliberately detached at the explicit live ref when held improvements are active; linked worktrees or secondmate homes are healthy at detached HEAD.
 Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 
 `fm-tangle-lib.sh` resolves the default branch from `origin/HEAD`, then local `main` or `master`, and classifies that named non-default primary branch as the tangle.
@@ -298,10 +298,14 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 ## Self-updates stay safe
 
-`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
-For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
-The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
-Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
+`/updatefirstmate` normally fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+When `config/held-improvements/` is initialized, the local default branch remains a pristine fast-forwarded upstream base and `refs/firstmate/held/live` identifies the detached effective revision the primary actually runs.
+The updater builds that revision in a scratch worktree by replaying the explicit ordered patches, publishes it only after every entry succeeds, and automatically retires an entry whose verbatim patch content or exact resulting content is already upstream.
+A replay conflict leaves the prior effective revision running and writes the existing `state/.nightly-update-needs-attention` alarm with the held id, upstream commit and subject, and collided paths.
+Known-good effective refs let clean detached linked secondmate worktrees move across replayed histories without weakening the refusal for dirty, feature-branch, or unknown commits.
+For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit; held mode does not send primary-local patches to a remote host and reports that route as skipped.
+The default update remains fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
+Local homes share the guarded fast-forward helper, while remote default-mode updates delegate the same safety decision to the configured host through the generic transport.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof

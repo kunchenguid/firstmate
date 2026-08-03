@@ -98,9 +98,11 @@ Because this resolves from the file on every spawn, the pin is durable across ev
 This is secondmate-only: crewmate/scout model resolution is untouched by this file.
 
 This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
-Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
-The locked session-start deferred network stage runs the same bootstrap sweep for every live local secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
-That no-fetch path is a purely local fast-forward of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s origin refresh.
+Before a local launch, `fm-spawn.sh --secondmate` locally advances the home to the primary firstmate checkout's current effective commit when it is safe; this is the default-branch commit normally and the explicit held-stack live ref when configured.
+In held mode, a clean detached linked home may move from any recorded known-good effective commit to the current one even though patch replay changed commit identities; dirty, named-branch, unknown-commit, or otherwise in-flight homes launch unchanged with a warning.
+The locked session-start deferred network stage runs the same guarded local convergence for every live local secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
+That no-fetch path is a local tracked-file update, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed.
+A linked worktree advances immediately; without held mode, a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s origin refresh, while held mode reports that it cannot import the private effective commit.
 A remote launch and the deferred bootstrap sweep ask the configured host to fast-forward its persistent home to that host's code-root commit under the same clean and ancestry guards.
 `/updatefirstmate` first updates the remote code root from its own origin, then runs that guarded home sync.
 SSH exit 255 preserves the route and reports unknown completion; it never triggers local respawn or failover.

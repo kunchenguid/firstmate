@@ -73,6 +73,7 @@ config/calm     Pi Calm presentation preference; LOCAL, gitignored, and not inhe
 config/startup-memory-budget     primary-authoritative per-home startup-memory budget; LOCAL, gitignored, materialized as 7,500 estimated tokens by locked primary bootstrap and inherited into secondmate homes; see docs/configuration.md "Startup memory budget"
 config/herdr-presentation-spaces  optional "off" opt-out from, or "on" opt-in to, Herdr's default-on disposable single-task visual projection, which is unconfigured-default-on only at or above a Herdr version floor; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Presentation spaces"
 config/trace-context  optional presence flag enabling default-off native W3C trace-context propagation to spawned agents; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Trace context propagation" and docs/trace-context.md
+config/held-improvements/  optional explicit ordered local patch stack; LOCAL, gitignored; keeps the upstream default branch pristine while `fm-update.sh` publishes a detached effective revision and converges linked secondmate worktrees; see docs/configuration.md "Held improvements"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
@@ -499,10 +500,10 @@ The scaffold is a safety contract, not a suggestion.
 
 ## 12. Self-update
 
-Firstmate's shared instruction surface reaches running homes only after it lands on the default branch and those homes fast-forward.
+Firstmate's shared instruction surface normally reaches running homes after it lands on the default branch and those homes fast-forward; an initialized held-improvement stack instead keeps that branch pristine and publishes one tested detached effective revision to the primary and linked secondmate worktrees.
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
-It performs guarded fast-forward updates of firstmate and registered secondmate homes, refreshes instructions, and never touches anything under `projects/`.
+It performs guarded upstream-base and effective-revision updates of firstmate and registered secondmate homes, refreshes instructions, and never touches anything under `projects/`.
 
 ## 13. Agent-only reference skills
 
