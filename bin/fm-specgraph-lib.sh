@@ -39,9 +39,11 @@ fm_specgraph_capture_best_effort() {
 
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [ -d "$state" ] && [ ! -L "$state" ]; then
-    umask 077
-    printf '%s\tevent=%s\tsubject=%s\texit=%s\n' "$now" "$event" "$subject" "$rc" \
-      >> "$state/specgraph-capture.failures.log" 2>/dev/null || true
+    (
+      umask 077
+      printf '%s\tevent=%s\tsubject=%s\texit=%s\n' "$now" "$event" "$subject" "$rc" \
+        >> "$state/specgraph-capture.failures.log"
+    ) 2>/dev/null || true
   fi
   printf 'warning: SpecGraph capture failed for %s/%s and the primary flow is continuing' \
     "$event" "$subject" >&2
