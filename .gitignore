@@ -10,3 +10,6 @@ __pycache__/
 *.pyc
 .env
 config/
+
+# pi package clones (installed via `pi install -l`)
+.pi/git/
