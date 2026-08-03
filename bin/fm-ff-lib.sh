@@ -10,16 +10,23 @@
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
 #
-# Every secondmate home is a worktree of this same repo, so it already holds the
-# primary's commit in the shared object store; the local-HEAD sync is therefore a
-# purely local fast-forward that never touches the network. A tracked-files
-# fast-forward never touches the gitignored operational dirs (data/, state/,
-# config/, projects/, .no-mistakes/), so a secondmate's backlog, projects, and
-# in-flight work are never disturbed. Homes are leased at a detached HEAD on the
+# A linked-worktree secondmate home already holds the primary's commit in the
+# shared object store, so its local-HEAD sync is a purely local fast-forward that
+# never touches the network. A standalone clone moves through that path only when
+# it already has the target; otherwise it is skipped until the origin path updates it.
+# A tracked-files fast-forward never touches the gitignored operational dirs
+# (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
+# secondmate's backlog, projects, or in-flight work.
+# The seeded .fm-secondmate-home identity marker is gitignored too; the local
+# sync tolerates only that marker during the one-time upgrade of pre-ignore
+# linked-worktree homes.
+# Homes are leased at a detached HEAD on the
 # default branch, so the fast-forward advances HEAD only and never moves the
 # shared default branch or any other worktree's checkout.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -226,20 +233,6 @@ dirty_status() {
   fi
 }
 
-secondmate_registry_field() {
-  local reg=$1 id=$2 key=$3 line value
-  [ -f "$reg" ] || return 1
-  line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
-  [ -n "$line" ] || return 1
-  case "$key" in
-    home) value=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//') ;;
-    projects) value=$(printf '%s\n' "$line" | sed -n 's/.*; projects:[[:space:]]*\([^;)]*\); added .*/\1/p' | sed 's/[[:space:]]*$//') ;;
-    *) return 1 ;;
-  esac
-  [ -n "$value" ] || return 1
-  printf '%s\n' "$value"
-}
-
 # List this home's LIVE secondmate direct reports from state/<id>.meta records.
 # The meta file is the liveness signal; data/secondmates.md is only the fallback
 # for durable fields such as home= when an older/incomplete meta lacks them.
@@ -405,6 +398,10 @@ process_secondmate() {
       return 0
     fi
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+    if [ "$nudge_requires_instr" = yes ] && [ -n "$FF_INSTR" ] \
+      && type fm_ff_after_instruction_update >/dev/null 2>&1; then
+      fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR"
+    fi
   fi
 }
 

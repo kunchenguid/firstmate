@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc '[ -n \"${GROK_WORKSPACE_ROOT:-}\" ] || exit 0; exec \"${GROK_WORKSPACE_ROOT:-}/bin/fm-arm-pretool-check.sh\"'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

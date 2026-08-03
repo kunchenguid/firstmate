@@ -17,6 +17,11 @@
 #     exit 1, silent               -> not linked, or window/cap exhausted (link
 #                                      pruned)
 #
+# Clear a legacy link without posting:
+#   fm-x-followup.sh --clear <task-id>
+#     idempotently removes only the X follow-up metadata for a typed terminal
+#     outcome.
+#
 # Post (after composing the reply to a file or stdin):
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] -
@@ -30,6 +35,10 @@
 #       locally-detected expiry, so an old relay (which only ever supported one
 #       follow-up) or an already-exhausted binding degrades gracefully instead
 #       of retrying forever.
+#       On fm-x-reply's fail-safe refusal (exit 8: platform or explicit budget
+#       unresolved): KEEPS the link and exits non-zero. This is a
+#       retryable hold, not an exhausted binding - retry once both values are
+#       recoverable rather than posting with a local default.
 #       On any other post failure: leaves the link in place so it can be
 #       retried, exit non-zero.
 #     Window or cap already exhausted: clears the link, posts nothing, exit 0
@@ -61,12 +70,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 
 usage() {
-  echo "usage: fm-x-followup.sh --check <task-id> | <task-id> [--image <path>] [--final] --text-file <path> | <task-id> [--image <path>] [--final] -" >&2
+  echo "usage: fm-x-followup.sh --check <task-id> | --clear <task-id> | <task-id> [--image <path>] [--final] --text-file <path> | <task-id> [--image <path>] [--final] -" >&2
 }
 
 help() {
   cat <<'EOF'
 usage: fm-x-followup.sh --check <task-id>
+       fm-x-followup.sh --clear <task-id>
        fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
        fm-x-followup.sh <task-id> [--image <path>] [--final] -
 
@@ -75,6 +85,7 @@ X-mode-linked task and manage the link's follow-up counter.
 
 Options:
   --check          Print the request_id when a follow-up is due.
+  --clear          Clear only the X follow-up link; never post.
   --image <path>   Attach one local image file; threaded replies attach it to the opener tweet or message.
   --final          Clear the link after this post regardless of the remaining count.
   --text-file <path>
@@ -104,7 +115,11 @@ case "${1:-}" in
 esac
 
 FINAL=0
-if [ "${1:-}" = --check ]; then
+if [ "${1:-}" = --clear ]; then
+  MODE=clear
+  ID=${2:-}
+  if [ -z "$ID" ] || [ "$#" -gt 2 ]; then usage; exit 2; fi
+elif [ "${1:-}" = --check ]; then
   MODE=check
   ID=${2:-}
   if [ -z "$ID" ] || [ "$#" -gt 2 ]; then usage; exit 2; fi
@@ -140,6 +155,13 @@ case "$ID" in
 esac
 
 META="$STATE/$ID.meta"
+if [ "$MODE" = clear ]; then
+  fmx_meta_link_clear "$META" \
+    || { echo "fm-x-followup: could not clear the link in state/$ID.meta" >&2; exit 1; }
+  printf '%s\n' "$ID"
+  exit 0
+fi
+
 RID=$(fmx_meta_get "$META" x_request)
 TS=$(fmx_meta_get "$META" x_request_ts)
 COUNT=$(fmx_meta_get "$META" x_followups)
@@ -228,6 +250,15 @@ case "$post_rc" in
     fi
     printf '%s\n' "$RID"
     exit 0
+    ;;
+  8)
+    # fm-x-reply.sh refused this follow-up (exit 8) because it could not
+    # authoritatively determine both the reply platform and explicit budget.
+    # That is a RETRYABLE HOLD, not an exhausted binding: keep the link so
+    # the follow-up can post once both values are recoverable. Never clear the
+    # link here.
+    echo "fm-x-followup: follow-up for $ID held: reply context lacks an authoritative platform or explicit budget; left the link in place to retry once both values are recoverable" >&2
+    exit 1
     ;;
   9)
     # fm-x-reply.sh distinguishes a relay rejection of this specific follow-up

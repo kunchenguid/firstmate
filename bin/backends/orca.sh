@@ -6,6 +6,12 @@
 #
 # Target string shape: the Orca terminal id accepted by `orca terminal ...`.
 
+# Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
+# dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
+# every backend so the decision cannot drift.
+# shellcheck source=bin/fm-composer-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
+
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
 }
@@ -283,24 +289,10 @@ fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
   stripped=${stripped//|/}
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  case "$stripped" in
-    '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
-  esac
-  # Strip a leading prompt glyph before judging what remains. '❯' is
-  # multi-byte, so strip it as a literal: a ? glob counts bytes under a
-  # C/POSIX locale and would leave a stray byte behind. The trim below
-  # eats any space that followed the glyph.
-  stripped=${stripped#'❯'}
-  case "$stripped" in
-    '>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
-  esac
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  [ -n "$stripped" ] || { printf 'empty'; return 0; }
-  if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_ORCA_IDLE_RE"; then
-    printf 'empty'; return 0
-  fi
-  printf 'pending'
+  # A row was found only by the bordered shape above, so content came from a
+  # genuine composer box - delegate to the shared owner with bordered=1. A bare
+  # dead-shell prompt has no bordered row and already returned 'unknown' above.
+  fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_ORCA_IDLE_RE"
 }
 
 fm_backend_orca_send_key() {  # <terminal-id> <key>

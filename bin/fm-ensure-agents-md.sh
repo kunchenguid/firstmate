@@ -5,8 +5,11 @@
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
 # file present, and refuses to clobber distinct real files or wrong symlinks.
 # Owns the canonical "## Maintaining this file" self-governance wording for
-# project AGENTS.md files, appending it to created skeletons and promoted
-# CLAUDE.md files that lack it.
+# project AGENTS.md files, injecting it idempotently into created skeletons,
+# promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
+# Refuses a case-variant real memory file such as a lowercase agents.md, whose
+# CLAUDE.md symlink would carry an uppercase literal target that dangles on a
+# case-sensitive filesystem (issue #389).
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
@@ -43,22 +46,39 @@ When updating this file, preserve this bar for all agents and keep entries conci
 EOF
 }
 
+write_maintenance_section_with_eol() {
+  local eol=$1 line
+  while IFS= read -r line; do
+    printf '%s%s' "$line" "$eol"
+  done < <(write_maintenance_section)
+}
+
+# Idempotently append the canonical self-governance section to AGENTS.md when it
+# is absent. Sets MAINT_INJECTED=1 when it appends and 0 when the section is
+# already present, so callers can report whether the file changed.
+MAINT_INJECTED=0
 ensure_maintenance_section() {
-  if grep -Fqx '## Maintaining this file' "$AGENTS"; then
+  MAINT_INJECTED=0
+  if grep -Fqx '## Maintaining this file' "$AGENTS" ||
+    grep -Fqx $'## Maintaining this file\r' "$AGENTS"; then
     return 0
   fi
-  sep=''
+  local eol=$'\n' sep=''
+  if LC_ALL=C grep -q $'\r$' "$AGENTS"; then
+    eol=$'\r\n'
+  fi
   if [ -s "$AGENTS" ]; then
     if [ -n "$(tail -c 1 "$AGENTS")" ]; then
-      sep=$'\n\n'
+      sep="${eol}${eol}"
     else
-      sep=$'\n'
+      sep=$eol
     fi
   fi
   {
     printf '%s' "$sep"
-    write_maintenance_section
+    write_maintenance_section_with_eol "$eol"
   } >> "$AGENTS"
+  MAINT_INJECTED=1
 }
 
 write_skeleton() {
@@ -90,6 +110,26 @@ PY
   return 1
 }
 
+# Refuse a case-variant real memory file (issue #389). On a case-insensitive
+# filesystem an existing lowercase agents.md satisfies every [ -e AGENTS.md ]
+# test below, so the script would emit a CLAUDE.md symlink whose uppercase
+# literal target dangles once the tree is checked out on a case-sensitive
+# filesystem. Reading the real directory entries catches the mismatch on both
+# filesystem kinds; surface it for manual reconciliation instead of linking blindly.
+for entry in *; do
+  if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+    continue
+  fi
+  if [ "$entry" != "$AGENTS" ]; then
+    case "$entry" in
+      [Aa][Gg][Ee][Nn][Tt][Ss].[Mm][Dd])
+        echo "conflict: memory file is named $entry in $DIR but the convention is AGENTS.md; rename it to AGENTS.md so CLAUDE.md links portably" >&2
+        exit 1
+        ;;
+    esac
+  fi
+done
+
 if [ -L "$AGENTS" ]; then
   echo "conflict: AGENTS.md is a symlink in $DIR; expected AGENTS.md to be the real file" >&2
   exit 1
@@ -102,15 +142,25 @@ fi
 if [ -e "$AGENTS" ]; then
   if [ -L "$CLAUDE" ]; then
     if is_correct_claude_symlink; then
-      echo "unchanged: AGENTS.md with CLAUDE.md -> AGENTS.md in $DIR"
+      ensure_maintenance_section
+      if [ "$MAINT_INJECTED" -eq 1 ]; then
+        echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
+      else
+        echo "unchanged: AGENTS.md with CLAUDE.md -> AGENTS.md in $DIR"
+      fi
       exit 0
     fi
     echo "conflict: CLAUDE.md is a symlink in $DIR but does not point to AGENTS.md" >&2
     exit 1
   fi
   if [ ! -e "$CLAUDE" ]; then
+    ensure_maintenance_section
     ln -s "$AGENTS" "$CLAUDE"
-    echo "symlinked: CLAUDE.md -> AGENTS.md in $DIR"
+    if [ "$MAINT_INJECTED" -eq 1 ]; then
+      echo "updated: added ## Maintaining this file to AGENTS.md and symlinked CLAUDE.md -> AGENTS.md in $DIR"
+    else
+      echo "symlinked: CLAUDE.md -> AGENTS.md in $DIR"
+    fi
     exit 0
   fi
   if [ -f "$CLAUDE" ]; then

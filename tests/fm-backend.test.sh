@@ -12,7 +12,10 @@
 #      binaries and fixtures as the REFACTORED versions in this checkout, then
 #      diffs the two command logs byte-for-byte - the report's P1 checklist
 #      item "run current main scripts and refactored scripts against the same
-#      fake tools and compare command logs".
+#      fake tools and compare command logs". The teardown old-vs-new case also
+#      overlays a content-historical permissive tmux kill fixture: after the
+#      exact-selector change lands on the default branch, merge-base with main
+#      collapses to HEAD and can no longer supply that baseline.
 #   3. Asserts the `--backend`/`FM_BACKEND` selection refuses unknown backends
 #      and the blocked `codex-app` backend loudly.
 #
@@ -30,7 +33,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
@@ -80,6 +83,9 @@ SH
 }
 
 # The commit this branch started from - the P1 "current main" baseline.
+# Suitable for byte-identical old-vs-new checks while a branch still diverges
+# from main. After a squash lands, merge-base(HEAD, main) collapses to HEAD, so
+# callers that need a true pre-change fixture must not rely on this alone.
 resolve_base_ref() {
   local ref base
   for ref in main refs/heads/main origin/main refs/remotes/origin/main origin/HEAD refs/remotes/origin/HEAD; do
@@ -95,23 +101,50 @@ resolve_base_ref() {
 BASE_REF=$(resolve_base_ref) \
   || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
 
+# Newest first-parent revision whose bin/backends/tmux.sh still uses the
+# pre-exact permissive kill-window target. Content-addressed from history so the
+# fixture stays historical on default-branch CI and on branches cut after the
+# exact-selector change, where merge-base with main is self-referential.
+resolve_permissive_tmux_kill_ref() {
+  local commit body
+  while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    body=$(git -C "$ROOT" show "$commit:bin/backends/tmux.sh" 2>/dev/null) || continue
+    # shellcheck disable=SC2016
+    case "$body" in
+      *'tmux kill-window -t "=$session:=$window"'*) continue ;;
+    esac
+    # shellcheck disable=SC2016
+    case "$body" in
+      *'tmux kill-window -t "$1"'*|*'tmux kill-window -t "$target"'*)
+        printf '%s\n' "$commit"
+        return 0
+        ;;
+    esac
+  done < <(git -C "$ROOT" log --first-parent --format='%H' HEAD -- bin/backends/tmux.sh)
+  return 1
+}
+
 # --- shared: a pre-refactor bin/ shim --------------------------------------
 #
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
-# fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh
-# (extracted from BASE_REF), plus symlinks to every OTHER sibling script those
-# five source - all unchanged by this task, so the real files are exactly
-# what BASE_REF would have used too. FM_ROOT_OVERRIDE pointed at this dir's
+# fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, fm-teardown.sh, and any
+# changed source-library dependency (all extracted from BASE_REF), plus copies
+# of every OTHER sibling script those five entrypoints source, so those copies are exactly
+# what BASE_REF would have used too. Copies keep BASH_SOURCE-based sibling
+# resolution inside the synthetic tree on both macOS and Linux; symlinks make
+# that resolution shell/platform-dependent. FM_ROOT_OVERRIDE pointed at this dir's
 # root makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
 # fm-backend.sh (and its bin/backends/ adapters) is the dispatcher every one
 # of the five REFACTORED scripts sources; it must be a real, reachable file in
 # the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu -
-# hence it is a symlinked sibling, not an extracted-from-BASE_REF file: for a
-# tmux-only conformance run the tmux adapter's behavior is what is under test,
-# and that is unchanged by any later (e.g. non-tmux backend) addition to
-# fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-guard.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
-OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
+# hence the dispatcher is a copied sibling, while the tmux adapter is extracted
+# from BASE_REF so conformance tests retain the exact historical behavior even
+# when this branch changes tmux dispatch semantics.
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-x-lib.sh"
+# A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
+OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
+OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
   local name=$1 root bin f
@@ -119,9 +152,14 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   bin="$root/bin"
   mkdir -p "$bin"
   for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
-    ln -s "$ROOT/bin/$f" "$bin/$f"
+    cp "$ROOT/bin/$f" "$bin/$f"
   done
-  ln -s "$ROOT/bin/backends" "$bin/backends"
+  for f in $OLD_BIN_OPTIONAL_SIBLINGS; do
+    [ -f "$ROOT/bin/$f" ] || continue
+    cp "$ROOT/bin/$f" "$bin/$f"
+  done
+  cp -R "$ROOT/bin/backends" "$bin/backends"
+  git -C "$ROOT" show "$BASE_REF:bin/backends/tmux.sh" > "$bin/backends/tmux.sh"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
     chmod +x "$bin/$f"
@@ -276,7 +314,7 @@ test_backend_detect_cmux_fallback_ancestry_pid_match() {
   # $$ is this test script's own pid - the walk starts there. The cmux app
   # pid (66666) is matched via the lsappinfo bundle-id resolution, with a
   # deliberately non-standard install path so only the pid can match.
-  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/Users/x/Custom.app/Contents/MacOS/custom\n' "$$" > "$table"
+  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/home/x/Custom.app/Contents/MacOS/custom\n' "$$" > "$table"
 
   (
     unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier
@@ -296,7 +334,7 @@ test_backend_detect_cmux_fallback_ancestry_comm_match() {
   # lsappinfo resolves nothing (empty output, like the real one for a
   # non-running or non-GUI-visible app); the bundle-shaped comm path is the
   # remaining match, at a non-/Applications install location on purpose.
-  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/Users/x/Applications/cmux.app/Contents/MacOS/cmux\n' "$$" > "$table"
+  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/home/x/Applications/cmux.app/Contents/MacOS/cmux\n' "$$" > "$table"
 
   (
     unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier FM_FAKE_LSAPPINFO_OUT
@@ -610,9 +648,23 @@ set -u
 case "${1:-}" in
   send-keys) exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
+  capture-pane)
+    start= end=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -S) start=$2; shift 2 ;;
+        -E) end=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$start" = 1 ] && [ "$end" = 1 ]; then
+      printf '│    │\n'
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
@@ -769,45 +821,21 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
     "$bin/bin/fm-spawn.sh" "$@"
 }
 
-test_spawn_conformance_old_vs_new() {
-  local old_bin fb proj wt data id log_old log_new out_old out_new
-  local state_old state_new config_old config_new
-  old_bin=$(build_old_bin spawn-old)
-  proj="$TMP_ROOT/spawn-project"; wt="$TMP_ROOT/spawn-wt"; data="$TMP_ROOT/spawn-data"
-  id="spawnconform1"
-  fm_git_worktree "$proj" "$wt" "fm/$id"
-  fb=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake" "$wt")
-  mkdir -p "$data/$id"
-  printf 'test brief content\n' > "$data/$id/brief.md"
-  state_old="$TMP_ROOT/spawn-state-old"; state_new="$TMP_ROOT/spawn-state-new"
-  config_old="$TMP_ROOT/spawn-config-old"; config_new="$TMP_ROOT/spawn-config-new"
-  mkdir -p "$state_old" "$state_new" "$config_old" "$config_new"
-  log_old="$TMP_ROOT/spawn-old.log"; log_new="$TMP_ROOT/spawn-new.log"
-
-  out_old=$(run_spawn_case "$old_bin" "$fb" "$log_old" "$state_old" "$data" "$config_old" "$proj" -- "$id" "$proj" claude 2>&1)
-  local rc_old=$?
-  out_new=$(run_spawn_case "$ROOT" "$fb" "$log_new" "$state_new" "$data" "$config_new" "$proj" -- "$id" "$proj" claude 2>&1)
-  local rc_new=$?
-
-  expect_code 0 "$rc_old" "old fm-spawn.sh should succeed"$'\n'"$out_old"
-  expect_code 0 "$rc_new" "new fm-spawn.sh should succeed"$'\n'"$out_new"
-  [ "$out_old" = "$out_new" ] || fail "fm-spawn.sh stdout differs old vs new"$'\n'"--- old ---"$'\n'"$out_old"$'\n'"--- new ---"$'\n'"$out_new"
-  assert_contains "$out_new" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-$id worktree=$wt" \
-    "spawn output missing the expected summary line"
-
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
-    || fail "fm-spawn.sh: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
-
-  # Sanity: the log actually captured the session/window lifecycle so an
-  # accidentally-empty log (e.g. a fake tmux path typo) cannot pass silently.
-  assert_contains "$(cat "$log_new")" $'\x1f''new-window' "spawn tmux log missing new-window"
-  assert_contains "$(cat "$log_new")" $'\x1f''treehouse get' "spawn tmux log missing the treehouse get send"
-  assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$data/$id/brief.md')\"" \
-    "spawn tmux log missing the literal launch-command send"
-
-  rm -rf "/tmp/fm-$id"
-  pass "fm-spawn.sh: tmux command log and printed summary line are byte-identical old vs new for a ship-task claude spawn"
-}
+# NOTE: the old-vs-new spawn command-log conformance test that used to live here
+# was retired. It asserted the P1 backend refactor was a byte-for-byte pure
+# extraction of the spawn window-creation/targeting sequence, but that sequence
+# is now DELIBERATELY changed: fm-spawn drives the tmux backend to capture a
+# stable window id, pin the window name (automatic-rename/allow-rename off), and
+# target that id for the rename-critical spawn steps (robustness under a
+# captain's non-default tmux config). A byte-identical old-vs-new diff can no
+# longer hold there by design. That intended sequence is now authoritatively and
+# comprehensively verified - via a recording fake-tmux - by
+# tests/fm-tangle-guard.test.sh ("fm-spawn: appends windows by session-colon,
+# pins the name, and targets the window id"), and the real tmux create/kill path
+# by tests/fm-backend-tmux-smoke.test.sh. The send/peek/teardown conformance
+# tests below remain pure extractions and stay. (make_spawn_fakebin and
+# run_spawn_case are retained: test_spawn_default_backend_writes_no_meta_field
+# uses make_spawn_fakebin, and #294's run_spawn_symlink_case uses run_spawn_case.)
 
 # --- symlinked project prefix must not false-refuse the isolation guard -----
 #
@@ -932,9 +960,20 @@ run_teardown_case() {
 }
 
 test_teardown_conformance_old_vs_new() {
-  local old_bin fb proj wt id
+  local old_bin fb proj wt id old_tmux_ref saved_base_ref
   local state_old state_new config_old config_new data log_old log_new out_old out_new rc_old rc_new
+  # Force the post-squash topology inside this case: merge-base with main may
+  # equal HEAD on default-branch CI, and that must not make the legacy kill
+  # fixture self-referential. build_old_bin still uses BASE_REF for entrypoints;
+  # only the tmux kill adapter is pinned to the content-historical permissive ref.
+  saved_base_ref=$BASE_REF
+  BASE_REF=$(git -C "$ROOT" rev-parse HEAD)
+  old_tmux_ref=$(resolve_permissive_tmux_kill_ref) \
+    || { BASE_REF=$saved_base_ref; fail "unable to locate a historical bin/backends/tmux.sh with permissive kill-window selectors"; }
   old_bin=$(build_old_bin teardown-old)
+  git -C "$ROOT" show "$old_tmux_ref:bin/backends/tmux.sh" > "$old_bin/bin/backends/tmux.sh" \
+    || { BASE_REF=$saved_base_ref; fail "could not materialize historical tmux adapter from $old_tmux_ref"; }
+  BASE_REF=$saved_base_ref
   proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
   id="teardownconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -949,9 +988,11 @@ test_teardown_conformance_old_vs_new() {
   mkdir -p "$state_old" "$state_new" "$config_old" "$config_new"
 
   fm_write_meta "$state_old/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "decisions_reviewed=1" "decision_keys="
   fm_write_meta "$state_new/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "decisions_reviewed=1" "decision_keys="
   touch "$state_old/.last-watcher-beat" "$state_new/.last-watcher-beat"
 
   log_old="$TMP_ROOT/teardown-old.log"; log_new="$TMP_ROOT/teardown-new.log"
@@ -962,14 +1003,21 @@ test_teardown_conformance_old_vs_new() {
 
   expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
-    || fail "fm-teardown.sh: tmux+treehouse command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/teardown-diff.txt")"
   assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
     "teardown did not call treehouse return --force <worktree>"
-  assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" \
-    "teardown did not call tmux kill-window -t <window>"
+  # The legacy fixture's adapter comes from BASE_REF, so its selector form is
+  # whatever the merge-base carried: permissive while the exact-selector change
+  # was still on a branch, exact for every branch cut after it landed on main.
+  # Pinning the old form here would make this case pass once and then fail
+  # forever, so the '=' exactness markers are normalized away and the legacy run
+  # is only required to have reached tmux window cleanup for this task. The
+  # exact-selector contract belongs to the current script, asserted below.
+  assert_contains "$(tr -d '=' < "$log_old")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" \
+    "legacy teardown fixture did not exercise tmux window cleanup for the task"
+  assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"=firstmate:=fm-$id" \
+    "teardown did not call tmux kill-window with exact session and window selectors"
 
-  pass "fm-teardown.sh: treehouse return + tmux kill-window command log is byte-identical old vs new for a scout task"
+  pass "fm-teardown.sh: treehouse return remains compatible while tmux cleanup uses exact selectors"
 }
 
 # --- backend selection loudly refuses an unknown backend --------------------
@@ -1105,7 +1153,6 @@ test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
-test_spawn_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag

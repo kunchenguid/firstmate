@@ -1,41 +1,47 @@
 #!/usr/bin/env bash
 # Bootstrap detection, best-effort fleet refresh/prune, and installs.
 # Usage: fm-bootstrap.sh
-#          Detect: prints one line per problem or capability fact and exits 0.
+#          Detect: prints one line per actionable problem, or an explicit
+#          BOOTSTRAP_INFO no-action fact for completed benign bootstrap work, and
+#          exits 0.
 #          Silent = all good.
-#          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
-#                 "CREW_HARNESS_OVERRIDE: <name>",
+#          Lines: "MISSING: <tool> (install: <command>)",
+#                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "BACKEND_INVALID: <name> (known: <names>)",
+#                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
-#                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
-#                 "TASKS_AXI: available", "TANGLE: <remediation>",
+#                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
-#                 "NUDGE_SECONDMATES: fm-<id>...",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
+#                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
+#                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
+#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
-#          A NUDGE_SECONDMATES line lists the RUNNING secondmate task selectors
-#          (fm-<id>) whose worktree was fast-forwarded to firstmate's own
-#          current default-branch commit (a purely LOCAL fast-forward, never an
-#          origin fetch) AND whose instruction surface (AGENTS.md, bin/, or
-#          .agents/skills/) actually changed; firstmate nudges each via
-#          bin/fm-send.sh fm-<id> so meta resolves the current backend target
-#          even when the same bootstrap run also respawned the secondmate.
+#          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
+#          own current default-branch commit (a purely LOCAL fast-forward, never
+#          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
+#          or .agents/skills/) actually changed, bootstrap immediately nudges it
+#          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
+#          current backend target and the standard from-firstmate marker is
+#          applied. A successful send prints one BOOTSTRAP_INFO line with the
+#          exact target and message sent; a failed send leaves an idempotent
+#          retry marker under state/.secondmate-nudge-pending/ and prints an
+#          actionable NUDGE_SECONDMATES line.
 #          Already-current or no-instruction-change homes are silently left alone.
-#          The secondmate sweep also propagates declared inheritable local config
+#          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
 #          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs or
-#          config-inheritance failures for live secondmate homes; no-op/current
-#          and successful updates stay quiet.
-#          SECONDMATE_LIVENESS lines report every live secondmate's deeper
-#          agent-liveness verdict (bin/fm-backend.sh's fm_backend_agent_alive,
-#          distinct from the endpoint pane-presence check): already-live is a
-#          no-op, respawned means a confirmed-dead endpoint (a bare shell left
-#          behind by an exited secondmate agent) was killed and relaunched via
-#          bin/fm-spawn.sh --secondmate, and skipped means the probe could not
-#          confidently classify the endpoint (never acted on - a false-dead
-#          reading would spin up a duplicate agent). Session-start scope only;
-#          see AGENTS.md "Session start" and docs/tmux-backend.md /
-#          docs/herdr-backend.md "Agent liveness probe" for the empirical basis.
+#          inheritance failures for live secondmate homes, plus quarantine
+#          diagnostics for divergent shared captain-preference copies;
+#          no-op/current and successful updates stay quiet.
+#          SECONDMATE_LIVENESS lines report only actionable failures from the
+#          recovery-grade state owned by bin/fm-backend.sh's
+#          fm_backend_agent_state: skipped distinguishes an existing ambiguous
+#          process, an unreadable target, and an unverified backend; respawn
+#          failed names whether the endpoint was missing or agent-less.
+#          Already-live and successfully relaunched secondmates are silent
+#          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -45,12 +51,19 @@
 #          1.31.2.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
-#          with update --archive-body); an installed but incompatible build
-#          reports MISSING like no-mistakes. When
-#          config/backlog-backend is not manual and tasks-axi is compatible,
-#          bootstrap prints TASKS_AXI: available. quota-axi is required because
-#          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
-#          degrades at runtime when quota data is unavailable.
+#          with update --archive-body and mv [<id>...]); an installed but
+#          incompatible build reports MISSING like no-mistakes. A compatible
+#          tasks-axi default backend is silent. quota-axi is required for the
+#          agent-owned dispatch-profile array procedure in AGENTS.md section 4
+#          and .agents/skills/quota-array-dispatch/SKILL.md, and is also version
+#          gated by fm-quota-axi-lib.sh, which owns that floor and its rationale.
+#          An older build reports MISSING like no-mistakes rather than passing
+#          silently while emitting auth semantics dispatch cannot scope.
+#          On a primary home, the locked mutable path materializes the visible
+#          default config/startup-memory-budget=7500 when absent. It never
+#          guesses at malformed or unsafe existing files, and secondmate homes
+#          await the primary-authoritative inherited value instead of creating
+#          their own.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -63,16 +76,17 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the four MUTATING sweeps
-#          (secondmate_sync, secondmate_liveness_sweep, x_mode_setup,
-#          fleet_sync) while still printing every read-only detect line
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
+#          x_mode_setup, fleet_sync) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          secondmate homes, X-mode artifacts, project clones, or repair
-#          instructions. Unset/0 (the default) runs every sweep exactly as
-#          before - this flag is purely additive.
+#          PR-check artifacts, secondmate homes, X-mode artifacts, project
+#          clones, or repair instructions.
+#          Unset/0 (the default) runs every sweep exactly as before - this flag
+#          is purely additive.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
@@ -83,14 +97,19 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -180,15 +199,19 @@ fleet_sync() {
 }
 
 secondmate_sync() {
-  # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home's worktree
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
-  # fetch, no origin dependency: a secondmate home is a worktree of this same repo
-  # and already holds the primary's commit (fm-ff-lib.sh). Emits NUDGE_SECONDMATES:
-  # only for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
+  # fetch, no origin dependency: a linked-worktree home already holds the primary's
+  # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
+  # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
+  # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
   # .agents/skills/) actually changed, so a secondmate already on the primary's
-  # version is never disturbed (AGENTS.md bootstrap + supervision). Mirrors
-  # fm-update's nudge-secondmates: report so firstmate can live-converge the
-  # listed fm-<id> selectors.
+  # version is never disturbed (AGENTS.md bootstrap + supervision). Unlike
+  # /updatefirstmate, startup owns the live-convergence send itself because it is
+  # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while
+  # preserving failed sends as NUDGE_SECONDMATES retry markers.
   [ -d "$STATE" ] || return 0
   local primary_head
   if ! primary_head=$(primary_head_commit "$FM_ROOT"); then
@@ -203,24 +226,138 @@ secondmate_sync() {
   fi
   FF_NUDGE_WINDOWS=""
   FF_SEEN_HOMES=""
+  SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+  SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"
+
+  secondmate_nudge_marker_path() {
+    case "$1" in
+      *[!/A-Za-z0-9._-]*|""|*/*) return 1 ;;
+    esac
+    printf '%s/%s.pending' "$SECOND_MATE_NUDGE_PENDING_DIR" "$1"
+  }
+
+  secondmate_write_nudge_marker() {
+    local id=$1 home=$2 commit=$3 instr=$4 selector marker tmp parent
+    selector="fm-$id"
+    marker=$(secondmate_nudge_marker_path "$id") || return 1
+    parent=${marker%/*}
+    mkdir -p "$parent" || return 1
+    tmp=$(mktemp "$parent/.nudge.XXXXXX" 2>/dev/null) || return 1
+    {
+      printf 'id=%s\n' "$id"
+      printf 'selector=%s\n' "$selector"
+      printf 'home=%s\n' "$home"
+      printf 'commit=%s\n' "$commit"
+      printf 'instructions=%s\n' "$instr"
+      printf 'message=%s\n' "$SECOND_MATE_NUDGE_MESSAGE"
+    } > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+  }
+
+  secondmate_send_nudge() {
+    local id=$1 home=$2 commit=$3 instr=$4 selector marker out
+    selector="fm-$id"
+    marker=$(secondmate_nudge_marker_path "$id") || {
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
+      return 0
+    }
+    if ! secondmate_write_nudge_marker "$id" "$home" "$commit" "$instr"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
+      return 0
+    fi
+    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+      rm -f "$marker"
+      echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
+    else
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+    fi
+  }
+
+  fm_ff_after_instruction_update() {
+    local id=$1 home=$2 _window=$3 instr=$4
+    secondmate_send_nudge "$id" "$home" "$primary_head" "$instr"
+  }
+
+  secondmate_retry_pending_nudges() {
+    local marker id selector home commit message expected_marker meta meta_home home_real head
+    [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
+    for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
+      [ -f "$marker" ] || continue
+      id=$(fm_meta_get "$marker" id)
+      if ! expected_marker=$(secondmate_nudge_marker_path "$id"); then
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker has unsafe id"
+        continue
+      fi
+      [ "$expected_marker" = "$marker" ] || {
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker filename mismatch"
+        continue
+      }
+      selector=$(fm_meta_get "$marker" selector)
+      home=$(fm_meta_get "$marker" home)
+      commit=$(fm_meta_get "$marker" commit)
+      message=$(fm_meta_get "$marker" message)
+      [ "$selector" = "fm-$id" ] || {
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
+        continue
+      }
+      [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
+        continue
+      }
+      meta="$STATE/$id.meta"
+      [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
+        continue
+      }
+      meta_home=$(fm_meta_get "$meta" home)
+      [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
+      if ! validate_secondmate_home "$id" "$meta_home"; then
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home unsafe: $VALIDATION_ERROR"
+        continue
+      fi
+      home_real="$VALIDATED_HOME"
+      [ "$home_real" = "$home" ] || {
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home changed"
+        continue
+      }
+      head=$(git -C "$home_real" rev-parse HEAD 2>/dev/null || true)
+      [ -n "$head" ] && [ "$head" = "$commit" ] || {
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
+        continue
+      }
+      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+        rm -f "$marker"
+        echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
+      else
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+      fi
+    done
+  }
+
   local tmp line
+  secondmate_retry_pending_nudges
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-secondmate-sync.XXXXXX" 2>/dev/null) || return 0
-  sweep_live_secondmate_metas "$STATE" "$primary_head" yes >"$tmp"
+  sweep_live_secondmate_metas "$STATE" "$primary_head" yes "$DATA/secondmates.md" >"$tmp"
   while IFS= read -r line; do
     case "$line" in
       secondmate\ *': skipped:'*) echo "SECONDMATE_SYNC: $line" ;;
+      BOOTSTRAP_INFO:\ *) echo "$line" ;;
+      NUDGE_SECONDMATES:\ *) echo "$line" ;;
     esac
   done < "$tmp"
   rm -f "$tmp"
-  # Inheritable-config propagation: push the primary's declared LOCAL config
-  # into every VALIDATED live secondmate home swept
-  # above (FF_SEEN_HOMES is exactly that set). config/ is gitignored, so this is a
-  # separate copy from the tracked-files fast-forward; primary-authoritative, so
-  # it runs whether or not the home's tracked files advanced, keeping the fleet
-  # converged on the primary. The propagation helper stays silent on success; a
-  # primary with no inheritable config set and no downstream copy is a no-op.
-  local id home home_real propagated_homes
+  unset -f fm_ff_after_instruction_update
+  # Inheritance propagation: push the primary-authoritative local inheritance
+  # surface into every VALIDATED live secondmate home swept above.
+  # FF_SEEN_HOMES is exactly that set, and fm-config-inherit-lib.sh owns the
+  # declared config items plus data/captain-shared.md.
+  # After a successful push that changes allowlisted config/* for an already-
+  # running home, send its literal-content reread instruction pointer so the
+  # live agent does not keep applying stale defaults. Spawn/respawn already
+  # re-reads at launch and needs no redundant nudge unless files changed after launch.
+  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
   propagated_homes=""
+  SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
     validate_secondmate_home "$id" "$home" || continue
     home_real="$VALIDATED_HOME"
@@ -232,47 +369,75 @@ secondmate_sync() {
       *" $home_real "*) continue ;;
     esac
     propagated_homes="$propagated_homes $home_real"
-    if ! propagate_inheritable_config "$CONFIG" "$home_real/config"; then
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: config inheritance failed"
+    mkdir -p "$home_real/state" || {
+      echo "CONFIG_REREAD: secondmate $id: send failed: could not create state directory"
+      continue
+    }
+    home_lock=$(fm_config_inherit_lock_path "$home_real") || {
+      echo "CONFIG_REREAD: secondmate $id: send failed: could not resolve per-home lock"
+      continue
+    }
+    fm_lock_acquire_wait "$home_lock" || {
+      echo "CONFIG_REREAD: secondmate $id: send failed: could not acquire per-home lock"
+      continue
+    }
+    reread_skip_pending=0
+    case " $SECONDMATE_RESPAWNED_IDS " in
+      *" $id "*) reread_skip_pending=1 ;;
+    esac
+    if [ "$reread_skip_pending" -eq 0 ] \
+      && fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+      fm_config_reread_retry_pending "$id" "$home_real" || true
+      if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+        echo "CONFIG_REREAD: secondmate $id: send failed: retry instruction queue is full"
+        fm_lock_release "$home_lock" || true
+        continue
+      fi
     fi
-  done < <(live_secondmate_meta_records "$STATE" "$FM_HOME/data/secondmates.md")
-  [ -n "$FF_NUDGE_WINDOWS" ] && echo "NUDGE_SECONDMATES:$FF_NUDGE_WINDOWS"
+    report=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-inherit.XXXXXX" 2>/dev/null) || {
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
+      fm_lock_release "$home_lock" || true
+      continue
+    }
+    if FM_CONFIG_INHERIT_REPORT="$report" \
+      propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
+      :
+    else
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
+    fi
+    if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_STATE_OVERRIDE="$STATE" \
+      FM_CONFIG_REREAD_SKIP_PENDING="$reread_skip_pending" \
+      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+      if [ -n "$reread_out" ]; then
+        printf '%s\n' "$reread_out"
+      else
+        echo "CONFIG_REREAD: secondmate $id: send failed: unknown error"
+      fi
+    elif [ -n "$reread_out" ]; then
+      printf '%s\n' "$reread_out"
+    fi
+    rm -f "$report"
+    fm_lock_release "$home_lock" || true
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }
 
 secondmate_liveness_sweep() {
-  # Idempotent secondmate liveness guarantee - SESSION START ONLY. A
-  # secondmate agent that has exited leaves its backend endpoint alive as a
-  # bare shell; the session-start digest's "endpoint: alive" read
-  # (fm_backend_target_exists, pane-PRESENCE only) reports that shell as
-  # alive, so recovery never respawns it, and the watcher deliberately exempts
-  # secondmates from stale-pane detection (an idle secondmate pane is healthy
-  # by design). Evidence 2026-07-07: every secondmate in this fleet was found
-  # as a dead zsh shell, invisible to every existing check. This sweep closes
-  # the gap deterministically: for every LIVE secondmate meta (kind=secondmate
-  # with a recorded window=), run the deeper fm_backend_agent_alive probe
-  # (bin/fm-backend.sh) and act only on a CONFIDENT verdict:
-  #   alive   - no-op.
-  #   dead    - kill the stale endpoint first (best-effort; the tmux adapter
-  #             refuses to create a same-named window over a live one) then
-  #             respawn via the existing recovery path (bin/fm-spawn.sh <id>
-  #             --secondmate; secondmate-provisioning).
-  #   unknown - NEVER acted on. A false-dead reading would spin up a DUPLICATE
-  #             agent (two supervisors in one home); a false-alive reading
-  #             merely leaves today's bug unfixed for one more sweep. The
-  #             worse direction is guarded by never treating anything less
-  #             than a confident dead reading as license to respawn.
-  # A meta with no recorded window= at all is left to the existing "meta with
-  # no window" recovery path (AGENTS.md section 5 / secondmate-provisioning);
-  # there is no endpoint here for this probe to read.
-  # Naturally scoped to the primary: a secondmate's own state/ never holds
-  # kind=secondmate metas (secondmates never spawn secondmates), so this
-  # sweep is a silent no-op there, exactly like secondmate_sync above.
-  # Scope: session start (reboot/restart) only. A secondmate dying
-  # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
-  # explicitly out of scope here.
+  # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
+  # state machine and its only recovery-authorizing states are owned by
+  # fm_backend_agent_state. A missing tmux pane is not enough: tmux must prove
+  # the window or session absent. This preserves duplicate prevention for
+  # existing ambiguous processes and every transiently unreadable target while
+  # adding the missing-session path the original bare-shell and Herdr-husk sweep
+  # lacked.
+  # A meta with no window remains owned by secondmate-provisioning recovery.
+  # Secondmate homes never contain kind=secondmate meta, so this is naturally a
+  # primary-only no-op there. Mid-session liveness remains explicitly out of
+  # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out
+  local meta id window harness backend target agent_state out cause
+  SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -283,25 +448,46 @@ secondmate_liveness_sweep() {
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
-    verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict="unknown"
+    agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
     case "$harness" in
-      claude|codex|opencode|pi|grok) ;;
-      *) [ "$verdict" = dead ] && verdict=unknown ;;
-    esac
-    case "$verdict" in
-      alive)
-        echo "SECONDMATE_LIVENESS: secondmate $id: already-live"
+      claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+      *)
+        case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
         ;;
-      dead)
-        fm_backend_kill "$backend" "$target" 2>/dev/null || true
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
-          echo "SECONDMATE_LIVENESS: secondmate $id: respawned"
-        else
-          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed: $(first_line "$out")"
+    esac
+    case "$agent_state" in
+      alive)
+        if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+          echo "BOOTSTRAP_INFO: secondmate $id already live (backend=$backend)"
         fi
         ;;
+      dead|missing)
+        if [ "$agent_state" = dead ]; then
+          cause="confirmed agent absence on existing endpoint"
+          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        else
+          cause="recorded endpoint confidently missing"
+        fi
+        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+          SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+          if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+            echo "BOOTSTRAP_INFO: secondmate $id relaunched after $cause (backend=$backend)"
+          fi
+        else
+          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+        fi
+        ;;
+      ambiguous)
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: existing endpoint has ambiguous agent process (backend=$backend)"
+        ;;
+      unreadable)
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint probe unreadable (backend=$backend)"
+        ;;
+      unverified-harness)
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded harness '$harness' is unverified for recovery (backend=$backend)"
+        ;;
       *)
-        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: liveness probe inconclusive (backend=$backend)"
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: agent recovery classifier unverified (backend=$backend)"
         ;;
     esac
   done
@@ -310,7 +496,8 @@ secondmate_liveness_sweep() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|gh|curl|jq|orca) echo "brew install $1  # or the platform's package manager" ;;
+    tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
+    cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -319,51 +506,123 @@ install_cmd() {
   esac
 }
 
+manual_install_url() {
+  case "$1" in
+    herdr) echo "https://herdr.dev" ;;
+    *) return 1 ;;
+  esac
+}
+
+missing_tool_diagnostic() {
+  local tool=$1 instructions
+  if instructions=$(manual_install_url "$tool"); then
+    echo "MISSING_MANUAL: $tool (instructions: $instructions)"
+    return 0
+  fi
+  echo "MISSING: $tool (install: $(install_cmd "$tool"))"
+}
+
+# Required-tool detection follows the RESOLVED backend, not a one-size default:
+# a universal toolchain every home needs plus the backend-specific delta owned by
+# fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
+# never told tmux is missing, and only orca drops treehouse. A backend value with
+# no verified dependency set is reported before the universal checks continue.
+COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
-case "$BACKEND" in
-  orca) TOOLS="orca node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi" ;;
-  *) TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi" ;;
-esac
-NO_MISTAKES_MIN_MAJOR=1
-NO_MISTAKES_MIN_MINOR=31
-NO_MISTAKES_MIN_PATCH=2
+BACKEND_VALID=1
+if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
+  BACKEND_VALID=0
+  BACKEND_TOOLS=""
+fi
+TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
+NO_MISTAKES_MIN=1.31.2
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
-no_mistakes_version_parts() {
-  local output
-  command -v no-mistakes >/dev/null 2>&1 || return 1
-  output=$(no-mistakes --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1
-}
-
-no_mistakes_compatible() {
-  local parts major minor patch extra
-  parts=$(no_mistakes_version_parts) || return 1
+# Shared semantic-version floor for the tool gates below. A version string that
+# cannot be parsed into exactly one major.minor.patch triple is incompatible,
+# never assumed current, so a development or vendored build cannot pass a floor
+# it was never checked against.
+tool_version_at_least() {  # <tool> <min-version>
+  local tool=$1 min=$2 output parts major minor patch extra
+  local min_major min_minor min_patch min_extra
+  command -v "$tool" >/dev/null 2>&1 || return 1
+  output=$("$tool" --version 2>/dev/null) || return 1
+  parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
   IFS=' ' read -r major minor patch extra <<< "$parts"
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  [ "$major" -gt "$NO_MISTAKES_MIN_MAJOR" ] && return 0
-  [ "$major" -eq "$NO_MISTAKES_MIN_MAJOR" ] || return 1
-  [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
-  [ "$minor" -eq "$NO_MISTAKES_MIN_MINOR" ] || return 1
-  [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
+  IFS='.' read -r min_major min_minor min_patch min_extra <<< "$min"
+  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
+  [ "$major" -gt "$min_major" ] && return 0
+  [ "$major" -eq "$min_major" ] || return 1
+  [ "$minor" -gt "$min_minor" ] && return 0
+  [ "$minor" -eq "$min_minor" ] || return 1
+  [ "$patch" -ge "$min_patch" ]
 }
 
-# Write CONTENT to DEST only when it differs, so re-running bootstrap does not
-# churn mtimes or duplicate generated files (idempotence).
-write_if_changed() {
-  local dest=$1 content=$2
-  [ -f "$dest" ] && [ "$(cat "$dest" 2>/dev/null)" = "$content" ] && return 0
-  printf '%s\n' "$content" > "$dest"
+x_mode_write_if_changed() {
+  local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
+  parent=${dest%/*}
+  [ "$parent" != "$dest" ] || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    parent_device=$(stat -f %d "$parent" 2>/dev/null) || return 1
+  else
+    parent_device=$(stat -c %d "$parent" 2>/dev/null) || return 1
+  fi
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    fmx_single_link_file_valid "$dest" "$parent_device" || return 1
+    if [ "$(uname)" = Darwin ]; then
+      current_mode=$(stat -f %Lp "$dest" 2>/dev/null) || return 1
+    else
+      current_mode=$(stat -c %a "$dest" 2>/dev/null) || return 1
+    fi
+    if [ "$current_mode" = "$mode" ] && cmp -s "$dest" <(printf '%s\n' "$content"); then
+      return 0
+    fi
+  fi
+  tmp=$(umask 077; mktemp "$parent/.fm-x-mode.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s\n' "$content" > "$tmp" \
+    || ! chmod "$mode" "$tmp" \
+    || ! fmx_single_link_file_mode_valid "$tmp" "$mode" "$parent_device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if { [ -e "$dest" ] || [ -L "$dest" ]; } \
+    && ! fmx_single_link_file_valid "$dest" "$parent_device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! fmx_single_link_file_mode_valid "$dest" "$mode" "$parent_device" \
+    || ! cmp -s "$dest" <(printf '%s\n' "$content"); then
+    rm -f -- "$dest"
+    return 1
+  fi
+}
+
+x_mode_artifact_present() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+x_mode_remove_artifact() {
+  local artifact=$1 parent=${1%/*}
+  x_mode_artifact_present "$artifact" || return 0
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  rm -f -- "$artifact" 2>/dev/null || return 1
+  ! x_mode_artifact_present "$artifact"
 }
 
 # X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
-# wire the relay poll into the EXISTING watcher check mechanism without touching
-# fm-watch.sh or any other watcher-backbone file. Drops two idempotent,
-# gitignored artifacts:
-#   state/x-watch.check.sh - check shim that execs bin/fm-x-poll.sh each cycle
+# wire the relay poll into the existing authenticated watcher dispatch.
+# Drops two idempotent, gitignored artifacts:
+#   state/x-watch.check.sh - byte-static identity shim; the watcher validates
+#                            its bytes and invokes bin/fm-x-poll.sh directly
 #   config/x-mode.env      - exports FM_CHECK_INTERVAL=30, sourced by the watcher
 #                            arm so only an X instance polls at the 30s cadence
 # On opt-out (no token, or empty) it removes any such artifacts so the instance
@@ -374,7 +633,7 @@ write_if_changed() {
 # applying a cadence transition to a running watcher is the caller's job via
 # the emitted harness-aware supervision repair instruction.
 x_mode_setup() {
-  local env_file token shim cadence shim_body cadence_body tool missing
+  local env_file token shim cadence shim_body cadence_body tool missing shim_home
   env_file="$FM_HOME/.env"
   shim="$STATE/x-watch.check.sh"
   cadence="$CONFIG/x-mode.env"
@@ -383,21 +642,23 @@ x_mode_setup() {
   [ -f "$env_file" ] && token=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
 
   x_mode_remove_artifacts() {
-    rm -f "$shim" "$cadence" 2>/dev/null || true
-    [ ! -e "$shim" ] && [ ! -e "$cadence" ]
+    local failed=0
+    x_mode_remove_artifact "$shim" || failed=1
+    x_mode_remove_artifact "$cadence" || failed=1
+    [ "$failed" -eq 0 ]
   }
 
   x_mode_supervision_repair() {
     local out
     out=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --repair-line 2>/dev/null) \
-      || out='resume supervision according to the session-start operating block.'
+      || out='repair missing watcher supervision according to the session-start operating block.'
     printf '%s\n' "$out"
   }
 
   if [ -z "$token" ]; then
     # Opt-out (or never opted in): drop any X artifacts; stay silent unless we
     # actually removed something.
-    if [ -e "$shim" ] || [ -e "$cadence" ]; then
+    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
         echo "FMX: X mode off - removed relay poll shim and 30s cadence; default cadence applies on the next supervision cycle; $(x_mode_supervision_repair)"
       else
@@ -415,7 +676,7 @@ x_mode_setup() {
     fi
   done
   if [ "$missing" -ne 0 ]; then
-    if [ -e "$shim" ] || [ -e "$cadence" ]; then
+    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
         echo "FMX: X mode off - missing relay poll dependencies; install them and rerun bootstrap"
       else
@@ -435,16 +696,17 @@ x_mode_setup() {
 
   mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
 
-  shim_body=$(cat <<EOF
-#!/usr/bin/env bash
-# Auto-generated by fm-bootstrap.sh - X mode connector poll shim.
-# The watcher runs this each check cycle; output becomes a check: wake.
-export FM_HOME=$(printf '%q' "$FM_HOME")
-exec $(printf '%q' "$FM_ROOT/bin/fm-x-poll.sh")
-EOF
-)
-  write_if_changed "$shim" "$shim_body" || { fmx_arm_failed; return 0; }
-  chmod +x "$shim" 2>/dev/null || { fmx_arm_failed; return 0; }
+  case "$FM_HOME" in
+    /*) shim_home=$FM_HOME ;;
+    *)
+      shim_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) \
+        || { fmx_arm_failed; return 0; }
+      ;;
+  esac
+  shim_body=$(fmx_poll_shim_content "$shim_home" "$FM_ROOT")
+  x_mode_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
+  fmx_poll_shim_valid "$shim" "$shim_home" "$FM_ROOT" \
+    || { fmx_arm_failed; return 0; }
 
   cadence_body=$(cat <<'EOF'
 # Auto-generated by fm-bootstrap.sh - X mode watcher cadence.
@@ -454,7 +716,7 @@ EOF
 export FM_CHECK_INTERVAL=30
 EOF
 )
-  write_if_changed "$cadence" "$cadence_body" || { fmx_arm_failed; return 0; }
+  x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fmx_arm_failed; return 0; }
 
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
@@ -472,23 +734,31 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","grok"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif ($h == "codex" or $h == "grok" or $h == "pi") then (["low","medium","high","xhigh"] | index($e))
-      elif $h == "opencode" then false
+      elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
+      elif $h == "grok" then (["low","medium","high"] | index($e))
+      elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "opencode" or $h == "kimi" then false
       else true
       end;
-    def use_profiles($u):
-      if ($u | type) == "array" then $u
-      elif ($u | type) == "object" then [$u]
+    def profiles($value):
+      if ($value | type) == "array" then $value
+      elif ($value | type) == "object" then [$value]
       else []
       end;
+    def configured_profiles:
+      ([(.rules // [])[]? | profiles(.use?)[]?]
+        + (if has("default") then [profiles(.default)[]?] else [] end));
+    def malformed_optional_fields($items):
+      ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
+      or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
     def bad_efforts:
-      ([(.rules // [])[]? | use_profiles(.use?)[]? | {h: .harness, e: .effort}]
-        + (if (.default? | type) == "object" then [{h: .default.harness, e: .default.effort}] else [] end))
+      configured_profiles
+      | map({h: .harness, e: .effort})
       | map(select(.e != null))
       | map(select((.h | type) == "string" and verified(.h)))
       | map(select(. as $p | effort_ok($p.h; $p.e) | not))
@@ -500,15 +770,20 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
     elif [(.rules // [])[]? | select((.use? | type) != "object" and (.use? | type) != "array")] | length > 0 then "each rule needs use"
     elif [(.rules // [])[]? | select((.use? | type) == "array" and (.use | length) == 0)] | length > 0 then "each rule needs at least one use profile"
-    elif [(.rules // [])[]? | use_profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
-    elif [(.rules // [])[]? | use_profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
+    elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
+    elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
+    elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile model and effort must be non-empty strings when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
-    elif has("default") and (.default | type) != "object" then "default must be an object"
-    elif has("default") and ((.default.harness? | type) != "string" or (.default.harness | length) == 0) then "default needs harness when present"
+    elif has("default") and ((.default | type) != "object" and (.default | type) != "array") then "default must be a profile object or non-empty profile array"
+    elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
+    elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
+    elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
+    elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then "default profile model and effort must be non-empty strings when present"
     else
-      ([(.rules // [])[]? | use_profiles(.use?)[]?.harness] + [.default?.harness?]
+      (configured_profiles
+        | map(.harness)
         | map(select(. != null))
         | map(select(. as $h | verified($h) | not))
         | unique) as $bad_harnesses
@@ -522,31 +797,48 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
     return 0
   fi
-  jq -r '
+  if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+    jq -r '
     def profile($p):
       ($p.harness | tostring)
       + (if ($p.model? != null) then "/" + ($p.model | tostring)
          elif ($p.effort? != null) then "/default"
          else "" end)
       + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
-    def use_label($r):
-      if ($r.use | type) == "array" then
-        ((if ($r.select? != null) then ($r.select | tostring) else "first" end)
-          + "[" + ([$r.use[] | profile(.)] | join(", ")) + "]")
-      else profile($r.use)
+    def profile_set($value; $selector):
+      if ($value | type) == "array" then
+        (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
+      else profile($value)
       end;
-    (["CREW_DISPATCH: active config/crew-dispatch.json"]
-      + [(.rules // [])[]? | "  rule: " + (.when | tostring) + " -> " + use_label(.)]
-      + (if (.default? | type) == "object" then ["  default: " + profile(.default)] else [] end))
+    (["BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json"]
+      + [(.rules // [])[]? | "BOOTSTRAP_INFO: crew dispatch rule: " + (.when | tostring) + " -> " + profile_set(.use; .select?)]
+      + (if has("default") then ["BOOTSTRAP_INFO: crew dispatch default: " + profile_set(.default; null)] else [] end))
     | .[]
   ' "$file"
+  fi
+}
+
+startup_memory_budget_setup() {
+  # Primary bootstrap owns default publication. A secondmate is deliberately
+  # passive here because its setting must converge from the primary through the
+  # inherited-local-material contract rather than becoming a local authority.
+  if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+    return 0
+  fi
+  if ! fm_startup_memory_budget_materialize "$CONFIG"; then
+    echo "STARTUP_MEMORY_BUDGET: invalid config/$FM_STARTUP_MEMORY_BUDGET_FILE - $FM_STARTUP_MEMORY_BUDGET_ERROR"
+  fi
 }
 
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
   for t in "$@"; do
-    cmd=$(install_cmd "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
+    if ! cmd=$(install_cmd "$t"); then
+      instructions=$(manual_install_url "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
+      echo "error: $t requires manual installation (instructions: $instructions)" >&2
+      exit 1
+    fi
     cmd=${cmd%%  #*}
     echo "installing $t: $cmd"
     eval "$cmd"
@@ -554,14 +846,37 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
-for t in $TOOLS; do
-  command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
+# This is the first mutating sweep at a locked session boundary. It pauses an
+# identity-matched watcher, holds its lock, and neutralizes legacy PR checks
+# before any tool detection or later bootstrap mutation can leave old artifacts
+# runnable. Detect-only sessions never touch state.
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
+  startup_memory_budget_setup
+fi
+
+if [ "$BACKEND_VALID" -eq 0 ]; then
+  echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"
+fi
+for t in $BACKEND_TOOLS; do
+  fm_backend_required_tool_available "$BACKEND" "$t" \
+    || missing_tool_diagnostic "$t"
 done
-if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+for t in $COMMON_TOOLS; do
+  command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
+done
+# The treehouse lease-support upgrade check is only relevant when the resolved
+# backend actually requires treehouse (every backend except orca, which owns its
+# own worktrees); an orca home must not be told to upgrade a provider it never uses.
+if fm_backend_list_contains "$TOOLS" treehouse \
+  && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
+if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+fi
+if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
+  echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
@@ -581,14 +896,17 @@ if [ -n "$tangle_branch" ]; then
 fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
-[ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
+if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then
+  echo "BOOTSTRAP_INFO: crew harness override active: $crew"
+fi
 crew_dispatch_validate
-if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
-  echo "TASKS_AXI: available"
+if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
+  && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
+  echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
-  secondmate_sync
   secondmate_liveness_sweep
+  secondmate_sync
   x_mode_setup
   fleet_sync
 fi

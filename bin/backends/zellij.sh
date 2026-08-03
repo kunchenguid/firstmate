@@ -101,8 +101,9 @@
 #     `close-tab-by-id`, which verified cleanly removes a live tab (pane and
 #     all) in one call - never a separate close-pane first.
 #
-# Requires: zellij (CLI), jq (JSON parsing). Both are gated behind selecting
-# this backend; bin/fm-bootstrap.sh's core tool list is unaffected.
+# Requires: zellij (CLI), jq (JSON parsing). Bootstrap detects these through
+# fm_backend_required_tools only when zellij is the resolved backend; this
+# adapter also gates them again before spawning.
 
 # FM_HOME fallback: every real caller already sets FM_HOME as a global before
 # sourcing fm-backend.sh (which sources this file); this exists only so this
@@ -500,8 +501,8 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
 # also the load-bearing defense against the
 # unconditional-exit-0 CLI quirk documented in the file header: a truly dead
 # target never shows a change, so it correctly reports pending/unknown rather
-# than a false "sent". Echoes empty|pending|unknown|send-failed, the SAME
-# vocabulary fm-send.sh already branches on for tmux and herdr.
+# than a false "sent". Echoes empty|pending|unknown|send-failed, a subset of the
+# proof-carrying submit vocabulary.
 fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} typed after i=0
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }

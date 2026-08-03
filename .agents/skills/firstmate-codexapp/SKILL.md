@@ -61,7 +61,8 @@ For a Firstmate-managed task, include an explicit status instruction:
 
 ```text
 Append supervisor-visible status lines to <absolute-firstmate-home>/state/<task-id>.status.
-Use only these prefixes for supervisor-actionable changes: working:, needs-decision:, blocked:, done:, failed:.
+Use only these prefixes for status changes: working:, needs-decision:, blocked:, paused:, done:, failed:.
+Use paused: only for a deliberate known external wait that should be rechecked later, never for a blocker that needs firstmate to act.
 Before doing substantive work, append "working: Codex Desktop thread started".
 ```
 
@@ -90,6 +91,7 @@ For Firstmate reconciliation, prefer concrete evidence:
 
 Avoid repeating long transcripts into Firstmate docs or PR bodies.
 Summarize only the host-tool calls, the status-file result, and the archive result.
+When reporting a Desktop-thread result to the captain, translate status prefixes and return-channel evidence through `AGENTS.md` section 9.
 
 ## Archive
 

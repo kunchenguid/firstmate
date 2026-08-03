@@ -70,13 +70,17 @@ sweep_live_secondmate_metas "$STATE" origin no
 # Registry backstop: a secondmate registered in data/secondmates.md but without
 # a live meta (e.g. between restarts) is still its persistent on-disk home.
 if [ -f "$SECONDMATES_MD" ]; then
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "- "*) ;;
       *) continue ;;
     esac
-    id=$(printf '%s\n' "$line" | sed -n 's/^- \([^ ][^ ]*\) - .*/\1/p')
-    home=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
+    if ! secondmate_registry_parse_line "$line"; then
+      echo "secondmate registry: skipped malformed entry: $line" >&2
+      continue
+    fi
+    id=$SECONDMATE_REGISTRY_ID
+    home=$SECONDMATE_REGISTRY_HOME
     process_secondmate "$id" "$home" "" origin no
   done < "$SECONDMATES_MD"
 fi

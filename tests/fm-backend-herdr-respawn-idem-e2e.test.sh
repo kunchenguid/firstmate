@@ -45,17 +45,22 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
-SESSION="fm-respawn-idem-e2e-$$"
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity (tests/herdr-test-safety.sh).
+herdr_forget_inherited_pane
+
+SESSION="fm-lab-respawn-idem-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-respawn-idem.XXXXXX")
-trap cleanup_all EXIT
-
 cleanup_all() {
   herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$SCRATCH"
 }
+trap cleanup_all EXIT
+fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
@@ -105,7 +110,7 @@ pass "repro setup: two real fm-<id> task tabs exist (crewmate-shaped and secondm
 # underlying process (a fresh shell) and its agent_status to unknown - the
 # exact husk shape a restored task tab comes back in.
 
-herdr session stop "$SESSION" --session "$SESSION" --json >/dev/null 2>&1 \
+fm_herdr_lab_stop "$SESSION" >/dev/null 2>&1 \
   || fail "could not stop the isolated session for the restart"
 sleep 0.5
 fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the restart"

@@ -27,17 +27,22 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
-SESSION="fm-backend-smoke-$$"
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity (tests/herdr-test-safety.sh).
+herdr_forget_inherited_pane
+
+SESSION="fm-lab-backend-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SM_SCRATCH=
-trap cleanup_all EXIT
-
 cleanup_all() {
   [ -n "$SM_SCRATCH" ] && rm -rf "$SM_SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
+trap cleanup_all EXIT
+fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
@@ -224,7 +229,7 @@ pass "real herdr: list_live stays scoped to each home's own workspace - neither 
 # still resolve, unchanged, after a `session stop` + fresh server restart, all
 # scoped to this suite's OWN isolated $SESSION - never the default session.
 
-herdr session stop "$SESSION" --session "$SESSION" --json >/dev/null 2>&1 \
+fm_herdr_lab_stop "$SESSION" >/dev/null 2>&1 \
   || fail "could not stop the isolated session for the restart-stability check"
 sleep 0.5
 fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the stop"

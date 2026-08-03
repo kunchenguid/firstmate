@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
-let skipNextTurnEnd = false;
+let guardFollowupActive = false;
 
 type LockOwnership = "owned" | "missing" | "other";
 
@@ -49,11 +50,15 @@ function lockOwnership(): LockOwnership {
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
-function markLoaded() {
-  if (lockOwnership() === "other") return false;
-  mkdirSync(state, { recursive: true });
+function markLoaded(): void {
+  if (!existsSync(state) || lockOwnership() === "other") return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
-  return true;
+}
+
+function runSessionstartNudge(): string {
+  const result = spawnSync(`${root}/bin/fm-sessionstart-nudge.sh`, [], { encoding: "utf8" });
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
 }
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
@@ -71,28 +76,85 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
   });
 }
 
-export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", markLoaded);
+// PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
+// bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
+// extension file rather than separate ones so no extra Pi -e flag is needed at
+// launch - the primary already loads this file for the turn-end guard, and
+// pi.on("tool_call", ...) can block (verified 2026-07-09 against pi 0.80.5:
+// returning {block: true} prevents the bash command from running). Each owner
+// script owns its own decision and is inert outside the real primary checkout.
+function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/${script}`, ["--command", command], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+  });
+}
 
-  pi.on("turn_end", async () => {
-    if (skipNextTurnEnd) {
-      skipNextTurnEnd = false;
+function runPretoolCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return runChecker("fm-arm-pretool-check.sh", command);
+}
+
+function runCdCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return runChecker("fm-cd-pretool-check.sh", command);
+}
+
+export default function (pi: ExtensionAPI) {
+  pi.on?.("session_start", (event) => {
+    const reason = String((event as { reason?: unknown }).reason ?? "");
+    const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";
+    markLoaded();
+    if (!nudge) return;
+    try {
+      pi.sendMessage({
+        customType: "firstmate-sessionstart-nudge",
+        content: nudge,
+        display: false,
+        details: { kind: "session-start" },
+      });
+    } catch {
+    }
+  });
+
+  pi.on("tool_call", async (event) => {
+    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+    const command = String((event.input as { command?: unknown })?.command ?? "");
+    if (!command) return {};
+    const cdResult = await runCdCheck(command);
+    if (cdResult.code === 2) {
+      return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
+    }
+    const result = await runPretoolCheck(command);
+    if (result.code !== 2) return {};
+    return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
+  });
+
+  pi.on("agent_settled", async () => {
+    if (guardFollowupActive) {
+      guardFollowupActive = false;
       return;
     }
 
     const result = await runGuard();
     if (result.code !== 2) return;
 
+    guardFollowupActive = true;
     try {
-      pi.sendUserMessage(
+      const content = encodeFirstmateOperationalInput(
+        "turn-end-guard",
         "TURN WOULD END BLIND - supervision is off. " +
-          "Resume supervision according to the session-start operating block before ending the turn.\n\n" +
+          "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
           result.stderr,
-        { deliverAs: "followUp" },
       );
-      skipNextTurnEnd = true;
+      await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {
-      skipNextTurnEnd = false;
+      guardFollowupActive = false;
     }
   });
 
