@@ -129,6 +129,11 @@
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# Every ship/scout worktree also receives the project's LOCAL gitignored env files
+# (.env.local and friends) before launch, because git never copies an ignored file
+# into a new worktree. bin/fm-project-env.sh owns that store and its
+# never-committed proof; a project with nothing stored is a graceful no-op that
+# reports the gap rather than failing the spawn.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -1443,6 +1448,17 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+
+# Local, gitignored env files (.env.local and friends). git never copies ignored
+# files into a new worktree, so without this a fresh worktree starts without the
+# credentials the project needs to run. bin/fm-project-env.sh owns the store
+# layout and the never-committed proof; it refuses rather than copying anything
+# git could stage. A project with nothing stored is a graceful no-op, so this
+# never blocks a spawn: the worst case is a printed explanation.
+if [ "$KIND" != secondmate ] && [ -n "$WT" ]; then
+  FM_PROJECT_ENV_DIR="${FM_PROJECT_ENV_DIR:-$CONFIG/project-env}" \
+    "$FM_ROOT/bin/fm-project-env.sh" apply "$(basename "$PROJ_ABS")" "$WT" || true
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

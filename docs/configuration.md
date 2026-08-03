@@ -31,6 +31,35 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Local project env files (config/project-env)
+
+Local env files such as `.env.local` are gitignored, and git never copies an ignored file into a new worktree.
+Without a propagation mechanism, every freshly spawned task worktree therefore starts without the credentials the project needs in order to run, and the files that do exist in older worktrees came from nowhere reproducible.
+
+`config/project-env` is this home's source of truth for those files.
+It lives outside every project checkout, so nothing in it is ever a candidate for staging or pushing.
+Inside it, one directory per project holds each file at its repo-relative path:
+
+```
+config/project-env/<project>/.env.local
+config/project-env/<project>/apps/web/.env.local
+```
+
+The directory tree is the whole manifest; there is no separate configuration file to keep in sync.
+`bin/fm-project-env.sh` owns the exact commands, the store layout, and the safety proof, and `FM_PROJECT_ENV_DIR` overrides the store location so several homes can share one.
+
+`bin/fm-spawn.sh` applies the store to every ship and scout worktree it creates, before the worker starts.
+Files are copied, never symlinked, so a disposable worktree can never mutate the fleet's source of truth and a tool that rewrites an env file in place cannot corrupt or silently replace the link.
+A copy is only ever written to a path the project already gitignores and does not track, and the write is verified against real repository state afterwards, so this mechanism never produces a file git could commit and never suppresses one with `assume-unchanged` or `skip-worktree`.
+A project with nothing stored is not an error: the spawn continues, and reports the gap when the project ships a `.env.example`-style template.
+
+Populating the store is an operator action, because Firstmate does not write into project checkouts.
+`bin/fm-project-env.sh adopt <project> <working-copy> <path>` captures a file that already exists in a working copy, and `status` shows what each project has stored.
+
+The primary clone under `projects/` is deliberately not populated automatically, for the same reason: writing into it is a project write, which `AGENTS.md` hard rule 1 reserves for the captain's concrete approval.
+Run `bin/fm-project-env.sh apply <project> projects/<project>` to populate it once the captain approves that operation.
+The store is per-home; a secondmate home needs its own, or a shared `FM_PROJECT_ENV_DIR`, and is not covered by secondmate config inheritance.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
