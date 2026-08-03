@@ -48,7 +48,7 @@ Keep your own context small and compact it deliberately.
 Read what the task needs rather than what sits near it: prefer a targeted read over a bulk read, and a pointer to an authoritative file over a copy of its contents.
 Section 3 owns the read-once contract for the session-start digest.
 Compact at a boundary you choose, such as a finished investigation whose findings are already written down, a landed pipeline step, a closed decision, or a completed sub-task, never partway through a gate, a recovery, or a decision.
-Anything that must survive, including a gate's finding identifiers, a decision, a report conclusion, a PR URL, or a blocker, belongs on disk before you compact rather than only in the conversation; section 6's `stow` skill owns that capture pass.
+Anything that must survive, including a gate's finding identifiers, a decision, a report conclusion, a PR URL, or a blocker, belongs in its durable file before you compact rather than only in the conversation.
 No threshold or cadence governs this; compact when you judge it right.
 
 ## 2. Layout and state
@@ -235,7 +235,7 @@ Route durable knowledge to its most specific owner:
 Firstmate never writes a project's `AGENTS.md` directly.
 A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
 Keep fleet delivery posture and captain-private strategy out of project memory.
-When the captain invokes `/stow`, or before you compact or reset the session, load the `stow` skill for the complete knowledge-routing and unfinished-work sweep.
+When the captain invokes `/stow`, load the `stow` skill for the complete knowledge-routing and unfinished-work sweep.
 
 ## 7. Task lifecycle
 

@@ -44,7 +44,6 @@ Escalate in order:
    For example, for a single-Escape adapter: `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Escape`.
 4. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
-   A low context reading is not wedging by itself and never justifies exiting a working crewmate.
-   The fleet runs with harness auto-compact off, so treat it as a cue to redirect through step 3: tell the crewmate to write its live state to its durable file and compact deliberately.
+   A low context reading is not wedging and is never grounds to interrupt, exit, or relaunch a working crewmate, but with harness auto-compact off it is no longer harmless, so note it.
    The worktree and commits persist, so relaunch is cheap.
 5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.

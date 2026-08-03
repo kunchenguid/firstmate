@@ -256,10 +256,8 @@ IFS= read -r -d '' CONTEXT_RULE <<'EOF' || true
 8. Keep your context small and compact it deliberately. Read what the task needs, not what sits
    near it, and point at an authoritative file instead of copying it. Compact at a seam you
    choose - a finished investigation, a landed step, a closed decision - never partway through
-   one. Anything that must survive (findings, a decision, a blocker) goes into a durable file
-   BEFORE you compact, never only in this chat: your report if you have one, otherwise a scratch
-   notes file in your worktree. Rule 4 still governs the status file: never append a status line
-   just to preserve state. No threshold, no cadence: compact when you judge it right.
+   one. Anything that must survive (findings, a decision, a blocker) is written down BEFORE you
+   compact, never only in this chat. No threshold, no cadence: compact when you judge it right.
 EOF
 CONTEXT_RULE=${CONTEXT_RULE%$'\n'}
 
