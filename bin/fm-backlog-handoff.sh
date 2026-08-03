@@ -78,6 +78,10 @@ release_remote_locks() {
 trap release_remote_locks EXIT
 trap 'exit 1' HUP INT TERM
 
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
+}
+
 RESUME_PENDING=0
 if [ "${1:-}" = --resume-pending ]; then
   [ "$#" -eq 1 ] || { echo "usage: fm-backlog-handoff.sh --resume-pending" >&2; exit 1; }
@@ -267,17 +271,45 @@ outbox_item_count() { # <path>
 }
 
 remote_deliver_outbox() { # <secondmate-id> <outbox-path>
-  local id=$1 outbox=$2 remote_rel receive_out
+  local id=$1 outbox=$2 remote_rel receive_out snapshot bytes hash generation counter counter_tmp current
   [ -f "$outbox" ] && [ ! -L "$outbox" ] || {
     echo "error: pending outbox is unavailable or unsafe: $outbox" >&2
     return 1
   }
+  snapshot=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-handoff-payload.XXXXXX") || return 1
+  if ! cp -p -- "$outbox" "$snapshot"; then
+    rm -f -- "$snapshot"
+    return 1
+  fi
+  bytes=$(LC_ALL=C wc -c < "$snapshot" | tr -d ' ')
+  hash=$(sha256_file "$snapshot") || { rm -f -- "$snapshot"; return 1; }
+  counter="$STATE/.remote-handoff-$id.generation"
+  current=0
+  if [ -e "$counter" ] || [ -L "$counter" ]; then
+    [ -f "$counter" ] && [ ! -L "$counter" ] || { rm -f -- "$snapshot"; return 1; }
+    IFS= read -r current < "$counter" || { rm -f -- "$snapshot"; return 1; }
+    case "$current" in ''|*[!0-9]*) rm -f -- "$snapshot"; return 1 ;; esac
+    [ "${#current}" -le 17 ] || { rm -f -- "$snapshot"; return 1; }
+  fi
+  generation=$((current + 1))
+  counter_tmp=$(umask 077; mktemp "$STATE/.remote-handoff-generation.XXXXXX") \
+    || { rm -f -- "$snapshot"; return 1; }
+  printf '%s\n' "$generation" > "$counter_tmp" \
+    || { rm -f -- "$snapshot" "$counter_tmp"; return 1; }
+  chmod 600 "$counter_tmp" \
+    || { rm -f -- "$snapshot" "$counter_tmp"; return 1; }
+  mv -f -- "$counter_tmp" "$counter" \
+    || { rm -f -- "$snapshot" "$counter_tmp"; return 1; }
   remote_rel="state/handoff/$id.outbox.md"
-  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh put "$remote_rel" 1048576 < "$outbox"; then
+  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh put "$remote_rel" 1048576 \
+    "$bytes" "$hash" "$generation" < "$snapshot"; then
+    rm -f -- "$snapshot"
     echo "error: handoff transfer to $id was unavailable or completion is unknown; outbox preserved at $outbox" >&2
     return 1
   fi
-  if ! receive_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-backlog-receive.sh "$remote_rel" 2>&1); then
+  rm -f -- "$snapshot"
+  if ! receive_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-backlog-receive.sh \
+    "$remote_rel" "$bytes" "$hash" "$generation" 2>&1); then
     [ -z "$receive_out" ] || printf '%s\n' "$receive_out" >&2
     echo "error: handoff receipt by $id was unavailable or completion is unknown; outbox preserved at $outbox" >&2
     return 1

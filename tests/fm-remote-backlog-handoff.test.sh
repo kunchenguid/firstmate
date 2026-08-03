@@ -20,7 +20,8 @@ mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE_ROOT/bin" \
 trap 'touch "$TMP_ROOT/put.release" "$TMP_ROOT/route.release" 2>/dev/null || true; rm -rf -- "$TMP_ROOT"' EXIT
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cp "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-file.sh" \
-  "$ROOT/bin/fm-backlog-receive.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-backlog-receive.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
+  "$ROOT/bin/fm-wake-lib.sh" "$REMOTE_ROOT/bin/"
 ln -s "$(command -v tasks-axi)" "$REMOTE_ROOT/bin/tasks-axi"
 ln -s "$(command -v node)" "$REMOTE_ROOT/bin/node"
 chmod +x "$REMOTE_ROOT/bin"/*.sh
@@ -87,14 +88,45 @@ handoff_env() {
   "$@"
 }
 
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
+}
+
+printf 'complete handoff payload\n' > "$TMP_ROOT/complete-payload"
+complete_bytes=$(LC_ALL=C wc -c < "$TMP_ROOT/complete-payload" | tr -d ' ')
+complete_hash=$(sha256_file "$TMP_ROOT/complete-payload")
+if printf 'complete' | FM_HOME="$REMOTE" "$REMOTE_ROOT/bin/fm-remote-file.sh" \
+  put state/handoff/integrity.outbox.md 1024 "$complete_bytes" "$complete_hash" 1 >/dev/null 2>&1; then
+  fail "confined put published a truncated payload"
+fi
+assert_absent "$REMOTE/state/handoff/integrity.outbox.md" "truncated confined put published a destination"
+FM_HOME="$REMOTE" "$REMOTE_ROOT/bin/fm-remote-file.sh" \
+  put state/handoff/integrity.outbox.md 1024 "$complete_bytes" "$complete_hash" 2 \
+  < "$TMP_ROOT/complete-payload" >/dev/null
+printf 'stale handoff payload\n' > "$TMP_ROOT/stale-payload"
+stale_bytes=$(LC_ALL=C wc -c < "$TMP_ROOT/stale-payload" | tr -d ' ')
+stale_hash=$(sha256_file "$TMP_ROOT/stale-payload")
+if FM_HOME="$REMOTE" "$REMOTE_ROOT/bin/fm-remote-file.sh" \
+  put state/handoff/integrity.outbox.md 1024 "$stale_bytes" "$stale_hash" 1 \
+  < "$TMP_ROOT/stale-payload" >/dev/null 2>&1; then
+  fail "confined put accepted a superseded payload generation"
+fi
+cmp -s "$TMP_ROOT/complete-payload" "$REMOTE/state/handoff/integrity.outbox.md" \
+  || fail "superseded confined put replaced the current payload"
+pass "confined put rejects incomplete and superseded payload generations"
+rm -f "$REMOTE/state/handoff/integrity.outbox.md" "$REMOTE/state/handoff/.integrity.upload-generation"
+
 mkdir -p "$REMOTE/state/handoff" "$TMP_ROOT/external-handoff"
+printf 'race-safe handoff\n' > "$TMP_ROOT/race-payload"
+race_bytes=$(LC_ALL=C wc -c < "$TMP_ROOT/race-payload" | tr -d ' ')
+race_hash=$(sha256_file "$TMP_ROOT/race-payload")
 (
   set -o pipefail
   (
     while [ ! -f "$TMP_ROOT/put.release" ]; do sleep 0.02; done
-    printf 'race-safe handoff\n'
+    cat "$TMP_ROOT/race-payload"
   ) | FM_HOME="$REMOTE" "$REMOTE_ROOT/bin/fm-remote-file.sh" \
-    put state/handoff/race.outbox.md 1024
+    put state/handoff/race.outbox.md 1024 "$race_bytes" "$race_hash" 1
 ) > "$TMP_ROOT/put-race.out" 2>&1 &
 put_race_pid=$!
 put_wait=0

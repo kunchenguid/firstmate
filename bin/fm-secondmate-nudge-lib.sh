@@ -20,6 +20,26 @@ fm_remote_inherit_transaction_lock_path() { # <state-dir> <id>
   printf '%s/.remote-inherit-%s.lock\n' "$state" "$id"
 }
 
+fm_remote_inherit_generation_next() { # <state-dir> <id>
+  local state=$1 id=$2 path current next tmp
+  case "$id" in *[!/A-Za-z0-9._-]*|''|*/*) return 1 ;; esac
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  path="$state/.remote-inherit-$id.generation"
+  current=0
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    IFS= read -r current < "$path" || return 1
+    case "$current" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#current}" -le 17 ] || return 1
+  fi
+  next=$((current + 1))
+  tmp=$(umask 077; mktemp "$state/.remote-inherit-generation.XXXXXX") || return 1
+  printf '%s\n' "$next" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$path" || { rm -f -- "$tmp"; return 1; }
+  printf '%s\n' "$next"
+}
+
 fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <message> <remote:0|1>
   local state=$1 id=$2 home=$3 commit=$4 instructions=$5 message=$6 remote=$7
   local marker parent tmp

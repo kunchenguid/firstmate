@@ -128,6 +128,13 @@ while IFS='|' read -r id home _window meta; do
       errors=1
       continue
     fi
+    remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$remote_generation" ]; then
+      echo "  config-reread: generation publication failed"
+      errors=1
+      fm_lock_release "$remote_lock" || true
+      continue
+    fi
     remote_marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id" 2>/dev/null || true)
     remote_pending=0
     if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
@@ -138,7 +145,7 @@ while IFS='|' read -r id home _window meta; do
       fm_lock_release "$remote_lock" || true
       continue
     fi
-    if remote_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" 2>&1); then
+    if remote_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       printf '%s\n' "$remote_out" | sed 's/^/  /'
       remote_nudge=0
       if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi

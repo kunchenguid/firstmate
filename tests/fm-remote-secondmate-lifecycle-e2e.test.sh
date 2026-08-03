@@ -174,6 +174,10 @@ remote_env() {
   "$@"
 }
 
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
+}
+
 seed_env() {
   FM_HOME="$TMP_ROOT/seed-parent" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
@@ -282,6 +286,31 @@ fi
 assert_grep "home: $REMOTE_HOME" "$PARENT/data/secondmates.md" "refused remote reassignment changed the durable route"
 pass "remote seed registers the route and provisions the whole home and project clone on that host"
 
+PROTOCOL_HOME="$TMP_ROOT/protocol-home"
+mkdir -p "$PROTOCOL_HOME/config" "$PROTOCOL_HOME/data" "$PROTOCOL_HOME/state"
+printf 'complete inherited payload\n' > "$TMP_ROOT/inherit-complete"
+inherit_bytes=$(LC_ALL=C wc -c < "$TMP_ROOT/inherit-complete" | tr -d ' ')
+inherit_hash=$(sha256_file "$TMP_ROOT/inherit-complete")
+if printf 'complete' | FM_HOME="$PROTOCOL_HOME" "$REMOTE_ROOT/bin/fm-remote-inherit.sh" \
+  put config/crew-harness "$inherit_bytes" "$inherit_hash" 1 >/dev/null 2>&1; then
+  fail "remote inheritance published a truncated payload"
+fi
+assert_absent "$PROTOCOL_HOME/config/crew-harness" "truncated inheritance published a destination"
+FM_HOME="$PROTOCOL_HOME" "$REMOTE_ROOT/bin/fm-remote-inherit.sh" \
+  put config/crew-harness "$inherit_bytes" "$inherit_hash" 2 \
+  < "$TMP_ROOT/inherit-complete" >/dev/null
+printf 'stale inherited payload\n' > "$TMP_ROOT/inherit-stale"
+inherit_stale_bytes=$(LC_ALL=C wc -c < "$TMP_ROOT/inherit-stale" | tr -d ' ')
+inherit_stale_hash=$(sha256_file "$TMP_ROOT/inherit-stale")
+if FM_HOME="$PROTOCOL_HOME" "$REMOTE_ROOT/bin/fm-remote-inherit.sh" \
+  put config/crew-harness "$inherit_stale_bytes" "$inherit_stale_hash" 1 \
+  < "$TMP_ROOT/inherit-stale" >/dev/null 2>&1; then
+  fail "remote inheritance accepted a superseded payload generation"
+fi
+cmp -s "$TMP_ROOT/inherit-complete" "$PROTOCOL_HOME/config/crew-harness" \
+  || fail "superseded inheritance replaced the current payload"
+pass "remote inheritance rejects incomplete and superseded payload generations"
+
 # Add one local route to prove mixed fleets remain parseable and projected.
 mkdir -p "$LOCAL_HOME/data" "$LOCAL_HOME/state" "$LOCAL_HOME/config" "$LOCAL_HOME/projects" "$LOCAL_HOME/bin"
 printf 'local\n' > "$LOCAL_HOME/.fm-secondmate-home"
@@ -319,6 +348,43 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = fallback-idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
+
+rm -f "$TMP_ROOT/inherit.entered" "$TMP_ROOT/inherit.release" "$TMP_ROOT/inherit.payload" "$TMUX_STATE"
+cat > "$PARENT/data/captain-shared.md" <<'EOF'
+# Shared captain preferences
+This file is main-authoritative and maintained by the main firstmate.
+It is read-only in secondmate homes and must not be edited there.
+Changes return through a marked status document pointer.
+stale spawn preference
+EOF
+FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-concurrent.out" 2>&1 &
+spawn_concurrent=$!
+spawn_inherit_wait=0
+while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
+  kill -0 "$spawn_concurrent" 2>/dev/null || fail "remote spawn exited before its blocked inheritance write"
+  spawn_inherit_wait=$((spawn_inherit_wait + 1))
+  [ "$spawn_inherit_wait" -le 250 ] || fail "remote spawn never reached its blocked inheritance write"
+  sleep 0.02
+done
+cat > "$PARENT/data/captain-shared.md" <<'EOF'
+# Shared captain preferences
+This file is main-authoritative and maintained by the main firstmate.
+It is read-only in secondmate homes and must not be edited there.
+Changes return through a marked status document pointer.
+current post-spawn preference
+EOF
+remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/spawn-concurrent-push.out" 2>&1 &
+spawn_config_push=$!
+sleep 0.2
+kill -0 "$spawn_config_push" 2>/dev/null \
+  || fail "config push bypassed the active remote spawn inheritance transaction"
+touch "$TMP_ROOT/inherit.release"
+wait "$spawn_concurrent" || fail "serialized remote spawn failed"
+wait "$spawn_config_push" || fail "config push failed after serialized remote spawn"
+[ "$(tail -1 "$REMOTE_HOME/data/captain-shared.md")" = 'current post-spawn preference' ] \
+  || fail "stale spawn inheritance overwrote later config convergence"
+pass "remote spawn serializes inheritance through launch publication"
 
 # A normal marked parent request traverses SSH, reaches the remote endpoint once,
 # and resolves only after the correlated remote log delta is ingested.
@@ -440,21 +506,25 @@ remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 3 "$CONFIG_RESULT
   || fail "remote config reread acknowledgement was not ingested"
 pass "remote inherited config retains and retries a failed live reread nudge"
 
-for pending_record in "$PARENT/state/pending-replies"/*; do
-  [ -f "$pending_record" ] || continue
-  [ "$(grep '^task_id=' "$pending_record" | cut -d= -f2-)" = ios ] || continue
-  [ "$(grep '^phase=' "$pending_record" | cut -d= -f2-)" != resolved ] || continue
-  pending_corr=$(basename "$pending_record")
-  printf 'done [corr=%s]: concurrent inherited data re-read\n' "$pending_corr" \
-    >> "$REMOTE_HOME/state/parent-replies.status"
-  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
-    || fail "remote reply source did not capture a concurrent inheritance acknowledgment"
-  pending_result=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" -print | sort | tail -1)
-  pending_seq=${pending_result%.result}
-  pending_seq=${pending_seq##*.}
-  remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios "$pending_seq" "$pending_result" >/dev/null \
-    || fail "concurrent inheritance acknowledgment was not ingested"
-done
+resolve_ios_pending() {
+  local pending_record pending_corr pending_result pending_seq
+  for pending_record in "$PARENT/state/pending-replies"/*; do
+    [ -f "$pending_record" ] || continue
+    [ "$(grep '^task_id=' "$pending_record" | cut -d= -f2-)" = ios ] || continue
+    [ "$(grep '^phase=' "$pending_record" | cut -d= -f2-)" != resolved ] || continue
+    pending_corr=$(basename "$pending_record")
+    printf 'done [corr=%s]: concurrent inherited data re-read\n' "$pending_corr" \
+      >> "$REMOTE_HOME/state/parent-replies.status"
+    remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+      || fail "remote reply source did not capture a concurrent inheritance acknowledgment"
+    pending_result=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" -print | sort | tail -1)
+    pending_seq=${pending_result%.result}
+    pending_seq=${pending_seq##*.}
+    remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios "$pending_seq" "$pending_result" >/dev/null \
+      || fail "concurrent inheritance acknowledgment was not ingested"
+  done
+}
+resolve_ios_pending
 
 # Structured fleet state comes from each home's own snapshot. The remote host is
 # explicit, and the local route remains alongside it.
@@ -509,13 +579,23 @@ pass "unreachable remote state remains unknown with no local respawn or failover
 # This fixture overrides FM_ROOT for transport, so teardown's root-owned guard
 # sees the fixture root rather than the source script path used by fm-send.
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
+resolve_ios_pending
 printf 'kind=ship\n' > "$REMOTE_HOME/state/child.meta"
+rm -rf "$PARENT/state/procevent"
+: > "$PARENT/state/procevent"
 if remote_env "$ROOT/bin/fm-teardown.sh" ios >/dev/null 2>&1; then
   fail "remote retirement ignored in-flight child work"
 fi
 assert_present "$REMOTE_HOME" "refused remote retirement removed the home"
 assert_present "$PARENT/state/ios.meta" "refused remote retirement removed parent metadata"
 assert_grep '- ios ' "$PARENT/data/secondmates.md" "refused remote retirement removed the route"
+rm -f "$PARENT/state/procevent"
+mkdir "$PARENT/state/procevent"
+remote_env "$ROOT/bin/fm-bootstrap.sh" >/dev/null \
+  || fail "bootstrap failed while repairing a preserved remote reply source"
+assert_present "$PARENT/state/procevent/remote-reply-ios.source" \
+  "bootstrap did not repair reply registration after retirement rollback"
+resolve_ios_pending
 rm -f "$REMOTE_HOME/state/child.meta"
 mkdir -p "$PARENT/data/handoff"
 ln -s "$TMP_ROOT/missing-outbox-target" "$PARENT/data/handoff/ios.outbox.md"

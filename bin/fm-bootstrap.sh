@@ -426,13 +426,22 @@ secondmate_sync() {
   # Remote routes converge through the generic transport. Their code root and
   # inherited files are authoritative on that host; no local path probe or
   # local fast-forward is attempted for them.
-  local remote_host sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock
+  local remote_host sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
+      continue
+    fi
+    if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null 2>&1; then
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote reply source could not be registered"
+    fi
+    remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$remote_generation" ]; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance generation could not be published"
+      fm_lock_release "$remote_lock" || true
       continue
     fi
     remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
@@ -452,7 +461,7 @@ secondmate_sync() {
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(first_line "$sync_out")"
       converged=0
     fi
-    if inherit_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" 2>&1); then
+    if inherit_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"

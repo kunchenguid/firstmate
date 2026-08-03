@@ -183,6 +183,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -298,7 +300,7 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness
+  local remote_backend remote_target remote_harness remote_lock remote_generation
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
   remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
@@ -354,10 +356,24 @@ spawn_remote_secondmate() {
       return 1
     fi
   fi
-  if "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" >/dev/null; then
+  remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id")
+  if ! fm_lock_acquire_wait "$remote_lock"; then
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id inheritance transaction could not be locked" >&2
+    return 1
+  fi
+  remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
+  if [ -z "$remote_generation" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id inheritance generation could not be published" >&2
+    return 1
+  fi
+  if "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" >/dev/null; then
     :
   else
     rc=$?
+    fm_lock_release "$remote_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     if [ "$rc" -eq 255 ]; then
       echo "error: remote secondmate $id inheritance completion is unknown; launch refused and route preserved for reconciliation" >&2
@@ -373,6 +389,7 @@ spawn_remote_secondmate() {
     rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
+    fm_lock_release "$remote_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     if [ "$rc" -eq 255 ]; then
@@ -384,6 +401,7 @@ spawn_remote_secondmate() {
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   [ -n "$remote_backend" ] && [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
+    fm_lock_release "$remote_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
     return 1
@@ -409,6 +427,7 @@ spawn_remote_secondmate() {
     echo "remote_target=$remote_target"
   } > "$tmp"
   mv -f -- "$tmp" "$meta"
+  fm_lock_release "$remote_lock" || true
   fm_lock_release "$SPAWN_TASK_LOCK" || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
