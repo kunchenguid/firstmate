@@ -393,6 +393,175 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
   pass "slow annotation releases the append lock and a deleted status file fails open"
 }
 
+# The annotation phase runs in its own process so that however it dies, the
+# death is a status the drain inspects rather than an event that reaches the
+# drain's own output, exit status, or the wake records it already committed.
+# Prove that with a real abnormal death rather than a simulated failure: a perl
+# shim walks its own ancestry, finds the drain processes standing between it and
+# the outermost drain, and SIGSEGVs them - the same signal, on the same
+# processes, that the locale-restore crash used to hit. Before that boundary
+# existed the drain ran the annotation inline, so this killed the drain's own
+# subshell and left a bare "Segmentation fault" on its stderr with no note.
+test_annotation_process_death_cannot_reach_the_drain() {
+  local dir state out err perl_bin walked raw_count
+  dir=$(make_case annotation-death)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  perl_bin=$(command -v perl) || fail "perl is required for safe status reads"
+  printf 'done: annotation fixture\n' > "$state/task.status"
+  cat > "$dir/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+# Record whether the ancestry walk worked at all, so a platform whose ps cannot
+# report it is skipped explicitly instead of passing without killing anything.
+chain=()
+probe=$PPID
+while [ -n "$probe" ] && [ "$probe" != 0 ] && [ "$probe" != 1 ]; do
+  line=$(ps -p "$probe" -o ppid=,command= 2>/dev/null) || break
+  case "$line" in
+    *fm-wake-drain.sh*) chain+=("$probe") ;;
+    *) break ;;
+  esac
+  probe=$(printf '%s' "$line" | awk '{print $1}')
+done
+printf '%s\n' "${#chain[@]}" > "$FM_WAKE_DEATH_CHAIN"
+i=0
+while [ "$i" -lt $(( ${#chain[@]} - 1 )) ]; do
+  kill -SEGV "${chain[$i]}" 2>/dev/null || true
+  i=$((i + 1))
+done
+exec "$FM_WAKE_DEATH_REAL_PERL" "$@"
+SH
+  chmod +x "$dir/fakebin/perl"
+
+  append_wake "$state" signal task.status "signal: task" || fail "annotation-death wake append failed"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_WAKE_DEATH_CHAIN="$dir/chain" FM_WAKE_DEATH_REAL_PERL="$perl_bin" \
+    "$DRAIN" > "$out" 2> "$err" || fail "a dying annotation phase failed the whole drain"
+
+  walked=$(cat "$dir/chain" 2>/dev/null || echo 0)
+  if [ "${walked:-0}" -lt 2 ]; then
+    echo "skip: ps on this platform cannot report the drain ancestry, so no annotation process was killed"
+    return 0
+  fi
+
+  raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
+  [ "$raw_count" -eq 1 ] || fail "a dying annotation phase changed the authoritative raw records"
+  grep -F "$(printf '\tsignal\ttask.status\t')" "$out" >/dev/null \
+    || fail "a dying annotation phase hid the committed raw row"
+  if grep -F 'wake annotation:' "$out" >/dev/null; then
+    fail "a dying annotation phase still emitted partial annotation output"
+  fi
+  grep -F 'wake annotation skipped' "$err" >/dev/null \
+    || fail "a dying annotation phase did not report the skipped annotation"
+  if grep -Eqi 'segmentation fault|bus error|abort trap' "$err"; then
+    fail "a dying annotation phase surfaced its abnormal termination on the drain's stderr"
+  fi
+  pass "annotation process death degrades to a skipped annotation and never reaches the drain"
+}
+
+# The regression this suite exists to hold: bash restoring LC_ALL inside a forked
+# child calls setlocale(LC_ALL, "") and, with no concrete ambient locale, that
+# resolution reaches CoreFoundation, which is not fork-safe. The drain forks for
+# every annotation, so a restoring locale pin there killed the annotation child
+# intermittently - roughly one drain in twelve on macOS with the bare "UTF-8"
+# LC_CTYPE and no LANG. The ambient locale below is exactly that shape, and the
+# repeat count is what makes an ~8% per-drain crash a near-certain catch rather
+# than a coin flip. Each drain must complete normally: no abnormal exit status,
+# no signal-death text, and a complete raw row every time.
+test_repeated_drains_never_terminate_abnormally() {
+  local dir state out err i rc abnormal=0 annotated=0 rows
+  dir=$(make_case drain-repeat)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  printf 'working: first\ndone: annotation source\n' > "$state/task.status"
+  i=0
+  while [ "$i" -lt 60 ]; do
+    append_wake "$state" signal task.status "signal: task" || fail "repeat-drain wake append failed"
+    env -u LANG -u LC_ALL LC_CTYPE=UTF-8 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err"
+    rc=$?
+    [ "$rc" -eq 0 ] || fail "drain $i exited $rc under the crash-triggering ambient locale"
+    if grep -Eqi 'segmentation fault|bus error|abort trap' "$err"; then
+      abnormal=$((abnormal + 1))
+    fi
+    if grep -F 'wake annotation skipped' "$err" >/dev/null; then
+      abnormal=$((abnormal + 1))
+    fi
+    if grep -F 'wake annotation:' "$out" >/dev/null; then
+      annotated=$((annotated + 1))
+    fi
+    rows=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
+    [ "$rows" -eq 1 ] || fail "drain $i printed $rows raw rows instead of 1"
+    i=$((i + 1))
+  done
+  [ "$abnormal" -eq 0 ] || fail "$abnormal of 60 drains lost their annotation phase to an abnormal termination"
+  # Surviving is only meaningful if the annotation phase actually ran: a renderer
+  # that quietly produced nothing would otherwise satisfy every check above.
+  [ "$annotated" -eq 60 ] || fail "only $annotated of 60 drains produced an annotation, so survival proves nothing"
+  pass "repeated drains under the crash-triggering ambient locale never terminate abnormally"
+}
+
+# The annotation caps are BYTE budgets, and they are only byte budgets because
+# the renderer measures ${#line} and slices ${line:0:n} under the C locale. The
+# rest of this suite's fixtures are ASCII, where bytes and characters are the
+# same number and a lost locale pin would go unnoticed. This one is multibyte on
+# purpose: under an ambient UTF-8 locale an unpinned renderer counts characters,
+# so the same 2035-unit slice runs to roughly 4.6 KB and the 2048-byte per-item
+# cap silently stops being a bound. Whatever mechanism supplies the C locale may
+# change; this is the guarantee it has to keep supplying.
+test_annotation_caps_are_byte_bounds_under_a_utf8_locale() {
+  local dir state out widest total
+  dir=$(make_case byte-bounds)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # Synthetic multibyte payload: two-byte and three-byte UTF-8 sequences only.
+  awk 'BEGIN { printf "done: "; for (i = 0; i < 1500; i++) printf "\303\251\303\250\342\200\223"; printf "\n" }' \
+    > "$state/multibyte.status"
+  append_wake "$state" signal multibyte.status "signal: multibyte" || fail "multibyte wake append failed"
+  env -u LANG -u LC_ALL LC_CTYPE=UTF-8 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain over multibyte status content failed"
+
+  grep '^wake annotation:' "$out" >/dev/null || fail "multibyte status content produced no annotation to bound"
+  widest=$(LC_ALL=C awk '/^wake annotation:/ { if (length($0) + 1 > m) m = length($0) + 1 } END { print m + 0 }' "$out")
+  [ "$widest" -le 2048 ] || fail "a per-item annotation reached $widest bytes, so the cap is counting characters not bytes"
+  total=$(LC_ALL=C awk '/^wake annotation:/ { bytes += length($0) + 1 } END { print bytes + 0 }' "$out")
+  [ "$total" -le 8192 ] || fail "global annotation output reached $total bytes over multibyte input"
+  pass "annotation caps stay byte bounds when the status content is multibyte"
+}
+
+# The same locale restore ran in the forked child that reads a process identity,
+# where it produced no visible crash at all: the read printed a correct identity
+# and then died, so the substitution returned a signal status and the caller read
+# a live watcher as absent. That is what surfaced as a watcher that had just
+# touched its beacon being reported as not there. Identity reads must therefore
+# be repeatable and stable under the same ambient locale.
+test_pid_identity_is_stable_under_repeated_forks() {
+  local dir state first current i
+  dir=$(make_case identity-stability)
+  state="$dir/state"
+  # Read under the ambient locale that triggers the restore crash: LC_CTYPE is
+  # the bare "UTF-8" with LANG and LC_ALL unset, which is what makes resolving
+  # "" reach CoreFoundation. Build that environment with `env`, never by
+  # unsetting the variables in a subshell here - `unset LC_ALL` in a forked
+  # child performs the very re-resolution under test and crashes the harness
+  # rather than the code it is measuring.
+  # shellcheck disable=SC2016 # The bash -c program is deliberately unexpanded.
+  read_identity() {
+    env -u LANG -u LC_ALL LC_CTYPE=UTF-8 FM_STATE_OVERRIDE="$state" \
+      bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$"
+  }
+  first=$(read_identity) || fail "the first identity read of a live process failed"
+  [ -n "$first" ] || fail "the first identity read of a live process was empty"
+  i=0
+  while [ "$i" -lt 60 ]; do
+    current=$(read_identity) || fail "identity read $i failed for a process that is still alive"
+    [ "$current" = "$first" ] || fail "identity read $i disagreed with the first read for the same live process"
+    i=$((i + 1))
+  done
+  pass "repeated identity reads of a live process stay successful and stable"
+}
+
 test_interruption_before_and_after_raw_commit() {
   local dir state before_out after_out replay_out empty_out pid rc count i
   dir=$(make_case interruption)
@@ -448,4 +617,8 @@ test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
+test_annotation_process_death_cannot_reach_the_drain
+test_repeated_drains_never_terminate_abnormally
+test_annotation_caps_are_byte_bounds_under_a_utf8_locale
+test_pid_identity_is_stable_under_repeated_forks
 test_interruption_before_and_after_raw_commit
