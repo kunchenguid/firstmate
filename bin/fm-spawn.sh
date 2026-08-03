@@ -2260,13 +2260,27 @@ agy_wait_for_ready() {
 }
 
 agy_wait_for_delivery() {
+  # Task-local turn-end hook creation is skipped for secondmate spawns (see
+  # the KIND=secondmate guard below), so $TURNEND never appears for that
+  # kind. Polling only for the transient busy footer is not enough either: a
+  # brief that starts and finishes between two polls leaves no busy sample to
+  # catch even though delivery genuinely succeeded. Once the transcript shows
+  # the pointer text, accept either the busy footer (mid-turn) or a
+  # returned-to-idle composer (already-completed turn) as proof, so a fast
+  # completion cannot read as a false delivery failure.
   local pane i=0 max=${FM_AGY_DELIVERY_POLLS:-40} interval=${FM_AGY_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
     pane=$(agy_capture)
-    if [ -e "$TURNEND" ] \
-       || { printf '%s\n' "$pane" | grep -Fq 'Read the brief at' \
-            && printf '%s\n' "$pane" | grep -Fq 'esc to cancel'; }; then
+    if [ -e "$TURNEND" ]; then
       return 0
+    fi
+    if printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; then
+      if printf '%s\n' "$pane" | grep -Fq 'esc to cancel'; then
+        return 0
+      fi
+      if agy_capture_has_empty_composer "$pane"; then
+        return 0
+      fi
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
