@@ -27,7 +27,7 @@ COMPOSER="${FM_FAKE_COMPOSER:?}"
 case "${1:-}" in
   display-message)
     for a in "$@"; do
-      case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac
+      case "$a" in *cursor_y*) printf '%s\n' "${FM_FAKE_CURSOR_Y:-1}"; exit 0 ;; esac
     done
     exit 0 ;;
   capture-pane)
@@ -364,11 +364,15 @@ test_queue_clear_on_exhaustion_rescan_reports_empty() {
   probe_count="$dir/probe-count"
   printf '#1 [fm-from-firstmate]corr=abc do the work\n╭─────╮\n│ >   │\n╰─────╯\n' > "$composer"
   : > "$sent"
+  touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_CURSOR_Y=2 \
     FM_FAKE_QUEUE_CLEAR_ON_RESCAN="$probe_count" FM_FAKE_PANE_BUSY=0 \
     fm_tmux_submit_enter_core "win" 1 0.05 > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] \
     || fail "a queue cleared on the exhaustion rescan must return empty, got '$(cat "$vfile")'"
+  [ "$(cat "$probe_count")" -eq 2 ] \
+    || fail "clear-on-exhaustion must perform the candidate scan and final rescan"
   pass "fm_tmux_submit_enter_core: exhaustion rescan preserves candidate-empty delivery proof"
 }
 

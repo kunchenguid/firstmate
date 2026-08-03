@@ -254,9 +254,7 @@ re-send), while an idle pane keeps `pending` as a genuine swallow. The herdr
 adapter observes the same opencode behavior but needs a separate fix; it is
 recorded as a known gap in `docs/herdr-backend.md` rather than patched here,
 so the tmux adapter does not paper over a herdr-specific shape.
-Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four
-scenarios (busy + pending -> `empty`, idle + pending -> `pending`, busy +
-cleared -> `empty`, idle + cleared -> `empty`).
+[`docs/verification/runtime-backends.md`](../../../docs/verification/runtime-backends.md#tmux) owns the active regression matrix for this exception and the numbered composer-queue override.
 
 **Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
 The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
