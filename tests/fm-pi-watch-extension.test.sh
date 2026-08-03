@@ -2436,6 +2436,69 @@ EOF
   pass "OpenCode stands a live watcher cycle down at away-mode entry without delivering its wake"
 }
 
+test_opencode_away_mode_cancels_pending_retry() {
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-afk-pending-retry-root"
+  home="$TMP_ROOT/opencode-afk-pending-retry-home"
+  log="$TMP_ROOT/opencode-afk-pending-retry.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=250 FM_WATCH_REARM_RETRY_MAX_MS=250 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let prompt = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts.map((part) => part.text).join("");
+    },
+  },
+};
+const armRows = () => {
+  try {
+    return readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+};
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 100 && armRows() !== 1; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (armRows() !== 1) throw new Error("initial arm cycle never started");
+await new Promise((resolve) => setTimeout(resolve, 50));
+writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
+await new Promise((resolve) => setTimeout(resolve, 400));
+if (armRows() !== 1) throw new Error(`pending retry launched ${armRows()} arm cycles during away mode`);
+if (prompt) throw new Error(`pending retry injected during away mode: ${prompt}`);
+if (!existsSync(`${process.env.FM_HOME}/state/.afk`)) throw new Error("away marker vanished");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must cancel a pending continuity retry when away mode begins"
+  [ -z "$out" ] || fail "OpenCode pending-retry away-mode test printed output: $out"
+  pass "OpenCode cancels a pending continuity retry when away mode begins"
+}
+
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
@@ -2469,3 +2532,4 @@ test_opencode_healthy_arm_output_does_not_suppress_guard
 test_pi_away_mode_stands_down_instead_of_arming
 test_pi_away_mode_suppresses_wake_from_live_arm_child
 test_opencode_away_mode_suppresses_wake_from_live_arm_child
+test_opencode_away_mode_cancels_pending_retry
