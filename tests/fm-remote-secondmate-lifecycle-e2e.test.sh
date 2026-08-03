@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+# Full remote secondmate lifecycle over the deterministic generic SSH boundary.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+TMP_ROOT=$(fm_test_tmproot fm-remote-secondmate-e2e)
+mkdir -p "$TMP_ROOT"
+TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
+PARENT="$TMP_ROOT/parent"
+REMOTE_ROOT="$TMP_ROOT/remote-root"
+REMOTE_HOME="$TMP_ROOT/remote-home"
+LOCAL_HOME="$TMP_ROOT/local-home"
+FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
+SSH_COUNT="$TMP_ROOT/ssh.count"
+TMUX_LOG="$TMP_ROOT/remote-tmux.log"
+TMUX_STATE="$TMP_ROOT/remote-tmux.state"
+CLAIMS="$TMP_ROOT/claims"
+mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
+trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT
+
+# Materialize the current branch as the remote host's tracked code root. The
+# fixture is a real git repository because provisioning and guarded sync exercise
+# the same clone and fast-forward path as a second Mac.
+(
+  cd "$ROOT" || exit
+  tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config -cf - .
+) | (cd "$REMOTE_ROOT" && tar -xf -)
+cat > "$REMOTE_ROOT/bin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+log='$TMUX_LOG'
+state='$TMUX_STATE'
+fail_send='$TMP_ROOT/tmux-send-fail'
+printf '%s\n' "\$*" >> "\$log"
+case "\${1:-}" in
+  has-session|new-session|set-window-option) exit 0 ;;
+  list-windows)
+    [ -f "\$state" ] || exit 0
+    name=\$(cut -d'|' -f1 "\$state")
+    case "\$*" in *'#{session_name}:#{window_name}'*) printf 'firstmate:%s\n' "\$name" ;; *) printf '%s\n' "\$name" ;; esac
+    exit 0
+    ;;
+  new-window)
+    name=; cwd=
+    while [ "\$#" -gt 0 ]; do
+      case "\$1" in -n) shift; name=\$1 ;; -c) shift; cwd=\$1 ;; esac
+      shift
+    done
+    printf '%s|%s\n' "\$name" "\$cwd" > "\$state"
+    printf '@1\n'
+    exit 0
+    ;;
+  display-message)
+    case "\$*" in
+      *'#{pane_current_path}'*) cut -d'|' -f2- "\$state" ;;
+      *'#{pane_current_command}'*) printf 'codex\n' ;;
+      *'#{cursor_y}'*) printf '0\n' ;;
+      *'#S'*) printf 'firstmate\n' ;;
+      *) printf '%%1\n' ;;
+    esac
+    exit 0
+    ;;
+  capture-pane) printf '\n'; exit 0 ;;
+  send-keys) [ ! -f "\$fail_send" ] || exit 1; exit 0 ;;
+  kill-window) rm -f -- "\$state"; exit 0 ;;
+  list-panes) printf 'codex\n'; exit 0 ;;
+esac
+exit 0
+SH
+chmod +x "$REMOTE_ROOT/bin/tmux"
+git -C "$REMOTE_ROOT" init -q -b main
+git -C "$REMOTE_ROOT" config user.email test@example.com
+git -C "$REMOTE_ROOT" config user.name Test
+git -C "$REMOTE_ROOT" add .
+git -C "$REMOTE_ROOT" commit -qm 'remote fixture root'
+REMOTE_ORIGIN="$TMP_ROOT/firstmate-origin.git"
+git init -q --bare "$REMOTE_ORIGIN"
+git -C "$REMOTE_ROOT" remote add origin "file://$REMOTE_ORIGIN"
+git -C "$REMOTE_ROOT" push -q -u origin main
+git --git-dir="$REMOTE_ORIGIN" symbolic-ref HEAD refs/heads/main
+
+# One remote-backed direct-PR project. The remote home clones its origin, never
+# the primary working tree.
+git init -q --bare "$TMP_ROOT/alpha.git"
+git -C "$PARENT/projects" init -q -b main alpha
+git -C "$PARENT/projects/alpha" config user.email test@example.com
+git -C "$PARENT/projects/alpha" config user.name Test
+printf 'alpha\n' > "$PARENT/projects/alpha/README.md"
+git -C "$PARENT/projects/alpha" add README.md
+git -C "$PARENT/projects/alpha" commit -qm init
+git -C "$PARENT/projects/alpha" remote add origin "file://$TMP_ROOT/alpha.git"
+git -C "$PARENT/projects/alpha" push -q -u origin main
+cat > "$PARENT/data/projects.md" <<EOF
+- alpha [direct-PR] - alpha project (added 2026-08-02)
+EOF
+printf 'codex\n' > "$PARENT/config/secondmate-harness"
+printf 'tmux\n' > "$PARENT/config/backend"
+printf 'primary harness defaults\n' > "$PARENT/config/crew-harness"
+
+cat > "$FAKEBIN/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+count=$(cat "$FM_FAKE_SSH_COUNT" 2>/dev/null || echo 0)
+printf '%s\n' "$((count + 1))" > "$FM_FAKE_SSH_COUNT"
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+host=$1
+entry=$2
+shift 2
+[ "$host" = remote-mac ] || exit 91
+[ "$entry" = fm-remote-entrypoint.sh ] || exit 92
+case "${FM_FAKE_SSH_MODE:-normal}" in
+  unreachable) exit 255 ;;
+  ambiguous) "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"; exit 255 ;;
+  *) exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" ;;
+esac
+SH
+chmod +x "$FAKEBIN/fake-ssh"
+
+publish_healthy_watcher_identity() { # <state> <home> <watch-script>
+  local state=$1 home=$2 watch=$3 identity
+  identity=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" /bin/bash -c \
+    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
+    || fail "could not derive fixture watcher identity"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch" > "$state/.watch.lock/watcher-path"
+  touch "$state/.last-watcher-beat"
+}
+
+remote_env() {
+  FM_HOME="$PARENT" \
+  FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
+  FM_SSH_BIN="$FAKEBIN/fake-ssh" \
+  FM_FAKE_SSH_COUNT="$SSH_COUNT" \
+  FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
+  "$@"
+}
+
+# Provision and register the remote route from the captain-facing primary.
+out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
+  FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$REMOTE_HOME" alpha)
+assert_contains "$out" "home=remote-mac:$REMOTE_HOME" "remote seed did not report the host-qualified home"
+assert_grep 'host: remote-mac; root:' "$PARENT/data/secondmates.md" "registry did not record the remote host dimension"
+assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not publish the identity marker"
+assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
+assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
+assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local status path"
+if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
+  FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$TMP_ROOT/other-home" alpha \
+  >/dev/null 2>&1; then
+  fail "remote seed allowed an existing id to move to another home"
+fi
+assert_grep "home: $REMOTE_HOME" "$PARENT/data/secondmates.md" "refused remote reassignment changed the durable route"
+pass "remote seed registers the route and provisions the whole home and project clone on that host"
+
+# Add one local route to prove mixed fleets remain parseable and projected.
+mkdir -p "$LOCAL_HOME/data" "$LOCAL_HOME/state" "$LOCAL_HOME/config" "$LOCAL_HOME/projects" "$LOCAL_HOME/bin"
+printf 'local\n' > "$LOCAL_HOME/.fm-secondmate-home"
+printf 'fixture\n' > "$LOCAL_HOME/AGENTS.md"
+printf '## In flight\n\n## Queued\n\n## Done\n' > "$LOCAL_HOME/data/backlog.md"
+cat >> "$PARENT/data/secondmates.md" <<EOF
+- local - Local delivery (home: $LOCAL_HOME; scope: local work; projects: alpha; added 2026-08-02)
+EOF
+remote_env "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "mixed local and remote registry validation failed"
+pass "mixed local and remote routes validate without migration"
+
+# Launch on the remote home's own configured backend. Parent metadata records
+# host placement separately from that backend and arms the reply source.
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
+assert_contains "$out" 'remote=remote-mac backend=tmux' "remote spawn did not report separate host and backend dimensions"
+assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
+assert_grep 'remote_backend=tmux' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
+assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
+assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
+publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "remote endpoint was not projected alive from its own host"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = fallback-idle ] \
+  || fail "remote endpoint delivery observation did not execute on its own host"
+pass "remote spawn launches on the remote-local backend and records a host-qualified route"
+
+# A normal marked parent request traverses SSH, reaches the remote endpoint once,
+# and resolves only after the correlated remote log delta is ingested.
+ssh_before_send=$(cat "$SSH_COUNT")
+set +e
+FM_FAKE_SSH_MODE=ambiguous remote_env "$ROOT/bin/fm-send.sh" fm-ios \
+  'report the build result' > "$TMP_ROOT/send.out" 2> "$TMP_ROOT/send.err"
+send_rc=$?
+set -e
+[ "$send_rc" -ne 0 ] || fail "ambiguous remote send claimed definite delivery"
+assert_grep 'do not resend' "$TMP_ROOT/send.err" "ambiguous remote send did not require same-host reconciliation"
+ssh_after_send=$(cat "$SSH_COUNT")
+[ "$ssh_after_send" -eq $((ssh_before_send + 1)) ] || fail "ambiguous remote send was retried"
+CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$TMUX_LOG" | tail -1 | cut -d= -f2-)
+[ -n "$CORR" ] || fail "remote send did not carry a correlation token"
+phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
+[ "$phase" = delivery_unknown ] || fail "ambiguous remote send did not preserve its pending expectation"
+printf 'done [corr=%s]: remote build passed\n' "$CORR" >> "$REMOTE_HOME/state/parent-replies.status"
+SID='remote-reply-ios'
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "remote reply source did not capture the correlated answer"
+RESULT="$PARENT/state/procevent-inbox/$SID.1.result"
+remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 1 "$RESULT" >/dev/null \
+  || fail "remote reply ingest failed"
+assert_grep "done [corr=$CORR]: remote build passed" "$PARENT/state/ios.status" "correlated remote reply did not reach the parent status channel"
+phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
+[ "$phase" = resolved ] || fail "correlated remote reply did not resolve the parent expectation"
+pass "marked send and routed reply complete through the existing parent correlation owner"
+rm -f "$PARENT/state/.wake-queue"
+
+# A failed live config reread keeps one durable nudge even though the bytes have
+# already converged, and a later unchanged push retries that exact route.
+printf 'codex\n' > "$PARENT/config/crew-harness"
+touch "$TMP_ROOT/tmux-send-fail"
+if remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-fail.out" 2>&1; then
+  fail "remote config push claimed success after its reread send failed"
+fi
+NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
+if [ ! -f "$NUDGE_MARKER" ]; then
+  printf 'config push failure output:\n%s\n' "$(cat "$TMP_ROOT/config-push-fail.out")" >&2
+  fail "failed remote config reread did not retain a retry marker"
+fi
+assert_grep 'remote=1' "$NUDGE_MARKER" "remote config reread marker lost its placement"
+rm -f "$TMP_ROOT/tmux-send-fail"
+remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-retry.out" \
+  || fail "unchanged remote config push did not retry its pending reread"
+assert_absent "$NUDGE_MARKER" "successful remote config reread left its retry marker"
+assert_grep 'config-reread: sent' "$TMP_ROOT/config-push-retry.out" "remote config reread retry was not reported"
+CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$TMUX_LOG" | tail -1 | cut -d= -f2-)
+[ -n "$CONFIG_CORR" ] || fail "remote config reread did not carry a correlation token"
+printf 'done [corr=%s]: inherited config re-read\n' "$CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "remote reply source did not capture the config reread acknowledgement"
+CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.2.result"
+remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 2 "$CONFIG_RESULT" >/dev/null \
+  || fail "remote config reread acknowledgement was not ingested"
+pass "remote inherited config retains and retries a failed live reread nudge"
+
+# Structured fleet state comes from each home's own snapshot. The remote host is
+# explicit, and the local route remains alongside it.
+SNAPSHOT=$(remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+if ! printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "ios" and .remote == true and .host == "remote-mac" and .provenance.selected == "structured-home")' >/dev/null; then
+  printf 'secondmate projection:\n%s\n' "$(printf '%s' "$SNAPSHOT" | jq '.secondmate_current')" >&2
+  fail "fleet snapshot did not select the remote structured-home projection"
+fi
+printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "local" and .remote == false)' >/dev/null \
+  || fail "fleet snapshot lost the existing local secondmate route"
+pass "fleet snapshot projects mixed local and remote structured state"
+rm -f "$PARENT/state/.wake-queue"
+
+# The remote code root updates independently, then the persistent home imports
+# and fast-forwards to that host-local commit without touching project clones.
+REMOTE_SEED="$TMP_ROOT/firstmate-seed"
+git clone -q "file://$REMOTE_ORIGIN" "$REMOTE_SEED"
+git -C "$REMOTE_SEED" config user.email test@example.com
+git -C "$REMOTE_SEED" config user.name Test
+printf 'remote update probe\n' > "$REMOTE_SEED/REMOTE_UPDATE_PROBE"
+git -C "$REMOTE_SEED" add REMOTE_UPDATE_PROBE
+git -C "$REMOTE_SEED" commit -qm 'advance remote code root'
+git -C "$REMOTE_SEED" push -q origin main
+UPDATE_OUT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh update ios)
+assert_contains "$UPDATE_OUT" 'synced:' "remote update did not report a host-local fast-forward"
+[ "$(git -C "$REMOTE_HOME" rev-parse HEAD)" = "$(git -C "$REMOTE_ROOT" rev-parse HEAD)" ] \
+  || fail "remote persistent home did not fast-forward to its code-root commit"
+assert_present "$REMOTE_HOME/REMOTE_UPDATE_PROBE" "remote update did not materialize the code-root commit"
+pass "remote update imports and fast-forwards the persistent home on its configured host"
+
+# Host loss maps to unknown/unavailable and never creates a local replacement.
+launches_before=$(grep -c '^new-window' "$TMUX_LOG" || true)
+rm -rf -- "$PARENT/state/.watch.lock"
+rm -f -- "$PARENT/state/.last-watcher-beat"
+BOOT_UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_contains "$BOOT_UNAVAILABLE" 'SECONDMATE_LIVENESS: secondmate ios: skipped: remote host unavailable or endpoint state unknown' \
+  "bootstrap did not preserve an unreachable remote endpoint as unknown"
+UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+printf '%s' "$UNAVAILABLE" | jq -e '.secondmate_current.records | any(.id == "ios" and .current.state == "unknown")' >/dev/null \
+  || fail "unreachable remote host was not projected unknown"
+rm -f "$PARENT/state/.wake-queue"
+launches_after=$(grep -c '^new-window' "$TMUX_LOG" || true)
+[ "$launches_before" -eq "$launches_after" ] || fail "unreachable projection attempted a replacement launch"
+pass "unreachable remote state remains unknown with no local respawn or failover"
+
+# Retirement delegates its safety check to the remote home. An in-flight child
+# record refuses cleanup and preserves both machines' durable routes.
+# This fixture overrides FM_ROOT for transport, so teardown's root-owned guard
+# sees the fixture root rather than the source script path used by fm-send.
+publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
+printf 'kind=ship\n' > "$REMOTE_HOME/state/child.meta"
+if remote_env "$ROOT/bin/fm-teardown.sh" ios >/dev/null 2>&1; then
+  fail "remote retirement ignored in-flight child work"
+fi
+assert_present "$REMOTE_HOME" "refused remote retirement removed the home"
+assert_present "$PARENT/state/ios.meta" "refused remote retirement removed parent metadata"
+assert_grep '- ios ' "$PARENT/data/secondmates.md" "refused remote retirement removed the route"
+rm -f "$REMOTE_HOME/state/child.meta"
+remote_env "$ROOT/bin/fm-teardown.sh" ios >/dev/null \
+  || fail "safe remote retirement failed after child work cleared"
+assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
+assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
+assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
+pass "remote retirement refuses child work, then cleans the same host through existing guards"
+
+echo "ALL TESTS PASSED"

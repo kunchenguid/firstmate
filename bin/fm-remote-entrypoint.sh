@@ -41,16 +41,13 @@ decode_text() { # <label> <encoded> <destination>
 normalize_lexical_path() { # <absolute-path>
   local path=$1 part old_ifs out=/
   case "$path" in /*) ;; *) return 1 ;; esac
+  case "$path" in *'//'*) return 1 ;; esac
   old_ifs=$IFS
   IFS=/
   for part in $path; do
     case "$part" in
-      ''|.) ;;
-      ..)
-        [ "$out" != / ] || return 1
-        out=${out%/*}
-        [ -n "$out" ] || out=/
-        ;;
+      '') ;;
+      .|..) IFS=$old_ifs; return 1 ;;
       *)
         case "$part" in *$'\n'*|*$'\r'*|*$'\t'*) IFS=$old_ifs; return 1 ;; esac
         if [ "$out" = / ]; then out="/$part"; else out="$out/$part"; fi
@@ -122,6 +119,8 @@ case "$COMMAND" in */*|*..*) die "command contains a path or traversal: $COMMAND
 COMMAND_PATH="$ROOT/bin/$COMMAND"
 [ -f "$COMMAND_PATH" ] && [ ! -L "$COMMAND_PATH" ] && [ -x "$COMMAND_PATH" ] \
   || die "command is not a genuine executable in the configured remote root: $COMMAND"
+git -C "$ROOT" ls-files --error-unmatch "bin/$COMMAND" >/dev/null 2>&1 \
+  || die "command is not tracked by the configured remote root: $COMMAND"
 
 unset HOME
 ACCOUNT_HOME=$(CDPATH='' cd ~ 2>/dev/null && pwd -P) || die "cannot resolve the remote account home"

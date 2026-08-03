@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Push the declared inherited-material allowlist to one remote secondmate route.
+# Usage: fm-remote-inherit-push.sh <secondmate-id>
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+
+die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+file_link_count() {
+  if [ "$(uname)" = Darwin ]; then stat -f %l "$1" 2>/dev/null; else stat -c %h "$1" 2>/dev/null; fi
+}
+shared_captain_header_valid() {
+  local head
+  head=$(sed -n '1,12p' "$1" 2>/dev/null) || return 1
+  case "$head" in *main-authoritative*) ;; *) return 1 ;; esac
+  case "$head" in *"read-only in secondmate homes"*) ;; *) return 1 ;; esac
+  case "$head" in *"must not be edited there"*) ;; *) return 1 ;; esac
+  case "$head" in *"main firstmate"*) ;; *) return 1 ;; esac
+  case "$head" in *"marked status"*|*"document pointer"*) ;; *) return 1 ;; esac
+}
+[ "$#" -eq 1 ] || { echo "usage: fm-remote-inherit-push.sh <secondmate-id>" >&2; exit 2; }
+ID=$1
+case "$ID" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $ID" ;; esac
+REMOTE=$(secondmate_registry_field "$DATA/secondmates.md" "$ID" remote 2>/dev/null || true)
+[ "$REMOTE" = 1 ] || die "secondmate $ID is not a remote route"
+
+ITEMS='config/crew-dispatch.json
+config/crew-harness
+config/backlog-backend
+config/backend
+config/herdr-presentation-spaces
+config/startup-memory-budget
+data/captain-shared.md'
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  case "$rel" in
+    config/*) source="$CONFIG/${rel#config/}" ;;
+    data/*) source="$DATA/${rel#data/}" ;;
+  esac
+  if [ -e "$source" ] || [ -L "$source" ]; then
+    [ -f "$source" ] && [ ! -L "$source" ] || die "inherited source is unsafe: $source"
+    [ "$(file_link_count "$source")" = 1 ] || die "inherited source is hardlinked: $source"
+    if [ "$rel" = data/captain-shared.md ]; then
+      shared_captain_header_valid "$source" || die "shared captain preferences have no valid primary-authoritative header"
+    fi
+    "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh put "$rel" < "$source"
+  else
+    "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh absent "$rel"
+  fi
+done <<EOF
+$ITEMS
+EOF

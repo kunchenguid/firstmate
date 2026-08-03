@@ -34,7 +34,7 @@ PROTOCOL=1
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 encode_base64() {
   base64 | tr -d '\n'
@@ -54,6 +54,8 @@ case "$COMMAND" in */*|*..*) die "remote command must not contain a path or trav
 LOCAL_COMMAND="$FM_ROOT/bin/$COMMAND"
 [ -f "$LOCAL_COMMAND" ] && [ ! -L "$LOCAL_COMMAND" ] && [ -x "$LOCAL_COMMAND" ] \
   || die "remote command is not a genuine tracked executable in this Firstmate checkout: $COMMAND"
+git -C "$FM_ROOT" ls-files --error-unmatch "bin/$COMMAND" >/dev/null 2>&1 \
+  || die "remote command is not tracked by this Firstmate checkout: $COMMAND"
 [ -f "$REG" ] && [ ! -L "$REG" ] || die "no safe secondmate registry at $REG"
 
 MATCHES=0
@@ -77,6 +79,10 @@ case "$HOST" in ''|-*|*[!A-Za-z0-9._-]*) die "configured SSH alias is unsafe: $H
 case "$ROOT" in /*) ;; *) die "configured remote root is not absolute: $ROOT" ;; esac
 case "$HOME_PATH" in /*) ;; *) die "configured remote home is not absolute: $HOME_PATH" ;; esac
 case "$ROOT$HOME_PATH" in *$'\n'*|*$'\r'*|*$'\t'*) die "configured remote root or home contains control characters" ;; esac
+for configured_path in "$ROOT" "$HOME_PATH"; do
+  case "/$configured_path/" in */../*|*/./*) die "configured remote root or home contains traversal components" ;; esac
+  case "$configured_path" in *'//'*) die "configured remote root or home contains an empty path component" ;; esac
+done
 
 ROOT_B64=$(printf '%s' "$ROOT" | encode_base64)
 HOME_B64=$(printf '%s' "$HOME_PATH" | encode_base64)

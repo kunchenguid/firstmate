@@ -41,7 +41,16 @@ secondmate_registry_parse_line() {
   SECONDMATE_REGISTRY_PROJECTS=
   SECONDMATE_REGISTRY_ADDED=
   SECONDMATE_REGISTRY_REMOTE=0
-  if [[ "$line" =~ $remote_re ]]; then
+  # Parse the legacy local form first so summary prose that happens to mention
+  # remote field names cannot change an existing route's placement semantics.
+  if [[ "$line" =~ $local_re ]]; then
+    SECONDMATE_REGISTRY_ID=${BASH_REMATCH[1]}
+    SECONDMATE_REGISTRY_SUMMARY=${BASH_REMATCH[2]}
+    SECONDMATE_REGISTRY_HOME=${BASH_REMATCH[3]}
+    SECONDMATE_REGISTRY_SCOPE=${BASH_REMATCH[4]}
+    SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[5]}
+    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[6]}
+  elif [[ "$line" =~ $remote_re ]]; then
     SECONDMATE_REGISTRY_ID=${BASH_REMATCH[1]}
     SECONDMATE_REGISTRY_SUMMARY=${BASH_REMATCH[2]}
     SECONDMATE_REGISTRY_HOST=${BASH_REMATCH[3]}
@@ -51,13 +60,6 @@ secondmate_registry_parse_line() {
     SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[7]}
     SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[8]}
     SECONDMATE_REGISTRY_REMOTE=1
-  elif [[ "$line" =~ $local_re ]]; then
-    SECONDMATE_REGISTRY_ID=${BASH_REMATCH[1]}
-    SECONDMATE_REGISTRY_SUMMARY=${BASH_REMATCH[2]}
-    SECONDMATE_REGISTRY_HOME=${BASH_REMATCH[3]}
-    SECONDMATE_REGISTRY_SCOPE=${BASH_REMATCH[4]}
-    SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[5]}
-    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[6]}
   else
     return 1
   fi
@@ -173,6 +175,41 @@ secondmate_registry_validate_bindings() {
           case "$root" in /*) ;; *)
             rm -rf -- "$tmp"
             SECONDMATE_REGISTRY_ERROR="unsafe non-absolute remote root for $id: $root"
+            return 1
+            ;;
+          esac
+          case "/$root/" in */../*|*/./*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="remote code root contains traversal components for $id: $root"
+            return 1
+            ;;
+          esac
+          case "/$home/" in */../*|*/./*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="remote home contains traversal components for $id: $home"
+            return 1
+            ;;
+          esac
+          case "$root$home" in *'//'*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="remote route contains an empty path component for $id"
+            return 1
+            ;;
+          esac
+          if [ "$root" = "$home" ]; then
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="overlapping remote root and home for $id: $root"
+            return 1
+          fi
+          case "$home/" in "$root/"*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="remote home for $id is inside its code root: $home"
+            return 1
+            ;;
+          esac
+          case "$root/" in "$home/"*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="remote code root for $id is inside its home: $root"
             return 1
             ;;
           esac

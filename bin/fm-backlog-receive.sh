@@ -26,7 +26,7 @@ LOCK_STALE_SECS=30
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 backlog_key_section() { # <file> <key>
   awk -v key="$2" '

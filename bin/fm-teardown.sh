@@ -123,6 +123,79 @@ FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+
+remote_secondmate_teardown() {
+  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp rec phase task_id
+  remote_host=$(fm_meta_get "$META" remote_host)
+  [ -n "$remote_host" ] || return 3
+  kind=$(fm_meta_get "$META" kind)
+  [ "$kind" = secondmate ] || { echo "REFUSED: remote placement metadata is valid only for a secondmate" >&2; return 1; }
+  remote_root=$(fm_meta_get "$META" remote_root)
+  remote_home=$(fm_meta_get "$META" home)
+  [ -n "$remote_root" ] && [ -n "$remote_home" ] || { echo "REFUSED: remote secondmate metadata is incomplete" >&2; return 1; }
+  secondmate_registry_line_for_id "$SECONDMATE_REG" "$ID" || { echo "REFUSED: remote secondmate route is missing or ambiguous" >&2; return 1; }
+  [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || { echo "REFUSED: secondmate registry route is not remote" >&2; return 1; }
+  route_host=$SECONDMATE_REGISTRY_HOST
+  route_root=$SECONDMATE_REGISTRY_ROOT
+  route_home=$SECONDMATE_REGISTRY_HOME
+  [ "$route_host" = "$remote_host" ] && [ "$route_root" = "$remote_root" ] && [ "$route_home" = "$remote_home" ] \
+    || { echo "REFUSED: remote secondmate metadata does not match its registry route" >&2; return 1; }
+  [ -z "$FORCE" ] || [ "$FORCE" = --force ] || { echo "error: invalid teardown option: $FORCE" >&2; return 2; }
+  if [ "$FORCE" != --force ] && [ -f "$DATA/handoff/$ID.outbox.md" ]; then
+    echo "REFUSED: remote secondmate $ID still has a pending backlog outbox; deliver it or explicitly discard with --force" >&2
+    return 1
+  fi
+  if [ "$FORCE" != --force ] && [ -d "$STATE/pending-replies" ]; then
+    for rec in "$STATE/pending-replies"/*; do
+      [ -f "$rec" ] || continue
+      task_id=$(fm_meta_get "$rec" task_id)
+      [ "$task_id" = "$ID" ] || continue
+      phase=$(fm_meta_get "$rec" phase)
+      [ "$phase" = resolved ] || {
+        echo "REFUSED: remote secondmate $ID still has an unresolved routed reply" >&2
+        return 1
+      }
+    done
+  fi
+  "$FM_ROOT/bin/fm-guard.sh" || true
+  if [ "$FORCE" = --force ]; then
+    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force 2>&1); then rc=0; else rc=$?; fi
+  else
+    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" 2>&1); then rc=0; else rc=$?; fi
+  fi
+  if [ "$rc" -ne 0 ]; then
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
+    if [ "$rc" -eq 255 ]; then
+      echo "error: remote retirement completion is unknown; preserving the route and local records for same-host reconciliation" >&2
+    fi
+    return "$rc"
+  fi
+  "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire "$ID" >/dev/null 2>&1 || {
+    echo "error: remote home retired but reply-source cleanup is incomplete; preserving the local route for retry" >&2
+    return 1
+  }
+  tmp="$SECONDMATE_REG.tmp.$$"
+  grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
+  mv -f -- "$tmp" "$SECONDMATE_REG"
+  if [ "$FORCE" = --force ]; then rm -f -- "$DATA/handoff/$ID.outbox.md"; fi
+  if [ -d "$STATE/pending-replies" ]; then
+    for rec in "$STATE/pending-replies"/*; do
+      [ -f "$rec" ] || continue
+      [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
+    done
+  fi
+  rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended"
+  printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
+  return 0
+}
+
+if remote_secondmate_teardown; then
+  exit 0
+else
+  remote_teardown_rc=$?
+fi
+[ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
+
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
@@ -133,7 +206,9 @@ WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
-"$FM_ROOT/bin/fm-guard.sh" || true
+if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
+  "$FM_ROOT/bin/fm-guard.sh" || true
+fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root

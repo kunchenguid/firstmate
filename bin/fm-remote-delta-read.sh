@@ -16,7 +16,7 @@ MAX_BYTES=${FM_REMOTE_DELTA_MAX_BYTES:-65536}
 POLL_SECONDS=${FM_REMOTE_DELTA_POLL_SECONDS:-0.2}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -104,7 +104,11 @@ while :; do
     fi
     if [ "$SIZE" -gt "$OFFSET" ]; then
       tail -c "+$((OFFSET + 1))" "$LOG" | head -c "$MAX_BYTES" > "$TMP/chunk" || true
-      perl -0777 -pe 's/[^\n]*\z//' "$TMP/chunk" > "$TMP/payload"
+      COMPLETE_BYTES=$(LC_ALL=C od -An -v -tu1 "$TMP/chunk" | awk '
+        { for (i = 1; i <= NF; i++) { bytes++; if ($i == 10) complete=bytes } }
+        END { print complete + 0 }
+      ')
+      if [ "$COMPLETE_BYTES" -eq 0 ]; then : > "$TMP/payload"; else head -c "$COMPLETE_BYTES" "$TMP/chunk" > "$TMP/payload"; fi
       BYTES=$(LC_ALL=C wc -c < "$TMP/payload" | tr -d ' ')
       if [ "$BYTES" -gt 0 ]; then
         TO=$((OFFSET + BYTES))

@@ -16,7 +16,7 @@ FM_HOME=${FM_HOME:?FM_HOME is required}
 MAX_DEFAULT=262144
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 resolve_file() { # <relative-path>
   local rel=$1 parent base home_real parent_real path

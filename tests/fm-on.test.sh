@@ -44,6 +44,11 @@ cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
 printf 'mutation\n' >> "$1"
 SH
 chmod +x "$REMOTE_ROOT/bin"/*.sh
+git -C "$REMOTE_ROOT" init -q -b main
+git -C "$REMOTE_ROOT" config user.email test@example.com
+git -C "$REMOTE_ROOT" config user.name Test
+git -C "$REMOTE_ROOT" add AGENTS.md bin
+git -C "$REMOTE_ROOT" commit -qm 'tracked remote fixture'
 
 cat > "$FAKEBIN/fake-ssh" <<'SH'
 #!/usr/bin/env bash
@@ -137,10 +142,27 @@ ln -s fm-probe-one.sh "$REMOTE_ROOT/bin/fm-symlink.sh"
 if fm_on ios fm-symlink.sh >/dev/null 2>&1; then
   fail "a symlinked command was accepted"
 fi
+cat > "$REMOTE_ROOT/bin/fm-untracked.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'untracked command ran\n'
+SH
+chmod +x "$REMOTE_ROOT/bin/fm-untracked.sh"
+if fm_on ios fm-untracked.sh >/dev/null 2>&1; then
+  fail "an untracked fm-*.sh executable was accepted"
+fi
 if FM_HOME="$LOCAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   "$ROOT/bin/fm-on.sh" '-oProxyCommand=bad' fm-probe-two.sh >/dev/null 2>&1; then
   fail "an option-shaped SSH route was accepted"
 fi
+ssh_before_bad_path=$(cat "$SSH_COUNT")
+cat > "$LOCAL_HOME/data/secondmates.md" <<EOF
+- ios - iOS delivery (host: remote-mac; root: $REMOTE_ROOT/../remote-root; home: $REMOTE_HOME; scope: iOS work; projects: alpha; added 2026-08-02)
+EOF
+if fm_on ios fm-probe-two.sh >/dev/null 2>&1; then
+  fail "a configured remote root with traversal was accepted"
+fi
+[ "$(cat "$SSH_COUNT")" -eq "$ssh_before_bad_path" ] || fail "unsafe configured paths reached SSH"
+write_registry
 pass "transport rejects shell escape, traversal, symlink, and option-injection surfaces"
 
 root_b64=$(printf '%s' "$REMOTE_ROOT" | base64 | tr -d '\n')
@@ -149,7 +171,11 @@ argv_b64=$(printf '%s\0' fm-probe-two.sh | base64 | tr -d '\n')
 if "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" 2 "$root_b64" "$home_b64" "$argv_b64" >/dev/null 2>&1; then
   fail "an incompatible transport protocol was accepted"
 fi
-pass "the fixed entrypoint refuses incompatible protocol versions"
+traversal_root_b64=$(printf '%s' "$REMOTE_ROOT/../remote-root" | base64 | tr -d '\n')
+if "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" 1 "$traversal_root_b64" "$home_b64" "$argv_b64" >/dev/null 2>&1; then
+  fail "the fixed entrypoint accepted traversal in the configured root"
+fi
+pass "the fixed entrypoint refuses incompatible protocols and unsafe roots"
 
 cat >> "$LOCAL_HOME/data/secondmates.md" <<EOF
 - build - build delivery (host: remote-mac; root: $REMOTE_ROOT; home: $TMP_ROOT/other-remote-home; scope: build work; projects: beta; added 2026-08-02)

@@ -77,9 +77,10 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -109,6 +110,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
@@ -202,8 +205,8 @@ fleet_sync() {
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
-  # to the primary checkout's current default-branch commit. Purely LOCAL - no
+  # Placement-specific secondmate sync: local homes fast-forward to the primary
+  # checkout's current default-branch commit. That path is purely LOCAL - no
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
   # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
@@ -227,32 +230,17 @@ secondmate_sync() {
   fi
   FF_NUDGE_WINDOWS=""
   FF_SEEN_HOMES=""
-  SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+  SECOND_MATE_NUDGE_MESSAGE=$FM_SECOND_MATE_NUDGE_MESSAGE
+  REMOTE_SECOND_MATE_NUDGE_MESSAGE=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
   SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"
 
   secondmate_nudge_marker_path() {
-    case "$1" in
-      *[!/A-Za-z0-9._-]*|""|*/*) return 1 ;;
-    esac
-    printf '%s/%s.pending' "$SECOND_MATE_NUDGE_PENDING_DIR" "$1"
+    fm_secondmate_nudge_marker_path "$STATE" "$1"
   }
 
   secondmate_write_nudge_marker() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker tmp parent
-    selector="fm-$id"
-    marker=$(secondmate_nudge_marker_path "$id") || return 1
-    parent=${marker%/*}
-    mkdir -p "$parent" || return 1
-    tmp=$(mktemp "$parent/.nudge.XXXXXX" 2>/dev/null) || return 1
-    {
-      printf 'id=%s\n' "$id"
-      printf 'selector=%s\n' "$selector"
-      printf 'home=%s\n' "$home"
-      printf 'commit=%s\n' "$commit"
-      printf 'instructions=%s\n' "$instr"
-      printf 'message=%s\n' "$SECOND_MATE_NUDGE_MESSAGE"
-    } > "$tmp" || { rm -f "$tmp"; return 1; }
-    mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+    local id=$1 home=$2 commit=$3 instr=$4 message=${5:-$SECOND_MATE_NUDGE_MESSAGE} remote=${6:-0}
+    fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" "$remote"
   }
 
   secondmate_send_nudge() {
@@ -280,7 +268,8 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message expected_marker meta meta_home home_real head
+    local marker id selector home commit message remote expected_marker meta meta_home home_real head out
+    local registry_remote registry_home registry_host
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -297,14 +286,26 @@ secondmate_sync() {
       home=$(fm_meta_get "$marker" home)
       commit=$(fm_meta_get "$marker" commit)
       message=$(fm_meta_get "$marker" message)
+      remote=$(fm_meta_get "$marker" remote)
+      [ -n "$remote" ] || remote=0
       [ "$selector" = "fm-$id" ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
         continue
       }
-      [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
-        continue
-      }
+      case "$remote" in
+        0) [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
+          continue
+        } ;;
+        1) [ "$message" = "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" ] || {
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: remote retry marker message mismatch"
+          continue
+        } ;;
+        *)
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker placement is invalid"
+          continue
+          ;;
+      esac
       meta="$STATE/$id.meta"
       [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
@@ -312,6 +313,24 @@ secondmate_sync() {
       }
       meta_home=$(fm_meta_get "$meta" home)
       [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
+      if [ "$remote" -eq 1 ]; then
+        registry_remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
+        registry_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home 2>/dev/null || true)
+        registry_host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host 2>/dev/null || true)
+        [ "$registry_remote" = 1 ] && [ "$registry_home" = "$home" ] \
+          && [ "$registry_host" = "$(fm_meta_get "$meta" remote_host)" ] \
+          && [ "$meta_home" = "$home" ] || {
+          echo "NUDGE_SECONDMATES: secondmate $id: send failed: remote retry target route changed"
+          continue
+        }
+        if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$message" 2>&1); then
+          rm -f "$marker"
+          echo "BOOTSTRAP_INFO: nudged $selector with '$message'"
+        else
+          echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+        fi
+        continue
+      fi
       if ! validate_secondmate_home "$id" "$meta_home"; then
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home unsafe: $VALIDATION_ERROR"
         continue
@@ -421,6 +440,38 @@ secondmate_sync() {
     rm -f "$report"
     fm_lock_release "$home_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+
+  # Remote routes converge through the generic transport. Their code root and
+  # inherited files are authoritative on that host; no local path probe or
+  # local fast-forward is attempted for them.
+  local remote_host sync_out inherit_out nudge_needed
+  while IFS='|' read -r id _home _window meta; do
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    [ -n "$remote_host" ] || continue
+    nudge_needed=0
+    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" 2>&1); then
+      case "$sync_out" in synced:*) nudge_needed=1 ;; esac
+    else
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(first_line "$sync_out")"
+    fi
+    if inherit_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" 2>&1); then
+      if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
+    else
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
+    fi
+    if [ "$nudge_needed" -eq 1 ]; then
+      if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
+        "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
+      elif out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+        rm -f "$(secondmate_nudge_marker_path "$id")"
+        [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
+      else
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+      fi
+    fi
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }
 
@@ -437,7 +488,7 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause
+  local meta id window harness backend target agent_state out cause remote_host remote_rc
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -446,6 +497,41 @@ secondmate_liveness_sweep() {
     window=$(fm_meta_get "$meta" window)
     [ -n "$window" ] || continue
     harness=$(fm_meta_get "$meta" harness)
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    if [ -n "$remote_host" ]; then
+      if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" 2>/dev/null); then
+        remote_rc=0
+      else
+        remote_rc=$?
+      fi
+      if [ "$remote_rc" -eq 255 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+        continue
+      fi
+      if [ "$remote_rc" -ne 0 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint probe unreadable on $remote_host"
+        continue
+      fi
+      agent_state=$(printf '%s\n' "$out" | tail -1)
+      case "$agent_state" in
+        alive)
+          [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: remote secondmate $id already live (host=$remote_host)"
+          ;;
+        dead|missing)
+          cause="remote endpoint $agent_state on its configured host"
+          if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+            SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+          else
+            echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+          fi
+          ;;
+        ambiguous|unreadable|unverified)
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint state is $agent_state on $remote_host"
+          ;;
+        *) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint returned an invalid state" ;;
+      esac
+      continue
+    fi
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
