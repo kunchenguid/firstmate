@@ -104,11 +104,6 @@ fm_forge_resolve_host() {
   [ -n "$remote_url" ] || return 1
 
   case "$remote_url" in
-    git@*:*|*@*:*)
-      # scp-like syntax: user@host:path  (host may be an ssh config alias)
-      host=${remote_url#*@}
-      host=${host%%:*}
-      ;;
     ssh://*)
       host=${remote_url#ssh://}
       host=${host#*@}
@@ -123,6 +118,10 @@ fm_forge_resolve_host() {
         \[*\]*) host=${host#\[}; host=${host%%\]*} ;;
         *:*) host=${host%%:*} ;;
       esac
+      ;;
+    *:*)
+      host=${remote_url%%:*}
+      host=${host##*@}
       ;;
     *)
       return 1

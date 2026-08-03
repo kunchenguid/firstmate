@@ -639,6 +639,17 @@ test_forge_provider_bootstrap_contracts() {
   [ "$out" = "FORGE_UNSUPPORTED: mystery (host: code.example)" ] \
     || fail "unknown forge must fail closed with its project and host, got: $out"
 
+  case_dir="$TMP_ROOT/forge-scp-no-user"
+  project="$case_dir/home/projects/github-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "scp origin without a user must resolve as GitHub, got: $out"
+
   case_dir="$TMP_ROOT/forge-local-origin"
   project="$case_dir/home/projects/local-project"
   mkdir -p "$project" "$case_dir/home/config"
