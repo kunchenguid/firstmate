@@ -241,6 +241,49 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+## Away-mode daemon liveness
+
+The fail-safe age contract and the away-mode liveness verdict behind [`bin/fm-afk-health.sh`](../../bin/fm-afk-health.sh) were verified on 2026-08-03 with isolated homes and daemons stopped by exact pid.
+
+```sh
+bash tests/fm-afk-daemon-liveness.test.sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+```
+
+Observed output:
+
+```text
+ok - fm-supervise-daemon.sh _file_age: unparseable mtime reads as due (999999), gate survives
+ok - fm-watch.sh age_of: unparseable mtime reads as due (999999), gate survives
+ok - fm-wake-lib.sh fm_path_age: unparseable mtime reads as due (999999), gate survives
+ok - housekeeping gate evaluates cleanly and runs housekeeping
+ok - corrupt counter file reads as 0 instead of aborting the poll
+ok - no away-mode flag reports AFK_OFF
+ok - away-mode flag with no live daemon is loudly AFK_DEGRADED
+ok - durable exit record is surfaced as the reason the daemon is gone
+ok - a freshly launched, not-yet-ready daemon reports AFK_STARTING
+ok - an unarmed daemon past the arming window is AFK_DEGRADED
+ok - the readiness beacon is what makes away mode AFK_HEALTHY
+ok - daemon stderr still lands in the log after repeated rotation
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-doc-audience-check: ok surfaces=64 local_links=185
+```
+
+The same suite was rerun against the pre-change `bin/` tree extracted from `cf95112`, with only the new health script and the new test copied in, and reported six failures.
+The untrusted age reached the housekeeping gate as an empty string on a zero exit status, so the gate printed both `line 241: File: unbound variable` and `[: : integer expression expected` and then evaluated to `NOTDUE`.
+That silent `NOTDUE` is the guarantee this record supports: an untrustworthy age must read as due, because a gate that errors and also reads false stops housekeeping while away mode still reports itself active.
+The same baseline lost daemon stderr after log rotation and let a corrupt counter file abort the poll.
+
+The related supervision suites passed on 2026-08-03 with zero `not ok` lines.
+
+```sh
+tests/fm-afk-launch.test.sh
+tests/fm-afk-return.test.sh
+tests/fm-wake-queue.test.sh
+tests/fm-supervision-events.test.sh
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
