@@ -303,6 +303,21 @@ test_cli_helper_uses_the_ambient_server_inside_a_herdr_pane() {
   pass "fm_backend_herdr_cli: a pane-scoped call uses the exact ambient Herdr server"
 }
 
+test_cli_helper_routes_a_different_session_via_flag_inside_a_herdr_pane() {
+  local dir log resp fb
+  dir="$TMP_ROOT/cli-helper-cross-session"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_PANE_ID=w7:p3 HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/live.sock \
+    HERDR_SESSION=default \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli other-worker workspace list' "$ROOT"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=other-worker" \
+    "cross-session call from inside a live pane did not set the requested HERDR_SESSION"
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''list'$'\x1f''--session'$'\x1f''other-worker' \
+    "cross-session call from inside a live pane did not append --session, falling back to the ambient (wrong) server"
+  pass "fm_backend_herdr_cli: a call for a DIFFERENT session from inside a live pane still routes via --session"
+}
+
 # --- launcher_identity: the exact workspace a worker must be placed in -------
 #
 # Herdr injects HERDR_ENV/HERDR_PANE_ID/HERDR_SESSION/HERDR_SOCKET_PATH into
@@ -3880,6 +3895,7 @@ test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_cli_helper_uses_the_ambient_server_inside_a_herdr_pane
+test_cli_helper_routes_a_different_session_via_flag_inside_a_herdr_pane
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set
 test_launcher_identity_resolves_the_exact_pane_tab_and_workspace
