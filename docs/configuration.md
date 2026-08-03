@@ -242,9 +242,10 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 [`docs/dispatch-pool.md`](dispatch-pool.md) owns the schema, rotation contract, key handling, limit-signature catalogue, and failover procedure in full.
 [`docs/examples/dispatch-pool.json`](examples/dispatch-pool.json) is a starting point to copy into local `config/dispatch-pool.json`.
 
-Two facts belong here because they interact with the rest of this document.
+Three facts belong here because they interact with the rest of this document.
 The pool is a different axis from the runtime backend above: `config/backend` selects the session provider and is recorded as `backend=`, while the pool selects the agent account and is recorded as `pool_backend=`.
 The pool is inert while the file is absent, so every path documented elsewhere in this file behaves identically until the captain opts in.
+`config/dispatch-pool.json` is not inherited into secondmate homes - it is absent from `FM_INHERITABLE_CONFIG` in `bin/fm-config-inherit-lib.sh` - so a secondmate home pools only when the captain places its own config there, and the account key files it names stay outside the repo under `~/.config/firstmate/keys/`.
 
 ## Toolchain
 

@@ -56,6 +56,9 @@ If an addition needs more than a few lines of conditional detail (detail that ma
 A skill's cost is paid only by the sessions that actually load it.
 When in doubt, write the fact into the skill or doc first, and add only the one-line trigger to `AGENTS.md`.
 
+There is a hard ceiling as well as a habit: `AGENTS.md` must stay under the character count at which Claude Code warns that a memory file is too large, and `tests/fm-instruction-owners.test.sh` owns that threshold and fails when the file reaches it.
+Crossing it degrades the always-loaded contract for every session in every home, so an addition that would cross it means relocating existing conditional detail to its owner in the same change, never trimming a safety boundary to make the number fit.
+
 ## Trigger hygiene
 
 A new skill is dead weight if nothing loads it.
