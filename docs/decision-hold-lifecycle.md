@@ -21,14 +21,14 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
-Verification accepts a listed decision only when tasks-axi parses it as a resolved captain row in the live backlog or as one unique resolved captain row in `data/done-archive.md`.
-An active unresolved row, an absent row, a duplicate archived identity, a malformed row, or an indeterminate live lookup keeps teardown refusing.
+Verification requires tasks-axi to parse each listed decision as a resolved captain row, falling back to exactly one matching row in `data/done-archive.md` only when the live lookup reports `NOT_FOUND`.
+A live row that is unresolved or malformed, any live lookup failure other than `NOT_FOUND`, or a fallback with an absent, malformed, or duplicated archived record keeps teardown refusing.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
-A later tasks-axi prune moves the resolved row to `data/done-archive.md` without invalidating the teardown proof.
+A later tasks-axi prune moves the resolved row to `data/done-archive.md` without invalidating the teardown proof or identical resolution retries.
 A failed intermediate step leaves the hold open.
 
 ## Structured read surfaces
