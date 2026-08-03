@@ -47,7 +47,7 @@ SH
 }
 
 make_spawn_case() {
-  local name=$1 harness=$2 case_dir home proj wt fakebin launchlog id
+  local name=$1 harness=$2 case_dir home proj wt fakebin launchlog id branch_name
   shift 2
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
@@ -57,7 +57,8 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
-  fm_git_worktree "$proj" "$wt" "wt-$name"
+  branch_name=${name//[^A-Za-z0-9_-]/-}
+  fm_git_worktree "$proj" "$wt" "wt-$branch_name"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
@@ -129,7 +130,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$WT_DIR/.fm/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -158,8 +159,8 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
     "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
-    "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
+  assert_contains "$launch" "< '$WT_DIR/.fm/brief.md'" \
+    "relative FM_DATA_OVERRIDE did not stage the brief inside the worktree"
   pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
 }
 
@@ -187,8 +188,8 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
     "relative FM_HOME leaked into Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
-    "relative FM_HOME leaked into the default cross-process brief path"
+  assert_contains "$launch" "< '$WT_DIR/.fm/brief.md'" \
+    "relative FM_HOME did not stage the brief inside the worktree"
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
@@ -207,8 +208,8 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
     "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$absolute_id/brief.md'" \
-    "absolute FM_HOME spelling changed in the default cross-process brief path"
+  assert_contains "$launch" "< '$WT_DIR/.fm/brief.md'" \
+    "absolute FM_HOME did not stage the brief inside the worktree"
   pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
 }
 
@@ -235,8 +236,8 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
     "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$id/brief.md'" \
-    "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
+  assert_contains "$launch" "< '$WT_DIR/.fm/brief.md'" \
+    "absolute FM_DATA_OVERRIDE did not stage the brief inside the worktree"
   pass "absolute override spellings are preserved in spawn launch paths"
 }
 
@@ -470,7 +471,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
-  local rec id out status launch
+  local rec id out status launch config home_real
   id=profile-opencode-z7
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
@@ -480,12 +481,67 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   expect_code 0 "$status" "opencode spawn with model and ignored effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
   launch=$(cat "$LAUNCH_LOG")
+  home_real=$(cd "$HOME_DIR" && pwd -P)
   assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch did not thread model"
+  config="OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\",\"external_directory\":{\"$home_real/state/*\":\"allow\",\"$home_real/data/$id/*\":\"allow\"}}}'"
+  assert_contains "$launch" "$config" \
+    "opencode launch did not scope external_directory to the task's output paths"
+  assert_contains "$launch" "< '$WT_DIR/.fm/brief.md'" \
+    "opencode launch did not read the staged brief"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
   pass "opencode receives --model and omits the unsupported effort axis"
+}
+
+test_spawn_stages_firstmate_brief_and_references() {
+  local rec id out status launch staged
+  id=profile-staged-z20
+  rec=$(make_spawn_case 'profile-staged spaces' opencode "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/data/prior" "$HOME_DIR/data/plan-review/decisions"
+  printf 'prior report; see data/prior/notes.md\n' > "$HOME_DIR/data/prior/report.md"
+  printf 'prior notes\n' > "$HOME_DIR/data/prior/notes.md"
+  printf 'decision one\n' > "$HOME_DIR/data/plan-review/decisions/one.md"
+  printf 'prior status\n' > "$HOME_DIR/state/prior.status"
+  cat > "$HOME_DIR/data/$id/brief.md" <<EOF
+Read \`$HOME_DIR/data/prior/report.md\` and \`data/prior/notes.md\`.
+Read all decisions at \`$HOME_DIR/data/plan-review/decisions/*.md\`.
+Read prior status at \`$HOME_DIR/state/prior.status\` and \`state/prior.status\`.
+The helper is \`$ROOT/bin/fm-ensure-agents-md.sh\`.
+Write findings to \`$HOME_DIR/data/$id/report.md\`.
+Append status to \`$HOME_DIR/state/$id.status\`.
+Relative output aliases are \`data/$id/report.md\` and \`state/$id.status\`.
+EOF
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn with firstmate-home references should succeed"
+  assert_contains "$out" "spawned $id harness=opencode" "staged-reference spawn did not report opencode"
+  assert_present "$WT_DIR/.fm/brief.md" "spawn did not stage the brief"
+  assert_present "$WT_DIR/.fm/refs/home/data/prior/report.md" "spawn did not stage the absolute report reference"
+  assert_present "$WT_DIR/.fm/refs/home/data/prior/notes.md" "spawn did not stage the transitive report reference"
+  assert_present "$WT_DIR/.fm/refs/home/data/plan-review/decisions/one.md" "spawn did not expand the decision glob"
+  assert_present "$WT_DIR/.fm/refs/home/state/prior.status" "spawn did not stage the prior status reference"
+  assert_present "$WT_DIR/.fm/refs/root/bin/fm-ensure-agents-md.sh" "spawn did not stage the firstmate helper reference"
+  staged=$(cat "$WT_DIR/.fm/brief.md")
+  assert_not_contains "$staged" "$HOME_DIR/data/prior/report.md" "staged brief retained an absolute firstmate report input"
+  assert_not_contains "$staged" "$ROOT/bin/fm-ensure-agents-md.sh" "staged brief retained an absolute firstmate helper input"
+  assert_contains "$staged" '.fm/refs/home/data/prior/report.md' "staged brief did not rewrite the absolute report input"
+  assert_contains "$staged" '.fm/refs/home/data/prior/notes.md' "staged brief did not rewrite the relative report input"
+  assert_contains "$staged" '.fm/refs/home/data/plan-review/decisions/*.md' "staged brief did not rewrite the decision glob"
+  assert_contains "$staged" '.fm/refs/home/state/prior.status' "staged brief did not rewrite the prior status input"
+  assert_contains "$staged" "$HOME_DIR/data/$id/report.md" "scout report output path was not preserved"
+  assert_contains "$staged" "$HOME_DIR/state/$id.status" "status output path was not preserved"
+  assert_not_contains "$staged" "\`data/$id/report.md\`" "relative scout report output was not redirected"
+  assert_not_contains "$staged" "\`state/$id.status\`" "relative status output was not redirected"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "< '$WT_DIR/.fm/brief.md'" "launch command still points at the home brief"
+  assert_not_contains "$launch" "$HOME_DIR/data/$id/brief.md" "launch command retained the external brief"
+  ( cd "$WT_DIR" && git check-ignore -q .fm/brief.md ) \
+    || fail "staged brief is not excluded from the task worktree"
+  pass "spawn stages firstmate inputs, rewrites references, and preserves external outputs"
 }
 
 test_pi_threads_model_and_max_effort() {
@@ -584,6 +640,9 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not share Pi's primary extension launch shape"
+  assert_present "$sm/.fm/brief.md" "secondmate charter was not staged inside its home"
+  assert_contains "$(cat "$sm/.fm/brief.md")" "charter for $id" \
+    "secondmate staged brief did not preserve the charter"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
@@ -690,6 +749,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_spawn_stages_firstmate_brief_and_references
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
