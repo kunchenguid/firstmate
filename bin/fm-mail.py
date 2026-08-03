@@ -46,7 +46,10 @@ Boundaries this file enforces, in order of importance:
     boundary.
   * A message is selected by a local fingerprint of its identifier, never by the
     identifier itself, so no mailbox identifier reaches process arguments or
-    shell history.
+    shell history. `show` resolves that fingerprint against the recent metadata
+    window and, only when that misses, against the unread-filtered one, so a
+    reference `list --unread` printed stays readable after the message has
+    fallen out of the folder's recent window.
 
 Configuration lives in the gitignored `config/mail.json` under the effective
 Firstmate home. docs/configuration.md owns its schema and docs/mail-readonly.md
@@ -110,6 +113,7 @@ REQUIRED_SCOPE_LEAVES = frozenset({"mail.read", "user.read"})
 KEYCHAIN_SERVICE = "firstmate-mail-readonly"
 DEFAULT_TENANT = "consumers"
 WELL_KNOWN_FOLDERS = ("inbox", "archive", "junkemail")
+DEFAULT_FOLDER = "inbox"
 
 HTTP_TIMEOUT = 30
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -654,6 +658,25 @@ def list_messages(config: Config, token: str, folder: str, limit: int, unread: b
     return messages
 
 
+def resolve_ref(config: Config, token: str, ref: str, folder: str, limit: int):
+    """Find the message a short reference names, over both windows `list` prints.
+
+    `list --unread` selects from the unread messages of a folder, so a reference
+    it printed can name a message that has already fallen out of the newest
+    `limit` messages of that folder. The recent whole-folder window is searched
+    first; only when it misses is the unread-filtered window searched, and both
+    lookups read metadata only.
+    """
+    for unread in (False, True):
+        candidates = list_messages(config, token, folder, limit, unread, "id")
+        matches = [item for item in candidates if message_ref(item["id"]) == ref]
+        if len(matches) > 1:
+            raise MailError("that reference matches more than one message; list again for fresh references")
+        if matches:
+            return matches[0]
+    return None
+
+
 def sender_of(message: dict) -> str:
     sender = message.get("from")
     if not isinstance(sender, dict):
@@ -804,7 +827,10 @@ def cmd_list(args) -> int:
         print("  from:    %s" % sanitize_line(sender_of(message), 90))
         print("  subject: %s" % render_subject(subject, bool(classify_credential_risk(subject, ""))))
     print("")
-    print("Read one message with: fm-mail.py show <ref>")
+    hint = "fm-mail.py show <ref>"
+    if args.folder != DEFAULT_FOLDER:
+        hint += " --folder %s" % args.folder
+    print("Read one message with: %s" % hint)
     return 0
 
 
@@ -814,17 +840,14 @@ def cmd_show(args) -> int:
     config = load_config()
     token = access_token(config)
     verify_account(config, token)
-    candidates = list_messages(config, token, args.folder, args.limit, False, "id")
-    matches = [item for item in candidates if message_ref(item["id"]) == args.ref]
-    if not matches:
+    selected = resolve_ref(config, token, args.ref, args.folder, args.limit)
+    if selected is None:
         raise MailError(
-            "no message with that reference in the newest %d messages of %s; widen --limit or list again"
-            % (args.limit, args.folder)
+            "no message with that reference in the newest %d messages of %s, read or unread; "
+            "widen --limit or list again" % (args.limit, args.folder)
         )
-    if len(matches) > 1:
-        raise MailError("that reference matches more than one message; list again for fresh references")
 
-    quoted = urllib.parse.quote(matches[0]["id"], safe="")
+    quoted = urllib.parse.quote(selected["id"], safe="")
     message = graph_get(
         config,
         token,
@@ -921,7 +944,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("auth", help="run the Microsoft device-code sign-in and store the refresh credential")
 
     listing = sub.add_parser("list", help="print message metadata only, newest first")
-    listing.add_argument("--folder", choices=WELL_KNOWN_FOLDERS, default="inbox")
+    listing.add_argument("--folder", choices=WELL_KNOWN_FOLDERS, default=DEFAULT_FOLDER)
     listing.add_argument("--unread", action="store_true", help="list only unread messages")
     listing.add_argument(
         "--limit",
@@ -932,13 +955,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     show = sub.add_parser("show", help="print one selected message as plain text")
     show.add_argument("ref", help="the short message reference printed by `list`")
-    show.add_argument("--folder", choices=WELL_KNOWN_FOLDERS, default="inbox")
+    show.add_argument("--folder", choices=WELL_KNOWN_FOLDERS, default=DEFAULT_FOLDER)
     show.add_argument(
         "--limit",
         type=search_limit,
         default=DEFAULT_SEARCH_LIMIT,
-        help="how many recent messages to search for the reference (default %d, maximum %d)"
-        % (DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT),
+        help="how many messages of each searched window - recent, then unread - to look the "
+        "reference up in (default %d, maximum %d)" % (DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT),
     )
     show.add_argument(
         "--redacted",

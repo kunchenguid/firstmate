@@ -99,7 +99,10 @@ A subject that looks like it carries a code or a secret is masked in the listing
 
 `<ref>` is the short reference printed next to each listed message.
 It is a one-way fingerprint of the mailbox identifier, not the identifier itself, so no mailbox identifier ever lands in your shell history or in a process argument list.
-A reference stays valid as long as the message is still inside the window `show` searches; widen it with `--limit` or list again.
+`show` looks the reference up in the folder's recent messages and, only when that misses, in the folder's unread ones, so a reference `list --unread` printed still resolves after the message has fallen out of the recent window.
+Both lookups read metadata only.
+A reference stays valid as long as the message is still inside one of those two windows; widen them with `--limit` or list again.
+A reference is scoped to the folder it was listed from, so pass the same `--folder` to `show` that you passed to `list`.
 
 `show` requests the body as plain text.
 If the mailbox returns HTML, the tool refuses to render it rather than parsing it, so no remote image, tracking pixel or link is ever fetched.

@@ -271,6 +271,8 @@ class Transport:
         if key not in self.routes:
             raise AssertionError("unrouted request: %s" % (key,))
         status, payload = self.routes[key]
+        if callable(payload):
+            payload = payload(self.calls[-1])
         return FakeResponse(status, payload)
 
 
@@ -611,6 +613,55 @@ expect("no message with that reference" in err, "an unknown reference is not rep
 code, out, err = run(["show", "not-a-reference"])
 expect(code == 2, "a malformed reference was not a usage error")
 ok("a message is selected by an explicit local reference, and an unknown or malformed one is refused")
+
+# --- a reference only `list --unread` could have printed ---------------------
+
+STALE_UNREAD_ID = "AAMkADAwATNiZmYAZC0zNzhmLTIzZTgtMDACLTAwCgBGAAAE"
+_directory, transport = scenario("show-unread-ref", stored=REFRESH)
+wire_refresh(transport)
+wire_me(transport)
+
+
+def unread_only_folder(call):
+    """A folder whose oldest unread message has fallen out of the recent window."""
+    if "isRead eq false" in call["query"]:
+        return {"value": [{"id": STALE_UNREAD_ID}]}
+    return {"value": [{"id": MESSAGE_ID}]}
+
+
+transport.route("GET", fm.GRAPH_HOST, "/v1.0/me/mailFolders/inbox/messages", 200, unread_only_folder)
+transport.route(
+    "GET", fm.GRAPH_HOST, "/v1.0/me/messages/" + urllib.parse.quote(STALE_UNREAD_ID, safe=""), 200,
+    {"id": STALE_UNREAD_ID, "subject": "An older unread note",
+     "body": {"contentType": "text", "content": "Still readable.\n"}},
+)
+code, out, err = run(["show", fm.message_ref(STALE_UNREAD_ID)])
+expect(code == 0, "a reference printed by `list --unread` could not be shown: %s%s" % (out, err))
+expect("Still readable." in out, "the unread lookup did not render the selected message")
+listings = [call for call in transport.calls if call["path"].endswith("/mailFolders/inbox/messages")]
+expect(len(listings) == 2, "show did not fall back to the unread window exactly once")
+expect("isRead eq false" not in listings[0]["query"], "show filtered its first lookup on unread")
+expect("isRead eq false" in listings[1]["query"], "show did not retry against the unread window")
+expect(all("body" not in call["query"].replace("mailFolders", "") for call in listings),
+       "a reference lookup asked the mailbox for body content")
+expect(all(call["method"] == "GET" for call in transport.calls if call["host"] == fm.GRAPH_HOST),
+       "the unread lookup used a non-GET Graph request")
+ok("a reference stays resolvable when its message is unread but older than the recent whole-folder window")
+
+_directory, transport = scenario("show-recent-ref", stored=REFRESH)
+wire_refresh(transport)
+wire_me(transport)
+transport.route("GET", fm.GRAPH_HOST, "/v1.0/me/mailFolders/inbox/messages", 200, unread_only_folder)
+transport.route(
+    "GET", fm.GRAPH_HOST, "/v1.0/me/messages/" + urllib.parse.quote(MESSAGE_ID, safe=""), 200,
+    {"id": MESSAGE_ID, "subject": "A recent note",
+     "body": {"contentType": "text", "content": "Nothing unusual.\n"}},
+)
+code, out, err = run(["show", fm.message_ref(MESSAGE_ID)])
+expect(code == 0, "showing a recent message failed: %s%s" % (out, err))
+listings = [call for call in transport.calls if call["path"].endswith("/mailFolders/inbox/messages")]
+expect(len(listings) == 1, "show queried the unread window although the recent one had resolved the reference")
+ok("a reference the recent window resolves costs exactly one metadata lookup")
 
 # --- credential-shaped mail -------------------------------------------------
 
