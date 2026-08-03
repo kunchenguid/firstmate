@@ -149,7 +149,7 @@ cmd_add() {
 }
 
 cmd_retire() {
-  local id=$1 reason=$2 config patch found= stem matches=0
+  local id=$1 reason=$2 config patch found='' stem matches=0
   validate_title "$reason"
   validate_id "$id"
   held_stack_active || die "held-improvement stack is not initialized"
