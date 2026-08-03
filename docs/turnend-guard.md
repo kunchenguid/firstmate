@@ -34,6 +34,8 @@ Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] 
 `bin/fm-guard.sh` uses that same check rather than treating the status helper's fresh-beacon field as sufficient.
 A stale beacon blocks even when a watcher pid is live.
 A fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
+`bin/fm-guard.sh` additionally separates a watcher that completed a cycle and is awaiting re-arm from one that is genuinely gone, and reports each differently; that distinction is about what the pull guard says mid-turn and never relaxes the turn-end block, because at a turn boundary an un-rearmed watcher is still no supervision.
+The two failure reasons and the three reported states are owned by `bin/fm-wake-lib.sh` and `bin/fm-guard.sh`'s own headers.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
@@ -104,7 +106,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
-`tests/fm-guard-stale-banner.test.sh` covers the matching pull-guard predicate, including the fresh-leftover-beacon negative control.
+`tests/fm-guard-stale-banner.test.sh` covers the matching pull-guard predicate, including the fresh-leftover-beacon negative control, the reported failure reason for each rejecting condition, the completed-cycle handoff state, and the true-positive controls for a watcher that vanished mid-cycle and for a handoff whose re-arm never arrived.
+`tests/fm-watcher-lock.test.sh` drives the real watcher to a real actionable exit and asserts the pull guard reports that cycle exit as a handoff rather than as absent supervision.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.

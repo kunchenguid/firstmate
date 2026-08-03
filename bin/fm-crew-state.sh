@@ -350,9 +350,23 @@ nm_ci_checks_state() {
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is a run for THIS branch active right now. Echoes the NEWEST row for this
+# branch, and only that row: its status word (running/completed/cancelled/
+# failed) when the row binds to this worktree's code, or empty when the branch
+# has no row within FM_CREW_STATE_RUNS_LIMIT rows or its newest row cannot be
+# bound.
+#
+# The newest row is the ONLY candidate on purpose. The identity check must stay
+# (a row for a rewritten or abandoned tip is not this work), but a rejected
+# newest row is evidence of AMBIGUITY, never evidence that an older row is the
+# answer: the rows are newest-first, so every older same-branch row is by
+# construction superseded work. Walking on past the rejection is what produced
+# the 2026-08-02 false `failed` readout - the pipeline commits fix rounds
+# continuously, so a healthy run's recorded tip and the worktree HEAD routinely
+# disagree for a moment, the live row was skipped, and the branch's older
+# `failed` rows answered for it while the run was still running. Returning empty
+# hands the caller back to the pane/log path, which reports what it can actually
+# see instead of a stale verdict.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -368,11 +382,9 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+      # Same code-identity rule as axi status. An unbindable newest row means
+      # this branch's run cannot be identified right now, so report nothing.
+      nm_coarse_head_matches_worktree "$sha" || return 0
       printf '%s' "$st"
       return 0
     fi

@@ -8,6 +8,17 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
+# The watcher's identity-bound terminal-delivery ledger. fm-watch.sh's wake()
+# publishes to it immediately before a deliberate cycle exit, so it is the one
+# durable record of a watcher choosing to end supervision. Named here because
+# three consumers need the same path: the watcher publishes, the arm layer
+# resolves an unobserved cycle against it, and fm_watcher_clean_handoff below
+# distinguishes a completed cycle from a watcher that died.
+fm_watch_delivery_log_path() {  # <state-dir>
+  printf '%s/.watch-deliveries.log\n' "$1"
+}
+WATCH_DELIVERY_LOG="${WATCH_DELIVERY_LOG:-$(fm_watch_delivery_log_path "$STATE")}"
+WATCH_DELIVERY_LOCK="${WATCH_DELIVERY_LOCK:-$STATE/.watch-deliveries.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
@@ -78,19 +89,43 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Why the last fm_watcher_healthy / fm_watcher_lock_matches_pid call rejected.
+# FM_WATCHER_UNHEALTHY_REASON is a stable token for code to branch on;
+# FM_WATCHER_UNHEALTHY_DETAIL is the rendered clause a message prints verbatim.
+# Both are empty after a healthy result. A caller that reports a failure MUST
+# report the condition recorded here: rendering an explanation from some other
+# field states a reason that was never the one tested, which is how the guard
+# came to print "no watcher has a fresh beacon" over a 16s-old beacon inside a
+# 300s grace window.
+FM_WATCHER_UNHEALTHY_REASON=
+FM_WATCHER_UNHEALTHY_DETAIL=
+
+fm_watcher_unhealthy_set() {  # <reason-token> <detail>
+  FM_WATCHER_UNHEALTHY_REASON=$1
+  FM_WATCHER_UNHEALTHY_DETAIL=$2
+  return 1
+}
+
 FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
   FM_WATCHER_MATCHED_IDENTITY=
+  FM_WATCHER_UNHEALTHY_REASON=
+  FM_WATCHER_UNHEALTHY_DETAIL=
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
-  [ -n "$lock_identity" ] || return 1
-  current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ] || return 1
+  [ "$lock_home" = "$home" ] \
+    || fm_watcher_unhealthy_set foreign-home "the supervision lock belongs to another firstmate home" || return 1
+  [ "$lock_path" = "$watch_path" ] \
+    || fm_watcher_unhealthy_set foreign-path "the supervision lock records a different watcher program" || return 1
+  [ -n "$lock_identity" ] \
+    || fm_watcher_unhealthy_set no-identity "the supervision lock records no watcher identity" || return 1
+  current_identity=$(fm_pid_identity "$pid") \
+    || fm_watcher_unhealthy_set unreadable-identity "the recorded watcher process could not be identified" || return 1
+  [ "$current_identity" = "$lock_identity" ] \
+    || fm_watcher_unhealthy_set identity-mismatch "the supervision lock names a process that is no longer that watcher" || return 1
   FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
@@ -100,19 +135,73 @@ fm_watcher_healthy() {
   local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
+  FM_WATCHER_UNHEALTHY_REASON=
+  # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
+  FM_WATCHER_UNHEALTHY_DETAIL=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  fm_pid_alive "$pid" || return 1
+  if [ -z "$pid" ]; then
+    # A watcher releases this lock on its way out, so an empty lock is the
+    # normal footprint of a cycle that ENDED, not of one that broke.
+    fm_watcher_unhealthy_set no-lock-pid "no watcher process holds the supervision lock"
+    return 1
+  fi
+  if ! fm_pid_alive "$pid"; then
+    # The lock survived its owner: that watcher died without running its exit
+    # trap, which a clean cycle exit never does.
+    fm_watcher_unhealthy_set dead-pid "the recorded watcher process (pid $pid) is gone"
+    return 1
+  fi
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
   identity=$FM_WATCHER_MATCHED_IDENTITY
   age=$(fm_path_age "$beat")
-  [ "$age" -lt "$grace" ] || return 1
+  [ "$age" -lt "$grace" ] \
+    || fm_watcher_unhealthy_set stale-beacon "no watcher has a fresh beacon" || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_IDENTITY=$identity
   return 0
+}
+
+# fm_watcher_clean_handoff <state-dir> [grace-seconds]
+# Call immediately after a failed fm_watcher_healthy for the same home; it reads
+# that call's FM_WATCHER_UNHEALTHY_REASON.
+#
+# Exit 0 (true) exactly when supervision is absent because the watcher COMPLETED
+# a cycle and a re-arm is owed, rather than because it broke. bin/fm-watch.sh is
+# built to run one cycle and exit after delivering an actionable wake, so every
+# wake-handling window legitimately has no watcher process; that window is not
+# the same state as supervision being gone, and reporting it as a dead watcher
+# sends firstmate chasing a phantom failure.
+#
+# Three facts must all hold, and every one of them is durable state rather than
+# an assumption about timing:
+#   1. The health check rejected on an EMPTY lock. A watcher releases the lock
+#      from its exit trap, so an empty lock is what a completed cycle leaves
+#      behind; a lock still naming a dead pid means the process was killed
+#      outright, and that always alarms.
+#   2. The beacon is still within the grace window. Past it, supervision has
+#      been absent longer than the guard tolerates however the cycle ended, and
+#      a re-arm that never arrived is a real lapse.
+#   3. The last recorded watcher act in this home was a terminal delivery. The
+#      watcher touches the beacon at the top of every poll and publishes the
+#      delivery ledger only on its way out, so a delivery at or after the last
+#      beat means the cycle chose to end. A watcher that died mid-cycle beat and
+#      published nothing, leaving the beacon strictly newer.
+# Every one of those checks fails toward alarming: an unwritable ledger, a
+# missing ledger, or an unreadable mtime all report a dead watcher.
+fm_watcher_clean_handoff() {  # <state-dir> [grace-seconds]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} beat beat_m delivery_m
+  [ "$FM_WATCHER_UNHEALTHY_REASON" = no-lock-pid ] || return 1
+  beat="$state/.last-watcher-beat"
+  [ -e "$beat" ] || return 1
+  [ "$(fm_path_age "$beat")" -lt "$grace" ] || return 1
+  beat_m=$(fm_path_mtime "$beat") || return 1
+  delivery_m=$(fm_path_mtime "$(fm_watch_delivery_log_path "$state")") || return 1
+  [ -n "$beat_m" ] && [ -n "$delivery_m" ] || return 1
+  [ "$delivery_m" -ge "$beat_m" ]
 }
 
 fm_lock_clean_known_files() {

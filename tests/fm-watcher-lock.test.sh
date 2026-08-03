@@ -107,6 +107,51 @@ test_live_stale_watch_lock_is_actionable() {
   pass "live watcher lock with stale heartbeat is actionable"
 }
 
+# End-to-end proof of the premise behind fm-guard's handoff state: drive the REAL
+# watcher to a REAL actionable exit, then ask the REAL guard what state the home
+# is in. bin/fm-watch.sh is built to run one cycle and exit after delivering a
+# wake, so this is the routine shape of the whole wake-handling window; before
+# 2026-08-02 the guard announced it as "WATCHER DOWN - SUPERVISION IS OFF" over a
+# beacon it had itself just called fresh. Nothing here is a hand-built fixture:
+# the empty lock, the fresh beacon and the terminal delivery record are whatever
+# the production watcher actually leaves behind.
+test_real_watcher_cycle_exit_is_reported_as_a_handoff() {
+  local dir state fakebin out err wpid i status guard_out
+  dir=$(make_case real-cycle-exit-handoff)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  mark_pr_check_migration_complete "$state"
+  printf 'project=x\n' > "$state/task.meta"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] || fail "real watcher never published a liveness beacon"
+  printf 'done: synthetic wake\n' > "$state/task.status"
+  status=0
+  wait "$wpid" || status=$?
+  expect_code 0 "$status" "real watcher cycle exit after delivering a wake"
+  grep -F 'signal:' "$out" >/dev/null || fail "real watcher did not deliver an actionable wake: $(cat "$out" "$err")"
+
+  # The durable footprint the handoff state reads, straight from production.
+  assert_absent "$state/.watch.lock/pid" "a clean cycle exit must release the supervision lock"
+  assert_present "$state/.watch-deliveries.log" "a clean cycle exit must publish its terminal delivery"
+
+  guard_out=$(FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2>&1)
+  assert_not_contains "$guard_out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "a real watcher cycle exit must not be announced as absent supervision"
+  assert_contains "$guard_out" "watcher handed off" \
+    "a real watcher cycle exit must be reported as the handoff it is"
+  pass "a real watcher cycle exit is reported as a handoff, not a dead watcher"
+}
+
 test_guard_warnings() {
   # The guard's two operator-visible states, with resilient substrings instead of
   # four copy-coupled tests:
@@ -1027,6 +1072,7 @@ test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
+test_real_watcher_cycle_exit_is_reported_as_a_handoff
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock

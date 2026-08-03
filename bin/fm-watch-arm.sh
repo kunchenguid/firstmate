@@ -101,8 +101,8 @@ lock_snapshot() {
   printf 'pid:%s|identity:%s' "$(cycle_clean_field "${pid:-none}")" "$(cycle_clean_field "${identity:-none}")"
 }
 
-WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
-WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
+# Ledger path and lock are owned by bin/fm-wake-lib.sh (WATCH_DELIVERY_LOG,
+# WATCH_DELIVERY_LOCK), sourced above.
 
 cycle_active=0
 cycle_watcher_pid=none

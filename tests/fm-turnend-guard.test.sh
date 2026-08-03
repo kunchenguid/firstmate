@@ -238,6 +238,23 @@ test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
   pass "fm-turnend-guard: blocks when a fresh beacon has no live watcher lock"
 }
 
+# fm-guard.sh reports a watcher that delivered its wake and exited cleanly as a
+# handoff rather than as absent supervision. That softer reading is scoped to
+# what the guard SAYS mid-turn: at turn end there is still no watcher armed, so
+# the block must fire exactly as it does for any other missing watcher.
+test_hook_blocks_on_a_clean_cycle_exit_awaiting_rearm() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-clean-handoff")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  # Published on the watcher's way out, so it is at or after the last beat.
+  printf '4242\tpid-identity\tsignal: task1\n' > "$dir/state/.watch-deliveries.log"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when a cleanly ended cycle has not been re-armed"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: blocks on a cleanly ended watcher cycle awaiting re-arm"
+}
+
 test_hook_blocks_source_only_home() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-source-only")
@@ -1544,6 +1561,7 @@ test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
+test_hook_blocks_on_a_clean_cycle_exit_awaiting_rearm
 test_hook_blocks_source_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon

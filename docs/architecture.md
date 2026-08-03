@@ -67,7 +67,8 @@ The existing turn-end guard remains the final backstop for all five harness-engi
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, if work, process-event sources, or X-mode relay polling needs supervision without a healthy identity-matched watcher, or if queued wakes are waiting to be drained.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
-It leads with a prominent bordered tangle banner, while `bin/fm-guard.sh` owns the stale-watcher banner/reminder policy so repeated guarded commands stay noisy without reprinting the full watcher-down banner in the same episode.
+It leads with a prominent bordered tangle banner, while `bin/fm-guard.sh` owns the watcher banner/notice/reminder policy so repeated guarded commands stay noisy without reprinting the full watcher-down banner in the same episode.
+That policy separates a watcher that completed a cycle and is awaiting re-arm, which the watcher is designed to do after every delivered wake, from one that is genuinely gone, and states the condition the health check actually rejected on rather than a fixed explanation.
 On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work, a process-event source, or X-mode relay polling needs supervision and no identity-matched watcher lock with a fresh beacon is live, direct Stop hooks block and passive turn-end hooks force one bounded follow-up.
 The guard covers the main primary and genuinely marked secondmate homes, exempts child crewmate/scout worktrees, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
 

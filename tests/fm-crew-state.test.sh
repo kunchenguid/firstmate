@@ -738,6 +738,97 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
+# Regression for the 2026-08-02 false-`failed` readout (task ai-journey-sankey-diag):
+# the pipeline commits fix rounds continuously, so the newest same-branch row's
+# recorded tip and this worktree's HEAD routinely disagree while a run is
+# healthy. Rejecting that newest row on code identity is correct; CONTINUING the
+# walk into an older same-branch row is not - an older row is by construction
+# superseded work, and this branch's older rows were `failed`. Case (i): the
+# newest row records a tip this worktree cannot resolve at all.
+test_unbindable_newest_row_does_not_fall_through_to_older_row() {
+  reset_fakes
+  local d short; d=$(new_case coarse-superseded-unresolvable)
+  make_repo_on_branch "$d/wt" fm/feat-race
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-race.meta" "window=fm:fm-feat-race" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing the change\n' > "$d/state/feat-race.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  # 9adabec is the advanced pipeline tip this worktree cannot bind; the older
+  # failed rows sit at the sha this worktree is actually parked on.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-02 11:10
+  running    fm/feat-race 9adabec  2026-08-02 11:09
+  failed     fm/feat-race ${short}  2026-08-02 10:40
+  failed     fm/feat-race ${short}  2026-08-02 10:05
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-race
+  local out; out=$(run_crew_state "$d" feat-race)
+  assert_not_contains "$out" "state: failed" \
+    "a superseded older row must never supply a failed verdict for live work"
+  assert_not_contains "$out" "source: run-step" \
+    "an unbindable newest row is ambiguity, not an older row's answer"
+  assert_contains "$out" "source: status-log" "unresolved run attribution falls through to the log path"
+  pass "an unbindable newest runs-list row does not fall through to an older row"
+}
+
+# Case (ii) of the same defect: the newest same-branch row records a tip this
+# worktree has advanced PAST (the run head is a strict ancestor of HEAD), which
+# the identity rule also rejects, while an older row still matches HEAD exactly.
+test_stale_newest_row_does_not_fall_through_to_older_row() {
+  reset_fakes
+  local d base_short head_short; d=$(new_case coarse-superseded-behind)
+  make_repo_on_branch "$d/wt" fm/feat-behind
+  base_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix round landed locally'
+  head_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  [ "$base_short" != "$head_short" ] || fail "fixture did not advance the worktree head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-behind.meta" "window=fm:fm-feat-behind" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing the change\n' > "$d/state/feat-behind.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-02 11:10
+  running    fm/feat-behind ${base_short}  2026-08-02 11:09
+  failed     fm/feat-behind ${head_short}  2026-08-02 10:40
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-behind
+  local out; out=$(run_crew_state "$d" feat-behind)
+  assert_not_contains "$out" "state: failed" \
+    "a superseded older row must never supply a failed verdict for live work"
+  assert_not_contains "$out" "source: run-step" \
+    "a newest row behind this worktree is ambiguity, not an older row's answer"
+  pass "a newest runs-list row behind this worktree does not fall through to an older row"
+}
+
+# True-positive protection for the fix above: a run that genuinely failed on the
+# code this worktree is parked on must still read as failed. The newest
+# same-branch row IS bindable here, so nothing about the fall-through rule
+# applies and the failed verdict must survive.
+test_genuinely_failed_newest_row_still_reports_failed() {
+  reset_fakes
+  local d short; d=$(new_case coarse-genuine-failed)
+  make_repo_on_branch "$d/wt" fm/feat-realfail
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-realfail.meta" "window=fm:fm-feat-realfail" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing the change\n' > "$d/state/feat-realfail.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-02 11:10
+  failed     fm/feat-realfail ${short}  2026-08-02 11:09
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-realfail)
+  assert_contains "$out" "state: failed" "a bindable failed row must still report failed"
+  assert_contains "$out" "source: run-step" "a bindable failed row remains run-step sourced"
+  pass "a genuinely failed newest row is still reported as failed"
+}
+
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
@@ -1331,6 +1422,9 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_unbindable_newest_row_does_not_fall_through_to_older_row
+test_stale_newest_row_does_not_fall_through_to_older_row
+test_genuinely_failed_newest_row_still_reports_failed
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
