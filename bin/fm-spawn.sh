@@ -1711,7 +1711,12 @@ stage_root_path() {
   case "$1" in
     home) printf '%s\n' "$FM_HOME" ;;
     root) printf '%s\n' "$FM_ROOT" ;;
-    secondmate) printf '%s\n' "${PROJ_ABS:-}" ;;
+    secondmate)
+      # Only a secondmate spawn owns a firstmate home at PROJ_ABS. On a crewmate
+      # spawn PROJ_ABS is the project checkout, which is not a staging root.
+      [ "$KIND" = secondmate ] || return 1
+      printf '%s\n' "${PROJ_ABS:-}"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -1720,7 +1725,10 @@ stage_root_real() {
   case "$1" in
     home) printf '%s\n' "$STAGE_HOME_REAL" ;;
     root) printf '%s\n' "$STAGE_ROOT_REAL" ;;
-    secondmate) printf '%s\n' "$STAGE_SECOND_HOME_REAL" ;;
+    secondmate)
+      [ "$KIND" = secondmate ] || return 1
+      printf '%s\n' "$STAGE_SECOND_HOME_REAL"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -1741,8 +1749,10 @@ stage_kind_for_path() {
 
 stage_rel_for_path() {
   local kind=$1 path=$2 root root_real rel
-  root=$(stage_root_path "$kind")
-  root_real=$(stage_root_real "$kind")
+  root=$(stage_root_path "$kind") || return 1
+  root_real=$(stage_root_real "$kind") || return 1
+  [ -n "$root" ] || return 1
+  [ -n "$root_real" ] || return 1
   case "$path" in
     "$root"/*) rel=${path#"$root"/} ;;
     "$root_real"/*) rel=${path#"$root_real"/} ;;
@@ -1781,6 +1791,9 @@ stage_target_for_reference() {
 
 stage_path_within_root() {
   local root=$1 path=$2
+  # An empty root would degenerate into the pattern `/*` and accept every
+  # absolute path, so a missing root is never a containment match.
+  [ -n "$root" ] || return 1
   case "$path" in
     "$root"|"$root"/*) return 0 ;;
     *) return 1 ;;
@@ -1881,19 +1894,28 @@ while (/(?:^|[^A-Za-z0-9_.\/-])((?:state)\/[A-Za-z0-9._*?\/-]+\.status)/g) {
 PERL
 }
 
+# The deliberate external writes, in every spelling a brief can name them by.
+# This is the single source of truth for both "never stage this" and "never
+# rewrite this", so a staged parent directory cannot redirect an output path.
+stage_external_outputs() {
+  printf '%s\n' \
+    "${STATE}/${ID}.status" \
+    "${STATE_REAL}/${ID}.status" \
+    "${FM_HOME}/state/${ID}.status" \
+    "${STAGE_HOME_REAL}/state/${ID}.status" \
+    "${DATA}/${ID}/report.md" \
+    "${STAGE_OUTPUT_DIR_REAL}/report.md" \
+    "${FM_HOME}/data/${ID}/report.md" \
+    "${STAGE_HOME_REAL}/data/${ID}/report.md"
+}
+
 stage_preserve_external() {
-  case "$1" in
-    "${STATE}/${ID}.status"|"${STATE_REAL}/${ID}.status"|\
-    "${FM_HOME}/state/${ID}.status"|"${STAGE_HOME_REAL}/state/${ID}.status")
+  local candidate
+  while IFS= read -r candidate; do
+    if [ "$candidate" = "$1" ]; then
       return 0
-      ;;
-  esac
-  case "$1" in
-    "$DATA"/"$ID"/report.md|"$STAGE_OUTPUT_DIR_REAL"/report.md|\
-    "$FM_HOME"/data/"$ID"/report.md|"$STAGE_HOME_REAL"/data/"$ID"/report.md)
-      return 0
-      ;;
-  esac
+    fi
+  done < <(stage_external_outputs)
   return 1
 }
 
@@ -1915,7 +1937,7 @@ stage_file() {
     echo "error: cannot resolve staged firstmate reference: $source" >&2
     return 1
   }
-  root_real=$(stage_root_real "$kind")
+  root_real=$(stage_root_real "$kind" 2>/dev/null || true)
   stage_path_within_root "$root_real" "$source_real" || {
     echo "error: staged firstmate reference escapes its home: $source" >&2
     return 1
@@ -1951,7 +1973,7 @@ stage_source() {
   if [ -d "$source" ]; then
     local source_real root_real
     source_real=$(cd "$source" 2>/dev/null && pwd -P) || return 1
-    root_real=$(stage_root_real "$kind")
+    root_real=$(stage_root_real "$kind" 2>/dev/null || true)
     stage_path_within_root "$root_real" "$source_real" || {
       echo "error: staged firstmate directory escapes its home: $source" >&2
       return 1
@@ -2026,25 +2048,33 @@ use strict;
 use warnings;
 
 open my $map, "<", $ENV{FM_STAGE_MAP} or die "cannot read staged path map: $!\n";
-my @pairs;
+my (@pairs, %repl);
 {
   local $/ = "\n";
   while (my $line = <$map>) {
     chomp $line;
     my ($old, $new) = split(/\t/, $line, 2);
-    push @pairs, [$old, $new] if defined($old) && defined($new);
+    next if !defined($old) || !defined($new) || $old eq "";
+    next if exists $repl{$old};
+    $repl{$old} = $new;
+    push @pairs, $old;
   }
 }
-@pairs = sort { length($b->[0]) <=> length($a->[0]) } @pairs;
-for my $pair (@pairs) {
-  my ($old, $new) = @$pair;
-  if ($old =~ m{^(?:data|state)/}) {
+if (@pairs) {
+  # Longest first so a staged parent directory never wins over the longer
+  # path it contains, and one single pass so a replacement is never itself
+  # rewritten by a later pair.
+  @pairs = sort { length($b) <=> length($a) } @pairs;
+  my $alternation = join "|", map {
+    my $quoted = quotemeta($_);
     # A relative output alias can also be the suffix of an absolute path that
-    # must stay external. Rewrite only a path-boundary occurrence.
-    s/(?<![A-Za-z0-9_.\/-])\Q$old\E/$new/g;
-  } else {
-    s/\Q$old\E/$new/g;
-  }
+    # must stay external, so it needs the stricter leading boundary.
+    m{^/} ? "(?<![A-Za-z0-9_.-])$quoted" : "(?<![A-Za-z0-9_./-])$quoted";
+  } @pairs;
+  # Require a trailing path boundary so a path is never rewritten as the
+  # prefix of a sibling name or of a longer extension, while a path that ends
+  # a sentence still matches.
+  s{($alternation)(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9])}{ $repl{$1} // $1 }ge;
 }
 PERL
 }
@@ -2060,6 +2090,12 @@ stage_launch_brief() {
   done < <(find "$STAGE_REF_DIR" -type f -print 2>/dev/null)
   : > "$STAGE_MAP"
   : > "$STAGE_SOURCES"
+  # Claim the deliberate external writes first: mapping each one to itself
+  # pins it through the single rewrite pass, so no staged parent directory can
+  # redirect the status file or the scout report into the worktree.
+  while IFS= read -r reference; do
+    stage_add_map "$reference" "$reference"
+  done < <(stage_external_outputs)
   stage_target_parent_safe "$STAGE_BRIEF" || return 1
   cp -p "$BRIEF" "$STAGE_BRIEF" || {
     echo "error: cannot stage launch brief: $BRIEF" >&2

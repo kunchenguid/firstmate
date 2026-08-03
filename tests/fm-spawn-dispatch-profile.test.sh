@@ -510,6 +510,8 @@ Read \`$HOME_DIR/data/prior/report.md\` and \`data/prior/notes.md\`.
 Read all decisions at \`$HOME_DIR/data/plan-review/decisions/*.md\`.
 Read prior status at \`$HOME_DIR/state/prior.status\` and \`state/prior.status\`.
 The helper is \`$ROOT/bin/fm-ensure-agents-md.sh\`.
+The task directory is \`$HOME_DIR/data/$id\` and the prior directory is \`$HOME_DIR/data/prior\`.
+The sibling \`$HOME_DIR/data/prior-two/missing.md\` is not staged.
 Write findings to \`$HOME_DIR/data/$id/report.md\`.
 Append status to \`$HOME_DIR/state/$id.status\`.
 Relative output aliases are \`data/$id/report.md\` and \`state/$id.status\`.
@@ -532,7 +534,12 @@ EOF
   assert_contains "$staged" '.fm/refs/home/data/prior/notes.md' "staged brief did not rewrite the relative report input"
   assert_contains "$staged" '.fm/refs/home/data/plan-review/decisions/*.md' "staged brief did not rewrite the decision glob"
   assert_contains "$staged" '.fm/refs/home/state/prior.status' "staged brief did not rewrite the prior status input"
+  assert_contains "$staged" ".fm/refs/home/data/$id" "staged brief did not rewrite the task directory input"
   assert_contains "$staged" "$HOME_DIR/data/$id/report.md" "scout report output path was not preserved"
+  assert_not_contains "$staged" ".fm/refs/home/data/$id/report.md" \
+    "a staged parent directory redirected the external scout report output"
+  assert_contains "$staged" "$HOME_DIR/data/prior-two/missing.md" \
+    "a staged path rewrote a sibling path that only shares its prefix"
   assert_contains "$staged" "$HOME_DIR/state/$id.status" "status output path was not preserved"
   assert_not_contains "$staged" "\`data/$id/report.md\`" "relative scout report output was not redirected"
   assert_not_contains "$staged" "\`state/$id.status\`" "relative status output was not redirected"
@@ -542,6 +549,32 @@ EOF
   ( cd "$WT_DIR" && git check-ignore -q .fm/brief.md ) \
     || fail "staged brief is not excluded from the task worktree"
   pass "spawn stages firstmate inputs, rewrites references, and preserves external outputs"
+}
+
+test_crewmate_spawn_never_stages_from_the_project_checkout() {
+  local rec id out status staged outside
+  id=profile-staged-project-z21
+  rec=$(make_spawn_case profile-staged-project opencode "$id")
+  read_case_record "$rec"
+  outside="$CASE_DIR/outside"
+  mkdir -p "$outside" "$PROJ_DIR/data/generated"
+  printf 'outside the project\n' > "$outside/secret.md"
+  ln -s "$outside/secret.md" "$PROJ_DIR/data/generated/notes.md"
+  cat > "$HOME_DIR/data/$id/brief.md" <<EOF
+Read \`data/generated/notes.md\` before you start.
+Write findings to \`$HOME_DIR/data/$id/report.md\`.
+EOF
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "crewmate spawn with a project-only data reference should succeed"
+  assert_contains "$out" "spawned $id harness=opencode" "project-reference spawn did not report opencode"
+  [ -e "$WT_DIR/.fm/refs/secondmate" ] \
+    && fail "crewmate spawn staged the project checkout as a secondmate home"
+  staged=$(cat "$WT_DIR/.fm/brief.md")
+  assert_contains "$staged" "\`data/generated/notes.md\`" \
+    "crewmate spawn rewrote a project-relative reference it must leave alone"
+  pass "crewmate spawn never stages the project checkout through the secondmate root"
 }
 
 test_pi_threads_model_and_max_effort() {
@@ -750,6 +783,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_spawn_stages_firstmate_brief_and_references
+test_crewmate_spawn_never_stages_from_the_project_checkout
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
