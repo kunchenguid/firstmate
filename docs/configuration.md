@@ -445,6 +445,7 @@ FM_SPAWN_WORKTREE_POLL_INTERVAL=1   # seconds between those polls; number from 0
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
+FM_SECONDMATE_COMMAND_OPERATIONAL=   # internal/exemption, not a tuning knob: names the single lane whose send guard is exempted for infrastructure messages that tell that lane about its own files (the handback request and the re-read nudges); setting it by hand to deliver work is stepping around the guard rather than using it, and bin/fm-send.sh's header owns the exact contract
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
