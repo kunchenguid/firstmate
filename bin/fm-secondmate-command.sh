@@ -315,11 +315,21 @@ endpoint_note() {  # <id>
 # retired immediately. Left open it would be indistinguishable from a stranded
 # question: the watcher would chase it, and onramp guard 6 would refuse the next
 # transfer forever over an artifact the transfer machinery created itself.
+#
+# The home context is passed explicitly: this script's own FM_HOME is a plain
+# assignment, so a child never inherits it in the ordinary main-home invocation
+# where FM_HOME was not already exported, and fm-send refuses to resolve a target
+# without it.
 # Returns non-zero when delivery was not confirmed.
 send_operational_notice() {  # <id> <message>
   local id=$1 msg=$2 before after corr rc=0
   before=$(open_pending_replies_for "$id")
-  FM_SECONDMATE_COMMAND_OPERATIONAL="$id" "$SEND_BIN" "$id" "$msg" >/dev/null 2>&1 || rc=$?
+  FM_HOME="$FM_HOME" \
+    FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
+    FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" \
+    FM_SEND_SETTLE="${FM_SEND_SETTLE:-0}" \
+    FM_SECONDMATE_COMMAND_OPERATIONAL="$id" \
+    "$SEND_BIN" "$id" "$msg" >/dev/null 2>&1 || rc=$?
   after=$(open_pending_replies_for "$id")
   for corr in $after; do
     case " $before " in *" $corr "*) continue ;; esac
@@ -510,7 +520,12 @@ cmd_offramp_request() {  # <id>
     } > "$rec"
   fi
   msg="Command handback requested: write your full position report to $report - what changed under captain command, what is under way, what is unresolved, and anything the main firstmate must know before it resumes supervising you - then append a status line pointing at that file."
-  if FM_SECONDMATE_COMMAND_OPERATIONAL="$id" "$SEND_BIN" "$id" "$msg" >/dev/null 2>&1; then
+  if FM_HOME="$FM_HOME" \
+    FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
+    FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" \
+    FM_SEND_SETTLE="${FM_SEND_SETTLE:-0}" \
+    FM_SECONDMATE_COMMAND_OPERATIONAL="$id" \
+    "$SEND_BIN" "$id" "$msg" >/dev/null 2>&1; then
     printf 'HANDBACK_REQUESTED: %s report=%s\n' "$id" "$report"
     return 0
   fi

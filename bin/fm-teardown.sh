@@ -167,8 +167,12 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 # to it, so it is refused outright while the captain commands that lane - with or
 # without --force. Hand the lane back first (bin/fm-secondmate-command.sh); only
 # then is retirement firstmate's to decide, and still only on an explicit word.
+#
+# The meta has already established that this id IS a lane, so a registry that is
+# absent, truncated, or resolved from the wrong root is a lost authority rather
+# than "not a lane": it blocks too.
 if [ "$KIND" = secondmate ]; then
-  TEARDOWN_COMMAND_BLOCK=$(fm_secondmate_command_blocks_firstmate_action "$ID" "$SECONDMATE_REG" || true)
+  TEARDOWN_COMMAND_BLOCK=$(fm_secondmate_command_blocks_known_lane "$ID" "$SECONDMATE_REG" || true)
   case "$TEARDOWN_COMMAND_BLOCK" in
     captain)
       echo "REFUSED: $ID is under captain command; firstmate does not retire a lane it does not command. Hand it back first." >&2
@@ -176,6 +180,10 @@ if [ "$KIND" = secondmate ]; then
       ;;
     invalid)
       echo "REFUSED: $ID carries an unrecognized command value in $SECONDMATE_REG; repair that record before retiring the lane." >&2
+      exit 1
+      ;;
+    unrecorded)
+      echo "REFUSED: $ID is a lane with no readable command record in $SECONDMATE_REG; repair that record before retiring the lane." >&2
       exit 1
       ;;
   esac

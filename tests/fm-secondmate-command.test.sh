@@ -88,13 +88,21 @@ SH
   printf '%s\n' "$path"
 }
 
-# A fake fm-send that records its argv and honours FM_FAKE_SEND_FAIL.
+# A fake fm-send that records its argv and honours FM_FAKE_SEND_FAIL. It also
+# mirrors the real fm-send's refusal to resolve a target without an explicit
+# FM_HOME, so a caller that forgets to pass the home down fails here rather than
+# silently passing against a fake that never needed it.
 make_fake_send() {  # <dir> -> echoes the script path
   local dir=$1 path="$1/fake-send.sh"
   mkdir -p "$dir"
   cat > "$path" <<'SH'
 #!/usr/bin/env bash
+printf 'FM_HOME=%s\n' "${FM_HOME-<unset>}" >> "${FM_FAKE_SEND_ENV_LOG:-/dev/null}"
 printf '%s\n' "$*" >> "${FM_FAKE_SEND_LOG:-/dev/null}"
+if [ -z "${FM_HOME:-}" ]; then
+  echo "error: FM_HOME is not set; fm-send refuses to resolve targets without an explicit firstmate home" >&2
+  exit 1
+fi
 [ -z "${FM_FAKE_SEND_FAIL:-}" ] || exit 1
 exit 0
 SH
@@ -394,6 +402,54 @@ test_both_directions_tell_the_running_lane() {
   assert_grep 're-read data/command.md' "$log" "the handback must tell the live lane too"
   assert_grep 'main firstmate commands this lane again' "$log" "the notice must name the restored commander"
   pass "both transfer directions tell the running lane to re-read its command state"
+}
+
+test_both_directions_notify_when_fm_home_is_not_in_the_environment() {
+  # The documented invocation is a plain `bin/fm-secondmate-command.sh onramp
+  # <id>` from the main home, where FM_HOME is resolved internally and is NOT an
+  # exported environment variable - so a child that is not handed the home
+  # explicitly never sees one. Every other case here goes through `env FM_HOME=`,
+  # which would hide exactly that.
+  local home envlog log out rc report
+  home=$(make_fleet transfer-notice-no-fm-home)
+  envlog="$home/send-env.log"
+  log="$home/send.log"
+  : > "$envlog"; : > "$log"
+  rc=0
+  out=$(env -u FM_HOME -u FM_DATA_OVERRIDE -u FM_STATE_OVERRIDE \
+    PATH="${ALIVE_TMUX:-}:$PATH" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_SEND_ENV_LOG="$envlog" FM_FAKE_SEND_LOG="$log" \
+    FM_SECONDMATE_COMMAND_CREW_STATE_BIN="${FAKE_CREW_STATE:-}" \
+    FM_SECONDMATE_COMMAND_SEND_BIN="${FAKE_SEND:-}" \
+    "$CMD" onramp sm-alpha 2>&1) || rc=$?
+  [ "$rc" = 0 ] || fail "onramp with no ambient FM_HOME must notify the lane, got exit $rc"$'\n'"$out"
+  assert_contains "$out" "TRANSFERRED: sm-alpha firstmate -> captain" \
+    "onramp must report a fully completed transfer"
+  assert_grep "FM_HOME=$home" "$envlog" "the notice must carry the resolved home down to the steer path"
+  assert_grep 're-read data/command.md' "$log" "the live lane must still be told"
+
+  out=$(env -u FM_HOME -u FM_DATA_OVERRIDE -u FM_STATE_OVERRIDE \
+    PATH="${ALIVE_TMUX:-}:$PATH" FM_ROOT_OVERRIDE="$home" \
+    FM_SECONDMATE_COMMAND_CREW_STATE_BIN="${FAKE_CREW_STATE:-}" \
+    FM_SECONDMATE_COMMAND_SEND_BIN="${FAKE_SEND:-}" \
+    "$CMD" offramp-request sm-alpha 2>&1) \
+    || fail "offramp-request with no ambient FM_HOME must deliver"$'\n'"$out"
+  report=$(printf '%s' "$out" | sed -n 's/^HANDBACK_REQUESTED: sm-alpha report=//p')
+  [ -n "$report" ] || fail "offramp-request must name the report it asked for"$'\n'"$out"
+  printf 'Nothing open.\n' > "$report"
+  : > "$envlog"
+  rc=0
+  out=$(env -u FM_HOME -u FM_DATA_OVERRIDE -u FM_STATE_OVERRIDE \
+    PATH="${ALIVE_TMUX:-}:$PATH" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_SEND_ENV_LOG="$envlog" \
+    FM_SECONDMATE_COMMAND_CREW_STATE_BIN="${FAKE_CREW_STATE:-}" \
+    FM_SECONDMATE_COMMAND_SEND_BIN="${FAKE_SEND:-}" \
+    "$CMD" offramp-complete sm-alpha --report "$report" 2>&1) || rc=$?
+  [ "$rc" = 0 ] || fail "offramp-complete with no ambient FM_HOME must notify the lane, got exit $rc"$'\n'"$out"
+  assert_contains "$out" "TRANSFERRED: sm-alpha captain -> firstmate" \
+    "offramp-complete must report a fully completed handback"
+  assert_grep "FM_HOME=$home" "$envlog" "the handback notice must carry the resolved home down too"
+  pass "both directions notify the lane when FM_HOME is not in the environment"
 }
 
 test_an_undelivered_notice_is_not_reported_as_a_finished_transfer() {
@@ -757,6 +813,42 @@ test_teardown_refuses_to_retire_a_captain_commanded_lane() {
   pass "firstmate does not retire a captain-commanded lane"
 }
 
+# A lane whose registry line is gone is a LOST authority, not an ordinary
+# crewmate: the meta already proved it is a lane. Every entry point that acts on
+# a lane must refuse rather than read the missing record as firstmate command.
+test_a_lost_command_record_blocks_every_action_on_a_known_lane() {
+  local home lane out rc
+  home=$(make_fleet lost-record)
+  lane=$(lane_of "$home")
+  printf '## Queued\n\n- [ ] alpha-item - do alpha work\n' > "$home/data/backlog.md"
+  printf '## Queued\n' > "$lane/data/backlog.md"
+  run_cmd "$home" onramp sm-alpha >/dev/null
+  # The captain holds the lane; the registry that records it is then lost.
+  printf '# Secondmates\n\n' > "$(reg_of "$home")"
+
+  rc=0
+  out=$(env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$TEARDOWN" sm-alpha 2>&1) || rc=$?
+  [ "$rc" != 0 ] || fail "firstmate must not retire a lane whose command record cannot be read"
+  assert_contains "$out" "no readable command record" \
+    "the retirement refusal must name the lost record"
+
+  rc=0
+  out=$(env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$home/data" \
+    "$HANDOFF" sm-alpha alpha-item 2>&1) || rc=$?
+  [ "$rc" != 0 ] || fail "firstmate must not route work into a lane whose command record cannot be read"
+  assert_contains "$out" "no readable command record" \
+    "the routing refusal must name the lost record"
+  assert_no_grep 'alpha-item' "$lane/data/backlog.md" "no item may land in a lane with no readable commander"
+
+  out=$(env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-session-start.sh" 2>&1 || true)
+  assert_contains "$out" "command: unrecorded" \
+    "the digest must never be silent about a lane whose command record cannot be read"
+  pass "a lost command record blocks retirement and routing, and is never silent at session start"
+}
+
 # --- 7. supervision ---------------------------------------------------------
 
 test_watcher_triage_absorbs_a_captain_commanded_lanes_status_events() {
@@ -979,6 +1071,7 @@ test_onramp_transfers_registry_marker_and_position_record
 test_onramp_is_idempotent
 test_onramp_keeps_every_other_registry_field
 test_both_directions_tell_the_running_lane
+test_both_directions_notify_when_fm_home_is_not_in_the_environment
 test_an_undelivered_notice_is_not_reported_as_a_finished_transfer
 
 test_offramp_complete_refuses_without_a_position_report
@@ -998,6 +1091,7 @@ test_the_handback_request_can_still_be_retried
 test_a_completed_handback_closes_its_own_expectation
 test_backlog_handoff_refuses_a_captain_commanded_lane
 test_teardown_refuses_to_retire_a_captain_commanded_lane
+test_a_lost_command_record_blocks_every_action_on_a_known_lane
 
 test_watcher_triage_absorbs_a_captain_commanded_lanes_status_events
 test_watcher_triage_keeps_a_damaged_record_loud

@@ -369,6 +369,8 @@ for meta in "$STATE"/*.meta; do
         printf 'command: invalid - this lane carries an unrecognized command value; repair it before acting on the lane.\n' ;;
       firstmate)
         printf 'command: firstmate\n' ;;
+      *)
+        printf 'command: unrecorded - this lane has no readable command record; repair it before acting on the lane.\n' ;;
     esac
   fi
 

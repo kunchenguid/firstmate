@@ -235,7 +235,11 @@ backlog_key_noncanonical_body_lines() {
 # firstmate pushed into its queue would sit there unasked-for. In-scope work that
 # arrives while the captain holds a lane stays in the main backlog, held for the
 # lane, and is re-evaluated at handback (secondmate-command-transfer skill).
-COMMAND_BLOCK=$(fm_secondmate_command_blocks_firstmate_action "$ID" "$REG" || true)
+#
+# This helper only ever targets a lane, so "no readable registry line" is a lost
+# authority, not "not a lane", and it blocks deliberately here rather than being
+# caught downstream by whichever field happens to be missing next.
+COMMAND_BLOCK=$(fm_secondmate_command_blocks_known_lane "$ID" "$REG" || true)
 case "$COMMAND_BLOCK" in
   captain)
     echo "error: $ID is under captain command; firstmate does not route work into its queue. Hold the item for the lane and hand it over after the lane returns to firstmate command." >&2
@@ -243,6 +247,10 @@ case "$COMMAND_BLOCK" in
     ;;
   invalid)
     echo "error: $ID carries an unrecognized command value in $REG; repair that record before routing work into the lane." >&2
+    exit 1
+    ;;
+  unrecorded)
+    echo "error: $ID has no readable command record in $REG; it is either not a registered lane or its record is lost. Repair the registry before routing work into the lane." >&2
     exit 1
     ;;
 esac
