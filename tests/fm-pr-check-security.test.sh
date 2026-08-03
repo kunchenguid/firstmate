@@ -68,7 +68,7 @@ case " $* " in
   *statusCheckRollup*)
     # bin/fm-pr-merge.sh's merge-time head verification. Green by default here;
     # tests/fm-pr-merge.test.sh owns the refusal matrix for that guard.
-    printf 'head=%s\nmergeable=MERGEABLE\nreview=\nchecks=1\nunsuccessful=0\n' \
+    printf 'head=%s\nmergeable=MERGEABLE\nreview=\nchecks=1\nunsuccessful=0\nfailing=0\nunrun=0\n' \
       "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;

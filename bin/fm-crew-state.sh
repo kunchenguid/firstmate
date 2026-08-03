@@ -35,6 +35,10 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#      A terminal checks-passed is a REPORTED claim and is corroborated against
+#      the run's own ci log before it is repeated: a claim the evidence does not
+#      record reports blocked, because a head no check run examined is not work
+#      ready for review. See nm_ci_checks_state for the measured defect.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -308,6 +312,14 @@ nm_effective_ci_step_status() {
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
+#
+# "no CI checks reported" is NOT green, and reading it as green is the defect
+# measured on 2026-08-02: a cross-repo fork pull request holds its workflows at
+# action_required until a maintainer approves them, so zero checks ever run and
+# the pipeline reports that absence as a terminal success. Nothing was red
+# because nothing executed. An absent verifier is a distinct state from a
+# passing one and never maps to green here, so a head no verifier examined
+# reaches firstmate as not-ready rather than as work ready for review.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -318,8 +330,8 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported - still monitoring"*|*"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -488,7 +500,22 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        # checks-passed is the pipeline's REPORTED terminal claim, and on
+        # 2026-08-02 it was reported for a head whose check-run set was empty.
+        # Corroborate it against the run's own ci log before repeating it: a
+        # claim of green that the run's own evidence does not record is not a
+        # green head, and a task whose checks never ran needs firstmate rather
+        # than a place in the ready-for-review queue. An unreadable log reports
+        # `unknown` and is left alone, because a log that could not be read is
+        # not evidence that nothing ran.
+        checks-passed)
+          if [ "$(nm_ci_checks_state)" = not-ready ]; then
+            RUN_STATE=blocked
+            RUN_DETAIL="run reported a passing result its own CI log does not record: nothing verified this head"
+          else
+            RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"
+          fi
+          ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;

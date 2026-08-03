@@ -24,6 +24,9 @@
 #   (i) an empty check rollup refuses, distinguishably from a failing rollup
 #   (j) an all-successful rollup with the same zero failure count still merges
 #   (k) a non-success check run refuses
+#   (k1) check runs that returned no verdict refuse, distinguishably from failures
+#   (k2) failures and non-reporters present together are each named separately
+#   (k3) counts that do not reconcile refuse as unreadable, not as a verdict
 #   (l) a non-mergeable PR refuses, including a not-yet-computed UNKNOWN
 #   (m) a review requesting changes refuses
 #   (n) an unreadable or absent gh refuses rather than merging unverified
@@ -63,10 +66,15 @@ make_case() {
 }
 
 # write_verify_payload <file> <head> <mergeable> <review> <checks> <unsuccessful>
-# The five lines fm-pr-merge.sh reads back from its single `gh pr view` call.
+#                      [failing] [unrun]
+# The seven lines fm-pr-merge.sh reads back from its single `gh pr view` call.
+# When a case does not care how the unsuccessful members break down, they
+# default to failures, which is the stricter reading and keeps the pre-existing
+# cases meaning exactly what they meant before the split.
 write_verify_payload() {
-  printf 'head=%s\nmergeable=%s\nreview=%s\nchecks=%s\nunsuccessful=%s\n' \
-    "$2" "$3" "$4" "$5" "$6" > "$1"
+  local failing=${7:-$6} unrun=${8:-0}
+  printf 'head=%s\nmergeable=%s\nreview=%s\nchecks=%s\nunsuccessful=%s\nfailing=%s\nunrun=%s\n' \
+    "$2" "$3" "$4" "$5" "$6" "$failing" "$unrun" > "$1"
 }
 
 # A green head: mergeable, no review blocking, ten check runs, none unsuccessful.
@@ -410,8 +418,10 @@ test_zero_check_runs_refuses() {
     "zero-checks: refusal did not name the empty check rollup"
   assert_grep "$head" "$case_dir/stderr" \
     "zero-checks: refusal did not name the head commit it evaluated"
-  assert_no_grep 'are not successful' "$case_dir/stderr" \
+  assert_no_grep 'check runs failed' "$case_dir/stderr" \
     "zero-checks: empty rollup was reported as a failing rollup instead of an empty one"
+  assert_no_grep 'reported no result' "$case_dir/stderr" \
+    "zero-checks: empty rollup was reported as members that ran without a verdict"
   assert_no_merge_side_effects "$case_dir" zero-checks
   pass "fm-pr-merge refuses a head with zero check runs and names it as empty, not failing"
 }
@@ -454,14 +464,94 @@ test_failing_check_run_refuses() {
   set -e
 
   expect_code 1 "$rc" "failing-check: a non-success check run must refuse the merge"
-  assert_grep '2 of 10 check runs are not successful' "$case_dir/stderr" \
+  assert_grep '2 of 10 check runs failed' "$case_dir/stderr" \
     "failing-check: refusal did not name the failing check runs"
   assert_grep "$head" "$case_dir/stderr" \
     "failing-check: refusal did not name the head commit it evaluated"
   assert_no_grep 'no check runs exist' "$case_dir/stderr" \
     "failing-check: a failing rollup was reported as an empty one"
+  assert_no_grep 'reported no result' "$case_dir/stderr" \
+    "failing-check: failed check runs were reported as runs that never produced a verdict"
   assert_no_merge_side_effects "$case_dir" failing-check
   pass "fm-pr-merge refuses a head with non-successful check runs, distinguishably from an empty one"
+}
+
+# The third state, and the one the two-bucket reading collapsed. These members
+# ran to completion and returned no verdict at all: nothing failed, and nothing
+# passed either. Reporting them as failures would send the captain hunting for a
+# broken test that does not exist.
+test_unrun_check_runs_refuse_distinguishably() {
+  local case_dir rc head=2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b
+  case_dir=$(make_case unrun-checks)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 4 4 0 4
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/34 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unrun-checks: check runs with no verdict must refuse the merge"
+  assert_grep '4 of 4 check runs reported no result' "$case_dir/stderr" \
+    "unrun-checks: refusal did not name the members that produced no verdict"
+  assert_no_grep 'check runs failed' "$case_dir/stderr" \
+    "unrun-checks: members that never reported were described as failures"
+  assert_no_grep 'no check runs exist' "$case_dir/stderr" \
+    "unrun-checks: a populated rollup was reported as an empty one"
+  assert_no_merge_side_effects "$case_dir" unrun-checks
+  pass "fm-pr-merge separates check runs that reported no result from check runs that failed"
+}
+
+# Both kinds present at once: each is counted and named on its own, so neither
+# fact is lost behind the other.
+test_failing_and_unrun_are_both_reported() {
+  local case_dir rc head=2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c
+  case_dir=$(make_case mixed-checks)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 9 5 2 3
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/35 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "mixed-checks: a rollup with failures and non-reporters must refuse"
+  assert_grep '2 of 9 check runs failed' "$case_dir/stderr" \
+    "mixed-checks: the failing members were not named"
+  assert_grep '3 of 9 check runs reported no result' "$case_dir/stderr" \
+    "mixed-checks: the non-reporting members were not named"
+  assert_no_merge_side_effects "$case_dir" mixed-checks
+  pass "fm-pr-merge reports failed and unrun check runs as separate facts about one head"
+}
+
+# The buckets must account for every unsuccessful member. A response that breaks
+# that identity was not understood, and an unreadable rollup is reported as
+# unreadable rather than resolved as either a pass or a failure.
+test_inconsistent_check_buckets_refuse_as_unreadable() {
+  local case_dir rc head=2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d
+  case_dir=$(make_case inconsistent-buckets)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 10 4 1 1
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/36 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "inconsistent-buckets: an unaccounted-for rollup must refuse the merge"
+  assert_grep 'the check rollup could not be read from GitHub' "$case_dir/stderr" \
+    "inconsistent-buckets: refusal did not report the rollup as unreadable"
+  assert_no_merge_side_effects "$case_dir" inconsistent-buckets
+  pass "fm-pr-merge reports a rollup whose counts do not reconcile as unreadable, not as a verdict"
 }
 
 test_not_mergeable_refuses() {
@@ -728,7 +818,7 @@ test_final_verification_refuses_changed_head() {
   set -e
 
   expect_code 1 "$rc" "final-verification-race: a changed red head must refuse the merge"
-  assert_grep '1 of 10 check runs are not successful' "$case_dir/stderr" \
+  assert_grep '1 of 10 check runs failed' "$case_dir/stderr" \
     "final-verification-race: the final check did not report the changed head's failure"
   assert_grep "$changed_head" "$case_dir/stderr" \
     "final-verification-race: the refusal did not name the changed head"
@@ -838,21 +928,52 @@ test_real_query_against_api_shaped_json() {
   run_fixture_case null-rollup 'null' MERGEABLE '' 52 1 'no check runs exist on this head'
   # Ten successful check runs: the same zero failures, but genuinely green.
   run_fixture_case all-success "[${success_runs%,}]" MERGEABLE '' 53 0 ''
-  # One still-running check run among nine passes: not yet an observed pass.
+  # One still-running check run among nine passes: not yet an observed pass, and
+  # not a failure either - it has returned no verdict at all.
   run_fixture_case in-progress \
     "[${success_runs%,},{\"__typename\":\"CheckRun\",\"status\":\"IN_PROGRESS\",\"conclusion\":\"\"}]" \
-    MERGEABLE '' 54 1 '1 of 11 check runs are not successful'
-  # A held cross-repo workflow reports ACTION_REQUIRED rather than a pass.
+    MERGEABLE '' 54 1 '1 of 11 check runs reported no result'
+  # A held cross-repo workflow reports ACTION_REQUIRED rather than a pass. This
+  # is the live shape of the 2026-08-02 defect once GitHub does surface the run.
   run_fixture_case action-required \
     '[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"ACTION_REQUIRED"}]' \
-    MERGEABLE '' 55 1 '1 of 1 check runs are not successful'
+    MERGEABLE '' 55 1 '1 of 1 check runs reported no result'
+  # The brief's named non-verifying conclusions: each ran to completion and
+  # decided nothing, so a rollup made only of them is not a green rollup.
+  run_fixture_case only-skipped \
+    '[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SKIPPED"}]' \
+    MERGEABLE '' 60 1 '1 of 1 check runs reported no result'
+  run_fixture_case only-neutral \
+    '[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"NEUTRAL"}]' \
+    MERGEABLE '' 61 1 '1 of 1 check runs reported no result'
+  run_fixture_case only-cancelled \
+    '[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"CANCELLED"}]' \
+    MERGEABLE '' 62 1 '1 of 1 check runs reported no result'
+  # A whole rollup of non-verifying members alongside real passes still refuses:
+  # the weakest member decides, and three of these decided nothing.
+  run_fixture_case skipped-among-passes \
+    "[${success_runs%,},{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"SKIPPED\"},{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"NEUTRAL\"},{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"CANCELLED\"}]" \
+    MERGEABLE '' 63 1 '3 of 13 check runs reported no result'
+  # The adverse conclusions, which must read as failures rather than as absence.
+  run_fixture_case timed-out \
+    '[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"TIMED_OUT"}]' \
+    MERGEABLE '' 64 1 '1 of 1 check runs failed'
+  run_fixture_case startup-failure \
+    '[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"STARTUP_FAILURE"}]' \
+    MERGEABLE '' 65 1 '1 of 1 check runs failed'
   # A legacy commit status carries .state instead of .conclusion.
   run_fixture_case legacy-status-success \
     '[{"__typename":"StatusContext","context":"ci/legacy","state":"SUCCESS"}]' \
     MERGEABLE '' 56 0 ''
   run_fixture_case legacy-status-failure \
     '[{"__typename":"StatusContext","context":"ci/legacy","state":"FAILURE"}]' \
-    MERGEABLE '' 57 1 '1 of 1 check runs are not successful'
+    MERGEABLE '' 57 1 '1 of 1 check runs failed'
+  run_fixture_case legacy-status-error \
+    '[{"__typename":"StatusContext","context":"ci/legacy","state":"ERROR"}]' \
+    MERGEABLE '' 66 1 '1 of 1 check runs failed'
+  run_fixture_case legacy-status-pending \
+    '[{"__typename":"StatusContext","context":"ci/legacy","state":"PENDING"}]' \
+    MERGEABLE '' 67 1 '1 of 1 check runs reported no result'
   # Mergeability and review decision read off the same single response.
   run_fixture_case conflicting "[${success_runs%,}]" CONFLICTING '' 58 1 \
     'the pull request is not mergeable (mergeable=CONFLICTING)'
@@ -874,6 +995,9 @@ test_parses_pr_url_for_gh_axi
 test_zero_check_runs_refuses
 test_all_successful_checks_still_merges
 test_failing_check_run_refuses
+test_unrun_check_runs_refuse_distinguishably
+test_failing_and_unrun_are_both_reported
+test_inconsistent_check_buckets_refuse_as_unreadable
 test_not_mergeable_refuses
 test_unknown_mergeable_refuses
 test_changes_requested_refuses

@@ -291,6 +291,19 @@ outcome: failed
 EOF
 }
 
+run_checks_passed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/3"
+  findings: none
+outcome: checks-passed
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -499,7 +512,13 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+# The 2026-08-02 defect, pinned from the other side. This marker means the
+# pipeline reached the end of its CI wait having seen zero check runs, which is
+# what a cross-repo fork pull request produces when its workflows sit at
+# action_required and never dispatch. Nothing was red because nothing ran, and
+# reading that absence as a terminal green is what put an unverified head in
+# front of the captain as work ready for review.
+test_ci_monitoring_no_checks_terminal_is_not_green() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -508,9 +527,77 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_not_contains "$out" "checks green" "a run that saw zero checks must not read as checks green"
+  assert_not_contains "$out" "state: done" "a run that saw zero checks must not read as done"
+  assert_contains "$out" "state: working" "a run that saw zero checks stays working"
+  pass "terminal no-checks ci-monitor marker is never reported as green"
+}
+
+# The positive control for the case above: the marker that means every check ran
+# and passed still reaches the captain as ready work, so the fix above refuses
+# absence rather than refusing everything.
+test_ci_monitoring_all_checks_passed_still_green() {
+  reset_fakes
+  local d; d=$(new_case ci-allpassed)
+  make_repo_on_branch "$d/wt" fm/feat-ciallpassed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciallpassed.meta" "window=fm:fm-feat-ciallpassed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciallpassed)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-ciallpassed)
+  assert_contains "$out" "state: done" "an all-passed ci-monitor run -> done"
+  assert_contains "$out" "checks green" "an all-passed ci-monitor run mentions checks green"
+  pass "all-checks-passed ci-monitor marker still surfaces done"
+}
+
+# The same defect arriving through the other channel. Here the pipeline has
+# finished and reported the terminal claim `checks-passed`, which is what it
+# reported on 2026-08-02 for a head whose check-run set was empty. The claim is
+# repeated only when the run's own evidence records checks actually passing.
+test_terminal_checks_passed_claim_without_evidence_is_not_green() {
+  reset_fakes
+  local d; d=$(new_case ci-claimed-nochecks)
+  make_repo_on_branch "$d/wt" fm/feat-ciclaimed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciclaimed.meta" "window=fm:fm-feat-ciclaimed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-ciclaimed)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-ciclaimed)
+  assert_not_contains "$out" "checks green" "an unevidenced checks-passed claim must not read as checks green"
+  assert_not_contains "$out" "state: done" "an unevidenced checks-passed claim must not read as done"
+  assert_contains "$out" "state: blocked" "an unevidenced checks-passed claim needs firstmate"
+  pass "a terminal checks-passed claim its own CI log does not support is never reported as green"
+}
+
+# The matched positive control: the same terminal claim, corroborated by a run
+# whose log records every check passing, still reaches the captain as ready.
+test_terminal_checks_passed_claim_with_evidence_stays_green() {
+  reset_fakes
+  local d; d=$(new_case ci-claimed-passed)
+  make_repo_on_branch "$d/wt" fm/feat-ciclaimedok
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciclaimedok.meta" "window=fm:fm-feat-ciclaimedok" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-ciclaimedok)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-ciclaimedok)
+  assert_contains "$out" "state: done" "an evidenced checks-passed claim -> done"
+  assert_contains "$out" "checks green" "an evidenced checks-passed claim mentions checks green"
+  pass "a terminal checks-passed claim its CI log corroborates still surfaces done"
+}
+
+# An unreadable log is not evidence that nothing ran. UNAVAILABLE must not be
+# resolved into either a pass or a refusal, so the claim is left as it was.
+test_terminal_checks_passed_claim_survives_unreadable_log() {
+  reset_fakes
+  local d; d=$(new_case ci-claimed-nolog)
+  make_repo_on_branch "$d/wt" fm/feat-ciclaimednolog
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciclaimednolog.meta" "window=fm:fm-feat-ciclaimednolog" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-ciclaimednolog)"
+  FM_FAKE_CI_LOGS=""
+  local out; out=$(run_crew_state "$d" feat-ciclaimednolog)
+  assert_contains "$out" "state: done" "an unreadable CI log must not manufacture a refusal"
+  pass "an unreadable CI log leaves the terminal claim as it stands rather than resolving it"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -1318,7 +1405,11 @@ test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_terminal_is_not_green
+test_ci_monitoring_all_checks_passed_still_green
+test_terminal_checks_passed_claim_without_evidence_is_not_green
+test_terminal_checks_passed_claim_with_evidence_stays_green
+test_terminal_checks_passed_claim_survives_unreadable_log
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
