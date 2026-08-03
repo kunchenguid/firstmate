@@ -179,6 +179,54 @@ SH
   pass "session-lock: ownership stops at the first non-harness gap above the contiguous run"
 }
 
+test_leading_dash_login_shell_comm_never_leaks_basename_errors() {
+  local dir fakebin got err
+  dir="$TMP_ROOT/leading-dash-comm"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  # macOS reports argv[0] in `ps -o comm=`, and a login shell's argv[0] is
+  # "-zsh". BSD and GNU basename both reject that as an option ("illegal
+  # option -- z"), so an unguarded basename in the ancestry walk sprays an
+  # error line into every Stop-hook and lock output that climbs through the
+  # login shell.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  700:comm=) printf '%s\n' claude ;;
+  700:args=) printf '%s\n' claude ;;
+  700:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' '-zsh' ;;
+  *:args=) printf '%s\n' '-zsh' ;;
+  *:ppid=) printf '%s\n' 700 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '700\n' > "$dir/state/.lock"
+
+  err="$dir/ancestry-stderr"
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid' 2>"$err") \
+    || fail "the session above a login shell was not found in the ancestry at all"
+  [ "$got" = 700 ] || fail "ancestry resolved '$got' through the login shell, expected 700"
+  [ -s "$err" ] && fail "the ancestry walk wrote to stderr on a leading-dash comm: $(cat "$err")"
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 800' 2>"$err"; then
+    fail "a login shell was classified as a harness process"
+  fi
+  [ -s "$err" ] && fail "the liveness predicate wrote to stderr on a leading-dash comm: $(cat "$err")"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" 2>"$err" \
+    || fail "the lock owner above a login shell did not recognize itself"
+  [ -s "$err" ] && fail "the ownership check wrote to stderr on a leading-dash comm: $(cat "$err")"
+  pass "session-lock: a leading-dash login-shell comm is walked cleanly with no basename errors"
+}
+
 test_competing_version_named_session_is_seen_as_live() {
   local dir fakebin
   dir="$TMP_ROOT/competing"
@@ -357,6 +405,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
+test_leading_dash_login_shell_comm_never_leaks_basename_errors
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
