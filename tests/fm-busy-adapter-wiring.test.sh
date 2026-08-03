@@ -263,7 +263,7 @@ test_claude_hooks_semantic_lifecycle() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  settings="$HOME_DIR/state/$id.claude-settings.json"
   assert_present "$settings" "claude spawn did not write hook settings"
   jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
@@ -301,13 +301,43 @@ test_claude_hooks_stale_incarnation_harmless() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  settings="$HOME_DIR/state/$id.claude-settings.json"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
   run_claude_hook "$settings" UserPromptSubmit \
     || fail "a stale-gen hook must still exit 0 so Claude's lifecycle is never broken"
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+# `.claude/settings.local.json` is a generic path some projects COMMIT. Writing
+# firstmate's hook scaffolding there overwrote the project's own hook config and
+# left the copy permanently dirty, which false-refused cleanup for every task in
+# such a project. The settings now live in state/ and ride the launch command, so
+# the project's tracked file is untouched and the copy stays clean.
+test_claude_settings_never_dirty_a_tracked_project_file() {
+  local rec id=busy-cl-3 out state settings tracked status
+  rec=$(make_spawn_case claude-tracked-settings claude "$id")
+  read_case_record "$rec"
+  tracked="$WT_DIR/.claude/settings.local.json"
+  mkdir -p "$WT_DIR/.claude"
+  printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"true"}]}]}}' > "$tracked"
+  git -C "$WT_DIR" add -- .claude/settings.local.json
+  git -C "$WT_DIR" -c user.email=t@t -c user.name=t commit -q -m "project tracks claude settings"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$state/$id.claude-settings.json"
+  assert_present "$settings" "claude spawn did not write its hook settings into state/"
+  jq -e '.hooks.Stop' "$settings" >/dev/null || fail "state hook settings lack the Stop hook"
+
+  status=$(git -C "$WT_DIR" status --porcelain)
+  [ -z "$status" ] || fail "claude spawn dirtied the worktree: $status"
+  grep -q '"command":"true"' "$tracked" \
+    || fail "claude spawn overwrote the project's own tracked hook config"
+  assert_contains "$out" "spawned $id harness=claude" "claude spawn did not complete normally"
+  pass "claude hook settings live outside the worktree, so a project-tracked settings file stays clean"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -349,6 +379,7 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_settings_never_dirty_a_tracked_project_file
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

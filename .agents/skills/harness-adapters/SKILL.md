@@ -191,8 +191,14 @@ Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are docu
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
+**Crewmate hook fact (verified 2026-08-03, Claude Code 2.1.220).**
+A crewmate's per-task hooks are written to `state/<task-id>.claude-settings.json` and loaded with `claude --settings <path>`, never into the copy's `.claude/settings.local.json`.
+That path is a generic one some projects TRACK, so writing scaffolding there destroyed the project's own hook config and left the copy permanently dirty.
+Hooks supplied through `--settings` fire, and the project's own `.claude/settings.json` hooks still fire alongside them; a missing `--settings` path is fatal, so a secondmate launch (which writes no per-task hook file) carries no such flag.
+`docs/verification/supervision.md` "Claude hook delivery through `--settings`" owns the evidence.
+
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204; Stop-owned auto-arm revalidated 2026-07-24, Claude Code 2.1.219).**
-This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
+This is separate from the per-task crewmate hooks above, which `fm-spawn` keeps outside the copy entirely (see the crewmate hook fact below).
 The firstmate PRIMARY's own `.claude/settings.json` registers two Stop hooks: `bin/fm-turnend-guard.sh --claude` and the Stop-owned auto-arm `bin/fm-claude-stop-autoarm.sh` (`asyncRewake: true`, `timeout: 28800`), and exiting the guard with status 2 plus stderr reliably forces the model to continue.
 Claude Code's stdin payload to a Stop hook carries a `stop_hook_active` boolean that is `true` when the current stop attempt follows ANY stop-hook-driven continuation, including `asyncRewake` rewakes; the primary guard therefore ignores it in `--claude` mode and uses the cooperative claim/epoch check plus a bounded re-block budget instead, while the codex-mode default still treats it as a one-block loop guard.
 A project-level `.claude/settings.json` only takes effect when Claude Code's project root is that exact directory - it does not walk up from a subdirectory looking for one, so firstmate launches the primary from the repo root.

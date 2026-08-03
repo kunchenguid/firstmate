@@ -168,6 +168,38 @@ In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycl
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
+### Claude hook delivery through `--settings`
+
+Claude's per-task hooks are written to `state/<task-id>.claude-settings.json` and loaded with `claude --settings <path>`, so firstmate never writes `.claude/settings.local.json` inside a project copy.
+Three properties were verified on 2026-08-03 with Claude Code 2.1.220.
+
+Hooks supplied through `--settings` fire, and the project's own `.claude/settings.json` hooks still fire alongside them (they merge, they do not replace).
+A project with a `Stop` hook touching `PROJECT_FIRED`, plus an external settings file with `Stop` and `UserPromptSubmit` hooks touching `EXTERNAL_FIRED` and `EXTERNAL_UPS_FIRED`:
+
+```sh
+claude -p "reply with the single word ok" --dangerously-skip-permissions \
+  --settings ./external-settings.json
+```
+
+Observed result: all three markers were created.
+
+The same delivery holds for the interactive TUI launch shape `fm-spawn` uses, verified in a real tmux pane with a launch-argv prompt and a settings file outside the project:
+
+```sh
+CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \
+  --settings <state>/settings.json 'reply with the single word ok'
+```
+
+Observed result: after the folder-trust dialog was accepted, both the `UserPromptSubmit` and `Stop` markers were created.
+
+A missing `--settings` path is fatal, which is why a secondmate launch (which writes no per-task hook file) carries no flag:
+
+```sh
+claude -p "say ok" --dangerously-skip-permissions --settings /nonexistent/path/x.json
+```
+
+Observed result: `Error: Settings file not found: /nonexistent/path/x.json`.
+
 Deterministic entry points:
 
 ```sh

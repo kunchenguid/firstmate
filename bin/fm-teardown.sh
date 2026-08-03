@@ -21,7 +21,19 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed.
+# Uncommitted changes are never landed. A dirty `git status` is not always an
+# uncommitted change, though: when a follow-up task points a second worktree at the
+# same branch (`git checkout -B <branch> origin/<branch>`) and commits, the branch
+# ref advances under the ORIGINAL worktree, whose index and files stay at the commit
+# it last wrote, so git reports every file that changed in between as a staged
+# modification. That copy holds no work - its content IS an already-landed commit.
+# Teardown clears that signal only on exact proof: the index and the working tree
+# must agree, and their one shared content tree must BE the tree of a commit
+# reachable from a remote (or, for a local-only task, from the local default
+# branch). Any real edit, any staged-then-modified file, and any untracked file
+# changes that tree, so it matches nothing and the refusal stands.
+# FM_TEARDOWN_STALE_CONTENT_SCAN_LIMIT (default 500) bounds the ancestry scan; a
+# too-small bound can only cost a refusal, never a false clearance.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -666,6 +678,24 @@ remove_kimi_turnend_auth() {
   rm -f -- "$path"
 }
 
+# Remove firstmate's own per-task scaffolding from a worktree so a reused pool copy
+# cannot fire signals for a dead task. Any path the project TRACKS is left alone:
+# these names are firstmate's by convention only, and `.claude/settings.local.json`
+# in particular is a generic path some repos commit. Deleting a tracked file would
+# be firstmate changing project content, which it never does.
+remove_worktree_scaffold_files() {
+  local wt=$1 rel
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  for rel in .claude/settings.local.json .opencode/plugins/fm-turn-end.js \
+    .opencode/plugins/fm-busy-state.js .fm-grok-turnend .fm-kimi-turnend; do
+    [ -e "$wt/$rel" ] || continue
+    if git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
+      continue
+    fi
+    rm -f -- "$wt/$rel"
+  done
+}
+
 retire_busy_state() {
   local state_dir=$1 id=$2 gen=${3:-}
   if [ -n "$gen" ]; then
@@ -888,6 +918,84 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+# Bound for the ancestry scan in dirty_is_landed_stale_content. The stale content
+# is the commit THIS copy last wrote, so it sits in HEAD's recent ancestry; the cap
+# keeps the scan cheap on a large history and can only ever cost a refusal.
+STALE_CONTENT_SCAN_LIMIT=${FM_TEARDOWN_STALE_CONTENT_SCAN_LIMIT:-500}
+
+# Echo "<index-tree> <worktree-tree>": the tree of the current index, and the tree
+# of the full working tree including anything git would newly add. Both are built
+# against a COPY of the index, so the task's real index is never modified. Returns
+# non-zero when either tree cannot be built (unmerged index, unreadable index or
+# worktree), so the caller refuses rather than guesses.
+worktree_content_trees() {
+  local real_index index_copy index_tree work_tree rc=0
+  real_index=$(git -C "$WT" rev-parse --git-path index 2>/dev/null) || return 1
+  [ -n "$real_index" ] || return 1
+  case "$real_index" in /*) ;; *) real_index="$WT/$real_index" ;; esac
+  [ -f "$real_index" ] || return 1
+  index_copy=$(mktemp "${TMPDIR:-/tmp}/fm-teardown-index.XXXXXX") || return 1
+  # GIT_INDEX_FILE resolves relative to git's working directory, which -C moves
+  # into the worktree, so only an absolute copy is usable.
+  case "$index_copy" in
+    /*) ;;
+    *) rm -f "$index_copy"; return 1 ;;
+  esac
+  if ! cp -- "$real_index" "$index_copy"; then
+    rm -f "$index_copy"
+    return 1
+  fi
+  index_tree=$(GIT_INDEX_FILE="$index_copy" git -C "$WT" write-tree 2>/dev/null) || rc=1
+  if [ "$rc" -eq 0 ]; then
+    GIT_INDEX_FILE="$index_copy" git -C "$WT" add -A >/dev/null 2>&1 || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    work_tree=$(GIT_INDEX_FILE="$index_copy" git -C "$WT" write-tree 2>/dev/null) || rc=1
+  fi
+  rm -f "$index_copy"
+  [ "$rc" -eq 0 ] && [ -n "$index_tree" ] && [ -n "$work_tree" ] || return 1
+  printf '%s %s\n' "$index_tree" "$work_tree"
+}
+
+# Is a non-empty `git status` a stale index/HEAD artifact rather than real work?
+# A follow-up task that runs `git checkout -B <branch> origin/<branch>` in a second
+# copy advances the branch ref under this one: HEAD jumps forward while this copy's
+# index and files stay at the commit it last wrote, so git reports every file that
+# changed in between as a staged modification. Nothing is at risk there, because the
+# content on disk IS an already-landed commit.
+# The proof is exact and narrow. The index and the working tree must agree, and that
+# one shared content tree must BE the tree of a commit already reachable from a
+# remote - plus the local default branch for a local-only task, whose landing target
+# is that branch. Any real edit, any staged-then-modified file, and any untracked
+# file changes the content tree, so it matches no landed commit and teardown refuses
+# exactly as before. Echoes the matching commit on success.
+dirty_is_landed_stale_content() {
+  local trees index_tree work_tree scan commit tree name unlanded
+  local -a exclude=(--not --remotes)
+  if [ "$MODE" = local-only ] && name=$(default_branch 2>/dev/null) && [ -n "$name" ] \
+    && git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+    exclude+=("refs/heads/$name")
+  fi
+  trees=$(worktree_content_trees) || return 1
+  index_tree=${trees%% *}
+  work_tree=${trees##* }
+  [ -n "$work_tree" ] && [ "$index_tree" = "$work_tree" ] || return 1
+  scan=$(git -C "$WT" log --max-count="$STALE_CONTENT_SCAN_LIMIT" --format='%H %T' HEAD 2>/dev/null) || return 1
+  while IFS=' ' read -r commit tree; do
+    [ -n "$commit" ] && [ "$tree" = "$work_tree" ] || continue
+    # Empty output means the commit is reachable from one of the exclusion refs,
+    # so its content is preserved outside this copy. A rev-list failure (unknown
+    # ref, no remotes at all) leaves the candidate unproven and is skipped.
+    unlanded=$(git -C "$WT" rev-list --max-count=1 "$commit" "${exclude[@]}" 2>/dev/null) || continue
+    [ -z "$unlanded" ] || continue
+    printf '%s\n' "$commit"
+    return 0
+  done <<EOF
+$scan
+EOF
+  return 1
 }
 
 backlog_refresh_reminder() {
@@ -1133,7 +1241,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch stale_commit
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1149,6 +1257,10 @@ validate_worktree_teardown_safety() {
     return 1
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  if [ -n "$dirty" ] && stale_commit=$(dirty_is_landed_stale_content); then
+    echo "teardown: worktree $WT reports differences only because its branch advanced in another copy; its content is exactly commit $stale_commit, which is already landed, so nothing here is unlanded work" >&2
+    dirty=
+  fi
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2224,15 +2336,12 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
-          "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        remove_worktree_scaffold_files "$child_wt"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
-        "$child_wt/.opencode/plugins/fm-busy-state.js" \
-        "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+      remove_worktree_scaffold_files "$child_wt"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -2257,6 +2366,7 @@ cleanup_firstmate_home_children() {
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
+      "$sub_state/$child_id.claude-settings.json" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current"
   done
@@ -2416,9 +2526,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-      "$WT/.opencode/plugins/fm-busy-state.js" \
-      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    remove_worktree_scaffold_files "$WT"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -2430,8 +2538,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  remove_worktree_scaffold_files "$WT"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -2534,7 +2641,8 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.claude-settings.json" \
+  "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" \
   "$STATE/.$ID.open-decisions-cursor" \

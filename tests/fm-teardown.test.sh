@@ -15,6 +15,12 @@
 #     main. Reachability alone false-refused this common GitHub flow; the check now
 #     recognizes a merged PR head containing the local work (or the content already
 #     in main) as landed.
+#   - worktree-branch-collision: a follow-up task that points a SECOND copy at the
+#     same branch advances the branch ref under the original copy, whose index and
+#     files stay at the commit it wrote, so git reports staged modifications for
+#     work that is already pushed. The check now clears that signal only on exact
+#     content proof (index and worktree agree, and their shared tree IS the tree of
+#     an already-landed commit); any real edit or untracked file still refuses.
 #   - teardown-lock-race: a killed crew process can leave a transient worktree
 #     git index.lock that blocks teardown. The return path retries on the lock
 #     error signature (even if the lock self-clears mid-check), then only removes a
@@ -38,6 +44,10 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (z) stale index from a second worktree on the same branch   -> ALLOW  (collision fix)
+#   (aa) same, plus a genuine uncommitted edit                  -> REFUSE (safety)
+#   (ab) same, plus an untracked file                           -> REFUSE (safety)
+#   (ac) same shape, content on no remote                       -> REFUSE (safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -929,6 +939,126 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+# Reproduce the two-worktrees-on-one-branch collision: a follow-up task points a
+# SECOND copy at the same branch with `git checkout -B <branch> origin/<branch>`
+# and commits. The branch ref advances under the original copy, whose index and
+# files stay at the commit it wrote, so `git status` there reports every file that
+# changed in between as a staged modification. Args: case_dir [push_second]
+# push_second defaults to "push"; pass "nopush" to leave the advanced head off
+# every remote.
+advance_branch_from_second_worktree() {
+  local case_dir=$1 push_second=${2:-push}
+  local second="$case_dir/wt2"
+  git -C "$case_dir/project" worktree add -q --detach "$second" main
+  git -C "$second" checkout -q -B fm/task-x1 fm/task-x1
+  printf '%s\n' "follow-up rewrite" > "$second/feature.txt"
+  printf '%s\n' "follow-up addition" > "$second/followup.txt"
+  git -C "$second" add -A
+  git -C "$second" -c user.email=t@t -c user.name=t commit -q -m "follow-up commit"
+  if [ "$push_second" = push ]; then
+    git -C "$second" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+  fi
+}
+
+# (z) The original copy's staged "changes" are the branch moving under it, and its
+# content is exactly a commit already on the remote. Nothing is at risk, so the
+# refusal must not fire.
+test_stale_index_from_second_worktree_allows() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-allow)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  advance_branch_from_second_worktree "$case_dir"
+  [ -n "$(git -C "$case_dir/wt" status --porcelain)" ] \
+    || fail "stale-index-allow: setup did not reproduce a stale index"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stale-index-allow: teardown should proceed when the copy's content is an already-landed commit"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "stale-index-allow: teardown printed a REFUSED line"
+  grep -q "already landed" "$case_dir/stderr" \
+    || fail "stale-index-allow: teardown did not explain why the stale signal was cleared"
+  pass "a copy left stale by a second worktree on the same branch is torn down (no false refusal)"
+}
+
+# (aa) The same collision, plus a genuine uncommitted edit. The content tree no
+# longer matches any landed commit, so the guard must still refuse.
+test_stale_index_with_real_edit_refuses() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-edit)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  advance_branch_from_second_worktree "$case_dir"
+  printf '%s\n' "work nobody has seen" > "$case_dir/wt/feature.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-index-edit: teardown should refuse a real uncommitted edit on a stale copy"
+  grep -q REFUSED "$case_dir/stderr" || fail "stale-index-edit: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "stale-index-edit: refusal did not cite uncommitted changes"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-index-edit: teardown completed despite real work"
+  pass "a real edit on top of a stale copy still refuses (the clearance proves content, not shape)"
+}
+
+# (ab) The same collision, plus an untracked file. An untracked file is work, and
+# it changes the content tree, so the refusal must still fire.
+test_stale_index_with_untracked_file_refuses() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-untracked)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  advance_branch_from_second_worktree "$case_dir"
+  printf '%s\n' "scratch notes nobody has seen" > "$case_dir/wt/notes.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-index-untracked: teardown should refuse an untracked file on a stale copy"
+  grep -q REFUSED "$case_dir/stderr" || fail "stale-index-untracked: no REFUSED line in stderr"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-index-untracked: teardown completed despite untracked work"
+  pass "an untracked file on a stale copy still refuses"
+}
+
+# (ac) The collision shape with nothing pushed: the content the copy holds is on no
+# remote, so it is unlanded work and the refusal must stand.
+test_stale_index_content_not_on_any_remote_refuses() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-unpushed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  advance_branch_from_second_worktree "$case_dir" nopush
+  [ -n "$(git -C "$case_dir/wt" status --porcelain)" ] \
+    || fail "stale-index-unpushed: setup did not reproduce a stale index"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stderr" 2>&1
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-index-unpushed: teardown should refuse when the copy's content is on no remote"
+  grep -q REFUSED "$case_dir/stderr" || fail "stale-index-unpushed: no REFUSED line in stderr"
+  ! grep -q "already landed" "$case_dir/stderr" \
+    || fail "stale-index-unpushed: teardown cleared a stale signal whose content is on no remote"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-index-unpushed: teardown completed despite unlanded work"
+  pass "a stale-looking copy whose content is on no remote still refuses"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -2621,6 +2751,10 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_stale_index_from_second_worktree_allows
+test_stale_index_with_real_edit_refuses
+test_stale_index_with_untracked_file_refuses
+test_stale_index_content_not_on_any_remote_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
