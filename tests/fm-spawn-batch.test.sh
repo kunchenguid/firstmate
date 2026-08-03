@@ -102,6 +102,39 @@ ROWS
   pass "projects/ paths are scoped through the firstmate home for single-task spawn"
 }
 
+# A brief still carrying the scaffold's bare {TASK} line is refused fail-closed
+# at the placeholder preflight, which sits right after the missing-brief check
+# and before any endpoint/worktree side effect. Covers single-task and the
+# batch re-exec path (one unfilled pair must not stop the loop, matching the
+# batch guarantee above).
+test_unfilled_brief_placeholder_refused() {
+  local home projects out status id=nope-placeholder-z9 idb=nope-placeholder-z10
+  home="$TMP_ROOT/placeholder home"
+  projects="$TMP_ROOT/placeholder projects"
+  mkdir -p "$home/data/$id" "$projects/alpha"
+  printf '# Task\n{TASK}\n\nDo not add Herdr lifecycle commands by hand.\n' > "$home/data/$id/brief.md"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+    FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" "$id" projects/alpha codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "single spawn with unfilled {TASK} brief should exit non-zero"
+  printf '%s\n' "$out" | grep -F "error: brief $home/data/$id/brief.md still contains the unfilled scaffold placeholder {TASK}" >/dev/null \
+    || fail "single spawn did not report the placeholder preflight error"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+    FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" "$id=projects/alpha" "$idb=projects/alpha" codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "batch with unfilled {TASK} brief should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'unfilled scaffold placeholder {TASK}' >/dev/null \
+    || fail "batch pair did not hit the placeholder preflight"
+  printf '%s\n' "$out" | grep -F "batch: FAILED to spawn $idb (projects/alpha)" >/dev/null \
+    || fail "batch stopped early after the placeholder refusal"
+  pass "unfilled {TASK} brief is refused for single and batch spawn, before side effects"
+}
+
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_projects_path_scoping
+test_unfilled_brief_placeholder_refused

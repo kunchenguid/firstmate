@@ -46,6 +46,13 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Refill target (config/refill-target)
+
+The local, gitignored `config/refill-target` file holds one integer: the number of live non-secondmate lanes this home wants working whenever the backlog has ready items.
+While it is present, `bin/fm-watch.sh` upgrades an otherwise-absorbable no-change heartbeat into an actionable `heartbeat (refill: ...)` wake whenever `tasks-axi ready` reports at least one ready item and live lanes are under the target, so a drained fleet with queued work re-wakes firstmate to dispatch instead of idling until the next crew event.
+Absent means no refill wakes and byte-identical heartbeat behavior to before this knob existed.
+The refill check never spawns anything itself; it only wakes firstmate, which dispatches through the ordinary intake path.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.

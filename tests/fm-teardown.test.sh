@@ -41,6 +41,14 @@
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
+# Open-PR refusal (recorded pr= still open on the forge orphans the PR's owner
+# lane and merge poll; fail closed on lookup errors):
+#   (aa) pr= recorded + forge says OPEN                        -> REFUSE (names URL)
+#   (ab) pr= recorded + OPEN + worktree already gone           -> REFUSE (owner loss)
+#   (ac) pr= recorded + forge says MERGED, nothing unpushed    -> ALLOW
+#   (ad) pr= recorded + state lookup errors, work landed       -> REFUSE (fail closed)
+#   (ae) pr= recorded + OPEN + --force                         -> ALLOW (escape hatch)
+#
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
 #   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
 #   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
@@ -228,6 +236,7 @@ case "\${1:-} \${2:-}" in
     case " \$* " in
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+      *"--json state -q .state"*) printf '%s\n' 'MERGED' ; exit 0 ;;
     esac
     ;;
 esac
@@ -235,6 +244,26 @@ echo "error: pull request not found" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Override the gh PR-state lookup only: `gh pr view <url> --json state -q .state`
+# reports the supplied state (OPEN, MERGED, CLOSED) and every other gh call
+# fails. Drives the open-PR teardown refusal without implying a merged head.
+add_gh_pr_state() {
+  local case_dir=$1 state=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"--json state -q .state"*) printf '%s\n' '$state' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
 }
 
 append_pr_meta_for_current_head() {
@@ -520,6 +549,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   case_dir=$(make_case tasks-axi-reminder)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_state "$case_dir" MERGED
   add_compatible_tasks_axi "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
@@ -539,6 +569,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   case_dir=$(make_case tasks-axi-manual-optout)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_state "$case_dir" MERGED
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   add_compatible_tasks_axi "$case_dir"
 
@@ -885,6 +916,100 @@ test_gh_error_and_content_absent_refuses() {
   expect_code 1 "$rc" "gh-error: teardown should refuse when the PR lookup errors and content is not landed"
   grep -q REFUSED "$case_dir/stderr" || fail "gh-error: no REFUSED line in stderr"
   pass "gh lookup error with content not in default refuses (fail-safe)"
+}
+
+test_open_pr_refuses() {
+  local case_dir rc
+  case_dir=$(make_case open-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  # Nothing dirty and nothing unpushed: without the open-PR refusal this case
+  # tears down cleanly, which is exactly how the 2026-08-02 sweeps orphaned
+  # open PRs whose branches were already pushed.
+  add_gh_pr_state "$case_dir" OPEN
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-pr: teardown should refuse while the recorded PR is open"
+  grep -q REFUSED "$case_dir/stderr" || fail "open-pr: no REFUSED line in stderr"
+  grep -qF 'https://github.com/example/repo/pull/7' "$case_dir/stderr" \
+    || fail "open-pr: refusal did not name the PR URL"
+  pass "recorded open PR refuses teardown even with nothing unpushed"
+}
+
+test_open_pr_refuses_when_worktree_gone() {
+  local case_dir rc
+  case_dir=$(make_case open-pr-no-wt)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_state "$case_dir" OPEN
+  # The orphan scenario: the lane's worktree is already gone, so every
+  # worktree-gated safety check is skipped; the open PR must still refuse.
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-pr-no-wt: teardown should refuse an open PR even without a worktree"
+  grep -q REFUSED "$case_dir/stderr" || fail "open-pr-no-wt: no REFUSED line in stderr"
+  pass "recorded open PR refuses teardown even when the worktree is already gone"
+}
+
+test_merged_pr_state_allows() {
+  local case_dir rc
+  case_dir=$(make_case merged-pr-state)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_state "$case_dir" MERGED
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merged-pr-state: teardown should proceed once the PR is merged"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-state: teardown printed a REFUSED line"
+  pass "merged PR state falls through to the ordinary landed checks"
+}
+
+test_pr_state_lookup_error_refuses() {
+  local case_dir rc
+  case_dir=$(make_case pr-state-error)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  # Nothing dirty or unpushed - the landed checks alone would allow - but the
+  # default gh mock fails every lookup, so the state is unknown and the guard
+  # must refuse rather than risk orphaning a possibly-open PR.
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pr-state-error: teardown should refuse when the PR state cannot be read"
+  grep -q REFUSED "$case_dir/stderr" || fail "pr-state-error: no REFUSED line in stderr"
+  pass "unreadable PR state refuses teardown (fail closed)"
+}
+
+test_open_pr_force_overrides() {
+  local case_dir rc
+  case_dir=$(make_case open-pr-force)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_state "$case_dir" OPEN
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "open-pr-force: --force should keep its explicit-discard override"
+  pass "--force overrides the open-PR refusal (explicit discard authority preserved)"
 }
 
 test_stale_index_lock_cleared_and_teardown_succeeds() {
@@ -1853,6 +1978,11 @@ test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
+test_open_pr_refuses
+test_open_pr_refuses_when_worktree_gone
+test_merged_pr_state_allows
+test_pr_state_lookup_error_refuses
+test_open_pr_force_overrides
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
 test_lsof_error_never_clears_index_lock
