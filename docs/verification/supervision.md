@@ -372,10 +372,10 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
-### Away-mode stand-down
+### Away-mode parking
 
 Every primary with a watcher wake path was audited on 2026-08-02 for whether it can deliver an ordinary watcher wake to firstmate, bypassing the away-mode daemon, while `state/.afk` exists.
-[`../watcher-continuity.md`](../watcher-continuity.md) "Away-mode stand-down" owns the resulting contract.
+[`../watcher-continuity.md`](../watcher-continuity.md) "Away-mode parking" owns the resulting contract.
 
 | Primary | Wake path | Away-mode result |
 | --- | --- | --- |
@@ -383,23 +383,25 @@ Every primary with a watcher wake path was audited on 2026-08-02 for whether it 
 | OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` automatic re-arm and `client.session.promptAsync` | Fixed partial defect: new arms were already gated, but a cycle live at away-mode entry still delivered its wake plus a spurious continuity failure. |
 | Claude | `bin/fm-claude-stop-autoarm.sh` Stop `asyncRewake` | Already correct: the hook exits at its `state/.afk` gate before claiming the home, and re-checks the flag mid-cycle before any classification or rewake. |
 | Codex | Model-driven `bin/fm-watch-checkpoint.sh` foreground checkpoint | Already correct: `.codex/hooks.json` registers only the session-start nudge, the pre-tool seatbelts, and the turn-end guard, so no adapter can inject a wake. |
-| Grok | Model-driven tracked background `bin/fm-watch-arm.sh` task | Defect, now fixed: the arm layer had no adapter behind it, so a background arm already live at away-mode entry returned its wake and Grok converted that completion into a synthetic user message. The arm now stands down at both wake-return boundaries. |
+| Grok | Model-driven tracked background `bin/fm-watch-arm.sh` task | Defect, now fixed: the arm layer had no adapter behind it, so any away-mode completion became a synthetic user message. The arm now parks without completing at every away-mode boundary, then resumes its cycle after return. |
 | kimi | None | Not applicable: kimi has no primary watcher adapter and follows the unknown-harness fallback protocol; its only tracked hook surface is the crewmate turn-end token hook. |
 
-Behavioral regression coverage for the executable stand-down paths uses real processes and real close handlers rather than source-text assertions:
+Behavioral regression coverage for the executable away-mode paths uses real processes and real close handlers rather than source-text assertions:
 
 ```sh
 tests/fm-watch-arm.test.sh
 tests/fm-pi-watch-extension.test.sh
 tests/fm-claude-stop-autoarm.test.sh
+FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh
 ```
 
-`tests/fm-watch-arm.test.sh` starts real watcher processes and proves both a pre-existing away flag and flags introduced after restart begins stand the arm down before signaling or forking, preserve the daemon's watcher process and lock, and allow normal arming again once the flag is cleared.
-It also forks a real arm-owned watcher cycle, creates `state/.afk` while that child is live, and proves the arm exits with `watcher: stood-down` and no wake line while the wake remains in the durable queue, with an away-mode-off control proving the same cycle still returns its wake to its caller.
+`tests/fm-watch-arm.test.sh` starts real watcher processes and proves both a pre-existing away flag and flags introduced after restart begins park the arm before signaling or forking, preserve the daemon's watcher process and lock, emit nothing while parked, exit promptly on `TERM`, and resume normal arming from the same process once the flag is cleared.
+It also forks real owned and attached watcher cycles, creates `state/.afk` while each child is live, and proves the tracked arm remains alive without returning a wake while the wake remains in the durable queue, with an away-mode-off control proving the same cycle still returns its wake to its caller.
 `tests/fm-pi-watch-extension.test.sh` drives the tracked Pi extension and OpenCode plugin with real arm children: an away-mode arm request starts no cycle and delivers no wake, a cycle already live when away mode begins is stood down without a wake or a successor while its queued captain-relevant record is classified by daemon housekeeping, an away-mode OpenCode idle event arms nothing, and clearing the flag restores ordinary arming and wake delivery in the same run.
 `tests/fm-claude-stop-autoarm.test.sh` continues to cover Claude's unchanged away-mode boundary, including the flag appearing mid-cycle.
+The opt-in `tests/fm-grok-continuity-live-e2e.test.sh` exercises Grok's native tracked background-task notification boundary, proves no completion wake reaches the primary while away mode is active, and proves normal completion wake delivery returns after the flag clears.
 
-The stand-down cases were confirmed to fail against the pre-fix adapters and arm layer before the fix was applied.
+The away-mode cases were confirmed to fail against the pre-fix adapters and arm layer before the fix was applied.
 
 ## Wedge-alarm channels
 

@@ -41,6 +41,11 @@ wait_for_text() {
   return 1
 }
 
+count_text() {
+  local expected=$1
+  capture | grep -Fc "$expected" || true
+}
+
 lab_pid_is_safe() {
   local pid=$1 command
   command=$(ps -p "$pid" -o command= 2>/dev/null || true)
@@ -94,7 +99,12 @@ if [ -z "$initial_watcher" ] || ! kill -0 "$initial_watcher" 2>/dev/null; then
   fail "Grok did not start the tracked background watcher"
 fi
 
-printf 'done: grok live e2e watcher fire\n' > "$HOME_DIR/state/grok-e2e.status"
+arm_pid=$(ps -p "$initial_watcher" -o ppid= 2>/dev/null | tr -d ' ' || true)
+[ -n "$arm_pid" ] && kill -0 "$arm_pid" 2>/dev/null \
+  || fail "Grok tracked arm process was not live"
+completion_count=$(count_text "Task completed in")
+date '+%s' > "$HOME_DIR/state/.afk"
+printf 'done: grok away-mode watcher fire\n' > "$HOME_DIR/state/grok-e2e.status"
 i=0
 while [ "$i" -lt 240 ]; do
   grep -Eq 'reason=actionable-signal' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null && break
@@ -103,10 +113,43 @@ while [ "$i" -lt 240 ]; do
 done
 grep -Eq 'reason=actionable-signal' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null \
   || fail "Grok action cycle was not classified in the lifecycle ledger"
-wait_for_text "Task completed in" 120 || fail "Grok did not surface its native background-task completion notification"
+sleep 5
+[ "$(count_text "Task completed in")" = "$completion_count" ] \
+  || fail "Grok surfaced a tracked-task completion while away mode was active"
+kill -0 "$arm_pid" 2>/dev/null || fail "Grok tracked arm completed instead of parking"
+grep -q 'grok-e2e.status' "$HOME_DIR/state/.wake-queue" 2>/dev/null \
+  || fail "away-mode wake was not preserved in the durable queue"
+
+rm -f "$HOME_DIR/state/.afk"
+i=0
+resumed_watcher=
+while [ "$i" -lt 240 ]; do
+  resumed_watcher=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -n "$resumed_watcher" ] && [ "$resumed_watcher" != "$initial_watcher" ] \
+    && kill -0 "$resumed_watcher" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+  i=$((i + 1))
+done
+if [ -z "$resumed_watcher" ] || [ "$resumed_watcher" = "$initial_watcher" ] \
+  || ! kill -0 "$resumed_watcher" 2>/dev/null; then
+  fail "Grok tracked arm did not resume supervision after away mode"
+fi
+resumed_arm_pid=$(ps -p "$resumed_watcher" -o ppid= 2>/dev/null | tr -d ' ' || true)
+[ "$resumed_arm_pid" = "$arm_pid" ] || fail "Grok resumed under a different tracked arm process"
+printf 'done: grok normal watcher fire\n' > "$HOME_DIR/state/grok-e2e.status"
+i=0
+while [ "$i" -lt 240 ]; do
+  [ "$(count_text "Task completed in")" -gt "$completion_count" ] && break
+  sleep 0.5
+  i=$((i + 1))
+done
+[ "$(count_text "Task completed in")" -gt "$completion_count" ] \
+  || fail "Grok did not restore native background-task completion after away mode"
 pane=$(capture)
 if printf '%s\n' "$pane" | grep -Fq 'bin/fm-watch-arm.sh &'; then
   fail "Grok used a shell ampersand instead of its tracked background task"
 fi
 
-printf 'ok - %s live E2E preserved tracked background completion and shared ledger classification\n' "$GROK_VERSION"
+printf 'ok - %s live E2E suppressed away-mode completion and restored normal wake delivery\n' "$GROK_VERSION"
