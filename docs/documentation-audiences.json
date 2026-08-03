@@ -26,6 +26,7 @@
   "readmeSetupTargets": [
     "docs/launcher.md",
     "docs/configuration.md",
+    "docs/windows-launcher.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -383,6 +384,10 @@
     },
     {
       "path": "docs/watcher-continuity.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/windows-launcher.md",
       "audience": "operator-current"
     },
     {
