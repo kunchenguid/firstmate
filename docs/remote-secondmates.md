@@ -46,14 +46,16 @@ The supported escape hatch is a wrapper in `~/.local/bin` rather than special-ca
 mkdir -p ~/.local/bin
 cat > ~/.local/bin/tasks-axi <<'SH'
 #!/usr/bin/env bash
-export NVM_DIR="$HOME/.nvm"
-. "$NVM_DIR/nvm.sh"
-exec tasks-axi "$@"
+tool_bin="$HOME/.nvm/versions/node/<selected-version>/bin"
+PATH="$tool_bin:$PATH"
+exec "$tool_bin/tasks-axi" "$@"
 SH
 chmod +x ~/.local/bin/tasks-axi
 ```
 
-Use the same shape for `asdf` (`. "$HOME/.asdf/asdf.sh"`) or `mise` (`eval "$(mise activate bash)"`), one wrapper per tool the remote home actually needs.
+Replace the placeholder with the remote account's selected nvm version.
+For asdf or mise, use the same shape with the selected version's absolute `bin` directory, one wrapper per tool the remote home actually needs.
+The wrapper must execute that absolute target rather than resolving its own name again through `~/.local/bin`.
 
 Check any host against the real contract:
 
