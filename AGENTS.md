@@ -140,7 +140,7 @@ If the session lock cannot be acquired and verified, report its exact diagnostic
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
 
 1. **Lock** - acquires the per-home session lock first, before anything mutates shared state.
-2. **Bootstrap** - detect-only checks (tool/version problems, GitHub auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.
+2. **Bootstrap** - detect-only checks (tool/version problems, GitHub auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status, and shared validation-daemon liveness) always run, but routine confirmations stay silent by default.
    When the lock could not be acquired, the worktree-tangle check uses read-only advisory wording without a checkout repair command.
    Home-local stale Herdr projection cleanup and the six bootstrap MUTATING sweeps - non-executing legacy PR-check migration, fleet sync, secondmate convergence, secondmate liveness, pending remote handoff retry, and X-mode artifact writes - run only when this session actually holds the lock from step 1.
    The secondmate liveness sweep deterministically accounts for every registered secondmate: it relaunches only from the recovery-grade `dead` or `missing` states, preserves ambiguous, unreadable, or unreachable remote targets, and reports skipped or failed guarantees as `SECONDMATE_LIVENESS:` lines (`bin/fm-bootstrap.sh`; `bin/fm-backend.sh`'s `fm_backend_agent_state`; `docs/remote-secondmates.md`).
