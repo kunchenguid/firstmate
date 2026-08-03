@@ -2314,7 +2314,7 @@ try {
   writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
   writeFileSync(`${process.env.FM_STOP_FILE}.1`, "release\n");
 
-  // That cycle's ordinary wake belongs to the away-mode daemon: no delivery to
+  // That cycle output belongs to the away-mode daemon: no delivery to
   // the primary, and no successor cycle competing for the watcher singleton.
   await new Promise((resolve) => setTimeout(resolve, 500));
   if (prompt) throw new Error(`away mode still delivered an ordinary wake: ${prompt}`);
