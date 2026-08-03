@@ -9,7 +9,7 @@ metadata:
 # firstmate-orca
 
 Use this as the operator checklist for Firstmate's experimental Orca runtime backend.
-It does not replace `AGENTS.md`, `docs/orca-backend.md`, or `harness-adapters`.
+It does not replace `primary-runtime`, `docs/orca-backend.md`, or `harness-adapters`.
 
 Orca is a runtime backend, not an agent harness.
 The runtime backend owns the task endpoint and, for Orca, the task worktree.

@@ -1,7 +1,8 @@
 # Native session-start adapters
 
-AGENTS.md section 3 is the authoritative behavioral contract for session start.
-This file owns how the tracked native session-open adapters deliver it, and the compatibility limits that force two tiers rather than one.
+The [`primary-runtime`](../.agents/skills/primary-runtime/SKILL.md) skill is the authoritative behavioral contract for session start.
+Root [`AGENTS.md`](../AGENTS.md) retains a compact read-only fallback for any primary startup path whose conditional delivery is absent or failed.
+This file owns how the tracked native session-open adapters deliver that contract, and the compatibility limits that force two tiers rather than one.
 
 Firstmate ships two session-open tiers, and the tier is a property of the harness surface, not of the home.
 
@@ -54,7 +55,8 @@ They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate a
 They share `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection owner.
 The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns marker validation, plain-checkout detection, and required Firstmate-shaped paths.
 
-The nudge payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, carries the current `session-start` protocol kind, and retains exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` as its body.
+The nudge payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, carries the current `session-start` protocol kind, and tells the primary to read `.agents/skills/primary-runtime/SKILL.md` and then run `bin/fm-session-start.sh` exactly once, before any other operational instruction or fleet mutation, staying read-only when that runtime owner cannot be read.
+The wrapper itself only prints that instruction: it never loads the skill, runs the digest, acquires the lock, performs bootstrap work, drains notifications, or arms supervision.
 The Ahoy skill owns the rule that this marked operational input is never a captain-authored session boundary, including its narrow legacy compatibility cases, and its own step 0 helm check is the fallback that protects a nudge-tier harness whose first command is a skill.
 
 Before printing, the nudge wrapper reads `state/.lock` and walks at most eight parents from its own pid in its own separate, hard-coded loop, independent of `bin/fm-lock.sh`'s ancestry walk (`fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh`, which now walks up to sixteen parents and can extend past a claude-named match to a still-more-ancestral one) and of Pi's `lockOwnership()`.
@@ -72,6 +74,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Pi / pi-signed | Run | `.pi/extensions/fm-primary-turnend-guard.ts` maps `session_start` reasons `startup`, `new`, `resume`, and `fork` onto wrapper sources, handles `session_compact` as the compaction equivalent, and injects the output with `pi.sendMessage`. | The custom message reaches model context without racing an initial positional prompt. Pi's `reload` reason is deliberately unmapped, as it always was. |
 | OpenCode | Nudge | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Interactive TUI delivery is supported; headless `opencode run` is intentionally fail-open because the process can exit before the queued turn. That early exit is also why OpenCode cannot use the run tier. |
 | Grok | Nudge | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project hook runs when the checkout is trusted, but Grok currently discards hook stdout from model context, so this path is intentionally fail-open and cannot use the run tier. |
+| Kimi | None | No native project session-start hook is installed. | Kimi loads the compact root fallback, while ordinary workers and second mates receive explicit role instructions through their launch brief or charter. |
 
 Pi is the only adapter that injects a message rather than hook stdout, so whatever it injects must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.
 The extension therefore encodes an unencoded digest as `session-start` operational input before sending it, and leaves the already-encoded nudge alone.
@@ -85,7 +88,8 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 
 ## Regression coverage
 
-`tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock, plus its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
+`tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
+It proves that wrapper's exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output for a plain primary and a marked linked second-mate primary, including runtime-owner-first ordering.
 It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree.
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including completion-gated `--reemit` selection, resume delegation, an unrecognized source falling through to the full digest, and bounded loud delivery of an oversized Pi digest.
 `tests/fm-session-start.test.sh` proves the runtime bound through the forced pure-Bash fallback: a TERM-resistant digest that exceeds its budget is force-killed with its grandchild, still emits its completed stages, names the incomplete stage and every stage it never reached, leaves no completion proof, and exits 0.
@@ -94,4 +98,5 @@ It proves the run wrapper's source routing end to end against a real `fm-session
 It verifies the context-preserving reopen source for every installed run-tier harness and context-reset delivery wherever the tracked TUI surface is reachable.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.
 
-[`verification/supervision.md`](verification/supervision.md#native-session-start-delivery) records the active version-scoped transport evidence.
+[`verification/supervision.md`](verification/supervision.md#native-session-start-delivery) records active version-scoped transport evidence.
+[`verification/role-context.md`](verification/role-context.md) records generated role contexts, skill discovery, startup fallback coverage, and measured savings.

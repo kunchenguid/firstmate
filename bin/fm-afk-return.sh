@@ -12,7 +12,7 @@
 # explicitly reclassified in the status stream with a durable reason, before an
 # ordinary captain request may proceed. `needs-decision:` belongs to the
 # configured approval authority and is deliberately not part of this blocker
-# gate; normal reporting routes it through the AGENTS.md section 7 contract.
+# gate; normal reporting routes it through the primary-runtime delivery contract.
 #
 # The durable state/.afk-return-catchup file is written BEFORE daemon shutdown,
 # so a crash between stopping, draining, and blocker handling fails closed. It

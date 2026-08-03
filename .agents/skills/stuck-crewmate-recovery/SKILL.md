@@ -1,9 +1,8 @@
 ---
 name: stuck-crewmate-recovery
 description: >-
-  Agent-only playbook for stuck or missing ordinary Firstmate direct reports.
-  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
-  Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
+  Recover a stuck or missing ordinary direct report while preserving its work.
+  Use for a dead or missing endpoint, stale event, loop, repeated confusion, unresponsiveness, brief-answered question, or failed steer.
 user-invocable: false
 metadata:
   internal: true
@@ -46,4 +45,4 @@ Escalate in order:
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
-5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `primary-runtime`'s captain-communication contract; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.

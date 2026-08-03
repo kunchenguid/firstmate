@@ -11,7 +11,7 @@ metadata:
 # ask-user-authority
 
 This skill is the single owner of the decision procedure for ask-user findings.
-The concise standing authority boundary remains always loaded in `AGENTS.md` section 7.
+The concise standing authority boundary remains role-loaded in `primary-runtime`.
 
 ## Decide who has authority
 

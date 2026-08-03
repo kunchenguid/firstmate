@@ -210,6 +210,10 @@ test_ship_modes_generate_clean_briefs() {
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
+    assert_grep "This launch brief establishes the ordinary worker role for this session." "$brief" \
+      "$id: ship brief did not establish worker-role precedence"
+    assert_grep "do not load the Firstmate primary runtime, operate the fleet, or delegate this task" "$brief" \
+      "$id: ship brief did not exclude primary-only behavior"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
@@ -461,6 +465,11 @@ test_secondmate_no_projects_charter() {
     "project-less charter kept the with-projects operating-model line"
   assert_grep 'working [key=<work-slug>]' "$brief" \
     "secondmate charter did not key material routed-work phases"
+  # shellcheck disable=SC2016 # Backticks are literal generated-brief markup.
+  assert_grep 'read and follow `.agents/skills/primary-runtime/SKILL.md`, then run `bin/fm-session-start.sh` exactly once' "$brief" \
+    "secondmate charter did not load the primary runtime before session start"
+  assert_grep 'This charter remains authoritative for your domain scope, persistence, idle-by-default behavior, and marked return channel.' "$brief" \
+    "secondmate charter did not preserve its role-specific authority"
   assert_grep 'resolved [key=<work-slug>]' "$brief" \
     "secondmate charter did not close a quietly ended routed-work phase"
   assert_grep 'use the same key on its later' "$brief" \
@@ -698,6 +707,10 @@ test_scout_and_secondmate_scaffold() {
   brief="$BRIEF_HOME/data/brief-scout-q6/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
+  assert_grep "This launch brief establishes the ordinary worker role for this session." "$brief" \
+    "scout brief did not establish worker-role precedence"
+  assert_grep "do not load the Firstmate primary runtime, operate the fleet, or delegate this task" "$brief" \
+    "scout brief did not exclude primary-only behavior"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
@@ -707,6 +720,8 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "secondmate charter was not scaffolded"
   assert_grep "persistent second mate" "$brief" \
     "secondmate charter must declare its role"
+  assert_grep "primary-runtime/SKILL.md" "$brief" \
+    "secondmate charter must load the primary runtime owner"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 

@@ -20,7 +20,7 @@
 # the same library drives the local-HEAD secondmate sync used by fm-spawn.sh and
 # fm-bootstrap.sh, so there is one ff implementation, not several.
 #
-# It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
+# It does NOT reload AGENTS.md plus primary-runtime or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)

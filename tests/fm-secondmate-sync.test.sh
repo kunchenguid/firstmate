@@ -399,14 +399,14 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
 
   info_line=$(printf '%s\n' "$out" | grep '^BOOTSTRAP_INFO: nudged fm-sm-instr ' || true)
   [ -n "$info_line" ] || fail "no BOOTSTRAP_INFO nudge line emitted (got: $out)"
-  assert_contains "$info_line" "firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions." \
+  assert_contains "$info_line" "firstmate was updated to the latest - re-read AGENTS.md and .agents/skills/primary-runtime/SKILL.md before further operation." \
     "successful nudge report should include the exact message sent"
   assert_not_contains "$out" "NUDGE_SECONDMATES:" "successful nudge must not leave a firstmate action item"
   assert_not_contains "$out" "sm-readme" "readme-only advance is not nudged"
   assert_not_contains "$out" "sm-current" "already-current secondmate is not nudged"
   assert_contains "$(cat "$log")" "[fm-from-firstmate]" "nudge send should use the marked fm-send secondmate path"
-  assert_contains "$(cat "$log")" "firstmate was updated to the latest - please re-read your AGENTS.md" \
-    "nudge send should type the exact re-read message"
+  assert_contains "$(cat "$log")" "firstmate was updated to the latest - re-read AGENTS.md and .agents/skills/primary-runtime/SKILL.md" \
+    "nudge send should type the exact role-aware re-read message"
   marker_dir="$w/home/state/.secondmate-nudge-pending"
   [ ! -e "$marker_dir/sm-instr.pending" ] || fail "successful nudge should clear its retry marker"
 
@@ -462,7 +462,7 @@ test_bootstrap_nudge_retry_rejects_malformed_marker_id() {
     printf 'home=%s\n' "$evil"
     printf 'commit=%s\n' "$c1"
     printf 'instructions=AGENTS.md\n'
-    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+    printf 'message=firstmate was updated to the latest - re-read AGENTS.md and .agents/skills/primary-runtime/SKILL.md before further operation.\n'
   } > "$marker"
   {
     printf 'window=firstmate:fm-evil\n'
@@ -502,7 +502,7 @@ test_bootstrap_nudge_failure_records_retry_marker() {
   marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
   assert_present "$marker" "failed nudge should leave a retry marker"
   assert_grep "selector=fm-sm-instr" "$marker" "retry marker should pin the stable selector"
-  assert_grep "message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions." \
+  assert_grep "message=firstmate was updated to the latest - re-read AGENTS.md and .agents/skills/primary-runtime/SKILL.md before further operation." \
     "$marker" "retry marker should pin the exact message"
   pass "T8c failed bootstrap nudge is surfaced and recorded for retry"
 }

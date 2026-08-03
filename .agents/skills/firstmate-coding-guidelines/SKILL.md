@@ -1,9 +1,8 @@
 ---
 name: firstmate-coding-guidelines
 description: >-
-  Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
-  Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and maintainer-verification evidence).
+  Repository-specific coding and instruction-ownership rules.
+  Use before any primary or worker changes Firstmate's shared tracked material, including `AGENTS.md`, skills, docs, scripts, tests, workflows, and public skills.
 user-invocable: false
 metadata:
   internal: true
@@ -11,7 +10,7 @@ metadata:
 
 # firstmate-coding-guidelines
 
-Load this before changing firstmate's shared, tracked material, as defined by `AGENTS.md` section 1.
+Load this before changing Firstmate's shared tracked material, as defined by the root `AGENTS.md` repository boundaries.
 It exists because `AGENTS.md` grew from 585 to 958 lines between its last two restructures, entirely from conditional detail added inline instead of routed to its right home.
 Applying the rules below on every change is what keeps that from happening again.
 
@@ -19,19 +18,21 @@ Applying the rules below on every change is what keeps that from happening again
 
 Before writing a new fact anywhere in this repo, ask where it belongs, in this order.
 
-1. Does the firstmate AGENT need this on every session or every turn to operate?
-   If yes: `AGENTS.md`, inline.
-2. Does the agent need it only in a nameable situation - a spawn, a recovery, a specific wake type, a specific lifecycle step?
-   If yes: an agent-only skill under `.agents/skills/`, plus a one-line trigger pointer left inline in `AGENTS.md` (usually section 13).
-3. Is it public product, setup, or user/operator reference?
+1. Does every repository role need this in every session?
+   If yes: root `AGENTS.md`, inline.
+2. Does every primary or second-mate session need it, but an ordinary worker does not?
+   If yes: `.agents/skills/primary-runtime/SKILL.md`, with only the compact startup safety fallback retained in root `AGENTS.md`.
+3. Does the agent need it only in a nameable situation - a spawn, a recovery, a specific notification type, or a specific lifecycle step?
+   If yes: an agent-only skill under `.agents/skills/`, with precise trigger metadata and a one-line pointer at the primary-runtime action point where missing it would be costly.
+4. Is it public product, setup, or user/operator reference?
    If yes: the surface classified for that audience in [`docs/documentation-audiences.md`](../../../docs/documentation-audiences.md), limited to current behavior, setup, supported limits, stable invariants, concise rationale, and current verification entry points.
-4. Is it contributor/maintainer architecture?
+5. Is it contributor/maintainer architecture?
    If yes: the classified maintainer-architecture owner for stable ownership, extension points, mechanism boundaries, and safety rationale.
-5. Is it active reusable verification for a current guarantee?
+6. Is it active reusable verification for a current guarantee?
    If yes: an explicitly classified maintainer-verification record may keep current dates, versions, exact commands, and exact output.
-6. Is it task or incident evidence - chronology, transcripts, branches, temporary paths, failed hypotheses, or delivery proof?
+7. Is it task or incident evidence - chronology, transcripts, branches, temporary paths, failed hypotheses, or delivery proof?
    If yes: keep it in the private task report or PR evidence by default, after distilling every unique current fact into its authoritative owner.
-7. Is it mechanics - exact flags, exact commands, exact paths?
+8. Is it mechanics - exact flags, exact commands, exact paths?
    If yes: the script's own header comment plus its `--help` output, not prose in `AGENTS.md`, a skill, or a second documentation owner.
 
 Stop at the first tier that answers yes.
@@ -48,25 +49,25 @@ When you touch a contract, patch, replace, or prune the owner's existing languag
 
 ## Inline-stub pattern
 
-When content moves out of `AGENTS.md` into a skill, decide what stays behind by asking one question: what must survive with no skill loaded?
+When content moves out of root `AGENTS.md` or `primary-runtime` into a conditional skill, decide what stays behind by asking one question: what must survive with no role-specific or conditional skill loaded?
 That is the trigger condition for loading the skill, plus any safety-critical fact that fires on a wake the skill itself is not loaded for.
 Everything else - the procedure, the mechanism, the surrounding detail - moves out completely.
 Do not leave a partial restatement behind "just in case".
 A partial copy is exactly the duplication the one-owner rule forbids.
-The model to copy is `AGENTS.md` section 8's "Away-mode stub": it keeps only the marker format, the ownership-transfer rule, and the exit condition inline, and points everything else at the `/afk` skill.
+The model is the root role gateway's compact primary fallback: it keeps only boundaries that must survive missing startup delivery and points complete operation at `primary-runtime`.
 
 ## Size discipline
 
-Apply the decision tree above to every line you are about to add to `AGENTS.md`.
+Apply the decision tree above to every line you are about to add to root `AGENTS.md` or `primary-runtime`.
 If an addition needs more than a few lines of conditional detail (detail that matters only in a specific situation) or reference detail (a wire format, an exact schema, historical rationale), you are almost certainly adding it to the wrong file.
-`AGENTS.md`'s token cost is paid by every session of every fleet member, every time, whether or not that session ever hits the situation the new lines describe.
+Root `AGENTS.md` is paid by every repository role, while `primary-runtime` is paid by every primary and second mate, so conditional detail belongs in neither surface.
 A skill's cost is paid only by the sessions that actually load it.
-When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
+When in doubt, write the fact into the skill or doc first by patching that owner's existing language, then add only the one-line trigger at the appropriate role-loaded action point.
 
 ## Trigger hygiene
 
 A new skill is dead weight if nothing loads it.
-Every new skill needs its load trigger declared inline: section 13 for agent-only reference skills, or the relevant operating section for anything else.
+Every new skill needs precise trigger metadata, plus a pointer at the primary-runtime action point where forgetting the load would be costly.
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
 Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.
 `bin/fm-brief.sh`'s `REPO` argument is a caller-supplied string with no reliable signal that it names firstmate's own repo, unlike a project registered in `data/projects.md`, so there is no clean point inside the scaffold to detect this case automatically.

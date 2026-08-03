@@ -28,7 +28,7 @@
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
-# resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
+# resolves it per task at intake (primary-runtime delivery contract); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
@@ -44,7 +44,7 @@
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
-# a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# a spawn-time and firstmate-side input only (primary-runtime delivery contract).
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -136,7 +136,7 @@ for a in "$@"; do
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 
-# Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
+# Ship delivery mode is an explicit per-task decision (primary-runtime delivery contract). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
 if [ "$KIND" = ship ]; then
   [ "$MODE_SET" -eq 1 ] || {
@@ -201,6 +201,10 @@ else
 fi
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
+Before any operation in this home, read and follow \`.agents/skills/primary-runtime/SKILL.md\`, then run \`bin/fm-session-start.sh\` exactly once.
+Do this before any other operational instruction or fleet mutation.
+If the runtime owner cannot be read, remain read-only and report the blocker through the return channel below.
+This charter remains authoritative for your domain scope, persistence, idle-by-default behavior, and marked return channel.
 
 # Charter
 $SECONDMATE_CHARTER
@@ -212,7 +216,8 @@ $SECONDMATE_SCOPE
 $PROJECT_CLONES_BODY
 
 # Operating model
-You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
+You are in an isolated firstmate home. The local \`AGENTS.md\` selects your role, this charter supplies your second-mate contract, and \`.agents/skills/primary-runtime/SKILL.md\` supplies the shared primary operating contract.
+Your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` directories are yours to operate.
 $PROJECT_CLONES_NOTE
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
@@ -251,7 +256,7 @@ Routine internal supervision, heartbeats, retries, and crewmate churn stay insid
 
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
-On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
+On startup and restart, load the primary runtime owner and run normal Firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to reconcile work that is already yours: in-flight crewmates, tracked backlog items, and durable monitoring recorded in this home.
 When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
 An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed "find work" task on your own initiative.
 If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
@@ -301,6 +306,9 @@ fi
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+This launch brief establishes the ordinary worker role for this session.
+Follow the repository's universal contract and this brief, but do not load the Firstmate primary runtime, operate the fleet, or delegate this task.
+Implement or investigate the assigned task directly in this isolated worktree.
 
 # Task
 {TASK}
@@ -395,7 +403,7 @@ Do not hand-edit, commit, or fix findings yourself while a run is active - the p
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
+  Firstmate applies the authority contract in \`.agents/skills/primary-runtime/SKILL.md\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
@@ -411,6 +419,9 @@ DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+This launch brief establishes the ordinary worker role for this session.
+Follow the repository's universal contract and this brief, but do not load the Firstmate primary runtime, operate the fleet, or delegate this task.
+Implement the assigned task directly in this isolated worktree.
 
 # Task
 {TASK}

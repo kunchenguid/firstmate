@@ -33,6 +33,18 @@ herdr_forget_inherited_pane() {
   unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
 }
 
+# herdr_isolate_shell_startup <scratch-root>: keep real-Herdr pane shells from
+# loading the operator's interactive zsh startup files. Those files can run
+# host-global initialization such as pyenv rehash, which is unrelated to the
+# product path and can serialize or delay concurrent worktree acquisition past
+# fm-spawn's bounded observation window.
+herdr_isolate_shell_startup() {
+  local scratch_root=$1
+  ZDOTDIR="$scratch_root/zdotdir"
+  mkdir -p "$ZDOTDIR"
+  export ZDOTDIR
+}
+
 herdr_refuse_if_default() { # <session>
   fm_herdr_lab_refuse_if_default "$1"
 }

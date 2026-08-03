@@ -128,7 +128,7 @@ FM_BACKEND_HERDR_PRESENTATION_FLOOR_MARKER_PREFIX=".herdr-presentation-floor-"
 # ->blocked edge and a reconnect level-reconcile never re-delivers a still-
 # blocked pane. Mirrors bin/fm-watch.sh's .stale-<key> naming.
 FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
-# .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
+# .fm-secondmate-home is written by bin/fm-home-seed.sh (secondmate-provisioning owner)
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
 # The primary firstmate home never carries this marker.
 FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
@@ -3245,7 +3245,7 @@ fm_backend_herdr_list_live() {  # <session>
 
 # --- native event push: pane.agent_status_changed subscriber -----------------
 #
-# The push half of the immediate blocked-state escalation (AGENTS.md section 8,
+# The push half of immediate blocker escalation (primary-runtime supervision,
 # docs/herdr-backend.md "Native pane.agent_status_changed push escalation").
 # fm_backend_herdr_wait_transition is the watcher's bounded wait primitive for
 # herdr homes: instead of a blind sleep, it blocks on herdr's native event

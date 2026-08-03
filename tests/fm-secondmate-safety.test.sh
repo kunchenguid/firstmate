@@ -9,6 +9,7 @@ set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
+fm_git_identity
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 export FM_BACKEND=tmux
@@ -2530,9 +2531,9 @@ test_secondmate_charter_brief_is_idle_by_default() {
   grep -F 'never spawn a survey, audit, or any self-directed' "$brief" >/dev/null \
     || fail "charter brief does not forbid self-initiated survey/audit work"
   # Reconcile-on-startup must remain: bootstrap and recovery still run, scoped to own work.
-  grep -F 'run normal firstmate bootstrap and recovery' "$brief" >/dev/null \
+  grep -F 'run normal Firstmate bootstrap and recovery' "$brief" >/dev/null \
     || fail "charter brief dropped the bootstrap/recovery reconciliation step"
-  grep -F 'only to RECONCILE work that is already yours' "$brief" >/dev/null \
+  grep -F 'only to reconcile work that is already yours' "$brief" >/dev/null \
     || fail "charter brief does not scope startup work to reconciling existing work"
   # Regression guard: the over-broad phrasing that got misread as "go find work" is gone.
   if grep -F 'then supervise work that matches your scope' "$brief" >/dev/null; then

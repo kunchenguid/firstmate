@@ -141,6 +141,7 @@ It reports an absent harness explicitly, asserts Pi compaction rather than notin
 The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and OpenCode 1.17.18.
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
 The detailed reconciliation and task chronology stay in the private audit report and PR evidence.
+[`role-context.md`](role-context.md) owns current role-aware startup context, skill-discovery, and context-size evidence.
 
 ## Semantic busy state
 

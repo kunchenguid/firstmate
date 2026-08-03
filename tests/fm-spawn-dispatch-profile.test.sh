@@ -97,7 +97,7 @@ run_spawn() {
     "$SPAWN" "$@" 2>&1
 }
 
-# Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
+# Ship spawns carry an explicit delivery contract (primary-runtime); these
 # tests are about profile resolution, so they pass a fixed valid one.
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off

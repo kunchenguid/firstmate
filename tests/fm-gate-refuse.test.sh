@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Behavior tests for the no-mistakes GATE-agent fleet-lifecycle refusal.
 #
-# A confused no-mistakes gate agent runs inside a firstmate checkout, adopts the
-# captain identity from AGENTS.md, and reaches for fm-spawn/fm-send/fm-teardown.
+# A confused no-mistakes gate agent runs inside a Firstmate checkout and may reach
+# for fm-spawn/fm-send/fm-teardown despite the universal contributor role gateway.
 # bin/fm-gate-refuse-lib.sh is the firstmate capability-removal half: sourced at
 # the top of those three entrypoints and called before any fleet mutation, it
 # fails closed on either of two independent signals:

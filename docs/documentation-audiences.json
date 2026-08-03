@@ -67,6 +67,10 @@
       "target": "docs/verification/supervision.md"
     },
     {
+      "source": "docs/sessionstart-nudge.md",
+      "target": "docs/verification/role-context.md"
+    },
+    {
       "source": "docs/turnend-guard.md",
       "target": "docs/verification/supervision.md"
     },
@@ -157,6 +161,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/primary-runtime/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -182,6 +190,10 @@
     },
     {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -334,6 +346,10 @@
     },
     {
       "path": "docs/verification/public-followup.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/role-context.md",
       "audience": "maintainer-verification"
     },
     {

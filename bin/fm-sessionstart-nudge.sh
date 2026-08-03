@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Print the one-line session-start instruction only for a genuine firstmate
+# Print the one-line role-aware startup instruction only for a genuine Firstmate
 # primary whose current harness session has not already acquired the home lock.
+# The instruction loads the primary runtime owner before the ordered session
+# digest, so a compact root fallback plus this native delivery converge on the
+# same contract without making an ordinary worker adopt primary behavior.
 # Every silence and error path exits 0 because Claude SessionStart exit 2 blocks
 # session initialization.
 set -u
@@ -39,7 +42,7 @@ lock_is_in_ancestry() {
 lock_is_in_ancestry && exit 0
 nudge=
 fm_operational_input_encode session-start \
-  "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \
+  "Read and follow \`.agents/skills/primary-runtime/SKILL.md\`, then run \`bin/fm-session-start.sh\` exactly once. Do this before any other operational instruction or fleet mutation. If the runtime owner cannot be read, remain read-only and report that blocker." \
   nudge || exit 0
 printf '%s\n' "$nudge"
 exit 0

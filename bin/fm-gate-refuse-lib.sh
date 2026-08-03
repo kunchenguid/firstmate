@@ -3,11 +3,12 @@
 # out of firstmate's fleet lifecycle.
 #
 # The hazard (data/nm-gate-ambient-authority-containment-c3/report.md): a
-# no-mistakes gate agent runs inside a firstmate checkout with a free shell, so
-# it auto-loads firstmate's AGENTS.md, adopts the captain identity, and - seeing
-# crew "in flight" - reaches for fm-spawn.sh/fm-send.sh/fm-teardown.sh to
-# "delegate" and "reconcile" the shared worktree. It has real capability because
-# those entrypoints self-locate their home and never knew a gate context existed.
+# no-mistakes gate agent runs inside a Firstmate checkout with a free shell.
+# Before role-aware instructions, it could auto-load the primary identity and reach
+# for fm-spawn.sh/fm-send.sh/fm-teardown.sh to "delegate" or "reconcile" shared work.
+# The compact root gateway now classifies an unmarked linked copy as an ordinary
+# contributor, but this mechanical boundary remains defense in depth because those
+# entrypoints otherwise self-locate a home and expose real fleet capability.
 #
 # no-mistakes owns the authority-removal half (it neutralizes the project
 # instructions and stamps NO_MISTAKES_GATE into the gate agent's environment).
@@ -46,8 +47,8 @@
 # guard a no-op; firstmate's shared test helpers (tests/lib.sh and the backend
 # safety helpers) export it, so every test that drives these scripts against its
 # temp-sandbox fleet is exempt. This does NOT weaken the boundary against the
-# real hazard: the threat is a CONFUSED-not-adversarial gate agent that runs
-# bin/fm-spawn.sh directly after adopting firstmate's identity - it never sources
+# real hazard: the threat is a confused, non-adversarial gate agent that runs
+# bin/fm-spawn.sh directly after adopting operational authority - it never sources
 # firstmate's test helpers, so it never carries the bypass; and the adversarial
 # case (an agent that would deliberately set it) is covered by no-mistakes'
 # neutral-execution-context and the HEAD-continuity guard. The dedicated

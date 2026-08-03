@@ -18,7 +18,7 @@ test_primary_and_secondmate_instruction_generation() {
   ship="$home/data/authority-worker/brief.md"
   assert_grep 'ask-user findings are never yours to answer' "$ship" \
     "generated implementation brief lets the worker own an ask-user decision"
-  assert_grep "Firstmate applies the authority contract in its \`AGENTS.md\`" "$ship" \
+  assert_grep "Firstmate applies the authority contract in \`.agents/skills/primary-runtime/SKILL.md\`" "$ship" \
     "generated implementation brief bypasses the primary authority owner"
   assert_grep "silently bypass firstmate's authority check and any required captain escalation" "$ship" \
     "generated implementation brief permits silent ask-user auto-resolution"
@@ -29,7 +29,7 @@ test_primary_and_secondmate_instruction_generation() {
     "$BRIEF" authority-mate --secondmate --no-projects >/dev/null 2>&1
   charter="$home/data/authority-mate/brief.md"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'The local `AGENTS.md` is your job description' "$charter" \
+  assert_grep 'Before any operation in this home, read and follow `.agents/skills/primary-runtime/SKILL.md`' "$charter" \
     "generated secondmate charter does not load the tracked authority boundary"
   assert_no_grep 'continuous frame-by-frame monitoring' "$charter" \
     "generated secondmate charter duplicated the detailed authority procedure"

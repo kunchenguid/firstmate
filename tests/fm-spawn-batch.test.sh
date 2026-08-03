@@ -28,7 +28,7 @@ run_spawn() {
     "$SPAWN" "$@" 2>&1
 }
 
-# Ship spawns carry an explicit delivery contract (AGENTS.md section 7); the
+# Ship spawns carry an explicit delivery contract (primary-runtime); the
 # batch path takes one shared pair of flags for every pair.
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off

@@ -33,7 +33,7 @@ NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 RUN="$ROOT/bin/fm-sessionstart-run.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
-NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
+NUDGE_TEXT="Read and follow \`.agents/skills/primary-runtime/SKILL.md\`, then run \`bin/fm-session-start.sh\` exactly once. Do this before any other operational instruction or fleet mutation. If the runtime owner cannot be read, remain read-only and report that blocker."
 fm_operational_input_encode session-start "$NUDGE_TEXT" NUDGE_LINE \
   || fail "could not construct expected session-start nudge"
 fm_git_identity fmtest fmtest@example.invalid
@@ -66,6 +66,10 @@ test_genuine_primary_nudges() {
   out=$(run_nudge "$root") || status=$?
   expect_code 0 "$status" "genuine primary nudge"
   [ "$out" = "$NUDGE_LINE" ] || fail "genuine primary printed unexpected output: $out"
+  case "$out" in
+    *primary-runtime/SKILL.md*fm-session-start.sh*) ;;
+    *) fail "genuine primary nudge did not order runtime loading before session start: $out" ;;
+  esac
   prefix_hex=$(printf '%s' "$out" | head -c 3 | od -An -tx1 | tr -d ' \n')
   [ "$prefix_hex" = e281a3 ] || fail "genuine primary nudge lost its U+2063 operational marker: $prefix_hex"
   pass "fm-sessionstart-nudge: a genuine primary gets one explicitly marked instruction line"
