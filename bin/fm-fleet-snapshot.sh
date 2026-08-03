@@ -32,6 +32,11 @@
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
+#     When FM_SNAPSHOT_INCLUDE_LIVENESS=1, every task also carries a `liveness`
+#     row from bin/fm-liveness-snapshot.sh.
+#     That row is the current output/process measurement Bearings consumes;
+#     current_state uses the same fleet-wide measurement when no matching
+#     no-mistakes run exists, so one two-sample observation serves every task.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -94,6 +99,8 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+FM_SNAPSHOT_INCLUDE_LIVENESS=${FM_SNAPSHOT_INCLUDE_LIVENESS:-0}
+case "$FM_SNAPSHOT_INCLUDE_LIVENESS" in 0|1) ;; *) echo "fm-fleet-snapshot: FM_SNAPSHOT_INCLUDE_LIVENESS must be 0 or 1" >&2; exit 2 ;; esac
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -206,6 +213,7 @@ crew_state_json() {  # <id>
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
+      FM_CREW_STATE_LIVENESS_JSON="$MEASURED_LIVENESS_JSON" \
       "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
   )
   raw=$(printf '%s\n' "$raw" | head -1)
@@ -404,7 +412,7 @@ task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw last_event_state current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -446,6 +454,7 @@ task_json_lines() {
     current_json=$(crew_state_json "$id")
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
+    last_event_state=$(printf '%s' "$event_json" | jq -r '.last_event.state // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
 
@@ -456,7 +465,8 @@ task_json_lines() {
     # reconciled against the crew LIFECYCLE, which only clears a stale decision the
     # crew has provably moved past. Two lifecycle signals clear it, neither of which
     # reads any report content:
-    #   - a live activity read (run-step or busy pane) that is working/done, so a
+    #   - a live activity read (run-step or measured process/output) that is
+    #     working/done, so a
     #     crew that resumed past a gate is not still reported as parked; and
     #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
     #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
@@ -468,9 +478,11 @@ task_json_lines() {
     # open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+       { { { [ "$current_source" = run-step ] || [ "$current_source" = process-output ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; } \
+         || { [ "$kind" = scout ] && [ -f "$report_path" ] \
+              && { [ "$last_event_state" = "done" ] || [ "$last_event_state" = "failed" ]; }; }; }; then
       open_decisions_tsv=""
     fi
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
@@ -1345,8 +1357,33 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
+EMPTY_LIVENESS_JSON='{"schema":"fm-liveness.v1","observed_at":null,"interval_ms":null,"process_samples":{"sample_1_readable":false,"sample_2_readable":false},"records":[]}'
+LIVENESS_BIN=${FM_LIVENESS_SNAPSHOT_BIN:-$SCRIPT_DIR/fm-liveness-snapshot.sh}
+if [ -n "${FM_SNAPSHOT_LIVENESS_JSON:-}" ]; then
+  MEASURED_LIVENESS_JSON=$FM_SNAPSHOT_LIVENESS_JSON
+elif ! MEASURED_LIVENESS_JSON=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$LIVENESS_BIN" --json 2>/dev/null); then
+  MEASURED_LIVENESS_JSON=$EMPTY_LIVENESS_JSON
+fi
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+LIVENESS_JSON=$EMPTY_LIVENESS_JSON
+if [ "$FM_SNAPSHOT_INCLUDE_LIVENESS" = 1 ]; then
+  LIVENESS_JSON=$MEASURED_LIVENESS_JSON
+  TASKS_JSON=$(jq -n --argjson tasks "$TASKS_JSON" --argjson live "$LIVENESS_JSON" '
+    def unavailable($task): {
+      id:$task.id,harness:$task.harness,harness_family:"unknown",backend:$task.backend,
+      target:$task.endpoint.target,worktree:$task.paths.worktree.path,
+      endpoint:{presence:"unverified",raw:"unreadable"},
+      worker:{presence:"unverified",pids_sample_1:0,pids_sample_2:0,
+        harness_processes_sample_1:0,harness_processes_sample_2:0},
+      output:{sample_1_readable:false,sample_2_readable:false,changed:false},
+      cpu:{sample_1_max_ms:0,sample_2_max_ms:0,delta_ms:0,rate_ms_per_minute:0,
+        baseline:"unverified",threshold_ms_per_minute:null},activity:"unverified"};
+    $tasks | map(. as $task | . + {
+      liveness:(([ $live.records[]? | select(.id==$task.id) ][0]) // unavailable($task))
+    })') || { echo "fm-fleet-snapshot: liveness join failed" >&2; exit 1; }
+fi
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   secondmate_home_summary_json "$BACKLOG_JSON" "$TASKS_JSON" \
@@ -1376,6 +1413,7 @@ jq -n \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
   --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
+  --argjson liveness "$LIVENESS_JSON" \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -1386,6 +1424,7 @@ jq -n \
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
+     liveness_observation:$liveness,
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,

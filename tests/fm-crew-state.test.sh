@@ -4,24 +4,24 @@
 #
 # The status file (state/<id>.status) is a best-effort append-only EVENT LOG, so
 # `tail -1` of it reports the last event, not the current state. fm-crew-state
-# reads the AUTHORITATIVE source (a matching no-mistakes run-step, else the
-# semantic busy-state contract) and reconciles the possibly-stale log against it. These
+# reads the AUTHORITATIVE source (a matching no-mistakes run-step, else measured
+# process/output liveness) and reconciles the possibly-stale log against it. These
 # cases pin every branch of that logic, hermetically, over real throwaway git
-# repos with a fake `no-mistakes` (run-step source) and a fake `tmux` (pane
-# source):
+# repos with a fake `no-mistakes` (run-step source) and injected independent
+# process/output measurements:
 #   (a) active run-step is authoritative                          -> run-step
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
 #   (e) cross-branch attribution: this branch's own run found via list lookup
-#   (f) no run + semantic busy                                    -> pane
-#   (g) no run + semantic idle falls to the status-log verb       -> status-log
-#   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
-#   (i) kind=scout skips the run lookup                           -> pane/status-log
+#   (f) no run + measured activity                                -> process-output
+#   (g) no run + measured baseline idle                           -> parked
+#   (h) absent endpoint: no run -> unknown; with a run -> run-step
+#   (i) kind=scout skips the run lookup                           -> process-output
 #   (j) torn-down worktree / missing meta                         -> unknown/none
 #   (k) crew_is_provably_working end-to-end over the REAL helper (not a canned
 #       fake fm-crew-state.sh verdict): cross-branch attribution via the runs
-#       list -> absorbed; genuinely no run anywhere + idle pane -> surfaced.
+#       list -> absorbed; genuinely no run anywhere + parked worker -> surfaced.
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
@@ -129,7 +129,7 @@ SH
 make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
   local dir=$1 tb="$1/notimeoutbin" tool real
   mkdir -p "$tb"
-  for tool in bash git grep sed head cut tail dirname perl; do
+  for tool in bash git grep sed head cut tail dirname jq perl; do
     real=$(command -v "$tool" || true)
     [ -n "$real" ] || fail "missing tool for no-timeout path: $tool"
     ln -s "$real" "$tb/$tool"
@@ -140,7 +140,21 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  local dir=$1 id=$2 activity endpoint worker changed=false backend
+  backend=$(sed -n 's/^backend=//p' "$dir/state/$id.meta" 2>/dev/null | tail -1)
+  [ -n "$backend" ] || backend=tmux
+  if { [ "$backend" = tmux ] && [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ]; } \
+    || { [ "$backend" = herdr ] && [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ]; }; then
+    activity=absent; endpoint=verified_absent; worker=verified_absent
+  elif [ "${FM_FAKE_BUSY:-0}" = 1 ] || [ "${FM_FAKE_HERDR_BUSY:-0}" = 1 ]; then
+    activity=active; endpoint=verified_present; worker=verified_present; changed=true
+  else
+    activity=parked; endpoint=verified_present; worker=verified_present
+  fi
+  FM_CREW_STATE_LIVENESS_JSON=$(jq -n --arg id "$id" --arg activity "$activity" --arg endpoint "$endpoint" --arg worker "$worker" --argjson changed "$changed" '
+    {records:[{id:$id,activity:$activity,endpoint:{presence:$endpoint},worker:{presence:$worker},
+      output:{changed:$changed},cpu:{delta_ms:(if $activity=="active" then 30 else 0 end),rate_ms_per_minute:(if $activity=="active" then 900 else 0 end)}}]}') \
+    PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" "$CREW_STATE" "$id"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -441,7 +455,7 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
-test_ci_ready_done_log_beats_monitoring_run() {
+test_ci_ready_status_event_cannot_override_monitoring_run() {
   reset_fakes
   local d; d=$(new_case ci-ready)
   make_repo_on_branch "$d/wt" fm/feat-ci
@@ -450,11 +464,10 @@ test_ci_ready_done_log_beats_monitoring_run() {
   printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
   local out; out=$(run_crew_state "$d" feat-ci)
-  assert_contains "$out" "state: done" "ci-ready status log -> done"
-  assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
-  assert_contains "$out" "checks green" "ci-ready detail preserves the report"
-  assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
+  assert_contains "$out" "state: working" "monitoring run remains current despite a done event"
+  assert_contains "$out" "source: run-step" "current state comes from the run step"
+  assert_not_contains "$out" "source: status-log" "status event must not become current state"
+  pass "a ci-ready status event cannot override a live monitoring run"
 }
 
 # Regression for the PR #252 incident: the crew's own status log never got a
@@ -738,7 +751,7 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
+test_coarse_run_ignores_unverified_ready_status_event() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
   make_repo_on_branch "$d/wt" fm/feat-coarseready
@@ -754,10 +767,10 @@ EOF
 )"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
+  assert_contains "$out" "state: working" "coarse current run remains working"
+  assert_contains "$out" "source: run-step" "coarse run is the current source"
+  assert_not_contains "$out" "source: status-log" "unverified ready event cannot become state"
+  pass "coarse run ignores an unverified checks-green status event"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -778,12 +791,13 @@ EOF
   arm_idle_record "$d/state" feat-g
   local out; out=$(run_crew_state "$d" feat-g)
   assert_not_contains "$out" "source: run-step" "another branch's run not misattributed"
-  assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
-  assert_contains "$out" "state: done" "falls back to the log verb"
-  pass "another branch's run is ignored, falls back"
+  assert_contains "$out" "source: process-output" "no own run uses measured liveness"
+  assert_contains "$out" "state: parked" "idle worker stays parked despite a done event"
+  assert_not_contains "$out" "source: status-log" "status event is not current state"
+  pass "another branch's run is ignored and measured liveness remains authoritative"
 }
 
-# (f) no run for this crew + a busy pane -> working via pane
+# (f) no run for this crew + measured output/process activity -> working
 test_no_run_busy_pane() {
   reset_fakes
   local d; d=$(new_case busy)
@@ -800,15 +814,14 @@ test_no_run_busy_pane() {
     --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" feat-h)
   assert_contains "$out" "state: working" "busy record -> working"
-  assert_contains "$out" "source: pane" "busy record -> pane source"
-  assert_contains "$out" "claude-hook" "the working verdict names its semantic source"
-  pass "no run + a busy semantic record reads working, attributed to its source"
+  assert_contains "$out" "source: process-output" "measured activity -> process/output source"
+  assert_contains "$out" "cpu_delta_ms=30" "working verdict carries cumulative CPU evidence"
+  pass "no run plus measured activity reads working from process/output evidence"
 }
 
-# A converted adapter must NOT read working from rendered footer text: the
-# redesign removed that dependency, so a pane painting "esc to interrupt" with
-# no semantic record is unknown, never working and never silently idle.
-test_no_run_footer_text_alone_is_not_working() {
+# Changed output plus a measured CPU delta establishes current work even when
+# the last status event claims completion.
+test_no_run_measured_activity_overrides_stale_done_event() {
   reset_fakes
   local d; d=$(new_case busy-footer-only)
   make_repo_on_branch "$d/wt" fm/feat-h2
@@ -819,10 +832,10 @@ test_no_run_footer_text_alone_is_not_working() {
   FM_FAKE_BUSY=1
   printf 'done: stale completion event\n' > "$d/state/feat-h2.status"
   local out; out=$(run_crew_state "$d" feat-h2)
-  assert_not_contains "$out" "state: working" "a footer alone must not read working for a converted adapter"
-  assert_contains "$out" "state: unknown" "no semantic record -> unknown"
-  assert_not_contains "$out" "source: status-log" "unknown semantic state must not fall through to a stale log"
-  pass "a converted adapter never reads working from rendered footer text"
+  assert_contains "$out" "state: working" "measured activity reads working"
+  assert_contains "$out" "source: process-output" "measurement is the current-state source"
+  assert_not_contains "$out" "source: status-log" "stale done event cannot override measurement"
+  pass "measured activity overrides a stale done event"
 }
 
 # Grok keeps its isolated temporary rendered-tail fallback until its structured
@@ -841,8 +854,8 @@ test_no_run_grok_uses_isolated_fallback() {
   export FM_FAKE_BUSY_TEXT
   local out; out=$(run_crew_state "$d" feat-h3)
   assert_contains "$out" "state: working" "grok busy tail -> working"
-  assert_contains "$out" "grok-regex" "the grok verdict names its isolated fallback source"
-  pass "grok still reads working through its isolated rendered-tail fallback"
+  assert_contains "$out" "source: process-output" "Grok activity uses the shared measurement source"
+  pass "Grok measured activity reads working without status authority"
 }
 
 test_no_run_herdr_unknown_uses_backend_capture() {
@@ -860,9 +873,8 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   FM_FAKE_HERDR_AGENT_STATUS=working
   local out; out=$(run_crew_state "$d" feat-herdr)
   assert_contains "$out" "state: working" "herdr native busy -> working"
-  assert_contains "$out" "source: pane" "herdr native busy -> pane source"
-  assert_contains "$out" "herdr-native" "the herdr verdict names its native source"
-  pass "herdr's native busy verdict reads working with no record present"
+  assert_contains "$out" "source: process-output" "Herdr activity -> process/output source"
+  pass "Herdr measured activity reads working with no status fallback"
 }
 
 # Regression (2026-07 herdr false-surface incident, now solved semantically):
@@ -893,9 +905,9 @@ test_no_run_herdr_idle_agent_status_outranked_by_record() {
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-herdr-idle busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" feat-herdr-idle)
-  assert_contains "$out" "state: working" "a busy record with herdr idle agent_status -> working"
-  assert_contains "$out" "claude-hook" "the record's source outranks herdr's narrower native verdict"
-  pass "a mid-tool-call crew stays working because its record outranks herdr's generation state"
+  assert_contains "$out" "state: parked" "idle process/output samples -> parked"
+  assert_contains "$out" "source: process-output" "Herdr idle uses measured liveness"
+  pass "Herdr generation metadata cannot override measured baseline-idle activity"
 }
 
 # The record must not mask a genuinely idle or human-blocked agent: an idle
@@ -918,13 +930,13 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-herdr-stopped idle --gen "$gen" \
     --source claude-hook --event stop
   local out; out=$(run_crew_state "$d" feat-herdr-stopped)
-  assert_not_contains "$out" "source: pane" "an idle record must not read as busy"
-  assert_contains "$out" "source: status-log" "an idle record falls to the status log"
-  pass "an idle record with idle agent_status stays not-busy (no regression for a human-blocked agent)"
+  assert_contains "$out" "state: parked" "baseline-idle process remains parked"
+  assert_contains "$out" "source: process-output" "idle status event does not become state"
+  pass "an idle Herdr worker stays parked from measured liveness"
 }
 
-# (g) no run + idle pane -> the status-log verb, as-is
-test_no_run_idle_pane_uses_log() {
+# (g) no run + baseline-idle worker -> parked, independent of status prose
+test_no_run_idle_worker_is_parked() {
   reset_fakes
   local d; d=$(new_case idle)
   make_repo_on_branch "$d/wt" fm/feat-i
@@ -935,9 +947,10 @@ test_no_run_idle_pane_uses_log() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-i
   local out; out=$(run_crew_state "$d" feat-i)
-  assert_contains "$out" "state: parked" "needs-decision log -> parked"
-  assert_contains "$out" "source: status-log" "idle pane -> status-log source"
-  pass "no run + idle pane uses the status-log verb"
+  assert_contains "$out" "state: parked" "baseline-idle worker -> parked"
+  assert_contains "$out" "source: process-output" "idle worker -> process/output source"
+  assert_not_contains "$out" "which database?" "status prose cannot become current detail"
+  pass "no run plus a baseline-idle worker is parked independently of status"
 }
 
 test_no_run_idle_pane_uses_keyed_log() {
@@ -951,9 +964,9 @@ test_no_run_idle_pane_uses_keyed_log() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-keyed
   local out; out=$(run_crew_state "$d" feat-keyed)
-  assert_contains "$out" "state: parked" "keyed needs-decision log -> parked"
-  assert_contains "$out" "which database?" "key token is excluded from status detail"
-  pass "no run + idle pane parses keyed status syntax"
+  assert_contains "$out" "state: parked" "keyed event does not change measured parked state"
+  assert_not_contains "$out" "which database?" "keyed event prose is not current detail"
+  pass "keyed status syntax remains historical while measured state stays parked"
 }
 
 # (g') no run + idle pane on a DECLARED external-wait pause -> state: paused, so a
@@ -970,10 +983,10 @@ test_no_run_idle_pane_paused() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-pause
   local out; out=$(run_crew_state "$d" feat-pause)
-  assert_contains "$out" "state: paused" "paused log -> paused"
-  assert_contains "$out" "source: status-log" "idle pause -> status-log source"
-  assert_contains "$out" "holding for the upstream tool release" "the pause reason is carried in the detail"
-  pass "no run + idle pane on a paused: status reports state: paused with its reason"
+  assert_contains "$out" "state: parked" "paused event cannot replace measured parked state"
+  assert_contains "$out" "source: process-output" "parked state comes from measurement"
+  assert_not_contains "$out" "holding for the upstream tool release" "pause event prose is not current detail"
+  pass "a paused event remains history while baseline-idle liveness reports parked"
 }
 
 test_no_run_idle_pane_custom_paused_verb() {
@@ -987,13 +1000,13 @@ test_no_run_idle_pane_custom_paused_verb() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-custom-pause
   local out; out=$(FM_CLASSIFY_PAUSED_VERB=awaiting run_crew_state "$d" feat-custom-pause)
-  assert_contains "$out" "state: paused" "custom paused verb -> paused"
-  assert_contains "$out" "source: status-log" "custom paused verb -> status-log source"
-  assert_contains "$out" "vendor maintenance window" "custom pause preserves its reason"
+  assert_contains "$out" "state: parked" "custom paused event cannot become state"
+  assert_contains "$out" "source: process-output" "custom pause still uses measured state"
+  assert_not_contains "$out" "vendor maintenance window" "custom pause prose is not current detail"
   printf 'paused: default verb no longer selected\n' > "$d/state/feat-custom-pause.status"
   out=$(FM_CLASSIFY_PAUSED_VERB=awaiting run_crew_state "$d" feat-custom-pause)
-  assert_contains "$out" "state: unknown" "custom paused verb replaces the default"
-  pass "no run + idle pane honors the configured paused verb"
+  assert_contains "$out" "state: parked" "changing event vocabulary does not change liveness"
+  pass "configured paused verbs do not become current liveness"
 }
 
 # A trailing keyed resolved: event is a decision-CLOSING event, not a run-state
@@ -1014,20 +1027,20 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" mate)
-  assert_contains "$out" "state: unknown" "resolved-then-idle secondmate is not a spurious run-state"
-  assert_contains "$out" "source: none" "a resolved event is not treated as a status-log state source"
+  assert_contains "$out" "state: parked" "resolved-then-idle secondmate keeps measured parked state"
+  assert_contains "$out" "source: process-output" "a resolved event is not treated as a state source"
   assert_not_contains "$out" "subscribe-before-write" "resolution prose must not leak into the detail"
   # A bare (non-keyed) resolved: closes the default key and behaves the same.
   printf 'blocked: waiting on infra\nresolved: infra access granted\n' > "$d/state/mate.status"
   out=$(run_crew_state "$d" mate)
-  assert_contains "$out" "source: none" "a bare resolved: is not a state source either"
+  assert_contains "$out" "source: process-output" "a bare resolved: is not a state source either"
   assert_not_contains "$out" "infra access granted" "bare resolution prose must not leak into the detail"
-  # Control: a genuine trailing state verb still renders from the log.
+  # Control: even a genuine trailing state verb remains event history.
   printf 'working: reconciling routed items\n' > "$d/state/mate.status"
   out=$(run_crew_state "$d" mate)
-  assert_contains "$out" "state: working" "a real trailing state verb still renders"
-  assert_contains "$out" "reconciling routed items" "a real state line still carries its detail"
-  pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
+  assert_contains "$out" "state: parked" "a trailing working event does not override measurement"
+  assert_not_contains "$out" "reconciling routed items" "event prose is not current detail"
+  pass "status events do not corrupt measured secondmate state"
 }
 
 test_dead_window_ignores_stale_status_log() {
@@ -1042,7 +1055,8 @@ test_dead_window_ignores_stale_status_log() {
   FM_FAKE_TMUX_MISSING=1
   local out; out=$(run_crew_state "$d" feat-dead)
   assert_contains "$out" "state: unknown" "dead window -> unknown"
-  assert_contains "$out" "source: none" "dead window -> none source"
+  assert_contains "$out" "source: process-output" "dead window -> measured source"
+  assert_contains "$out" "endpoint=verified_absent" "dead endpoint is explicitly verified absent"
   assert_not_contains "$out" "source: status-log" "dead window does not reuse stale log"
   pass "dead window ignores stale status log"
 }
@@ -1106,10 +1120,13 @@ SH
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
   start=$SECONDS
-  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
+  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_NM_TIMEOUT=1 \
+    FM_CREW_STATE_LIVENESS_JSON='{"records":[{"id":"feat-timeout","activity":"active","endpoint":{"presence":"verified_present"},"worker":{"presence":"verified_present"},"output":{"changed":true},"cpu":{"delta_ms":30,"rate_ms_per_minute":900}}]}' \
+    "$CREW_STATE" feat-timeout)
   elapsed=$((SECONDS - start))
-  assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
-  assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
+  assert_contains "$out" "state: working" "timed-out no-mistakes falls back to measured activity"
+  assert_contains "$out" "source: process-output" "timed-out no-mistakes -> process/output source"
   [ "$elapsed" -lt 5 ] || fail "perl timeout did not bound no-mistakes calls (elapsed ${elapsed}s)"
   calls=$(awk 'END { print NR + 0 }' "$calls_file" 2>/dev/null || echo 0)
   [ "$calls" -eq 1 ] || fail "empty no-mistakes status triggered extra lookups ($calls calls)"
@@ -1132,7 +1149,7 @@ test_scout_skips_run_lookup() {
     --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" scout-j)
   assert_not_contains "$out" "source: run-step" "scout ignores no-mistakes run-step"
-  assert_contains "$out" "source: pane" "scout reads its semantic busy state"
+  assert_contains "$out" "source: process-output" "scout reads independent measured activity"
   pass "scout skips the run lookup"
 }
 
@@ -1241,8 +1258,8 @@ test_historical_same_branch_rewritten_head_not_current() {
   out=$(run_crew_state "$d" wishlist)
   assert_not_contains "$out" "source: run-step" "historical rewritten head must not use run-step"
   assert_not_contains "$out" "parked at" "historical parked run must not mask current state"
-  assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
-  assert_contains "$out" "state: working" "status-log working: remains current"
+  assert_contains "$out" "source: process-output" "falls back to measured liveness after head mismatch"
+  assert_contains "$out" "state: parked" "stale working event cannot override baseline-idle measurement"
   pass "historical same-branch rewritten head is not attributed as current"
 }
 
@@ -1285,8 +1302,8 @@ test_local_advanced_past_run_head_invalidates() {
   arm_idle_record "$d/state" adv
   out=$(run_crew_state "$d" adv)
   assert_not_contains "$out" "source: run-step" "local-advanced tip must not use historical run"
-  assert_contains "$out" "source: status-log" "falls back after local advanced past run"
-  assert_contains "$out" "state: working" "status-log working: is current"
+  assert_contains "$out" "source: process-output" "falls back to measured liveness after local advance"
+  assert_contains "$out" "state: parked" "status event cannot override baseline-idle measurement"
   pass "local work advanced past run head invalidates attribution"
 }
 
@@ -1304,8 +1321,8 @@ test_missing_run_head_falls_back_to_current_state() {
   arm_idle_record "$d/state" no-head
   out=$(run_crew_state "$d" no-head)
   assert_not_contains "$out" "source: run-step" "missing run head must not permit branch-only attribution"
-  assert_contains "$out" "source: status-log" "missing run head falls back to current state sources"
-  assert_contains "$out" "state: working" "status-log remains current after missing run head"
+  assert_contains "$out" "source: process-output" "missing run head falls back to measured liveness"
+  assert_contains "$out" "state: parked" "status event is not current after missing run head"
   pass "missing run head falls back instead of matching by branch"
 }
 
@@ -1315,7 +1332,7 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
-test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_status_event_cannot_override_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
@@ -1331,15 +1348,15 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_coarse_run_ignores_unverified_ready_status_event
 test_other_branch_run_ignored
 test_no_run_busy_pane
-test_no_run_footer_text_alone_is_not_working
+test_no_run_measured_activity_overrides_stale_done_event
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
-test_no_run_idle_pane_uses_log
+test_no_run_idle_worker_is_parked
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb

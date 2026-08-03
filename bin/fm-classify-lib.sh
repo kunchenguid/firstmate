@@ -31,7 +31,7 @@
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
 
 # The crew current-state reader used for the "provably working" decision.
-# Overridable so tests can stub the run-step/pane verdict without a real worktree
+# Overridable so tests can stub the run-step/process-output verdict without a real worktree
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
@@ -607,12 +607,11 @@ signal_reason_is_actionable() {  # <file> ...
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
-#             pane; the crew is legitimately mid-work on a static-looking pane
-#             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
+#   working - an actively-running no-mistakes step (running/fixing/ci) or
+#             independently measured process/output activity;
+#   parked  - an exact-worktree worker is present but its harness-relative CPU
+#             delta and sampled output are idle;
+#   none    - neither, so the wake must surface (a stopped/finished/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
@@ -626,10 +625,13 @@ crew_absorb_class() {  # <id>
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    case "$src" in run-step|process-output) printf 'working'; return ;; esac
+  fi
+  if [ "$state" = parked ]; then
+    src=${line#*source: }; src=${src%% *}
+    [ "$src" = process-output ] && { printf 'parked'; return; }
   fi
   printf 'none'
 }
@@ -650,6 +652,12 @@ crew_is_provably_working() {  # <id>
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# 0 only when independent process/output evidence reports a retained worker at
+# its harness-relative idle baseline. A status event can never make this true.
+crew_is_parked() {  # <id>
+  [ "$(crew_absorb_class "$1")" = parked ]
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
