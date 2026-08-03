@@ -391,7 +391,7 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER"; do
+  for label in "data/projects.md" "data/charter.md" "data/command.md" "$SUB_HOME_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
@@ -599,6 +599,7 @@ SEED_PARENT_BRIEF_CREATED=0
 SEED_PARENT_BRIEF_DIR_CREATED=0
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
+SEED_COMMAND_EXISTED=0
 SEED_MARKER_EXISTED=0
 
 restore_seed_file() {
@@ -720,6 +721,7 @@ seed_rollback() {
       if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
+        restore_seed_file "$SEED_COMMAND_EXISTED" "$SEED_BACKUP_DIR/command.md" "$SEED_HOME/data/command.md"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
     fi
@@ -939,6 +941,7 @@ seed_home() {
   SEED_PARENT_BRIEF_DIR_CREATED=0
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
+  SEED_COMMAND_EXISTED=0
   SEED_MARKER_EXISTED=0
   trap seed_rollback EXIT
   if [ -f "$REG" ]; then
@@ -978,6 +981,10 @@ seed_home() {
   if [ -f "$home/data/charter.md" ]; then
     SEED_CHARTER_EXISTED=1
     cp "$home/data/charter.md" "$SEED_BACKUP_DIR/charter.md"
+  fi
+  if [ -f "$home/data/command.md" ]; then
+    SEED_COMMAND_EXISTED=1
+    cp "$home/data/command.md" "$SEED_BACKUP_DIR/command.md"
   fi
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     SEED_MARKER_EXISTED=1
@@ -1029,6 +1036,19 @@ seed_home() {
   done
 
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
+  # Every seeded home starts under firstmate command, stated rather than implied,
+  # so the charter's "read data/command.md" instruction always finds a record.
+  # bin/fm-secondmate-command.sh is the only thing that ever rewrites it.
+  {
+    printf '# Command state\n\n'
+    printf 'command: firstmate\n'
+    printf 'recorded: seed\n\n'
+    printf 'The primary firstmate writes this file; it is read-only here.\n'
+    printf 'The authority is the command field on this lane in the primary home secondmate registry.\n'
+    printf 'Never edit this file to change who commands this lane - a lane cannot transfer itself.\n'
+    printf 'Under command: firstmate there is no captain in this pane: never address the captain, and route every report to the main firstmate.\n'
+    printf 'Under command: captain the captain reads this pane himself: address him directly, and do not wait on the main firstmate for decisions that are now his.\n'
+  } > "$home/data/command.md"
 
   projects_csv=$(join_projects "$@")
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"

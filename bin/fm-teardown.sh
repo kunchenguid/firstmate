@@ -124,6 +124,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-secondmate-command-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -160,6 +162,24 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+
+# Command guard: retiring a lane is the most irreversible thing firstmate can do
+# to it, so it is refused outright while the captain commands that lane - with or
+# without --force. Hand the lane back first (bin/fm-secondmate-command.sh); only
+# then is retirement firstmate's to decide, and still only on an explicit word.
+if [ "$KIND" = secondmate ]; then
+  TEARDOWN_COMMAND_BLOCK=$(fm_secondmate_command_blocks_firstmate_action "$ID" "$SECONDMATE_REG" || true)
+  case "$TEARDOWN_COMMAND_BLOCK" in
+    captain)
+      echo "REFUSED: $ID is under captain command; firstmate does not retire a lane it does not command. Hand it back first." >&2
+      exit 1
+      ;;
+    invalid)
+      echo "REFUSED: $ID carries an unrecognized command value in $SECONDMATE_REG; repair that record before retiring the lane." >&2
+      exit 1
+      ;;
+  esac
+fi
 
 default_branch() {
   local ref branch

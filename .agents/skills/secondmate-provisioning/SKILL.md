@@ -29,6 +29,8 @@ The home-seeded `data/charter.md` is the sole owner of boilerplate idle-by-defau
 The `scope:` field is used during intake.
 The `projects:` field is a non-exclusive clone list, not ownership.
 An optional trailing `; label: <display name>` field (after `added <date>`) pins the secondmate's session display name, for example `SM API`; `fm-spawn` re-reads it on every relaunch and derives `SM <Title-cased id suffix>` when it is absent, so set an explicit label whenever the derived form is wrong (acronyms, house names).
+An optional trailing `; command: <firstmate|captain>` field records who commands that lane; an absent field means `firstmate`, and `bin/fm-secondmate-command.sh` is the only thing that ever writes it.
+The complete two-way transfer procedure and everything that changes while the captain holds a lane are owned by the [`secondmate-command-transfer` skill](../secondmate-command-transfer/SKILL.md); never hand-edit this field.
 
 ## Charter and seed
 
@@ -178,6 +180,7 @@ It never initiates a survey or audit during recovery.
 A secondmate is persistent by default.
 An empty queue is healthy and does not trigger teardown.
 Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent second mate.
+Teardown refuses outright, with or without `--force`, while that lane is under captain command; hand it back through `secondmate-command-transfer` first.
 
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.

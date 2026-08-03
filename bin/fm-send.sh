@@ -29,6 +29,22 @@
 # an explicit backend-target escape-hatch target, and the --key path are never
 # marked - their behavior is unchanged.
 #
+# Command guard: any send to a secondmate selector - text or --key - is refused
+# outright when that lane is under CAPTAIN command, or when its command record is
+# unreadable (bin/fm-secondmate-command-lib.sh). Firstmate does not steer, and
+# does not interrupt, a lane it does not command. The refusal happens before any
+# pending-reply record exists and before any keystroke reaches the endpoint, so
+# nothing is left half-done.
+#
+# FM_SECONDMATE_COMMAND_OPERATIONAL=<exact lane id> is the one narrow exemption,
+# for messages that are infrastructure rather than work: the handback request
+# issued by bin/fm-secondmate-command.sh, and the "re-read your own instructions
+# or config" nudges after a sync (bin/fm-bootstrap.sh, bin/fm-config-inherit-lib.sh).
+# Those tell a lane about its own files; they never hand it work or answer for
+# it. An unreadable command record exempts nothing, because an authority that
+# cannot be read is not authority. Setting the variable by hand to deliver work
+# is stepping around the guard, not using it.
+#
 # Parent-owned pending-reply expectation: every newly marked secondmate request
 # also receives a privacy-safe correlation id and a durable parent record under
 # state/pending-replies/ before delivery (bin/fm-pending-reply-lib.sh). Delivery
@@ -75,6 +91,8 @@ fi
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-secondmate-command-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -205,6 +223,28 @@ TARGET_TASK_ID=
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+fi
+
+# Command guard: firstmate does not steer, or interrupt, a lane it does not
+# command. This runs before any pending-reply record is created and before the
+# backend is touched, so a refused send leaves no trace. Only the narrow
+# infrastructure exemption named in the header gets through, and only for the
+# exact lane it names; a damaged command record blocks everything, including
+# that, because an authority that cannot be read is not authority.
+if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ -n "$TARGET_TASK_ID" ]; then
+  FM_SEND_COMMAND_BLOCK=$(fm_secondmate_command_blocks_firstmate_action "$TARGET_TASK_ID" || true)
+  case "$FM_SEND_COMMAND_BLOCK" in
+    captain)
+      if [ "${FM_SECONDMATE_COMMAND_OPERATIONAL:-}" != "$TARGET_TASK_ID" ]; then
+        echo "error: $TARGET_TASK_ID is under captain command; firstmate does not steer it. Hand it back through bin/fm-secondmate-command.sh before sending it work." >&2
+        exit 1
+      fi
+      ;;
+    invalid)
+      echo "error: $TARGET_TASK_ID carries an unrecognized command value in the secondmate registry; repair that record before steering the lane." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to

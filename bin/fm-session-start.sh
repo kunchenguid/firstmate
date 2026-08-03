@@ -39,9 +39,11 @@
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       every state/*.meta, each secondmate's recorded command
+#                       state, a bounded state/*.status tail, state/.afk, and a
+#                       cheap per-task endpoint-liveness read: read-only, always
+#                       runs. The command line exists so a restarting firstmate
+#                       never resumes supervising a lane the captain has taken.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -103,6 +105,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-secondmate-command-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -352,6 +356,21 @@ for meta in "$STATE"/*.meta; do
   id=$(basename "$meta" .meta)
   printf '\n--- %s ---\n' "$id"
   cat "$meta"
+
+  # Command state, so a restarting firstmate never resumes supervising a lane the
+  # captain has taken. Printed per task rather than only inside the registry echo
+  # above, because this block is where the session decides what to act on.
+  if [ "$(fm_meta_get "$meta" kind)" = secondmate ]; then
+    command_state=$(fm_secondmate_command_state "$id" "$DATA/secondmates.md") || true
+    case "${command_state:-}" in
+      captain)
+        printf 'command: captain - the captain commands this lane; do not steer it, route work into it, or retire it.\n' ;;
+      invalid)
+        printf 'command: invalid - this lane carries an unrecognized command value; repair it before acting on the lane.\n' ;;
+      firstmate)
+        printf 'command: firstmate\n' ;;
+    esac
+  fi
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")

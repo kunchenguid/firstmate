@@ -53,6 +53,8 @@ REG="$DATA/secondmates.md"
 MAIN_BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-secondmate-command-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
 
 [ $# -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
 ID=$1
@@ -228,6 +230,22 @@ backlog_key_noncanonical_body_lines() {
     capturing && /^[[:space:]]/ && !/^  / && /[^[:space:]]/ { print }
   ' "$file"
 }
+
+# Command guard: a lane under captain command has its own commander, and work
+# firstmate pushed into its queue would sit there unasked-for. In-scope work that
+# arrives while the captain holds a lane stays in the main backlog, held for the
+# lane, and is re-evaluated at handback (secondmate-command-transfer skill).
+COMMAND_BLOCK=$(fm_secondmate_command_blocks_firstmate_action "$ID" "$REG" || true)
+case "$COMMAND_BLOCK" in
+  captain)
+    echo "error: $ID is under captain command; firstmate does not route work into its queue. Hold the item for the lane and hand it over after the lane returns to firstmate command." >&2
+    exit 1
+    ;;
+  invalid)
+    echo "error: $ID carries an unrecognized command value in $REG; repair that record before routing work into the lane." >&2
+    exit 1
+    ;;
+esac
 
 RAW_HOME=$(secondmate_home "$ID") || exit 1
 [ -n "$RAW_HOME" ] || { echo "error: secondmate $ID has no home in $REG" >&2; exit 1; }

@@ -168,6 +168,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/secondmate-command-transfer/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
       "audience": "agent-runtime"
     },

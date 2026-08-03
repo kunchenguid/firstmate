@@ -17,6 +17,7 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_COMMAND: secondmate <id>: <divergent or unrecognized command record>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -41,7 +42,16 @@
 #          process, an unreadable target, and an unverified backend; respawn
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
-#          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
+#          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts,
+#          with one exception: relaunching a lane under CAPTAIN command always
+#          reports, because the captain's conversation in that pane did not
+#          survive it.
+#          SECONDMATE_COMMAND lines are detect-only and run even in a read-only
+#          session: they report a lane whose authoritative command record and
+#          its own derived copy disagree, or whose record is unrecognized.
+#          Either means the lane may be addressing the wrong person, so nothing
+#          may act on it until it is reconciled; secondmate-command-transfer
+#          owns the repair. Silent when every lane agrees.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -108,6 +118,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-secondmate-command-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -259,7 +271,7 @@ secondmate_sync() {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
       return 0
     fi
-    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" FM_SECONDMATE_COMMAND_OPERATIONAL="$id" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
       rm -f "$marker"
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
@@ -319,7 +331,7 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
         continue
       }
-      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" FM_SECONDMATE_COMMAND_OPERATIONAL="$id" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$marker"
         echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
       else
@@ -417,6 +429,39 @@ secondmate_sync() {
   return 0
 }
 
+# Detect-only: report any registered lane whose authoritative command record and
+# derived home marker disagree, or whose record is unrecognized. Both mean the
+# lane may be addressing the wrong person - the captain in a pane firstmate is
+# still steering, or the reverse - so this runs even in a read-only session,
+# which must not act on such a lane either. Silent when every lane agrees.
+# secondmate-command-transfer owns the repair.
+secondmate_command_check() {
+  local reg="$DATA/secondmates.md" id home reg_state marker_state rc
+  [ -f "$reg" ] || return 0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    rc=0
+    reg_state=$(fm_secondmate_command_state "$id" "$reg") || rc=$?
+    if [ "$rc" -eq 2 ]; then
+      echo "SECONDMATE_COMMAND: secondmate $id: unrecognized command value in $reg; repair it before steering, routing work into, or retiring this lane"
+      continue
+    fi
+    [ "$rc" -eq 0 ] || continue
+    home=$(secondmate_registry_field "$reg" "$id" home 2>/dev/null || true)
+    [ -n "$home" ] || continue
+    [ -d "$home" ] || continue
+    rc=0
+    marker_state=$(fm_secondmate_command_marker_state "$home") || rc=$?
+    [ "$rc" -ne 1 ] || marker_state=absent
+    case "$marker_state" in
+      absent) [ "$reg_state" = firstmate ] && continue ;;
+      *) [ "$marker_state" = "$reg_state" ] && continue ;;
+    esac
+    echo "SECONDMATE_COMMAND: secondmate $id: command record says $reg_state but the lane's own copy says $marker_state; the registry is authoritative - reconcile before acting on this lane"
+  done < <(sed -n 's/^- \([A-Za-z0-9._-][A-Za-z0-9._-]*\)\([ ].*\)\{0,1\}$/\1/p' "$reg")
+  return 0
+}
+
 secondmate_liveness_sweep() {
   # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
   # state machine and its only recovery-authorizing states are owned by
@@ -430,7 +475,7 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause
+  local meta id window harness backend target agent_state out cause command_state
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -464,7 +509,14 @@ secondmate_liveness_sweep() {
         fi
         if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
           SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
-          if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+          command_state=$(fm_secondmate_command_state "$id" "$DATA/secondmates.md") || true
+          if [ "${command_state:-}" = captain ]; then
+            # Relaunching is infrastructure, not command: the fresh agent reads
+            # its own command marker and comes back correctly commanded. But the
+            # captain was mid-conversation in that pane and the thread is gone,
+            # so this relaunch is never silent, whatever the verbosity setting.
+            echo "SECONDMATE_LIVENESS: secondmate $id relaunched under captain command after $cause (backend=$backend); the captain's conversation in that pane did not survive - tell him it restarted"
+          elif [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
             echo "BOOTSTRAP_INFO: secondmate $id relaunched after $cause (backend=$backend)"
           fi
         else
@@ -878,6 +930,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != 
   echo "BOOTSTRAP_INFO: crew harness override active: $crew"
 fi
 crew_dispatch_validate
+secondmate_command_check
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
