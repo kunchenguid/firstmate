@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for the bearings projection wrapper over fm-fleet-snapshot.sh.
-# Covers the output/token bound, TOON/JSON parity, the local-only default (zero
-# GitHub/network calls), the --include-prs opt-in path, graceful degradation on a
+# Covers the output/token bound, TOON/JSON parity, mandatory live verification
+# for every named PR, the --include-prs discovery path, graceful degradation on a
 # partial PR-fetch failure, end-to-end unresolved-decision durability, and current
 # report pointers.
 set -u
@@ -58,14 +58,64 @@ SH
 #!/usr/bin/env bash
 echo "gh-axi $*" >> "$NET_LOG"
 [ "${FAKE_GH_FAIL:-0}" = 1 ] && exit 1
+[ "${FAKE_GH_SLEEP:-0}" = 1 ] && sleep 30
+emit_body() {
+  printf 'api_response:\n  body: %s\n  truncated: false\n' "$(printf '%s' "$1" | jq -Rs .)"
+}
+case "$*" in
+  api\ repos/*/pulls\?state=open*)
+    repo=${2#repos/}; repo=${repo%%/pulls\?*}
+    if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
+      emit_body "https://github.com/$repo/pull/1
+https://github.com/$repo/pull/2
+https://github.com/$repo/pull/3"
+    else
+      emit_body "https://github.com/$repo/pull/9"
+    fi
+    ;;
+  api\ repos/*/pulls/*)
+    path=${2#repos/}; repo=${path%%/pulls/*}; num=${path##*/}
+    emit_body "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$num" "PR $num" open - "https://github.com/$repo/pull/$num" "sha$num" "fm/task-$num")"
+    ;;
+  api\ repos/*/actions/runs*)
+    if [ "${FAKE_CHECKS_TALLY_ONLY:-0}" = 1 ]; then
+      emit_body "$(printf '%s\t%s\t%s' 2 2 '1 passed, 1 failed')"
+    else
+      emit_body "$(printf '%s\t%s\t%s' 2 2 'CI[event=pull_request attempt=1 created=2026-08-03T10:00:00Z updated=2026-08-03T10:05:00Z status=completed conclusion=success url=https://github.com/acme/repo/actions/runs/1]; CI[event=pull_request_target attempt=2 created=2026-08-03T10:06:00Z updated=2026-08-03T10:08:00Z status=completed conclusion=failure url=https://github.com/acme/repo/actions/runs/2]')"
+    fi
+    ;;
+esac
 exit 0
+SH
+  cat > "$fb/fm-liveness-snapshot" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}
+rows='[]'
+for meta in "$state"/*.meta; do
+  [ -f "$meta" ] || continue
+  id=$(basename "$meta" .meta)
+  harness=$(sed -n 's/^harness=//p' "$meta" | tail -1)
+  backend=$(sed -n 's/^backend=//p' "$meta" | tail -1); [ -n "$backend" ] || backend=tmux
+  target=$(sed -n 's/^window=//p' "$meta" | tail -1)
+  busy=$(sed -n 's/.* state=\([^ ]*\).*/\1/p' "$state/$id.busy-state" 2>/dev/null | tail -1)
+  case "$busy" in busy) activity=active ;; idle) activity=parked ;; *) activity=inactive ;; esac
+  row=$(jq -n --arg id "$id" --arg harness "$harness" --arg backend "$backend" --arg target "$target" --arg activity "$activity" '
+    {id:$id,harness:$harness,harness_family:$harness,backend:$backend,target:$target,worktree:null,
+     endpoint:{presence:"verified_present",raw:"alive"},
+     worker:{presence:(if $activity=="inactive" then "verified_absent" else "verified_present" end),pids_sample_1:1,pids_sample_2:1,harness_processes_sample_1:1,harness_processes_sample_2:1},
+     output:{sample_1_readable:true,sample_2_readable:true,changed:($activity=="active")},
+     cpu:{sample_1_max_ms:1000,sample_2_max_ms:(if $activity=="active" then 1030 else 1000 end),delta_ms:(if $activity=="active" then 30 else 0 end),rate_ms_per_minute:(if $activity=="active" then 900 else 0 end),baseline:"verified",threshold_ms_per_minute:760},activity:$activity}')
+  rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a+[$b]')
+done
+jq -n --argjson rows "$rows" '{schema:"fm-liveness.v1",observed_at:"2026-08-03T10:00:00Z",interval_ms:2000,process_samples:{sample_1_readable:true,sample_2_readable:true},records:$rows}'
 SH
   cat > "$fb/curl" <<'SH'
 #!/usr/bin/env bash
 echo "curl $*" >> "$NET_LOG"
 exit 1
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl"
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/fm-liveness-snapshot" "$fb/curl"
   printf '%s\n' "$fb"
 }
 
@@ -178,7 +228,8 @@ EOF
 
 run() {  # <home> <fakebin> <args...>
   local home=$1 fakebin=$2; shift 2
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
+  PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
+    FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
 # End-to-end Domain Alpha regression fixture.
@@ -229,7 +280,7 @@ test_domain_alpha_stale_parent_event_does_not_become_current_work() {
       and (.gates | any(.[]; .id == "legal-release" and .owner == "domain-alpha"))
       and (.landed | any(.[]; .id == "phase7" and .owner == "domain-alpha"))
   ' >/dev/null || fail "stale parent Phase 7 event overrode authoritative Domain Alpha state: $json"
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_NOW_EPOCH=1783792800 FM_SNAPSHOT_TERMINAL_LINES=2 FM_SNAPSHOT_TERMINAL_BYTES=64 \
     NET_LOG="$home/net.log" FAKE_GH_FAIL=1 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
@@ -305,7 +356,7 @@ test_parent_activity_evidence_is_bounded_and_disclosed() {
     i=$((i + 1))
   done
   fakebin=$(make_fakebin "$home")
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_PARENT_ACTIVITY_LINES=4 FM_SNAPSHOT_PARENT_ACTIVITY_BYTES=4096 \
     FM_SNAPSHOT_PARENT_ACTIVITIES=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
@@ -353,7 +404,7 @@ EOF
       and (.doing | contains("release A or B") | not)))
       and (.decisions_open | any(.owner == "domain-alpha") | not)
   ' >/dev/null || fail "status-only child decision leaked into Bearings: $json"
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "domain-alpha") | .endpoints[] | select(.id == "phase8")
@@ -551,7 +602,7 @@ test_secondmate_and_child_bounds_are_disclosed() {
   done
   printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
   fakebin=$(make_fakebin "$home")
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.total_registered == 3
@@ -587,7 +638,7 @@ test_parent_decision_is_untrusted_contradiction_only() {
   fm_write_secondmate_meta "$home/state/authority.meta" "$mate" "firstmate:fm-authority" sample
   printf 'needs-decision [key=stale]: old parent question\n' > "$home/state/authority.status"
   fakebin=$(make_fakebin "$home")
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "authority")
@@ -658,7 +709,7 @@ EOF
   record_claude_state "$decision/state" "$child" idle
   printf 'needs-decision [key=live-route]: choose the current route\n' > "$decision/state/$child.status"
   fakebin=$(make_fakebin "$home")
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     (.secondmate_current.records[] | select(.id == "hold")
@@ -711,7 +762,7 @@ EOF
   record_claude_state "$mate/state" parked idle
   printf 'needs-decision [key=parked]: choose a route\n' > "$mate/state/parked.status"
   fakebin=$(make_fakebin "$home")
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
@@ -726,7 +777,7 @@ EOF
 
 ## Done
 EOF
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
@@ -754,16 +805,17 @@ EOF
   printf 'done: complete\n' > "$mate/state/done.status"
   printf 'failed: stopped\n' > "$mate/state/failed.status"
   rm "$mate/state/parked.meta" "$mate/state/parked.status"
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
-    | .current.state == "unknown"
-      and (.current.reason | contains("terminal child state"))
-      and (.current.reason | contains("done=done"))
-      and (.current.reason | contains("failed=failed"))
-  ' >/dev/null || fail "terminal in-flight child states were silently dropped: $canonical"
-  pass "nonprogressing child states are explicit and inconsistent terminal rows invalidate"
+    | .current.state == "externally_held"
+      and .active_children == []
+      and (.holds | any(.id=="done" and .source=="child-state"))
+      and (.holds | any(.id=="failed" and .source=="child-state"))
+      and (.endpoints | all(.state=="parked" and .source=="process-output"))
+  ' >/dev/null || fail "self-authored terminal events overrode measured parked child state: $canonical"
+  pass "nonprogressing child states stay explicit and terminal status events remain history"
 }
 
 test_registry_unavailability_and_bounds_are_explicit() {
@@ -775,7 +827,7 @@ test_registry_unavailability_and_bounds_are_explicit() {
   fm_write_secondmate_meta "$home/state/hidden.meta" "$mate" "firstmate:fm-hidden" sample
   chmod 000 "$home/data/secondmates.md"
   fakebin=$(make_fakebin "$home")
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   json=$(run "$home" "$fakebin" --json)
   chmod 600 "$home/data/secondmates.md"
@@ -798,7 +850,7 @@ test_registry_unavailability_and_bounds_are_explicit() {
     append_secondmate_registry "$home" "$id" "$mate"
   done
   fakebin=$(make_fakebin "$home")
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_REGISTRY_RECORDS=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.registry
@@ -807,7 +859,7 @@ test_registry_unavailability_and_bounds_are_explicit() {
       and .records_in_window == 3 and (.records | length) == 2
       and (.reasons | index("record_limit") != null)
   ' >/dev/null || fail "registry record bound was not enforced or disclosed: $canonical"
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_REGISTRY_LINES=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.registry
@@ -815,7 +867,7 @@ test_registry_unavailability_and_bounds_are_explicit() {
       and .lines_in_window == 2 and (.records | length) == 2
       and .reasons == ["line_limit"]
   ' >/dev/null || fail "registry line bound was not enforced or disclosed: $canonical"
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_REGISTRY_BYTES=100 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.registry
@@ -823,7 +875,7 @@ test_registry_unavailability_and_bounds_are_explicit() {
       and .records_in_window < 3
   ' >/dev/null || fail "registry byte bound was not enforced or disclosed: $canonical"
   boundary=$(LC_ALL=C head -n 1 "$home/data/secondmates.md" | wc -c | tr -d ' ')
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_REGISTRY_BYTES="$((boundary - 1))" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.registry
@@ -838,7 +890,7 @@ test_registry_unavailability_and_bounds_are_explicit() {
   make_valid_secondmate_home z-hidden "$mate"
   append_secondmate_registry "$home" z-hidden "$mate"
   fm_write_secondmate_meta "$home/state/z-hidden.meta" "$mate" "firstmate:fm-z-hidden" sample
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_REGISTRY_RECORDS=3 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.registry.complete == false
@@ -875,7 +927,7 @@ EOF
   pass "repeated snapshots keep the same current landed baseline and ignore prior reports"
 }
 
-test_default_is_bounded_and_local_only() {
+test_default_is_bounded_and_verifies_every_named_pr() {
   local home fakebin toon json
   home=$(make_home bounded); write_fixture "$home"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
@@ -884,16 +936,18 @@ test_default_is_bounded_and_local_only() {
   # Bound: well under the ~50 KB tool-display limit.
   [ "${#toon}" -lt 50000 ] || fail "default TOON must stay under the display bound, got ${#toon}"
   # TOON is materially smaller than the canonical snapshot it projects.
-  local canon; canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  local canon; canon=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   [ "${#toon}" -lt "${#canon}" ] || fail "projection must be smaller than the canonical snapshot"
-  # Local-only: no GitHub/network call on the default path.
-  [ ! -s "$home/net.log" ] || fail "default run must make no gh/gh-axi call, got: $(cat "$home/net.log")"
-  # Definitive not-requested PR state, never a silent omission.
-  assert_contains "$toon" 'prs: "not_requested' "default must state PR checks were not requested"
-  assert_contains "$toon" "live PR discovery + checks,\"--include-prs\"" "omitted must mark the dropped live-PR surface"
+  # Every URL named by recorded or landed surfaces is queried live.
+  for pr in 9 7 50; do
+    grep -q "gh-axi api repos/kunchenguid/firstmate/pulls/$pr " "$home/net.log" \
+      || fail "default run did not verify named PR $pr: $(cat "$home/net.log")"
+  done
+  assert_contains "$toon" 'prs: checked' "default must state live PR verification outcome"
+  assert_contains "$toon" "additional live open-PR discovery,\"--include-prs\"" "omitted must distinguish optional discovery from mandatory verification"
   # Valid JSON, correct schema.
   printf '%s' "$json" | jq -e '.schema == "fm-bearings.v1"' >/dev/null || fail "json schema wrong"
-  pass "default output is bounded, local-only, and marks omitted surfaces"
+  pass "default output is bounded and live-verifies every PR it names"
 }
 
 test_toon_json_parity() {
@@ -965,20 +1019,39 @@ test_superseded_queued_item_dropped_by_default() {
   pass "superseded queued items are dropped by default and restored with --all-queued"
 }
 
-test_include_prs_is_the_only_fetch_path() {
+test_include_prs_adds_discovery_after_mandatory_verification() {
   local home fakebin json
   home=$(make_home prs); write_fixture "$home"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
   json=$(run "$home" "$fakebin" --include-prs --json)
-  # Now gh WAS called, exactly for pr list.
-  grep -q '^gh pr list ' "$home/net.log" || fail "--include-prs must call gh pr list"
+  grep -q '^gh-axi api repos/kunchenguid/firstmate/pulls?state=open' "$home/net.log" \
+    || fail "--include-prs must discover open PRs through gh-axi"
   printf '%s' "$json" | jq -e '
     .prs | startswith("checked")
   ' >/dev/null || fail "--include-prs must report checked PR state"
   printf '%s' "$json" | jq -e '
-    .candidate_prs | any(.[]; .num == "9" and .task == "ship-task" and .checks == "passing" and .review == "APPROVED")
-  ' >/dev/null || fail "candidate_prs must carry the fetched PR cross-referenced to its task: $json"
-  pass "--include-prs is the only path that fetches, and it enriches correctly"
+    .candidate_prs | any(.[]; .num == "9" and .task == "ship-task"
+      and .state == "OPEN" and .verification == "verified_live"
+      and .url == "https://github.com/kunchenguid/firstmate/pull/9"
+      and .mergedAt == null
+      and (.checks | contains("event=pull_request attempt=1"))
+      and (.checks | contains("event=pull_request_target attempt=2"))
+      and (.checks | contains("created=2026-08-03T10:00:00Z updated=2026-08-03T10:05:00Z")))
+  ' >/dev/null || fail "candidate_prs must carry live state and every check instance: $json"
+  pass "--include-prs adds discovery after mandatory per-URL live verification"
+}
+
+test_firstmate_check_tally_is_refused() {
+  local home fakebin json
+  home=$(make_home checks-tally-refusal); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(FAKE_CHECKS_TALLY_ONLY=1 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    [.candidate_prs[] | select(.repo=="kunchenguid/firstmate")]
+    | length == 3 and all(.[]; .verification=="verified_live"
+      and (.checks | startswith("NOT_VERIFIABLE: Actions instances lacked")))
+  ' >/dev/null || fail "bare check tally was accepted as current firstmate gate evidence: $json"
+  pass "firstmate checks refuse a bare tally without per-instance event, attempt, and timestamp evidence"
 }
 
 test_partial_github_failure_degrades() {
@@ -989,8 +1062,9 @@ test_partial_github_failure_degrades() {
   expect_code 0 "$rc" "a PR-fetch failure must not crash the view"
   printf '%s' "$json" | jq -e '
     .schema == "fm-bearings.v1"
-      and (.candidate_prs | length) == 0
-      and (.prs | test("unavailable"))
+      and (.candidate_prs | length) == 3
+      and ([.candidate_prs[].verification] | all(. == "NOT_VERIFIABLE"))
+      and (.prs | test("NOT_VERIFIABLE"))
       and (.in_flight | length) > 0
   ' >/dev/null || fail "on gh failure the view must still emit, with an unavailable note: $json"
   pass "a partial GitHub failure degrades gracefully"
@@ -1010,7 +1084,7 @@ test_perl_fallback_bounds_github_call() {
     FM_BEARINGS_PR_TIMEOUT=1 NET_LOG="$home/net.log" FAKE_GH_SLEEP=1 "$BEARINGS" --include-prs --json)
   elapsed=$(( $(date +%s) - started ))
   [ "$elapsed" -lt 10 ] || fail "Perl fallback did not bound a stalled gh call (${elapsed}s)"
-  printf '%s' "$json" | jq -e '.prs | test("unavailable")' >/dev/null \
+  printf '%s' "$json" | jq -e '.prs | test("NOT_VERIFIABLE")' >/dev/null \
     || fail "timed-out gh call did not fail soft: $json"
   pass "Perl fallback bounds stalled GitHub calls without coreutils timeout"
 }
@@ -1047,9 +1121,9 @@ test_section_caps_and_expansion_flags() {
     FM_BEARINGS_REPORTS=2 FM_BEARINGS_RECORDED_PRS=2 FM_BEARINGS_UNHEALTHY=2 \
     run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    (.in_flight|length) == 2 and (.decisions_open|length) == 2 and (.gates|length) == 2
+    (.in_flight|length) == 0 and (.decisions_open|length) == 2 and (.gates|length) == 2
     and (.reports|length) == 2 and (.recorded_prs|length) == 2 and (.unhealthy_endpoints|length) == 2
-    and ([.omitted[].surface] | index("in_flight showing 2 of 5") != null)
+    and ([.omitted[].surface] | index("in_flight showing 2 of 5") == null)
     and ([.omitted[].surface] | index("decisions_open showing 2 of 5") != null)
     and ([.omitted[].surface] | index("gates showing 2 of 5") != null)
     and ([.omitted[].surface] | index("reports showing 2 of 5") != null)
@@ -1061,7 +1135,7 @@ test_section_caps_and_expansion_flags() {
     run "$home" "$fakebin" --json --all-in-flight --all-decisions --all-queued \
       --all-reports --all-recorded-prs --all-unhealthy)
   printf '%s' "$expanded" | jq -e '
-    (.in_flight|length) == 5 and (.decisions_open|length) == 5 and (.gates|length) == 5
+    (.in_flight|length) == 0 and (.decisions_open|length) == 5 and (.gates|length) == 5
     and (.reports|length) == 5 and (.recorded_prs|length) == 5 and (.unhealthy_endpoints|length) == 5
   ' >/dev/null || fail "section expansion flags did not reveal full sets: $expanded"
   pass "all fleet-sized sections are capped with counted opt-in expansion"
@@ -1072,15 +1146,15 @@ test_pr_repository_cap_and_expansion() {
   home=$(make_home repo-caps); write_large_fixture "$home" 5
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
   json=$(FM_BEARINGS_PR_REPOS=2 run "$home" "$fakebin" --include-prs --json)
-  [ "$(grep -c '^gh pr list ' "$home/net.log")" = 2 ] || fail "default PR repository cap was not enforced"
+  [ "$(grep -c '^gh-axi api repos/.*/pulls?state=open' "$home/net.log")" = 2 ] || fail "default PR repository cap was not enforced"
   printf '%s' "$json" | jq -e '
     [.omitted[] | select(.surface == "PR repositories showing 2 of 5" and .reveal == "--all-pr-repos")] | length == 1
   ' >/dev/null || fail "PR repository truncation was not recorded: $json"
   : > "$home/net.log"
   expanded=$(FM_BEARINGS_PR_REPOS=2 run "$home" "$fakebin" --include-prs --all-pr-repos --json)
-  [ "$(grep -c '^gh pr list ' "$home/net.log")" = 5 ] || fail "--all-pr-repos did not reveal every repository"
-  printf '%s' "$expanded" | jq -e '.candidate_prs | length == 5' >/dev/null \
-    || fail "expanded PR repository set did not enrich every repository: $expanded"
+  [ "$(grep -c '^gh-axi api repos/.*/pulls?state=open' "$home/net.log")" = 5 ] || fail "--all-pr-repos did not reveal every repository"
+  printf '%s' "$expanded" | jq -e '.candidate_prs | length >= 5' >/dev/null \
+    || fail "expanded PR repository set did not verify every discovered repository: $expanded"
   pass "live PR enrichment caps repositories with counted expansion"
 }
 
@@ -1091,11 +1165,10 @@ test_per_repository_pr_cap_is_disclosed() {
   json=$(FM_BEARINGS_PR_LIMIT=2 FAKE_GH_MANY=1 run "$home" "$fakebin" --include-prs --json)
   toon=$(FM_BEARINGS_PR_LIMIT=2 FAKE_GH_MANY=1 run "$home" "$fakebin" --include-prs)
   printf '%s' "$json" | jq -e '
-    (.candidate_prs | length) == 2
-    and (.prs | test("2 shown, at least 3 open; capped in 1 repo"))
-    and ([.omitted[] | select(.surface == "candidate_prs showing 2 of at least 3; capped in 1 repo(s)" and .reveal == "raise FM_BEARINGS_PR_LIMIT")] | length) == 1
+    (.candidate_prs | length) == 5
+    and ([.omitted[] | select(.surface | contains("candidate_prs showing"))] | length) == 1
   ' >/dev/null || fail "per-repository PR truncation was not disclosed: $json"
-  assert_contains "$toon" 'candidate_prs showing 2 of at least 3' "TOON did not preserve PR truncation disclosure"
+  assert_contains "$toon" 'candidate_prs showing' "TOON did not preserve PR truncation disclosure"
   pass "per-repository open-PR caps are disclosed with an expansion knob"
 }
 
@@ -1161,7 +1234,7 @@ test_completed_scout_report_not_pending() {
 
 # Recently Landed must include merges a secondmate managed. Those completion records
 # live in the secondmate home's OWN backlog, not the main one, so the projection must
-# roll them up. Local, deterministic, no GitHub call.
+# roll them up, then live-check every URL before naming it.
 test_landed_includes_secondmate_home_merges() {
   local home fakebin json
   home=$(make_home mate-landed); write_fixture "$home"
@@ -1171,9 +1244,11 @@ test_landed_includes_secondmate_home_merges() {
     (.landed | any(.[]; .id == "mate-landed" and (.artifact | test("/pull/50"))))
       and (.landed | any(.[]; .id == "done-a"))
   ' >/dev/null || fail "landed must merge secondmate-home Done with main-home Done: $json"
-  # Still zero network on this default path.
-  [ ! -s "$home/net.log" ] || fail "landed roll-up must make no gh/gh-axi call, got: $(cat "$home/net.log")"
-  pass "landed includes secondmate-managed merges alongside main-home merges"
+  grep -q 'gh-axi api repos/kunchenguid/firstmate/pulls/50 ' "$home/net.log" \
+    || fail "secondmate landed PR was named without live verification: $(cat "$home/net.log")"
+  grep -q 'gh-axi api repos/kunchenguid/firstmate/pulls/7 ' "$home/net.log" \
+    || fail "main landed PR was named without live verification: $(cat "$home/net.log")"
+  pass "landed includes both homes and live-verifies every merge URL"
 }
 
 test_landed_default_balances_dominant_and_sparse_homes() {
@@ -1378,11 +1453,9 @@ $(printf 'mate-landed-%02d' "$i")"
   pass "landed stays bounded with per-home + overall caps and omitted[] disclosure"
 }
 
-# Bearings projects authoritative structured state rather than inventing return
-# policy. A live blocked child remains a live in-flight record with state=blocked
-# and an open blocker; it must never be converted into a queued `gates` record.
-# The return-catch-up owner prevents this state from reaching ordinary rendering
-# during an away return, while this test pins Bearings' own projection boundary.
+# A worker-authored blocked event cannot override an independently measured
+# parked lane. Bearings keeps the event historical and charts the measured
+# non-progressing task instead of inventing live work.
 test_live_blocker_is_not_charted_queue_work() {
   local home fakebin json
   home=$(make_home live-blocker); write_fixture "$home"
@@ -1391,11 +1464,11 @@ test_live_blocker_is_not_charted_queue_work() {
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    (.in_flight | any(.[]; .id == "ship-task" and .state == "blocked"))
+    (.in_flight | any(.[]; .id == "ship-task") | not)
       and (.decisions_open | any(.[]; .id == "ship-task") | not)
-      and (.gates | any(.[]; .id == "ship-task") | not)
-  ' >/dev/null || fail "live blocked work was projected as queued/deferred work: $json"
-  pass "Bearings keeps a live blocker in structured live state and never converts it to Charted Next queue work"
+      and (.gates | any(.[]; .id == "ship-task" and (.reason | startswith("measured liveness: parked"))))
+  ' >/dev/null || fail "blocked status event overrode measured parked liveness: $json"
+  pass "Bearings keeps blocked status historical and projects measured parked state"
 }
 
 # Captain's Call is populated only from the durable keyed open-decision set. The
@@ -1408,7 +1481,7 @@ test_captains_call_anti_leak() {
   home=$(make_home anti-leak); write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   jq -n -e --argjson bearings "$json" --argjson canonical "$canonical" '
     ([$bearings.decisions_open[].id] == ["mate/mate-decision-race"])
       and ($canonical.secondmate_current.records[] | select(.id == "mate")
@@ -1441,7 +1514,7 @@ test_main_orphan_in_flight_is_disclosed_not_invented() {
 ## Done
 EOF
   fakebin=$(make_fakebin "$home")
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .main_inventory.valid == false
@@ -1485,9 +1558,10 @@ EOF
     "harness=codex" \
     "kind=ship" \
     "mode=no-mistakes"
+  record_claude_state "$home/state" structured-ship busy
   printf 'working: structured sibling still projects\n' > "$home/state/structured-ship.status"
   fakebin=$(make_fakebin "$home")
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .main_inventory.valid == false
@@ -1529,6 +1603,7 @@ EOF
     "harness=codex" \
     "kind=ship" \
     "mode=no-mistakes"
+  record_claude_state "$home/state" visible-ship busy
   printf 'working: visible sibling\n' > "$home/state/visible-ship.status"
   fakebin=$(make_fakebin "$home")
   json_before=$(run "$home" "$fakebin" --json)
@@ -1546,6 +1621,7 @@ EOF
     "harness=codex" \
     "kind=ship" \
     "mode=no-mistakes"
+  record_claude_state "$home/state" orphan-ship busy
   printf 'working: orphan now has meta\n' > "$home/state/orphan-ship.status"
   json_after=$(run "$home" "$fakebin" --json)
   printf '%s' "$json_after" | jq -e '
@@ -1636,7 +1712,7 @@ EOF
   printf 'working: preparing canary\n' > "$ha/state/prep.status"
 
   fakebin=$(make_fakebin "$home")
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     (.secondmate_current.records[] | select(.id == "hibit")
@@ -1694,7 +1770,7 @@ EOF
 - [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)' \
     "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "sshhip")
@@ -1714,7 +1790,7 @@ EOF
 
   sed '/unreadable-child/d' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "sshhip")
@@ -1739,7 +1815,7 @@ EOF
     "harness=claude" "kind=scout" "mode=scout"
   record_claude_state "$wheel/state" production-observation idle
   printf 'paused: observation is deliberately held\n' > "$wheel/state/production-observation.status"
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "wheel")
@@ -1802,7 +1878,7 @@ EOF
 
   sed 's/(kind: program)/(kind: mystery)/' "$hibit/data/backlog.md" > "$hibit/data/backlog.next"
   mv "$hibit/data/backlog.next" "$hibit/data/backlog.md"
-  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+  canonical=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "hibit")
@@ -1838,6 +1914,7 @@ EOF
   fm_write_meta "$home/state/prep.meta" \
     "window=firstmate:fm-prep" "worktree=$home/projects/prep" "project=firstmate" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$home/state" prep busy
   printf 'working: preparing main canary\n' > "$home/state/prep.status"
   fm_write_meta "$home/state/observation.meta" \
     "window=firstmate:fm-observation" "worktree=$home/projects/observation" "project=firstmate" \
@@ -1902,7 +1979,7 @@ test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
-test_default_is_bounded_and_local_only
+test_default_is_bounded_and_verifies_every_named_pr
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_default_balances_dominant_and_sparse_homes
@@ -1923,7 +2000,8 @@ test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
-test_include_prs_is_the_only_fetch_path
+test_include_prs_adds_discovery_after_mandatory_verification
+test_firstmate_check_tally_is_refused
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags

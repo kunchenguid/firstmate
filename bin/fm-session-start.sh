@@ -358,6 +358,11 @@ print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
 subsection "Work under way (state/*.meta)"
 META_FOUND=0
+LIVENESS_BIN=${FM_LIVENESS_SNAPSHOT_BIN:-$SCRIPT_DIR/fm-liveness-snapshot.sh}
+if ! LIVENESS_JSON=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$LIVENESS_BIN" --json 2>/dev/null); then
+  LIVENESS_JSON='{"records":[]}'
+fi
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
@@ -366,16 +371,20 @@ for meta in "$STATE"/*.meta; do
   cat "$meta"
 
   window=$(fm_meta_get "$meta" window)
-  target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
-    backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-    fi
+  backend=$(fm_backend_of_meta "$meta")
+  live_row=$(printf '%s' "$LIVENESS_JSON" | jq -c --arg id "$id" '[.records[]? | select(.id==$id)][0] // empty' 2>/dev/null || true)
+  if [ -n "$live_row" ]; then
+    endpoint=$(printf '%s' "$live_row" | jq -r '.endpoint.presence')
+    worker=$(printf '%s' "$live_row" | jq -r '.worker.presence')
+    activity=$(printf '%s' "$live_row" | jq -r '.activity')
+    cpu_delta=$(printf '%s' "$live_row" | jq -r '.cpu.delta_ms')
+    cpu_rate=$(printf '%s' "$live_row" | jq -r '.cpu.rate_ms_per_minute')
+    output_changed=$(printf '%s' "$live_row" | jq -r '.output.changed')
+    printf 'liveness: endpoint=%s worker=%s activity=%s backend=%s window=%s cpu_delta_ms=%s cpu_rate_ms_per_min=%s output_changed=%s\n' \
+      "$endpoint" "$worker" "$activity" "$backend" "${window:--}" "$cpu_delta" "$cpu_rate" "$output_changed"
   else
-    printf 'endpoint: unknown (no window recorded)\n'
+    printf 'liveness: endpoint=unverified worker=unverified activity=unverified backend=%s window=%s (measurement unavailable)\n' \
+      "$backend" "${window:--}"
   fi
 
   status="$STATE/$id.status"

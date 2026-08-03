@@ -226,7 +226,8 @@ EOF
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
-# actively-running pipeline step (source run-step) or a busy pane (source pane);
+# actively-running pipeline step (source run-step) or independent measured
+# activity (source process-output);
 # everything else - a stale working: status-log line, a finished/parked/failed run,
 # an unknown/torn-down crew, or an empty id - is NOT provable, so it surfaces. The
 # fake fm-crew-state.sh (FM_CREW_STATE_BIN) returns a canned verdict per case.
@@ -240,8 +241,10 @@ test_crew_is_provably_working_classifier() {
   export FM_FAKE_CREW_STATE
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   crew_is_provably_working a || fail "active run-step not treated as provably working"
+  FM_FAKE_CREW_STATE='state: working · source: process-output · cpu delta above baseline'
+  crew_is_provably_working a || fail "measured activity not treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
-  crew_is_provably_working a || fail "busy pane not treated as provably working"
+  ! crew_is_provably_working a || fail "pane-authored busy verdict treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   ! crew_is_provably_working a || fail "stale status-log working: treated as provably working"
   FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
@@ -255,7 +258,7 @@ test_crew_is_provably_working_classifier() {
   FM_FAKE_CREW_STATE='state: working · source: run-step · x'
   ! crew_is_provably_working "" || fail "empty id treated as provably working"
   unset FM_FAKE_CREW_STATE
-  pass "crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface"
+  pass "crew_is_provably_working: only run-step or independent process/output activity is provable"
 }
 
 # status_is_paused: the shared pause verb test both consumers read (so neither
@@ -282,7 +285,7 @@ test_status_is_paused_classifier() {
 }
 
 # crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
-# reasons - working (active run/busy pane), paused (declared external wait), or none
+# reasons - working (active run/measured activity), parked (measured idle), or none
 # (surface it) - so the watcher's stale path gets both for one bounded call.
 # crew_is_paused delegates to it exactly as crew_is_provably_working does.
 test_crew_absorb_class_classifier() {
@@ -292,12 +295,14 @@ test_crew_absorb_class_classifier() {
   export FM_FAKE_CREW_STATE
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   [ "$(crew_absorb_class a)" = working ] || fail "active run-step not classed working"
-  FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
-  [ "$(crew_absorb_class a)" = working ] || fail "busy pane not classed working"
-  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
-  [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
-  crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
-  ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
+  FM_FAKE_CREW_STATE='state: working · source: process-output · cpu delta above baseline'
+  [ "$(crew_absorb_class a)" = working ] || fail "measured activity not classed working"
+  FM_FAKE_CREW_STATE='state: parked · source: process-output · harness-relative idle baseline'
+  [ "$(crew_absorb_class a)" = parked ] || fail "measured idle not classed parked"
+  crew_is_parked a || fail "crew_is_parked did not recognize independent parked evidence"
+  ! crew_is_provably_working a || fail "a parked crew was treated as actively working"
+  FM_FAKE_CREW_STATE='state: parked · source: status-log · parked by worker claim'
+  [ "$(crew_absorb_class a)" = none ] || fail "status-authored parked claim was trusted"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
@@ -305,7 +310,7 @@ test_crew_absorb_class_classifier() {
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  pass "crew_absorb_class: working/parked/none comes only from authoritative sources"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -359,9 +364,8 @@ test_turn_ended_provably_working_absorbed() {
   local dir state fakebin out pid
   dir=$(make_case turn-ended-working); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   : > "$state/task.turn-ended"
-  # A busy pane is the second form of positive evidence (covers a queued
-  # continuation right after the turn-end).
-  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  # Independent process/output activity is the second form of positive evidence.
+  export FM_FAKE_CREW_STATE='state: working · source: process-output · cumulative CPU above harness baseline'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   if ! wait_live "$pid" 30; then
@@ -370,7 +374,7 @@ test_turn_ended_provably_working_absorbed() {
   [ ! -s "$out" ] || fail "provably-working turn-end printed a wake reason: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "provably-working turn-end enqueued a durable wake record"
   reap "$pid"
-  pass "a bare turn-end whose crew is provably working (busy pane) is absorbed"
+  pass "a bare turn-end whose crew has measured process/output activity is absorbed"
 }
 
 # --- a no-verb signal whose crew is NOT provably working SURFACES -------------
@@ -569,6 +573,52 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
 }
 
+# A retained lane whose exact-worktree worker is independently measured at its
+# harness-relative idle baseline is healthy parked capacity. It must neither
+# wake once per poll nor start a wedge timer. Neutralizing that measurement to
+# unknown must make the identical stale input surface immediately.
+test_measured_parked_stale_is_absorbed_without_wedge() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case measured-parked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-parked"
+  printf 'idle retained lane' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/parked.meta"
+  printf 'done: retained after completion\n' > "$state/parked.status"
+  sig=$(seen_sig "$state/parked.status"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle retained lane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: process-output · exact worker at harness-relative idle baseline'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 35 || { reap "$pid"; fail "measured parked lane woke instead of remaining retained: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "measured parked lane queued a stale wake"; }
+  [ -e "$state/.parked-$key" ] || { reap "$pid"; fail "measured parked classification was not retained for the exact hash"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "measured parked lane started a wedge timer"; }
+  reap "$pid"
+
+  # Guard neutralization: remove the independent parked verdict while keeping
+  # every other input identical. The watcher must go RED by surfacing the lane.
+  rm -f "$state/.parked-$key" "$state/.stale-$key" "$state/.wake-queue"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: process-output · measurement unavailable'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "neutralized parked guard did not surface the stale lane"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "neutralized parked guard did not go RED"
+  unset FM_FAKE_CREW_STATE
+  pass "measured parked stale is quiet without a wedge; neutralizing the measurement surfaces it"
+}
+
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -632,8 +682,9 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pane_hash=$(hash_text "idle, holding for upstream")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  # crew_absorb_class reads the declared pause from fm-crew-state.sh.
-  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release'
+  # The pause event supplies the reason; independent liveness proves the worker
+  # is parked rather than active or unverified.
+  export FM_FAKE_CREW_STATE='state: parked · source: process-output · measured idle while holding for the upstream tool release'
 
   # Phase A: a fresh pause (status file just written) under a high re-surface
   # threshold is absorbed - no wake, no wedge timer.
@@ -704,7 +755,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   round=1
   while [ "$round" -le 6 ]; do
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: unknown · source: process-output · worker absent' \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
@@ -733,7 +784,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: unknown · source: process-output · worker absent' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -756,7 +807,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   # First sight must surface promptly so a live external-decision gate is not
   # hidden behind the pause cadence.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: parked · source: process-output · measured idle at an external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
@@ -768,7 +819,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   # a second possible-wedge wake.
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: parked · source: process-output · measured idle at an external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
@@ -802,7 +853,7 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+  export FM_FAKE_CREW_STATE='state: parked · source: process-output · measured idle awaiting the upstream release'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -879,7 +930,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   printf '%s' "$pane_hash" > "$state/.stale-$key"
   printf '1\n' > "$state/.count-$key"
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+  export FM_FAKE_CREW_STATE='state: parked · source: process-output · measured idle awaiting the upstream release'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
@@ -1785,7 +1836,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   # Deliberately do not seed .hash-*: this is the changed-pane path that used to
   # call handle_paused_stale before AFK's one-shot daemon handoff.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream tool release' \
+    FM_FAKE_CREW_STATE='state: parked · source: process-output · measured idle awaiting the upstream tool release' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -1815,6 +1866,7 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_measured_parked_stale_is_absorbed_without_wedge
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed

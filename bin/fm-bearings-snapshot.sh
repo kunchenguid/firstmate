@@ -11,13 +11,14 @@
 # output, it never removes them from - or otherwise weakens - the canonical snapshot,
 # which stays complete.
 #
-# LOCAL-ONLY by default: a normal invocation makes ZERO GitHub/network/auth calls.
-# It MAY surface PR URLs already recorded locally in task meta (recorded_prs), but it
-# performs no live discovery or checks. Live PR discovery/checks happen ONLY under
-# --include-prs, which is the sole path that touches the network; all gh coupling
-# lives in that branch and never in the canonical snapshot. The default output states
-# explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
-# absence is never ambiguous.
+# Every PR URL the projection names is checked live at render time through gh-axi.
+# A locally recorded pr= row is only a candidate URL, never forge-state evidence.
+# The default verifies URLs already selected from task metadata and the bounded
+# landed baseline; --include-prs additionally discovers open PRs in candidate repos.
+# An unreachable or unsupported forge remains in the result as NOT_VERIFIABLE.
+# The firstmate upstream check surface enumerates every Actions run instance with
+# event, attempt, and timestamp; it never collapses duplicate event-payload checks
+# into a pass/fail tally.
 #
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability. It never infers
@@ -33,16 +34,17 @@
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
 # a per-home cap and an overall cap, with omitted[] disclosure of both and of any
-# secondmate home whose backlog was unreadable; no GitHub/network call is involved.
+# secondmate home whose backlog was unreadable. Each selected PR artifact is then
+# live-verified; the local landed selection itself remains deterministic.
 # The default landed baseline is balanced across homes: each home keeps its internal
 # newest-first ordering, homes iterate in deterministic id order, sparse homes do not
 # waste capacity, and --all-landed switches back to the complete global newest-first
 # order.
 #
 # Flags:
-#   (default)        compact projection, TOON, local-only
+#   (default)        compact projection, TOON, live-verifies every named PR
 #   --json           the same projected model as JSON (machine/debug; parity form)
-#   --include-prs    ALSO do live open-PR discovery + checks (the only network path)
+#   --include-prs    ALSO do live open-PR discovery in candidate repositories
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision
@@ -100,7 +102,7 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
                                [--all-pr-repos]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
-Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
+Every PR URL named by the output is verified live; --include-prs also discovers.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
@@ -166,111 +168,193 @@ command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
   if [ "$ALL_LANDED" = 1 ]; then
-    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
+    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_INCLUDE_LIVENESS=1 FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
   else
-    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 "$FLEET" --json) || exit $?
+    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_INCLUDE_LIVENESS=1 FM_SNAPSHOT_SECONDMATES=0 "$FLEET" --json) || exit $?
   fi
 else
-  SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json) || exit $?
+  SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_INCLUDE_LIVENESS=1 "$FLEET" --json) || exit $?
 fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
 
-# --- optional live PR enrichment (the ONLY network path) --------------------
-PR_STATUS='not_requested (run: /bearings include PRs)'
+# --- live verification for every PR URL the projection can name ------------
+PR_STATUS='checked (0 PRs named)'
 CANDIDATE_PRS='[]'
 PR_REPOS_TOTAL=0
 PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
 PR_ROWS_MIN_TOTAL=0
+RECORDED_URL_TOTAL=$(printf '%s' "$SNAP" | jq '[.tasks[] | select(.kind != "secondmate") | .pr.url // empty] | length')
 
 # Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
 repo_slug() {  # <url>
   printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p' | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
 }
 
-# Bounded gh call; prints stdout, non-zero on timeout/failure. gh only.
-gh_bounded() {  # <args...>
+# Bounded gh-axi call; prints stdout, non-zero on timeout/failure.
+ghaxi_bounded() {  # <args...>
   if command -v timeout >/dev/null 2>&1; then
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 timeout "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
+    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 timeout "$FM_BEARINGS_PR_TIMEOUT" gh-axi "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gtimeout "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
+    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gtimeout "$FM_BEARINGS_PR_TIMEOUT" gh-axi "$@"
   elif command -v perl >/dev/null 2>&1; then
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
+    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_BEARINGS_PR_TIMEOUT" gh-axi "$@"
   else
     return 124
   fi
 }
 
-if [ "$INCLUDE_PRS" = 1 ]; then
-  if ! command -v gh >/dev/null 2>&1; then
-    PR_STATUS='unavailable (gh not found)'
-  else
-    # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.
-    repos=""
-    while IFS= read -r u; do
-      [ -n "$u" ] || continue
-      s=$(repo_slug "$u"); [ -n "$s" ] || continue
-      case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
-    done <<EOF
-$(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
-EOF
-    while IFS= read -r wt; do
-      [ -n "$wt" ] || continue
-      [ -d "$wt" ] || continue
-      u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
-      s=$(repo_slug "$u"); [ -n "$s" ] || continue
-      case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
-    done <<EOF
-$(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
+decode_api_body() {
+  local encoded
+  encoded=$(sed -n 's/^[[:space:]]*body: //p' | head -1)
+  [ -n "$encoded" ] || return 1
+  printf '%s' "$encoded" | jq -er '.'
+}
+
+URLS=""
+add_pr_url() {  # <url>
+  local url=$1
+  [ -n "$url" ] || return 0
+  case "
+$URLS
+" in *"
+$url
+"*) return 0 ;; esac
+  URLS="${URLS}${URLS:+
+}$url"
+}
+
+# URLs that can otherwise appear in recorded_prs or the bounded landed baseline.
+while IFS= read -r url; do add_pr_url "$url"; done <<EOF
+$(printf '%s' "$SNAP" | jq -r --argjson all "$ALL_RECORDED_PRS" --argjson limit "$FM_BEARINGS_RECORDED_PRS" '[.tasks[] | select(.kind != "secondmate") | .pr.url // empty] | (if $all==1 then . else .[:$limit] end)[]')
+$(printf '%s' "$SNAP" | jq -r --argjson limit "$FM_BEARINGS_LANDED" '[.backlog.records[]? | select(.state=="done") | .pr_url // empty][:$limit][]')
+$(printf '%s' "$SNAP" | jq -r --argjson limit "$FM_BEARINGS_LANDED" '[.secondmate_landed.records[]? | .pr_url // empty][:$limit][]')
 EOF
 
-    for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
-    nrepos=0; npr=0; nwarn=0; ncapped=0; rows='[]'
+repos=""
+while IFS= read -r url; do
+  [ -n "$url" ] || continue
+  slug=$(repo_slug "$url")
+  [ -n "$slug" ] || continue
+  case " $repos " in *" $slug "*) ;; *) repos="$repos $slug" ;; esac
+done <<EOF
+$URLS
+EOF
+
+if [ "$INCLUDE_PRS" = 1 ]; then
+  while IFS= read -r wt; do
+    [ -d "$wt" ] || continue
+    origin=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
+    slug=$(repo_slug "$origin")
+    [ -n "$slug" ] || continue
+    case " $repos " in *" $slug "*) ;; *) repos="$repos $slug" ;; esac
+  done <<EOF
+$(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
+EOF
+  for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
+  nrepos=0
+  for repo in $repos; do
+    if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
+    nrepos=$((nrepos + 1))
     pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
-    for repo in $repos; do
-      if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
-      nrepos=$((nrepos + 1))
-      out=$(gh_bounded pr list --repo "$repo" --state open --limit "$pr_fetch_limit" \
-        --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
-        || { nwarn=$((nwarn + 1)); continue; }
-      [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
-        [ .[] | {
-          num:(.number|tostring),
-          repo:$repo,
-          task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
-          url:(.url // "-"),
-          review:(.reviewDecision // "none"),
-          mergeable:(.mergeable // "UNKNOWN"),
-          checks:(
-            (.statusCheckRollup // []) as $c
-            | if ($c|length) == 0 then "none"
-              elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED")) then "failing"
-              elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
-              else "passing" end)
-        } ] as $rows | {returned:($rows | length), rows:$rows[:$limit]}') || { nwarn=$((nwarn + 1)); continue; }
-      returned=$(printf '%s' "$repo_result" | jq '.returned')
-      repo_rows=$(printf '%s' "$repo_result" | jq '.rows')
-      cnt=$(printf '%s' "$repo_rows" | jq 'length')
-      [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
-      npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
-    done
-    PR_REPOS_SHOWN=$nrepos
-    PR_ROWS_CAPPED=$ncapped
-    PR_ROWS_MIN_TOTAL=$((npr + ncapped))
-    CANDIDATE_PRS=$rows
-    warnnote=""
-    [ "$nwarn" -gt 0 ] && warnnote="; ${nwarn} repo(s) unavailable"
-    cappednote=""
-    [ "$ncapped" -gt 0 ] && cappednote="; ${npr} shown, at least ${PR_ROWS_MIN_TOTAL} open; capped in ${ncapped} repo(s)"
-    if [ "$ncapped" -gt 0 ]; then
-      PR_STATUS="checked (${nrepos} repos${cappednote}${warnnote})"
-    else
-      PR_STATUS="checked (${nrepos} repos, ${npr} open${warnnote})"
+    api=$(ghaxi_bounded api "repos/$repo/pulls?state=open&per_page=$pr_fetch_limit" \
+      --jq 'map(.html_url) | join("\n")' 2>/dev/null) || continue
+    discovered=$(printf '%s\n' "$api" | decode_api_body 2>/dev/null) || continue
+    returned=0
+    while IFS= read -r url; do
+      [ -n "$url" ] || continue
+      returned=$((returned + 1))
+      [ "$returned" -le "$FM_BEARINGS_PR_LIMIT" ] && add_pr_url "$url"
+    done <<EOF
+$discovered
+EOF
+    if [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ]; then
+      PR_ROWS_CAPPED=$((PR_ROWS_CAPPED + 1))
+    fi
+  done
+  PR_REPOS_SHOWN=$nrepos
+fi
+
+rows='[]'
+named=0
+unverified=0
+while IFS= read -r url; do
+  [ -n "$url" ] || continue
+  named=$((named + 1))
+  repo=$(repo_slug "$url")
+  num=$(printf '%s' "$url" | sed -n 's#^https://github\.com/[^/]*/[^/]*/pull/\([0-9][0-9]*\)/*$#\1#p')
+  task=$(printf '%s' "$SNAP" | jq -r --arg url "$url" '[.tasks[] | select(.pr.url==$url) | .id][0] // "-"')
+  if [ -z "$repo" ] || [ -z "$num" ] || ! command -v gh-axi >/dev/null 2>&1; then
+    row=$(jq -n --arg num "${num:--}" --arg repo "${repo:--}" --arg task "$task" --arg url "$url" \
+      '{num:$num,repo:$repo,task:$task,url:$url,title:"NOT_VERIFIABLE",state:"NOT_VERIFIABLE",mergedAt:"NOT_VERIFIABLE",head:"NOT_VERIFIABLE",checks:"NOT_VERIFIABLE",verification:"NOT_VERIFIABLE"}')
+    unverified=$((unverified + 1))
+    rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a + [$b]')
+    continue
+  fi
+  api=$(ghaxi_bounded api "repos/$repo/pulls/$num" \
+    --jq '[.number,.title,.state,(.merged_at // "-"),.html_url,.head.sha,.head.ref] | @tsv' 2>/dev/null) || api=
+  details=$(printf '%s\n' "$api" | decode_api_body 2>/dev/null) || details=
+  if [ -z "$details" ]; then
+    row=$(jq -n --arg num "$num" --arg repo "$repo" --arg task "$task" --arg url "$url" \
+      '{num:$num,repo:$repo,task:$task,url:$url,title:"NOT_VERIFIABLE",state:"NOT_VERIFIABLE",mergedAt:"NOT_VERIFIABLE",head:"NOT_VERIFIABLE",checks:"NOT_VERIFIABLE",verification:"NOT_VERIFIABLE"}')
+    unverified=$((unverified + 1))
+    rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a + [$b]')
+    continue
+  fi
+  IFS=$(printf '\t') read -r live_num title state merged_at canonical_url head_sha head_ref <<EOF
+$details
+EOF
+  case "$live_num:$state:$canonical_url:$head_sha:$head_ref" in
+    "$num:open:https://github.com/$repo/pull/$num":?*:?*|"$num:closed:https://github.com/$repo/pull/$num":?*:?*) ;;
+    *)
+      row=$(jq -n --arg num "$num" --arg repo "$repo" --arg task "$task" --arg url "$url" \
+        '{num:$num,repo:$repo,task:$task,url:$url,title:"NOT_VERIFIABLE",state:"NOT_VERIFIABLE",mergedAt:"NOT_VERIFIABLE",head:"NOT_VERIFIABLE",checks:"NOT_VERIFIABLE",verification:"NOT_VERIFIABLE"}')
+      unverified=$((unverified + 1))
+      rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a + [$b]')
+      continue
+      ;;
+  esac
+  [ "$merged_at" != - ] && live_state=MERGED || live_state=$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]')
+  runs_api=$(ghaxi_bounded api "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100" \
+    --jq '[.total_count, (.workflow_runs|length), (.workflow_runs | map("\(.name)[event=\(.event) attempt=\(.run_attempt) created=\(.created_at) updated=\(.updated_at) status=\(.status) conclusion=\(.conclusion // \"pending\") url=\(.html_url)]") | join("; "))] | @tsv' 2>/dev/null) || runs_api=
+  runs=$(printf '%s\n' "$runs_api" | decode_api_body 2>/dev/null) || runs=
+  checks=NOT_VERIFIABLE
+  if [ -n "$runs" ]; then
+    IFS=$(printf '\t') read -r runs_total runs_returned checks <<EOF
+$runs
+EOF
+    case "$runs_total:$runs_returned" in *[!0-9:]*|:*) runs_total=invalid; runs_returned=invalid ;; esac
+    if [ "$runs_total" != "$runs_returned" ]; then
+      checks="NOT_VERIFIABLE: Actions run list returned $runs_returned of $runs_total"
+    elif [ "$runs_returned" = 0 ]; then
+      checks=none
+    elif [ -z "$checks" ] || ! printf '%s\n' "$checks" | awk '
+      BEGIN { RS="; "; ok=1; n=0 }
+      {
+        n++
+        if ($0 !~ /\[event=[^ ]+ attempt=[0-9]+ created=[^ ]+ updated=[^ ]+ status=[^ ]+ conclusion=[^ ]+ url=https:\/\//) ok=0
+      }
+      END { exit !(ok && n == expected) }
+    ' expected="$runs_returned"; then
+      checks="NOT_VERIFIABLE: Actions instances lacked event, attempt, timestamp, status, conclusion, or URL evidence"
     fi
   fi
+  row=$(jq -n --arg num "$live_num" --arg repo "$repo" --arg task "$task" \
+    --arg url "$canonical_url" --arg title "$title" --arg state "$live_state" \
+    --arg mergedAt "$merged_at" --arg head "$head_ref@$head_sha" --arg checks "$checks" \
+    '{num:$num,repo:$repo,task:$task,url:$url,title:$title,state:$state,
+      mergedAt:(if $mergedAt=="-" then null else $mergedAt end),head:$head,checks:$checks,verification:"verified_live"}')
+  rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a + [$b]')
+done <<EOF
+$URLS
+EOF
+CANDIDATE_PRS=$rows
+PR_ROWS_MIN_TOTAL=$named
+if [ "$unverified" -gt 0 ]; then
+  PR_STATUS="checked ($named named; $unverified NOT_VERIFIABLE)"
+else
+  PR_STATUS="checked ($named named; all verified live)"
 fi
 
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
@@ -301,6 +385,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
+  --argjson recorded_url_total "$RECORDED_URL_TOTAL" \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
@@ -328,14 +413,21 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (if $all_landed == 1 then $landed_sorted else ($per_home_groups | round_robin_landed($landed_n)) end) as $done
   | ($done | map(.id)) as $done_ids
   | ([.tasks[] | select(.kind != "secondmate") | .id]) as $live_ids
-  | ([.tasks[] | select(.kind != "secondmate" and .current_state.state == "working") | .id]) as $working_ids
+  | ([.tasks[] | select(.kind != "secondmate" and .liveness.activity == "active") | .id]) as $working_ids
   | ($live_ids + $done_ids) as $rel_ids
   | ([ .tasks[]
-       | select(.endpoint.exists == false or .endpoint.agent_alive == "dead")
-       | {id, backend, target:(.endpoint.target // "-"), exists:.endpoint.exists, agent:.endpoint.agent_alive} ]
+       | select(.liveness.endpoint.presence != "verified_present" or .liveness.worker.presence != "verified_present")
+       | {id, backend, target:(.endpoint.target // "-"), endpoint:.liveness.endpoint.presence,
+          worker:.liveness.worker.presence,activity:.liveness.activity} ]
      + [ (.secondmate_current.records // [])[] as $m | $m.endpoints[]?
          | select(.endpoint.exists == false or .endpoint.agent_alive == "dead")
-         | {id:($m.id + "/" + .id),backend:"secondmate-home",target:(.endpoint.target // "-"),exists:.endpoint.exists,agent:.endpoint.agent_alive} ]) as $unhealthy_all
+         | {id:($m.id + "/" + .id),backend:"secondmate-home",target:(.endpoint.target // "-"),
+            endpoint:(if .endpoint.exists == false then "verified_absent"
+                      elif .endpoint.exists == true then "verified_present" else "unverified" end),
+            worker:(if .endpoint.agent_alive == "alive" then "verified_present"
+                    elif .endpoint.agent_alive == "dead" then "verified_absent" else "unverified" end),
+            activity:(if .endpoint.exists == false then "absent"
+                      elif .endpoint.agent_alive == "dead" then "inactive" else "unverified" end)} ]) as $unhealthy_all
   | ([ (.secondmate_current.records // [])[]
        | ([.decisions_open[]? | select(.source == "backlog" and .verb == "captain-hold")]) as $captain_holds
        | ([.holds[]? | select(.source == "backlog")]) as $backlog_holds
@@ -372,11 +464,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
-       | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | select(.backlog.current_role != "held" or .liveness.activity == "active")
+       | select(.liveness.activity == "active")
        | {id, kind,
-        state: .current_state.state,
-        doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+        state: .liveness.activity,
+        doing: ((if .liveness.output.changed then "backend output changed across samples"
+                 else "cumulative CPU delta \(.liveness.cpu.delta_ms) ms (\(.liveness.cpu.rate_ms_per_minute) ms/min, \(.liveness.harness_family) baseline)" end) | trunc(90))
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
@@ -397,6 +490,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           reason:"main inventory",
           owner:"(main)"}]
       else [] end)
+     + [ .tasks[]
+         | select(.kind != "secondmate" and .backlog.state == "in_flight"
+                  and .backlog.current_role != "held" and .liveness.activity != "active")
+         | {id,title:((.backlog.title // .id) | trunc(60)),blocked_by:"-",
+            reason:("measured liveness: " + .liveness.activity + "; endpoint=" + .liveness.endpoint.presence + "; worker=" + .liveness.worker.presence | trunc(120)),owner:"(main)"} ]
      + [ .backlog.records[]
          | . as $record
          | select(.structured and
@@ -419,7 +517,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
-  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
+  | ([ $candidate_prs[] | select(.task != "-")
+       | {id:.task,url,state,mergedAt,verification} ]) as $recorded_prs_all
   | . as $snap
   | {
       schema: "fm-bearings.v1",
@@ -438,11 +537,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | . + (if ($unhealthy_all | length) > 0 then
            {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
          else {} end)
-  | . + (if $include_prs == 1 then {candidate_prs:$candidate_prs} else {} end)
+  | . + {candidate_prs:$candidate_prs}
   | . + (if $f_bodies then {bodies:[ $snap.backlog.records[] | select(.structured and (.state == "queued" or .state == "done")) | {id, body:((.body_excerpt // .raw // "-") | trunc(200))} ]} else {} end)
   | . + (if $f_paths then {paths:[ $snap.tasks[] | {id, worktree:(.paths.worktree.path // "-"), home:(.paths.home.path // "-"), status:.paths.status_log.path, report:.paths.report.path} ]} else {} end)
   | . + (if $f_actions then {actions:[ $snap.tasks[] | {id, watch:(.actions.watch // .actions.send // "-"), steer:(.actions.steer // .actions.send // "-")} ]} else {} end)
-  | . + (if $f_endpoints then {endpoints:[ $snap.tasks[] | {id, backend, target:(.endpoint.target // "-"), exists:.endpoint.exists, agent:.endpoint.agent_alive} ]} else {} end)
+  | . + (if $f_endpoints then {endpoints:[ $snap.tasks[] | {id, backend, target:(.endpoint.target // "-"),
+      endpoint:.liveness.endpoint.presence,worker:.liveness.worker.presence,activity:.liveness.activity} ]} else {} end)
   | . + {omitted: (
       [ (if $f_bodies then empty else {surface:"backlog item bodies", reveal:"--fields bodies"} end),
         (if $f_paths then empty else {surface:"task paths", reveal:"--fields paths"} end),
@@ -469,11 +569,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
         (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
         (if $all_reports == 0 and ($reports_all | length) > $reports_n then {surface:("reports showing \($reports_n) of \($reports_all | length)"), reveal:"--all-reports"} else empty end),
-        (if $all_recorded_prs == 0 and ($recorded_prs_all | length) > $recorded_prs_n then {surface:("recorded_prs showing \($recorded_prs_n) of \($recorded_prs_all | length)"), reveal:"--all-recorded-prs"} else empty end),
+        (if $all_recorded_prs == 0 and $recorded_url_total > (.recorded_prs | length) then {surface:("recorded_prs showing \(.recorded_prs | length) of \($recorded_url_total)"), reveal:"--all-recorded-prs"} else empty end),
         (if $all_unhealthy == 0 and ($unhealthy_all | length) > $unhealthy_n then {surface:("unhealthy_endpoints showing \($unhealthy_n) of \($unhealthy_all | length)"), reveal:"--all-unhealthy"} else empty end),
         (if $include_prs == 1 and $pr_repos_total > $pr_repos_shown then {surface:("PR repositories showing \($pr_repos_shown) of \($pr_repos_total)"), reveal:"--all-pr-repos"} else empty end),
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
-        (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
+        (if $include_prs == 1 then empty else {surface:"additional live open-PR discovery", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
 
 if [ "$FORMAT" = json ]; then
