@@ -38,7 +38,8 @@ During no-mistakes' `ci` monitor phase, it also reads the ci step log tail becau
 The most recent recognized ci log marker wins for an unpaused monitor, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 Before that log inference, the current-state reader recognizes the narrow passive-monitor pause using structured phase, ULID run time, run id, the run's own exact head identity, and semantic worker activity.
 Fixing, active pre-CI steps, parked gates, terminal outcomes, a busy or unknown worker, a newer run, an ancestor-only head match, and a changed head retain their ordinary authoritative classifications.
-The watcher caches only an unchanged canonical paused verdict, including its matched run identity, and invalidates it on a status event, code head, semantic worker generation, or long recheck deadline change.
+The watcher caches only that unchanged run-step-sourced paused verdict, including its matched run identity, and invalidates it on a status event, code head, semantic worker generation, or long recheck deadline change.
+Every other verdict, including a `paused:` the crew declared for itself, keeps the fresh read, because a validation starting underneath a self-declared pause must still report working rather than serve a cached pause for a whole recheck window.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
