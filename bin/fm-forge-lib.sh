@@ -150,9 +150,10 @@ fm_forge_require_cli() {
       done
       ;;
     gitlab)
-      for tool in glab; do
-        command -v "$tool" >/dev/null 2>&1 || { echo "MISSING: $tool"; missing=1; }
-      done
+      if ! command -v glab >/dev/null 2>&1; then
+        echo "MISSING: glab"
+        missing=1
+      fi
       ;;
     local|unknown)
       : # no forge CLI required
