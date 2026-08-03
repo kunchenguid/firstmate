@@ -142,6 +142,7 @@ ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+LINE_BREAK_RE = re.compile("[\u2028\u2029]")
 URL_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"')]+", re.IGNORECASE)
 LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{16,}\b")
 GROUPED_CODE_RE = re.compile(r"\b\d{3,}(?:[ .-]\d{3,})+\b")
@@ -155,10 +156,11 @@ CREDENTIAL_PATTERNS = (
     (
         re.compile(
             r"\b(?:one[- ]?time|single[- ]use|verification|security|login|sign[- ]?in|"
-            r"access|confirmation|authentication)\s+(?:code|passcode|pin)\b",
+            r"access|confirmation|authentication)\s+"
+            r"(?:code|passcode|pin|password|passphrase|passwort|kennwort)\b",
             re.IGNORECASE,
         ),
-        "names a one-time or verification code",
+        "names a one-time or verification code or password",
     ),
     (
         re.compile(r"\b(?:otp|2fa|mfa|two[- ]factor|multi[- ]factor|authenticator)\b", re.IGNORECASE),
@@ -178,10 +180,11 @@ CREDENTIAL_PATTERNS = (
     ),
     (
         re.compile(
-            r"\b(?:best(?:ä|ae)tigungs|sicherheits|verifizierungs|einmal|anmelde|zugangs)code\b",
+            r"\b(?:best(?:ä|ae)tigungs|sicherheits|verifizierungs|einmal(?:ig(?:e[nmrs]?)?)?|"
+            r"anmelde|zugangs)[- ]?(?:code|passcode|passwort|kennwort)\b",
             re.IGNORECASE,
         ),
-        "names a German verification code",
+        "names a German verification code or password",
     ),
     (
         re.compile(r"\b(?:magic|sign[- ]?in|login|one[- ]?time)\s+link\b", re.IGNORECASE),
@@ -696,6 +699,7 @@ def sender_of(message: dict) -> str:
 
 def sanitize_text(value: str) -> str:
     text = value.replace("\r\n", "\n").replace("\r", "\n")
+    text = LINE_BREAK_RE.sub("\n", text)
     text = ANSI_OSC_RE.sub("", text)
     text = ANSI_CSI_RE.sub("", text)
     text = text.replace("\x1b", "")
