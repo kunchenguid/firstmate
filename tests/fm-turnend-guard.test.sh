@@ -1557,26 +1557,36 @@ stop_fake_lock_owner() {
   FAKE_LOCK_OWNER_PID=''
 }
 
-# Run the guard under a harness-named parent so its ancestry RESOLVES, the same
-# fake-harness mechanism run_integrated_autoarm already uses. Without this the
-# walk depends on whoever launched the suite: under a real session it resolves,
-# and on a CI runner with no harness ancestor it does not, so a test meaning to
-# exercise positive foreign ownership would silently exercise the unresolvable
-# case instead and pass for the wrong reason.
+# Run the guard under a harness-named parent so its ancestry RESOLVES, without
+# borrowing the host's process tree for that answer. Two properties carry it:
+#
+#   - The fake harness must SURVIVE as a real parent. bash exec-optimizes a -c
+#     string that is one simple command, replacing the fake-claude process with
+#     the guard's own bash and leaving no harness-named ancestor at all, so the
+#     child runs a list instead.
+#   - The deep-shell wrapper sits ABOVE the fake harness, pushing whatever
+#     launched the suite past the walk's 16-hop bound. The fixture is then the
+#     only reachable harness: the walk binds to it on a developer machine and a
+#     CI runner alike, and if the exec collapse ever returns the walk resolves
+#     nothing, the guard blocks, and this test fails loudly instead of passing
+#     through the host's real session.
 run_hook_claude_under_fake_harness() {
   local dir=$1 home
   home=$(cd "$dir" && pwd)
   ln -sf /bin/bash "$dir/fake-claude"
   # shellcheck disable=SC2016 # the fake harness expands FM_HOME inside its child shell.
   printf '{"stop_hook_active":false,"session_id":"sess-claude-mode"}' \
-    | CLAUDECODE=1 FM_HOME="$home" "$dir/fake-claude" -c \
-      'bash "$FM_HOME/bin/fm-turnend-guard.sh" --claude' 2>&1
+    | CLAUDECODE=1 FM_HOME="$home" bash "$dir/deep-shell.sh" 18 \
+      "$dir/fake-claude" -c \
+      'bash "$FM_HOME/bin/fm-turnend-guard.sh" --claude; exit $?' 2>&1
 }
 
-# Run the guard beneath more plain shells than the ancestry walk's 16-hop bound,
-# which makes fm_harness_ancestry_pids fail to resolve on every host and platform
-# rather than depending on the launching process tree. Each level runs its child
-# and waits, so the intervening shells stay alive as real ancestors.
+# Put more plain shells between a command and the suite than the ancestry walk's
+# 16-hop bound, so whatever launched the suite is out of reach on every host and
+# platform. Each level runs its child and waits, so the intervening shells stay
+# alive as real ancestors. Run the guard directly under it and the walk resolves
+# nothing; interpose a fake harness first and the fixture is the only ancestor
+# the walk can find.
 install_deep_shell() {
   local dir=$1
   cat > "$dir/deep-shell.sh" <<'SH'
@@ -1611,6 +1621,7 @@ test_hook_claude_mode_allows_when_another_live_session_owns_the_lock() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-foreign-lock")
   : > "$dir/state/task1.meta"
+  install_deep_shell "$dir"
   start_fake_lock_owner "$dir"
   printf '%s\n' "$FAKE_LOCK_OWNER_PID" > "$dir/state/.lock"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_under_fake_harness "$dir"); status=$?
