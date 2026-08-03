@@ -167,7 +167,7 @@ Natural language is acceptable if uncertain.
 ## Submission acknowledgement hazards
 
 A send or key action reporting success is not proof that the intended action happened.
-OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
+Claude and OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
 The shared symptom is a healthy-looking pane with no work in progress, so each adapter must verify the observable postcondition that is specific to its TUI.
 
 ## claude (VERIFIED; busy-state hooks live-verified 2026-07-28 on Claude Code 2.1.220)
@@ -244,23 +244,8 @@ Opencode can auto-upgrade itself in the background and the running TUI can exit 
 If a pane shows the exit banner, relaunch with `--continue` to resume the session.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
 
-**Busy-queued Enter (opencode 1.18.4, tmux backend fix, herdr known gap).**
-While opencode is mid-turn, the composer accepts Enter as a "send when the turn
-ends" keystroke but does not clear the typed text from the composer until the
-turn actually finishes.
-Without a fix, every `fm-send` to a busy opencode pane exits non-zero on a
-false "Enter swallowed", and every daemon escalation that lands while the
-primary is mid-turn is treated as wedged.
-The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) now falls back
-to `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means
-the Enter was accepted and queued (reported as `empty` so the caller does not
-re-send), while an idle pane keeps `pending` as a genuine swallow. The herdr
-adapter observes the same opencode behavior but needs a separate fix; it is
-recorded as a known gap in `docs/herdr-backend.md` rather than patched here,
-so the tmux adapter does not paper over a herdr-specific shape.
-Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four
-scenarios (busy + pending -> `empty`, idle + pending -> `pending`, busy +
-cleared -> `empty`, idle + cleared -> `empty`).
+The header of `bin/fm-tmux-lib.sh` owns the harness-gated tmux busy-queued Enter contract and points to its regression coverage.
+The separate OpenCode gap on Herdr remains documented in `docs/herdr-backend.md`.
 
 **Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
 The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.

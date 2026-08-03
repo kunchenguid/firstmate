@@ -78,7 +78,7 @@ Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identiti
 Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
-The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
+The structural multi-row composer reader, Kimi pointer-delivery path, Claude rendered busy-footer matrix, and harness-gated tmux busy-queue behavior were reverified on 2026-08-03 and are pinned by:
 
 ```sh
 tests/fm-composer-ghost.test.sh
@@ -87,7 +87,8 @@ tests/fm-tmux-submit-busy.test.sh
 ```
 
 Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
-Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
+Expected submit matrix: proven pending plus a matching busy footer is accepted as queued only for an opted-in harness; an idle, unknown, or non-opted-in harness remains pending; ambiguous pending is never converted; and only a proven empty composer succeeds directly.
+Expected Claude footer matrix: streaming, tool-wait, and extended-thinking rows classify busy without depending on non-ASCII glyphs, while finished-turn timers and completed tool-path durations remain idle.
 
 ### Cleanup endpoint identity
 

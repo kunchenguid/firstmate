@@ -71,11 +71,9 @@ Only a proven empty composer is a positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 `fm-send.sh` reports every unconfirmed verdict as a failure instead of retyping or assuming delivery.
 
-OpenCode 1.18.4 has one busy-queue exception.
-While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
-After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
-Ambiguous pending text never receives the busy-queue conversion.
-`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
+Claude and OpenCode are the only verified tmux harnesses whose matching rendered busy footer can prove that retained, structurally pending text was queued after the Enter retry budget is exhausted.
+Every other or unknown harness fails closed with `pending`, and ambiguous pending text is never converted.
+The header of `bin/fm-tmux-lib.sh` owns the exact capability and rendered-footer contract; `tests/fm-tmux-submit-busy.test.sh` is its regression entry point.
 
 ## Limits and regression entry points
 

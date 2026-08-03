@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# tests/fm-tmux-submit-busy.test.sh - regression: busy pane + pending composer
-# after Enter retries must return "empty" (message queued), not "pending".
+# tests/fm-tmux-submit-busy.test.sh - regression: an opted-in harness's matching
+# busy footer plus a pending composer proves queued delivery after Enter retries.
 set -u
 
 # shellcheck source=tests/lib.sh

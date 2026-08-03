@@ -2,9 +2,10 @@
 # fm-tmux-lib.sh — shared tmux pane primitives for firstmate.
 #
 # ONE source of truth for: busy detection, composer-empty (pending-input)
-# detection, and a verify-and-retry-Enter submit. Sourced by both the away-mode
-# daemon (bin/fm-supervise-daemon.sh) and bin/fm-send.sh so the composer/submit
-# logic cannot drift between the two.
+# detection, and a verify-and-retry-Enter submit. Sourced by the away-mode daemon
+# (bin/fm-supervise-daemon.sh), bin/fm-send.sh, and the secondmate pending-reply
+# guard (bin/fm-pending-reply-lib.sh) so their rendered delivery checks share one
+# contract.
 #
 # Why this exists (incident afk-invx-i5): the daemon's old composer check only
 # recognized a BARE prompt glyph ("> ") as an empty composer. claude draws its
@@ -49,9 +50,10 @@
 #
 # NOT a task-state source: task busy state is owned by bin/fm-busy-lib.sh's
 # semantic contract. The matching below serves only delivery guards: the submit
-# acknowledgement and the away-mode supervisor-pane busy guard. Both ask about
-# the pane receiving input, not the state of a recorded worker task. Matching
-# stays harness-scoped so one harness's output cannot make another read busy.
+# acknowledgement, the away-mode supervisor-pane busy guard, and the secondmate
+# pending-reply observation. They ask about a pane receiving input or completing
+# one delivered request, not the state of a recorded worker task. Matching stays
+# harness-scoped so one harness's output cannot make another read busy.
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
@@ -71,8 +73,8 @@
 # "<Gerund> for 53s . 1 shell still running" with neither a counter nor a
 # parenthesized duration, and extended thinking "<Gerund>... (2m 50s .
 # thinking some more with xhigh effort)" with neither a counter nor a wait
-# hint. The gerund is randomised, is not always ASCII ("Sauteed"), and each
-# release adds shapes, so it is never matched.
+# hint. The gerund is randomised and can contain non-ASCII characters, so it is
+# never matched.
 # The elapsed timer is NOT the discriminator either: a FINISHED turn renders
 # the same timer ("Baked for 8m 42s"), so a bare timer alternative reports a
 # genuinely idle pane as busy - the direction that makes the submit guard
