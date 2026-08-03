@@ -25,10 +25,12 @@
 #      fallback)? Bare `axi status` owns current-run chronology: its same-branch
 #      nonterminal run remains the current validation owner when its nonempty,
 #      mutable head has advanced beyond history available to the unchanged
-#      submitting worktree. A run head the branch's own local reflog records as
-#      a former tip is not such an advance: the branch was rewritten away from
-#      it after submission, so that abandoned nonterminal run is rejected as
-#      stale rather than masking the crew's current state.
+#      submitting worktree. A run head built on a former tip the branch's own
+#      local reflog shows was rewritten away - whether the head still is that
+#      tip or advanced beyond it with pipeline fix commits - is not such an
+#      advance: the branch was rewritten away from it after submission, so
+#      that abandoned nonterminal run is rejected as stale rather than
+#      masking the crew's current state.
 #      Terminal and coarse historical attribution stays
 #      strictly head-bound, and the coarse fallback stops at the newest row for
 #      the branch rather than searching older history after an identity miss.
@@ -385,23 +387,36 @@ nm_run_head_matches_worktree() {
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
-# 0 if the crew branch's local reflog records this exact commit as a former
-# tip. A divergent run head that the branch itself once pointed at means the
-# submitting worktree rewrote the branch after submission - the run is an
-# abandoned leftover, not a pipeline-advanced current head. A missing or
-# unreadable reflog yields no entries and never rejects on its own.
-nm_branch_reflog_contains() {  # <full-sha>
+# 0 if the crew branch's local reflog shows the run head was built on a
+# rewritten-away former tip: some recorded tip that is no longer part of the
+# local HEAD's history yet underlies the run head's line of history. The
+# submitting worktree rewrote the branch away from that tip after submission,
+# so the run is an abandoned leftover - whether its head still IS that former
+# tip or advanced beyond it with pipeline fix commits - not a
+# pipeline-advanced current head. Former tips still underlying the local HEAD
+# (the branch-creation base, the current tip, ordinary ancestors) never
+# reject, so a legitimately rebased pipeline head stays accepted. A missing
+# or unreadable reflog yields no entries and never rejects on its own.
+nm_run_head_built_on_rewritten_tip() {  # <run-full-sha> <local-full-sha>
+  local run_full=$1 local_full=$2 tip
   [ -n "$CREW_BRANCH" ] || return 1
-  git -C "$WT" reflog show --format=%H "refs/heads/$CREW_BRANCH" 2>/dev/null \
-    | grep -qxF "$1"
+  while IFS= read -r tip; do
+    [ -n "$tip" ] || continue
+    git -C "$WT" merge-base --is-ancestor "$tip" "$local_full" 2>/dev/null && continue
+    if git -C "$WT" merge-base --is-ancestor "$tip" "$run_full" 2>/dev/null; then
+      return 0
+    fi
+  done < <(git -C "$WT" reflog show --format=%H "refs/heads/$CREW_BRANCH" 2>/dev/null)
+  return 1
 }
 
 # Bare axi status selects the branch's current run. A clearly nonterminal run
 # with a nonempty mutable head therefore retains ownership when that head is
 # divergent from or unavailable to the unchanged submitting worktree. Local
 # work strictly ahead of the run is still newer code and rejects attribution,
-# a divergent head the branch's own reflog shows was rewritten away rejects as
-# stale, and terminal runs retain the strict historical head binding above.
+# a divergent head built on a tip the branch's own reflog shows was rewritten
+# away rejects as stale, and terminal runs retain the strict historical head
+# binding above.
 nm_primary_run_matches() {
   local run_head status outcome local_full run_full
   run_head=$(strip_quotes "$(nm_field head)")
@@ -417,7 +432,7 @@ nm_primary_run_matches() {
   local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
   run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 0
   git -C "$WT" merge-base --is-ancestor "$run_full" "$local_full" 2>/dev/null && return 1
-  nm_branch_reflog_contains "$run_full" && return 1
+  nm_run_head_built_on_rewritten_tip "$run_full" "$local_full" && return 1
   return 0
 }
 

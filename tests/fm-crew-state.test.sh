@@ -27,8 +27,10 @@
 #       benefits from the fix in both directions.
 #   (l) branch chronology outranks mutable head identity for the current
 #       nonterminal run, while terminal history remains strictly head-bound and
-#       a nonterminal head the branch's own reflog shows was rewritten away
-#       (an abandoned run on a reused branch) is rejected as stale.
+#       a nonterminal head built on a tip the branch's own reflog shows was
+#       rewritten away - whether it still is that tip or advanced beyond it
+#       with pipeline fix commits (an abandoned run on a reused branch) - is
+#       rejected as stale.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1446,6 +1448,41 @@ test_stale_parked_run_on_rewritten_branch_not_current() {
   pass "stale parked run on a rewritten branch is not attributed as current"
 }
 
+# A nonterminal run whose head advanced beyond the rewritten-away submitted
+# tip (pipeline fix commits on top of the abandoned tip - the typical
+# fixing/fix_review shape) is still built on that former tip and must be
+# rejected as stale, exactly like a run whose head IS the former tip.
+test_stale_advanced_run_head_on_rewritten_branch_not_current() {
+  reset_fakes
+  local d old_head run_head new_head out
+  d=$(new_case stale-advanced-rewritten)
+  make_repo_on_branch "$d/wt" fm/todo-flag3
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  # The pipeline advanced the abandoned run's head beyond the submitted tip.
+  git -C "$d/wt" checkout -q --detach "$old_head"
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix on abandoned run'
+  run_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q fm/todo-flag3
+  # Simulate a stage-2 rewrite that keeps the branch reflog: amend the tip.
+  git -C "$d/wt" commit -q --allow-empty --amend -m 'stage 2 rewritten tip'
+  new_head=$(git -C "$d/wt" rev-parse HEAD)
+  [ "$old_head" != "$new_head" ] || fail "rewrite did not produce a new head"
+  [ "$run_head" != "$old_head" ] || fail "run head did not advance beyond the submitted tip"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/stale-advanced.meta" "window=fm:fm-stale-advanced" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 setup complete rebased onto merged #76\n' > "$d/state/stale-advanced.status"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/todo-flag3)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" stale-advanced
+  out=$(run_crew_state "$d" stale-advanced)
+  assert_not_contains "$out" "source: run-step" "advanced head on a rewritten-away tip must not use run-step"
+  assert_not_contains "$out" "parked at" "abandoned parked run must not mask current state"
+  assert_contains "$out" "source: status-log" "falls back to status-log after reflog rejection"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "stale advanced run head on a rewritten branch is not attributed as current"
+}
+
 test_cross_branch_fallback_stops_at_newest_target_branch_row() {
   reset_fakes
   local d local_short out
@@ -1526,6 +1563,7 @@ test_newer_divergent_ci_run_uses_its_latest_green_marker
 test_newer_divergent_ci_run_later_non_ready_marker_stays_working
 test_same_branch_terminal_mismatch_does_not_resurrect_older_run
 test_stale_parked_run_on_rewritten_branch_not_current
+test_stale_advanced_run_head_on_rewritten_branch_not_current
 test_cross_branch_fallback_stops_at_newest_target_branch_row
 
 echo "all fm-crew-state tests passed"
