@@ -49,10 +49,15 @@ batched digest rather than per-wake injections.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
-3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
+3. **Verify supervision is real before reporting it.**
+   Launching the daemon is not evidence that it is supervising: while `state/.afk` exists the watcher drops to one-shot and hands triage to the daemon, so a flag with a dead daemon means nothing triages at all.
+   Wait for the daemon's own `afk: supervision live` line, which it prints only after its first housekeeping tick has actually run, or confirm with `bin/fm-afk-health.sh` (`AFK_HEALTHY`).
+   Never acknowledge away mode on `AFK_DEGRADED`: repair the daemon or clear the flag first.
+
+4. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
 
-4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
+5. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 
 ## How to exit afk
 

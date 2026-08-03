@@ -286,7 +286,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        n=$(( $(read_counter "$escalation_file") + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
@@ -432,10 +432,26 @@ surface_nonterminal_stale() {  # <window> <hash>
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
-age_of() {  # seconds since file mtime; "due immediately" if missing
-  local f=$1 m
+# Seconds since file mtime; "due immediately" if missing OR unreadable.
+# bin/fm-wake-lib.sh's fm_path_age owns the fail-safe age contract: validate the
+# output, not just the exit status, so an unparseable age reads as DUE instead
+# of returning an empty string that makes the caller's `-ge` gate die and read
+# as false, silently disabling the cadence it guards.
+age_of() {
+  local f=$1 m now
   m=$(stat_mtime "$f") || { echo 999999; return; }
-  echo $(( $(date +%s) - m ))
+  case $m in ''|*[!0-9]*) echo 999999; return ;; esac
+  now=$(date +%s) || { echo 999999; return; }
+  case $now in ''|*[!0-9]*) echo 999999; return ;; esac
+  echo $(( now - m ))
+}
+
+# Counter state files follow the same contract: a truncated, empty, or corrupt
+# file must never reach $(( )), where `set -u` would abort the poll mid-cycle.
+read_counter() {  # <file> -> non-negative integer; 0 when missing or unparseable
+  local v
+  v=$(cat "$1" 2>/dev/null || true)
+  case $v in ''|*[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
 }
 
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
@@ -953,7 +969,7 @@ EOF
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
     if [ "$h" = "$prev" ]; then
-      n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
+      n=$(( $(read_counter "$cf") + 1 ))
       echo "$n" > "$cf"
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
@@ -1115,7 +1131,7 @@ EOF
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
-      echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
+      echo $(( $(read_counter "$STATE/.heartbeat-streak") + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi

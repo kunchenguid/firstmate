@@ -235,10 +235,23 @@ else
   _stat_file_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
 _now() { date +%s; }
-_file_age() {  # seconds since mtime; very large if missing
-  local f=$1 m
+# Seconds since mtime; "very old" (999999) whenever the age cannot be trusted.
+# bin/fm-wake-lib.sh's fm_path_age owns the fail-safe age contract this follows:
+# an unreadable or unparseable age must read as DUE, never as an empty string.
+# Checking only the exit status is not enough. A `stat` that exits 0 while
+# printing non-numeric text (a wrapper/shim, or a non-BSD stat reached with BSD
+# flags) reaches $(( )), where `set -u` turns the recursive arithmetic
+# evaluation of $m into an unbound-variable error, so the echo never runs and
+# the caller's `-ge` gate receives an EMPTY operand: it dies with "integer
+# expression expected" and reads as FALSE, silently stopping housekeeping while
+# away mode still reports itself active.
+_file_age() {
+  local f=$1 m now
   m=$(_stat_file_mtime "$f") || { echo 999999; return; }
-  echo $(( $(_now) - m ))
+  case $m in ''|*[!0-9]*) echo 999999; return ;; esac
+  now=$(_now) || { echo 999999; return; }
+  case $now in ''|*[!0-9]*) echo 999999; return ;; esac
+  echo $(( now - m ))
 }
 
 _hash_text() {
@@ -932,14 +945,17 @@ inject_wedge_alarm() {  # <state> <age-seconds>
 }
 
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
-  local f=$1 since
+  local f=$1 since epoch now
   [ -s "$f" ] || { echo 999999; return; }
   since="${f}.since"
-  if [ -r "$since" ]; then
-    echo $(( $(_now) - $(cat "$since" 2>/dev/null || echo 0) ))
-  else
-    echo 999999
-  fi
+  [ -r "$since" ] || { echo 999999; return; }
+  # Same fail-safe age contract as _file_age: a truncated or corrupt sidecar
+  # must flush the buffer, never abort the tick with an empty operand.
+  epoch=$(cat "$since" 2>/dev/null || true)
+  case $epoch in ''|*[!0-9]*) echo 999999; return ;; esac
+  now=$(_now) || { echo 999999; return; }
+  case $now in ''|*[!0-9]*) echo 999999; return ;; esac
+  echo $(( now - epoch ))
 }
 
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
@@ -1332,6 +1348,29 @@ fm_super_main() {
   echo "$$" > "$PIDFILE"
   fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
 
+  # --- the daemon must never die silently ----------------------------------
+  # Away mode hands triage to this process while state/.afk exists, so a death
+  # here stops all triage while away mode still reports itself active. Two
+  # durable records make that impossible to miss:
+  #   1. stderr is appended to the daemon log, so a bash error (the class that
+  #      caused the housekeeping-gate incident) lands where supervision already
+  #      looks instead of in a harness task-output file nobody reads;
+  #   2. an EXIT trap records the exit code, so a gone process always leaves a
+  #      reason behind. bin/fm-afk-health.sh reads both.
+  local READY="$STATE/.subsuper-daemon-ready"
+  local EXITED="$STATE/.subsuper-daemon-exit"
+  rm -f "$READY" "$EXITED" 2>/dev/null || true
+  exec 2>>"$LOG"
+  record_exit() {
+    local rc=$?
+    printf '%s\texit=%s\tpid=%s\tready=%s\n' \
+      "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$rc" "$$" \
+      "$([ -f "$READY" ] && echo yes || echo no)" > "$EXITED" 2>/dev/null || true
+    log "daemon exited rc=$rc"
+    rm -f "$READY" 2>/dev/null || true
+  }
+  trap record_exit EXIT
+
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
   # (herdr) > tmux fallback. Resolved before the target below, since target
@@ -1519,6 +1558,15 @@ fm_super_main() {
     if [ "$(_file_age "$STATE/.subsuper-last-housekeep")" -ge "${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}" ]; then
       _now > "$STATE/.subsuper-last-housekeep"
       housekeeping "$STATE"
+      # Readiness is claimed only here, AFTER a housekeeping tick has actually
+      # run. Arming reports success from this beacon rather than from "the
+      # process was launched", so a daemon that starts and then dies before it
+      # ever triages can no longer be reported as live away-mode supervision.
+      if [ ! -f "$READY" ]; then
+        _now > "$READY"
+        log "daemon ready (first housekeeping tick complete)"
+        echo "afk: supervision live (first housekeeping tick complete)"
+      fi
     fi
   done
 }

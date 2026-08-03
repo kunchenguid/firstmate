@@ -72,10 +72,25 @@ fm_path_mtime() {
   fi
 }
 
+# Owner of the fail-safe age contract shared with fm-watch.sh's age_of and
+# fm-supervise-daemon.sh's _file_age: every age helper must emit a bare integer
+# on every path, and must report "very old" (999999, i.e. DUE) whenever the age
+# cannot be trusted, so a cadence gate errs toward doing the work.
+#
+# Validating the OUTPUT matters as much as the exit status. A `stat` that exits
+# 0 while printing non-numeric text (a wrapper/shim, or a non-BSD stat reached
+# with BSD flags) reaches $(( )); under `set -u` the recursive arithmetic
+# evaluation of that text raises an unbound-variable error, the echo never runs,
+# and the helper returns an EMPTY string on a ZERO exit status. Callers then die
+# with "integer expression expected" and the gate reads FALSE, which silently
+# disables the very cadence it guards instead of failing loudly.
 fm_path_age() {
-  local path=$1 m
+  local path=$1 m now
   m=$(fm_path_mtime "$path") || { echo 999999; return; }
-  echo $(( $(date +%s) - m ))
+  case $m in ''|*[!0-9]*) echo 999999; return ;; esac
+  now=$(date +%s) || { echo 999999; return; }
+  case $now in ''|*[!0-9]*) echo 999999; return ;; esac
+  echo $(( now - m ))
 }
 
 FM_WATCHER_MATCHED_IDENTITY=
