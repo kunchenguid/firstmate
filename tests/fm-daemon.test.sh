@@ -1356,6 +1356,41 @@ test_wedge_alarm_herdr_channel_selected() {
   pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
 }
 
+# The herdr-verdict tests below deliberately turn the harness recorder seam off
+# (FM_WEDGE_ALARM_EXEC='') so wedge_alarm_via_herdr runs its real body - which
+# means it reaches a real `command -v herdr` and would run a real herdr if the
+# fakebin were missing. The suite runs under `set -u` but not `set -e`, so a
+# failed mkdir/chmod (unwritable TMP_ROOT, full disk) would fall through
+# silently and a real desktop notification could fire. install_fake_herdr makes
+# that impossible in both directions: it fails loudly if the fake cannot be
+# installed or does not shadow a real herdr on PATH, and the fake records every
+# invocation so assert_fake_herdr_ran can prove afterwards that the binary which
+# actually ran was ours. Sets FAKE_HERDR_BIN to the bindir to prepend to PATH.
+FAKE_HERDR_BIN=
+install_fake_herdr() {  # <dir> <stdout-payload>
+  local dir=$1 payload=$2 fb=$1/fakebin
+  mkdir -p "$fb" || fail "could not create the fake herdr bindir $fb"
+  printf '%s\n' "$payload" > "$dir/herdr.stdout" \
+    || fail "could not write the fake herdr payload under $dir"
+  rm -f "$dir/herdr.invoked"
+  cat > "$fb/herdr" <<SH || fail "could not write the fake herdr at $fb/herdr"
+#!/usr/bin/env bash
+printf '%s\n' "\$\$" > "$dir/herdr.invoked"
+cat "$dir/herdr.stdout"
+exit 0
+SH
+  chmod +x "$fb/herdr" || fail "could not make the fake herdr executable"
+  [ -x "$fb/herdr" ] || fail "the fake herdr at $fb/herdr is not executable"
+  [ "$(PATH="$fb:$PATH" command -v herdr)" = "$fb/herdr" ] \
+    || fail "the fake herdr does not shadow a real herdr on PATH: $(PATH="$fb:$PATH" command -v herdr)"
+  FAKE_HERDR_BIN=$fb
+}
+
+assert_fake_herdr_ran() {  # <dir> <context>
+  [ -s "$1/herdr.invoked" ] \
+    || fail "$2: the fake herdr recorded no invocation - a real system herdr may have run and posted a notification"
+}
+
 # The active-alert channel must not lie about delivery. `herdr notification
 # show` can exit 0 while its own structured result reports shown=false
 # (verified live on Linux/WSL2, herdr 0.7.4: reason "disabled" - the captain
@@ -1363,19 +1398,16 @@ test_wedge_alarm_herdr_channel_selected() {
 # and it silently did not). A bare exit-code check treated this as success;
 # these two pin that the real JSON result now governs the verdict.
 test_wedge_alarm_herdr_not_shown_is_a_failure() {
-  local dir fb daemon_log rc
+  local dir daemon_log rc
   command -v jq >/dev/null 2>&1 || { pass "herdr shown=false verdict skipped without jq"; return; }
-  dir="$TMP_ROOT/wedge-herdr-not-shown"; fb="$dir/fakebin"; mkdir -p "$fb"
+  dir="$TMP_ROOT/wedge-herdr-not-shown"
   daemon_log="$dir/daemon.log"
-  cat > "$fb/herdr" <<'SH'
-#!/usr/bin/env bash
-printf '{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}\n'
-exit 0
-SH
-  chmod +x "$fb/herdr"
-  PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+  install_fake_herdr "$dir" \
+    '{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}'
+  PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
     wedge_alarm_via_herdr "away-mode WEDGED 900s"
   rc=$?
+  assert_fake_herdr_ran "$dir" "shown=false verdict"
   [ "$rc" -ne 0 ] \
     || fail "herdr exiting 0 with shown=false was treated as a successful delivery"
   grep -F 'not shown (reason: disabled)' "$daemon_log" >/dev/null \
@@ -1384,18 +1416,15 @@ SH
 }
 
 test_wedge_alarm_herdr_shown_true_succeeds() {
-  local dir fb daemon_log rc
-  dir="$TMP_ROOT/wedge-herdr-shown"; fb="$dir/fakebin"; mkdir -p "$fb"
+  local dir daemon_log rc
+  dir="$TMP_ROOT/wedge-herdr-shown"
   daemon_log="$dir/daemon.log"
-  cat > "$fb/herdr" <<'SH'
-#!/usr/bin/env bash
-printf '{"id":"cli:notification:show","result":{"reason":"shown","shown":true,"type":"notification_show"}}\n'
-exit 0
-SH
-  chmod +x "$fb/herdr"
-  PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+  install_fake_herdr "$dir" \
+    '{"id":"cli:notification:show","result":{"reason":"shown","shown":true,"type":"notification_show"}}'
+  PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
     wedge_alarm_via_herdr "away-mode WEDGED 900s"
   rc=$?
+  assert_fake_herdr_ran "$dir" "shown=true verdict"
   [ "$rc" -eq 0 ] || fail "a genuine shown=true herdr result was treated as a failure ($rc)"
   [ ! -s "$daemon_log" ] || fail "a genuine shown=true herdr result logged a spurious failure: $(cat "$daemon_log")"
   pass "wedge_alarm_via_herdr: a shown=true herdr result succeeds without a spurious failure log"
@@ -1409,20 +1438,16 @@ SH
 # "configure a command: channel" advice, while disabled and an unknown reason
 # keep it.
 test_wedge_alarm_herdr_transient_reason_avoids_permanent_advice() {
-  local dir fb daemon_log rc reason
+  local dir daemon_log rc reason
   command -v jq >/dev/null 2>&1 || { pass "herdr transient-reason verdict skipped without jq"; return; }
   for reason in rate_limited no_foreground_client busy; do
-    dir="$TMP_ROOT/wedge-herdr-transient-$reason"; fb="$dir/fakebin"; mkdir -p "$fb"
+    dir="$TMP_ROOT/wedge-herdr-transient-$reason"
     daemon_log="$dir/daemon.log"
-    cat > "$fb/herdr" <<SH
-#!/usr/bin/env bash
-printf '{"result":{"reason":"$reason","shown":false}}\n'
-exit 0
-SH
-    chmod +x "$fb/herdr"
-    PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    install_fake_herdr "$dir" "{\"result\":{\"reason\":\"$reason\",\"shown\":false}}"
+    PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
       wedge_alarm_via_herdr "away-mode WEDGED 900s"
     rc=$?
+    assert_fake_herdr_ran "$dir" "transient reason '$reason'"
     [ "$rc" -ne 0 ] || fail "a transient reason ($reason) was treated as a successful delivery"
     grep -F "not shown this time (reason: $reason, transient)" "$daemon_log" >/dev/null \
       || fail "transient reason '$reason' did not get the transient phrasing: $(cat "$daemon_log" 2>/dev/null)"
@@ -1433,20 +1458,16 @@ SH
 }
 
 test_wedge_alarm_herdr_permanent_reason_keeps_command_channel_advice() {
-  local dir fb daemon_log rc reason
+  local dir daemon_log rc reason
   command -v jq >/dev/null 2>&1 || { pass "herdr permanent-reason verdict skipped without jq"; return; }
   for reason in disabled something-new-and-unrecognized; do
-    dir="$TMP_ROOT/wedge-herdr-permanent-$reason"; fb="$dir/fakebin"; mkdir -p "$fb"
+    dir="$TMP_ROOT/wedge-herdr-permanent-$reason"
     daemon_log="$dir/daemon.log"
-    cat > "$fb/herdr" <<SH
-#!/usr/bin/env bash
-printf '{"result":{"reason":"$reason","shown":false}}\n'
-exit 0
-SH
-    chmod +x "$fb/herdr"
-    PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    install_fake_herdr "$dir" "{\"result\":{\"reason\":\"$reason\",\"shown\":false}}"
+    PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
       wedge_alarm_via_herdr "away-mode WEDGED 900s"
     rc=$?
+    assert_fake_herdr_ran "$dir" "permanent reason '$reason'"
     [ "$rc" -ne 0 ] || fail "permanent reason '$reason' was treated as a successful delivery"
     grep -F 'configure a command: channel instead' "$daemon_log" >/dev/null \
       || fail "permanent/unrecognized reason '$reason' lost the command-channel advice: $(cat "$daemon_log" 2>/dev/null)"
@@ -1455,21 +1476,17 @@ SH
 }
 
 test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code() {
-  local dir fb daemon_log rc
-  dir="$TMP_ROOT/wedge-herdr-unparseable"; fb="$dir/fakebin"; mkdir -p "$fb"
+  local dir daemon_log rc
+  dir="$TMP_ROOT/wedge-herdr-unparseable"
   daemon_log="$dir/daemon.log"
   # An older herdr build, or extra non-JSON chatter on stdout, leaves nothing
   # to parse. That is an inability to VERIFY delivery, not proof of a
   # non-delivery, so it must fall back to the exit code like the no-jq path.
-  cat > "$fb/herdr" <<'SH'
-#!/usr/bin/env bash
-printf 'notification sent\n'
-exit 0
-SH
-  chmod +x "$fb/herdr"
-  PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+  install_fake_herdr "$dir" 'notification sent'
+  PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
     wedge_alarm_via_herdr "away-mode WEDGED 900s"
   rc=$?
+  assert_fake_herdr_ran "$dir" "unparseable-output fallback"
   [ "$rc" -eq 0 ] || fail "unparseable herdr output was treated as a proven non-delivery ($rc)"
   [ ! -s "$daemon_log" ] \
     || fail "unparseable herdr output logged a false non-delivery: $(cat "$daemon_log")"
@@ -1477,23 +1494,17 @@ SH
 }
 
 test_wedge_alarm_herdr_notifier_pid_survives_capture() {
-  local dir fb daemon_log
-  dir="$TMP_ROOT/wedge-herdr-pid"; fb="$dir/fakebin"; mkdir -p "$fb"
+  local dir daemon_log
+  dir="$TMP_ROOT/wedge-herdr-pid"
   daemon_log="$dir/daemon.log"
   # Capturing herdr's JSON must not push the bounded runner into a subshell:
   # the daemon's shutdown trap can only kill a hung notifier group through the
   # WEDGE_ALARM_NOTIFIER_PID this shell can see.
-  cat > "$fb/herdr" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\$\$" > "$dir/notifier.pid"
-printf '{"result":{"shown":true}}\n'
-exit 0
-SH
-  chmod +x "$fb/herdr"
+  install_fake_herdr "$dir" '{"result":{"shown":true}}'
   unset WEDGE_ALARM_NOTIFIER_PID
-  PATH="$fb:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+  PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
     wedge_alarm_via_herdr "away-mode WEDGED 900s"
-  [ -s "$dir/notifier.pid" ] || fail "the fake herdr notifier never ran"
+  assert_fake_herdr_ran "$dir" "notifier-PID visibility"
   [ -n "${WEDGE_ALARM_NOTIFIER_PID+set}" ] \
     || fail "wedge_alarm_via_herdr never touched WEDGE_ALARM_NOTIFIER_PID in this shell (still subshell-scoped)"
   [ -z "$WEDGE_ALARM_NOTIFIER_PID" ] \
