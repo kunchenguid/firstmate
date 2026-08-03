@@ -150,4 +150,84 @@ case $out in
   *) fail "exit record not surfaced by the health check: $out" ;;
 esac
 
+# --- 5. a live-but-unarmed daemon is "starting" only for a bounded window ----
+# A daemon that never reaches its first housekeeping tick is not triaging, so
+# AFK_STARTING must age into AFK_DEGRADED instead of reading as supervision.
+mkdir -p "$WORK/fakebin"
+cat > "$WORK/fakebin/fm-supervise-daemon.sh" <<'FAKE'
+#!/bin/sh
+sleep 120
+FAKE
+chmod +x "$WORK/fakebin/fm-supervise-daemon.sh"
+"$WORK/fakebin/fm-supervise-daemon.sh" &
+FAKE_PID=$!
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+cleanup() { kill "$FAKE_PID" 2>/dev/null || true; rm -rf "$WORK"; }
+
+LOCKDIR="$FM_STATE_OVERRIDE/.supervise-daemon.lock"
+mkdir -p "$LOCKDIR"
+echo "$FAKE_PID" > "$LOCKDIR/pid"
+
+if out=$("$HEALTH" 2>&1); then
+  case $out in
+    AFK_STARTING*) pass "a freshly launched, not-yet-ready daemon reports AFK_STARTING" ;;
+    *) fail "expected AFK_STARTING inside the arming window, got: $out" ;;
+  esac
+else
+  fail "health check exited non-zero inside the arming window: $out"
+fi
+
+# Age the daemon's own start evidence past the window.
+touch -t 202001010000 "$LOCKDIR"
+if out=$("$HEALTH" 2>&1); then
+  fail "a daemon that never armed still reported success: $out"
+else
+  case $out in
+    AFK_DEGRADED*) pass "an unarmed daemon past the arming window is AFK_DEGRADED" ;;
+    *) fail "expected AFK_DEGRADED past the arming window, got: $out" ;;
+  esac
+fi
+
+# Ready beacon present: supervision is real again regardless of arming age.
+touch "$FM_STATE_OVERRIDE/.subsuper-daemon-ready"
+if out=$("$HEALTH" 2>&1); then
+  case $out in
+    AFK_HEALTHY*) pass "the readiness beacon is what makes away mode AFK_HEALTHY" ;;
+    *) fail "expected AFK_HEALTHY with the ready beacon, got: $out" ;;
+  esac
+else
+  fail "health check failed with a ready daemon: $out"
+fi
+
+kill "$FAKE_PID" 2>/dev/null || true
+
+# --- 6. daemon stderr must survive log rotation ------------------------------
+# The daemon binds fd 2 to its log so a bash error lands where supervision
+# already looks. Rotation must not detach that fd from the log file.
+STDERR_LOG="$WORK/daemon.log"
+cat > "$WORK/trimcheck.sh" <<TRIM
+set -u
+FM_HOME=$WORK
+FM_STATE_OVERRIDE=$WORK/state
+. '$ROOT/bin/fm-supervise-daemon.sh' >/dev/null 2>&1 || true
+LOG='$STDERR_LOG'
+: > "\$LOG"
+exec 2>>"\$LOG"
+export FM_LOG_MAX_BYTES=200 FM_LOG_KEEP_LINES=3
+r=0
+while [ \$r -lt 3 ]; do
+  i=0
+  while [ \$i -lt 100 ]; do echo "filler line \$i" >> "\$LOG"; i=\$(( i + 1 )); done
+  trim_log
+  r=\$(( r + 1 ))
+done
+echo 'DAEMON-STDERR-MARKER' >&2
+TRIM
+bash "$WORK/trimcheck.sh" >/dev/null 2>&1 || true
+if grep -q 'DAEMON-STDERR-MARKER' "$STDERR_LOG" 2>/dev/null; then
+  pass "daemon stderr still lands in the log after repeated rotation"
+else
+  fail "daemon stderr was lost after log rotation - a crash would be invisible"
+fi
+
 exit "$FAILED"

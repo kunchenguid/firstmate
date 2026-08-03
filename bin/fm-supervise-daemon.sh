@@ -254,6 +254,18 @@ _file_age() {
   echo $(( now - m ))
 }
 
+# Age of the epoch RECORDED INSIDE a marker file (not its mtime). Same fail-safe
+# contract as fm_path_age in bin/fm-wake-lib.sh: unreadable or unparseable reads
+# as very old, so a cadence gate errs toward doing the work.
+_marker_age() {
+  local f=$1 v now
+  v=$(cat "$f" 2>/dev/null || true)
+  case $v in ''|*[!0-9]*) echo 999999; return ;; esac
+  now=$(_now) || { echo 999999; return; }
+  case $now in ''|*[!0-9]*) echo 999999; return ;; esac
+  echo $(( now - v ))
+}
+
 _hash_text() {
   if command -v md5 >/dev/null 2>&1; then printf '%s' "$1" | md5 -q
   else printf '%s' "$1" | md5sum | cut -d ' ' -f1; fi
@@ -973,8 +985,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
-  now=$(_now)
+  local state=$1 due f key task win marker age last max_defer oldest pause_secs
   migrate_watcher_pause_markers "$state"
 
   # (1) batch flush
@@ -1024,7 +1035,7 @@ housekeeping() {  # <state>
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    age=$(_marker_age "$marker")
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
@@ -1055,7 +1066,7 @@ housekeeping() {  # <state>
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    age=$(_marker_age "$marker")
     [ "$age" -ge "$pause_secs" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
@@ -1305,7 +1316,13 @@ trim_log() {
   sz=$(wc -c < "$LOG" 2>/dev/null) || return 0
   [ "$sz" -ge "${FM_LOG_MAX_BYTES:-$LOG_MAX_BYTES_DEFAULT}" ] || return 0
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-daemon-log.XXXXXX") || return 0
-  tail -n "${FM_LOG_KEEP_LINES:-$LOG_KEEP_LINES_DEFAULT}" "$LOG" >"$tmp" 2>/dev/null && mv -f "$tmp" "$LOG"
+  # Written back IN PLACE rather than mv'd over: the daemon's stderr is bound to
+  # this file's inode (exec 2>>"$LOG"), so replacing the inode would silently
+  # send every later bash error to an unlinked file.
+  if tail -n "${FM_LOG_KEEP_LINES:-$LOG_KEEP_LINES_DEFAULT}" "$LOG" >"$tmp" 2>/dev/null; then
+    cat "$tmp" > "$LOG" 2>/dev/null || true
+  fi
+  rm -f "$tmp" 2>/dev/null || true
 }
 
 # ============================================================================

@@ -13,9 +13,12 @@
 #
 # Verdicts (first token of the single status line, also the exit code):
 #   AFK_OFF        0  no away-mode flag; nothing to supervise
-#   AFK_HEALTHY    0  flag present, daemon live, past its first housekeeping tick
-#   AFK_STARTING   0  flag present, daemon live, not yet ready (still arming)
-#   AFK_DEGRADED   1  flag present, NO live daemon - away mode is a lie, repair now
+#   AFK_HEALTHY    0  flag present, daemon live and past its first housekeeping
+#                     tick - away-mode supervision is active
+#   AFK_STARTING   0  flag present, daemon live but not yet ready - away mode is
+#                     still arming, NOT yet supervising (bounded window)
+#   AFK_DEGRADED   1  flag present but NOT SUPERVISED: no live daemon, or a live
+#                     daemon that never armed within the window - repair now
 #
 # Usage: fm-afk-health.sh [--quiet]
 #   --quiet  print nothing; use the exit code only
@@ -30,6 +33,34 @@ FM_AFK_HEALTH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # script's source guard means sourcing it defines the helpers without arming.
 # shellcheck source=bin/fm-afk-start.sh
 . "$FM_AFK_HEALTH_DIR/fm-afk-start.sh"
+
+# Mirrors HOUSEKEEPING_TICK_DEFAULT in bin/fm-supervise-daemon.sh, which owns it.
+FM_AFK_HEALTH_TICK_DEFAULT=15
+
+# Arming window: a live daemon that has never completed a housekeeping tick is
+# only credibly "starting" for a bounded time. One missed tick is a slow start;
+# two consecutive missed ticks is a daemon that is not triaging. So the window is
+# twice the configured tick, floored at 60s so a fast tick cannot make the
+# verdict hair-trigger, and capped at 300s so the worst case stays bounded.
+fm_afk_arming_window() {
+  local tick window
+  tick=${FM_HOUSEKEEPING_TICK:-$FM_AFK_HEALTH_TICK_DEFAULT}
+  case $tick in ''|*[!0-9]*) tick=$FM_AFK_HEALTH_TICK_DEFAULT ;; esac
+  window=$(( tick * 2 ))
+  if [ "$window" -lt 60 ]; then window=60; fi
+  if [ "$window" -gt 300 ]; then window=300; fi
+  echo "$window"
+}
+
+# Elapsed arming time, measured from the daemon's own start evidence on disk (the
+# lock it holds), through the fail-safe age helper: an unreadable age reads as
+# very old and therefore resolves toward AFK_DEGRADED rather than leaving away
+# mode "starting" forever.
+fm_afk_arming_age() {
+  local owner
+  owner=$(daemon_lock_owner 2>/dev/null) || { echo 999999; return; }
+  fm_path_age "$owner"
+}
 
 fm_afk_health_main() {
   local quiet=0
@@ -53,7 +84,16 @@ fm_afk_health_main() {
     if [ -f "$ready" ]; then
       verdict=AFK_HEALTHY; rc=0; detail="daemon pid=${pid:-?} ready"
     else
-      verdict=AFK_STARTING; rc=0; detail="daemon pid=${pid:-?} not yet past its first housekeeping tick"
+      local arming window
+      arming=$(fm_afk_arming_age)
+      window=$(fm_afk_arming_window)
+      if [ "$arming" -lt "$window" ]; then
+        verdict=AFK_STARTING; rc=0
+        detail="daemon pid=${pid:-?} not yet past its first housekeeping tick (arming ${arming}s of ${window}s)"
+      else
+        verdict=AFK_DEGRADED; rc=1
+        detail="daemon pid=${pid:-?} is alive but never reached its first housekeeping tick within ${window}s (arming ${arming}s); it is not triaging"
+      fi
     fi
   else
     verdict=AFK_DEGRADED; rc=1

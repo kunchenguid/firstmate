@@ -1107,7 +1107,7 @@ EOF
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
   # surfaced non-heartbeat wake.
-  streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
+  streak=$(read_counter "$STATE/.heartbeat-streak")
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX

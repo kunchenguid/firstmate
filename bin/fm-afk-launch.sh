@@ -431,7 +431,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     return 1
   fi
   fm_afk_launch_commit_terminal herdr "$session:$pane" "$wsid" 1 || return 1
-  fm_afk_launch_log "daemon launched in non-visible herdr workspace $wsid (pane $session:$pane), supervising $captain_target"
+  fm_afk_launch_log "daemon process launched in non-visible herdr workspace $wsid (pane $session:$pane), target $captain_target; supervision is NOT yet confirmed - run bin/fm-afk-health.sh for the verdict"
 }
 
 # Launch the daemon in a detached tmux session (never a split-window in the
@@ -457,7 +457,7 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
     return 1
   fi
   fm_afk_launch_commit_terminal tmux "$session" "" 1 || return 1
-  fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
+  fm_afk_launch_log "daemon process launched in detached tmux session '$session', target $captain_target; supervision is NOT yet confirmed - run bin/fm-afk-health.sh for the verdict"
 }
 
 fm_afk_launch_start() {

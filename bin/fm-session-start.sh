@@ -403,7 +403,12 @@ subsection "AFK"
 # means nothing is triaging at all. bin/fm-afk-health.sh owns that verdict.
 if [ -e "$STATE/.afk" ]; then
   if AFK_HEALTH=$("$FM_ROOT/bin/fm-afk-health.sh" 2>&1); then
-    printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
+    case "$AFK_HEALTH" in
+      AFK_STARTING*)
+        printf 'present - away mode is still arming, not yet supervising.\n' ;;
+      *)
+        printf 'present - away-mode supervision is active; the daemon owns the watcher.\n' ;;
+    esac
     printf '%s\n' "$AFK_HEALTH"
   else
     printf 'present but NOT SUPERVISED - the away-mode flag is set and no daemon is triaging.\n'
