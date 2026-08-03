@@ -145,7 +145,7 @@ for a in "$@"; do
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
     --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's approval posture" >&2; exit 1 ;;
-    --base-branch) want_value=base-branch ;;
+    --base-branch) want_value='base-branch' ;;
     *) POS+=("$a") ;;
   esac
 done
