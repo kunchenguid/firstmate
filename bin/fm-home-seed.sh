@@ -16,7 +16,8 @@
 #       refuses a home with project clones or project-registry entries, so it
 #       never converts populated homes in place. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
-#       initialized, an ignored .fm-secondmate-home identity marker is written, and
+#       initialized, an ignored .fm-secondmate-home identity marker is written,
+#       data/command.md records who commands the lane, and
 #       data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
@@ -34,6 +35,13 @@
 #       The label must be a single line without ";", "(", or ")".
 #       Reseeding without FM_SECONDMATE_LABEL preserves an already-registered
 #       label; setting it explicitly still wins.
+#       data/command.md is the derived, main-authoritative copy of the lane's
+#       command state, read-only to the lane, stating "firstmate" for a new home.
+#       A reseed is provisioning and never a command decision: it carries a
+#       recorded trailing "command:" field forward exactly as it preserves the
+#       label, leaves a captain-commanded lane's existing copy untouched, and
+#       refuses on an unrecognized value rather than quietly resetting it.
+#       bin/fm-secondmate-command.sh owns every other write of that state.
 #   fm-home-seed.sh validate
 #       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
 #       data/secondmates.md.

@@ -20,6 +20,12 @@
 # paused, or neither. Callers run it ONLY on no-verb signal handling and first
 # sighting of a stale hash, never on every wake, so the per-wake triage stays
 # cheap.
+#
+# task_is_captain_commanded is the other non-status-file read: it answers from
+# this home's secondmate registry whether a lane is under captain command. It is
+# deliberately shared but applied by each consumer rather than inside the scan
+# they have in common, because their correct behavior there is opposite; the
+# function's own comment owns that contract.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a

@@ -9,6 +9,11 @@
 # working signal is never silently swallowed. A declared external-wait pause is
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
+# A persistent secondmate under CAPTAIN command is absorbed on every path -
+# signal, stale, and heartbeat backstop - and is never pre-marked surfaced, so a
+# status written while he holds it still surfaces if the lane later returns to
+# firstmate command (bin/fm-classify-lib.sh owns that predicate and why the
+# away-mode daemon's behavior is deliberately the opposite).
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status

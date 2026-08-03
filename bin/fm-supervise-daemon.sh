@@ -54,6 +54,11 @@
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
+#   - Captain-commanded lanes: a persistent secondmate the captain commands is
+#     never aged toward a wedge, so its stale wakes self-handle, while its
+#     captain-relevant events still escalate carrying FM_CAPTAIN_COMMAND_LABEL.
+#     bin/fm-classify-lib.sh owns that predicate and why the always-on watcher
+#     absorbs the same events instead.
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop

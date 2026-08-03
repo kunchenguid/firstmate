@@ -63,7 +63,11 @@
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
-# Secondmates (kind=secondmate in meta) are retired explicitly. Normal
+# Secondmates (kind=secondmate in meta) are retired explicitly. Teardown refuses
+# outright, with or without --force, while the lane is under CAPTAIN command or
+# its command record is unreadable or unrecognized: firstmate does not retire a
+# lane it does not command, so hand it back with bin/fm-secondmate-command.sh
+# first (secondmate-command-transfer skill). Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
 # child work, kills child runtime endpoints, and removes the retired home. Removing a

@@ -19,6 +19,11 @@
 #   - proving the destination is a genuine seeded secondmate home
 #     (.fm-secondmate-home marker, AGENTS.md + bin/), never a project clone, the
 #     active home, or the firstmate repo;
+#   - refusing outright while the destination lane is under CAPTAIN command, or
+#     while its command record is unrecognized or unreadable: firstmate does not
+#     route work into a lane it does not command, so the item stays in the main
+#     backlog under a captain-kind hold naming the lane and is re-evaluated at
+#     handback (secondmate-command-transfer skill);
 #   - moving only `## Queued` items, refusing `## In flight` and historical
 #     `## Done` records, which must stay with their home for pruning or
 #     archiving;
