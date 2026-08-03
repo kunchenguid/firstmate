@@ -34,6 +34,14 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Point every suite's shared-validation-daemon liveness read (bootstrap's
+# VALIDATION_DAEMON check) at a root that does not exist, so it is deterministically
+# silent. Without this, whether the machine's real no-mistakes daemon happens to
+# be alive would leak into every suite that asserts exact bootstrap output. The
+# cases that own that check set NM_HOME per invocation, which wins over this.
+# Same hermeticity discipline as pinning PATH: the tests decide the inputs.
+export NM_HOME="${TMPDIR:-/tmp}/fm-test-absent-nm-home"
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

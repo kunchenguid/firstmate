@@ -15,6 +15,9 @@
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
+# Dedicated shared-validation-daemon cases pin alive, down, missing pid file,
+# and unreadable pid file as four distinguishable outcomes, plus the outage
+# length a down report has to carry.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -122,6 +125,69 @@ add_real_jq() {
 exec '$real_jq' "\$@"
 SH
   chmod +x "$fakebin/jq"
+}
+
+# --- shared validation-daemon fixtures --------------------------------------
+#
+# NM_HOME is the no-mistakes daemon's OWN root selector, so every case below
+# points bootstrap at a purpose-built fake root. These tests only ever read a
+# fabricated pid file; they must never touch the machine's live shared daemon.
+
+# set_mtime_age <file> <seconds>: backdate <file>'s mtime by <seconds>.
+# perl is already a suite dependency (the fleet-sync cases use it) and both
+# `touch -d @<epoch>` and `date -d` are GNU-only.
+set_mtime_age() {
+  perl -e 'my ($f, $age) = @ARGV; my $t = time - $age; utime($t, $t, $f) or die "utime: $!"' \
+    "$1" "$2"
+}
+
+# iso_age <seconds>: a UTC ISO-8601 stamp <seconds> in the past, in the exact
+# shape the daemon writes into started_at.
+iso_age() {
+  perl -e 'my @t = gmtime(time - $ARGV[0]);
+           printf "%04d-%02d-%02dT%02d:%02d:%02dZ", $t[5]+1900, $t[4]+1, $t[3], $t[2], $t[1], $t[0]' \
+    "$1"
+}
+
+# make_nm_root <dir> <daemon.pid body|none> [daemon.log age in seconds]
+make_nm_root() {
+  local root=$1 body=$2 log_age=${3:-}
+  mkdir -p "$root"
+  [ "$body" = none ] || printf '%s' "$body" > "$root/daemon.pid"
+  if [ -n "$log_age" ]; then
+    mkdir -p "$root/logs"
+    : > "$root/logs/daemon.log"
+    set_mtime_age "$root/logs/daemon.log" "$log_age"
+  fi
+}
+
+# Sets DEAD_PID to a pid that is certainly not running: spawn it, reap it, then
+# prove with signal 0 that nothing answers. Constructing the negative positively
+# is the point - a down-detector confirmed only against a live daemon proves
+# nothing about the case it exists for.
+DEAD_PID=""
+make_dead_pid() {
+  local tries=0
+  ( exit 0 ) &
+  DEAD_PID=$!
+  wait "$DEAD_PID" 2>/dev/null || true
+  while kill -0 "$DEAD_PID" 2>/dev/null && [ "$tries" -lt 100 ]; do
+    command sleep 0.05
+    tries=$((tries + 1))
+  done
+  ! kill -0 "$DEAD_PID" 2>/dev/null \
+    || fail "could not construct a pid that is certainly not running (pid $DEAD_PID still answers)"
+}
+
+# run_bootstrap_nm <case dir> <NM_HOME> [verbose 0/1]
+run_bootstrap_nm() {
+  local case_dir=$1 nm_home=$2 verbose=${3:-0} fakebin
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_VERBOSE_FACTS="$verbose" \
+    NM_HOME="$nm_home" "$ROOT/bin/fm-bootstrap.sh"
 }
 
 make_fake_fleet_sync_root() {
@@ -832,6 +898,115 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# --- shared validation-daemon liveness --------------------------------------
+#
+# The shared no-mistakes validation daemon died three times and stayed down for
+# 2.5 days, 2.9 days and 8 hours before anything restarted it, because nothing
+# ever asked whether it was running. Bootstrap now reads its pid file and asks
+# the recorded process whether it answers.
+#
+# The pid file is JSON ({"pid":929670,"started_at":"..."}), not a bare integer,
+# so a reader that pipes it straight into a signal check reports a LIVE daemon
+# as down. alive/down/unknown are three separate outcomes and the cases below
+# pin them apart: collapsing unknown into down manufactures false alarms, and
+# collapsing it into alive recreates the silence this check exists to end.
+
+test_validation_daemon_alive_is_silent() {
+  local case_dir nm out
+  case_dir="$TMP_ROOT/nm-alive"
+  nm="$case_dir/nm"
+  # $$ is this test script's own pid, which certainly answers signal 0.
+  make_nm_root "$nm" "{\"pid\":$$,\"started_at\":\"$(iso_age 250560)\"}" 30
+
+  out=$(run_bootstrap_nm "$case_dir" "$nm")
+  [ -z "$out" ] || fail "a live validation daemon must stay silent, got: $out"
+
+  out=$(run_bootstrap_nm "$case_dir" "$nm" 1)
+  [ "$out" = "BOOTSTRAP_INFO: validation daemon alive (pid $$, up 2.9d)" ] \
+    || fail "expected a verbose alive fact with uptime, got: $out"
+  pass "bootstrap parses the JSON pid file and stays silent while the validation daemon answers"
+}
+
+test_validation_daemon_down_is_reported_with_outage_length() {
+  local case_dir nm out
+  make_dead_pid
+  case_dir="$TMP_ROOT/nm-down"
+  nm="$case_dir/nm"
+  # Started 3.2 days ago, last wrote to its log 2.9 days ago: the signature of
+  # the 2026-07-31 outage, which nobody noticed for 2.9 days.
+  make_nm_root "$nm" "{\"pid\":$DEAD_PID,\"started_at\":\"$(iso_age 276480)\"}" 250560
+
+  out=$(run_bootstrap_nm "$case_dir" "$nm")
+  [ "$out" = "VALIDATION_DAEMON: down - recorded pid $DEAD_PID is not running; started 3.2d ago, last active 2.9d ago" ] \
+    || fail "expected a down report naming the outage length, got: $out"
+
+  # A verbose session must not turn the actionable line into a benign fact.
+  out=$(run_bootstrap_nm "$case_dir" "$nm" 1)
+  assert_contains "$out" "VALIDATION_DAEMON: down - recorded pid $DEAD_PID is not running" \
+    "verbose bootstrap must still report a down validation daemon"
+  pass "bootstrap reports a recorded pid that no longer answers as down, with the outage length"
+}
+
+test_validation_daemon_down_without_a_log_omits_the_outage_length() {
+  local case_dir nm out
+  make_dead_pid
+  case_dir="$TMP_ROOT/nm-down-nolog"
+  nm="$case_dir/nm"
+  make_nm_root "$nm" "{\"pid\":$DEAD_PID,\"started_at\":\"$(iso_age 276480)\"}"
+
+  out=$(run_bootstrap_nm "$case_dir" "$nm")
+  [ "$out" = "VALIDATION_DAEMON: down - recorded pid $DEAD_PID is not running; started 3.2d ago" ] \
+    || fail "expected a down report without an invented outage length, got: $out"
+  pass "bootstrap reports down without an outage length when the daemon log is absent"
+}
+
+test_validation_daemon_missing_pid_file_is_down() {
+  local case_dir nm out
+  case_dir="$TMP_ROOT/nm-nopid"
+  nm="$case_dir/nm"
+  make_nm_root "$nm" none 250560
+
+  out=$(run_bootstrap_nm "$case_dir" "$nm")
+  [ "$out" = "VALIDATION_DAEMON: down - no pid file at $nm/daemon.pid; last active 2.9d ago" ] \
+    || fail "expected a used-but-pidless root to report down, got: $out"
+  pass "bootstrap reports a used daemon root with no pid file as down"
+}
+
+# A recorded pid of 0 belongs in this table rather than with the live cases:
+# `kill -0 0` signals the CALLER's own process group, so a reader that passes it
+# through would answer "alive" for a daemon that is not there.
+test_validation_daemon_malformed_pid_file_is_unknown_not_down() {
+  local label body case_dir nm out n
+  n=0
+  while IFS='^' read -r label body; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/nm-unknown-$n"
+    nm="$case_dir/nm"
+    make_nm_root "$nm" "$body" 250560
+
+    out=$(run_bootstrap_nm "$case_dir" "$nm")
+    [ "$out" = "VALIDATION_DAEMON: unknown - cannot read a pid from $nm/daemon.pid; last active 2.9d ago" ] \
+      || fail "$label: expected an unknown report, got: $out"
+    assert_not_contains "$out" "down" "$label: an unparseable pid file must never be reported as down"
+  done <<'ROWS'
+truncated json^{"pid":
+non-numeric pid^{"pid":"cafe","started_at":"2026-08-02T23:25:46Z"}
+empty file^
+unrelated text^not a pid file at all
+zero pid^{"pid":0,"started_at":"2026-08-02T23:25:46Z"}
+ROWS
+  pass "bootstrap keeps an unreadable pid file distinct from a down daemon"
+}
+
+test_validation_daemon_unused_root_is_silent() {
+  local case_dir out
+  case_dir="$TMP_ROOT/nm-absent"
+  out=$(run_bootstrap_nm "$case_dir" "$case_dir/never-created")
+  [ -z "$out" ] || fail "a home that has never run the daemon must stay silent, got: $out"
+  pass "bootstrap stays silent when no daemon root exists to check"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_quota_axi_min_version
@@ -853,3 +1028,9 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_validation_daemon_alive_is_silent
+test_validation_daemon_down_is_reported_with_outage_length
+test_validation_daemon_down_without_a_log_omits_the_outage_length
+test_validation_daemon_missing_pid_file_is_down
+test_validation_daemon_malformed_pid_file_is_unknown_not_down
+test_validation_daemon_unused_root_is_silent

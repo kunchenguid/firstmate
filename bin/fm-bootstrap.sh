@@ -12,6 +12,7 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "VALIDATION_DAEMON: down|unknown - <evidence>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -62,6 +63,15 @@
 #          gated by fm-quota-axi-lib.sh, which owns that floor and its rationale.
 #          An older build reports MISSING like no-mistakes rather than passing
 #          silently while emitting auth semantics dispatch cannot scope.
+#          The shared no-mistakes validation daemon is checked read-only once
+#          per bootstrap, so a silent multi-day outage becomes visible instead of
+#          being discovered days later. A VALIDATION_DAEMON line reports down or
+#          unknown; a healthy daemon is silent, and reports its uptime only as a
+#          BOOTSTRAP_INFO fact under FM_BOOTSTRAP_VERBOSE_FACTS=1. The check runs
+#          in detect-only sessions too and never touches the daemon's lifecycle.
+#          bin/fm-validation-daemon-lib.sh owns the root resolution (NM_HOME),
+#          the JSON pid-file parse, the alive/down/unknown contract, and the
+#          exact line wording.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -116,6 +126,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-validation-daemon-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-validation-daemon-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -992,8 +1004,15 @@ if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
-if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
-  echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+if command -v no-mistakes >/dev/null 2>&1; then
+  if ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
+    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+  fi
+  # Read-only liveness of the SHARED validation daemon (bin/fm-validation-daemon-lib.sh).
+  # It only reads two files and sends signal 0; it never touches the daemon's
+  # lifecycle, and it deliberately runs in detect-only sessions too, because a
+  # multi-day outage is exactly what a second session also needs to see.
+  fm_validation_daemon_report
 fi
 if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
   echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
