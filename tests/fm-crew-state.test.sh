@@ -586,7 +586,7 @@ test_terminal_checks_passed_claim_with_evidence_stays_green() {
 }
 
 # An unreadable log is not evidence that nothing ran. UNAVAILABLE must not be
-# resolved into either a pass or a refusal, so the claim is left as it was.
+# resolved into either a pass or a refusal.
 test_terminal_checks_passed_claim_survives_unreadable_log() {
   reset_fakes
   local d; d=$(new_case ci-claimed-nolog)
@@ -596,8 +596,12 @@ test_terminal_checks_passed_claim_survives_unreadable_log() {
   FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-ciclaimednolog)"
   FM_FAKE_CI_LOGS=""
   local out; out=$(run_crew_state "$d" feat-ciclaimednolog)
-  assert_contains "$out" "state: done" "an unreadable CI log must not manufacture a refusal"
-  pass "an unreadable CI log leaves the terminal claim as it stands rather than resolving it"
+  assert_contains "$out" "state: unknown" "an unreadable CI log leaves corroboration unknown"
+  assert_contains "$out" "claim could not be corroborated" "an unreadable CI log reports the unavailable evidence"
+  assert_not_contains "$out" "checks green" "an unreadable CI log must not corroborate checks-passed"
+  assert_not_contains "$out" "state: blocked" "an unreadable CI log must not manufacture a refusal"
+  assert_not_contains "$out" "state: failed" "an unreadable CI log must not manufacture a failure"
+  pass "an unreadable CI log leaves the terminal claim uncorroborated"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {

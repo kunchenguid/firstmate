@@ -505,16 +505,21 @@ if [ "$HAVE_RUN" = 1 ]; then
         # Corroborate it against the run's own ci log before repeating it: a
         # claim of green that the run's own evidence does not record is not a
         # green head, and a task whose checks never ran needs firstmate rather
-        # than a place in the ready-for-review queue. An unreadable log reports
-        # `unknown` and is left alone, because a log that could not be read is
-        # not evidence that nothing ran.
+        # than a place in the ready-for-review queue.
         checks-passed)
-          if [ "$(nm_ci_checks_state)" = not-ready ]; then
-            RUN_STATE=blocked
-            RUN_DETAIL="run reported a passing result its own CI log does not record: nothing verified this head"
-          else
-            RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"
-          fi
+          case "$(nm_ci_checks_state)" in
+            green)
+              RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"
+              ;;
+            not-ready)
+              RUN_STATE=blocked
+              RUN_DETAIL="run reported a passing result its own CI log does not record: nothing verified this head"
+              ;;
+            unknown)
+              RUN_STATE=unknown
+              RUN_DETAIL="run reported checks-passed, but its CI log is unavailable: claim could not be corroborated"
+              ;;
+          esac
           ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
