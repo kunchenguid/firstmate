@@ -17,6 +17,7 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -494,6 +495,27 @@ secondmate_liveness_sweep() {
   return 0
 }
 
+secondmate_handoff_resume() {
+  [ -d "$DATA/handoff" ] || return 0
+  "$SCRIPT_DIR/fm-backlog-handoff.sh" --resume-pending >/dev/null 2>&1 || true
+}
+
+secondmate_handoff_detect() {
+  local outbox id count
+  [ -d "$DATA/handoff" ] || return 0
+  for outbox in "$DATA/handoff"/*.outbox.md; do
+    [ -e "$outbox" ] || continue
+    id=$(basename "$outbox" .outbox.md)
+    case "$id" in ''|*[!A-Za-z0-9._-]*) id=unknown ;; esac
+    if [ ! -f "$outbox" ] || [ -L "$outbox" ]; then
+      echo "SECONDMATE_HANDOFF: secondmate $id: pending delivery: unsafe outbox"
+      continue
+    fi
+    count=$(awk '/^- \[[ x]\] / { count++ } END { print count + 0 }' "$outbox" 2>/dev/null || printf unknown)
+    echo "SECONDMATE_HANDOFF: secondmate $id: pending delivery: $count item(s)"
+  done
+}
+
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
@@ -907,7 +929,9 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
+  secondmate_handoff_resume
   x_mode_setup
   fleet_sync
 fi
+secondmate_handoff_detect
 exit 0

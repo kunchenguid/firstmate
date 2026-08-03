@@ -42,7 +42,12 @@
 # own hand-editing of its own backlog, not this validated helper. Idempotent:
 # re-running converges. Atomic: on any move failure nothing moves.
 # See AGENTS.md project management and task lifecycle.
+# Remote routes use an outbox handoff: one atomic local tasks-axi mv removes the
+# selected set from the dispatchable backlog into data/handoff/<id>.outbox.md,
+# then an idempotent confined transfer and fm-backlog-receive.sh deliver it.
+# A present outbox is the whole recovery record. No two-phase journal exists.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
+#        fm-backlog-handoff.sh --resume-pending
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,9 +61,17 @@ MAIN_BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
-[ $# -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
-ID=$1
-shift
+RESUME_PENDING=0
+if [ "${1:-}" = --resume-pending ]; then
+  [ "$#" -eq 1 ] || { echo "usage: fm-backlog-handoff.sh --resume-pending" >&2; exit 1; }
+  RESUME_PENDING=1
+  ID=
+  shift
+else
+  [ "$#" -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
+  ID=$1
+  shift
+fi
 
 secondmate_home() {
   local id=$1 home
@@ -226,6 +239,163 @@ backlog_key_noncanonical_body_lines() {
     capturing && /^[[:space:]]/ && !/^  / && /[^[:space:]]/ { print }
   ' "$file"
 }
+
+seed_backlog_scaffold() { # <path>
+  mkdir -p "$(dirname "$1")"
+  [ -f "$1" ] || printf '## In flight\n\n## Queued\n\n## Done\n' > "$1"
+}
+
+outbox_item_count() { # <path>
+  awk '/^- \[[ x]\] / { count++ } END { print count + 0 }' "$1"
+}
+
+remote_deliver_outbox() { # <secondmate-id> <outbox-path>
+  local id=$1 outbox=$2 remote_rel receive_out
+  [ -f "$outbox" ] && [ ! -L "$outbox" ] || {
+    echo "error: pending outbox is unavailable or unsafe: $outbox" >&2
+    return 1
+  }
+  remote_rel="state/handoff/$id.outbox.md"
+  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh put "$remote_rel" 1048576 < "$outbox"; then
+    echo "error: handoff transfer to $id was unavailable or completion is unknown; outbox preserved at $outbox" >&2
+    return 1
+  fi
+  if ! receive_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-backlog-receive.sh "$remote_rel" 2>&1); then
+    [ -z "$receive_out" ] || printf '%s\n' "$receive_out" >&2
+    echo "error: handoff receipt by $id was unavailable or completion is unknown; outbox preserved at $outbox" >&2
+    return 1
+  fi
+  rm -f -- "$outbox" || {
+    echo "error: remote receipt was confirmed but local outbox cleanup failed: $outbox" >&2
+    return 1
+  }
+  printf '%s\n' "$receive_out"
+}
+
+remove_interrupted_source_duplicates() { # <outbox> <keys...>
+  local outbox=$1 key progress remaining pass=0
+  shift
+  while :; do
+    remaining=0
+    progress=0
+    for key in "$@"; do
+      backlog_key_section "$outbox" "$key" >/dev/null 2>&1 || continue
+      if backlog_key_section "$MAIN_BACKLOG" "$key" >/dev/null 2>&1; then
+        remaining=$((remaining + 1))
+        if tasks-axi rm "$key" --file "$MAIN_BACKLOG" >/dev/null 2>&1; then
+          progress=$((progress + 1))
+        fi
+      fi
+    done
+    [ "$remaining" -gt 0 ] || return 0
+    [ "$progress" -gt 0 ] || {
+      echo "error: could not complete interrupted source removal; outbox remains authoritative at $outbox" >&2
+      return 1
+    }
+    pass=$((pass + 1))
+    [ "$pass" -le "$#" ] || return 1
+  done
+}
+
+remote_handoff() { # <secondmate-id> <keys...>
+  local id=$1 outbox section main_section out_section key mv_out
+  local -a requested to_move already missing in_flight done_items not_queued
+  shift
+  requested=("$@")
+  outbox="$DATA/handoff/$id.outbox.md"
+  validate_backlog_file "main backlog" "$MAIN_BACKLOG" || return 1
+  validate_backlog_file "remote handoff outbox" "$outbox" || return 1
+  fm_tasks_axi_compatible || {
+    echo "error: tasks-axi with atomic multi-ID mv support (0.2.2+) is required to stage remote handoffs" >&2
+    return 1
+  }
+  to_move=()
+  already=()
+  missing=()
+  in_flight=()
+  done_items=()
+  not_queued=()
+  for key in "${requested[@]}"; do
+    out_section=$(backlog_key_section "$outbox" "$key" 2>/dev/null || true)
+    main_section=$(backlog_key_section "$MAIN_BACKLOG" "$key" 2>/dev/null || true)
+    if [ -n "$out_section" ]; then
+      [ "$out_section" = '## Queued' ] || not_queued+=("$key")
+      already+=("$key")
+      continue
+    fi
+    case "$main_section" in
+      '## Queued') to_move+=("$key") ;;
+      '## In flight') in_flight+=("$key") ;;
+      '## Done') done_items+=("$key") ;;
+      '') missing+=("$key") ;;
+      *) not_queued+=("$key") ;;
+    esac
+  done
+  if [ "${#in_flight[@]}" -gt 0 ] || [ "${#done_items[@]}" -gt 0 ] \
+    || [ "${#not_queued[@]}" -gt 0 ] || [ "${#missing[@]}" -gt 0 ]; then
+    [ "${#in_flight[@]}" -eq 0 ] || echo "error: refusing to hand off in-flight backlog items: ${in_flight[*]}" >&2
+    [ "${#done_items[@]}" -eq 0 ] || echo "error: refusing to hand off Done backlog items: ${done_items[*]}" >&2
+    [ "${#not_queued[@]}" -eq 0 ] || echo "error: refusing to hand off non-Queued outbox or backlog items: ${not_queued[*]}" >&2
+    [ "${#missing[@]}" -eq 0 ] || echo "error: no backlog or pending outbox item matched: ${missing[*]}" >&2
+    echo "       nothing new was staged." >&2
+    return 1
+  fi
+  for key in "${to_move[@]}"; do
+    while IFS= read -r line; do
+      printf 'error: refusing to hand off %s: non-2-space continuation line: %s\n' "$key" "$line" >&2
+      return 1
+    done < <(backlog_key_noncanonical_body_lines "$MAIN_BACKLOG" "$key")
+  done
+  seed_backlog_scaffold "$outbox"
+  if [ "${#to_move[@]}" -gt 0 ]; then
+    if ! mv_out=$(tasks-axi mv "${to_move[@]}" --file "$MAIN_BACKLOG" --to "$outbox" 2>&1); then
+      [ -z "$mv_out" ] || printf '%s\n' "$mv_out" >&2
+      echo "error: atomic outbox staging failed; nothing new was handed off" >&2
+      return 1
+    fi
+  fi
+  # A hard local kill can land tasks-axi's target persist before its source
+  # persist. The outbox is already authoritative in that state, so converge by
+  # deleting only duplicates that tasks-axi itself confirms are dependency-safe.
+  remove_interrupted_source_duplicates "$outbox" "${requested[@]}" || return 1
+  remote_deliver_outbox "$id" "$outbox" || return 1
+  echo "handed off ${#requested[@]} item(s) to remote secondmate $id: ${requested[*]}"
+  [ "${#already[@]}" -eq 0 ] || echo "  already staged (recovered): ${already[*]}"
+}
+
+resume_pending_outboxes() {
+  local outbox id failed=0 remote
+  [ -d "$DATA/handoff" ] || return 0
+  for outbox in "$DATA/handoff"/*.outbox.md; do
+    [ -e "$outbox" ] || continue
+    if [ ! -f "$outbox" ] || [ -L "$outbox" ]; then
+      echo "error: unsafe pending handoff outbox: $outbox" >&2
+      failed=1
+      continue
+    fi
+    id=$(basename "$outbox" .outbox.md)
+    case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe pending handoff id: $id" >&2; failed=1; continue ;; esac
+    remote=$(secondmate_registry_field "$REG" "$id" remote 2>/dev/null || true)
+    if [ "$remote" != 1 ]; then
+      echo "error: pending outbox has no matching remote secondmate route: $id" >&2
+      failed=1
+      continue
+    fi
+    remote_deliver_outbox "$id" "$outbox" || failed=1
+  done
+  return "$failed"
+}
+
+if [ "$RESUME_PENDING" -eq 1 ]; then
+  resume_pending_outboxes
+  exit $?
+fi
+
+REMOTE=$(secondmate_registry_field "$REG" "$ID" remote 2>/dev/null || true)
+if [ "$REMOTE" = 1 ]; then
+  remote_handoff "$ID" "$@"
+  exit $?
+fi
 
 RAW_HOME=$(secondmate_home "$ID") || exit 1
 [ -n "$RAW_HOME" ] || { echo "error: secondmate $ID has no home in $REG" >&2; exit 1; }

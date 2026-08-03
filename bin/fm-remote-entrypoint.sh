@@ -128,7 +128,7 @@ ACCOUNT_HOME=$(CDPATH='' cd ~ 2>/dev/null && pwd -P) || die "cannot resolve the 
 trap - EXIT
 rm -rf -- "$TMP"
 exec /usr/bin/env -i \
-  PATH="$SAFE_PATH" \
+  PATH="$ROOT/bin:$ACCOUNT_HOME/.local/bin:$SAFE_PATH" \
   HOME="$ACCOUNT_HOME" \
   FM_HOME="$HOME_PATH" \
   FM_ROOT_OVERRIDE="$ROOT" \

@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Path-confined remote file reads for fm-on.sh.
+# Path-confined remote file transfer for fm-on.sh.
 #
 # Usage:
 #   fm-remote-file.sh get <relative-path> [max-bytes]
+#   fm-remote-file.sh put state/handoff/<id>.outbox.md [max-bytes]
 #
-# The path is relative to FM_HOME, must resolve through ordinary directories to
-# one non-symlink regular file inside that home, and is bounded before output.
-# There is deliberately no delete or arbitrary write operation in this command.
+# A get path is relative to FM_HOME, must resolve through ordinary directories
+# to one non-symlink regular file inside that home, and is bounded before output.
+# Put is deliberately narrower: it atomically replaces only a backlog handoff
+# scratch file under state/handoff. There is no delete operation and no generic
+# write path; the receiving command owns scratch cleanup after committed ingest.
 set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}
@@ -30,13 +33,49 @@ resolve_file() { # <relative-path>
   printf '%s\n' "$path"
 }
 
-[ "${1:-}" = get ] || usage
+COMMAND=${1:-}
 [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
 REL=$2
 MAX=${3:-$MAX_DEFAULT}
 case "$MAX" in ''|*[!0-9]*|0) die "max-bytes must be a positive integer" ;; esac
 [ "$MAX" -le 1048576 ] || die "max-bytes exceeds the 1048576-byte safety bound"
-FILE=$(resolve_file "$REL")
-BYTES=$(LC_ALL=C wc -c < "$FILE" | tr -d ' ')
-[ "$BYTES" -le "$MAX" ] || die "file exceeds max-bytes: $REL ($BYTES > $MAX)"
-cat "$FILE"
+case "$COMMAND" in
+  get)
+    FILE=$(resolve_file "$REL")
+    BYTES=$(LC_ALL=C wc -c < "$FILE" | tr -d ' ')
+    [ "$BYTES" -le "$MAX" ] || die "file exceeds max-bytes: $REL ($BYTES > $MAX)"
+    cat "$FILE"
+    ;;
+  put)
+    case "$REL" in state/handoff/*.outbox.md) ;; *) die "put is confined to state/handoff/<id>.outbox.md" ;; esac
+    NAME=${REL#state/handoff/}
+    ID=${NAME%.outbox.md}
+    case "$ID" in ''|*[!A-Za-z0-9._-]*) die "put path has an unsafe handoff id" ;; esac
+    case "$NAME" in */*) die "put path has an extra directory" ;; esac
+    case "/$REL/" in */../*|*/./*) die "put path contains traversal" ;; esac
+    case "$REL" in *'//'*) die "put path is malformed" ;; esac
+    HOME_REAL=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || die "FM_HOME is unavailable"
+    STATE_DIR="$HOME_REAL/state"
+    [ ! -L "$STATE_DIR" ] || die "state directory must not be a symlink"
+    mkdir -p "$STATE_DIR" || die "cannot create state directory"
+    HANDOFF_DIR="$STATE_DIR/handoff"
+    [ ! -L "$HANDOFF_DIR" ] || die "handoff directory must not be a symlink"
+    mkdir -p "$HANDOFF_DIR" || die "cannot create handoff directory"
+    DEST="$HANDOFF_DIR/$(basename "$REL")"
+    [ ! -L "$DEST" ] || die "handoff destination must not be a symlink"
+    TMP=$(umask 077; mktemp "$HANDOFF_DIR/.put.XXXXXX") || die "cannot stage handoff transfer"
+    if ! head -c "$((MAX + 1))" > "$TMP"; then
+      rm -f -- "$TMP"
+      die "cannot read handoff transfer"
+    fi
+    BYTES=$(LC_ALL=C wc -c < "$TMP" | tr -d ' ')
+    if [ "$BYTES" -gt "$MAX" ]; then
+      rm -f -- "$TMP"
+      die "handoff transfer exceeds max-bytes"
+    fi
+    chmod 600 "$TMP" || { rm -f -- "$TMP"; die "cannot secure handoff transfer"; }
+    mv -f -- "$TMP" "$DEST" || { rm -f -- "$TMP"; die "cannot publish handoff transfer"; }
+    printf 'stored: %s bytes=%s\n' "$REL" "$BYTES"
+    ;;
+  *) usage ;;
+esac
