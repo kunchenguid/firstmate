@@ -354,8 +354,17 @@ spawn_remote_secondmate() {
       return 1
     fi
   fi
-  if ! "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" >/dev/null; then
-    echo "warning: remote secondmate $id inheritance failed before launch" >&2
+  if "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" >/dev/null; then
+    :
+  else
+    rc=$?
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    if [ "$rc" -eq 255 ]; then
+      echo "error: remote secondmate $id inheritance completion is unknown; launch refused and route preserved for reconciliation" >&2
+    else
+      echo "error: remote secondmate $id inheritance failed; launch refused" >&2
+    fi
+    return "$rc"
   fi
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "$id" "$harness" "$model" "$effort" "$backend" 2>&1); then

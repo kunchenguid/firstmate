@@ -110,6 +110,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -129,6 +131,19 @@ REMOTE_HANDOFF_DIR_REAL=
 REMOTE_OUTBOX_PRESENT=0
 REMOTE_PENDING_DIR_PRESENT=0
 REMOTE_PENDING_DIR_REAL=
+REMOTE_HANDOFF_LOCK=
+REMOTE_REGISTRY_LOCK=
+
+remote_teardown_locks_release() {
+  if [ -n "$REMOTE_HANDOFF_LOCK" ]; then
+    fm_lock_release "$REMOTE_HANDOFF_LOCK"
+    REMOTE_HANDOFF_LOCK=
+  fi
+  if [ -n "$REMOTE_REGISTRY_LOCK" ]; then
+    fm_lock_release "$REMOTE_REGISTRY_LOCK"
+    REMOTE_REGISTRY_LOCK=
+  fi
+}
 
 remote_recovery_paths_validate() {
   local mode=${1:-initial} handoff_dir outbox pending_dir real rec
@@ -277,7 +292,22 @@ remote_secondmate_teardown() {
   return 0
 }
 
-if remote_secondmate_teardown; then
+remote_secondmate_teardown_locked() {
+  local rc
+  [ -n "$(fm_meta_get "$META" remote_host)" ] || return 3
+  REMOTE_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+  fm_lock_acquire_wait "$REMOTE_REGISTRY_LOCK" || return 1
+  REMOTE_HANDOFF_LOCK="$STATE/.backlog-handoff-$ID.lock"
+  fm_lock_acquire_wait "$REMOTE_HANDOFF_LOCK" || {
+    remote_teardown_locks_release
+    return 1
+  }
+  if remote_secondmate_teardown; then rc=0; else rc=$?; fi
+  remote_teardown_locks_release
+  return "$rc"
+}
+
+if remote_secondmate_teardown_locked; then
   exit 0
 else
   remote_teardown_rc=$?
@@ -1608,11 +1638,15 @@ cleanup_firstmate_home_children() {
 }
 
 remove_secondmate_registry_entry() {
-  local id=$1 tmp
+  local id=$1 tmp lock rc=0
   [ -f "$SECONDMATE_REG" ] || return 0
+  lock=$(secondmate_registry_lock_path "$STATE")
+  fm_lock_acquire_wait "$lock" || return 1
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
-  mv "$tmp" "$SECONDMATE_REG"
+  mv "$tmp" "$SECONDMATE_REG" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
 }
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1

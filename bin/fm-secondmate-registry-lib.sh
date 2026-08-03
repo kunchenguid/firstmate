@@ -28,6 +28,8 @@ SECONDMATE_REGISTRY_MATCH_PROJECTS=
 SECONDMATE_REGISTRY_MATCH_REMOTE=0
 SECONDMATE_REGISTRY_ERROR=
 
+secondmate_registry_lock_path() { printf '%s/.secondmate-registry.lock\n' "$1"; }
+
 secondmate_registry_parse_line() {
   local line=$1
   local local_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'

@@ -26,11 +26,25 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-charter-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 encode() { base64 | tr -d '\n'; }
 safe_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
+
+TMP=
+REGISTRY_LOCK=
+REGISTRY_LOCK_HELD=0
+cleanup() {
+  [ -z "$TMP" ] || rm -rf -- "$TMP"
+  if [ "$REGISTRY_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$REGISTRY_LOCK"
+    REGISTRY_LOCK_HELD=0
+  fi
+}
+trap cleanup EXIT
 
 [ "$#" -ge 5 ] || usage
 ID=$1
@@ -65,6 +79,11 @@ if [ "$NO_PROJECTS" -eq 1 ]; then
 else
   [ "${#PROJECT_NAMES[@]}" -gt 0 ] || die "at least one project or --no-projects is required"
 fi
+
+mkdir -p "$STATE" || die "cannot create parent state directory"
+REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+fm_lock_acquire_wait "$REGISTRY_LOCK" || die "cannot lock the secondmate registry"
+REGISTRY_LOCK_HELD=1
 
 if [ -e "$REG" ] || [ -L "$REG" ]; then
   [ -f "$REG" ] && [ ! -L "$REG" ] || die "secondmate registry is unavailable or unsafe: $REG"
@@ -102,8 +121,6 @@ SCOPE=$(registry_scope_for_brief "$BRIEF")
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-home-seed.XXXXXX") || die "cannot create seed staging directory"
 REG_EXISTED=0
 [ -f "$REG" ] && { cp "$REG" "$TMP/registry.before"; REG_EXISTED=1; }
-cleanup() { rm -rf -- "$TMP"; }
-trap cleanup EXIT
 
 # Keep the parent charter as its durable source, but publish a remote copy whose
 # status path is the remote append-only relay log rather than a local Mac path.

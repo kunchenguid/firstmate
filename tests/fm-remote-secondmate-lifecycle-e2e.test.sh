@@ -20,7 +20,7 @@ TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
-trap 'touch "$TMP_ROOT/provision.release" 2>/dev/null || true; FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" 2>/dev/null || true; FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT
 
 # Materialize the current branch as the remote host's tracked code root. The
 # fixture is a real git repository because provisioning and guarded sync exercise
@@ -124,6 +124,11 @@ $command_fields
 EOF
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   inherit-partial:fm-remote-inherit.sh:config/crew-harness) exit 255 ;;
+  provision-block-fail:fm-remote-home-provision.sh:*)
+    touch "$FM_FAKE_SEED_ENTERED"
+    while [ ! -f "$FM_FAKE_SEED_RELEASE" ]; do sleep 0.02; done
+    exit 1
+    ;;
 esac
 case "${FM_FAKE_SSH_MODE:-normal}" in
   unreachable) exit 255 ;;
@@ -153,7 +158,21 @@ remote_env() {
   FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   FM_FAKE_SSH_COUNT="$SSH_COUNT" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_FAKE_SEED_ENTERED="$TMP_ROOT/seed.entered" \
+  FM_FAKE_SEED_RELEASE="$TMP_ROOT/seed.release" \
   FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
+  "$@"
+}
+
+seed_env() {
+  FM_HOME="$TMP_ROOT/seed-parent" \
+  FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
+  FM_SSH_BIN="$FAKEBIN/fake-ssh" \
+  FM_FAKE_SSH_COUNT="$SSH_COUNT" \
+  FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_FAKE_SEED_ENTERED="$TMP_ROOT/seed.entered" \
+  FM_FAKE_SEED_RELEASE="$TMP_ROOT/seed.release" \
   "$@"
 }
 
@@ -205,6 +224,35 @@ if [ "${FM_TEST_PROVISION_ONLY:-0}" = 1 ]; then
   exit 0
 fi
 
+mkdir -p "$TMP_ROOT/seed-parent/data" "$TMP_ROOT/seed-parent/state"
+FM_SECONDMATE_CHARTER='Failing seed charter.' FM_SECONDMATE_SCOPE='failed seed' \
+  FM_FAKE_SSH_MODE=provision-block-fail seed_env "$ROOT/bin/fm-remote-home-seed.sh" \
+  seed-fail remote-mac "$REMOTE_ROOT" "$TMP_ROOT/seed-fail-home" --no-projects \
+  > "$TMP_ROOT/seed-fail.out" 2>&1 &
+seed_fail_pid=$!
+seed_wait=0
+while [ ! -f "$TMP_ROOT/seed.entered" ]; do
+  kill -0 "$seed_fail_pid" 2>/dev/null || fail "failing seed exited before remote provisioning"
+  seed_wait=$((seed_wait + 1))
+  [ "$seed_wait" -le 250 ] || fail "failing seed never reached remote provisioning"
+  sleep 0.02
+done
+FM_SECONDMATE_CHARTER='Successful seed charter.' FM_SECONDMATE_SCOPE='successful seed' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-keep remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-keep-home" --no-projects > "$TMP_ROOT/seed-keep.out" 2>&1 &
+seed_keep_pid=$!
+sleep 0.2
+kill -0 "$seed_keep_pid" 2>/dev/null || fail "competing seed bypassed the shared registry transaction"
+touch "$TMP_ROOT/seed.release"
+if wait "$seed_fail_pid"; then
+  fail "known-failing seed unexpectedly succeeded"
+fi
+wait "$seed_keep_pid" || fail "serialized successful seed failed"
+assert_no_grep '- seed-fail ' "$TMP_ROOT/seed-parent/data/secondmates.md" "failed seed route survived rollback"
+assert_grep '- seed-keep ' "$TMP_ROOT/seed-parent/data/secondmates.md" "failed seed rollback removed a competing successful route"
+assert_present "$TMP_ROOT/seed-keep-home/.fm-secondmate-home" "serialized seed lost its published remote home"
+pass "remote seed rollback preserves serialized competing routes"
+
 # Provision and register the remote route from the captain-facing primary.
 out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
@@ -237,6 +285,18 @@ pass "mixed local and remote routes validate without migration"
 
 # Launch on the remote home's own configured backend. Parent metadata records
 # host placement separately from that backend and arms the reply source.
+printf 'pi\n' > "$PARENT/config/crew-harness"
+launches_before_inherit=0
+[ ! -f "$TMUX_LOG" ] || launches_before_inherit=$(grep -c '^new-window' "$TMUX_LOG" || true)
+if FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-inherit-partial.out" 2>&1; then
+  fail "remote spawn launched after ambiguous partial inheritance"
+fi
+launches_after_inherit=0
+[ ! -f "$TMUX_LOG" ] || launches_after_inherit=$(grep -c '^new-window' "$TMUX_LOG" || true)
+[ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
+  || fail "remote spawn reached launch after ambiguous partial inheritance"
+assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=tmux' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
@@ -280,7 +340,7 @@ pass "marked send and routed reply complete through the existing parent correlat
 rm -f "$PARENT/state/.wake-queue"
 
 printf '{"revision":2}\n' > "$PARENT/config/crew-dispatch.json"
-printf 'pi\n' > "$PARENT/config/crew-harness"
+printf 'grok\n' > "$PARENT/config/crew-harness"
 set +e
 FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-config-push.sh" \
   > "$TMP_ROOT/config-partial.out" 2>&1
@@ -288,14 +348,14 @@ config_partial_rc=$?
 set -e
 [ "$config_partial_rc" -ne 0 ] || fail "partial remote inheritance claimed complete convergence"
 assert_grep '"revision":2' "$REMOTE_HOME/config/crew-dispatch.json" "partial inheritance did not apply its first file"
-[ "$(cat "$REMOTE_HOME/config/crew-harness")" != pi ] \
+[ "$(cat "$REMOTE_HOME/config/crew-harness")" != grok ] \
   || fail "partial inheritance unexpectedly applied the failed file"
 NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
 assert_grep 'remote=1' "$NUDGE_MARKER" "partial inheritance left no durable remote reread marker"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
 remote_env "$ROOT/bin/fm-bootstrap.sh" > "$TMP_ROOT/config-partial-retry.out" \
   || fail "bootstrap did not converge partial remote inheritance"
-[ "$(cat "$REMOTE_HOME/config/crew-harness")" = pi ] \
+[ "$(cat "$REMOTE_HOME/config/crew-harness")" = grok ] \
   || fail "bootstrap did not apply the remaining inherited file"
 assert_absent "$NUDGE_MARKER" "bootstrap cleared no remote reread marker after convergence"
 PARTIAL_CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$TMUX_LOG" | tail -1 | cut -d= -f2-)
@@ -412,8 +472,31 @@ assert_present "$REMOTE_HOME" "unsafe pending-replies retirement removed the rem
 assert_present "$TMP_ROOT/external-pending/escape" "unsafe retirement removed an external pending reply"
 rm -f "$PARENT/state/pending-replies"
 mv "$PARENT/state/pending-replies.safe" "$PARENT/state/pending-replies"
-remote_env "$ROOT/bin/fm-teardown.sh" ios >/dev/null \
-  || fail "safe remote retirement failed after child work cleared"
+handoff_lock="$PARENT/state/.backlog-handoff-ios.lock"
+FM_HOME="$PARENT" /bin/bash -c '
+  . "$1"
+  fm_lock_acquire_wait "$2"
+  touch "$3"
+  while [ ! -f "$4" ]; do sleep 0.02; done
+  fm_lock_release "$2"
+' _ "$ROOT/bin/fm-wake-lib.sh" "$handoff_lock" "$TMP_ROOT/handoff.entered" \
+  "$TMP_ROOT/handoff.release" &
+handoff_holder_pid=$!
+handoff_wait=0
+while [ ! -f "$TMP_ROOT/handoff.entered" ]; do
+  kill -0 "$handoff_holder_pid" 2>/dev/null || fail "handoff lock holder exited before acquiring the route lock"
+  handoff_wait=$((handoff_wait + 1))
+  [ "$handoff_wait" -le 250 ] || fail "handoff lock holder never acquired the route lock"
+  sleep 0.02
+done
+remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-serialized.out" 2>&1 &
+teardown_pid=$!
+sleep 0.2
+kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active backlog handoff"
+assert_present "$REMOTE_HOME" "remote retirement removed the home during an active backlog handoff"
+touch "$TMP_ROOT/handoff.release"
+wait "$handoff_holder_pid" || fail "handoff lock holder failed to release"
+wait "$teardown_pid" || fail "safe remote retirement failed after handoff serialization"
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
