@@ -175,7 +175,7 @@ PRES_HOME="$TMP_ROOT/presentation-home"
 mkdir -p "$PRES_HOME/state" "$PRES_HOME/config"
 : > "$PRES_HOME/config/herdr-presentation-spaces"
 
-for id in uniqA uniqB dupC dupD staleF smE presU presD; do
+for id in uniqA uniqB dupC dupD staleF smE presU presD presT; do
   mkdir -p "$PRIMARY_HOME/data/$id" "$SM_HOME/data/$id" "$PRES_HOME/data/$id"
   printf 'trivial launcher-placement brief: nothing to do.\n' > "$PRIMARY_HOME/data/$id/brief.md"
   printf 'trivial launcher-placement brief: nothing to do.\n' > "$SM_HOME/data/$id/brief.md"
@@ -256,6 +256,30 @@ PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
   || fail "the projection journal does not name its own workspace"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
 pass "real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus"
+
+# --- 2c. presentation spaces ON with a non-home launcher label: the exact
+#         live parent label must be used for ordering and the v2 binding -----
+
+read -r WS_TILDE _ LAUNCH_TILDE_PANE <<EOF
+$(make_workspace '~')
+EOF
+[ -n "$WS_TILDE" ] || fail "could not create the non-home-labeled launcher workspace"
+
+spawn_from_launcher "$LAUNCH_TILDE_PANE" "$PRES_HOME" presT "$PROJ"
+[ "$SPAWN_RC" -eq 0 ] || fail "a projected spawn under the '~' launcher label failed"$'\n'"$(cat "$SPAWN_ERR")"
+PREST_META="$PRES_HOME/state/presT.meta"
+record_worktree "$PREST_META"
+PREST_PANE=$(grep '^herdr_pane_id=' "$PREST_META" | cut -d= -f2-)
+PREST_WS=$(workspace_of_pane "$PREST_PANE")
+PREST_JOURNAL="$PRES_HOME/state/presT.herdr-presentation"
+[ "$(journal_field "$PREST_JOURNAL" version)" = 2 ] \
+  || fail "the non-home-labeled projection did not publish a version 2 binding"$'\n'"$(cat "$PREST_JOURNAL" 2>/dev/null)"
+[ "$(journal_field "$PREST_JOURNAL" parent_workspace_id)" = "$WS_TILDE" ] \
+  || fail "the non-home-labeled projection did not bind the exact launcher workspace (launcher=$WS_TILDE journal=$(journal_field "$PREST_JOURNAL" parent_workspace_id))"
+[ "$(journal_field "$PREST_JOURNAL" parent_label)" = '~' ] \
+  || fail "the projection binding used the home fallback label instead of the launcher's live label"
+[ "$PREST_WS" != "$WS_TILDE" ] || fail "a projected worker must not be collapsed into its '~' parent workspace"
+pass "real herdr E2E: an exact launcher workspace labeled '~' publishes a version 2 binding with that live parent label"
 
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real
 #        Herdr pane so the identity comes from Herdr's own injection ----------

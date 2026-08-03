@@ -1142,6 +1142,8 @@ case "$BACKEND" in
     if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
+      HERDR_PARENT_WORKSPACE_ID=""
+      HERDR_LAUNCHER_STATUS=2
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
@@ -1151,6 +1153,18 @@ case "$BACKEND" in
           echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
           exit 1
         }
+        set +e
+        fm_backend_herdr_launcher_identity "$HERDR_SES"
+        HERDR_LAUNCHER_STATUS=$?
+        set -e
+        case "$HERDR_LAUNCHER_STATUS" in
+          0)
+            HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+            HERDR_PARENT_LABEL=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_LABEL
+            ;;
+          2) : ;;
+          *) spawn_herdr_presentation_order_lock_release; exit 1 ;;
+        esac
         if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
           herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
         fi
@@ -1200,11 +1214,17 @@ case "$BACKEND" in
           HERDR_LAUNCHER_STATUS=$?
           set -e
           case "$HERDR_LAUNCHER_STATUS" in
-            0) HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID ;;
-            2) HERDR_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_parent_workspace_exact \
-                 "$HERDR_SES" "$HERDR_PARENT_LABEL" 2>/dev/null || true) ;;
+            0)
+              HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+              HERDR_PARENT_LABEL=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_LABEL
+              ;;
+            2) : ;;
             *) spawn_herdr_presentation_order_lock_release; exit 1 ;;
           esac
+          if [ "$HERDR_LAUNCHER_STATUS" -eq 2 ]; then
+            HERDR_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_parent_workspace_exact \
+                 "$HERDR_SES" "$HERDR_PARENT_LABEL" 2>/dev/null || true)
+          fi
           if [ -z "$HERDR_PARENT_WORKSPACE_ID" ]; then
             echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
             spawn_herdr_presentation_order_lock_release
