@@ -380,6 +380,11 @@ ok - mitigation: no explicit close and no corrective focus were needed on the de
 evidence: herdr=0.7.5 protocol=17 steal_live=1 default-session-tripwire=armed
 ```
 
+The active sampler reads the operation's exact pre-operation tab identity and focus state rather than reconstructing focus from a multi-object workspace snapshot.
+It makes at most eight bounded probes with a 10-millisecond delay after a missing, malformed, or identity-mismatched response; a valid unfocused response is returned immediately and fails the in-operation comparison.
+The final sample must still equal the exact pre-operation tab identity and focus state.
+If the adapter issues a corrective `tab focus`, the regression records that tab's immediately preceding state and fails when it was genuinely unfocused or unreadable, while a redundant focus of the already focused tab does not masquerade as a wrong-focus interval.
+
 Direct lab probes on the same day established the removal rules the emptying-close plan relies on, each verified with `workspace list` focus reads around one mutation in a guarded `fm-lab-` session:
 
 - An explicit `pane close` that emptied a non-focused workspace moved focus off the focused workspace in both before-focus and after-focus geometries.

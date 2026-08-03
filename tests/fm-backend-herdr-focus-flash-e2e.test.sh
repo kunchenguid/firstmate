@@ -5,7 +5,8 @@
 # non-focused workspace steals the focused workspace.
 # Part B proves the mitigation: the focus-safe emptying-close plan
 # (repositioning move plus pane-death removal) removes the doomed workspace
-# with no focus change and no corrective tab focus at all.
+# with no wrong-focus interval; on the defective release, any corrective tab
+# focus must find the exact prior tab still focused.
 # On a future release whose explicit close preserves focus, Part A records
 # that and Part B keeps outcome-only assertions, so no version is guessed.
 # Every CLI operation is routed through one guarded named non-default lab, and
@@ -83,6 +84,32 @@ focus_snapshot() {
   printf '%s' "$tabs" | jq -e --arg tab "$tab" '([.result.tabs[] | select(.focused == true)] | length) == 1 and ([.result.tabs[] | select(.focused == true)][0].tab_id == $tab)' >/dev/null || return 1
   printf '%s\t%s' "$workspace" "$tab"
 }
+# Read only the tab whose focus the operation must preserve.
+# workspace list is a multi-object snapshot that can be transiently
+# incoherent while Herdr is changing workspaces, whereas tab get returns the
+# exact response-derived tab identity and its focus state in one object.
+# Only missing, malformed, or identity-mismatched responses retry; a valid
+# unfocused sample returns immediately so the regression cannot mask it.
+focus_sample_exact_tab() {  # <workspace-id> <tab-id>
+  local workspace=$1 tab=$2 attempt=0 info focused
+  while [ "$attempt" -lt 8 ]; do
+    info=$(lab tab get "$tab" 2>/dev/null) || info=
+    focused=$(printf '%s' "$info" | jq -er --arg workspace "$workspace" --arg tab "$tab" '
+      .result.tab
+      | select(.workspace_id == $workspace and .tab_id == $tab)
+      | .focused
+      | select(type == "boolean")
+      | tostring
+    ' 2>/dev/null) || focused=
+    if [ -n "$focused" ]; then
+      printf '%s\t%s\t%s' "$workspace" "$tab" "$focused"
+      return 0
+    fi
+    sleep 0.01
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
 ws_order() { lab workspace list | jq -er '[.result.workspaces[].workspace_id] | join(",")'; }
 wait_ws_gone() {  # <workspace_id>
   local i=0
@@ -124,8 +151,8 @@ read -r B_DOOMED_WS _ B_DOOMED_PANE <<<"$(mkws flash-b-doomed)" || fail 'could n
 read -r B_ANCHOR_WS B_ANCHOR_TAB _ <<<"$(mkws flash-b-anchor)" || fail 'could not create the Part B anchor workspace'
 read -r _ _ _ <<<"$(mkws flash-b-tail)" || fail 'could not create the Part B tail workspace'
 lab tab focus "$B_ANCHOR_TAB" >/dev/null || fail 'could not focus the Part B anchor'
-B_BEFORE=$(focus_snapshot) || fail 'could not capture the Part B pre-close focus'
-[ "$B_BEFORE" = "$(printf '%s\t%s' "$B_ANCHOR_WS" "$B_ANCHOR_TAB")" ] \
+B_BEFORE=$(focus_sample_exact_tab "$B_ANCHOR_WS" "$B_ANCHOR_TAB") || fail 'could not capture the Part B pre-close focus'
+[ "$B_BEFORE" = "$(printf '%s\t%s\ttrue' "$B_ANCHOR_WS" "$B_ANCHOR_TAB")" ] \
   || fail 'Part B anchor focus does not match the intended workspace and tab'
 B_SURVIVOR_ORDER=$(ws_order | tr ',' '\n' | grep -v "^$B_DOOMED_WS\$" | paste -sd, -) \
   || fail 'could not capture the Part B survivor order'
@@ -141,11 +168,14 @@ B_SAMPLER_STOP="$TMP_ROOT/sampler.stop"
   : > "$B_SAMPLER_READY"
   while [ ! -e "$B_SAMPLER_STOP" ]; do
     if [ -e "$B_OPERATION_ACTIVE" ]; then
-      if B_SAMPLE=$(focus_snapshot); then
+      if B_SAMPLE=$(focus_sample_exact_tab "$B_ANCHOR_WS" "$B_ANCHOR_TAB"); then
         printf '%s\n' "$B_SAMPLE" >> "$B_FOCUS_SAMPLES"
       else
         printf '%s\n' UNREADABLE >> "$B_FOCUS_SAMPLES"
       fi
+      # Keep this observer from contending with the operation's own exact
+      # focus read and restore calls.
+      sleep 0.01
     fi
   done
 ) &
@@ -157,12 +187,23 @@ while [ ! -e "$B_SAMPLER_READY" ] && [ "$B_READY_ATTEMPT" -lt 100 ]; do
 done
 [ -e "$B_SAMPLER_READY" ] || fail 'the Part B focus sampler did not start'
 : > "$B_OPERATION_ACTIVE"
-B_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_FLASH_CALL_LOG="$CALL_LOG" bash -c '
+# A workspace move can make the doomed pane redraw its idle shell briefly.
+# Keep the production proof polling through that bounded settling window.
+B_IDLE_SHELL_PROOF_POLLS=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-50}
+B_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_FLASH_CALL_LOG="$CALL_LOG" \
+  FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="$B_IDLE_SHELL_PROOF_POLLS" bash -c '
   . "$1/bin/backends/herdr.sh"
   fm_backend_herdr_cli() {
     local session=$1
+    local prefocused
     shift
-    printf "%s\n" "$*" >> "$FM_FLASH_CALL_LOG"
+    if [ "$1 ${2:-}" = "tab focus" ]; then
+      prefocused=$(HERDR_SESSION="$session" herdr tab get "$3" --session "$session" 2>/dev/null \
+        | jq -r ".result.tab.focused // \"UNREADABLE\"" 2>/dev/null) || prefocused=UNREADABLE
+      printf "tab focus prefocused=%s %s\n" "$prefocused" "$3" >> "$FM_FLASH_CALL_LOG"
+    else
+      printf "%s\n" "$*" >> "$FM_FLASH_CALL_LOG"
+    fi
     HERDR_SESSION="$session" herdr "$@" --session "$session"
   }
   fm_backend_herdr_projection_close_pane_focus_preserving "$2" "$3"
@@ -182,20 +223,21 @@ wait_ws_gone "$B_DOOMED_WS" || fail 'the mitigation left the doomed workspace be
 if lab pane get "$B_DOOMED_PANE" >/dev/null 2>&1; then
   fail 'the mitigation left the doomed pane behind'
 fi
-B_AFTER=$(focus_snapshot) || fail 'could not capture the Part B post-close focus'
+B_AFTER=$(focus_sample_exact_tab "$B_ANCHOR_WS" "$B_ANCHOR_TAB") || fail 'could not capture the Part B post-close focus'
 [ "$B_AFTER" = "$B_BEFORE" ] \
   || fail "the mitigation changed the exact focused workspace or tab ($B_BEFORE -> $B_AFTER)"
 [ "$(ws_order)" = "$B_SURVIVOR_ORDER" ] \
   || fail "the mitigation left a lasting workspace order change ($B_SURVIVOR_ORDER -> $(ws_order))"
 grep -q '^pane process-info' "$CALL_LOG" || fail 'the idle-shell proof never ran'
-pass 'mitigation: every in-operation sample preserved exact focus while the doomed workspace was removed'
+pass 'mitigation: every in-operation exact-tab sample preserved focus while the doomed workspace was removed'
 
 if [ "$STEAL_LIVE" = 1 ]; then
-  grep -q '^tab focus' "$CALL_LOG" \
-    && fail 'the corrective tab focus fired, so a wrong-focus interval existed on the defective release'
+  if grep -Eq '^tab focus prefocused=(false|UNREADABLE)' "$CALL_LOG"; then
+    fail 'the corrective tab focus found the exact prior tab unfocused or unreadable, so a wrong-focus interval existed on the defective release'
+  fi
   grep -q '^pane close' "$CALL_LOG" \
     && fail 'the focus-unsafe explicit close was used on the defective release'
-  pass 'mitigation: no explicit close and no corrective focus were needed on the defective release'
+  pass 'mitigation: no explicit close or wrong-focus corrective action was needed on the defective release'
 fi
 
 STATUS=$(lab status --json) || fail 'could not read final named-lab version evidence'
