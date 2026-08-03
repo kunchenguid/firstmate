@@ -8,13 +8,13 @@
 #
 # The defect it exists for: a harness that rewrites its own process title made
 # `#{pane_current_command}` report a version string, the classifier could not
-# attribute the pane, and supervision lost the agent. These cases prove the
-# verdict never depends on a single name surface, by driving the two name
-# sources APART on purpose and asserting the verdict survives either one
-# failing to classify. tmux and `ps -o comm=` read different name surfaces, and
-# which one a given trick breaks is platform-dependent, so every case asserts
-# only the platform-independent property: exactly one source classifies, and the
-# verdict is still correct.
+# attribute the pane, and supervision lost the agent. The version-string case
+# below carries the proof that the verdict never depends on a single name
+# surface: it drives the two sources apart on purpose and asserts that
+# divergence, so it cannot go quietly vacuous. tmux and `ps -o comm=` read
+# different name surfaces, and which one a given construction blinds differs
+# between macOS and Linux, so every case asserts only the platform-independent
+# property that the verdict itself is correct.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

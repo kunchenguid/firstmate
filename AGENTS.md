@@ -186,11 +186,6 @@ Do not add model-specific versions of that policy.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable; pass an explicit per-spawn `--backend` only under that exact task's own authority, never as later-task precedent (selection contract: [`docs/configuration.md`](docs/configuration.md) "Runtime backend").
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
 
-Anything that reads a harness's own runtime identity, output, or keys must be proven end to end against the real harness, because a stub or fake agent can only confirm what firstmate already assumed.
-Authorize that verification to spend tokens rather than accepting a stubbed pass; the cost is small against a check that silently stops working.
-Prefer a structural or kernel signal over matching a rendered surface a vendor can change in a patch release, and where a surface signal is unavoidable back it with a guard that fails loudly naming the harness and version instead of degrading quietly.
-`firstmate-coding-guidelines` owns how to build and register that proof.
-
 ## 5. Recovery
 
 After the one session-start digest, reconcile reality with durable records before taking new work.
