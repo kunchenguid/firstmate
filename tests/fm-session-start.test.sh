@@ -105,6 +105,34 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  cat > "$fakebin/fm-liveness-snapshot" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}
+rows='[]'
+for meta in "$state"/*.meta; do
+  [ -f "$meta" ] || continue
+  id=$(basename "$meta" .meta)
+  harness=$(sed -n 's/^harness=//p' "$meta" | tail -1)
+  backend=$(sed -n 's/^backend=//p' "$meta" | tail -1); [ -n "$backend" ] || backend=tmux
+  target=$(sed -n 's/^window=//p' "$meta" | tail -1)
+  case "$target" in
+    *dead*|*missing*) endpoint=verified_absent; worker=verified_absent; activity=absent ;;
+    *unverified*) endpoint=unverified; worker=unverified; activity=unverified ;;
+    '') endpoint=unverified; worker=unverified; activity=unverified ;;
+    *) endpoint=verified_present; worker=verified_present; activity=parked ;;
+  esac
+  row=$(jq -n --arg id "$id" --arg harness "$harness" --arg backend "$backend" --arg target "$target" --arg endpoint "$endpoint" --arg worker "$worker" --arg activity "$activity" '
+    {id:$id,harness:$harness,harness_family:$harness,backend:$backend,target:$target,worktree:null,
+     endpoint:{presence:$endpoint,raw:(if $endpoint=="verified_absent" then "missing" elif $endpoint=="verified_present" then "alive" else "unreadable" end)},
+     worker:{presence:$worker,pids_sample_1:1,pids_sample_2:1,harness_processes_sample_1:1,harness_processes_sample_2:1},
+     output:{sample_1_readable:true,sample_2_readable:true,changed:false},
+     cpu:{sample_1_max_ms:1000,sample_2_max_ms:1000,delta_ms:0,rate_ms_per_minute:0,baseline:"verified",threshold_ms_per_minute:760},activity:$activity}')
+  rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a+[$b]')
+done
+jq -n --argjson rows "$rows" '{schema:"fm-liveness.v1",observed_at:"2026-08-03T10:00:00Z",interval_ms:2000,process_samples:{sample_1_readable:true,sample_2_readable:true},records:$rows}'
+SH
+  chmod +x "$fakebin/fm-liveness-snapshot"
   printf '%s\n' manual > "${fakebin%/*}/home-placeholder" 2>/dev/null || true
 }
 
@@ -513,11 +541,11 @@ run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
     env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" FM_LIVENESS_SNAPSHOT_BIN="${path%%:*}/fm-liveness-snapshot" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" FM_LIVENESS_SNAPSHOT_BIN="${path%%:*}/fm-liveness-snapshot" \
       "$SESSION_START"
   fi
 }
@@ -1238,7 +1266,7 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
     "session start did not distinguish an existing Pi-shaped process from a missing window"
   [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "liveness: endpoint=verified_present worker=verified_present activity=parked backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID" \
     "the later fleet read should still see the ambiguous endpoint"
   pass "session start: an existing ambiguous Pi process prevents duplicate recovery"
 }
@@ -1257,8 +1285,8 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later cheap presence read should preserve the visible offline symptom"
+  assert_contains "$out" "liveness: endpoint=verified_present worker=verified_present activity=parked backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID" \
+    "the later measured read should remain explicit rather than reuse a stale status event"
   pass "session start: transient tmux unreadability never licenses a relaunch"
 }
 
@@ -1313,12 +1341,14 @@ EOF
 
   printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
+  printf 'window=fm-sess:unverified-window\nkind=ship\n' > "$home/state/task-unverified.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "liveness: endpoint=verified_present worker=verified_present activity=parked backend=tmux window=fm-sess:live-window" "live tmux endpoint not verified present"
+  assert_contains "$out" "liveness: endpoint=verified_absent worker=verified_absent activity=absent backend=tmux window=fm-sess:dead-window" "dead tmux endpoint not verified absent"
+  assert_contains "$out" "liveness: endpoint=unverified worker=unverified activity=unverified backend=tmux window=fm-sess:unverified-window" "unreadable tmux endpoint did not stay unverified"
 
-  pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
+  pass "tmux liveness distinguishes verified present, verified absent, and unverified"
 }
 
 test_endpoint_liveness_herdr() {
@@ -1335,10 +1365,10 @@ EOF
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
+  assert_contains "$out" "liveness: endpoint=verified_present worker=verified_present activity=parked backend=herdr window=sess:p-live" "live herdr endpoint not verified present"
+  assert_contains "$out" "liveness: endpoint=verified_absent worker=verified_absent activity=absent backend=herdr window=sess:p-dead" "dead herdr endpoint not verified absent"
 
-  pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
+  pass "herdr liveness distinguishes verified present from verified absent"
 }
 
 # --- composition: real scripts run, not reimplemented ------------------------

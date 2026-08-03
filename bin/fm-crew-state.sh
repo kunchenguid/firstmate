@@ -9,14 +9,15 @@
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
 # no-mistakes run-step attributed to this crew's branch and current code
-# identity, else the pane busy-signature) and reconciles the possibly-stale log
-# against it.
+# identity, else the independently measured process/output observation from
+# bin/fm-liveness-snapshot.sh) and labels historical log contradictions.
 #
-# The determinism lives entirely here - only run-step / pane / log reads plus
+# The determinism lives entirely here - only run-step, process, output, and
+# historical log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|process-output|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -39,13 +40,15 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#   4. No run for this crew (pre-validation, or kind=scout): use two samples
+#      bound to the recorded endpoint and exact worktree.
+#      Changed output or above-baseline cumulative CPU -> working; a verified
+#      worker at its harness-relative baseline -> parked; absent, inactive, or
+#      unverified evidence -> unknown.
+#      The status log is never a fallback current-state source.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
-#      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log.
+#      attributed to this crew, absent or unreadable liveness reports unknown ·
+#      process-output rather than trusting a stale status log.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -56,8 +59,6 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
-# shellcheck source=bin/fm-tmux-lib.sh
-. "$SCRIPT_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -100,7 +101,6 @@ meta_value() {  # <key>
 
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
-HARNESS=$(meta_value harness)
 [ -n "$KIND" ] || KIND=ship
 
 # A torn-down (or never-created) worktree has no current state to read.
@@ -115,58 +115,10 @@ log_last_line() {
   [ -f "$LOG" ] || return 1
   grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
 }
-# Map a status-log verb onto a canonical state for the fallback path. `paused` is
-# the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
-# a crew with no active run and an idle pane that declared a known external wait
-# reports `paused` distinctly, so a supervisor reading this sees a declared pause
-# and its reason rather than a wedge-suspect idle.
-map_log_state() {  # <line>
-  if status_is_paused "$1"; then
-    echo paused
-    return
-  fi
-  case "$(status_line_verb "$1")" in
-    working)        echo working ;;
-    needs-decision) echo parked ;;
-    blocked)        echo blocked ;;
-    done)           echo "done" ;;
-    failed)         echo failed ;;
-    *)              echo unknown ;;
-  esac
-}
-
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
-# pane_readable is consulted ONLY in the no-run fallback below. The run-step path
-# stays authoritative regardless of pane liveness - judge by the run-step, not the
-# shell - so a finished crew whose endpoint has closed still reports its run-step
-# state (e.g. done) instead of being masked as unknown. Backend-aware
-# (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
-# herdr task is read through fm_backend_capture instead of a bare tmux probe.
-TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
-EXPECTED_LABEL="fm-$ID"
-pane_readable() {  # <target>
-  case "$TASK_BACKEND" in
-    tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
-    *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
-  esac
-}
-# crew_busy_verdict: the crew's semantic busy state from the one contract
-# owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
-# adapter answers from its own lifecycle record; Grok answers from its
-# isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
-# when no record exists, but its native `idle` is NOT, because agent.get
-# reports generation state (idle while a crew blocks on its own long-running
-# foreground tool call) rather than turn state.
-crew_busy_verdict() {  # <target>
-  local tail40=''
-  case "$HARNESS" in
-    grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
-  esac
-  fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
-}
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 # trim, strip_quotes, the bounded nm_run call, nm_field's TOON parse, and the
@@ -241,14 +193,6 @@ nm_gate_findings_count() {
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
 }
-log_reports_ci_ready() {
-  [ "$LOG_VERB" = "done" ] || return 1
-  case "$(status_line_note "$LOG_LINE")" in
-    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
@@ -496,23 +440,6 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
-  fi
-
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
@@ -532,42 +459,26 @@ if [ "$HAVE_RUN" = 1 ]; then
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
-# The run-step path above already handled any crew with a run, regardless of pane
-# liveness, so a finished-but-pane-closed crew never reaches here. Down here there
-# is no run to consult, so a dead/unreadable target means the crew is gone: report
-# unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
-
-# Secondmates idle on their own watcher (idle pane = healthy), so the busy
-# state is not meaningful for them; read their state from the status log only.
-# Only an exact busy verdict reports working here, and only an exact idle
-# verdict permits the status-log fallback below. Missing, malformed, stale, or
-# unverified semantic state remains unknown.
-if [ "$KIND" != secondmate ]; then
-  BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
-  case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
-    idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
-  esac
+if [ -n "${FM_CREW_STATE_LIVENESS_JSON:-}" ]; then
+  LIVENESS_JSON=$FM_CREW_STATE_LIVENESS_JSON
+else
+  LIVENESS_BIN=${FM_LIVENESS_SNAPSHOT_BIN:-$SCRIPT_DIR/fm-liveness-snapshot.sh}
+  LIVENESS_JSON=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$LIVENESS_BIN" --json --id "$ID" 2>/dev/null) || LIVENESS_JSON='{"records":[]}'
 fi
-
-# Fall back to the status log's last line, but ONLY when its verb maps to a real
-# run-state. A decision-closing event - resolved: (fm-classify-lib.sh's
-# FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
-# it exists solely to CLOSE a keyed decision in the durable fold, so a trailing
-# resolved: must never become the current state or leak its resolution prose as the
-# detail. Skipping it lets a just-resolved idle crew (typically a secondmate, which
-# has no busy check above) fall through to the idle default instead of rendering
-# `unknown` with the resolution note as `doing`. map_log_state is the single owner of
-# the verb->state mapping (including the configurable paused verb), so reusing its
-# `unknown` verdict as the "not a state" test needs no second verb list here.
-if [ -n "$LOG_VERB" ]; then
-  LOG_STATE=$(map_log_state "$LOG_LINE")
-  if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
-  fi
-fi
-
-emit unknown none "no current-state source available"
+LIVE_ROW=$(printf '%s' "$LIVENESS_JSON" | jq -c --arg id "$ID" '[.records[]? | select(.id==$id)][0] // empty' 2>/dev/null || true)
+[ -n "$LIVE_ROW" ] || emit unknown process-output "liveness measurement unavailable"
+ACTIVITY=$(printf '%s' "$LIVE_ROW" | jq -r '.activity // "unverified"')
+ENDPOINT_PRESENCE=$(printf '%s' "$LIVE_ROW" | jq -r '.endpoint.presence // "unverified"')
+WORKER_PRESENCE=$(printf '%s' "$LIVE_ROW" | jq -r '.worker.presence // "unverified"')
+CPU_DELTA=$(printf '%s' "$LIVE_ROW" | jq -r '.cpu.delta_ms // 0')
+CPU_RATE=$(printf '%s' "$LIVE_ROW" | jq -r '.cpu.rate_ms_per_minute // 0')
+OUTPUT_CHANGED=$(printf '%s' "$LIVE_ROW" | jq -r '.output.changed // false')
+DETAIL="activity=$ACTIVITY endpoint=$ENDPOINT_PRESENCE worker=$WORKER_PRESENCE cpu_delta_ms=$CPU_DELTA cpu_rate_ms_per_min=$CPU_RATE output_changed=$OUTPUT_CHANGED"
+case "$ACTIVITY" in
+  active) emit working process-output "$DETAIL" ;;
+  parked) emit parked process-output "$DETAIL" ;;
+  inactive|absent|unverified) emit unknown process-output "$DETAIL" ;;
+  *) emit unknown process-output "invalid liveness verdict" ;;
+esac

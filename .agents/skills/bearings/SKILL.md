@@ -3,7 +3,7 @@ name: bearings
 description: >-
   Generate a "pick up where I left off" fleet digest from firstmate's live fleet state.
   Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
-  Plain /bearings is chat-only by default, while /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact; live PR enrichment remains opt-in and composes with file mode.
+  Plain /bearings is chat-only by default, while /bearings file explicitly writes a new dated data/status-report-<YYYY-MM-DD>[-<HHMMSS>[-N]].md artifact; additional open-PR discovery remains opt-in and composes with file mode.
 user-invocable: true
 metadata:
   internal: true
@@ -20,12 +20,12 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
 ## Invocation modes
 
 - Plain `/bearings` gathers a fresh bounded snapshot and renders the four-section chat digest without creating, deleting, reading, or replacing `data/status-report-<YYYY-MM-DD>.md`.
-- `/bearings file` gathers a fresh bounded snapshot, replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch, and renders the four-section chat digest with a link or path to that report.
+- `/bearings file` gathers a fresh bounded snapshot, creates a new non-destructive dated report, and renders the four-section chat digest with a link or path to that report.
 - Treat `file` only as an explicit invocation option in the slash command.
 - Do not treat natural-language requests such as "write a report", "save this", "persist it", or "make a file" as file mode unless the invocation explicitly includes the standalone `file` option.
-- When the captain asks to include PRs, pass the snapshot command's live-PR opt-in.
-- `/bearings include PRs` remains chat-only and makes the live-PR opt-in.
-- `/bearings file include PRs` writes the dated report and makes the live-PR opt-in.
+- When the captain asks to include PRs, pass the snapshot command's additional open-PR discovery opt-in.
+- `/bearings include PRs` remains chat-only and adds open-PR discovery; PRs already recorded in fleet state are live-verified in every mode.
+- `/bearings file include PRs` writes a new dated report and adds open-PR discovery.
 
 ## What it does
 
@@ -34,7 +34,10 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    It is the single bounded, deterministic fleet-state source for Bearings and renders TOON by default.
    Do not create or consult a second fleet-state reader, parser contract, status-event-tail interpretation, visible-session recap, ad-hoc project probe, or ad-hoc `gh-axi`/`gh` query.
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
-   Keep the default local-only read unless the captain asks to include PRs.
+   The command live-checks every PR URL it names at render time; `--include-prs` only expands discovery to additional open PRs.
+   Never supplement or replace that verification with a locally recorded `pr=` state.
+   An unreachable forge is `NOT_VERIFIABLE`, never an inferred PR state.
+   For the firstmate upstream contribution gate, retain every returned check-run instance with its event type, attempt, and timestamps; a bare pass/fail tally cannot identify the current body snapshot.
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    Structured captain-held decisions come from `decision-hold-lifecycle` and appear under `decisions_open`.
@@ -49,11 +52,13 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.
    Plain mode stops here and writes no report artifact.
 
-3. **In explicit file mode only, compose and replace the detailed report file.**
+3. **In explicit file mode only, compose a new detailed report file.**
    The report uses the same four complete sections as the chat, in the same order, and adds the detail the chat omits.
    Never read an earlier `data/status-report-*.md` to decide what to omit, include, describe as changed, or call current.
-   Write the full report to `data/status-report-<YYYY-MM-DD>.md` using today's date.
-   If today's file already exists, delete it first, then create a new file from scratch.
+   Prefer `data/status-report-<YYYY-MM-DD>.md` using today's date when that path does not exist.
+   If it already exists, preserve it and select `data/status-report-<YYYY-MM-DD>-<HHMMSS>.md`; if that also exists, append the first available `-N` suffix.
+   Never delete, truncate, replace, or derive the new report from an earlier report.
+   This preserves same-day snapshots that may already be cited and have no git history because `data/` is gitignored.
    This is the only write allowed by the skill.
    The detailed report includes:
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
@@ -84,11 +89,12 @@ Rules that keep the contract unambiguous:
 - Every chat digest and file-mode report is a complete current snapshot, never a delta against a prior report.
 - Recently Landed always renders the bounded current baseline, even when the same completions appeared in an earlier report.
 - The four buckets are mutually exclusive, so every item is forced into exactly one: needs-your-action is Captain's Call, done is Recently Landed, self-progressing is Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
-- The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
+- The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a live-verified PR that needs no captain action each belong to one of the other three sections, never Captain's Call.
 - A secondmate's own row appears Underway only for `active_child_work`; `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown`.
 - Include the required direct address to the captain inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
+- Render `NOT_VERIFIABLE` beside any named PR whose forge check failed; never reuse its locally recorded state as a substitute.
 - The chat follows `AGENTS.md` section 9 and carries one scannable line per item.
 - Detailed decisions, plans, full gate reasons, and evidence belong in the file only when file mode is explicit, so plain chat stays concise and file-mode chat stays materially shorter than that file.
 - In file mode, include the report path or link inside the four-section digest without adding another heading.
