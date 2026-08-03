@@ -3,9 +3,9 @@
 #
 # The view is read-only and does not parse fleet files itself.
 # Every task is classified exclusively from reconciled current state: working,
-# waiting for captain action or merge, finished, failed, paused, or unknown.
+# waiting for a decision or merge, finished, failed, paused, or unknown.
 # Queued backlog records are shown separately as ready, dependency-blocked, or
-# captain-held; captain-held records appear under waiting rather than queued.
+# decision-held; decision-held records appear under waiting rather than queued.
 # Watch mode uses only bash, jq, terminal control sequences, and sleep; a failed
 # snapshot or render prints an explicit degraded panel and retries next redraw.
 set -u
@@ -160,12 +160,12 @@ render_once() {
     | ([$queued[]
         | select(((.unresolved_blocker_ids // []) | length) > 0)]) as $blocked
     | ("=" * $width),
-      ("FIRSTMATE FLEET" | clip($width)),
+      ("FLEET STATUS" | clip($width)),
       ("=" * $width),
       "",
       ("WORKING NOW (\($working | length))" | clip($width)),
       (if ($working | length) == 0 then
-         "  No live workers."
+         "  No active tasks."
        else
          $working[]
          | line("• "; ((.id // "unknown") + " · " + task_title(.))),
@@ -173,9 +173,9 @@ render_once() {
        end),
       "",
       (if ($waiting | length) > 0 then "!" * $width else empty end),
-      ("WAITING ON YOU (\($waiting | length))" | clip($width)),
+      ("WAITING ON DECISION (\($waiting | length))" | clip($width)),
       (if ($waiting | length) == 0 then
-         "  Nothing needs your action."
+         "  No decisions or merges pending."
        else
          $waiting[]
          | line("! "; .id),
@@ -196,7 +196,7 @@ render_once() {
       "",
       ("FAILED (\($failed | length))" | clip($width)),
       (if ($failed | length) == 0 then
-         "  No failed workers."
+         "  No failed tasks."
        else
          $failed[]
          | line("• "; ((.id // "unknown") + " · " + task_title(.))),
@@ -212,7 +212,7 @@ render_once() {
        end),
       ("UNKNOWN (\($unknown | length))" | clip($width)),
       (if ($unknown | length) == 0 then
-         "  No workers with unknown state."
+         "  No tasks with unknown state."
        else
          $unknown[]
          | line("• "; ((.id // "unknown") + " · " + task_title(.))),

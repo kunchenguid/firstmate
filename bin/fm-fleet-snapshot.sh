@@ -34,10 +34,9 @@
 #     return-channel supervision data; other tasks use "not_checked".
 #     usage is the live codeburn delta for crewmate/scout tasks and is null for
 #     persistent secondmates. Collected in parallel across every live task, each
-#     bounded by FM_FLEET_USAGE_TIMEOUT (default 5s), with a per-task cache under
-#     state/usage-cache/ served (marked stale:true) when a call times out or fails,
-#     so total wait stays bounded by the slowest single call and a transient
-#     hiccup never blanks usage to unavailable.
+#     bounded by FM_FLEET_USAGE_TIMEOUT (default 5s), with an existing per-task
+#     cache under state/usage-cache/ served (marked stale:true) when a call times
+#     out or fails, so total wait stays bounded by the slowest single call.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -433,9 +432,8 @@ collect_usage_parallel() {  # <output-dir>
 }
 
 # Reads a task's usage from the parallel-collected dir; on a timed-out or failed
-# call, falls back to the last successful reading cached under state/usage-cache/
-# (marked stale:true) instead of blanking to unavailable, then updates that cache
-# on a fresh success.
+# call, falls back to an existing reading cached under state/usage-cache/
+# (marked stale:true) instead of blanking to unavailable.
 usage_json_for_id() {  # <id> <harness> <collected-dir>
   local id=$1 harness=$2 dir=$3 raw cache cached
   cache="$(usage_cache_dir)/$id.json"
@@ -444,7 +442,6 @@ usage_json_for_id() {  # <id> <harness> <collected-dir>
     raw=$(cat "$dir/$id.json" 2>/dev/null || true)
   fi
   if printf '%s' "$raw" | jq -e 'type == "object" and .schema == "fm-task-usage.v1"' >/dev/null 2>&1; then
-    mkdir -p "$(usage_cache_dir)" 2>/dev/null && printf '%s' "$raw" > "$cache" 2>/dev/null
     printf '%s' "$raw"
     return 0
   fi

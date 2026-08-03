@@ -82,9 +82,9 @@ write_fixture() {  # <home>
 
 ## Queued
 - [ ] queued-task - Queued Task blocked-by: ship-task (repo: alpha) (kind: ship) (since 2026-07-08)
-- [ ] captain-one - First captain call (repo: alpha) (kind: captain) (hold: choose API A or B) (hold-kind: captain)
-- [ ] captain-two - Second captain call (repo: alpha) (kind: captain) (hold: approve the narrow rollout) (hold-kind: captain)
-- [ ] captain-three - Third captain call (repo: alpha) (kind: captain) (hold: choose the storage boundary) (hold-kind: captain)
+- [ ] decision-one - First decision request (repo: alpha) (kind: captain) (hold: choose API A or B) (hold-kind: captain)
+- [ ] decision-two - Second decision request (repo: alpha) (kind: captain) (hold: approve the narrow rollout) (hold-kind: captain)
+- [ ] decision-three - Third decision request (repo: alpha) (kind: captain) (hold: choose the storage boundary) (hold-kind: captain)
 handoff note without canonical syntax
 
 ## Done
@@ -152,7 +152,7 @@ test_empty_fleet_json() {
   ' >/dev/null \
     || fail "empty snapshot schema or absence markers wrong: $out"
   view=$(FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "No live workers." "empty fleet view should say no live workers"
+  assert_contains "$view" "No active tasks." "empty fleet view should report no active tasks"
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
@@ -196,12 +196,12 @@ test_fixture_snapshot_json() {
     [.backlog.records[] | select(.state == "queued")] | length == 5
   ' >/dev/null || fail "queued canonical and unstructured backlog records missing"
   printf '%s' "$out" | jq -e '
-    .backlog.records[] | select(.id == "captain-one")
-    | .title == "First captain call"
+    .backlog.records[] | select(.id == "decision-one")
+    | .title == "First decision request"
       and .kind == "captain"
       and .hold == "choose API A or B"
       and .hold_kind == "captain"
-  ' >/dev/null || fail "captain hold metadata did not parse into a clean decision row"
+  ' >/dev/null || fail "hold metadata did not parse into a clean decision row"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-task")
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
@@ -584,7 +584,7 @@ test_view_renders_snapshot() {
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
   working_line=$(printf '%s\n' "$view" | grep -n '^WORKING NOW' | cut -d: -f1)
-  waiting_line=$(printf '%s\n' "$view" | grep -n '^WAITING ON YOU' | cut -d: -f1)
+  waiting_line=$(printf '%s\n' "$view" | grep -n '^WAITING ON DECISION' | cut -d: -f1)
   finished_line=$(printf '%s\n' "$view" | grep -n '^FINISHED' | cut -d: -f1)
   queued_line=$(printf '%s\n' "$view" | grep -n '^QUEUED' | cut -d: -f1)
   [ "$working_line" -lt "$waiting_line" ] && [ "$waiting_line" -lt "$finished_line" ] && [ "$finished_line" -lt "$queued_line" ] \
@@ -592,22 +592,22 @@ test_view_renders_snapshot() {
   assert_contains "$view" "WORKING NOW (1)" \
     "only a reconciled working state should count as working"
   assert_contains "$view" "• ship-task · Ship Task" \
-    "view should render the live worker and task"
-  working_section=$(printf '%s\n' "$view" | sed -n '/^WORKING NOW/,/^WAITING ON YOU/p')
+    "view should render the active task"
+  working_section=$(printf '%s\n' "$view" | sed -n '/^WORKING NOW/,/^WAITING ON DECISION/p')
   assert_not_contains "$working_section" "scout-task" \
     "a done task must never appear under WORKING NOW"
   assert_not_contains "$working_section" "secondmate-task" \
     "a parked task must never appear under WORKING NOW"
-  assert_contains "$view" "WAITING ON YOU (4)" \
-    "captain decisions should have a prominent dedicated section"
+  assert_contains "$view" "WAITING ON DECISION (4)" \
+    "decisions should have a prominent dedicated section"
   assert_contains "$view" "! secondmate-task" \
-    "live captain decisions should appear in the captain section"
+    "live decisions should appear in the decision section"
   assert_contains "$view" "  choose the public API shape" \
-    "live captain decisions should show their one-line reason"
-  assert_contains "$view" "! captain-one" \
-    "queued captain holds should move out of the queue"
+    "live decisions should show their one-line reason"
+  assert_contains "$view" "! decision-one" \
+    "queued decision holds should move out of the queue"
   assert_contains "$view" "  choose API A or B" \
-    "queued captain holds should show their one-line reason"
+    "queued decision holds should show their one-line reason"
   assert_contains "$view" "https://github.com/kunchenguid/firstmate/pull/7" \
     "finished work should include its PR link"
   assert_contains "$view" "UNKNOWN (2)" \
@@ -654,12 +654,12 @@ EOF
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
 
   assert_contains "$view" "WORKING NOW (1)" "only genuinely running work belongs in WORKING NOW"
-  assert_contains "$view" "WAITING ON YOU (2)" "parked decisions and merge-ready work belong in WAITING ON YOU"
+  assert_contains "$view" "WAITING ON DECISION (2)" "parked decisions and merge-ready work belong in WAITING ON DECISION"
   assert_contains "$view" "FINISHED (showing 1 of 1)" "successful terminal work belongs in FINISHED"
   assert_contains "$view" "FAILED (1)" "unsuccessful terminal work belongs in FAILED"
   assert_contains "$view" "UNKNOWN (1)" "indeterminate work belongs in UNKNOWN"
-  working_section=$(printf '%s\n' "$view" | sed -n '/^WORKING NOW/,/^WAITING ON YOU/p')
-  waiting_section=$(printf '%s\n' "$view" | sed -n '/^WAITING ON YOU/,/^FINISHED/p')
+  working_section=$(printf '%s\n' "$view" | sed -n '/^WORKING NOW/,/^WAITING ON DECISION/p')
+  waiting_section=$(printf '%s\n' "$view" | sed -n '/^WAITING ON DECISION/,/^FINISHED/p')
   finished_section=$(printf '%s\n' "$view" | sed -n '/^FINISHED/,/^FAILED/p')
   failed_section=$(printf '%s\n' "$view" | sed -n '/^FAILED/,/^UNKNOWN/p')
   unknown_section=$(printf '%s\n' "$view" | sed -n '/^UNKNOWN/,/^QUEUED/p')
@@ -668,14 +668,14 @@ EOF
   assert_not_contains "$working_section" "done-task" "done task leaked into WORKING NOW"
   assert_not_contains "$working_section" "failed-task" "failed task leaked into WORKING NOW"
   assert_not_contains "$working_section" "unknown-task" "unknown task leaked into WORKING NOW"
-  assert_contains "$waiting_section" "parked-task" "parked task missing from WAITING ON YOU"
+  assert_contains "$waiting_section" "parked-task" "parked task missing from WAITING ON DECISION"
   assert_contains "$waiting_section" "choose the gate resolution" "parked task reason missing"
-  assert_contains "$waiting_section" "merge-ready" "merge-ready task missing from WAITING ON YOU"
+  assert_contains "$waiting_section" "merge-ready" "merge-ready task missing from WAITING ON DECISION"
   assert_contains "$waiting_section" "https://github.com/acme/alpha/pull/42" "merge-ready PR link missing"
   assert_contains "$finished_section" "done-task" "done task missing from FINISHED"
   assert_contains "$failed_section" "failed-task" "failed task missing from FAILED"
   assert_contains "$unknown_section" "unknown-task" "unknown task missing from UNKNOWN"
-  pass "fleet view buckets every worker by reconciled state"
+  pass "fleet view buckets every task by reconciled state"
 }
 
 test_view_renders_dead_secondmate_agent_status() {
@@ -696,7 +696,7 @@ test_view_renders_dead_secondmate_agent_status() {
     "view should retain a degraded task row when current state is unknown"
   assert_contains "$view" "UNKNOWN (1)" \
     "view should label unavailable task state instead of crashing"
-  pass "fleet view degrades an unreadable worker row to unknown"
+  pass "fleet view degrades an unreadable task row to unknown"
 }
 
 test_oversized_backlog_and_status_stream() {
@@ -749,7 +749,7 @@ test_oversized_backlog_and_status_stream() {
     || fail "oversized snapshot lost backlog or task data"
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" COLUMNS=60 "$VIEW")
   bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json)
-  assert_contains "$view" "WAITING ON YOU (1)" "oversized fleet view should still render"
+  assert_contains "$view" "WAITING ON DECISION (1)" "oversized fleet view should still render"
   printf '%s' "$bearings" | jq -e '.schema == "fm-bearings.v1" and (.gates | length) == 20' >/dev/null \
     || fail "oversized bearings snapshot did not render its bounded projection"
   pass "oversized backlog and status payloads stream through snapshot, fleet view, and bearings"

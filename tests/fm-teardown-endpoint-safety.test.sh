@@ -146,6 +146,57 @@ test_supported_backend_endpoint_records_validate() {
   pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
 }
 
+test_oversized_backend_endpoint_fields_refuse_before_cleanup() {
+  local dir id=endpoint-a oversized
+  oversized=$(printf '%04100d' 0 | tr '0' x)
+
+  dir=$(make_case oversized-tmux)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=$oversized:fm-$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "oversized tmux session"
+  assert_contains "$(cat "$dir/stderr")" "endpoint field window exceeds 4096 bytes" \
+    "oversized tmux endpoint should identify the bounded field"
+
+  dir=$(make_case oversized-orca)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=$oversized" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=worktree-9" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "oversized Orca terminal"
+  assert_contains "$(cat "$dir/stderr")" "endpoint field terminal exceeds 4096 bytes" \
+    "oversized Orca endpoint should identify the bounded field"
+
+  dir=$(make_case oversized-herdr)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:pane" "endpoint_task_id=$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "backend=herdr" "herdr_session=lab" \
+    "herdr_workspace_id=$oversized" "herdr_tab_id=tab" "herdr_pane_id=pane" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "oversized Herdr workspace"
+  assert_contains "$(cat "$dir/stderr")" "endpoint field herdr_workspace_id exceeds 4096 bytes" \
+    "oversized Herdr endpoint should identify the bounded field"
+
+  dir=$(make_case oversized-zellij)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:7" "endpoint_task_id=$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "backend=zellij" "zellij_session=$oversized" \
+    "zellij_tab_id=3" "zellij_pane_id=7" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "oversized Zellij session"
+  assert_contains "$(cat "$dir/stderr")" "endpoint field zellij_session exceeds 4096 bytes" \
+    "oversized Zellij endpoint should identify the bounded field"
+
+  dir=$(make_case oversized-cmux)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=workspace:surface" "endpoint_task_id=$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "backend=cmux" "cmux_workspace_id=workspace" \
+    "cmux_surface_id=$oversized" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "oversized cmux surface"
+  assert_contains "$(cat "$dir/stderr")" "endpoint field cmux_surface_id exceeds 4096 bytes" \
+    "oversized cmux endpoint should identify the bounded field"
+
+  pass "cleanup identity: oversized backend targets refuse before mutation"
+}
+
 test_tmux_empty_target_refuses_without_invocation() {
   local dir rc
   dir=$(make_case direct-empty)
@@ -270,6 +321,7 @@ SH
 
 test_invalid_endpoint_records_refuse_before_mutation
 test_supported_backend_endpoint_records_validate
+test_oversized_backend_endpoint_fields_refuse_before_cleanup
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup

@@ -394,6 +394,16 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+fm_backend_endpoint_field_bounded() {  # <meta-file> <field> <value>
+  local meta=$1 field=$2 value=$3 bytes
+  bytes=$(printf '%s' "$value" | LC_ALL=C wc -c | tr -d ' ')
+  if [ "$bytes" -gt 4096 ]; then
+    printf 'REFUSED: endpoint field %s exceeds 4096 bytes in %s; preserving task state.\n' \
+      "$field" "$meta" >&2
+    return 1
+  fi
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -411,6 +421,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: task $id has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
     return 1
   }
+  fm_backend_endpoint_field_bounded "$meta" window "$window" || return 1
   worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
     return 1
@@ -471,6 +482,10 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       workspace=$(fm_backend_meta_exact_value "$meta" herdr_workspace_id) || workspace=
       tab=$(fm_backend_meta_exact_value "$meta" herdr_tab_id) || tab=
       pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id) || pane=
+      fm_backend_endpoint_field_bounded "$meta" herdr_session "$recorded_session" || return 1
+      fm_backend_endpoint_field_bounded "$meta" herdr_workspace_id "$workspace" || return 1
+      fm_backend_endpoint_field_bounded "$meta" herdr_tab_id "$tab" || return 1
+      fm_backend_endpoint_field_bounded "$meta" herdr_pane_id "$pane" || return 1
       if [ -z "$recorded_session" ] || [ -z "$workspace" ] || [ -z "$tab" ] || [ -z "$pane" ] \
         || [ "$window" != "$recorded_session:$pane" ] \
         || ! fm_backend_endpoint_atom_valid "$recorded_session" \
@@ -489,6 +504,9 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       recorded_session=$(fm_backend_meta_exact_value "$meta" zellij_session) || recorded_session=
       tab=$(fm_backend_meta_exact_value "$meta" zellij_tab_id) || tab=
       pane=$(fm_backend_meta_exact_value "$meta" zellij_pane_id) || pane=
+      fm_backend_endpoint_field_bounded "$meta" zellij_session "$recorded_session" || return 1
+      fm_backend_endpoint_field_bounded "$meta" zellij_tab_id "$tab" || return 1
+      fm_backend_endpoint_field_bounded "$meta" zellij_pane_id "$pane" || return 1
       case "$tab:$pane" in *[!0-9:]*) tab= ;; esac
       if [ -z "$recorded_session" ] || [ -z "$tab" ] || [ -z "$pane" ] \
         || [ "$window" != "$recorded_session:$pane" ] \
@@ -504,6 +522,8 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal=
       worktree_id=$(fm_backend_meta_exact_value "$meta" orca_worktree_id) || worktree_id=
+      fm_backend_endpoint_field_bounded "$meta" terminal "$terminal" || return 1
+      fm_backend_endpoint_field_bounded "$meta" orca_worktree_id "$worktree_id" || return 1
       [ -n "$terminal" ] || {
         echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
         return 1
@@ -527,6 +547,8 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       workspace=$(fm_backend_meta_exact_value "$meta" cmux_workspace_id) || workspace=
       surface=$(fm_backend_meta_exact_value "$meta" cmux_surface_id) || surface=
+      fm_backend_endpoint_field_bounded "$meta" cmux_workspace_id "$workspace" || return 1
+      fm_backend_endpoint_field_bounded "$meta" cmux_surface_id "$surface" || return 1
       if [ -z "$workspace" ] || [ -z "$surface" ] || [ "$window" != "$workspace:$surface" ] \
         || ! fm_backend_endpoint_atom_valid "$workspace" \
         || ! fm_backend_endpoint_atom_valid "$surface"; then
