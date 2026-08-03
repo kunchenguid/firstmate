@@ -639,6 +639,29 @@ test_forge_provider_bootstrap_contracts() {
   [ "$out" = "FORGE_UNSUPPORTED: mystery (host: code.example)" ] \
     || fail "unknown forge must fail closed with its project and host, got: $out"
 
+  case_dir="$TMP_ROOT/forge-local-origin"
+  project="$case_dir/home/projects/local-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin "file://$case_dir/local-upstream.git"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "file origin must remain local and bootstrap silently, got: $out"
+
+  case_dir="$TMP_ROOT/forge-upstream-only"
+  project="$case_dir/home/projects/upstream-only"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add upstream https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a non-origin remote must not create forge requirements, got: $out"
+
   case_dir="$TMP_ROOT/forge-gitlab"
   project="$case_dir/home/projects/gitlab-project"
   mkdir -p "$project" "$case_dir/home/config"
@@ -661,7 +684,7 @@ SH
   [ "$out" = "NEEDS_GLAB_AUTH: gitlab.example" ] \
     || fail "GitLab auth diagnostic must retain the normalized host, got: $out"
 
-  pass "bootstrap fails closed and owns GitLab install/auth remediation"
+  pass "bootstrap keeps origin-only local semantics and owns forge remediation"
 }
 
 test_cmux_bundled_cli_satisfies_dependency() {

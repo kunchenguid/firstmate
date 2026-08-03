@@ -47,10 +47,6 @@ fm_forge_checkout_remote() {
     printf '%s\n' "$remote"
     return 0
   }
-  while IFS= read -r remote; do
-    [ -n "$remote" ] || continue
-    git -C "$checkout" remote get-url "$remote" 2>/dev/null && return 0
-  done < <(git -C "$checkout" remote 2>/dev/null)
   return 1
 }
 
@@ -69,6 +65,12 @@ fm_forge_detect_provider() {
     echo "local"
     return 0
   }
+  case "$remote_url" in
+    file://*|/*|./*|../*)
+      echo "local"
+      return 0
+      ;;
+  esac
   host=$(fm_forge_resolve_host "$remote_url" 2>/dev/null) || host=""
   case "$host" in
     github.com) echo "github" ;;
