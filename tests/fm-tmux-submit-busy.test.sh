@@ -27,7 +27,7 @@ COMPOSER="${FM_FAKE_COMPOSER:?}"
 case "${1:-}" in
   display-message)
     for a in "$@"; do
-      case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac
+      case "$a" in *cursor_y*) printf '%s\n' "${FM_FAKE_CURSOR_Y:-1}"; exit 0 ;; esac
     done
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
@@ -50,6 +50,11 @@ esac
 exit 1
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/sleep"
   printf '%s\n' "$fakebin"
 }
 
@@ -313,6 +318,15 @@ test_claude_busy_shapes_cover_every_live_form() {
   printf '* Churned for 53s | 1 shell still running\n' > "$composer"
   pane_busy ascii-shape2 claude || fail "ASCII-degraded tool wait must be busy"
 
+  printf 'Retry completed (5s)\n' > "$composer"
+  pane_busy idle-retry claude && fail "completed retry transcript must be idle"
+  printf '2 jobs still running after cleanup\n' > "$composer"
+  pane_busy idle-cleanup claude && fail "cleanup transcript must be idle"
+  printf ' ok 12 - retry completed (5s)\n' > "$composer"
+  pane_busy idle-test-output claude && fail "completed test output must be idle"
+  printf 'Server 3 workers still running after restart\n' > "$composer"
+  pane_busy idle-server claude && fail "server restart transcript must be idle"
+
   # A finished turn carries the same elapsed timer and must stay idle.
   printf '✻ Baked for 8m 42s\n' > "$composer"
   pane_busy idle-long claude && fail "finished turn over a minute must be idle"
@@ -328,6 +342,35 @@ test_claude_busy_shapes_cover_every_live_form() {
   pass "fm_pane_is_busy: Claude busy shapes match without the timer false-positive"
 }
 
+test_submit_fallback_uses_recorded_claude_harness() {
+  local dir fakebin composer home unknown_home rc
+  dir="$TMP_ROOT/claude-submit-fallback"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  home="$dir/home"
+  unknown_home="$dir/unknown-home"
+  mkdir -p "$home/state" "$unknown_home/state"
+  fm_write_meta "$home/state/claude-submit.meta" "window=sess:win" "kind=ship" "harness=claude"
+  printf '✻ Churned for 53s · 1 shell still running\n╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
+  touch "$dir/.swallow"
+  env PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=2 \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+    FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" fm-claude-submit fix >/dev/null 2>/dev/null
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "recorded Claude harness must select the tool-wait signature"
+
+  env PATH="$fakebin:$PATH" FM_HOME="$unknown_home" FM_ROOT_OVERRIDE="$unknown_home" \
+    FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=2 \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+    FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" sess:win fix >/dev/null 2>/dev/null
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "unknown harness must retain the shared compatibility signature"
+  pass "fm-send: submit fallback uses the recorded Claude busy signature"
+}
+
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_busy_pane_composer_clears_first_try
@@ -337,3 +380,4 @@ test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
 test_claude_busy_shapes_cover_every_live_form
+test_submit_fallback_uses_recorded_claude_harness

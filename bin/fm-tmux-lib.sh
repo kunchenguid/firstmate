@@ -78,11 +78,13 @@
 # The elapsed timer is NOT the discriminator either: a FINISHED turn renders
 # the same timer ("Baked for 8m 42s"), so a bare timer alternative reports a
 # genuinely idle pane as busy - the direction that makes the submit guard
-# treat a swallowed Enter as delivered. What actually separates busy from
-# idle is a PARENTHESIZED duration (streaming and thinking) or the "still
-# running" wait hint; a finished turn renders neither. The wait hint counts
-# arbitrary tool nouns ("5 shells, 1 monitor still running"), so it is matched
-# by count-plus-nouns rather than "shells?".
+# treat a swallowed Enter as delivered. Streaming and thinking rows therefore
+# require a complete parenthesized duration-plus-detail footer, and tool-wait
+# rows require the elapsed "for" prefix plus a complete count-and-nouns wait
+# hint. Both shapes are anchored as full rows so ordinary transcript fragments
+# cannot keep an idle pane falsely busy. The wait hint counts arbitrary tool
+# nouns ("5 shells, 1 monitor still running"), so it is matched by
+# count-plus-nouns rather than "shells?".
 # The parenthesized-duration arm rejects lines containing a path separator
 # before it, because a completed tool call leaves its own elided path and
 # duration in the transcript ("/private/tmp/...- ... (6m 8s)").
@@ -101,7 +103,7 @@
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
-FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|^[^/]*\([0-9]+[hms]|[0-9]+ [a-z][a-z, 0-9]* still running'
+FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|^[^/]*\(([0-9]+h )?([0-9]+m )?[0-9]+s [^[:alnum:][:space:]]+ (([^[:alnum:][:space:]]+ )?[0-9]+(\.[0-9]+)?[kKmM]? tokens( [^[:alnum:][:space:]]+ (still thinking with [a-z]+ effort|thought for ([0-9]+m )?[0-9]+s))?|thinking( some more)? with [a-z]+ effort)\)$|^[^/]* for ([0-9]+h )?([0-9]+m )?[0-9]+s [^[:alnum:][:space:]]+ [0-9]+ [a-z]+(, [0-9]+ [a-z]+)* still running$'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
@@ -410,8 +412,8 @@ fm_pane_is_busy() {  # <target> [harness]
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
 # never reaches this exception.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness]
+  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} i=0 state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
@@ -432,16 +434,16 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   # and queued the message for processing when the current turn ends.
   # Treat it as submitted so the caller does not re-send.
   # On an idle pane, keep reporting pending - a genuine swallow.
-  if fm_pane_is_busy "$target"; then
+  if fm_pane_is_busy "$target" "$harness"; then
     printf 'empty'
   else
     printf 'pending'
   fi
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-}
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness"
 }

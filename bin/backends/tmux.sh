@@ -15,9 +15,9 @@
 #
 # The verified composer/busy-detection and verify-and-retry-submit primitives
 # already live in bin/fm-tmux-lib.sh, shared with the away-mode daemon
-# (bin/fm-supervise-daemon.sh); this adapter sources that file and re-exports
-# its submit core under the backend's naming convention rather than
-# duplicating it, so the two consumers cannot drift apart.
+# (bin/fm-supervise-daemon.sh); this adapter sources that file and exposes its
+# submit core under the backend's naming convention rather than duplicating it,
+# so the two consumers cannot drift apart.
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
 
@@ -48,10 +48,11 @@ fm_backend_tmux_send_key() {  # <target> <key>
 
 # fm_backend_tmux_send_text_submit: type <text> into <target> once, then
 # submit with Enter, retried (Enter only, never retyped) until the composer
-# clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
-# that file for the composer-verification contract and echoed verdicts.
-fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  fm_tmux_submit_core "$@"
+# clears. The backend-only expected-label slot is skipped while the optional
+# harness is forwarded to fm_tmux_submit_core; see that file for the
+# composer-verification contract and echoed verdicts.
+fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
+  fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" "${7:-}"
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
