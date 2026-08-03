@@ -687,11 +687,15 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # The installed codex config schema uses model_reasoning_effort. The bundled
+      # catalog of codex-cli 0.146.0 advertises max for gpt-5.6-{luna,sol,terra} and
+      # codex-auto-review (`codex debug models`, verified 2026-08-03), so max is
+      # passed through rather than dropped. Dropping it silently ran the session at
+      # the model default instead - medium for gpt-5.6-luna - which is a silent
+      # downgrade the caller never sees. sol and terra additionally advertise
+      # `ultra`, which firstmate's shared effort axis does not carry.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;
     grok)
