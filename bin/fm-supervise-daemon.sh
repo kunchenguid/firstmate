@@ -201,6 +201,11 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# Stdout capture file of the in-flight herdr notifier, registered here for the
+# same reason WEDGE_ALARM_NOTIFIER_PID is: the daemon's shutdown trap can fire
+# while the bounded notifier is still running, and both the process group and
+# its temp file have to be reaped from there.
+WEDGE_ALARM_CAPTURE_FILE=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -750,6 +755,16 @@ wedge_alarm_run_bounded() {
   return "$rc"
 }
 
+# Unlink the registered herdr stdout capture, if any, and deregister it. Safe to
+# call when nothing is registered, and idempotent, so both the normal path and
+# the shutdown trap can call it.
+wedge_alarm_discard_capture() {
+  local capture=${WEDGE_ALARM_CAPTURE_FILE:-}
+  WEDGE_ALARM_CAPTURE_FILE=
+  [ -n "$capture" ] && [ "$capture" != /dev/null ] || return 0
+  rm -f "$capture" 2>/dev/null || true
+}
+
 wedge_alarm_stop_active_notifier() {
   local pid=${WEDGE_ALARM_NOTIFIER_PID:-}
   [ -n "$pid" ] || return 0
@@ -832,11 +847,12 @@ wedge_alarm_via_herdr() {  # <summary>
   # WEDGE_ALARM_NOTIFIER_PID assignment is invisible to the daemon's shutdown
   # trap and a hung notifier process group would survive TERM/INT.
   capture=$(mktemp "${TMPDIR:-/tmp}/fm-wedge-herdr.XXXXXX" 2>/dev/null) || capture=/dev/null
+  WEDGE_ALARM_CAPTURE_FILE=$capture
   wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
     --body "$summary" --sound request > "$capture" 2>/dev/null
   rc=$?
   out=$(cat "$capture" 2>/dev/null || printf '')
-  [ "$capture" = /dev/null ] || rm -f "$capture"
+  wedge_alarm_discard_capture
   [ "$rc" -eq 0 ] || { log "wedge alarm: herdr notification failed"; return 1; }
   # Only a parseable result OBJECT proves anything about delivery. Unparseable
   # output, a missing result, or an absent `shown` field all mean "cannot
@@ -1495,6 +1511,7 @@ fm_super_main() {
   cleanup() {
     trap - TERM INT
     wedge_alarm_stop_active_notifier
+    wedge_alarm_discard_capture
     escalate_flush "$STATE" 2>/dev/null || true
     if [ -n "${WATCHER_PID:-}" ]; then
       kill "$WATCHER_PID" 2>/dev/null || true

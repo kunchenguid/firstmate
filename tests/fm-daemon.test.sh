@@ -1512,6 +1512,36 @@ test_wedge_alarm_herdr_notifier_pid_survives_capture() {
   pass "wedge_alarm_via_herdr: the notifier PID stays visible to this shell, so shutdown can still kill its group"
 }
 
+# The stdout capture is a real temp file, so it needs the same two-sided
+# bookkeeping the notifier PID has: the normal path unlinks it, and a shutdown
+# that lands mid-notification unlinks it from the trap instead of leaking it
+# into TMPDIR for the rest of the host's uptime.
+test_wedge_alarm_herdr_capture_is_not_leaked() {
+  local dir daemon_log tmpdir leftover stranded
+  dir="$TMP_ROOT/wedge-herdr-capture"
+  daemon_log="$dir/daemon.log"
+  tmpdir="$dir/tmp"
+  install_fake_herdr "$dir" '{"result":{"shown":true}}'
+  mkdir -p "$tmpdir" || fail "could not create the capture TMPDIR $tmpdir"
+  unset WEDGE_ALARM_CAPTURE_FILE
+  PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" TMPDIR="$tmpdir" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  assert_fake_herdr_ran "$dir" "capture cleanup"
+  leftover=$(find "$tmpdir" -name 'fm-wedge-herdr.*' 2>/dev/null | head -1)
+  [ -z "$leftover" ] || fail "a completed herdr notification left its capture behind: $leftover"
+  [ -z "${WEDGE_ALARM_CAPTURE_FILE:-}" ] \
+    || fail "a completed herdr notification left a stale capture registered: $WEDGE_ALARM_CAPTURE_FILE"
+  # Shutdown mid-notification: the capture is registered but not yet unlinked,
+  # which is exactly the state the daemon's TERM/INT trap finds it in.
+  stranded=$(mktemp "$tmpdir/fm-wedge-herdr.XXXXXX") || fail "could not stage a stranded capture"
+  WEDGE_ALARM_CAPTURE_FILE=$stranded
+  wedge_alarm_discard_capture
+  [ ! -e "$stranded" ] || fail "shutdown left the in-flight herdr capture behind: $stranded"
+  [ -z "${WEDGE_ALARM_CAPTURE_FILE:-}" ] || fail "shutdown did not deregister the herdr capture"
+  wedge_alarm_discard_capture || fail "discarding an unregistered capture is not a no-op"
+  pass "wedge_alarm_via_herdr: its stdout capture is unlinked on both the normal path and a mid-notification shutdown"
+}
+
 test_wedge_alarm_command_channel_receives_summary() {
   local dir out_argv out_stdin chan
   dir=$(make_wedge_case wedge-command)
@@ -2064,6 +2094,7 @@ test_wedge_alarm_herdr_transient_reason_avoids_permanent_advice
 test_wedge_alarm_herdr_permanent_reason_keeps_command_channel_advice
 test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code
 test_wedge_alarm_herdr_notifier_pid_survives_capture
+test_wedge_alarm_herdr_capture_is_not_leaked
 test_wedge_alarm_command_channel_receives_summary
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
