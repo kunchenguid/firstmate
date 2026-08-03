@@ -128,7 +128,7 @@ generate_ship_brief() {
   local home=$1 id=$2 repo=$3
   rm -f "$home/data/$id/brief.md"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-brief.sh" "$id" "$repo" >/dev/null 2>&1
+    "$ROOT/bin/fm-brief.sh" "$id" "$repo" --mode no-mistakes >/dev/null 2>&1
 }
 
 replace_brief_invocation_token() {
@@ -191,7 +191,7 @@ test_token_stripped_current_ship_brief_refuses_launch() {
   generate_ship_brief "$HOME_DIR" "$id" project
   replace_brief_invocation_token "$HOME_DIR" "$id" ""
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "token-stripped current ship brief should refuse launch"
   assert_contains "$out" "$id" "missing-token refusal did not name the task"
@@ -211,7 +211,7 @@ test_legacy_codex_ship_brief_migrates_private_launch_copy() {
   durable="$HOME_DIR/data/$id/brief.md"
   make_legacy_ship_brief "$HOME_DIR" "$id"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "exact legacy Codex ship brief should relaunch"
   assert_contains "$out" "warning: task $id" "legacy migration warning did not name the task"
@@ -239,7 +239,7 @@ test_legacy_claude_ship_brief_migrates_private_launch_copy() {
   durable="$HOME_DIR/data/$id/brief.md"
   make_legacy_ship_brief "$HOME_DIR" "$id"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "exact legacy Claude ship brief should relaunch"
   assert_contains "$out" "warning: task $id" "legacy migration warning did not name the task"
@@ -266,7 +266,7 @@ test_aborted_spawn_removes_private_launch_brief() {
   launch_brief="$home_real/state/$id.launch-brief.md"
 
   out=$(FM_TEST_SEND_KEYS_FAIL=1 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "spawn should fail when worker launch delivery fails"
   assert_absent "$launch_brief" "aborted spawn orphaned its private rendered launch brief"
@@ -280,7 +280,7 @@ test_claude_launch_brief_uses_slash_no_mistakes_invocation() {
   read_case_record "$rec"
   generate_ship_brief "$HOME_DIR" "$id" project
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn with generated ship brief should succeed"
   brief=$(launched_brief_path "$LAUNCH_LOG")
@@ -300,7 +300,7 @@ test_codex_launch_brief_uses_dollar_no_mistakes_invocation() {
   read_case_record "$rec"
   generate_ship_brief "$HOME_DIR" "$id" project
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "codex spawn with generated ship brief should succeed"
   brief=$(launched_brief_path "$LAUNCH_LOG")
@@ -320,7 +320,7 @@ test_opencode_launch_brief_uses_harness_agnostic_no_mistakes_wording() {
   read_case_record "$rec"
   generate_ship_brief "$HOME_DIR" "$id" project
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "opencode spawn with generated ship brief should succeed"
   brief=$(launched_brief_path "$LAUNCH_LOG")

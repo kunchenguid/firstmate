@@ -496,7 +496,7 @@ test_kimi_post_delivery_failure_retains_private_launch_brief() {
   home_real=$(cd "$HOME_DIR" && pwd -P)
   rm -f "$HOME_DIR/data/$id/brief.md"
   FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-brief.sh" "$id" project >/dev/null 2>&1
+    "$ROOT/bin/fm-brief.sh" "$id" project --mode no-mistakes >/dev/null 2>&1
   grep -qF '__FM_NO_MISTAKES_INVOCATION__' "$HOME_DIR/data/$id/brief.md" \
     || fail "kimi fixture did not generate a tokenized no-mistakes ship brief"
   launch_brief="$home_real/state/$id.launch-brief.md"
