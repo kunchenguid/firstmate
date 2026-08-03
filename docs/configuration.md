@@ -273,6 +273,21 @@ Every profile array is an implicit quota-aware choice resolved through `quota-ar
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
+
+### Recorded route and capability floor
+
+Every ship and scout spawn records which route it was dispatched at as `route=`, `floor=`, and `policy_revision=` in `state/<id>.meta`.
+This is a record only: it selects nothing, enforces nothing, and changes no routing behavior, and nothing reads the fields yet.
+It exists because a run-time capability escalation may never lower the capability floor the work started at, and an escalation cannot be checked against a floor that was never written down.
+
+Firstmate is the only thing that matches a natural-language dispatch rule, so it names the route it matched to `fm-spawn.sh --route <id>`, or the reserved token `default` when no rule matched and the top-level `default` profile was used.
+Three optional fields supply the recorded values, and a home that omits them simply records nothing resolvable: a rule's `route` and `floor`, the `default` profile's `route` and `floor`, and a top-level `_policy.version` string recorded verbatim as `policy_revision`.
+Their meaning and assignment belong to routing policy; `bin/fm-dispatch-record-lib.sh` only reads them, and it owns the resolution contract.
+
+Anything unresolvable records the literal token `unknown`, never a blank value, an omitted line, or another task's value: no route declared, no dispatch config, no `jq`, a route absent from the config, or rules that disagree about a route's floor.
+"Resolved to the explicit default" and "could not be resolved" therefore stay distinguishable, which matters because a field populated only when resolution succeeds would make a floor look recorded while under-reporting it.
+An omitted `--route` records `unknown` rather than assuming a route, so a relaunch that should keep a task's floor has to name the same route again.
+A secondmate is a persistent home rather than a routed task, so it records none of these fields and `--route` is refused on that spawn.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
