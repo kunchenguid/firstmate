@@ -232,6 +232,11 @@ RAW_HOME=$(secondmate_home "$ID") || exit 1
 [ -n "$RAW_HOME" ] || { echo "error: secondmate $ID has no home in $REG" >&2; exit 1; }
 SUB_HOME=$(validate_secondmate_home "$ID" "$RAW_HOME") || exit 1
 SUB_BACKLOG="$SUB_HOME/data/backlog.md"
+mkdir -p "$SUB_HOME/data"
+if [ "${FM_DATA_WRITE_LOCK_HELD:-0}" != 1 ]; then
+  exec "$SCRIPT_DIR/fm-data-write.py" --data "$DATA" --data "$SUB_HOME/data" -- \
+    env FM_DATA_WRITE_LOCK_HELD=1 "$0" "$ID" "$@"
+fi
 validate_backlog_file "main backlog" "$MAIN_BACKLOG" || exit 1
 validate_backlog_file "secondmate backlog" "$SUB_BACKLOG" || exit 1
 
@@ -307,7 +312,6 @@ fi
 # does not exist yet, so the moved item lands under the right section. (Left to
 # create the file itself, tasks-axi mv writes its own `# Backlog` title format,
 # which is not firstmate's home-backlog convention.)
-mkdir -p "$SUB_HOME/data"
 SUB_CREATED=0
 if [ ! -f "$SUB_BACKLOG" ]; then
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$SUB_BACKLOG"

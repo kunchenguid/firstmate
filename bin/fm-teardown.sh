@@ -978,24 +978,24 @@ backlog_refresh_reminder() {
     case "$KIND" in
       scout)
         report_path="data/$ID/report.md"
-        done_cmd="tasks-axi done $ID --report $report_path"
+        done_cmd="bin/fm-data-write.py --data \"\$FM_HOME/data\" -- tasks-axi done $ID --report $report_path"
         ;;
       *)
         if [ "$MODE" = local-only ]; then
-          done_cmd="tasks-axi done $ID --note \"local main\""
+          done_cmd="bin/fm-data-write.py --data \"\$FM_HOME/data\" -- tasks-axi done $ID --note \"local main\""
         else
           pr=$PR_URL
           if [ -n "$pr" ]; then
-            done_cmd="tasks-axi done $ID --pr $pr"
+            done_cmd="bin/fm-data-write.py --data \"\$FM_HOME/data\" -- tasks-axi done $ID --pr $pr"
           else
-            done_cmd="tasks-axi done $ID --pr PR_URL"
+            done_cmd="bin/fm-data-write.py --data \"\$FM_HOME/data\" -- tasks-axi done $ID --pr PR_URL"
           fi
         fi
         ;;
     esac
     printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
   else
-    printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Backlog: $ID just finished. Through bin/fm-data-write.py --data \"\$FM_HOME/data\" -- <command>, update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi
 }
 

@@ -603,7 +603,9 @@ spawn_refuse_missing_backlog_row() {  # <task-id> <kind> <project-dir>
   [ -n "$repo" ] || repo=unknown
   backlog="$DATA/backlog.md"
   echo "error: new $kind task $task_id has no In flight or Queued row in $backlog; file it before dispatch." >&2
-  printf 'fix: tasks-axi add %s %s --kind %s --repo %s --start --backend markdown --file %s\n' \
+  printf 'fix: %s --data %s -- tasks-axi add %s %s --kind %s --repo %s --start --backend markdown --file %s\n' \
+    "$(spawn_shell_quote "$SCRIPT_DIR/fm-data-write.py")" \
+    "$(spawn_shell_quote "$DATA")" \
     "$(spawn_shell_quote "$task_id")" "$(spawn_shell_quote '<one line>')" \
     "$(spawn_shell_quote "$kind")" "$(spawn_shell_quote "$repo")" \
     "$(spawn_shell_quote "$backlog")" >&2

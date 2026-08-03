@@ -63,6 +63,10 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
 SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
+export FM_TREEHOUSE_ROOT="$TMP_ROOT/treehouse-pools"
+export FM_CHECKOUT_REFRESH_STATE_BASE="$TMP_ROOT/checkout-refresh"
+export FM_HERDR_LAB_STATE_DIR="$TMP_ROOT/herdr-lab-state"
+mkdir -p "$FM_TREEHOUSE_ROOT" "$FM_CHECKOUT_REFRESH_STATE_BASE" "$FM_HERDR_LAB_STATE_DIR"
 herdr_test_lab_available "$SESSION" || exit 0
 WT1=; WT2=
 cleanup_all() {
@@ -87,26 +91,22 @@ printf '# Backlog\n\n## In flight\n- [ ] cm1 - primary Herdr e2e spawn (repo: pr
   > "$PRIMARY_HOME/data/backlog.md"
 
 SM_HOME="$TMP_ROOT/secondmate-home"
-SM_ORIGIN=$(git -C "$ROOT" remote get-url origin)
+PRIMARY_ORIGIN="$TMP_ROOT/primary-origin.git"
 PRIMARY_ROOT="$TMP_ROOT/primary-root"
-git init -q "$PRIMARY_ROOT"
-git -C "$PRIMARY_ROOT" remote add origin "$SM_ORIGIN"
-git -C "$PRIMARY_ROOT" fetch -q "$ROOT" refs/remotes/origin/main:refs/remotes/origin/main
-git -C "$PRIMARY_ROOT" checkout -q -B main FETCH_HEAD
-git -C "$PRIMARY_ROOT" remote set-head origin main
-git init -q "$SM_HOME"
-git -C "$SM_HOME" remote add origin "$SM_ORIGIN"
-git -C "$SM_HOME" fetch -q origin main
-git -C "$SM_HOME" checkout -q -B main FETCH_HEAD
-git -C "$SM_HOME" remote set-head origin main
+PRIMARY_TIP=$(git -C "$ROOT" rev-parse HEAD)
+git clone -q --bare "$ROOT" "$PRIMARY_ORIGIN"
+git --git-dir="$PRIMARY_ORIGIN" update-ref refs/heads/main "$PRIMARY_TIP"
+git --git-dir="$PRIMARY_ORIGIN" symbolic-ref HEAD refs/heads/main
+git clone -q --branch main "$PRIMARY_ORIGIN" "$PRIMARY_ROOT"
+git clone -q --branch main "$PRIMARY_ORIGIN" "$SM_HOME"
 mkdir -p "$SM_HOME/state" "$SM_HOME/data/cm2" "$SM_HOME/config" "$SM_HOME/projects" "$SM_HOME/bin"
 printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
 printf 'trivial e2e secondmate-owned crewmate brief: nothing to do.\n' > "$SM_HOME/data/cm2/brief.md"
-printf -- '- e2esm1 - Herdr workspace isolation (home: %s; scope: Herdr workspace isolation; projects: ; added 2026-07-27)\n' \
-  "$SM_HOME" > "$PRIMARY_HOME/data/secondmates.md"
 printf '# Backlog\n\n## In flight\n- [ ] cm2 - secondmate Herdr e2e spawn (repo: project)\n\n## Queued\n\n## Done\n' \
   > "$SM_HOME/data/backlog.md"
+printf -- '- e2esm1 - Herdr workspace fixture (home: %s; scope: Herdr workspace isolation; projects: ; added 2026-08-02)\n' \
+  "$SM_HOME" > "$PRIMARY_HOME/data/secondmates.md"
 
 write_completion_report() {  # <path> <summary>
   printf '# Completion\n\n## Summary\n\n%s\n\n## What changed\n\nNo project files changed.\n\n## Verification\n\nThe task command ran in its isolated Herdr pane.\n\n## Visual evidence\n\nNone.\n\n## Artifacts\n\nThe captured pane output is the test artifact.\n\n## Follow-ups\n\nNone.\n' "$2" > "$1"
@@ -131,7 +131,7 @@ PROJ2="$TMP_ROOT/scratch-project-2"; make_scratch_project "$PROJ2"
 # --- 1. primary-shaped home: a crewmate spawns into the "firstmate" space ---
 
 CM1_OUT="$TMP_ROOT/cm1.out"; CM1_ERR="$TMP_ROOT/cm1.err"
-FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$PRIMARY_ROOT" \
   "$ROOT/bin/fm-spawn.sh" cm1 "$PROJ1" "sh -c 'echo primary-crew-ok; sleep 300'" --backend herdr \
   >"$CM1_OUT" 2>"$CM1_ERR"
 rc=$?
@@ -186,7 +186,7 @@ pass "real herdr E2E: a --secondmate spawn by the PRIMARY lands in the SECONDMAT
 # secondmate workspace (this exact path has never run before this test) -----
 
 CM2_OUT="$TMP_ROOT/cm2.out"; CM2_ERR="$TMP_ROOT/cm2.err"
-FM_SPAWN_NO_GUARD=1 FM_HOME="$SM_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+FM_SPAWN_NO_GUARD=1 FM_HOME="$SM_HOME" FM_ROOT_OVERRIDE="$PRIMARY_ROOT" \
   "$ROOT/bin/fm-spawn.sh" cm2 "$PROJ2" "sh -c 'echo sm-crew-ok; sleep 300'" --backend herdr \
   >"$CM2_OUT" 2>"$CM2_ERR"
 rc=$?
@@ -228,7 +228,7 @@ pass "real herdr E2E: list_live from the secondmate's own context sees only task
 fm_backend_herdr_send_key "$SESSION:$CM1_PANE" C-c || fail "could not stop cm1's raw fixture command"
 sleep 1
 TD1_OUT="$TMP_ROOT/td1.out"
-FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
+FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
   FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" FM_REPORT_STACK_ROOT="$TMP_ROOT/report-stack" \
   "$ROOT/bin/fm-teardown.sh" cm1 >"$TD1_OUT" 2>&1
 rc=$?
@@ -249,7 +249,7 @@ pass "real herdr E2E: tearing down cm1 closes only its own tab - the secondmate'
 fm_backend_herdr_send_key "$SESSION:$CM2_PANE" C-c || fail "could not stop cm2's raw fixture command"
 sleep 1
 TD2_OUT="$TMP_ROOT/td2.out"
-FM_HOME="$SM_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$SM_HOME/state" FM_DATA_OVERRIDE="$SM_HOME/data" \
+FM_HOME="$SM_HOME" FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_STATE_OVERRIDE="$SM_HOME/state" FM_DATA_OVERRIDE="$SM_HOME/data" \
   FM_CONFIG_OVERRIDE="$SM_HOME/config" FM_REPORT_STACK_ROOT="$TMP_ROOT/report-stack" \
   "$ROOT/bin/fm-teardown.sh" cm2 >"$TD2_OUT" 2>&1
 rc=$?
