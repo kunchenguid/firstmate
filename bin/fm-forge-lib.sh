@@ -19,7 +19,7 @@ set -u
 # fm_forge_detect_provider <path-to-checkout>
 # Resolves a project checkout's `origin` remote to a provider. Does not
 # guess: unknown/missing remotes are reported as "unknown", never silently
-# defaulted to github or gitlab (matches the plan's boundary rule).
+# defaulted to github or gitlab.
 #
 # Output: one line, one of: github gitlab local unknown
 # Exit: 0 always (the classification itself is the result; "unknown" is not
@@ -93,8 +93,7 @@ fm_forge_detect_provider() {
 # fm_forge_resolve_host <remote-url-or-ssh-alias>
 # Resolves a git remote URL (scp-like SSH syntax, ssh:// URL, or https:// URL)
 # to its real hostname, following `~/.ssh/config` Host aliases via `ssh -G`
-# (needed because this stack's GitLab remotes use an alias, `gitlab-becoming`,
-# not a literal hostname — see DAILY_OPERATIONS_GUIDE.md project setup).
+# so aliases for self-managed GitLab instances classify by their real hostname.
 #
 # Output: one line, the resolved lowercase hostname, or empty on failure
 # Exit: 0 if resolved, 1 if the remote URL could not be parsed at all
@@ -185,7 +184,7 @@ fm_forge_require_cli() {
 # fm_forge_check_auth <provider> <host>
 # Checks forge authentication, scoped to the specific host (never an
 # unscoped "--all" check — a single stale unrelated credential must not
-# fail an otherwise-healthy host, per the plan's explicit warning).
+# fail an otherwise-healthy host).
 #
 # Output: nothing on success; one diagnostic line on failure, matching the
 #         existing NEEDS_GH_AUTH convention so fm-session-start.sh's existing

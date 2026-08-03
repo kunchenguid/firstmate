@@ -60,11 +60,11 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ### Requirements
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Oh My Pi (`omp`), Codex, OpenCode, Cursor Agent CLI, or Antigravity CLI (`agy`).
-- Git and the GitHub CLI, authenticated through `gh auth login`.
+- Git, plus the authenticated forge CLI required by each registered GitHub or GitLab project; GitHub projects use `gh auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
 The first mate detects supported missing or outdated tools and offers their install or upgrade after you approve.
-Backend-specific setup is linked in [Documentation](#documentation).
+Forge and backend-specific requirements are owned by [docs/configuration.md](docs/configuration.md#toolchain); backend-specific setup is also linked in [Documentation](#documentation).
 
 ### Recommended harnesses
 
@@ -82,7 +82,6 @@ Antigravity CLI (`agy`) is verified as a primary too, using a tracked project-lo
 ### Install and launch
 
 ```sh
-gh auth login
 git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```
