@@ -14,11 +14,22 @@ FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 # three consumers need the same path: the watcher publishes, the arm layer
 # resolves an unobserved cycle against it, and fm_watcher_clean_handoff below
 # distinguishes a completed cycle from a watcher that died.
-fm_watch_delivery_log_path() {  # <state-dir>
-  printf '%s/.watch-deliveries.log\n' "$1"
-}
-WATCH_DELIVERY_LOG="${WATCH_DELIVERY_LOG:-$(fm_watch_delivery_log_path "$STATE")}"
+WATCH_DELIVERY_LOG="${WATCH_DELIVERY_LOG:-$STATE/.watch-deliveries.log}"
 WATCH_DELIVERY_LOCK="${WATCH_DELIVERY_LOCK:-$STATE/.watch-deliveries.lock}"
+
+# Resolve the ledger for one home. THIS home's answer is WATCH_DELIVERY_LOG
+# itself, so an override moves the publisher and every reader together: a reader
+# that re-derived the default path would look somewhere the watcher never wrote
+# and read a clean handoff as a dead watcher. Another home's state dir - which
+# nothing in-tree passes today - resolves to that home's default.
+fm_watch_delivery_log_path() {  # [state-dir]
+  local state=${1:-$STATE}
+  if [ "$state" = "$STATE" ]; then
+    printf '%s\n' "$WATCH_DELIVERY_LOG"
+    return 0
+  fi
+  printf '%s/.watch-deliveries.log\n' "$state"
+}
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on

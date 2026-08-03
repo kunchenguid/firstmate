@@ -152,6 +152,50 @@ test_real_watcher_cycle_exit_is_reported_as_a_handoff() {
   pass "a real watcher cycle exit is reported as a handoff, not a dead watcher"
 }
 
+# The terminal-delivery ledger has one owner (bin/fm-wake-lib.sh) and, like every
+# sibling path there, honors an ambient WATCH_DELIVERY_LOG. That override must
+# move the PUBLISHER and every READER together: a reader that re-derived the
+# default path would look where the watcher never wrote, find no delivery, and
+# report a clean handoff as a dead watcher. This pins both halves against the
+# real watcher and the real guard.
+test_delivery_ledger_override_moves_publisher_and_reader_together() {
+  local dir state fakebin out err ledger wpid i status guard_out
+  dir=$(make_case delivery-ledger-override)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  ledger="$dir/custom-deliveries.log"
+  mark_pr_check_migration_complete "$state"
+  printf 'project=x\n' > "$state/task.meta"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" WATCH_DELIVERY_LOG="$ledger" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2> "$err" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] || fail "real watcher never published a liveness beacon"
+  printf 'done: synthetic wake\n' > "$state/task.status"
+  status=0
+  wait "$wpid" || status=$?
+  expect_code 0 "$status" "real watcher cycle exit under an overridden ledger path"
+
+  assert_present "$ledger" "the publisher must honor the overridden ledger path"
+  assert_absent "$state/.watch-deliveries.log" \
+    "the publisher must not also write the default ledger path when overridden"
+
+  guard_out=$(FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    WATCH_DELIVERY_LOG="$ledger" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2>&1)
+  assert_contains "$guard_out" "watcher handed off" \
+    "the reader must resolve the same overridden ledger the publisher wrote"
+  assert_not_contains "$guard_out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "a reader looking at the wrong ledger would report this clean handoff as a dead watcher"
+  pass "an overridden delivery-ledger path is honored by both the publisher and the guard"
+}
+
 test_guard_warnings() {
   # The guard's two operator-visible states, with resilient substrings instead of
   # four copy-coupled tests:
@@ -1073,6 +1117,7 @@ test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_real_watcher_cycle_exit_is_reported_as_a_handoff
+test_delivery_ledger_override_moves_publisher_and_reader_together
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
