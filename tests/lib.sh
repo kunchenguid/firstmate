@@ -34,6 +34,15 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Fixture commits must not depend on the host's signing setup. A developer whose
+# global config sets commit.gpgsign=true otherwise fails every suite that builds
+# a throwaway repo: `git commit` aborts with "gpg: skipped ...: No secret key"
+# because the fixture identity (fm_git_identity) has no key, leaving repos with
+# no HEAD and cascading into unrelated assertion failures. GIT_CONFIG_* applies
+# to every git invocation these suites make, including the ones inside the
+# scripts under test, without touching the host config.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

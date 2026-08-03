@@ -613,7 +613,49 @@ test_passive_ci_pause_disconfirming_states() {
   out=$(run_crew_state "$d" paused-cancelled)
   assert_contains "$out" "state: failed" "cancelled run remains failed"
 
-  pass "pause override rejects busy, active, fixing, parked, changed-head, ancestor-only-head, failed, and cancelled states"
+  # A readable endpoint with NO semantic record proves nothing either way. Only
+  # an affirmatively idle verdict may override the monitor, so an inconclusive
+  # one keeps the run's own authority.
+  d=$(new_case paused-unknown-worker)
+  make_repo_on_branch "$d/wt" fm/paused-unknown-worker
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/paused-unknown-worker.meta" "window=fm:fm-paused-unknown-worker" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: external wait; remain idle\n' > "$d/state/paused-unknown-worker.status"
+  FM_FAKE_RUN_HEAD="$head"
+  FM_FAKE_RUN_ID=01KYXA52EDXCKVA15F61EX2BTJ
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/paused-unknown-worker)"
+  FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed'
+  out=$(run_crew_state "$d" paused-unknown-worker)
+  assert_not_contains "$out" "state: paused" "an unknown worker verdict cannot override a passive monitor"
+  assert_not_contains "$out" "passive CI monitor remains attached" "an unknown worker cannot attach the passive-monitor override"
+
+  pass "pause override rejects busy, unknown, active, fixing, parked, changed-head, ancestor-only-head, failed, and cancelled states"
+}
+
+# The second admissible override: the endpoint is gone rather than idle. With no
+# pane to read, only a CONFIDENTLY dead agent (here tmux reports no such window)
+# may absorb the pause, and the detail says so.
+test_passive_ci_monitor_pause_with_gone_worker_is_paused() {
+  reset_fakes
+  local d head out
+  d=$(new_case passive-ci-paused-gone)
+  make_repo_on_branch "$d/wt" fm/paused-worker-gone
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/paused-worker-gone.meta" "window=fm:fm-paused-worker-gone" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: awaiting a qualifying human approval; remain idle\n' > "$d/state/paused-worker-gone.status"
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_RUN_HEAD="$head"
+  FM_FAKE_RUN_ID=01KYXA52EDXCKVA15F61EX2BTJ
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/paused-worker-gone)"
+  FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed'
+  out=$(run_crew_state "$d" paused-worker-gone)
+  assert_contains "$out" "state: paused" "a confidently gone worker with a newer exact-head pause -> paused"
+  assert_contains "$out" "source: run-step" "the gone-worker pause stays bound to the matched run"
+  assert_contains "$out" "worker gone" "the paused detail names the gone worker"
+  assert_contains "$out" "$FM_FAKE_RUN_ID" "the gone-worker paused detail carries the matched run identity"
+  pass "a confidently gone worker may absorb its matched passive CI monitor"
 }
 
 test_ci_ready_done_log_beats_monitoring_run() {
@@ -1492,6 +1534,7 @@ test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_passive_ci_monitor_with_newer_exact_head_pause_is_paused
 test_passive_ci_pause_disconfirming_states
+test_passive_ci_monitor_pause_with_gone_worker_is_paused
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
