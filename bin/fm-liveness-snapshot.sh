@@ -26,6 +26,9 @@
 # activity, so leftover background shells cannot impersonate a live worker.
 #
 # Harness-relative CPU thresholds are rates in milliseconds per minute.
+# The 7.5-second default interval gives a 10 ms process-time clock at least ten
+# ticks at the measured 800 ms/min working floor, instead of deciding near the
+# boundary from one or two scheduler ticks.
 # They preserve the measured separation in the 2026-08-03 observation:
 #   claude idle <=190 ms/min, working >=800 ms/min -> threshold 760 ms/min
 #     (four times the observed idle ceiling);
@@ -52,7 +55,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-INTERVAL_MS=${FM_LIVENESS_INTERVAL_MS:-2000}
+INTERVAL_MS=${FM_LIVENESS_INTERVAL_MS:-7500}
 case "$INTERVAL_MS" in
   ''|*[!0-9]*|0) echo "fm-liveness-snapshot: FM_LIVENESS_INTERVAL_MS must be a positive integer" >&2; exit 2 ;;
 esac
@@ -120,7 +123,12 @@ process_snapshot() {  # <output>
   [ -n "$pid_list" ] || { : > "$output"; return 0; }
   # `-p` binds every enumerated PID to its kernel-reported cwd. A task or pane
   # label is never searched in the command line because it is not ownership.
-  lsof -a -d cwd -p "$pid_list" -Fn > "$cwd_raw" 2>/dev/null || return 1
+  # lsof returns non-zero when any requested PID is inaccessible, even while
+  # emitting complete cwd records for every accessible process. macOS ps -A
+  # includes root-owned processes such as launchd, so judge this evidence by
+  # the emitted records rather than by that aggregate exit status.
+  lsof -a -d cwd -p "$pid_list" -Fn > "$cwd_raw" 2>/dev/null || true
+  [ -s "$cwd_raw" ] || return 1
   awk '
     /^p[0-9]+$/ { pid=substr($0,2); next }
     /^n/ && pid != "" { print pid "\t" substr($0,2) }

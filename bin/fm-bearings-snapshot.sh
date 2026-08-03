@@ -203,8 +203,11 @@ gh_bounded() {  # <args...>
 }
 
 decode_api_body() {
-  local encoded
-  encoded=$(sed -n 's/^[[:space:]]*body: //p' | head -1)
+  local payload encoded truncated
+  payload=$(cat)
+  truncated=$(printf '%s\n' "$payload" | sed -n 's/^[[:space:]]*truncated: //p' | head -1)
+  [ "$truncated" = false ] || return 1
+  encoded=$(printf '%s\n' "$payload" | sed -n 's/^[[:space:]]*body: //p' | head -1)
   [ -n "$encoded" ] || return 1
   printf '%s' "$encoded" | jq -er '.'
 }
@@ -314,7 +317,7 @@ EOF
   esac
   [ "$merged_at" != - ] && live_state=MERGED || live_state=$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]')
   runs_api=$(ghaxi_bounded api "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100" \
-    --jq '[.total_count, (.workflow_runs|length), (.workflow_runs | map("\(.name)[event=\(.event) attempt=\(.run_attempt) created=\(.created_at) updated=\(.updated_at) status=\(.status) conclusion=\(.conclusion // \"pending\") url=\(.html_url)]") | join("; "))] | @tsv' 2>/dev/null) || runs_api=
+    --jq '[.total_count, (.workflow_runs|length), (.workflow_runs | map("\(.name)[event=\(.event) attempt=\(.run_attempt) created=\(.created_at) updated=\(.updated_at) status=\(.status) conclusion=\(.conclusion // "pending") url=\(.html_url)]") | join("; "))] | @tsv' 2>/dev/null) || runs_api=
   runs=$(printf '%s\n' "$runs_api" | decode_api_body 2>/dev/null) || runs=
   checks=NOT_VERIFIABLE
   if [ -n "$runs" ]; then
