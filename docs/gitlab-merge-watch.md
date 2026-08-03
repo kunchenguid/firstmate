@@ -56,9 +56,9 @@ $ cd /tmp && glab mr view 1 -R https://gitlab.com/KarotKris/gitlab-merge-watch-f
 title:	Add the merged example file
 state:	merged
 author:	KarotKris
-labels:	
-assignees:	
-reviewers:	
+labels:
+assignees:
+reviewers:
 comments:	0
 number:	1
 url:	https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
