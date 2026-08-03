@@ -100,12 +100,13 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   It preserves idle bordered composers such as claude's `│ > … │` and bare agent glyphs as empty, but a bare shell glyph is unknown unless inside a genuine bordered composer box; see `docs/herdr-backend.md` "Composer and injection safety" for the complete contract.
   `pane_input_pending` remains the tested predicate for callers that only need to know whether real unsubmitted text is present, but it is insufficient for an injection-safety decision because it cannot distinguish `empty` from `unknown`.
 
-A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
+Escalation digests are delivered through the durable wake queue (`state/.wake-queue`, kind `escalation`); the pane injection is only a short static nudge pointing at `bin/fm-wake-drain.sh`.
+A busy primary pane, or any composer verdict other than `empty`, therefore defers only the nudge - the digest content is already durable - and the nudge is retried on the next housekeeping tick; a digest still in `state/.subsuper-escalations` means only that its batch window is open or its queue append failed.
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
-If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
-attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
+If a queued escalation stays un-nudged (or a digest stays buffered unappended) past `FM_MAX_DEFER_SECS` (default 300), the daemon
+retries delivery, which still requires an idle pane and an affirmatively empty composer.
 The alarm is defense in depth rather than a substitute for keeping every genuinely idle supported composer injectable.
 If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
@@ -230,7 +231,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-inject-wedged`, and `state/.subsuper-nudge-epoch` as session-scoped delivery artifacts, not as the durable work record; delivered digests live as `escalation` records in the durable wake queue until drained.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
