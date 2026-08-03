@@ -155,7 +155,10 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_GROK_STOP_LIVE_E2E=1 FM_GROK_NATIVE_BIN="$native_grok" FM_GROK_LEGACY_BIN="$pre_native_grok" tests/fm-grok-stop-live-e2e.test.sh
 ```
 
-The Claude auto-arm false-failure, guard-predicate, and monotonic bounded fail-open correction was verified on 2026-08-02 with the installed ShellCheck 0.11.0 and isolated behavior suites.
+The Claude auto-arm false-failure, monotonic bounded fail-open, session-lock ownership split, and per-block budget accounting were verified on 2026-08-03 with the installed ShellCheck 0.11.0 and isolated behavior suites.
+The `--claude` guard allows a stop for a non-owning session only on `fm_session_lock_live_foreign_owner`'s complete evidence, which includes a resolved harness ancestry, so an unresolvable ancestry, a missing or malformed lock, and a dead owner all keep the ordinary blocking path.
+The bounded block budget counts blocked stops rather than epoch identities, so the documented ceiling stays reachable when a stalled auto-arm freezes `state/.claude-autoarm-epoch`, while the allow paths keep their per-epoch idempotence.
+`bin/fm-claude-stop-autoarm.sh` reads the same lock through the shared `fm_session_lock_stale_owner`, which needs no ancestry because a dead pid is not this live process either way.
 
 ```sh
 bin/fm-lint.sh
@@ -167,8 +170,15 @@ Observed output:
 
 ```text
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
-fm-doc-audience-check: ok surfaces=61 local_links=174
-FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=102585
+fm-doc-audience-check: ok surfaces=61 local_links=176
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=160810
+```
+
+The unresolvable-ancestry assertion needs its own negative control, because a guard invoked under a plain shell resolves its ancestry on a real session host and fails to resolve it on a bare runner, so that assertion can pass for the wrong reason.
+Rerunning the same suite against a scratch copy carrying the previous predicate, a live numeric lock pid plus a negated `fm_session_lock_owned_by_self` with no ancestry requirement, fails exactly one assertion while the live-foreign-owner allow still passes.
+
+```text
+not ok - --claude mode must keep blocking when it cannot resolve whose lock this is: expected exit 2, got 0
 ```
 
 The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.
