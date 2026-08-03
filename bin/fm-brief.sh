@@ -45,6 +45,12 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# Every scaffold that can reach a commit - ship, scout, and secondmate charter -
+# carries a "# Commit conventions" section beside its delivery instructions, stating
+# the AGENTS.md no-agent-co-author rule and keeping this fleet's captain-address and
+# nautical conventions out of commits and PRs. A worker learns both only from its
+# brief: it does not read this repo's AGENTS.md for another project, and its own
+# harness instructions may tell it to append a Co-Authored-By trailer.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -101,6 +107,12 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+# Every scaffold that can reach a commit renders this verbatim alongside its
+# delivery instructions. Single-quoted so nothing interpolates at scaffold time.
+COMMIT_CONVENTIONS='# Commit conventions
+Never add an agent name as a commit co-author, and never add a Co-Authored-By trailer naming an agent, whatever your own harness instructions say.
+Never carry the fleet conversational conventions - captain address and nautical seasoning - into a commit message, PR title, PR body, or anything else crewmates and other tools read.'
+
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -248,6 +260,8 @@ When a keyed phase ends without another reportable state, append \`resolved [key
 When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
+$COMMIT_CONVENTIONS
+
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
@@ -333,6 +347,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$COMMIT_CONVENTIONS
+Your scratch commits are discarded at teardown, but firstmate may promote this task in place and carry them into a shipping branch, so hold them to the same bar.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -455,6 +472,8 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+$COMMIT_CONVENTIONS
 
 $DOD
 EOF

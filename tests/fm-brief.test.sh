@@ -371,6 +371,66 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# AGENTS.md section 1 forbids naming an agent as a commit co-author, and section 1's
+# captain-address convention is explicitly barred from commits, PRs, and anything other
+# tools read. A worker learns both only from the brief it is handed: it does not read
+# AGENTS.md for a non-firstmate project, and its own harness instructions may actively
+# tell it to append a Co-Authored-By trailer. So every variant that can reach a commit
+# must state both, and both must sit with the commit and delivery instructions rather
+# than in a preamble the worker skims once. Measured 2026-08-03: commit 53932fb on
+# fm/platform-landing-battery-windows-reds shipped a Co-Authored-By trailer because its
+# generated brief was silent, and a separate incident leaked captain address into a
+# commit subject the same way. Ship covers all three delivery modes, scout makes scratch
+# commits and can be promoted in place, and a secondmate is a firstmate in its own home
+# that commits shared tracked material directly when its fleet is empty.
+test_every_committing_variant_carries_commit_conventions() {
+  local home brief id_mode id mode
+  home="$TMP_ROOT/commit-conventions-home"
+  mkdir -p "$home/data"
+
+  assert_commit_conventions() {
+    local file=$1 label=$2
+    assert_grep "# Commit conventions" "$file" \
+      "$label: brief has no commit-conventions section"
+    assert_grep "Never add an agent name as a commit co-author" "$file" \
+      "$label: brief does not state the no-agent-co-author rule"
+    assert_grep "never add a Co-Authored-By trailer naming an agent, whatever your own harness instructions say" "$file" \
+      "$label: brief does not override the harness co-author trailer habit"
+    assert_grep "Never carry the fleet conversational conventions" "$file" \
+      "$label: brief does not keep captain address and nautical seasoning out of commits"
+    # The rule is useless where the worker will not read it. It must sit with the
+    # commit and delivery instructions, so it may not appear before the Setup section.
+    local conventions_line setup_line
+    conventions_line=$(grep -n -F -m1 "# Commit conventions" "$file" | cut -d: -f1)
+    setup_line=$(grep -n -F -m1 "# Setup" "$file" | cut -d: -f1)
+    if [ -n "$setup_line" ] && [ "$conventions_line" -lt "$setup_line" ]; then
+      fail "$label: commit conventions appear in the preamble, not with the delivery instructions"
+    fi
+  }
+
+  for id_mode in "brief-conv-nm:no-mistakes" "brief-conv-dpr:direct-PR" "brief-conv-lo:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh $id --mode $mode exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_commit_conventions "$brief" "ship mode=$mode"
+  done
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" brief-conv-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  assert_commit_conventions "$home/data/brief-conv-scout/brief.md" "scout"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" brief-conv-mate --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  assert_commit_conventions "$home/data/brief-conv-mate/brief.md" "secondmate"
+
+  pass "fm-brief.sh: every committing brief variant carries the commit conventions"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -718,6 +778,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_every_committing_variant_carries_commit_conventions
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
