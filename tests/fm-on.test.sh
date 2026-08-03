@@ -39,6 +39,11 @@ cat > "$REMOTE_ROOT/bin/fm-probe-two.sh" <<'SH'
 printf 'home=%s\nroot=%s\n' "$FM_HOME" "$FM_ROOT_OVERRIDE"
 if [ -n "${TOP_SECRET:-}" ]; then printf 'secret=leaked\n'; else printf 'secret=absent\n'; fi
 SH
+cat > "$REMOTE_ROOT/bin/fm-probe-path.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$PATH"
+SH
+cp "$ROOT/bin/fm-remote-doctor.sh" "$REMOTE_ROOT/bin/fm-remote-doctor.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'mutation\n' >> "$1"
@@ -124,6 +129,84 @@ assert_contains "$out" "home=$REMOTE_HOME" "remote FM_HOME was not explicit"
 assert_contains "$out" "root=$REMOTE_ROOT" "remote root was not explicit"
 assert_contains "$out" 'secret=absent' "the primary ambient environment crossed the transport"
 pass "the fixed entrypoint sets only its explicit environment"
+
+# The child PATH is the entrypoint's own composition, so it is asserted on the
+# PATH a real child receives rather than on the script that builds it. The
+# expectation is rebuilt here from the documented contract - fixed head, the
+# package-manager directories that exist on this host, fixed tail - so a host
+# with nix, homebrew, or neither exercises both the include and omit directions.
+ACCOUNT_HOME=$(unset HOME; CDPATH='' cd ~ && pwd -P)
+ACCOUNT_USER=$(id -un)
+OPTIONAL_DIRS=(
+  "$ACCOUNT_HOME/.nix-profile/bin"
+  "/etc/profiles/per-user/$ACCOUNT_USER/bin"
+  /run/current-system/sw/bin
+  /opt/homebrew/bin
+  /usr/local/bin
+)
+EXPECTED_PATH=
+expect_dir() {
+  case ":$EXPECTED_PATH:" in *":$1:"*) return 0 ;; esac
+  EXPECTED_PATH="${EXPECTED_PATH:+$EXPECTED_PATH:}$1"
+}
+path_has() { case ":$1:" in *":$2:"*) return 0 ;; esac; return 1; }
+expect_dir "$REMOTE_ROOT/bin"
+expect_dir "$ACCOUNT_HOME/.local/bin"
+for candidate in "${OPTIONAL_DIRS[@]}"; do
+  [ -d "$candidate" ] && expect_dir "$candidate"
+done
+for fixed in /usr/bin /bin /usr/sbin /sbin; do expect_dir "$fixed"; done
+
+CHILD_PATH=$(fm_on ios fm-probe-path.sh)
+[ "$CHILD_PATH" = "$EXPECTED_PATH" ] \
+  || fail "composed child PATH did not match the portable contract"$'\n'"expected: $EXPECTED_PATH"$'\n'"actual:   $CHILD_PATH"
+[ "${CHILD_PATH%%:*}" = "$REMOTE_ROOT/bin" ] || fail "the remote code root's bin was not first on the child PATH"
+[ "$(printf '%s' "$CHILD_PATH" | cut -d: -f2)" = "$ACCOUNT_HOME/.local/bin" ] \
+  || fail "the account's ~/.local/bin was not second on the child PATH"
+case "$CHILD_PATH" in *:/usr/bin:/bin:/usr/sbin:/sbin) ;; *) fail "the child PATH did not end with the portable system tail" ;; esac
+DUPES=$(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sort | uniq -d)
+[ -z "$DUPES" ] || fail "the child PATH repeated entries: $DUPES"
+PRESENT_CHECKED=0
+ABSENT_CHECKED=0
+for candidate in "${OPTIONAL_DIRS[@]}"; do
+  if [ -d "$candidate" ]; then
+    path_has "$CHILD_PATH" "$candidate" || fail "an existing package-manager directory was dropped: $candidate"
+    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
+  else
+    path_has "$CHILD_PATH" "$candidate" && fail "an absent directory was added to the child PATH: $candidate"
+    ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
+  fi
+done
+pass "the entrypoint composes a deduplicated child PATH (kept $PRESENT_CHECKED existing, omitted $ABSENT_CHECKED absent)"
+
+out=$(fm_on ios fm-remote-doctor.sh)
+rc=$?
+expect_code 0 "$rc" "the remote doctor failed through the transport"
+assert_contains "$out" "path=$EXPECTED_PATH" "the remote doctor did not report the entrypoint child PATH"
+assert_contains "$out" 'entrypoint=yes' "the remote doctor did not detect its entrypoint launch"
+assert_contains "$out" 'required git=' "the remote doctor did not report the required tool"
+pass "the remote doctor reports the same PATH the entrypoint hands its children"
+
+DOCTOR_BIN="$TMP_ROOT/doctor-bin"
+mkdir -p "$DOCTOR_BIN"
+ln -sf "$(command -v bash)" "$DOCTOR_BIN/bash"
+set +e
+out=$(PATH="$DOCTOR_BIN" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "the remote doctor passed with a missing required tool"
+assert_contains "$out" 'required git=MISSING' "the remote doctor did not mark the missing required tool"
+assert_contains "$out" 'required tools do not resolve on the remote runtime PATH: git' "the remote doctor did not name the missing tool"
+assert_contains "$out" '.local/bin' "the remote doctor did not offer the wrapper escape hatch"
+ln -sf "$(command -v git)" "$DOCTOR_BIN/git"
+set +e
+out=$(PATH="$DOCTOR_BIN" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+rc=$?
+set -e
+expect_code 0 "$rc" "the remote doctor failed with every required tool present"
+assert_contains "$out" "required git=$DOCTOR_BIN/git" "the remote doctor did not report where the required tool resolved"
+assert_contains "$out" 'optional tmux=absent' "the remote doctor did not report an absent optional tool"
+pass "the remote doctor fails only on missing required tools and names them"
 
 out=$(fm_on ios fm-probe-two.sh)
 assert_contains "$out" "home=$REMOTE_HOME" "first dynamic command stopped resolving"
