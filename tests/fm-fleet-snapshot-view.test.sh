@@ -779,6 +779,145 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# --- oversized-input regressions -------------------------------------------
+#
+# Linux caps a single argv entry at MAX_ARG_STRLEN (131072 bytes) regardless of
+# the far larger ARG_MAX total, so bulk JSON passed to jq as a command-line
+# argument aborts with "Argument list too long" once the fleet grows. Two
+# distinct failures followed: an oversized backlog killed the snapshot outright,
+# and an oversized per-task decision set silently dropped that task from the
+# live inventory while the snapshot still exited 0.
+#
+# Fixtures are generated here rather than copied from any real backlog.
+FM_ARGV_STRLEN_CAP=131072
+
+write_oversized_backlog() {  # <home> <record-count>
+  local home=$1 count=$2 i hold
+  # A long captain-hold reason per record, mirroring the shape real holds take.
+  hold="captain must choose between the narrow repair and the broader refactor "
+  hold="$hold$hold$hold$hold$hold$hold$hold$hold"
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=0
+    while [ "$i" -lt "$count" ]; do
+      printf -- '- [ ] bulk-%03d - Bulk record %d (repo: alpha) (kind: ship) (hold: %s) (hold-kind: captain)\n' \
+        "$i" "$i" "$hold"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+}
+
+test_oversized_backlog_renders_instead_of_dying() {
+  local home fakebin out rc backlog_bytes view view_rc
+  home=$(make_home oversized-backlog)
+  write_oversized_backlog "$home" 80
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json 2>/dev/null)
+  rc=$?
+  expect_code 0 "$rc" "oversized backlog must not abort the snapshot"
+  # Prove the fixture actually exercises the cap, so this test cannot quietly
+  # stop covering the defect if record sizes drift.
+  backlog_bytes=$(printf '%s' "$out" | jq -r '.backlog | tojson | length')
+  [ "$backlog_bytes" -gt "$FM_ARGV_STRLEN_CAP" ] \
+    || fail "fixture backlog JSON is $backlog_bytes bytes, under the $FM_ARGV_STRLEN_CAP argv cap it must exceed"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and ([.backlog.records[] | select(.structured)] | length) == 80
+      and .main_inventory.valid == true
+  ' >/dev/null || fail "oversized backlog produced no usable snapshot: $(printf '%s' "$out" | head -c 400)"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" 2>/dev/null)
+  view_rc=$?
+  expect_code 0 "$view_rc" "oversized backlog must not abort the fleet view"
+  assert_contains "$view" "bulk-079" "fleet view must render rows from an oversized backlog"
+  pass "an oversized backlog still renders through the snapshot and the view"
+}
+
+test_oversized_task_decisions_keep_the_task_visible() {
+  local home fakebin out rc summary i
+  home=$(make_home oversized-decisions)
+  mkdir -p "$home/projects/wt"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  for i in quiet-task loud-task; do
+    fm_write_meta "$home/state/$i.meta" \
+      "window=firstmate:fm-$i" \
+      "worktree=$home/projects/wt" \
+      "project=alpha" \
+      "harness=claude" \
+      "kind=ship" \
+      "mode=ship"
+  done
+  printf 'working: nothing unusual\n' > "$home/state/quiet-task.status"
+  # A long-lived task parked at a gate keeps its whole keyed decision set open,
+  # which is what grows past the argv cap.
+  record_claude_idle "$home/state" quiet-task
+  record_claude_idle "$home/state" loud-task
+  summary="captain must choose between the narrow repair and the broader refactor "
+  summary="$summary$summary$summary$summary$summary$summary"
+  i=0
+  while [ "$i" -lt 400 ]; do
+    printf 'needs-decision [key=k%04d]: %s\n' "$i" "$summary" >> "$home/state/loud-task.status"
+    i=$((i + 1))
+  done
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json 2>/dev/null)
+  rc=$?
+  expect_code 0 "$rc" "an oversized decision set must not abort the snapshot"
+  # The defect: loud-task vanished from the inventory while the snapshot still
+  # reported success, so supervision reviewed a fleet that was missing a worker.
+  printf '%s' "$out" | jq -e '[.tasks[].id] == ["loud-task","quiet-task"]' >/dev/null \
+    || fail "a task with an oversized decision set was dropped from the inventory: $(printf '%s' "$out" | jq -c '[.tasks[].id]')"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "loud-task")
+    | (.hints.open_decisions | length) == 400 and .hints.pending_decision == true
+  ' >/dev/null || fail "the oversized decision set was not preserved for loud-task"
+  pass "a task with an oversized decision set stays in the inventory"
+}
+
+test_snapshot_failure_exits_nonzero_with_diagnostic() {
+  local home fakebin out rc err view_rc view_out
+  home=$(make_home snapshot-failure)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  # A genuine total failure of the JSON engine the snapshot depends on. It must
+  # surface as a nonzero exit with a diagnostic, never as silent empty output.
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+echo "jq: simulated failure" >&2
+exit 1
+SH
+  chmod +x "$fakebin/jq"
+  err="$home/snapshot.err"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json 2>"$err")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed snapshot must not exit 0 (stdout was: '$out')"
+  [ -z "$out" ] || fail "a failed snapshot must not emit a partial document: $out"
+  assert_contains "$(cat "$err")" "fm-fleet-snapshot:" "a failed snapshot must say what failed"
+  view_out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" 2>/dev/null)
+  view_rc=$?
+  [ "$view_rc" -ne 0 ] || fail "the fleet view must not exit 0 when its snapshot failed"
+  [ -z "$view_out" ] || fail "a failed fleet view must not emit a partial render: $view_out"
+  pass "a genuine snapshot failure exits nonzero, says what failed, and emits nothing"
+}
+
+test_empty_fleet_is_success_not_failure() {
+  local home out rc view view_rc
+  home=$(make_home empty-success)
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json 2>/dev/null)
+  rc=$?
+  # An empty fleet is a valid observation and must stay distinguishable from the
+  # failure case above, which exits nonzero and prints nothing.
+  expect_code 0 "$rc" "an empty-but-valid fleet must exit 0"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1" and (.tasks | length) == 0 and .main_inventory.valid == true
+  ' >/dev/null || fail "an empty fleet must still produce a valid snapshot document: $out"
+  view=$(FM_HOME="$home" "$VIEW" 2>/dev/null)
+  view_rc=$?
+  expect_code 0 "$view_rc" "an empty-but-valid fleet view must exit 0"
+  assert_contains "$view" "No live task metadata found." "an empty fleet view must state the absence explicitly"
+  pass "an empty-but-valid fleet exits 0 and is not confused with a failed snapshot"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -794,3 +933,7 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_oversized_backlog_renders_instead_of_dying
+test_oversized_task_decisions_keep_the_task_visible
+test_snapshot_failure_exits_nonzero_with_diagnostic
+test_empty_fleet_is_success_not_failure
