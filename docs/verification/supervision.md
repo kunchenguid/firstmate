@@ -230,12 +230,44 @@ Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+The three reported watcher states were verified on 2026-08-03 against isolated project and home state.
+
+```sh
+tests/fm-watcher-lock.test.sh
+tests/fm-guard-stale-banner.test.sh
+tests/fm-turnend-guard.test.sh
+```
+
+All three suites exited 0.
+Observed guarantee: `bin/fm-guard.sh` separates a healthy watcher, a completed cycle awaiting re-arm reported as a handoff notice, and a genuinely absent watcher reported with the full `WATCHER DOWN - SUPERVISION IS OFF` banner, and a genuinely dead watcher still alarms at the same beacon age at which a clean cycle exit does not.
+
+```text
+ok - fm-guard banner: a genuinely stale beacon is still reported as such
+ok - fm-guard banner: a clean cycle exit is reported as a handoff, not a dead watcher
+ok - fm-guard banner: a watcher that vanished mid-cycle still alarms immediately
+ok - fm-guard banner: a handoff whose re-arm never came escalates to the full banner
+```
+
+The handoff state rests on an ordering invariant of the real watcher process: `bin/fm-watch.sh` touches `state/.last-watcher-beat` at the top of every poll iteration and publishes the terminal-delivery ledger only immediately before a deliberate exit, so `mtime(.watch-deliveries.log) >= mtime(.last-watcher-beat)` holds only after a completed cycle.
+That invariant is why the state is proven against the live processes rather than by fixtures alone: `tests/fm-watcher-lock.test.sh` launches the real `bin/fm-watch.sh`, drives it to a real actionable cycle exit, and then runs the real `bin/fm-guard.sh` against the resulting on-disk state.
+
+```text
+ok - a real watcher cycle exit is reported as a handoff, not a dead watcher
+```
+
+The softer pull-guard reading does not reach the turn-end block decision, because at a turn boundary an un-rearmed watcher is still absent supervision.
+
+```text
+ok - fm-turnend-guard: blocks on a cleanly ended watcher cycle awaiting re-arm
+```
+
 Deterministic entry points:
 
 ```sh
 tests/fm-pi-watch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-watcher-lock.test.sh
+tests/fm-guard-stale-banner.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
