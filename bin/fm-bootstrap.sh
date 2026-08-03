@@ -793,7 +793,7 @@ secondmate_handoff_detect() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
+    tmux|node|git|gh|glab|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
@@ -825,7 +825,15 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi"
+COMMON_TOOLS="node git no-mistakes chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+FORGE_PROJECTS=$(fm_forge_scan_registered_projects "$PROJECTS")
+FORGE_PROVIDERS_SEEN=$(printf '%s\n' "$FORGE_PROJECTS" | awk '{print $2}' | sort -u)
+if printf '%s\n' "$FORGE_PROVIDERS_SEEN" | grep -qx github; then
+  COMMON_TOOLS="$COMMON_TOOLS gh gh-axi"
+fi
+if printf '%s\n' "$FORGE_PROVIDERS_SEEN" | grep -qx gitlab; then
+  COMMON_TOOLS="$COMMON_TOOLS glab"
+fi
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -1411,6 +1419,24 @@ detect_local_tools() {
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
   fi
+  FORGE_AUTH_CHECKED=""
+  while read -r _proj_id _proj_provider _proj_host; do
+    [ -n "${_proj_provider:-}" ] || continue
+    case "$_proj_provider" in
+      github|gitlab) : ;;
+      unknown)
+        echo "FORGE_UNSUPPORTED: $_proj_id (host: ${_proj_host:-unresolved})"
+        continue
+        ;;
+      *) continue ;;
+    esac
+    _pair="$_proj_provider:${_proj_host:-}"
+    case " $FORGE_AUTH_CHECKED " in
+      *" $_pair "*) continue ;;
+    esac
+    FORGE_AUTH_CHECKED="$FORGE_AUTH_CHECKED $_pair"
+    fm_forge_check_auth "$_proj_provider" "${_proj_host:-}"
+  done <<< "$FORGE_PROJECTS"
 }
 
 detect_local_config() {

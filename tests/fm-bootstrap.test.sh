@@ -624,6 +624,46 @@ test_herdr_install_requires_manual_action() {
   pass "bootstrap: Herdr manual-install guidance is never executed as a shell command"
 }
 
+test_forge_provider_bootstrap_contracts() {
+  local case_dir fakebin out project
+
+  case_dir="$TMP_ROOT/forge-unknown"
+  project="$case_dir/home/projects/mystery"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://code.example/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: mystery (host: code.example)" ] \
+    || fail "unknown forge must fail closed with its project and host, got: $out"
+
+  case_dir="$TMP_ROOT/forge-gitlab"
+  project="$case_dir/home/projects/gitlab-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://user@gitlab.example:8443/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITLAB_HOSTS=gitlab.example FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "MISSING: glab (install: brew install glab  # or the platform's package manager)" ] \
+    || fail "GitLab remote with userinfo and port must require installable glab, got: $out"
+
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/glab"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITLAB_HOSTS=gitlab.example FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "NEEDS_GLAB_AUTH: gitlab.example" ] \
+    || fail "GitLab auth diagnostic must retain the normalized host, got: $out"
+
+  pass "bootstrap fails closed and owns GitLab install/auth remediation"
+}
+
 test_cmux_bundled_cli_satisfies_dependency() {
   local case_dir fakebin bundle out
   case_dir="$TMP_ROOT/cmux-bundled-cli"
@@ -1250,6 +1290,7 @@ test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
+test_forge_provider_bootstrap_contracts
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
