@@ -29,6 +29,11 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# A ship task released while its PR is still open leaves state/<task-id>.landing
+# behind: a minimal durable record (pr, pr_head, project) that keeps the PR
+# landable through bin/fm-pr-merge.sh and rearmable through bin/fm-pr-check.sh
+# after the task itself is gone. It is written unless the forge reports the PR
+# already merged, and a failed write warns without blocking cleanup.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -136,6 +141,8 @@ T_ORCA=
 "$FM_ROOT/bin/fm-guard.sh" || true
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+LANDING_PENDING_URL=
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
@@ -347,6 +354,43 @@ validate_pr_poll_cleanup() {
       return 1
     fi
   done
+}
+
+# The captain's parked-completion ruling releases a ship worker once its pull
+# request is done, green, and mergeable - that is, before it lands - and this
+# cleanup then removes the meta bin/fm-pr-merge.sh needs. Leave a minimal
+# durable landing record behind so the request can still be landed through the
+# sanctioned path, and so bin/fm-pr-check.sh can rearm its merge watch.
+#
+# The forge decides whether the record is needed: it is written unless the forge
+# positively reports the request already merged, because an unreachable forge is
+# not evidence that anything landed. Writing a record for an already-landed
+# request would only leave an inert file, while omitting one for an open request
+# is what strands it.
+#
+# A failed write is reported and never blocks cleanup. bin/fm-pr-merge.sh
+# rebuilds the record from the request itself, so a missing record costs the
+# merge watch but not the ability to land.
+write_landing_record_if_unlanded() {
+  [ -n "$PR_URL" ] || return 0
+  [ "$KIND" = ship ] || return 0
+  [ "$MODE" != local-only ] || return 0
+  fm_pr_url_parse "$PR_URL" || return 0
+  if fm_pr_forge_view "$PR_URL" && [ "$FM_PR_FORGE_STATE" = merged ]; then
+    return 0
+  fi
+  if ! fm_pr_landing_record_write "$STATE" "$ID" "$PR_URL" "$PR_HEAD_RECORDED" "$PROJ"; then
+    echo "warning: could not record the pending landing for $ID; land $PR_URL with bin/fm-pr-merge.sh, which rebuilds that record from the pull request" >&2
+    return 0
+  fi
+  LANDING_PENDING_URL=$PR_URL
+}
+
+# Reported after cleanup so the released PR is not silently forgotten: the task
+# is gone from the fleet, but its PR still needs landing.
+report_pending_landing() {
+  [ -n "$LANDING_PENDING_URL" ] || return 0
+  printf '%s\n' "Pending landing: $ID was released before $LANDING_PENDING_URL landed. Land it with bin/fm-pr-merge.sh $ID $LANDING_PENDING_URL once it is approved."
 }
 
 remove_pr_poll_artifacts() {
@@ -1683,6 +1727,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+write_landing_record_if_unlanded
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
@@ -1692,4 +1737,5 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
+report_pending_landing
 backlog_refresh_reminder
