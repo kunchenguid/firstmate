@@ -155,7 +155,8 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
 }
 
 fm_backend_orca_terminal_create() {  # <worktree-id> <title>
-  local worktree_id=$1 title=$2 out terminal
+  local worktree_id title=$2 out terminal
+  worktree_id=$(fm_backend_orca_worktree_id_for_cli "${1:-}")
   fm_backend_orca_tool_check || return 1
   out=$(orca terminal create --worktree "id:$worktree_id" --title "$title" --json) || return 1
   terminal=$(printf '%s' "$out" | fm_backend_orca_json_get terminal-handle) || {
@@ -178,14 +179,16 @@ fm_backend_orca_send_literal() {  # <terminal-id> <text>
 }
 
 fm_backend_orca_remove_worktree() {  # <worktree-id>
-  local worktree_id=${1:-}
+  local worktree_id
+  worktree_id=$(fm_backend_orca_worktree_id_for_cli "${1:-}")
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
   fm_backend_orca_tool_check || return 1
   fm_backend_orca_run_json orca worktree rm --worktree "id:$worktree_id" --force --json
 }
 
 fm_backend_orca_worktree_path() {
-  local worktree_id=${1:-} out path
+  local worktree_id out path
+  worktree_id=$(fm_backend_orca_worktree_id_for_cli "${1:-}")
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot resolve worktree path" >&2; return 1; }
   fm_backend_orca_tool_check || return 1
   out=$(orca worktree show --worktree "id:$worktree_id" --json) || return 1

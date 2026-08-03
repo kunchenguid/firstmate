@@ -793,7 +793,7 @@ fm_backend_remove_worktree() {  # <backend> <worktree-id>
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
-    orca) set -- "$(fm_backend_orca_worktree_id_for_cli "${1:-}")"; fm_backend_orca_remove_worktree "$@" ;;
+    orca) fm_backend_orca_remove_worktree "$@" ;;
     *) echo "error: backend '$backend' does not own task worktrees" >&2; return 1 ;;
   esac
 }
@@ -803,7 +803,7 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
-    orca) set -- "$(fm_backend_orca_worktree_id_for_cli "${1:-}")"; fm_backend_orca_worktree_path "$@" ;;
+    orca) fm_backend_orca_worktree_path "$@" ;;
     *) echo "error: backend '$backend' does not own task worktrees" >&2; return 1 ;;
   esac
 }

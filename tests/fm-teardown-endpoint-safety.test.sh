@@ -143,7 +143,8 @@ test_supported_backend_endpoint_records_validate() {
   for garbage in \
     "284dc4d4-dd13-4a07-9406-b5cd59a55aeb::$dir/worktree/../escape" \
     "284dc4d4-dd13-4a07-9406-b5cd59a55aeb::$dir/worktree with-space" \
-    "284dc4d4-dd13-4a07-9406-b5cd59a55aeb::$dir/worktree;touch"; do
+    "284dc4d4-dd13-4a07-9406-b5cd59a55aeb::$dir/worktree;touch" \
+    "284dc4d4-dd13-4a07-9406-b5cd59a55aeb::$dir/worktree\"x"; do
     fm_write_meta "$dir/home/state/orca-garbage-task.meta" \
       "window=fm-orca-garbage-task" "endpoint_task_id=orca-garbage-task" \
       "terminal=term_garbage" "worktree=$dir/worktree" "project=$dir/project" \
