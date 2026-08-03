@@ -12,7 +12,7 @@ metadata:
 
 Analyze a public video URL or an explicitly supplied local video file with sparse, evidence-grounded sampling.
 This skill is cross-harness: it uses `bin/fm-video-watch.sh` and the ordinary file `Read` tool rather than any Claude-only plugin directory.
-The script's `--help` output owns exact flags, limits, manifest fields, cleanup receipt behavior, and exit codes.
+`bin/fm-video-watch.sh --help` owns the exact subcommands, flags, defaults, and limits, that script's header comment owns the media, coverage, cleanup receipt, and exit-code contract, and the emitted manifest carries its own field set.
 
 ## Intake
 

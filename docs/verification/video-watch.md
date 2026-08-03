@@ -3,7 +3,7 @@
 Audience: maintainer verification.
 
 This record holds reusable evidence for Firstmate's `/watch` safety and manifest guarantees.
-The user-facing workflow is owned by `.agents/skills/watch/SKILL.md`, and the exact mechanics, flags, limits, manifest schema, cleanup receipt, and exit codes are owned by `bin/fm-video-watch.sh --help`.
+The user-facing workflow is owned by `.agents/skills/watch/SKILL.md`, the exact subcommands, flags, and limits are owned by `bin/fm-video-watch.sh --help`, and the media, coverage, cleanup receipt, and exit-code contract is owned by that script's header comment.
 
 ## Upstream provenance
 
@@ -151,15 +151,15 @@ Counterfactuals, run through the local-file path on synthesized clips so no netw
 
 ```text
 12s at 25fps, default frame budget
-  implementation at ad44376 (before the correction): exit 5, "frame extraction failed"
-  implementation at b52f31c (with tail_seek_limit): exit 0, 18 frames, last frame 11.5s of 12.0s
+  before the correction: exit 5, "frame extraction failed"
+  with tail_seek_limit: exit 0, 18 frames, last frame 11.5s of 12.0s
 
 6s at 10fps with --max-frames 8 --resolution 128, the shape the regression test ships
-  implementation at ad44376: exit 5, "frame extraction failed"
+  before the correction: exit 5, "frame extraction failed"
   current implementation: exit 0, every planned frame on disk, final frame inside the media
 
 mocked suite with the strengthened stub ffmpeg, 120s fixture
-  implementation at ad44376: exit 5
+  before the correction: exit 5
   current implementation: exit 0, 21 frames, last frame 119.0
 ```
 
@@ -179,5 +179,3 @@ The route is now chosen from the projected byte cost rather than taken unconditi
 
 The estimate is trustworthy because the metadata call now uses the same format selector as the download, so `declared_bytes` describes the bytes actually fetched instead of the best-quality formats.
 The focus range itself is never altered by this choice: `selected_ranges` is identical on both routes, and taking the full media only ever widens what was acquired, which `media.visual_coverage` and `media.acquisition_reason` both state.
-
-resolved: [key=01KZ1NPWRMTEZXYFDDXT1XT9N4] captain approved refreshed public proof and whole-video extraction correction

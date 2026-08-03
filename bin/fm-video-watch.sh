@@ -7,8 +7,8 @@
 #   fm-video-watch.sh cleanup <opaque-receipt>
 #   fm-video-watch.sh smoke --url <public-url> --i-understand-this-uses-network [prepare options]
 #
-# This script owns the user-visible mechanics, limits, manifest contract, cleanup
-# receipt, and exit-code classes for the Firstmate watch skill.
+# This script owns the user-visible mechanics, limits, media and coverage contract,
+# cleanup receipt handling, and exit-code classes for the Firstmate watch skill.
 # A public URL is fetched exactly as supplied, so providers that carry the video
 # identity in query parameters keep working; URLs bearing credential, signature,
 # session, or token query fields are refused, and the manifest description prints
@@ -36,7 +36,9 @@
 #   5 media probing, download, frame extraction, or cleanup failed, insufficient local
 #     free space for the transient copy, or an unexpected internal failure
 #
-# Use --help for the full operator contract.
+# This header and the exit classes above are the prose contract; use --help for the
+# exact subcommands, flags, defaults, and limits, and read the emitted manifest for
+# its own field set.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
