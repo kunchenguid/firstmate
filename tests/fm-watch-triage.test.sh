@@ -1845,3 +1845,186 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+
+# --- quiet stall, seat death, refill heartbeat, captain pulse ---------------
+
+# A churning idle pane (every capture differs, e.g. a ticking token counter)
+# never yields two identical hashes, so the stability path cannot see it.
+# quiet_stall_check must key on engagement signals instead and surface it.
+test_quiet_stall_churning_idle_pane_surfaced() {
+  local dir state fakebin out drain_out old pid
+  dir=$(make_case quiet-stall-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf 'w9\n'; exit 0 ;;
+  capture-pane) printf 'churn %s\n' "$(date +%s%N)"; exit 0 ;;
+  display-message) printf 'claude\n'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  printf 'window=default:w9\nkind=ship\nharness=claude\n' > "$state/qs.meta"
+  printf 'working: chewing\n' > "$state/qs.status"
+  old=$(( $(date +%s) - 1800 ))
+  set_mtime "$old" "$state/qs.meta"
+  set_mtime "$old" "$state/qs.status"
+  printf '%s' "$(seen_sig "$state/qs.status")" > "$state/.seen-qs_status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'  \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_QUIET_STALL_SECS=5 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 || { reap "$pid"; fail "quiet stall on a churning idle pane was not surfaced: $(cat "$out")"; }
+  grep -F "quiet stall" "$out" >/dev/null || fail "quiet-stall wake reason missing: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after quiet-stall wake failed"
+  grep -F "quiet stall" "$drain_out" >/dev/null || fail "quiet-stall wake was not durably queued"
+  [ -e "$state/.quietstall-default_w9" ] || fail "quiet-stall re-fire throttle marker was not recorded"
+  pass "a churning idle pane with no engagement signals surfaces as a quiet stall"
+}
+
+# A fresh worktree commit is an engagement signal: the same fixture with a
+# just-committed worktree must absorb instead of firing.
+test_quiet_stall_fresh_commit_absorbed() {
+  local dir state fakebin out old wt pid
+  dir=$(make_case quiet-stall-commit); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; wt="$dir/wt"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf 'w9\n'; exit 0 ;;
+  capture-pane) printf 'churn %s\n' "$(date +%s%N)"; exit 0 ;;
+  display-message) printf 'claude\n'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  git init -q "$wt" && git -C "$wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
+  printf 'window=default:w9\nkind=ship\nharness=claude\nworktree=%s\n' "$wt" > "$state/qs.meta"
+  printf 'working: chewing\n' > "$state/qs.status"
+  old=$(( $(date +%s) - 1800 ))
+  set_mtime "$old" "$state/qs.meta"
+  set_mtime "$old" "$state/qs.status"
+  printf '%s' "$(seen_sig "$state/qs.status")" > "$state/.seen-qs_status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'  \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_QUIET_STALL_SECS=5 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "quiet-stall fired despite a fresh worktree commit: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "fresh-commit case enqueued a durable wake"
+  reap "$pid"
+  pass "a fresh worktree commit suppresses the quiet-stall wake"
+}
+
+# A pane whose capture fails and whose backend confirms the agent gone, while
+# the task's last status is non-terminal, is a silent seat death: it must
+# surface instead of being skipped by the capture guard forever.
+test_seat_death_capture_failed_dead_agent_surfaced() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case seat-death); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) exit 0 ;;
+  capture-pane) exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  printf 'window=default:w8\nkind=ship\nharness=claude\n' > "$state/sd.meta"
+  printf 'working: mid-flight\n' > "$state/sd.status"
+  printf '%s' "$(seen_sig "$state/sd.status")" > "$state/.seen-sd_status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'  \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 || { reap "$pid"; fail "dead endpoint behind a non-terminal status was not surfaced: $(cat "$out")"; }
+  grep -F "endpoint dead" "$out" >/dev/null || fail "seat-death wake reason missing: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after seat-death wake failed"
+  grep -F "endpoint dead" "$drain_out" >/dev/null || fail "seat-death wake was not durably queued"
+  [ -e "$state/.seatdeath-default_w8" ] || fail "seat-death re-fire throttle marker was not recorded"
+  pass "a capture-failed pane with a confirmed-dead agent and non-terminal status surfaces"
+}
+
+# The same dead endpoint behind an already captain-relevant status keeps its
+# existing signal-path owner: no seat-death wake.
+test_seat_death_terminal_status_keeps_signal_owner() {
+  local dir state fakebin out pid
+  dir=$(make_case seat-death-terminal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) exit 0 ;;
+  capture-pane) exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  printf 'window=default:w8\nkind=ship\nharness=claude\n' > "$state/sd.meta"
+  printf 'done: PR https://example.test/pr/9\n' > "$state/sd.status"
+  printf '%s' "$(seen_sig "$state/sd.status")" > "$state/.seen-sd_status"
+  printf 'done: PR https://example.test/pr/9' > "$state/.hb-surfaced-sd"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'  \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "seat-death fired for an already captain-relevant status: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "terminal-status seat death enqueued a durable wake"
+  reap "$pid"
+  pass "a dead endpoint behind a captain-relevant status stays with the signal path"
+}
+
+# config/refill-target + ready backlog + lanes under target upgrades a
+# no-change heartbeat into an actionable refill wake.
+test_heartbeat_refill_target_surfaces_idle_fleet() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case heartbeat-refill); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  mkdir -p "$dir/config"
+  printf '3\n' > "$dir/config/refill-target"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = ready ] && printf 'count: 2\nready[2]{id}:\n  a\n  b\n'
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 || { reap "$pid"; fail "refill heartbeat did not surface an idle fleet with ready backlog: $(cat "$out")"; }
+  grep -F "refill:" "$out" >/dev/null || fail "refill wake reason missing: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after refill wake failed"
+  grep -F "refill:" "$drain_out" >/dev/null || fail "refill wake was not durably queued"
+  pass "an idle fleet with ready backlog under config/refill-target surfaces a refill heartbeat"
+}
+
+# Every poll overwrites the captain pulse line, so healthy quiet stays
+# distinguishable from a dead loop.
+test_captain_pulse_written_every_poll() {
+  local dir state fakebin out pid
+  dir=$(make_case captain-pulse); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 20 || { reap "$pid"; fail "watcher exited unexpectedly while asserting the pulse: $(cat "$out")"; }
+  [ -s "$state/.captain-pulse" ] || { reap "$pid"; fail "state/.captain-pulse was not written"; }
+  grep -F "watcher alive" "$state/.captain-pulse" >/dev/null || { reap "$pid"; fail "pulse line lacks the liveness marker: $(cat "$state/.captain-pulse")"; }
+  grep -F "live-lanes=0" "$state/.captain-pulse" >/dev/null || { reap "$pid"; fail "pulse line lacks the lane count: $(cat "$state/.captain-pulse")"; }
+  reap "$pid"
+  pass "the captain pulse is overwritten every poll with lanes, queue depth, and event age"
+}
+
+test_quiet_stall_churning_idle_pane_surfaced
+test_quiet_stall_fresh_commit_absorbed
+test_seat_death_capture_failed_dead_agent_surfaced
+test_seat_death_terminal_status_keeps_signal_owner
+test_heartbeat_refill_target_surfaces_idle_fleet
+test_captain_pulse_written_every_poll
