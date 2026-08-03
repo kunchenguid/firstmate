@@ -151,7 +151,9 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __CLAUDESETTINGS__ absolute path to state/<task-id>.claude-settings.json (claude
 #                  per-task hook settings, written by this script; outside the worktree so
-#                  firstmate never writes a path the project may track)
+#                  firstmate never writes a path the project may track. A raw claude
+#                  launch command gets the --settings flag inserted after its command
+#                  word, so the escape hatch keeps the same hook wiring)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1131,9 +1133,33 @@ launch_template() {
   esac
 }
 
+# Echo $1 with the flag $2 inserted immediately after the command word, past any
+# leading VAR=value assignments. Only that prefix is rebuilt, so everything after
+# the command word - quoting, substitutions, the operator's own flags - survives
+# byte for byte. Returns non-zero when the string carries no command word.
+launch_insert_flag_after_command() {
+  local rest=$1 flag=$2 prefix='' word
+  while [ -n "$rest" ]; do
+    case $rest in
+      ' '*) prefix="$prefix "; rest=${rest# }; continue ;;
+    esac
+    word=${rest%% *}
+    rest=${rest#"$word"}
+    prefix="$prefix$word"
+    case $word in
+      [A-Za-z_]*=*) continue ;;
+    esac
+    printf '%s %s%s' "$prefix" "$flag" "$rest"
+    return 0
+  done
+  return 1
+}
+
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    RAW_LAUNCH=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -1181,6 +1207,38 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
+
+# Claude's per-task turn-end and busy-state hooks are loaded by `--settings`, so
+# the wiring exists only on a launch that carries the flag. The template adds it;
+# a raw launch command is the operator's own string, so the flag is inserted right
+# after the command word. An operator who already passes --settings owns claude's
+# settings for that task - a second flag would silently lose to theirs, so
+# firstmate installs no wiring at all rather than arm a busy record no hook can
+# ever clear, exactly as it does for any other unverified adapter.
+CLAUDE_HOOK_SETTINGS=0
+case "$HARNESS" in
+  claude*)
+    if [ "$KIND" = secondmate ]; then
+      :
+    elif [ "$RAW_LAUNCH" != 1 ]; then
+      CLAUDE_HOOK_SETTINGS=1
+    else
+      case " $LAUNCH " in
+        *' --settings '*|*' --settings='*)
+          echo "warn: raw claude launch command already passes --settings; firstmate installs no turn-end or busy-state hooks for this task" >&2
+          ;;
+        *)
+          if LAUNCH=$(launch_insert_flag_after_command "$LAUNCH" '--settings __CLAUDESETTINGS__'); then
+            CLAUDE_HOOK_SETTINGS=1
+          else
+            echo "error: could not place --settings into the raw claude launch command" >&2
+            exit 1
+          fi
+          ;;
+      esac
+    fi
+    ;;
+esac
 
 # pi-signed is an explicitly selected executable identity, not an alias that may
 # silently fall back to pi. Resolve it from PATH before creating an endpoint and
@@ -2205,13 +2263,21 @@ if [ "$KIND" != secondmate ]; then
       fi
       ;;
   esac
+  arm_busy_state() {
+    BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+      echo "error: failed to arm the busy-state contract for $ID" >&2
+      exit 1
+    }
+    [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+  }
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
-      BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
-        echo "error: failed to arm the busy-state contract for $ID" >&2
-        exit 1
-      }
-      [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+    claude*)
+      # Claude's wiring rides --settings; without it there are no hooks, so an
+      # arm would seed a busy record nothing could ever clear.
+      [ "$CLAUDE_HOOK_SETTINGS" != 1 ] || arm_busy_state
+      ;;
+    opencode*|pi|pi-signed)
+      arm_busy_state
       ;;
     kimi*)
       # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
@@ -2226,6 +2292,12 @@ if [ "$KIND" != secondmate ]; then
   esac
   case "$HARNESS" in
     claude*)
+      # No --settings on the launch means no hook file can be loaded, so writing
+      # one would leave dead scaffolding in state/ and claim wiring that is not
+      # there. The launch resolution above already reported why.
+      if [ "$CLAUDE_HOOK_SETTINGS" != 1 ]; then
+        :
+      else
       # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
       # a turn; Stop (normal completion), StopFailure (API-error turn end),
       # and SessionEnd (process shutdown) all close it, so an abnormal end can
@@ -2254,6 +2326,7 @@ if [ "$KIND" != secondmate ]; then
       cat > "$CLAUDE_SETTINGS" <<EOF
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
+      fi
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"

@@ -31,7 +31,9 @@
 # must agree, and their one shared content tree must BE the tree of a commit
 # reachable from a remote (or, for a local-only task, from the local default
 # branch). Any real edit, any staged-then-modified file, and any untracked file
-# changes that tree, so it matches nothing and the refusal stands.
+# changes that tree, so it matches nothing and the refusal stands. The only paths
+# left out of that tree are firstmate's own untracked scaffolding, the same paths
+# the dirty check already forgives (TOLERATED_UNTRACKED_SCAFFOLD owns the list).
 # FM_TEARDOWN_STALE_CONTENT_SCAN_LIMIT (default 500) bounds the ancestry scan; a
 # too-small bound can only cost a refusal, never a false clearance.
 # local-only projects additionally accept work merged into the local default
@@ -925,6 +927,40 @@ work_is_landed() {
 # keeps the scan cheap on a large history and can only ever cost a refusal.
 STALE_CONTENT_SCAN_LIMIT=${FM_TEARDOWN_STALE_CONTENT_SCAN_LIMIT:-500}
 
+# Firstmate's own worktree-resident scaffolding, which the dirty check forgives
+# while it is UNTRACKED: it is firstmate's material, not the project's work. This
+# is the single owner of that list - both the dirty filter and the content proof
+# below derive from it, so they can never disagree and leave a residual false
+# refusal on a copy carrying leftover scaffolding.
+TOLERATED_UNTRACKED_SCAFFOLD=(.claude .fm-grok-turnend .fm-kimi-turnend)
+
+# Echo the porcelain-line pattern that matches an untracked tolerated path.
+tolerated_untracked_pattern() {
+  local rel alt=''
+  for rel in "${TOLERATED_UNTRACKED_SCAFFOLD[@]}"; do
+    alt="${alt:+$alt|}${rel//./\\.}(/|\$)"
+  done
+  printf '^\\?\\? (%s)' "$alt"
+}
+
+# Drop from an index COPY every tolerated scaffold path the project does not
+# track, so the content proof forgives exactly what the dirty filter forgives.
+# A path the project TRACKS is real project content and stays in the tree.
+drop_tolerated_untracked_scaffold() {
+  local index_copy=$1 rel staged
+  staged=$(GIT_INDEX_FILE="$index_copy" git -C "$WT" ls-files -- "${TOLERATED_UNTRACKED_SCAFFOLD[@]}" 2>/dev/null) || return 1
+  [ -n "$staged" ] || return 0
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    ! git -C "$WT" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || continue
+    # update-index --force-remove touches only the index copy; `git rm --cached`
+    # would refuse a path whose staged content differs from HEAD.
+    GIT_INDEX_FILE="$index_copy" git -C "$WT" update-index --force-remove -- "$rel" >/dev/null 2>&1 || return 1
+  done <<EOF
+$staged
+EOF
+}
+
 # Echo "<index-tree> <worktree-tree>": the tree of the current index, and the tree
 # of the full working tree including anything git would newly add. Both are built
 # against a COPY of the index, so the task's real index is never modified. Returns
@@ -952,6 +988,9 @@ worktree_content_trees() {
     GIT_INDEX_FILE="$index_copy" git -C "$WT" add -A >/dev/null 2>&1 || rc=1
   fi
   if [ "$rc" -eq 0 ]; then
+    drop_tolerated_untracked_scaffold "$index_copy" || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
     work_tree=$(GIT_INDEX_FILE="$index_copy" git -C "$WT" write-tree 2>/dev/null) || rc=1
   fi
   rm -f "$index_copy"
@@ -969,8 +1008,10 @@ worktree_content_trees() {
 # one shared content tree must BE the tree of a commit already reachable from a
 # remote - plus the local default branch for a local-only task, whose landing target
 # is that branch. Any real edit, any staged-then-modified file, and any untracked
-# file changes the content tree, so it matches no landed commit and teardown refuses
-# exactly as before. Echoes the matching commit on success.
+# file the project could own changes the content tree, so it matches no landed
+# commit and teardown refuses exactly as before. Firstmate's own untracked
+# scaffolding is the sole exception, matching the dirty filter exactly.
+# Echoes the matching commit on success.
 dirty_is_landed_stale_content() {
   local trees index_tree work_tree scan commit tree name unlanded
   local -a exclude=(--not --remotes)
@@ -1256,7 +1297,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE "$(tolerated_untracked_pattern)" | head -1 || true)
   if [ -n "$dirty" ] && stale_commit=$(dirty_is_landed_stale_content); then
     echo "teardown: worktree $WT reports differences only because its branch advanced in another copy; its content is exactly commit $stale_commit, which is already landed, so nothing here is unlanded work" >&2
     dirty=

@@ -369,6 +369,55 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+# Claude's turn-end and busy-state hooks ride --settings, so a raw claude launch
+# command (the unverified-adapter escape hatch) must carry the flag too. Without
+# it the busy arm would seed a record no hook could ever clear and the watcher
+# would never see a turn boundary.
+test_raw_claude_launch_command_carries_hook_settings() {
+  local rec id out status launch state_real settings
+  id=profile-raw-claude-z16
+  rec=$(make_spawn_case profile-raw-claude claude "$id")
+  read_case_record "$rec"
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  settings="$state_real/$id.claude-settings.json"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --dangerously-skip-permissions")
+  status=$?
+  expect_code 0 "$status" "raw claude launch command should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "claude --settings '$settings' --dangerously-skip-permissions" ] \
+    || fail "raw claude launch did not receive --settings"$'\n'"actual: $launch"
+  [ -f "$settings" ] || fail "raw claude launch wrote no hook settings file"
+  assert_grep "busy_gen=" "$HOME_DIR/state/$id.meta" "raw claude launch did not arm the busy-state contract"
+  pass "a raw claude launch command carries firstmate's hook settings"
+}
+
+# An operator who passes their own --settings owns claude's settings for that task.
+# A second flag would silently lose, so firstmate installs no wiring at all rather
+# than arm a busy record nothing can clear.
+test_raw_claude_launch_with_own_settings_installs_no_wiring() {
+  local rec id out status launch state_real
+  id=profile-raw-claude-z17
+  rec=$(make_spawn_case profile-raw-own-settings claude "$id")
+  read_case_record "$rec"
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --settings /tmp/own.json")
+  status=$?
+  expect_code 0 "$status" "raw claude launch with its own --settings should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "claude --settings /tmp/own.json" ] \
+    || fail "firstmate rewrote a raw claude launch that already owns --settings"$'\n'"actual: $launch"
+  [ ! -f "$state_real/$id.claude-settings.json" ] \
+    || fail "firstmate wrote hook settings no launch can load"
+  ! grep -q "busy_gen=" "$HOME_DIR/state/$id.meta" \
+    || fail "firstmate armed a busy record no hook could ever clear"
+  assert_contains "$out" "already passes --settings" "spawn did not report the skipped wiring"
+  pass "a raw claude launch owning --settings gets no unwireable firstmate hooks"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch state_real
   id=profile-claude-z2
@@ -688,6 +737,8 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_claude_launch_command_carries_hook_settings
+test_raw_claude_launch_with_own_settings_installs_no_wiring
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

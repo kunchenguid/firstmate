@@ -47,6 +47,8 @@
 #   (z) stale index from a second worktree on the same branch   -> ALLOW  (collision fix)
 #   (aa) same, plus a genuine uncommitted edit                  -> REFUSE (safety)
 #   (ab) same, plus an untracked file                           -> REFUSE (safety)
+#   (ad) same, plus leftover firstmate hook scaffolding         -> ALLOW  (collision fix)
+#   (ae) same, but the project TRACKS that scaffold path        -> REFUSE (safety)
 #   (ac) same shape, content on no remote                       -> REFUSE (safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
@@ -1035,6 +1037,65 @@ test_stale_index_with_untracked_file_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "stale-index-untracked: no REFUSED line in stderr"
   [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-index-untracked: teardown completed despite untracked work"
   pass "an untracked file on a stale copy still refuses"
+}
+
+# (ad) The collision on a legacy pool copy that still carries firstmate's own
+# untracked hook scaffolding. The dirty check already forgives those paths, so the
+# content proof must forgive exactly the same ones - otherwise the leftovers alone
+# reinstate the false refusal the fix removes.
+test_stale_index_with_leftover_scaffold_allows() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-scaffold)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  advance_branch_from_second_worktree "$case_dir"
+  # A developer's global ignore file may already cover these paths; the guard must
+  # hold for a project where it does not, so pin the repo to no global excludes.
+  git -C "$case_dir/wt" config core.excludesFile /dev/null
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' '{"hooks":{}}' > "$case_dir/wt/.claude/settings.local.json"
+  printf '%s\n' "$case_dir/state/task-x1.turn-ended" > "$case_dir/wt/.fm-grok-turnend"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stale-index-scaffold: leftover firstmate scaffolding must not refuse a copy that holds no work"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "stale-index-scaffold: teardown printed a REFUSED line"
+  grep -q "already landed" "$case_dir/stderr" \
+    || fail "stale-index-scaffold: teardown did not clear the stale signal"
+  pass "leftover firstmate scaffolding does not defeat the stale-content proof"
+}
+
+# (ae) The same path names, but the PROJECT tracks them and one is modified. Then
+# the content is project work, not firstmate scaffolding, and the refusal stands.
+test_stale_index_with_tracked_scaffold_path_refuses() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-tracked-scaffold)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" config core.excludesFile /dev/null
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' '{"hooks":{"Stop":[]}}' > "$case_dir/wt/.claude/settings.local.json"
+  git -C "$case_dir/wt" add -- .claude/settings.local.json
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project tracks claude settings"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  advance_branch_from_second_worktree "$case_dir"
+  printf '%s\n' '{"hooks":{"Stop":["edited by the crewmate"]}}' > "$case_dir/wt/.claude/settings.local.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-index-tracked-scaffold: an edit to a tracked file must refuse even at a scaffold path"
+  grep -q REFUSED "$case_dir/stderr" || fail "stale-index-tracked-scaffold: no REFUSED line in stderr"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-index-tracked-scaffold: teardown completed despite real work"
+  pass "an edit to a project-tracked file at a scaffold path still refuses"
 }
 
 # (ac) The collision shape with nothing pushed: the content the copy holds is on no
@@ -2754,6 +2815,8 @@ test_dirty_worktree_refuses
 test_stale_index_from_second_worktree_allows
 test_stale_index_with_real_edit_refuses
 test_stale_index_with_untracked_file_refuses
+test_stale_index_with_leftover_scaffold_allows
+test_stale_index_with_tracked_scaffold_path_refuses
 test_stale_index_content_not_on_any_remote_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
