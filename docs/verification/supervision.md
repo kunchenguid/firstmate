@@ -379,14 +379,14 @@ Every primary with a watcher wake path was audited on 2026-08-02 for whether it 
 
 | Primary | Wake path | Away-mode result |
 | --- | --- | --- |
-| Pi, pi-signed | `.pi/extensions/fm-primary-pi-watch.ts` automatic re-arm and `pi.sendUserMessage` | Defect: every arm-cycle close delivered a wake and re-armed, taking the watcher singleton from the daemon. Fixed and covered below. |
-| OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` automatic re-arm and `client.session.promptAsync` | Partial defect: new arms were already gated, but a cycle live at away-mode entry still delivered its wake plus a spurious continuity failure. Fixed and covered below. |
+| Pi, pi-signed | `.pi/extensions/fm-primary-pi-watch.ts` automatic re-arm and `pi.sendUserMessage` | Fixed defect: every arm-cycle close had delivered a wake and re-armed, taking the watcher singleton from the daemon. |
+| OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` automatic re-arm and `client.session.promptAsync` | Fixed partial defect: new arms were already gated, but a cycle live at away-mode entry still delivered its wake plus a spurious continuity failure. |
 | Claude | `bin/fm-claude-stop-autoarm.sh` Stop `asyncRewake` | Already correct: the hook exits at its `state/.afk` gate before claiming the home, and re-checks the flag mid-cycle before any classification or rewake. |
 | Codex | Model-driven `bin/fm-watch-checkpoint.sh` foreground checkpoint | Already correct: `.codex/hooks.json` registers only the session-start nudge, the pre-tool seatbelts, and the turn-end guard, so no adapter can inject a wake. |
-| Grok | Model-driven tracked background `bin/fm-watch-arm.sh` task | Already correct at the adapter level (`.grok/hooks/` registers no arm hook), and now deterministic: the arm layer stands down rather than arming. |
+| Grok | Model-driven tracked background `bin/fm-watch-arm.sh` task | Incomplete: new arm calls stand down, but a background arm already live at away-mode entry still completes on its one-shot wake and Grok converts that completion into a synthetic user message. |
 | kimi | None | Not applicable: kimi has no primary watcher adapter and follows the unknown-harness fallback protocol; its only tracked hook surface is the crewmate turn-end token hook. |
 
-Behavioral coverage, all real processes and real close handlers rather than source inspection:
+Behavioral regression coverage for the executable stand-down paths uses real processes and real close handlers rather than source-text assertions:
 
 ```sh
 tests/fm-watch-arm.test.sh
