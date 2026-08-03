@@ -51,7 +51,11 @@ test_repair_lines() {
 
   out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
-  assert_contains "$out" "Claude Code background task" "claude repair line missing background-task mechanism"
+  assert_contains "$out" "watcher supervision needs Stop-owned automatic recovery" "claude pre-verification repair line is not neutral"
+  assert_not_contains "$out" "is broken" "claude pre-verification repair line claimed a verified mechanism failure"
+  assert_not_contains "$out" "FAILED" "claude pre-verification repair line emitted a verified failure notice"
+  assert_not_contains "$out" "manual background" "claude pre-verification repair line directed a manual background arm"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude pre-verification repair line directed an arm command"
 
   : > "$home/config/x-mode.env"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)
@@ -91,8 +95,9 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$ordinary" "do not arm another cycle" "claude ordinary-wake line does not forbid a model re-arm"
   assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "claude ordinary-wake line incorrectly calls the manual arm"
   out=$("$RENDER" --harness claude --repair-line)
-  assert_contains "$out" "Claude Code background task" "claude recovery line lost its tracked background repair"
-  assert_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line lost the arm command"
+  assert_contains "$out" "watcher supervision needs Stop-owned automatic recovery" "claude recovery line lost its neutral automatic-recovery guidance"
+  assert_not_contains "$out" "is broken" "claude recovery line claimed failure before verification"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line must not create a repeatable manual arm loop"
 
   out=$("$RENDER" --harness grok)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')

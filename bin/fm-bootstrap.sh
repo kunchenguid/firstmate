@@ -17,24 +17,27 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
-#          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
-#          own current default-branch commit (a purely LOCAL fast-forward, never
-#          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
-#          or .agents/skills/) actually changed, bootstrap immediately nudges it
+#          When a RUNNING local secondmate worktree is fast-forwarded to
+#          firstmate's own current default-branch commit, that update is a
+#          purely local fast-forward and never an origin fetch. Remote routes
+#          instead converge the persistent home to their configured remote code
+#          root. If either placement changes its loaded instruction surface
+#          (AGENTS.md, bin/, or .agents/skills/), bootstrap immediately nudges it
 #          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
-#          current backend target and the standard from-firstmate marker is
-#          applied. A successful send prints one BOOTSTRAP_INFO line with the
-#          exact target and message sent; a failed send leaves an idempotent
-#          retry marker under state/.secondmate-nudge-pending/ and prints an
-#          actionable NUDGE_SECONDMATES line.
+#          current route and the standard from-firstmate marker is applied. A
+#          successful send prints one BOOTSTRAP_INFO line with the exact target
+#          and message sent; a failed send leaves an idempotent retry marker
+#          under state/.secondmate-nudge-pending/ and prints an actionable
+#          NUDGE_SECONDMATES line.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
-#          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs or
-#          inheritance failures for live secondmate homes, plus quarantine
-#          diagnostics for divergent shared captain-preference copies;
-#          no-op/current and successful updates stay quiet.
+#          SECONDMATE_SYNC lines report actionable skipped placement-specific
+#          syncs or inheritance failures for live secondmate homes, plus
+#          quarantine diagnostics for divergent shared captain-preference
+#          copies; no-op/current and successful updates stay quiet.
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
 #          recovery-grade state owned by bin/fm-backend.sh's
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
@@ -76,15 +79,16 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          PR-check artifacts, secondmate homes, X-mode artifacts, project
-#          clones, or repair instructions.
+#          PR-check artifacts, secondmate homes, pending handoff outboxes,
+#          X-mode artifacts, project clones, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #        fm-bootstrap.sh install <tool>...
@@ -108,6 +112,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
@@ -201,8 +207,8 @@ fleet_sync() {
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
-  # to the primary checkout's current default-branch commit. Purely LOCAL - no
+  # Placement-specific secondmate sync: local homes fast-forward to the primary
+  # checkout's current default-branch commit. That path is purely LOCAL - no
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
   # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
@@ -226,32 +232,17 @@ secondmate_sync() {
   fi
   FF_NUDGE_WINDOWS=""
   FF_SEEN_HOMES=""
-  SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+  SECOND_MATE_NUDGE_MESSAGE=$FM_SECOND_MATE_NUDGE_MESSAGE
+  REMOTE_SECOND_MATE_NUDGE_MESSAGE=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
   SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"
 
   secondmate_nudge_marker_path() {
-    case "$1" in
-      *[!/A-Za-z0-9._-]*|""|*/*) return 1 ;;
-    esac
-    printf '%s/%s.pending' "$SECOND_MATE_NUDGE_PENDING_DIR" "$1"
+    fm_secondmate_nudge_marker_path "$STATE" "$1"
   }
 
   secondmate_write_nudge_marker() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker tmp parent
-    selector="fm-$id"
-    marker=$(secondmate_nudge_marker_path "$id") || return 1
-    parent=${marker%/*}
-    mkdir -p "$parent" || return 1
-    tmp=$(mktemp "$parent/.nudge.XXXXXX" 2>/dev/null) || return 1
-    {
-      printf 'id=%s\n' "$id"
-      printf 'selector=%s\n' "$selector"
-      printf 'home=%s\n' "$home"
-      printf 'commit=%s\n' "$commit"
-      printf 'instructions=%s\n' "$instr"
-      printf 'message=%s\n' "$SECOND_MATE_NUDGE_MESSAGE"
-    } > "$tmp" || { rm -f "$tmp"; return 1; }
-    mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+    local id=$1 home=$2 commit=$3 instr=$4 message=${5:-$SECOND_MATE_NUDGE_MESSAGE} remote=${6:-0}
+    fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" "$remote"
   }
 
   secondmate_send_nudge() {
@@ -279,7 +270,7 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message expected_marker meta meta_home home_real head
+    local marker id selector home commit message remote expected_marker meta meta_home home_real head out
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -296,14 +287,27 @@ secondmate_sync() {
       home=$(fm_meta_get "$marker" home)
       commit=$(fm_meta_get "$marker" commit)
       message=$(fm_meta_get "$marker" message)
+      remote=$(fm_meta_get "$marker" remote)
+      [ -n "$remote" ] || remote=0
       [ "$selector" = "fm-$id" ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
         continue
       }
-      [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
-        continue
-      }
+      case "$remote" in
+        0) [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
+          continue
+        } ;;
+        1) [ "$message" = "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" ] || {
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: remote retry marker message mismatch"
+          continue
+        } ;;
+        *)
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker placement is invalid"
+          continue
+          ;;
+      esac
+      [ "$remote" -ne 1 ] || continue
       meta="$STATE/$id.meta"
       [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
@@ -399,7 +403,7 @@ secondmate_sync() {
       fm_lock_release "$home_lock" || true
       continue
     }
-    if FM_CONFIG_INHERIT_REPORT="$report" \
+    if FM_CONFIG_INHERIT_REPORT="$report" FM_CONFIG_INHERIT_LIVE=1 \
       propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
       :
     else
@@ -420,6 +424,65 @@ secondmate_sync() {
     rm -f "$report"
     fm_lock_release "$home_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+
+  # Remote routes converge through the generic transport. Their code root and
+  # inherited files are authoritative on that host; no local path probe or
+  # local fast-forward is attempted for them.
+  local remote_host sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+  while IFS='|' read -r id _home _window meta; do
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    [ -n "$remote_host" ] || continue
+    remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
+      continue
+    fi
+    if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null 2>&1; then
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote reply source could not be registered"
+    fi
+    remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$remote_generation" ]; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance generation could not be published"
+      fm_lock_release "$remote_lock" || true
+      continue
+    fi
+    remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
+    remote_pending=0
+    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
+      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
+      fm_lock_release "$remote_lock" || true
+      continue
+    fi
+    nudge_needed=0
+    converged=1
+    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" 2>&1); then
+      case "$sync_out" in synced:*) nudge_needed=1 ;; esac
+    else
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(first_line "$sync_out")"
+      converged=0
+    fi
+    if inherit_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
+      if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
+    else
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
+      converged=0
+    fi
+    [ "$remote_pending" -eq 0 ] || nudge_needed=1
+    if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
+      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+        rm -f "$remote_marker"
+        [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
+      else
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+      fi
+    elif [ "$converged" -eq 1 ]; then
+      rm -f "$remote_marker"
+    fi
+    fm_lock_release "$remote_lock" || true
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }
 
@@ -436,7 +499,7 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause
+  local meta id window harness backend target agent_state out cause remote_host remote_rc
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -445,6 +508,41 @@ secondmate_liveness_sweep() {
     window=$(fm_meta_get "$meta" window)
     [ -n "$window" ] || continue
     harness=$(fm_meta_get "$meta" harness)
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    if [ -n "$remote_host" ]; then
+      if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" 2>/dev/null); then
+        remote_rc=0
+      else
+        remote_rc=$?
+      fi
+      if [ "$remote_rc" -eq 255 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+        continue
+      fi
+      if [ "$remote_rc" -ne 0 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint probe unreadable on $remote_host"
+        continue
+      fi
+      agent_state=$(printf '%s\n' "$out" | tail -1)
+      case "$agent_state" in
+        alive)
+          [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: remote secondmate $id already live (host=$remote_host)"
+          ;;
+        dead|missing)
+          cause="remote endpoint $agent_state on its configured host"
+          if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+            SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+          else
+            echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+          fi
+          ;;
+        ambiguous|unreadable|unverified)
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint state is $agent_state on $remote_host"
+          ;;
+        *) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint returned an invalid state" ;;
+      esac
+      continue
+    fi
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
@@ -492,6 +590,27 @@ secondmate_liveness_sweep() {
     esac
   done
   return 0
+}
+
+secondmate_handoff_resume() {
+  [ -d "$DATA/handoff" ] || return 0
+  "$SCRIPT_DIR/fm-backlog-handoff.sh" --resume-pending >/dev/null 2>&1 || true
+}
+
+secondmate_handoff_detect() {
+  local outbox id count
+  [ -d "$DATA/handoff" ] || return 0
+  for outbox in "$DATA/handoff"/*.outbox.md; do
+    [ -e "$outbox" ] || continue
+    id=$(basename "$outbox" .outbox.md)
+    case "$id" in ''|*[!A-Za-z0-9._-]*) id=unknown ;; esac
+    if [ ! -f "$outbox" ] || [ -L "$outbox" ]; then
+      echo "SECONDMATE_HANDOFF: secondmate $id: pending delivery: unsafe outbox"
+      continue
+    fi
+    count=$(awk '/^- \[[ x]\] / { count++ } END { print count + 0 }' "$outbox" 2>/dev/null || printf unknown)
+    echo "SECONDMATE_HANDOFF: secondmate $id: pending delivery: $count item(s)"
+  done
 }
 
 install_cmd() {
@@ -907,7 +1026,9 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
+  secondmate_handoff_resume
   x_mode_setup
   fleet_sync
 fi
+secondmate_handoff_detect
 exit 0

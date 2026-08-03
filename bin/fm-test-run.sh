@@ -9,6 +9,7 @@
 #   fm-test-run.sh --family <name>
 #   fm-test-run.sh --changed [--base <git-ref>]
 #   fm-test-run.sh --lane portable-parallel-1|portable-parallel-2|portable-serial
+#   fm-test-run.sh --lane portable-serial-<k>of<n>   (one CI serial shard)
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
 #
@@ -60,6 +61,11 @@
 # live in this script only (one owner). The proven-isolated candidate set remains
 # owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
 # duration-balanced partition of that exact set (see docs/fm-test-portable-shards.md).
+#
+# portable-serial stays strictly serial. Its CI shards (portable-serial-<k>of<n>)
+# split it across separate runners, so two of its stateful scripts still never
+# share a machine. This script owns <n>: a lane whose <n> disagrees with the
+# configured shard count is refused, so a CI matrix cannot silently drop a shard.
 # --changed is conservative: it over-selects related families rather than
 # under-selecting, and never expands to the complete suite unless --all.
 set -eu
@@ -82,6 +88,15 @@ EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
 JOBS_MAX=8
+
+# How many separate-runner shards the portable serial remainder splits into.
+# One owner: CI lane names carry this count and are refused when they disagree.
+PORTABLE_SERIAL_SHARDS=4
+
+# Balance hint for a portable-serial script with no measured duration, close to
+# the measured per-script mean so a newly added test neither starves nor
+# overloads the shard it lands in.
+PORTABLE_SERIAL_DEFAULT_WEIGHT_MS=20000
 
 usage() {
   awk '
@@ -127,13 +142,16 @@ family_for_basename() {
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
-    fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
+    fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
+    fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
+    fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
+    fm-session-lock-ancestry.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
-    fm-wake-queue.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
+    fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
     fm-watcher-lock.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
@@ -145,7 +163,9 @@ family_for_basename() {
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh)
       printf '%s\n' real-herdr-gated
       ;;
-    fm-backlog-handoff.test.sh|fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
+    fm-backlog-handoff.test.sh|fm-on.test.sh|fm-remote-backlog-handoff.test.sh|\
+    fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
+    fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|\
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
@@ -158,13 +178,16 @@ family_for_basename() {
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
-    fm-grok-stop-live-e2e.test.sh|fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
+    fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
+    fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
+    fm-tmux-agent-liveness.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|\
+    fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -223,12 +246,16 @@ EOF
 }
 
 list_known_lanes() {
-  cat <<'EOF'
-portable-parallel-1
-portable-parallel-2
-portable-serial
-real-herdr-gated
-EOF
+  local i
+  printf '%s\n' portable-parallel-1
+  printf '%s\n' portable-parallel-2
+  printf '%s\n' portable-serial
+  i=1
+  while [ "$i" -le "$PORTABLE_SERIAL_SHARDS" ]; do
+    printf 'portable-serial-%sof%s\n' "$i" "$PORTABLE_SERIAL_SHARDS"
+    i=$((i + 1))
+  done
+  printf '%s\n' real-herdr-gated
 }
 
 # Exact proven-isolated candidate set (same paths as
@@ -309,6 +336,178 @@ is_proven_isolated_script() {
   return 1
 }
 
+# The portable serial remainder: every tests/*.test.sh that is neither
+# proven-isolated nor real-herdr-gated. Watcher, lock, AFK, real tmux, daemon,
+# secondmate lifecycle, bootstrap, live-harness opt-in, GUI-backend, and other
+# unproven work stays here. Derived rather than enumerated so a newly added test
+# lands here by default instead of falling out of every lane.
+list_portable_serial() {
+  local s base fam
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    base=$(basename "$s")
+    fam=$(family_for_basename "$base")
+    if [ "$fam" = "real-herdr-gated" ]; then
+      continue
+    fi
+    if is_proven_isolated_script "$s"; then
+      continue
+    fi
+    printf '%s\n' "$s"
+  done < <(all_repo_tests)
+}
+
+# Measured portable-serial script durations in milliseconds, from the CI timing
+# artifact recorded in docs/fm-test-portable-shards.md. These are balance hints
+# only: the shard partition stays complete and disjoint whatever they say, so a
+# stale hint costs balance rather than coverage. That doc owns the refresh
+# procedure.
+portable_serial_weight_hints() {
+  cat <<'EOF'
+tests/fm-afk-inject-e2e.test.sh 34019
+tests/fm-afk-pi-herdr-return-e2e.test.sh 42
+tests/fm-afk-return.test.sh 1105
+tests/fm-ask-user-authority.test.sh 68
+tests/fm-backend-cmux-smoke.test.sh 29
+tests/fm-backend-cmux.test.sh 2349
+tests/fm-backend-herdr-focus-flash-e2e.test.sh 21
+tests/fm-backend-orca.test.sh 12041
+tests/fm-backend-tmux-smoke.test.sh 314
+tests/fm-backend-zellij-smoke.test.sh 21
+tests/fm-backend-zellij.test.sh 4225
+tests/fm-backend.test.sh 16370
+tests/fm-backlog-handoff.test.sh 2786
+tests/fm-bearings-snapshot.test.sh 60103
+tests/fm-bootstrap.test.sh 21912
+tests/fm-busy-adapter-wiring.test.sh 13962
+tests/fm-busy-state.test.sh 607
+tests/fm-calm-pi-extension.test.sh 203
+tests/fm-claude-stop-autoarm-live-e2e.test.sh 19
+tests/fm-claude-stop-autoarm.test.sh 60521
+tests/fm-codex-continuity-live-e2e.test.sh 19
+tests/fm-daemon.test.sh 15140
+tests/fm-documentation-audiences.test.sh 572
+tests/fm-fleet-snapshot-view.test.sh 5902
+tests/fm-fleet-sync.test.sh 16417
+tests/fm-gate-refuse.test.sh 2839
+tests/fm-gitignore-config.test.sh 28
+tests/fm-gotmp.test.sh 308
+tests/fm-grok-continuity-live-e2e.test.sh 19
+tests/fm-grok-stop-live-e2e.test.sh 19
+tests/fm-guard-stale-banner.test.sh 2917
+tests/fm-herdr-session-cleanup.test.sh 4802
+tests/fm-kimi-harness.test.sh 12590
+tests/fm-opencode-primary-live-e2e.test.sh 18
+tests/fm-operational-input.test.sh 184
+tests/fm-pending-reply.test.sh 7328
+tests/fm-pi-primary-live-e2e.test.sh 19
+tests/fm-pi-watch-extension.test.sh 16386
+tests/fm-pr-check-security.test.sh 199573
+tests/fm-procevent.test.sh 42789
+tests/fm-public-followup.test.sh 23365
+tests/fm-quota-array-dispatch-live-e2e.test.sh 19
+tests/fm-secondmate-harness.test.sh 87895
+tests/fm-secondmate-lifecycle-e2e.test.sh 4929
+tests/fm-secondmate-liveness.test.sh 12553
+tests/fm-secondmate-safety.test.sh 24432
+tests/fm-secondmate-sync.test.sh 12289
+tests/fm-send-secondmate-marker-herdr-e2e.test.sh 27
+tests/fm-send-secondmate-marker.test.sh 2136
+tests/fm-session-start.test.sh 37289
+tests/fm-sessionstart-nudge.test.sh 264
+tests/fm-shared-captain-inheritance.test.sh 3506
+tests/fm-spawn-dispatch-profile.test.sh 41351
+tests/fm-spawn-worktree-settle.test.sh 4598
+tests/fm-startup-memory-budget.test.sh 4260
+tests/fm-subagent-pretool-check.test.sh 901
+tests/fm-supervision-events.test.sh 413
+tests/fm-tangle-guard.test.sh 7230
+tests/fm-teardown-endpoint-safety.test.sh 1073
+tests/fm-teardown.test.sh 23237
+tests/fm-test-isolation-proof.test.sh 326
+tests/fm-turnend-guard.test.sh 5986
+tests/fm-update.test.sh 1894
+tests/fm-vendor-auth-probe.test.sh 42796
+tests/fm-wake-daemon-lifecycle-e2e.test.sh 4284
+tests/fm-wake-queue.test.sh 22787
+tests/fm-watch-checkpoint.test.sh 3943
+tests/fm-watch-triage.test.sh 113051
+tests/fm-watcher-lock.test.sh 98342
+EOF
+}
+
+portable_serial_weight_for() {
+  local want=$1 path ms
+  while read -r path ms; do
+    if [ "$path" = "$want" ]; then
+      printf '%s\n' "$ms"
+      return 0
+    fi
+  done < <(portable_serial_weight_hints)
+  printf '%s\n' "$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS"
+}
+
+# Longest-processing-time assignment of the serial remainder to
+# PORTABLE_SERIAL_SHARDS bins, printing "<shard>\t<script>" for every script.
+# Deterministic: candidates are ordered by hint descending then path, and ties
+# between equally loaded bins always take the lowest bin index.
+portable_serial_assignments() {
+  local ms script i best best_load
+  local -a loads=()
+  i=1
+  while [ "$i" -le "$PORTABLE_SERIAL_SHARDS" ]; do
+    loads[i]=0
+    i=$((i + 1))
+  done
+  while IFS=$'\t' read -r ms script; do
+    [ -n "$script" ] || continue
+    best=1
+    best_load=${loads[1]}
+    i=2
+    while [ "$i" -le "$PORTABLE_SERIAL_SHARDS" ]; do
+      if [ "${loads[i]}" -lt "$best_load" ]; then
+        best_load=${loads[i]}
+        best=$i
+      fi
+      i=$((i + 1))
+    done
+    loads[best]=$((best_load + ms))
+    printf '%s\t%s\n' "$best" "$script"
+  done < <(
+    while IFS= read -r script; do
+      [ -n "$script" ] || continue
+      printf '%s\t%s\n' "$(portable_serial_weight_for "$script")" "$script"
+    done < <(list_portable_serial) | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2
+  )
+}
+
+# Parse "<k>of<n>" from a portable-serial shard lane and echo <k>, refusing when
+# <n> disagrees with this script's configured count so a CI matrix built for a
+# different shard count fails loudly instead of dropping tests.
+portable_serial_shard_index() {
+  local lane=$1 spec index count
+  spec=${lane#portable-serial-}
+  index=${spec%%of*}
+  count=${spec#*of}
+  case "$spec" in
+    *of*) ;;
+    *) die "unknown lane '$lane' (see --list-lanes)" ;;
+  esac
+  case "$index" in
+    ''|*[!0-9]*) die "unknown lane '$lane' (see --list-lanes)" ;;
+  esac
+  case "$count" in
+    ''|*[!0-9]*) die "unknown lane '$lane' (see --list-lanes)" ;;
+  esac
+  if [ "$count" -ne "$PORTABLE_SERIAL_SHARDS" ]; then
+    die "lane '$lane' asks for $count portable serial shards but this runner is configured for $PORTABLE_SERIAL_SHARDS (see --list-lanes)"
+  fi
+  if [ "$index" -lt 1 ] || [ "$index" -gt "$PORTABLE_SERIAL_SHARDS" ]; then
+    die "lane '$lane' shard index is outside 1..$PORTABLE_SERIAL_SHARDS (see --list-lanes)"
+  fi
+  printf '%s\n' "$index"
+}
+
 select_proven_isolated() {
   local s
   while IFS= read -r s; do
@@ -318,7 +517,7 @@ select_proven_isolated() {
 }
 
 select_lane() {
-  local want=$1 s base fam found=0
+  local want=$1 s shard idx found=0
   case "$want" in
     portable-parallel-1)
       while IFS= read -r s; do
@@ -335,22 +534,22 @@ select_lane() {
       done < <(list_portable_parallel_2)
       ;;
     portable-serial)
-      # Everything in the complete suite that is not proven-isolated and not
-      # real-herdr-gated. Watcher/lock/AFK/tmux/daemon/ambiguous/stateful work
-      # stays here, serial only.
       while IFS= read -r s; do
         [ -n "$s" ] || continue
-        base=$(basename "$s")
-        fam=$(family_for_basename "$base")
-        if [ "$fam" = "real-herdr-gated" ]; then
-          continue
-        fi
-        if is_proven_isolated_script "$s"; then
-          continue
-        fi
         add_script "$s"
         found=1
-      done < <(all_repo_tests)
+      done < <(list_portable_serial)
+      ;;
+    portable-serial-*)
+      # One separate-runner shard of the same remainder, still serial in itself.
+      shard=$(portable_serial_shard_index "$want")
+      while IFS=$'\t' read -r idx s; do
+        [ -n "$s" ] || continue
+        if [ "$idx" = "$shard" ]; then
+          add_script "$s"
+          found=1
+        fi
+      done < <(portable_serial_assignments)
       ;;
     real-herdr-gated)
       select_family real-herdr-gated
@@ -364,7 +563,7 @@ select_lane() {
 }
 
 run_coverage_guard() {
-  local tmp missing extra a b
+  local tmp missing extra a b shard
   local -a saved_scripts=()
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
@@ -391,15 +590,50 @@ run_coverage_guard() {
     return 1
   fi
 
-  # Serial + Herdr lane listings without disturbing a caller's selection.
+  # Serial (whole lane and each CI shard) + Herdr lane listings without
+  # disturbing a caller's selection.
   saved_scripts=("${SCRIPTS[@]+"${SCRIPTS[@]}"}")
   SCRIPTS=()
   select_lane portable-serial
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial"
+  : >"$tmp/serial_shards_raw"
+  shard=1
+  while [ "$shard" -le "$PORTABLE_SERIAL_SHARDS" ]; do
+    SCRIPTS=()
+    select_lane "portable-serial-${shard}of${PORTABLE_SERIAL_SHARDS}"
+    if [ "${#SCRIPTS[@]}" -eq 0 ]; then
+      log "coverage guard: portable serial shard $shard of $PORTABLE_SERIAL_SHARDS is empty"
+      SCRIPTS=("${saved_scripts[@]+"${saved_scripts[@]}"}")
+      rm -rf "$tmp"
+      return 1
+    fi
+    printf '%s\n' "${SCRIPTS[@]}" >>"$tmp/serial_shards_raw"
+    shard=$((shard + 1))
+  done
   SCRIPTS=()
   select_family real-herdr-gated
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/herdr"
   SCRIPTS=("${saved_scripts[@]+"${saved_scripts[@]}"}")
+
+  # Every serial script runs in exactly one CI shard: no duplicate work across
+  # runners, and no script silently left out of the required lane.
+  LC_ALL=C sort "$tmp/serial_shards_raw" | uniq -d >"$tmp/serial_shard_dups"
+  if [ -s "$tmp/serial_shard_dups" ]; then
+    log "coverage guard: portable serial shards share scripts:"
+    cat "$tmp/serial_shard_dups" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  LC_ALL=C sort -u "$tmp/serial_shards_raw" >"$tmp/serial_shards"
+  missing=$(comm -23 "$tmp/serial" "$tmp/serial_shards" || true)
+  extra=$(comm -13 "$tmp/serial" "$tmp/serial_shards" || true)
+  if [ -n "$missing" ] || [ -n "$extra" ]; then
+    log "coverage guard: portable serial shards must equal the portable serial lane"
+    [ -z "$missing" ] || { log "missing from serial shards:"; printf '%s\n' "$missing" >&2; }
+    [ -z "$extra" ] || { log "extra beyond serial lane:"; printf '%s\n' "$extra" >&2; }
+    rm -rf "$tmp"
+    return 1
+  fi
 
   for pair in "shards_union:serial" "shards_union:herdr" "serial:herdr"; do
     a=${pair%%:*}
@@ -442,10 +676,11 @@ run_coverage_guard() {
     fi
   fi
 
-  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s serial=%s herdr=%s\n' \
+  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s serial=%s serial_shards=%s herdr=%s\n' \
     "$(wc -l <"$tmp/all" | tr -d ' ')" \
     "$(wc -l <"$tmp/shards_union" | tr -d ' ')" \
     "$(wc -l <"$tmp/serial" | tr -d ' ')" \
+    "$PORTABLE_SERIAL_SHARDS" \
     "$(wc -l <"$tmp/herdr" | tr -d ' ')"
   rm -rf "$tmp"
   return 0
@@ -651,7 +886,8 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
-    bin/fm-secondmate*|bin/fm-home-seed.sh|bin/fm-backlog-handoff.sh|\
+    bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
+    bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
       ;;

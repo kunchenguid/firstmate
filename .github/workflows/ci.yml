@@ -25,7 +25,8 @@ jobs:
       - run: bin/fm-lint.sh
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr
-  # equal the complete tests/*.test.sh inventory with no missing or duplicates.
+  # equal the complete tests/*.test.sh inventory with no missing or duplicates,
+  # and that the portable serial CI shards partition that serial lane exactly.
   test-coverage:
     name: Test coverage guard
     runs-on: ubuntu-latest
@@ -104,13 +105,22 @@ jobs:
 
   # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
   # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
+  # Split across separate runners so no two of these stateful scripts ever share
+  # a machine: each shard is still strictly serial in itself. Shard membership
+  # and the shard count both belong to bin/fm-test-run.sh, which refuses a lane
+  # whose "ofN" disagrees with it (docs/fm-test-portable-shards.md).
   tests-portable-serial:
-    name: Behavior portable serial
+    name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Measured serial remainder is ~13 min wall without Herdr. Cap is a hang
-    # tripwire above observed p99 script cost and suite wall, not the expected
-    # healthy end (interim 25m full-suite slack reduced after sharding).
-    timeout-minutes: 20
+    # Measured whole remainder is ~19 min of serial work; the balanced shards
+    # are ~4.8 min each. Cap is a hang tripwire with roughly 3x margin, not the
+    # expected healthy end of the lane.
+    timeout-minutes: 15
+    strategy:
+      # Every shard reports so one failure never hides another shard's result.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -133,18 +143,24 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - name: Run portable serial remainder
+      - name: Run portable serial shard ${{ matrix.shard }}
+        env:
+          # job-total rather than a literal, so shrinking or growing the matrix
+          # without matching bin/fm-test-run.sh is refused instead of quietly
+          # leaving a shard of the required lane unrun.
+          FM_SERIAL_LANE: portable-serial-${{ matrix.shard }}of${{ strategy.job-total }}
+          FM_SERIAL_SHARD: ${{ matrix.shard }}
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-serial \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial.json"
-      - name: Upload portable serial timing artifact
+          bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
+      - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fm-test-timing-portable-serial
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial.json
+          name: fm-test-timing-portable-serial-${{ matrix.shard }}
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-${{ matrix.shard }}.json
           if-no-files-found: warn
 
   # Required real-Herdr lane: pinned install, serial real-herdr-gated family,

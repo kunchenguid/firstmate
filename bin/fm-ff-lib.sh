@@ -414,6 +414,7 @@ sweep_live_secondmate_metas() {
   local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
   [ -d "$state" ] || return 0
   while IFS='|' read -r id home window meta; do
+    if grep -q '^remote_host=.' "$meta" 2>/dev/null; then continue; fi
     process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
   done < <(live_secondmate_meta_records "$state" "$registry")
 }

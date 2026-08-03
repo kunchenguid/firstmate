@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# Register and provision a whole secondmate home on an SSH-reachable host.
+#
+# Usage:
+#   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>...|--no-projects}
+#
+# The SSH alias must already reach a host whose non-interactive PATH exposes the
+# fixed fm-remote-entrypoint.sh from <remote-root>. The command records the
+# remote host dimension in data/secondmates.md, sends a bounded provisioning
+# manifest through fm-on.sh, and lets the remote host clone its own Firstmate
+# home and project origins. No project tree or secret environment is copied.
+# Known provisioning failure rolls the registry back. SSH status 255 preserves
+# the route because completion is unknown and a same-route rerun converges.
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+REG="$DATA/secondmates.md"
+MAX_MANIFEST_BYTES=1048576
+
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-secondmate-charter-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+encode() { base64 | tr -d '\n'; }
+safe_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
+
+TMP=
+REGISTRY_LOCK=
+REGISTRY_LOCK_HELD=0
+cleanup() {
+  [ -z "$TMP" ] || rm -rf -- "$TMP"
+  if [ "$REGISTRY_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$REGISTRY_LOCK"
+    REGISTRY_LOCK_HELD=0
+  fi
+}
+trap cleanup EXIT
+
+[ "$#" -ge 5 ] || usage
+ID=$1
+HOST=$2
+REMOTE_ROOT=$3
+REMOTE_HOME=$4
+shift 4
+safe_id "$ID" || die "invalid secondmate id: $ID"
+case "$HOST" in ''|-*|*[!A-Za-z0-9._-]*) die "invalid SSH config alias: $HOST" ;; esac
+for path in "$REMOTE_ROOT" "$REMOTE_HOME"; do
+  case "$path" in /*) ;; *) die "remote root and home must be absolute paths" ;; esac
+  case "$path" in *';'*|*')'*|*$'\n'*|*$'\r'*|*$'\t'*) die "remote root or home contains a registry delimiter" ;; esac
+  case "/$path/" in */../*|*/./*) die "remote root or home contains traversal components" ;; esac
+  case "$path" in *'//'*) die "remote root or home contains an empty path component" ;; esac
+done
+[ "$REMOTE_ROOT" != "$REMOTE_HOME" ] || die "remote root and home must be separate"
+case "$REMOTE_HOME/" in "$REMOTE_ROOT/"*) die "remote home must not be inside the remote code root" ;; esac
+case "$REMOTE_ROOT/" in "$REMOTE_HOME/"*) die "remote code root must not be inside the remote home" ;; esac
+
+NO_PROJECTS=0
+PROJECT_NAMES=()
+for arg in "$@"; do
+  if [ "$arg" = --no-projects ]; then
+    NO_PROJECTS=1
+  else
+    safe_id "$arg" || die "invalid project name: $arg"
+    PROJECT_NAMES+=("$arg")
+  fi
+done
+if [ "$NO_PROJECTS" -eq 1 ]; then
+  [ "${#PROJECT_NAMES[@]}" -eq 0 ] || die "--no-projects cannot be combined with project names"
+else
+  [ "${#PROJECT_NAMES[@]}" -gt 0 ] || die "at least one project or --no-projects is required"
+fi
+
+mkdir -p "$STATE" || die "cannot create parent state directory"
+REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+fm_lock_acquire_wait "$REGISTRY_LOCK" || die "cannot lock the secondmate registry"
+REGISTRY_LOCK_HELD=1
+
+if [ -e "$REG" ] || [ -L "$REG" ]; then
+  [ -f "$REG" ] && [ ! -L "$REG" ] || die "secondmate registry is unavailable or unsafe: $REG"
+  secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key \
+    || die "$SECONDMATE_REGISTRY_ERROR"
+  if secondmate_registry_line_for_id "$REG" "$ID"; then
+    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] \
+      && [ "$SECONDMATE_REGISTRY_HOST" = "$HOST" ] \
+      && [ "$SECONDMATE_REGISTRY_ROOT" = "$REMOTE_ROOT" ] \
+      && [ "$SECONDMATE_REGISTRY_HOME" = "$REMOTE_HOME" ] \
+      || die "secondmate $ID is already registered to a different local or remote home"
+  fi
+fi
+
+mkdir -p "$DATA"
+BRIEF="$DATA/$ID/brief.md"
+BRIEF_CREATED=0
+if [ ! -f "$BRIEF" ]; then
+  [ -n "${FM_SECONDMATE_CHARTER:-}" ] || die "no filled charter at $BRIEF; set FM_SECONDMATE_CHARTER or scaffold one first"
+  if [ "$NO_PROJECTS" -eq 1 ]; then
+    "$SCRIPT_DIR/fm-brief.sh" "$ID" --secondmate --no-projects >/dev/null
+  else
+    "$SCRIPT_DIR/fm-brief.sh" "$ID" --secondmate "${PROJECT_NAMES[@]}" >/dev/null
+  fi
+  BRIEF_CREATED=1
+fi
+if grep -F '{TASK}' "$BRIEF" >/dev/null 2>&1; then
+  [ "$BRIEF_CREATED" -eq 0 ] || rm -f -- "$BRIEF"
+  die "secondmate charter still contains {TASK}: $BRIEF"
+fi
+SUMMARY=$(registry_summary_for_brief "$BRIEF")
+SCOPE=$(registry_scope_for_brief "$BRIEF")
+[ -n "$SUMMARY" ] && [ -n "$SCOPE" ] || die "charter summary and routing scope must be nonempty"
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-home-seed.XXXXXX") || die "cannot create seed staging directory"
+REG_EXISTED=0
+[ -f "$REG" ] && { cp "$REG" "$TMP/registry.before"; REG_EXISTED=1; }
+
+# Keep the parent charter as its durable source, but publish a remote copy whose
+# status path is the remote append-only relay log rather than a local Mac path.
+PARENT_STATUS="$STATE/$ID.status"
+REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
+while IFS= read -r line || [ -n "$line" ]; do
+  printf '%s\n' "${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}"
+done < "$BRIEF" > "$TMP/charter.remote"
+
+PROJECTS_CSV=
+: > "$TMP/project.records"
+for project in "${PROJECT_NAMES[@]}"; do
+  SRC="$PROJECTS/$project"
+  [ -d "$SRC/.git" ] || die "project clone is unavailable: $SRC"
+  MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
+  read -r MODE _ <<EOF
+$MODE_LINE
+EOF
+  case "$MODE" in
+    no-mistakes|direct-PR) ;;
+    local-only) die "project $project is local-only and cannot be provisioned remotely" ;;
+    *) die "project $project has unsupported delivery mode: $MODE" ;;
+  esac
+  ORIGIN=$(git -C "$SRC" remote get-url origin 2>/dev/null || true)
+  [ -n "$ORIGIN" ] || die "project $project has no origin remote"
+  REGISTRY_LINE=$(awk -v p="$project" '$1 == "-" && $2 == p { print; exit }' "$DATA/projects.md")
+  [ -n "$REGISTRY_LINE" ] || die "project $project has no registry record"
+  NAME_B64=$(printf '%s' "$project" | encode)
+  ORIGIN_B64=$(printf '%s' "$ORIGIN" | encode)
+  PROJECT_REG_B64=$(printf '%s' "$REGISTRY_LINE" | encode)
+  MODE_B64=$(printf '%s' "$MODE" | encode)
+  printf 'project=%s|%s|%s|%s\n' "$NAME_B64" "$ORIGIN_B64" "$PROJECT_REG_B64" "$MODE_B64" >> "$TMP/project.records"
+  PROJECTS_CSV="${PROJECTS_CSV}${PROJECTS_CSV:+, }$project"
+done
+
+{
+  printf 'schema=fm-remote-home-provision.v1\n'
+  printf 'id_b64=%s\n' "$(printf '%s' "$ID" | encode)"
+  printf 'charter_b64=%s\n' "$(encode < "$TMP/charter.remote")"
+  printf 'project_count=%s\n' "${#PROJECT_NAMES[@]}"
+  cat "$TMP/project.records"
+} > "$TMP/manifest"
+MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
+[ "$MANIFEST_BYTES" -le "$MAX_MANIFEST_BYTES" ] \
+  || die "remote provisioning manifest exceeds the $MAX_MANIFEST_BYTES-byte bound"
+
+TODAY=$(date +%F)
+REG_TMP="$TMP/secondmates.next"
+if [ -f "$REG" ]; then grep -vE "^- $ID( |$)" "$REG" > "$REG_TMP" || true; else : > "$REG_TMP"; fi
+printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; added %s)\n' \
+  "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$SCOPE" "$PROJECTS_CSV" "$TODAY" >> "$REG_TMP"
+mv -f -- "$REG_TMP" "$REG"
+if ! secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key "$ID" "$REMOTE_HOME"; then
+  if [ "$REG_EXISTED" -eq 1 ]; then cp "$TMP/registry.before" "$REG"; else rm -f -- "$REG"; fi
+  die "$SECONDMATE_REGISTRY_ERROR"
+fi
+
+set +e
+PROVISION_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-home-provision.sh < "$TMP/manifest" 2>&1)
+PROVISION_RC=$?
+set -e
+if [ "$PROVISION_RC" -ne 0 ]; then
+  if [ "$PROVISION_RC" -ne 255 ]; then
+    if [ "$REG_EXISTED" -eq 1 ]; then cp "$TMP/registry.before" "$REG"; else rm -f -- "$REG"; fi
+    [ "$BRIEF_CREATED" -eq 0 ] || rm -f -- "$BRIEF"
+  fi
+  [ -z "$PROVISION_OUT" ] || printf '%s\n' "$PROVISION_OUT" >&2
+  if [ "$PROVISION_RC" -eq 255 ]; then
+    die "remote provisioning completion is unknown; route preserved for same-host reconciliation"
+  fi
+  die "remote provisioning failed; registry restored"
+fi
+printf '%s\n' "$PROVISION_OUT"
+printf 'home=%s:%s\n' "$HOST" "$REMOTE_HOME"
