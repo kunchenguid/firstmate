@@ -128,6 +128,13 @@ fm_backend_orca_repo_ensure() {  # <project-path>
   printf '%s' "$repo_id"
 }
 
+fm_backend_orca_worktree_id_for_cli() {  # <id-or-id-and-path>
+  case "$1" in
+    *::*) printf '%s' "${1%%::*}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 fm_backend_orca_worktree_create() {  # <project-path> <name>
   local project=$1 name=$2 repo_id out wt_id wt_path terminal
   repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1

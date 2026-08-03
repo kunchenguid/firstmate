@@ -408,13 +408,6 @@ fm_backend_orca_worktree_id_valid() {  # <value>
   esac
 }
 
-fm_backend_orca_worktree_id_for_cli() {  # <id-or-id-and-path>
-  case "$1" in
-    *::*) printf '%s' "${1%%::*}" ;;
-    *) printf '%s' "$1" ;;
-  esac
-}
-
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
