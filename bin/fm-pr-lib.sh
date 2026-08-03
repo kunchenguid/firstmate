@@ -16,6 +16,11 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+#
+# A task released before its pull request lands keeps no meta, so its identity
+# record is the durable landing record bin/fm-teardown.sh leaves behind. Every
+# consumer resolves "the task's PR identity record" through
+# fm_pr_identity_record_path rather than naming the meta directly.
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -34,6 +39,8 @@ FM_PR_META_URL=
 FM_PR_META_HOST=
 FM_PR_META_PATH=
 FM_PR_META_NUMBER=
+FM_PR_FORGE_STATE=
+FM_PR_FORGE_HEAD=
 FM_PR_REG_ID=
 FM_PR_REG_PROVIDER=
 FM_PR_REG_URL=
@@ -327,6 +334,139 @@ fm_pr_metadata_identity_parse() {
   [ -n "$FM_PR_META_URL" ]
 }
 
+# Landing record layout: the version tag, then the same key=value lines a meta
+# uses, restricted to the minimum needed to land a released task's pull request.
+# The tag is first so the file is never mistaken for a meta, and every remaining
+# line sits where fm_pr_metadata_identity_parse already accepts it: project=
+# before pr=, and only pr_head= after it.
+fm_pr_landing_record_valid() {
+  local file=$1 first
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
+  IFS= read -r first < "$file" || return 1
+  [ "$first" = fm-landing-v1 ] || return 1
+  fm_pr_metadata_identity_parse "$file"
+}
+
+# Resolve a task's PR identity record. A live task's meta always wins: a landing
+# record is written only once the task is released and must never shadow one.
+# The two are validated differently on purpose. A meta's contents are the
+# caller's existing contract - bin/fm-pr-check.sh resolves one before any pr= is
+# recorded in it - so only its presence is decided here. A landing record has no
+# other purpose, so a file at that name that is not a well-formed landing record
+# is refused rather than resolved.
+fm_pr_identity_record_path() {
+  local state=$1 id=$2 meta landing
+  fm_pr_task_id_valid "$id" || return 1
+  meta="$state/$id.meta"
+  landing="$state/$id.landing"
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    printf '%s\n' "$meta"
+    return 0
+  fi
+  fm_pr_landing_record_valid "$landing" || return 1
+  printf '%s\n' "$landing"
+}
+
+# Write a task's landing record from forge-derived values, replacing any earlier
+# one atomically. The head is optional because only some forge CLIs report it,
+# and every consumer treats it as evidence rather than as merge authority.
+fm_pr_landing_record_write() {
+  local state=$1 id=$2 url=$3 head=${4-} project=${5-}
+  local dest tmp state_device canonical_url prev_umask
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  canonical_url=$FM_PR_URL
+  [ -z "$head" ] || fm_pr_head_valid "$head" || return 1
+  case "$project" in *[![:print:]]*) return 1 ;; esac
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  dest="$state/$id.landing"
+  fm_pr_regular_destination_on_device_or_absent "$dest" "$state_device" || return 1
+  # The private mode is asserted explicitly below; this only keeps the window
+  # between creation and that assertion closed, and it is restored immediately
+  # so callers such as bin/fm-teardown.sh keep their own umask afterwards.
+  prev_umask=$(umask)
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-landing.XXXXXX") || { umask "$prev_umask"; return 1; }
+  umask "$prev_umask"
+  {
+    printf '%s\n' fm-landing-v1
+    [ -z "$project" ] || printf 'project=%s\n' "$project"
+    printf 'pr=%s\n' "$canonical_url"
+    [ -z "$head" ] || printf 'pr_head=%s\n' "$head"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! chmod 0600 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
+    || ! fm_pr_landing_record_valid "$tmp" \
+    || [ "$FM_PR_META_URL" != "$canonical_url" ] \
+    || ! fm_pr_regular_destination_on_device_or_absent "$dest" "$state_device" \
+    || ! mv -f -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  fm_pr_private_file_valid "$dest" 600 "$state_device" || return 1
+  fm_pr_landing_record_valid "$dest" || return 1
+  [ "$FM_PR_META_URL" = "$canonical_url" ]
+}
+
+# Ask the forge for its own view of one pull or merge request, so landing
+# identity is read from the request rather than asserted by the caller. Returns
+# non-zero whenever the forge cannot answer; a caller must treat that as "not
+# known", never as evidence about whether the request merged. Each provider is
+# read through the same CLI and output shape bin/fm-pr-poll.sh already relies on.
+# FM_PR_FORGE_STATE is normalised to open, merged, or closed, and
+# FM_PR_FORGE_HEAD is set only when the CLI reports a valid head.
+# This re-parses the URL, so it overwrites every FM_PR_* parse global.
+fm_pr_forge_view() {
+  local url=$1 out state head number host path
+  FM_PR_FORGE_STATE=
+  FM_PR_FORGE_HEAD=
+  fm_pr_url_parse "$url" || return 1
+  url=$FM_PR_URL
+  number=$FM_PR_NUMBER
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
+  case "$FM_PR_PROVIDER" in
+    github)
+      command -v gh >/dev/null 2>&1 || return 1
+      # gh resolves a full pull request URL without a repository around it, so
+      # this runs from / rather than from a worktree that may already be gone.
+      out=$(cd / && gh pr view "$url" --json state,headRefOid \
+        -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+      state=${out%%$'\t'*}
+      head=${out#*$'\t'}
+      [ "$state" != "$out" ] || return 1
+      case "$state" in
+        OPEN) state=open ;;
+        MERGED) state=merged ;;
+        CLOSED) state=closed ;;
+        *) return 1 ;;
+      esac
+      # Consumed by bin/fm-pr-check.sh, bin/fm-pr-merge.sh, and bin/fm-teardown.sh.
+      # shellcheck disable=SC2034
+      fm_pr_head_valid "$head" && FM_PR_FORGE_HEAD=$head
+      ;;
+    gitlab)
+      command -v glab >/dev/null 2>&1 || return 1
+      # glab cannot take a merge request URL, so the instance comes from the
+      # validated record through -R, exactly as the merge poll addresses it.
+      out=$(cd / && glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || return 1
+      state=$(printf '%s\n' "$out" | sed -n 's/^state:[[:space:]]*//p' | head -1)
+      case "$state" in
+        open|opened) state=open ;;
+        merged) state=merged ;;
+        closed) state=closed ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+  # Consumed by bin/fm-pr-check.sh, bin/fm-pr-merge.sh, and bin/fm-teardown.sh.
+  # shellcheck disable=SC2034
+  FM_PR_FORGE_STATE=$state
+}
+
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar
 # written before the provider tag existed has a URL on its first line and one
 # line fewer, so it fails both the field count and the provider comparison and
@@ -580,19 +720,19 @@ fm_pr_poll_publish_prepared() {
 }
 
 fm_pr_poll_artifacts_valid() {
-  local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
+  local state=$1 id=$2 template=$3 state_device check data registration record data_hash template_hash data_identity check_identity
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   check="$state/$id.check.sh"
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
-  meta="$state/$id.meta"
+  record=$(fm_pr_identity_record_path "$state" "$id") || return 1
   fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
   fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  [ "$(fm_pr_file_link_count "$record")" = 1 ] || return 1
   cmp -s "$template" "$check" || return 1
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
@@ -610,7 +750,7 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || return 1
   [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
   [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ] || return 1
-  fm_pr_metadata_identity_parse "$meta" || return 1
+  fm_pr_metadata_identity_parse "$record" || return 1
   [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
   [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || return 1
   [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
@@ -721,7 +861,7 @@ fm_pr_poll_retirement_parse() {
 }
 
 fm_pr_poll_retirement_receipt_valid() {
-  local state=$1 id=$2 receipt state_device meta
+  local state=$1 id=$2 receipt state_device record
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -729,8 +869,8 @@ fm_pr_poll_retirement_receipt_valid() {
   fm_pr_private_file_valid "$receipt" 600 "$state_device" || return 1
   fm_pr_poll_retirement_parse "$receipt" || return 1
   [ "$FM_PR_RETIRE_ID" = "$id" ] || return 1
-  meta="$state/$id.meta"
-  fm_pr_metadata_identity_parse "$meta" || return 1
+  record=$(fm_pr_identity_record_path "$state" "$id") || return 1
+  fm_pr_metadata_identity_parse "$record" || return 1
   [ "$FM_PR_META_PROVIDER" = "$FM_PR_RETIRE_PROVIDER" ] || return 1
   [ "$FM_PR_META_URL" = "$FM_PR_RETIRE_URL" ] || return 1
   [ "$FM_PR_META_HOST" = "$FM_PR_RETIRE_HOST" ] || return 1

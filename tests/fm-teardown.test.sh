@@ -41,6 +41,13 @@
 #   (z) spawn-written turn-end artifacts, no info/exclude       -> ALLOW  (firstmate's own)
 #   (aa) untracked crew file beside a turn-end artifact         -> REFUSE (exact-path allowlist)
 #
+# Also covers the durable landing record. The captain's parked-completion ruling
+# releases a ship worker once its PR is green and mergeable, which is before the
+# PR lands, and cleanup removes the meta bin/fm-pr-merge.sh needs. A minimal
+# record left behind keeps that PR landable through the sanctioned path:
+#   (q1) ship + PR still open at the forge                     -> record written
+#   (q2) ship + PR already merged at the forge                 -> no record
+#
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -254,6 +261,43 @@ echo "error: pull request not found" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Override GitHub lookups to report PR 7 as still open with the supplied head.
+# This is the state the captain's parked-completion ruling releases a worker in:
+# the PR is done and green, and it has not landed yet.
+add_gh_pr_open_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
+  "pr view") printf '%s\n' "pull_request:" "  number: 7" "  state: open" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid"*) printf '%s\t%s\n' 'OPEN' '$head' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+file_mode_of() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
 }
 
 append_pr_meta_for_current_head() {
@@ -668,6 +712,65 @@ test_squash_merged_branch_deleted_allows() {
   expect_code 0 "$rc" "squash-merged: teardown should succeed when the PR is merged"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-merged: teardown printed a REFUSED line"
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
+}
+
+test_release_with_open_pr_leaves_landing_record() {
+  local case_dir rc head
+  case_dir=$(make_case release-open-pr)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "green work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  append_pr_meta_for_current_head "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$head"
+  assert_absent "$case_dir/state/task-x1.landing" \
+    "release-open-pr: the fixture already had a landing record"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "release-open-pr: teardown should succeed"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "release-open-pr: releasing the task should still remove its meta"
+  assert_present "$case_dir/state/task-x1.landing" \
+    "release-open-pr: an unlanded PR was released with no way to land it"
+  assert_grep 'pr=https://github.com/example/repo/pull/7' "$case_dir/state/task-x1.landing" \
+    "release-open-pr: the landing record does not name the PR"
+  assert_grep "pr_head=$head" "$case_dir/state/task-x1.landing" \
+    "release-open-pr: the landing record does not carry the released head"
+  assert_grep "project=$case_dir/project" "$case_dir/state/task-x1.landing" \
+    "release-open-pr: the landing record does not name the project"
+  [ "$(file_mode_of "$case_dir/state/task-x1.landing")" = 600 ] \
+    || fail "release-open-pr: the landing record is not private"
+  assert_grep 'Pending landing: task-x1 was released before https://github.com/example/repo/pull/7 landed' \
+    "$case_dir/stdout" "release-open-pr: the pending landing was not reported"
+  pass "releasing a task whose PR has not landed leaves a durable landing record"
+}
+
+test_release_with_merged_pr_leaves_no_landing_record() {
+  local case_dir rc pr_head
+  case_dir=$(make_case release-merged-pr)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # Same shape as the case above; only the forge's answer differs.
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "release-merged-pr: teardown should succeed"
+  assert_absent "$case_dir/state/task-x1.landing" \
+    "release-merged-pr: a PR the forge reports as merged needs no landing record"
+  assert_no_grep 'Pending landing:' "$case_dir/stdout" \
+    "release-merged-pr: an already-landed PR was reported as pending"
+  pass "releasing a task whose PR already merged leaves no landing record"
 }
 
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
@@ -1919,6 +2022,8 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
+test_release_with_open_pr_leaves_landing_record
+test_release_with_merged_pr_leaves_no_landing_record
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch

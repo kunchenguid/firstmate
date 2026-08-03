@@ -13,8 +13,8 @@ Actionable wakes include captain-relevant status signals, no-verb signals whose 
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 A busy pane is otherwise exempt from staleness, but only until its latest `state/<id>.turn-ended` marker reaches `FM_BUSY_TURN_MAX_SECS`, or its `state/<id>.meta` spawn record reaches that age before any turn completes; past that bound it is routed through the same wedge escalation, with the identical reason, escalation count, and `demand-deep-inspection` marker, for inspection only - never an automatic interrupt, signal, or restart.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
-When a canonical validated PR poll returns exactly `merged`, the watcher appends that durable notification before publishing a private receipt bound to the poll's registration, bytes, file identities, metadata, provider, URL, and task ID.
-The receipt makes retirement safely retryable across restarts: fixed-path recovery revalidates the same evidence, removes the runnable check first, removes its registration and data sidecars, removes the receipt last, and preserves task metadata including `pr=` and `pr_head=`.
+When a canonical validated PR poll returns exactly `merged`, the watcher appends that durable notification before publishing a private receipt bound to the poll's registration, bytes, file identities, task identity record, provider, URL, and task ID.
+The receipt makes retirement safely retryable across restarts: fixed-path recovery revalidates the same evidence, removes the runnable check first, removes its registration and data sidecars, removes the receipt last, and preserves the live meta or released-task landing record containing `pr=` and `pr_head=`.
 A concurrent replacement remains armed, every non-merged or invalid observation remains unchanged, and retirement never performs task or persistent-secondmate cleanup.
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
@@ -236,10 +236,14 @@ The armed merge poll also reports conflicts: one request carries the pull reques
 Conflicts are deduped by the head commit reported with them, because poll silence cannot distinguish clean from unknown from a failed lookup while a changed head does mean the branch moved; an untouched conflict re-surfaces no more often than `FM_PR_DIRTY_RESURFACE_SECS`.
 GitHub can briefly report mergeability as unknown while it recomputes after a base push, which is silence here and resolves on the following sweep rather than costing the static poll a retry.
 GitLab merge requests keep merge-only detection, because plain `glab mr view` field output carries no conflict field and reading one would require the JSON processor firstmate deliberately does not depend on.
-PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
+PR-based task merges go through `bin/fm-pr-merge.sh`, which resolves the task's forge-verified landing identity before calling `gh-axi pr merge`.
+For a live task it records `pr=` and any available `pr_head=` and arms the merge poll through `bin/fm-pr-check.sh`; for a released task it merges synchronously through the landing record without arming a poll.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge.
+Landing identity comes from the task's durable record, and from the pull request itself when the task has none.
+A ship task released before its pull request lands keeps a minimal `state/<task-id>.landing` record instead of its meta, so the same merge helper still lands that request and `bin/fm-pr-check.sh` can still rearm its merge watch; a task released before landing records existed has its record rebuilt from a forge read of the request.
+Either way the merge re-reads the request at its forge, so no stale local value decides anything, and a task with no record and no resolvable request is still refused.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
-[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
+[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, landing-record rule, PR-discovery fallback, and stale-lock recovery procedure.
 
 ## Optional X mode
 
