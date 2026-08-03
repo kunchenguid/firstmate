@@ -61,7 +61,11 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    # The prose `{TASK}` mention mirrors the scaffold's Herdr NOT-ENABLED gate:
+    # every successful spawn below doubles as regression proof that the
+    # placeholder preflight only refuses a bare {TASK} line, not filled briefs.
+    # shellcheck disable=SC2016 # Backticks are literal brief prose.
+    printf 'brief for %s\nthis scaffold cannot inspect the task text that replaces `{TASK}` later.\n' "$id" > "$home/data/$id/brief.md"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }

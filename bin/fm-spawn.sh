@@ -104,6 +104,9 @@
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
+#   A brief still carrying the scaffold's unfilled {TASK} placeholder (the bare
+#   placeholder alone on a line) refuses to spawn, fail-closed, before any
+#   endpoint or worktree exists; fill the brief per bin/fm-brief.sh first.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -845,6 +848,16 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+# Refuse an unfilled scaffold: a brief whose {TASK} placeholder was never
+# replaced launches a lane that idles or asks instead of working (3 of 8 lanes
+# launched dead this way on 2026-08-02). Match only a line that IS the bare
+# placeholder - a correctly filled brief still mentions `{TASK}` in prose (the
+# scaffold's Herdr NOT-ENABLED gate), so a substring match would false-positive
+# on every healthy brief.
+if grep -Eq '^[[:space:]]*\{TASK\}[[:space:]]*$' "$BRIEF"; then
+  echo "error: brief $BRIEF still contains the unfilled scaffold placeholder {TASK}; replace it with the task description (see bin/fm-brief.sh) before spawning $ID" >&2
+  exit 1
+fi
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
