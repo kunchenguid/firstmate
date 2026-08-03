@@ -2842,6 +2842,11 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "pair-production":
         config = channel.load_config()
+        if channel.disabled():
+            raise ChannelError(
+                "disabled",
+                "remove the kill switch only through a separately reviewed re-enrollment",
+            )
         if (
             config["provider"] != "production"
             or config["enabled"]
@@ -2864,10 +2869,19 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "record-pairing":
         config = channel.load_config()
-        if config["provider"] != "production" or config["enabled"]:
+        if channel.disabled():
+            raise ChannelError(
+                "disabled",
+                "remove the kill switch only through a separately reviewed re-enrollment",
+            )
+        if (
+            config["provider"] != "production"
+            or config["enabled"]
+            or config.get("binding") is not None
+        ):
             raise ChannelError(
                 "pairing-refusal",
-                "pairing record requires a disabled production config",
+                "pairing record requires a disabled unpaired production config",
             )
         response = read_stdin_json()
         binding = response.get("binding")
