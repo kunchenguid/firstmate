@@ -289,6 +289,20 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
   pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
 }
 
+test_cli_helper_uses_the_ambient_server_inside_a_herdr_pane() {
+  local dir log resp fb
+  dir="$TMP_ROOT/cli-helper-ambient"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_PANE_ID=w7:p3 HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/live.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli default workspace list' "$ROOT"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default" \
+    "ambient Herdr routing did not preserve the requested session identity"
+  assert_not_contains "$(cat "$log")" $'\x1f--session' \
+    "ambient Herdr routing performed a profile-local --session lookup"
+  pass "fm_backend_herdr_cli: a pane-scoped call uses the exact ambient Herdr server"
+}
+
 # --- launcher_identity: the exact workspace a worker must be placed in -------
 #
 # Herdr injects HERDR_ENV/HERDR_PANE_ID/HERDR_SESSION/HERDR_SOCKET_PATH into
@@ -334,9 +348,9 @@ test_launcher_identity_resolves_the_exact_pane_tab_and_workspace() {
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest || exit 1
-      printf "%s|%s|%s" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID"' "$ROOT" )
-  [ "$out" = 'w7:p3|w7:t3|w7' ] \
-    || fail "launcher_identity should resolve the launcher's own pane, tab, and workspace, got '$out'"
+      printf "%s|%s|%s|%s" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_LABEL"' "$ROOT" )
+  [ "$out" = 'w7:p3|w7:t3|w7|firstmate' ] \
+    || fail "launcher_identity should resolve the launcher's own pane, tab, workspace, and live label, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w7:p3' "launcher_identity did not read its own pane"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''get'$'\x1f''w7:t3' "launcher_identity did not cross-check the owning tab"
   pass "fm_backend_herdr_launcher_identity: resolves the launcher's exact workspace even when a same-labeled workspace sorts first"
@@ -3865,6 +3879,7 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
+test_cli_helper_uses_the_ambient_server_inside_a_herdr_pane
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set
 test_launcher_identity_resolves_the_exact_pane_tab_and_workspace

@@ -143,10 +143,13 @@ fm_backend_herdr_workspace_label() {
   printf 'firstmate'
 }
 
-# fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
-# BOTH the HERDR_SESSION env var AND appending a trailing `--session <name>`
-# CLI flag. Verified empirically (docs/herdr-backend.md "Session targeting: the
-# --session flag, not HERDR_SESSION alone"): on the installed herdr 0.7.1
+# fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>. In a live
+# Herdr pane, the ambient socket is the authoritative server identity, so the
+# CLI must not add `--session` and make a profile-HOME session lookup on the
+# wrong server. Outside a live pane, set BOTH the HERDR_SESSION env var AND
+# append a trailing `--session <name>` CLI flag. Verified empirically
+# (docs/herdr-backend.md "Session targeting: the --session flag, not
+# HERDR_SESSION alone"): on the installed herdr 0.7.1
 # client, the HERDR_SESSION env var is NOT reliably honored by CLI subcommands
 # once ANY other herdr server is already bound on the machine - queries
 # silently fall back to whatever server IS running (the wrong one) instead of
@@ -161,7 +164,11 @@ fm_backend_herdr_workspace_label() {
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   local session=$1
   shift
-  HERDR_SESSION="$session" herdr "$@" --session "$session"
+  if [ -n "${HERDR_PANE_ID:-}" ] && [ -n "${HERDR_SOCKET_PATH:-}" ]; then
+    HERDR_SESSION="$session" herdr "$@"
+  else
+    HERDR_SESSION="$session" herdr "$@" --session "$session"
+  fi
 }
 
 # fm_backend_herdr_tool_check: refuse loudly if herdr or jq is missing.
@@ -177,7 +184,14 @@ fm_backend_herdr_tool_check() {
 fm_backend_herdr_version_check() {
   fm_backend_herdr_tool_check || return 1
   local status protocol version
-  status=$(herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
+  if [ -n "${HERDR_PANE_ID:-}" ] && [ -n "${HERDR_SOCKET_PATH:-}" ]; then
+    status=$(fm_backend_herdr_cli "$(fm_backend_herdr_session)" status --json 2>/dev/null) || {
+      echo "error: 'herdr status --json' failed against the ambient Herdr server; is herdr installed correctly?" >&2
+      return 1
+    }
+  else
+    status=$(herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
+  fi
   protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
   version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
   case "$protocol" in
@@ -1282,6 +1296,7 @@ fm_backend_herdr_workspace_find() {  # <session>
 #   FM_BACKEND_HERDR_LAUNCHER_PANE_ID
 #   FM_BACKEND_HERDR_LAUNCHER_TAB_ID
 #   FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+#   FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_LABEL
 #
 # Returns:
 #   0 - one exact, self-consistent launcher pane/tab/workspace in <session>.
@@ -1300,6 +1315,7 @@ fm_backend_herdr_launcher_identity() {  # <session>
   FM_BACKEND_HERDR_LAUNCHER_PANE_ID=""
   FM_BACKEND_HERDR_LAUNCHER_TAB_ID=""
   FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID=""
+  FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_LABEL=""
   [ -n "$pane" ] || return 2
 
   # Same-session proof, before the pane id is trusted at all: herdr pane ids
@@ -1381,6 +1397,20 @@ fm_backend_herdr_launcher_identity() {  # <session>
   # shellcheck disable=SC2034  # callers consume the verified binding's parts
   FM_BACKEND_HERDR_LAUNCHER_TAB_ID=$tab
   FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID=$workspace
+  # shellcheck disable=SC2034  # callers consume the verified binding's label
+  FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_LABEL=$(printf '%s' "$list" | jq -er --arg workspace "$workspace" '
+    [.result.workspaces[] | select(.workspace_id == $workspace)]
+    | select(length == 1)
+    | .[0].label
+    | select(type == "string")
+  ' 2>/dev/null) || {
+    # shellcheck disable=SC2034  # clear the caller-visible verified binding
+    FM_BACKEND_HERDR_LAUNCHER_PANE_ID=""
+    FM_BACKEND_HERDR_LAUNCHER_TAB_ID=""
+    FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID=""
+    echo "error: herdr launcher workspace '$workspace' has no usable live label in session '$session'; refusing to place a worker without its exact parent workspace" >&2
+    return 1
+  }
   return 0
 }
 
@@ -3021,7 +3051,7 @@ fm_backend_herdr_list_live() {  # <session>
 # ~/.config/herdr/sessions/<name>/herdr.sock). Empty on any failure.
 fm_backend_herdr_socket_path() {  # <session>
   local session=$1
-  herdr session list --json 2>/dev/null \
+  fm_backend_herdr_cli "$session" session list --json 2>/dev/null \
     | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .socket_path // empty' 2>/dev/null \
     | head -1
 }
@@ -3045,7 +3075,7 @@ fm_backend_herdr_events_capable() {  # <session>
   if [ -z "${FM_BACKEND_HERDR_EVENT_READER:-}" ]; then
     command -v python3 >/dev/null 2>&1 || return 1
   fi
-  protocol=$(herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
+  protocol=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
   schema=$(herdr api schema --json 2>/dev/null) || return 1
