@@ -515,7 +515,7 @@ def choose_caption(metadata: dict[str, Any], requested: str | None) -> tuple[str
     return None, None, None
 
 
-def retrieve_captions(url: str, work: Path, lang: str) -> Path | None:
+def retrieve_captions(url: str, work: Path, lang: str, warnings: list[str]) -> Path | None:
     out_dir = work / "captions"
     out_dir.mkdir(parents=True, exist_ok=True)
     template = str(out_dir / "caption.%(ext)s")
@@ -536,9 +536,15 @@ def retrieve_captions(url: str, work: Path, lang: str) -> Path | None:
         template,
         url,
     ]
-    result = run_quiet(cmd)
+    try:
+        returncode = run_quiet(cmd).returncode
+    except WatchError:
+        returncode = 1
+        warnings.append(
+            "caption retrieval did not finish; the run continued without caption evidence"
+        )
     candidates = sorted(out_dir.glob("*.vtt"))
-    if result.returncode != 0 and not candidates:
+    if returncode != 0 and not candidates:
         return None
     return candidates[0] if candidates else None
 
@@ -711,6 +717,16 @@ def resolve_media_ceiling(requested: int | None, work: Path, warnings: list[str]
     if ceiling <= 0:
         raise WatchError("no usable local free space remains for transient media", 5)
     return ceiling
+
+
+def require_free_space(work: Path, needed_bytes: int) -> None:
+    usable = max(0, shutil.disk_usage(work).free - FREE_SPACE_MARGIN_BYTES)
+    if needed_bytes > usable:
+        raise WatchError(
+            "no usable local free space remains for the transient copy of this video; "
+            f"{needed_bytes} bytes are needed and only {usable} usable bytes are available",
+            5,
+        )
 
 
 def declared_media_bytes(metadata: dict[str, Any]) -> int | None:
@@ -1110,7 +1126,7 @@ def build_manifest(args: argparse.Namespace, smoke_mode: bool = False) -> dict[s
             metadata = load_ytdlp_metadata(fetch_source)
             transcript_language, caption_kind, caption_lang = choose_caption(metadata, args.caption_lang)
             if caption_lang:
-                caption_path = retrieve_captions(fetch_source, work, caption_lang)
+                caption_path = retrieve_captions(fetch_source, work, caption_lang, warnings)
                 if caption_path:
                     transcript_segments = parse_vtt(caption_path)
                     transcript_provenance = f"captions:{caption_kind}"
@@ -1131,6 +1147,7 @@ def build_manifest(args: argparse.Namespace, smoke_mode: bool = False) -> dict[s
             media.acquisition_reason = acquisition_reason
         else:
             local_path = validate_local(fetch_source, args.max_local_bytes)
+            require_free_space(work, local_path.stat().st_size)
             media_dir = work / "media"
             media_dir.mkdir(parents=True, exist_ok=True)
             local_copy = media_dir / f"local{local_path.suffix.lower()}"
@@ -1149,12 +1166,19 @@ def build_manifest(args: argparse.Namespace, smoke_mode: bool = False) -> dict[s
             media = confirm_section_media(media, float(probed["duration_seconds"]), warnings)
         else:
             probed = {}
-        duration = safe_float(metadata.get("duration"), 0.0) or float(probed.get("duration_seconds", 0.0))
+        probed_duration = float(probed.get("duration_seconds", 0.0))
+        duration = safe_float(metadata.get("duration"), 0.0)
+        if duration <= 0 and probed_duration > 0:
+            duration = media.offset_seconds + probed_duration if media.coverage == "section" else probed_duration
+            if media.coverage == "section":
+                warnings.append(
+                    "the source advertised no duration, so the reported duration is a lower bound "
+                    "derived from the bounded section that was acquired"
+                )
         if duration <= 0:
             raise WatchError("video duration could not be determined", 5)
         chapters = normalize_chapters(metadata.get("chapters"), duration)
         ranges = select_ranges(duration, transcript_segments, chapters, args.question, start, end)
-        max_frames, resolution = clamp_requested_limits(args, ranges[0].reason == "focused_range", warnings)
         selected_transcript, transcript_truncated = transcript_excerpt(transcript_segments, ranges)
         if transcript_truncated:
             warnings.append("transcript evidence was truncated to the bounded manifest budget")
@@ -1172,7 +1196,7 @@ def build_manifest(args: argparse.Namespace, smoke_mode: bool = False) -> dict[s
                 plan,
                 resolution,
                 media.offset_seconds,
-                tail_seek_limit(float(probed["duration_seconds"]), float(probed.get("frame_rate") or 0.0)),
+                tail_seek_limit(probed_duration, float(probed.get("frame_rate") or 0.0)),
             )
         else:
             recommendation = focused_pass_recommendation(ranges, duration)
@@ -1324,6 +1348,9 @@ def main(argv: list[str] | None = None) -> int:
     except WatchError as exc:
         eprint(f"fm-video-watch: {exc}")
         return exc.code
+    except Exception as exc:
+        eprint(f"fm-video-watch: unexpected {type(exc).__name__} while preparing video evidence")
+        return 5
 
 
 if __name__ == "__main__":

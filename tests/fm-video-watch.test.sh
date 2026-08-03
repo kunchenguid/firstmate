@@ -352,6 +352,94 @@ test_section_download_keeps_absolute_timestamps() {
   pass "bounded section downloads keep manifest timestamps absolute and coverage honest"
 }
 
+test_section_download_without_advertised_duration_keeps_the_focus_range() {
+  local dir="$TMP_ROOT/section-no-duration" out err fakebin metadata receipt rc
+  mkdir -p "$dir"
+  out="$dir/out.json"
+  err="$dir/err"
+  metadata='{"id":"abc","title":"No duration","availability":"public"}'
+  fakebin=$(make_fakebin "$dir")
+  : > "$dir/commands.log"
+  set +e
+  FM_FAKE_COMMAND_LOG="$dir/commands.log" FM_FAKE_YTDLP_METADATA="$metadata" FM_FAKE_MEDIA_DURATION=10 \
+    FM_FAKE_FFPROBE_JSON='{"format":{"duration":"10.0","size":"1000"},"streams":[{"codec_type":"video","width":1280,"height":720,"codec_name":"h264"}]}' \
+    PATH="$fakebin:$BASE_PATH" "$WATCH" prepare 'https://video.example/watch/one' \
+    --start 00:10 --end 00:20 --max-frames 6 > "$out" 2> "$err"
+  rc=$?
+  set +e
+  expect_code 0 "$rc" "a bounded section download of a source with no advertised duration was rejected"
+  [ "$(json_get "$out" "data['media']['acquisition_reason']")" = 'source_duration_unknown_so_the_focus_range_bounds_acquisition' ] \
+    || fail "the unknown-duration acquisition route was not recorded"
+  [ "$(json_get "$out" "data['selected_ranges'][0]['reason']")" = 'focused_range' ] || fail "the focus range was lost"
+  [ "$(json_get "$out" "data['selected_ranges'][0]['start_seconds']")" = '10.0' ] || fail "the focus range start moved"
+  [ "$(json_get "$out" "data['selected_ranges'][0]['end_seconds']")" = '20.0' ] || fail "the focus range end moved"
+  [ "$(json_get "$out" "data['duration_seconds']")" = '20.0' ] \
+    || fail "duration was reported in acquired-media coordinates instead of source coordinates"
+  assert_contains "$(json_get "$out" "' '.join(data['warnings'])")" 'lower bound' \
+    "the derived source duration was not disclosed as a lower bound"
+  receipt=$(json_get "$out" "data['cleanup_receipt']")
+  PATH="$(dirname "$REAL_PYTHON"):$BASE_PATH" "$WATCH" cleanup "$receipt" >/dev/null
+  pass "a section download of a source with no advertised duration keeps source-timeline focus ranges"
+}
+
+test_optional_enrichment_and_unexpected_failures_stay_in_contract() {
+  "$REAL_PYTHON" - "$ROOT/bin/fm-video-watch-impl.py" <<'PY' || fail "optional caption, free-space, and exit-class contracts regressed"
+import contextlib, importlib.util, io, sys, tempfile
+from collections import namedtuple
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("fmvw", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+sys.modules["fmvw"] = mod
+spec.loader.exec_module(mod)
+
+work = Path(tempfile.mkdtemp(prefix="fm-video-watch-unit-"))
+
+
+def _timeout(*_a, **_k):
+    raise mod.WatchError("command timed out after 180s: yt-dlp", 5)
+
+
+mod.run_quiet = _timeout
+warnings = []
+assert mod.retrieve_captions("https://video.example/watch/one", work, "en", warnings) is None
+assert warnings and "caption retrieval did not finish" in warnings[0], warnings
+
+usage = namedtuple("usage", "total used free")
+mod.shutil.disk_usage = lambda _path: usage(0, 0, mod.FREE_SPACE_MARGIN_BYTES + 1000)
+mod.require_free_space(work, 1000)
+try:
+    mod.require_free_space(work, 1001)
+except mod.WatchError as exc:
+    assert exc.code == 5, exc.code
+    assert "no usable local free space" in str(exc), str(exc)
+else:
+    raise AssertionError("a local copy larger than the usable free space must be refused")
+
+
+def _boom(_args):
+    raise OSError(28, "No space left on device", "/private/captain/secret-holiday.mp4")
+
+
+mod.cmd_doctor = _boom
+sys.modules["fmvw"].cmd_doctor = _boom
+parser = mod.parser()
+args = parser.parse_args(["doctor"])
+args.func = _boom
+mod.parser = lambda: type("P", (), {"parse_args": staticmethod(lambda _argv=None: args)})()
+captured = io.StringIO()
+with contextlib.redirect_stderr(captured):
+    code = mod.main([])
+assert code == 5, code
+assert "secret-holiday" not in captured.getvalue(), captured.getvalue()
+assert "OSError" in captured.getvalue(), captured.getvalue()
+
+mod.shutil.rmtree(work, ignore_errors=True)
+assert not work.exists(), work
+PY
+  pass "optional caption failure degrades and unexpected failures map onto the documented exit classes"
+}
+
 test_wide_focus_range_takes_the_cheaper_full_download() {
   local dir="$TMP_ROOT/wide-focus" out err fakebin metadata commands receipt
   mkdir -p "$dir"
@@ -661,6 +749,8 @@ test_metadata_rejections
 test_prepare_transcript_first_and_manifest_contract
 test_focused_range_caps_and_language_choice
 test_section_download_keeps_absolute_timestamps
+test_section_download_without_advertised_duration_keeps_the_focus_range
+test_optional_enrichment_and_unexpected_failures_stay_in_contract
 test_wide_focus_range_takes_the_cheaper_full_download
 test_media_ceiling_refuses_before_download
 test_media_ceiling_override_requires_free_space

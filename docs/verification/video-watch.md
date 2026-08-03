@@ -46,7 +46,9 @@ Covered guarantees include:
 | frame and token budgets | default caps prefer a compact frame set, hard caps clamp excessive requests, and manifest token estimates expose the resulting cost |
 | scene-plus-periodic evidence | fake scene-change output is combined with bounded periodic coverage and every selected frame records a timestamp and reason |
 | whole-video extraction | the stub `ffmpeg` refuses a seek at or past the last frame, so the mocked suite can no longer hide this class; additionally, when real `ffmpeg` and `ffprobe` are present the default no-focus-range path runs end to end over a synthesized clip, every planned frame lands on disk, the final frame stays inside the last decodable frame, and cleanup proves absence, and that one case is skipped when those tools are absent |
-| optional enrichment stays optional | scene-change detection that fails or does not finish degrades to periodic coverage with a warning instead of aborting the manifest |
+| optional enrichment stays optional | scene-change detection that fails or does not finish degrades to periodic coverage with a warning, and caption retrieval that fails or does not finish degrades to a warning, instead of aborting the manifest |
+| source-timeline range fidelity | a source that advertises no duration still honors `--start`/`--end` after a bounded section download: the focus range, the acquisition reason, and a duration disclosed as a lower bound all stay in source coordinates |
+| documented exit classes | a local copy that would exhaust usable free space is refused before it starts, and any unexpected failure is reported as exit 5 by exception class alone rather than escaping as a traceback that names local paths |
 | focused ranges | `--start` and `--end` produce absolute focused ranges, denser allowed caps, and focused start/end frame reasons |
 | manifest schema | schema, sanitized source identity, duration, chapters, transcript provenance, frames, warnings, token budget, and cleanup receipt are present |
 | malformed metadata | invalid JSON from `yt-dlp` or `ffprobe` is refused without leaking raw command output |

@@ -33,7 +33,8 @@
 #   2 command-line usage or invalid input
 #   3 missing required local dependency
 #   4 unsupported, unsafe, authenticated, DRM, playlist, or live source
-#   5 media probing, caption retrieval, download, frame extraction, or cleanup failed
+#   5 media probing, download, frame extraction, or cleanup failed, insufficient local
+#     free space for the transient copy, or an unexpected internal failure
 #
 # Use --help for the full operator contract.
 set -euo pipefail
