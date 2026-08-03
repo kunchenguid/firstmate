@@ -146,8 +146,13 @@ fm_backend_herdr_workspace_label() {
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>. In a live
 # Herdr pane, the ambient socket is the authoritative server identity, so the
 # CLI must not add `--session` and make a profile-HOME session lookup on the
-# wrong server. Outside a live pane, set BOTH the HERDR_SESSION env var AND
-# append a trailing `--session <name>` CLI flag. Verified empirically
+# wrong server - but ONLY when <session> is that pane's own ambient session
+# (fm_backend_herdr_session); a caller inside a live pane may still query a
+# DIFFERENT session (e.g. fm_backend_target_exists checking another worker),
+# and that cross-session case must keep routing via --session below, exactly
+# like the no-live-pane case, to stay fail-closed. Outside a live pane, or for
+# any non-ambient session, set BOTH the HERDR_SESSION env var AND append a
+# trailing `--session <name>` CLI flag. Verified empirically
 # (docs/herdr-backend.md "Session targeting: the --session flag, not
 # HERDR_SESSION alone"): on the installed herdr 0.7.1
 # client, the HERDR_SESSION env var is NOT reliably honored by CLI subcommands
@@ -164,7 +169,8 @@ fm_backend_herdr_workspace_label() {
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   local session=$1
   shift
-  if [ -n "${HERDR_PANE_ID:-}" ] && [ -n "${HERDR_SOCKET_PATH:-}" ]; then
+  if [ -n "${HERDR_PANE_ID:-}" ] && [ -n "${HERDR_SOCKET_PATH:-}" ] \
+    && [ "$session" = "$(fm_backend_herdr_session)" ]; then
     HERDR_SESSION="$session" herdr "$@"
   else
     HERDR_SESSION="$session" herdr "$@" --session "$session"
