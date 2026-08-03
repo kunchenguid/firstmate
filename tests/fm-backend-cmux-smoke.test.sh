@@ -140,8 +140,8 @@ bs=$(fm_backend_busy_state cmux "$TARGET")
 pass "real cmux: fm_backend_busy_state reports unknown (watcher falls back to pane-regex, same as tmux/zellij/orca)"
 
 # --- window_of_workspace: real-cmux window/count detection -------------------
-# The last-workspace-in-a-window teardown fix (docs/cmux-backend.md "Closing the
-# last workspace in a window") pivots on window_of_workspace reading the live
+# The last-workspace-in-a-window teardown fix (docs/cmux-backend.md "Current
+# operation and safety") pivots on window_of_workspace reading the live
 # `list-windows` / `workspace list --window` JSON correctly (the version-fragile
 # part the fake-CLI suite cannot prove). This task workspace shares its window
 # with at least the app's own workspace, so it reports "<window_id> <count>"

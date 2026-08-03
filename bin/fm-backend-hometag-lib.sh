@@ -9,8 +9,8 @@
 # happen to collide can send/peek/close each other's tabs - the gap a
 # captain-directed no-mistakes review gate caught for cmux
 # (docs/cmux-backend.md) and this same tag mechanism was later ported to
-# zellij to close for the same reason (docs/zellij-backend.md "Home-scoped
-# tab titles").
+# zellij to close for the same reason (docs/zellij-backend.md "Task shape and
+# home isolation").
 #
 # fm_backend_hometag() derives a short, stable tag: a readable prefix
 # ("firstmate" for the primary home, "2ndmate-<id>" for a secondmate home
