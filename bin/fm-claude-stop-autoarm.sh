@@ -28,15 +28,24 @@
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
 #   - Translation: while supervision is still needed and AFK remains inactive,
-#     an actionable arm close (signal:/stale:/check:/heartbeat) or a typed
-#     watcher: FAILED prints one rewake banner to stderr and exits 2, which
-#     wakes Claude even while idle ("Stop hook feedback"). A clean close with
-#     no actionable reason and no remaining need exits 0 silently.
+#     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
+#     rewake banner to stderr and exits 2, which wakes Claude even while idle
+#     ("Stop hook feedback"). A close that reports no actionable reason is
+#     benign when a live identity-matched watcher still has a fresh beacon.
+#   - Failure handling: a typed failure is rechecked against the same live,
+#     fresh watcher predicate and retried a bounded number of times in this
+#     hook. Only an exhausted failure with no verified watcher emits one
+#     last-resort notice per failure episode; later consecutive failures still
+#     exit 2 to guarantee the next Stop-owned retry without repeating notice,
+#     until the synchronous guard has consumed its attended fail-open.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim and
 # outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
 # allow a stop whose recovery this hook already owns, instead of forcing a
-# duplicate continuation for the same event epoch.
+# duplicate continuation for the same event epoch. The failure marker
+# state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
+# and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
+# suppresses any later automatic continuation in that unresolved episode.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
@@ -53,6 +62,13 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
+FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
+FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
+case "$AUTOARM_ATTEMPTS" in
+  1|2|3) : ;;
+  *) AUTOARM_ATTEMPTS=2 ;;
+esac
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -109,6 +125,10 @@ fi
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
 fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
+  fm_lock_release "$OWNER_LOCK"
+  exit 0
+fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 
 write_epoch() {  # <outcome>
@@ -136,37 +156,46 @@ write_epoch arming
 # NO shell &: this hook process tree is the harness-owned lifecycle. The arm
 # forks the watcher as its own tracked child exactly as it does for the
 # model-driven background-task path, and propagates the wake reason on close.
-OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
-if [ -n "$OUT" ]; then
-  "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1
-  RC=$?
-else
-  "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1
-  RC=$?
-fi
-
-# --- classify and translate ---------------------------------------------------
-# AFK may have appeared mid-cycle: the daemon owns triage now, so suppress the
-# rewake even for an actionable close.
-if [ -e "$STATE/.afk" ]; then
-  write_epoch afk
-  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 0
-fi
-
+# Every non-actionable close is checked against the same identity-matched live
+# watcher and fresh-beacon predicate used by the turn-end guard before it is
+# retried or translated into an operator-visible failure.
+OUT=
 ACTIONABLE=0
-FAILED=0
-if [ -n "$OUT" ]; then
-  grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" 2>/dev/null && ACTIONABLE=1
-  grep -q '^watcher: FAILED' "$OUT" 2>/dev/null && FAILED=1
-fi
-[ "$RC" -ne 0 ] && FAILED=1
+HEALTHY=0
+attempt=0
+while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
+  attempt=$((attempt + 1))
+  OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
+  if [ -n "$OUT" ]; then
+    "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
+  else
+    "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
+  fi
 
-if [ "$ACTIONABLE" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
-  write_epoch clean
+  # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress
+  # every subsequent classification and handoff.
+  if [ -e "$STATE/.afk" ]; then
+    write_epoch afk
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+
+  ACTIONABLE=0
+  if [ -n "$OUT" ]; then
+    grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" 2>/dev/null && ACTIONABLE=1
+  fi
+  [ "$ACTIONABLE" -eq 1 ] && break
+
+  # A non-actionable close is benign when another verified watcher already owns
+  # this home and is still beating within the shared grace window.
+  if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+    HEALTHY=1
+    break
+  fi
+  [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 0
-fi
+  OUT=
+done
 
 # The need may have vanished mid-cycle (fleet torn down, X opted out): nothing
 # left to supervise, so close quietly instead of waking the model.
@@ -176,19 +205,51 @@ if ! need_supervision; then
   exit 0
 fi
 
-write_epoch rewake
-if [ "$FAILED" -eq 1 ]; then
-  {
-    printf 'firstmate watcher cycle FAILED - supervision is down while this home still needs it.\n'
-    [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
-    printf 'Run bin/fm-wake-drain.sh first. Then repair supervision with bin/fm-watch-arm.sh as its own Claude Code background task (never shell &). If the failure repeats, treat it as a blocker and report it instead of ending blind.\n'
-  } >&2
-else
+if [ "$HEALTHY" -eq 1 ]; then
+  if fm_failure_episode_reset "$STATE"; then
+    write_epoch clean
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+  write_epoch failed-suppressed
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  [ -e "$FAILURE_ALARM" ] && exit 0
+  exit 2
+fi
+
+# After the synchronous guard has consumed the episode's attended fail-open,
+# do not create another exit-2 continuation that could defeat it.
+if [ -e "$FAILURE_ALARM" ]; then
+  write_epoch failed-suppressed
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+fi
+
+if [ "$ACTIONABLE" -eq 1 ]; then
+  write_epoch rewake
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
     printf 'Run bin/fm-wake-drain.sh first and handle the wake. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 2
 fi
+
+# Notify only once for this continuous failure episode; every later invocation
+# still exits 2 so Claude must continue into another Stop-owned retry without
+# creating a repeated operator notice or manual-arm loop.
+if [ ! -e "$FAILURE_NOTICE" ]; then
+  write_epoch failed
+  {
+    printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
+    [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+    printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
+  } >&2
+  : > "$FAILURE_NOTICE" 2>/dev/null || true
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 2
+fi
+write_epoch failed-suppressed
 [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
 exit 2
