@@ -669,7 +669,8 @@ This exception is narrow: ordinary crewmates still trip stale detection when the
 **Watcher liveness is guarded, not just disciplined.**
 Resuming the emitted supervision protocol is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.
 The supervision scripts and `bin/fm-wake-drain.sh` call `bin/fm-guard.sh`, which prints a prominent bordered banner when tasks are in flight but queued wakes are pending or the watcher's liveness beacon is missing or stale; `docs/architecture.md` ("Event-driven supervision") owns the beacon and grace mechanics.
-The banner is only a supervision warning: the guarded operation still runs, and `fm-send`'s banner says explicitly that the requested message WILL still be sent.
+The banner is only a supervision warning: the supervision guard itself does not cancel the requested operation.
+`fm-send` may still refuse at a later target, identity, or Herdr composer safety check, so its continuation banner is not a delivery confirmation.
 If a guard warning says queued wakes are pending, drain them before doing anything else.
 If a guard warning says watcher liveness is stale, drain any queued wakes and then resume the emitted supervision protocol.
 

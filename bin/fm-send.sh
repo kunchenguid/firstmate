@@ -20,6 +20,9 @@
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
+# Herdr text sends also require a positively identified empty composer before
+# staging text. A modal, pending input, unreadable pane, or malformed detector
+# result fails closed before fm-send presses any key.
 #
 # From-firstmate marker: when the resolved target is a task selector whose meta
 # records kind=secondmate, the text is prefixed with the from-firstmate marker
@@ -323,8 +326,33 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  # Type once, submit, verify. Lenient: only a positively-confirmed swallow
-  # (text still in the composer) is an error; an unreadable pane is assumed sent.
+  # A Herdr Enter is terminal input, not a semantic "submit this composer"
+  # operation. Prove that the target is an empty agent composer before staging
+  # text; every other outcome refuses before send_text_submit can type or press
+  # anything. This is deliberately Herdr-scoped because it is the established
+  # affected retry path and its adapter already exposes a structural composer
+  # classifier. Do not weaken unknown into success: a permission modal has no
+  # composer row and therefore reaches exactly that refusal branch.
+  if [ "$TARGET_BACKEND" = herdr ]; then
+    composer_state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" 2>/dev/null) \
+      || composer_state=unknown
+    case "$composer_state" in
+      empty) ;;
+      pending)
+        [ -z "$MANAGED_STEERING_ID" ] || record_managed_delivery_event not-submitted >/dev/null 2>&1 || true
+        echo "error: text not sent to $T (Herdr composer already contains pending input; refusing to type or press Enter; tried $RESOLUTION_TRIED)" >&2
+        exit 1
+        ;;
+      *)
+        [ -z "$MANAGED_STEERING_ID" ] || record_managed_delivery_event not-submitted >/dev/null 2>&1 || true
+        echo "error: text not sent to $T (could not prove an empty Herdr composer; a modal or unreadable state is unsafe, so no text or key was sent; tried $RESOLUTION_TRIED)" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  # Type once, submit, verify. The preflight above has already rejected an
+  # unreadable starting state; this adapter verdict now describes only the
+  # submission attempt that began from a positively empty composer.
   if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$RECORDED_SCOPED_TARGET"); then
     [ -z "$MANAGED_STEERING_ID" ] || record_managed_delivery_event send-failed >/dev/null 2>&1 || true
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2

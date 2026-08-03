@@ -467,7 +467,8 @@ That classifier is still the terminal-backed away-mode compatibility path's affi
 Normal idle-baseline submit confirmation now uses herdr's native agent-state instead; see "Native agent-state submit confirmation" for the current submit path.
 A dedicated composer-state or cursor-row/style primitive is still a candidate upstream Herdr feature request; it would let the guard/fallback classifier eventually reach tmux's cursor-row precision instead of relying on a structural approximation over captured tail rows and ANSI style.
 
-All implemented backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`), so `fm-send.sh` needs no backend-specific branching at all.
+All implemented backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`).
+`fm-send.sh` additionally requires an affirmative `empty` preflight for Herdr text sends before it stages text; [`fm-send` modal safety](fm-send-modal-safety.md) owns that guard's scope, evidence, and remaining race.
 
 ## Session targeting: the `--session` flag, not `HERDR_SESSION` alone
 

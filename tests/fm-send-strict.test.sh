@@ -604,3 +604,5 @@ test_managed_steering_rejects_parent_swap_during_persistence
 test_healthy_fm_id_send_still_works
 test_managed_tmux_send_rejects_reused_id_in_other_session
 test_managed_tmux_send_retains_verified_stable_id
+bash "$ROOT/tests/fm-send-permission-modal-probe.sh" \
+  || fail "fm-send strict: Herdr permission-modal boundary probe failed"
