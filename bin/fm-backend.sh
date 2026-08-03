@@ -595,6 +595,10 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
+  # Refuse a missing adapter before sourcing it: under `set -e`, bash 3.2 exits
+  # the whole shell when `.` cannot find its file, which would kill a caller's
+  # own refusal path instead of letting it explain itself.
+  [ -r "$FM_BACKEND_LIB_DIR/backends/$name.sh" ] || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then

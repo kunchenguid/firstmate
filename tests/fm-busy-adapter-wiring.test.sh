@@ -320,10 +320,17 @@ test_claude_settings_never_dirty_a_tracked_project_file() {
   rec=$(make_spawn_case claude-tracked-settings claude "$id")
   read_case_record "$rec"
   tracked="$WT_DIR/.claude/settings.local.json"
+  # A developer's global ignore file commonly covers this exact path; then `git add`
+  # refuses it and the case would silently stop tracking the file it is about. Pin
+  # the repo to no global excludes so the tracked premise always holds.
+  git -C "$WT_DIR" config core.excludesFile /dev/null
   mkdir -p "$WT_DIR/.claude"
   printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"true"}]}]}}' > "$tracked"
-  git -C "$WT_DIR" add -- .claude/settings.local.json
+  git -C "$WT_DIR" add -- .claude/settings.local.json \
+    || fail "setup could not track .claude/settings.local.json"
   git -C "$WT_DIR" -c user.email=t@t -c user.name=t commit -q -m "project tracks claude settings"
+  git -C "$WT_DIR" ls-files --error-unmatch -- .claude/settings.local.json >/dev/null \
+    || fail "setup did not leave .claude/settings.local.json tracked"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
