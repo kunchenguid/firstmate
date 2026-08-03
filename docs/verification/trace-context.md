@@ -5,7 +5,7 @@ Current behavior and rationale are owned by [`../trace-context.md`](../trace-con
 
 Date: 2026-08-03.
 Shell: GNU bash 3.2.57 (macOS).
-Comparison base: `main` at `4ee4a0a`.
+Comparison base: `main` at `976d97f`.
 
 The colocated unit suite `tests/fm-trace-context-lib.test.sh` (26 assertions) exercises validation (valid accepted; malformed, wrong-length, uppercase, all-zero, `ff` version, and shell-metacharacter values rejected), root minting with every mint a distinct sampled root and no parent-adoption input, the recovery reuse path with the recorded carrier winning over the ambient environment, default-off omission, the enable precedence of `FM_TRACE_CONTEXT` over `config/trace-context` with unset or empty deferring to the file, normalized home-session state, atomic replacement of a read-only prior record, stale-session rejection after failed publication, missing or invalid state defaulting off, the Secondmate home-session boundary with later file state plus the per-task trace boundary (two resolves under one persistent ambient `TRACEPARENT` root two distinct traces and adopt neither), forced entropy failure omitting safely, and the minted-root fixed-shape check.
 
@@ -16,12 +16,16 @@ A final assertion drives the file-decided path (`FM_TRACE_CONTEXT` unset) and pr
 The suite touches no real harness or live fleet.
 `tests/fm-session-start.test.sh` additionally proves only a lock-owning session start writes the effective state and a lock-refused read-only start leaves it unchanged.
 
+The remote-route suite `tests/fm-remote-secondmate-trace-context.test.sh` (6 assertions) covers the Secondmate path that never reaches the local export site, driving the real chain - the parent's `bin/fm-spawn.sh`, `bin/fm-on.sh`, the real remote entrypoint, `bin/fm-remote-secondmate-control.sh`, and the remote host's own `bin/fm-spawn.sh` - over the deterministic SSH boundary with a fake tmux, so the carrier the remote pane receives is read back from that pane's own log: disabled, the parent records no `traceparent=`, the remote pane receives no export, the remote home inherits no enablement flag, and the delivered snapshot is `FM_TRACE_CONTEXT=off` while `GOTMPDIR` still ships; enabled, the parent's recorded carrier, the remote endpoint's own record, and the exported pane value are one identical valid carrier sent after `GOTMPDIR` and before the launch command, with `FM_TRACE_CONTEXT=on` and the inherited flag delivered; a relaunch keeps that carrier verbatim in both the parent record and the pane export; a second remote route resolved from an environment holding a fixed ambient `TRACEPARENT` roots a trace id distinct from both that ambient carrier and the first route; the remote receiver accepts `config/trace-context` as ordinary declared inherited material while refusing `config/secondmate-harness`, which the primary deliberately does not propagate; and the delivery argument that carries a parent's carrier to a remote host is refused on a ship spawn, on a shell-metacharacter value, on an all-zero trace id, and on an empty value, so nothing but a strict W3C carrier on a Secondmate launch can reach a pane export.
+
 ```console
 $ bash tests/fm-trace-context-lib.test.sh | tail -1
 # fm-trace-context-lib.test.sh: all assertions passed
 $ bash tests/fm-trace-context-spawn.test.sh | tail -1
 # all fm-trace-context-spawn tests passed
+$ bash tests/fm-remote-secondmate-trace-context.test.sh | tail -1
+ALL TESTS PASSED
 ```
 
-Run both trace-context suites from the repo root; each prints one `ok - ...` per assertion.
+Run all three trace-context suites from the repo root; each prints one `ok - ...` per assertion.
 A single live-backend end-to-end check - a real spawn confirming the pane received the `TRACEPARENT` export before the launch line, with nothing left after teardown - is a bounded manual step, deferred here because a live agent spawn disrupts a running fleet.

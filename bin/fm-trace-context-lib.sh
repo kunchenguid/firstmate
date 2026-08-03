@@ -58,6 +58,11 @@
 #   frozen on/off decision into the new process as a non-empty FM_TRACE_CONTEXT
 #   value in the launch prefix (bin/fm-spawn.sh). The Secondmate freezes that
 #   inherited decision when its own home session starts.
+#   A REMOTE secondmate route resolves here too, in the PARENT process that owns
+#   that task's meta: fm-spawn's spawn_remote_secondmate resolves the carrier,
+#   hands it to the configured host through fm-spawn's --traceparent, and records
+#   the carrier the remote endpoint reports back. Only the pane export moves
+#   hosts; identity, enablement, and the per-task boundary do not.
 #
 # Wire shape: version 00 only, "00-<32 hex trace>-<16 hex span>-<2 hex flags>",
 # with the trace id and span id never all-zero (W3C rejects both). New roots use
@@ -140,7 +145,10 @@ fm_trace_context_session_lock() {  # <effective-state-file>
   local effective_file=$1 state_dir lock_pid
   state_dir=${effective_file%/*}
   [ "$state_dir" = "$effective_file" ] && state_dir=.
-  IFS= read -r lock_pid < "$state_dir/.lock" 2>/dev/null || return 1
+  # Grouped so the stderr redirect is in place BEFORE the input redirect is
+  # attempted: an absent lock is an ordinary silent "not locked" answer, and a
+  # trailing 2>/dev/null on the bare read would still leak the open failure.
+  { IFS= read -r lock_pid < "$state_dir/.lock"; } 2>/dev/null || return 1
   case "$lock_pid" in
     '' | *[!0-9]*) return 1 ;;
   esac

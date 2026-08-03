@@ -16,6 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -25,11 +27,20 @@ file_link_count() {
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
 }
+# Writable set, derived from the ONE declared inherited-material owner
+# (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh), so this code root's
+# receiver and sender cannot drift silently. This runs under the remote
+# entrypoint's fixed empty environment, so the declaration is this code root's
+# own, never something the caller can widen over SSH; a caller from a different
+# revision must match it or the transfer fails closed.
 allowed() {
-  case "$1" in
-    config/crew-dispatch.json|config/crew-harness|config/backlog-backend|config/backend|config/herdr-presentation-spaces|config/startup-memory-budget|data/captain-shared.md) return 0 ;;
-    *) return 1 ;;
-  esac
+  local candidate
+  while IFS= read -r candidate; do
+    [ "$candidate" = "$1" ] && return 0
+  done <<EOF
+$(fm_config_inherit_items)
+EOF
+  return 1
 }
 
 [ "$#" -eq 5 ] || usage
