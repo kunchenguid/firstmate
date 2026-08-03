@@ -371,6 +371,37 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_ship_git_safety_wording() {
+  local home id brief
+  home="$TMP_ROOT/git-safety-home"
+  mkdir -p "$home/data"
+  id="brief-git-safety-c2"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "BEFORE editing anything, fetch the actual PR head" "$brief" \
+    "ship brief did not require catch-up before resumed edits"
+  assert_grep "fast-forward your local task branch to that exact commit" "$brief" \
+    "ship brief did not constrain catch-up to a clean fast-forward"
+  assert_grep "stop and report instead of reconciling the histories by hand" "$brief" \
+    "ship brief did not fail closed on a non-fast-forward catch-up"
+  assert_grep "Commit after each real step" "$brief" \
+    "ship brief did not require step commits"
+  assert_grep "after the failing test exists and has been shown to fail" "$brief" \
+    "ship brief did not require the RED test commit"
+  assert_grep "after the fix makes it pass" "$brief" \
+    "ship brief did not require the GREEN fix commit"
+  assert_grep "after documentation is updated" "$brief" \
+    "ship brief did not require the documentation commit"
+  assert_grep "This is not a per-file commit rule." "$brief" \
+    "ship brief turned step commits into per-file ceremony"
+  assert_grep "$ROOT/bin/fm-push-guard.sh" "$brief" \
+    "ship brief did not wire the push guard by absolute path"
+  assert_grep "immediately before every push" "$brief" \
+    "ship brief did not place the guard at the push boundary"
+  pass "fm-brief.sh: ship scaffold requires catch-up, step commits, and the push guard"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -718,6 +749,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_git_safety_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
