@@ -221,6 +221,18 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
   pass "compressed AGENTS.md retains authority, supervision, AFK, and X safety"
 }
 
+test_agents_md_stays_under_memory_warning_ceiling() {
+  # 40000 characters is the threshold at which Claude Code warns that a memory
+  # file is too large. AGENTS.md is loaded in full at the start of every session,
+  # so crossing it silently undoes the reduction pass.
+  local ceiling size
+  ceiling=40000
+  size=$(LC_ALL=C wc -c <"$AGENTS")
+  size=${size//[[:space:]]/}
+  [ "$size" -lt "$ceiling" ] || fail "AGENTS.md is $size characters, at or over the $ceiling-character memory-file warning ceiling"
+  pass "AGENTS.md stays under the $ceiling-character memory-file warning ceiling ($size)"
+}
+
 test_new_skill_metadata_and_triggers
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
@@ -230,3 +242,4 @@ test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
 test_compressed_agents_retains_authority_and_supervision_safety
+test_agents_md_stays_under_memory_warning_ceiling

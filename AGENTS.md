@@ -59,7 +59,6 @@ bin/                 helper scripts, committed; read each script's header before
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
 config/              local operating choices; LOCAL, gitignored; docs/configuration.md owns every file's schema, defaults, and secondmate inheritance
 data/                personal fleet records; LOCAL, gitignored as a whole
-  backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style
   captain-shared.md  main-authoritative shared captain preferences propagated read-only to secondmate homes
   learnings.md       fleet-local operational facts and gotchas
@@ -74,7 +73,7 @@ state/               volatile runtime signals; gitignored; each producing script
   <id>.check.sh      authenticated slow poll; the watcher runs only trusted repository scripts and registered hash-validated custom checks, and rejects the rest without execution
   .wake-queue        durable queued wakes, one tab-separated record per line
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations
-  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak .watch.lock .wake-queue.lock   watcher internals; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 ```
 
@@ -423,7 +422,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `project-management` - load before adding, creating, removing, or initializing a project.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before any secondmate-home lifecycle action, and before editing `data/secondmates.md`.
-- `decision-hold-lifecycle` - load before treating an investigation or visual review as complete, and when recording or routing the captain's answer.
+- `decision-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
 - `fmx-respond` - load on an `x-mention` or `x-mode-error` `check:` wake, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling its smoke evidence.
 - `proplane-ladder` - load before PropPlane ship or scout work, ladder smoke e2e, or briefing crewmates on proplane keeper branches and promotion scripts.
