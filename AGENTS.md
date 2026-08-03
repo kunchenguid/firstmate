@@ -77,8 +77,6 @@ state/               volatile runtime signals; gitignored; each producing script
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 ```
 
-The tree lists only what an agent must recognize on sight; `docs/configuration.md` owns the full layout, and the remaining private `state/` files are owned by the scripts that produce them.
-
 `bin/fm-crew-state.sh` owns current-state reconciliation.
 Treat `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md` as canonical regardless of harness memory.
 
@@ -259,7 +257,7 @@ For PR-based ship tasks the worker reports the PR at its mode's definition of do
 Run `bin/fm-pr-check.sh <id> <PR url>` to record the PR in the task's durable record and arm the watcher's merge poll.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
-For any custom `state/<id>.check.sh` you write yourself, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
+For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.

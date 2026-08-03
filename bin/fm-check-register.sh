@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
 # Usage: fm-check-register.sh <id>
+#
+# Shape contract for state/<id>.check.sh, enforced below before any hash is
+# taken: it must be an ordinary file, not a symlink, with exactly one hard link,
+# mode 0700, residing on the same device as the state directory itself.
+# Registration refuses with "error: custom check is unavailable" otherwise, so a
+# check written under a permissive umask must be chmod 0700 before it can bind.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
