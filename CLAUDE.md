@@ -539,9 +539,10 @@ When updating this file, preserve every safety boundary and keep the always-load
 
 ## 🔄 Last Session (auto-generated)
 
-> **2026-08-03 11:52** · branch: `detached`
+> **2026-08-03 12:54** · branch: `detached`
 
 **Commits (today)**
+- 5b301ac no-mistakes(review): reclaim stale capture locks and reseed sequence from snapshots
 - e945582 feat: capture SpecGraph snapshots
 - 33a4287 fix(bin): harden Claude supervision auto-arm recovery (#1495)
 - 88b2a94 fix(bin): correct session lock and attached watcher supervision (#1545)
@@ -561,6 +562,5 @@ When updating this file, preserve every safety boundary and keep the always-load
 
 **Uncommitted**
 - `CLAUDE.md`
-- `bin/fm-specgraph-capture.sh`
 
 <!-- SESSION-PROGRESS-END -->
