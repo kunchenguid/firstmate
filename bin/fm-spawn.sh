@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
+#   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
+#   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
+#   standing posture as context, not as this task's answer, so a spawn never looks
+#   the mode up. A ship spawn additionally reads the brief's recorded
+#   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
+#   instructions and the recorded task delivery cannot drift apart; a brief
+#   scaffolded before that line existed warns once and launches on the flag. When
+#   the explicit mode carries less rigor than the project's standing posture, a
+#   loud one-line deviation notice is printed and the spawn continues.
+#   no-mistakes-prod-only is a registry policy rather than a task mode and is
+#   refused as a flag value.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -99,7 +112,9 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend applies to every pair.
+#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   applies to every pair. A ship batch therefore carries one delivery contract, and each
+#   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
@@ -118,9 +133,10 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
-# mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
-# secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
+# mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
+# success line and state/<id>.meta omit them.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -188,10 +204,14 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+MODE=
+YOLO=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+MODE_SET=0
+YOLO_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -204,6 +224,8 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      mode) MODE=$a; MODE_SET=1 ;;
+      yolo) YOLO=$a; YOLO_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -220,6 +242,10 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --mode) want_value=mode ;;
+    --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --yolo) want_value=yolo ;;
+    --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -228,10 +254,47 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
+[ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+
+# Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
+# firstmate's per-task decision, so they are required and closed-set validated
+# here rather than resolved from the project registry. Scouts deliver a report
+# and record no delivery posture; secondmate spawns hardcode theirs.
+if [ "$KIND" = ship ]; then
+  [ "$MODE_SET" -eq 1 ] || {
+    echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+    exit 1
+  }
+  [ "$YOLO_SET" -eq 1 ] || {
+    echo "error: ship spawns require --yolo <on|off>; it is this task's routine approval authority, not a project lookup" >&2
+    exit 1
+  }
+  case "$MODE" in
+    no-mistakes|direct-PR|local-only) ;;
+    no-mistakes-prod-only)
+      echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
+      exit 1 ;;
+    *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+  esac
+  case "$YOLO" in
+    on|off) ;;
+    *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
+  esac
+else
+  [ "$MODE_SET" -eq 0 ] || {
+    echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+    exit 1
+  }
+  [ "$YOLO_SET" -eq 0 ] || {
+    echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+    exit 1
+  }
+fi
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -324,8 +387,8 @@ spawn_abort_cleanup() {
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
             echo "kind=$KIND"
-            echo "mode=${MODE:-no-mistakes}"
-            echo "yolo=${YOLO:-off}"
+            [ -z "${MODE:-}" ] || echo "mode=$MODE"
+            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
@@ -394,6 +457,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  # One delivery contract applies to every pair in a batch, exactly like the shared
+  # harness. Each pair still re-validates it against its own brief, so a batch
+  # spanning several modes is two invocations rather than a silent mixed dispatch.
+  [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
+  [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -845,6 +913,41 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
+  case "$1" in
+    no-mistakes) echo 3 ;;
+    direct-PR) echo 2 ;;
+    local-only) echo 1 ;;
+    *) echo 0 ;;
+  esac
+}
+
+# Brief/spawn delivery agreement, checked before any endpoint exists.
+# fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
+# line. A spawn that disagrees would launch a worker whose instructions and whose
+# recorded task delivery differ, which is the exact drift this contract prevents.
+if [ "$KIND" = ship ]; then
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  if [ -z "$BRIEF_MODE" ]; then
+    echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
+  elif [ "$BRIEF_MODE" != "$MODE" ]; then
+    echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
+    exit 1
+  fi
+  # The registry holds the captain's standing posture, so dropping below it is
+  # allowed (a current explicit captain instruction wins) but never silent. An
+  # unregistered project resolves to the same no-mistakes standing default, which
+  # is why the notice names the standing posture rather than the registry line. A
+  # conditional policy is excluded: both of its legs are legitimate classifications.
+  STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
+  if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
+     && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
+    echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
@@ -1585,19 +1688,19 @@ EOF
   esac
 fi
 
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
-# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
-# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
-# merge, so scout teardown ignores mode.
+# Delivery posture recorded in meta so fm-teardown's safety check and the
+# validate/merge stages can branch on it. A ship task carries the explicit
+# per-task decision validated above; a secondmate's posture is fixed; a scout
+# records none at all, because its deliverable is a report rather than a merge
+# (fm-teardown.sh defaults an absent mode to no-mistakes, and fm-promote.sh
+# requires an explicit mode when a scout is promoted to a ship task).
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
   : "${SECONDMATE_PROJECTS:=}"
-else
-  PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
+elif [ "$KIND" = scout ]; then
+  MODE=
+  YOLO=
 fi
 
 META_WINDOW=$T
@@ -1609,8 +1712,8 @@ META_WINDOW=$T
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
-  echo "mode=$MODE"
-  echo "yolo=$YOLO"
+  [ -z "$MODE" ] || echo "mode=$MODE"
+  [ -z "$YOLO" ] || echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
@@ -1722,4 +1825,6 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
-echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
+SPAWN_DELIVERY=
+[ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
