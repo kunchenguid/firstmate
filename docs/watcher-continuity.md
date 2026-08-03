@@ -49,6 +49,7 @@ An attached arm follows verified identity-matched successors and resolves the sa
 Before releasing its singleton lock after printing an actionable reason, the watcher records that reason with its PID and process identity in `state/.watch-deliveries.log`.
 A matching PID and identity lets an attached arm report the delivered reason and exit zero even after the durable wake queue was drained, while an unrelated queue producer or a recycled PID cannot satisfy the match.
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
+The pull guard reads that same ledger's timestamp against the beacon to tell a completed cycle awaiting re-arm from a watcher that died, so the ledger must stay published only on the way out; `fm_watcher_clean_handoff` in `bin/fm-wake-lib.sh` owns that rule.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.

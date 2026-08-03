@@ -36,6 +36,12 @@ watch_delivery_clean_reason() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-4096
 }
 
+# Publish only on the way out, after the cycle's last beacon touch. Beyond the
+# arm layer's use of the record itself, fm_watcher_clean_handoff
+# (bin/fm-wake-lib.sh) reads mtime(ledger) >= mtime(beacon) as proof that the
+# cycle CHOSE to end, so a delivery published from anywhere but the exit path
+# would let a watcher that was killed mid-cycle read as a clean handoff and
+# silence a real supervision alarm.
 watch_delivery_publish() {
   local reason=$1 i size tmp raw
   [ -n "$FM_WATCH_DELIVERY_PID" ] || return 0

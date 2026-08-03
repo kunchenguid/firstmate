@@ -35,7 +35,7 @@ Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] 
 A stale beacon blocks even when a watcher pid is live.
 A fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
 `bin/fm-guard.sh` additionally separates a watcher that completed a cycle and is awaiting re-arm from one that is genuinely gone, and reports each differently; that distinction is about what the pull guard says mid-turn and never relaxes the turn-end block, because at a turn boundary an un-rearmed watcher is still no supervision.
-The two failure reasons and the three reported states are owned by `bin/fm-wake-lib.sh` and `bin/fm-guard.sh`'s own headers.
+`bin/fm-wake-lib.sh`'s header owns the recorded rejection-reason fields and every condition that sets them, and `bin/fm-guard.sh`'s header owns the three reported states.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
