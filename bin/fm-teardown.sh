@@ -13,6 +13,13 @@
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
+# Before those landed checks, a task whose metadata records pr= REFUSES teardown
+# while that PR or MR is still OPEN on its forge, even when every commit is
+# pushed: teardown removes the lane that owns the PR and its armed merge poll,
+# orphaning a PR nobody is driving (the 2026-08-02 orphaned-PR sweeps). A merged
+# or closed PR proceeds to the ordinary landed checks, and a failed state lookup
+# refuses rather than guessing (fail closed). --force keeps its explicit-discard
+# override.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -53,7 +60,8 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force]
-#   --force skips ordinary-task dirty and landed-work checks, skips scout report
+#   --force skips the open-PR refusal and ordinary-task dirty and landed-work
+#   checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #
@@ -500,6 +508,52 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+# State of the recorded pr= URL on its forge: prints open, merged, or closed and
+# returns 0; returns non-zero on an unparseable URL, an unsupported provider, or
+# any lookup failure. Each provider is read through the same CLI and field
+# choices as bin/fm-pr-poll.sh: gh takes the URL directly, and glab takes the
+# validated number plus -R project URL because it cannot take an MR URL (see
+# that script's rationale).
+recorded_pr_state() {
+  local state raw
+  fm_pr_url_parse "$PR_URL" || return 1
+  case "$FM_PR_PROVIDER" in
+    github)
+      state=$(gh pr view "$FM_PR_URL" --json state -q .state 2>/dev/null) || return 1
+      ;;
+    gitlab)
+      raw=$(glab mr view "$FM_PR_NUMBER" -R "https://$FM_PR_HOST/$FM_PR_PATH" 2>/dev/null) || return 1
+      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1)
+      ;;
+    *) return 1 ;;
+  esac
+  case "$state" in
+    OPEN|open|opened) printf '%s\n' open ;;
+    MERGED|merged) printf '%s\n' merged ;;
+    CLOSED|closed) printf '%s\n' closed ;;
+    *) return 1 ;;
+  esac
+}
+
+# Refuse while the recorded PR is still open, and refuse when its state cannot
+# be read (fail closed): teardown removes the PR's owner lane and its armed
+# merge poll either way, so proceeding on an open or unknown state orphans the
+# PR. Runs even when the worktree is already gone - the orphaning harm is
+# losing the owner and the poll, not just local commits.
+refuse_teardown_while_recorded_pr_open() {
+  local state
+  if ! state=$(recorded_pr_state); then
+    echo "REFUSED: cannot read the state of recorded PR $PR_URL; refusing teardown while it may still be open." >&2
+    echo "Fix the forge lookup (auth, network, or CLI), or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+  if [ "$state" = open ]; then
+    echo "REFUSED: PR $PR_URL is still open; this task still owns it and its merge poll." >&2
+    echo "Wait for the merge, merge or close it under the configured authority, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
 }
 
 backlog_refresh_reminder() {
@@ -1531,6 +1585,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   fi
   require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
   ORCA_PATH_MATCH_VERIFIED=1
+fi
+
+# Open-PR refusal (see header): independent of the worktree checks below so it
+# still fires when the worktree is already gone.
+if [ "$FORCE" != "--force" ] && [ -n "$PR_URL" ] \
+  && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+  refuse_teardown_while_recorded_pr_open || exit 1
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
