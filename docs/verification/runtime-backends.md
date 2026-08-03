@@ -92,6 +92,7 @@ Expected submit matrix: proven pending plus busy is accepted as queued; proven p
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+On 2026-08-03 the Orca fixture matrix was extended to the composite `orca_worktree_id=<id>::<absolute path>` records written by `fm-spawn.sh`, with path-traversal, whitespace, semicolon, and quote composites refusing.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
