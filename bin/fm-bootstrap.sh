@@ -27,10 +27,11 @@
 #          read, so it stays on the local pass rather than the deferred network
 #          one), so a stalled update is
 #          visible at session start rather than only to whoever remembered to look.
-#          When a RUNNING local secondmate worktree is fast-forwarded to
-#          firstmate's own current default-branch commit, that update is a
-#          purely local fast-forward and never an origin fetch. Remote routes
-#          instead converge the persistent home to their configured remote code
+#          When a RUNNING local secondmate worktree is advanced to firstmate's
+#          own current effective commit - the default-branch commit normally, or
+#          the held-stack live ref when that stack is configured - that update is
+#          purely local and never an origin fetch. Remote routes instead converge
+#          the persistent home to their configured remote code
 #          root. If either placement changes its loaded instruction surface
 #          (AGENTS.md, bin/, or .agents/skills/), bootstrap immediately nudges it
 #          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
@@ -277,9 +278,10 @@ fleet_sync() {
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  # Placement-specific secondmate sync: local homes fast-forward to the primary
-  # checkout's current default-branch commit. That path is purely LOCAL - no
-  # fetch, no origin dependency: a linked-worktree home already holds the primary's
+  # Placement-specific secondmate sync: local homes converge on the primary
+  # checkout's current effective commit (default branch, or the held-stack live
+  # ref when configured). That path is purely LOCAL - no fetch, no origin
+  # dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
   # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
   # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or

@@ -210,6 +210,7 @@ Local secondmates retain their generation-specific local pointer contract; remot
 
 `/updatefirstmate` updates each remote code root from its own origin, then guardedly fast-forwards the persistent remote home to that code-root commit.
 Dirty, diverged, unavailable, or otherwise unsafe targets are reported and left untouched.
+A primary running an initialized held-improvement stack never sends its primary-local patches to a host and reports every remote route as skipped instead of claiming parity; the skip says held improvements require host-local stack configuration, and no upstream-only update is attempted for that home (`docs/configuration.md` "Held improvements" owns that contract).
 
 Retire a remote second mate with the normal guarded command:
 

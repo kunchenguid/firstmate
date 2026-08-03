@@ -222,6 +222,7 @@ A conflict returns nonzero, leaves the previous effective revision running, and 
 An upstream commit that touched several of the held patch's paths is one collision and is named once.
 `bin/fm-bootstrap.sh` reports that file verbatim as a `NIGHTLY_UPDATE_ATTENTION:` line on every path including detect-only, so a stalled nightly update surfaces in the session-start digest instead of waiting to be looked for.
 Only the updater writes or clears the file.
+Firstmate ships no scheduler, so the nightly cadence the alarm name refers to is whatever unattended `bin/fm-update.sh` run the operator schedules; a captain-invoked `/updatefirstmate` writes and clears the same file.
 After inspecting both sides, an operator can replace the held entry or explicitly run `retire <id> <reason>` and rerun the updater.
 `add` and `retire` match an id exactly against the `<order>-<id>` stem, so an id that is a dash-suffix of another entry's id never selects it.
 `init` publishes the stack directory, the live ref, and the detached checkout together, and rolls the directory back if any of them fails, so a half-initialized stack is unreachable rather than merely escapable.

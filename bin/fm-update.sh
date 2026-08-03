@@ -12,9 +12,12 @@
 # secondmates move to that same known-good effective commit. Every path remains
 # clean-only and never stashes or discards unlanded work.
 #
-# The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
-# the same library drives the local-HEAD secondmate sync used by fm-spawn.sh and
-# fm-bootstrap.sh, so there is one ff implementation, not several.
+# The guarded revision-sync mechanics live in bin/fm-ff-lib.sh (base_mode
+# "origin" here in default mode, the effective commit in held mode); the same
+# library drives the local secondmate sync used by fm-spawn.sh and
+# fm-bootstrap.sh, so there is one implementation, not several. The held-stack
+# replay, retirement, alarm, and effective-ref mechanics live in
+# bin/fm-held-lib.sh.
 #
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics

@@ -19,7 +19,7 @@ This skill performs that pull for the running main firstmate and every secondmat
 Without a held stack, the update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
 With `config/held-improvements/` initialized, the default branch still fast-forwards only, while a scratch worktree transactionally reapplies the explicit patches and publishes a detached effective revision after the complete stack succeeds.
 Content already present upstream retires automatically by verbatim patch or exact resulting content, independent of commit identity.
-A genuine replay conflict keeps the last known-good effective revision live and writes the existing nightly attention alarm naming the held improvement, the upstream change, and the paths.
+A genuine replay conflict keeps the last known-good effective revision live and writes the `state/.nightly-update-needs-attention` alarm naming the held improvement, the upstream change, and the paths.
 For a remote route in default mode, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
 Held mode does not send primary-private patches to a remote host and reports that route as skipped.
 It never creates a merge commit or stashes; anything dirty, diverged, offline, on the wrong branch, or outside the held stack's known-effective set is skipped and reported.
