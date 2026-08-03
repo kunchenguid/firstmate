@@ -669,6 +669,65 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+scout_report_front_contract_holds() {
+  local brief=$1 executive decision actions
+  # shellcheck disable=SC2016 # Generated Markdown backticks must remain literal.
+  executive=$(grep -nFx '1. `## Executive summary`' "$brief" | cut -d: -f1)
+  # shellcheck disable=SC2016 # Generated Markdown backticks must remain literal.
+  decision=$(grep -nFx '2. `## Decision inventory`' "$brief" | cut -d: -f1)
+  # shellcheck disable=SC2016 # Generated Markdown backticks must remain literal.
+  actions=$(grep -nFx '3. `## Current next actions`' "$brief" | cut -d: -f1)
+  # shellcheck disable=SC2016 # Generated Markdown backticks must remain literal.
+  [ -n "$executive" ] && [ -n "$decision" ] && [ -n "$actions" ] \
+    && [ "$executive" -lt "$decision" ] && [ "$decision" -lt "$actions" ] \
+    && grep -Fq 'the `## Decision inventory` section must contain the exact line `Decision inventory: None`' "$brief" \
+    && grep -Fq 'current conclusions, consequences, and recommendations rather than investigation chronology' "$brief" \
+    && grep -Fq 'stable privacy-safe key, owner, exact options, and current OPEN or resolved state' "$brief" \
+    && grep -Fq 'distinguish authorized next work from recommendations that still need authorization' "$brief" \
+    && grep -Fq 'data/' "$brief" \
+    && grep -Fq 'decision-hold-lifecycle/SKILL.md' "$brief"
+}
+
+test_scout_report_front_is_stable_by_construction() {
+  local home brief mutant_root mutant_home mutant_brief mutant_out
+  home="$TMP_ROOT/scout-front-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" stable-front sample --scout >/dev/null 2>&1
+  brief="$home/data/stable-front/brief.md"
+  scout_report_front_contract_holds "$brief" \
+    || fail "generated scout brief lost the stable report front, explicit empty inventory, report path, or decision owner"
+
+  mutant_root="$TMP_ROOT/scout-front-mutant"
+  mutant_home="$mutant_root/home"
+  mkdir -p "$mutant_root/bin" "$mutant_home/data"
+  cp "$ROOT/bin/fm-brief.sh" "$ROOT/bin/fm-marker-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
+    "$ROOT/bin/fm-classify-lib.sh" "$mutant_root/bin/"
+  python3 - "$mutant_root/bin/fm-brief.sh" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = text.replace(
+    "2. \\`## Decision inventory\\`\n3. \\`## Current next actions\\`",
+    "2. \\`## Current next actions\\`\n3. \\`## Decision inventory\\`",
+    1,
+)
+path.write_text(text, encoding="utf-8")
+PY
+  chmod +x "$mutant_root/bin/fm-brief.sh"
+  if ! mutant_out=$(FM_HOME="$mutant_home" FM_ROOT_OVERRIDE="$mutant_root" \
+    "$mutant_root/bin/fm-brief.sh" unstable-front sample --scout 2>&1); then
+    fail "realistic heading-order mutant did not generate a scout brief: $mutant_out"
+  fi
+  mutant_brief="$mutant_home/data/unstable-front/brief.md"
+  assert_present "$mutant_brief" "realistic heading-order mutant did not write its generated brief"
+  if scout_report_front_contract_holds "$mutant_brief"; then
+    fail "stable-front behavior check survived a realistic heading-order mutation"
+  fi
+  pass "fm-brief.sh: scout reports start with a mutation-witnessed stable front and explicit empty inventory"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -726,5 +785,6 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_scout_report_front_is_stable_by_construction
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

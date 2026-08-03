@@ -337,6 +337,14 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+The report must begin with these level-two sections in exactly this order:
+1. \`## Executive summary\`
+2. \`## Decision inventory\`
+3. \`## Current next actions\`
+The executive summary must state current conclusions, consequences, and recommendations rather than investigation chronology.
+List each remaining decision with its stable privacy-safe key, owner, exact options, and current OPEN or resolved state.
+Keep that stable front current when detailed evidence grows, and distinguish authorized next work from recommendations that still need authorization.
+When no captain decision remains, the \`## Decision inventory\` section must contain the exact line \`Decision inventory: None\`.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.

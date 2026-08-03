@@ -66,6 +66,21 @@ Never describe the session as reset-safe while the memory total is over budget o
    The only graduation moves are promotion to tracked shared material through a PR, folding a learning into the captain-preference destination selected by AGENTS.md, or deletion of a stale entry.
    Do not invent another graduation path.
 
+## Fresh-session safety
+
+Treat a compact summary as navigation evidence, never as a durable knowledge destination or a substitute for the ownership routes above.
+Call the current session safe to reset only after a major investigation or implementation phase has ended and all of these conditions hold:
+
+- the current goal, accepted requirements, every still-binding authority boundary, every open decision, the exact code or pull request head, active file changes, validation receipts, and ordered next actions are recorded in their authoritative durable owners;
+- every unresolved report or visual-review decision has passed the `decision-hold-lifecycle` completion owner;
+- no active tool call, queued message, compaction, or retry is in progress;
+- no credential or approval exists only in conversation context;
+- the next task can resume from named durable files and structured fleet state without broad evidence rereads.
+
+Refuse a reset-safe verdict while any binding authority, open decision, exact head, validation receipt, active change, or next action exists only in conversation context.
+Recommend a fresh session after one successful bounded compaction when the next provider-reported input remains above 50,000 tokens on two ordinary turns, the summary exceeds 3,000 output tokens without a documented safety need, or a closed investigation still dominates the next task's context.
+Do not recommend a fresh session merely because the JSONL file is large.
+
 ## Completion receipt
 
 Report the outcome in plain captain-facing language with all of these facts:
@@ -74,9 +89,13 @@ Report the outcome in plain captain-facing language with all of these facts:
 - one or more actions for each of `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`: `unchanged`, `added`, `rewritten`, `pruned`, or `routed`;
 - each durable finding filed outside memory and its authoritative owner;
 - every unresolved exception, including a primary-owned shared-file constraint in a secondmate home;
-- whether the session is safe to reset, only when all durable findings are captured and the post-pass result is within budget with no exception.
+- whether the session is safe to reset, only when all durable findings are captured, the fresh-session conditions above hold, and the post-pass result is within budget with no exception;
+- when reset is safe, one copy-pasteable final line in this exact shape: `RESUME POINTER: Load <named durable files>; inspect <structured fleet source>; continue with <first next action>.`
 
-Do not hide an over-budget result behind a reset-safe claim.
+Every resume-pointer file and structured source must already exist and contain the current state it names.
+Keep the literal uppercase `RESUME POINTER:` prefix and the three semicolon-delimited clauses, and never rename or paraphrase that receipt label.
+Withhold the resume pointer and state the missing durable fact when reset is unsafe.
+Do not hide an over-budget result or a conversation-only authority fact behind a reset-safe claim.
 
 ## Scope exclusion: no skill storage
 

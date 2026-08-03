@@ -34,6 +34,13 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Fixture commits must not inherit a developer's global commit-signing policy.
+# GPG signing is outside every test's contract and can otherwise make identical
+# fixture setup fail before the behavior under test runs.
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=commit.gpgsign
+export GIT_CONFIG_VALUE_0=false
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
