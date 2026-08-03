@@ -15,6 +15,12 @@
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction.
+# An INCONCLUSIVE verdict gets one read-back before that nonzero exit: when the
+# backend's native busy state proves an agent mid-turn AND a bounded capture
+# still shows the typed text, the harness queued the message for its next turn
+# (loop audit 2026-08-02: busy panes made every such steer read as undelivered
+# and callers double-queued by retyping), so fm-send prints a "queued while
+# pane busy" note and exits 0. See fm_send_readback_queued for the exact proof.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -120,6 +126,48 @@ fm_send_count_colons() {  # <string>
   local s=$1 no_colons
   no_colons=${s//:/}
   printf '%s' $(( ${#s} - ${#no_colons} ))
+}
+
+# stdin -> stdout: drop all whitespace and composer border glyphs so a capture
+# row wrapped at pane width or boxed by a bordered composer still substring-
+# matches the typed text.
+fm_send_condense() {
+  tr -d ' \t\r\n' | sed -e 's/│//g' -e 's/┃//g' -e 's/|//g'
+}
+
+# Read-back rescue for an inconclusive submit verdict. Delivered proof requires
+# BOTH the backend's NATIVE busy state reading busy (an agent mid-turn queues
+# submitted text for its next turn - the same policy the tmux submit core
+# applies to its proven busy-queued Enter) AND a condensed prefix of the typed
+# text visible in a bounded capture. Anything less - idle or unknown busy
+# state, failed capture, absent text - refuses and records why in
+# FM_SEND_READBACK_WHY, preserving the loud nonzero boundary. Backends with no
+# native busy primitive (tmux reports unknown) never reach the rescue; their
+# submit cores own the equivalent conversion.
+fm_send_readback_queued() {  # <backend> <target> <message>
+  local backend=$1 target=$2 message=$3 busy cap probe hay
+  FM_SEND_READBACK_WHY=""
+  busy=$(fm_backend_busy_state "$backend" "$target")
+  if [ "$busy" != busy ]; then
+    FM_SEND_READBACK_WHY="pane not provably busy (busy_state=${busy:-unknown})"
+    return 1
+  fi
+  if ! cap=$(fm_backend_capture "$backend" "$target" "${FM_SEND_READBACK_LINES:-80}" "$EXPECTED_LABEL"); then
+    FM_SEND_READBACK_WHY="capture unavailable"
+    return 1
+  fi
+  probe=$(printf '%s' "$message" | fm_send_condense)
+  probe=${probe:0:48}
+  if [ -z "$probe" ]; then
+    FM_SEND_READBACK_WHY="message has no matchable content"
+    return 1
+  fi
+  hay=$(printf '%s' "$cap" | fm_send_condense)
+  case "$hay" in
+    *"$probe"*) return 0 ;;
+  esac
+  FM_SEND_READBACK_WHY="text absent from capture"
+  return 1
 }
 
 fm_send_resolve_target() {  # <raw-target>
@@ -309,11 +357,15 @@ else
       exit 1
       ;;
     *)
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      if fm_send_readback_queued "$TARGET_BACKEND" "$T" "$MESSAGE"; then
+        echo "delivered: queued while pane busy (read-back verified; verdict=${verdict:-unknown})"
+      else
+        if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+          fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+        fi
+        echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; read-back: ${FM_SEND_READBACK_WHY:-unavailable}; tried $RESOLUTION_TRIED)" >&2
+        exit 1
       fi
-      echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
-      exit 1
       ;;
   esac
   # Delivery confirmed. Mark the pending expectation delivered without resolving

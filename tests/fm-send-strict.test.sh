@@ -5,6 +5,11 @@
 # well-formed backend target must fail loudly. These tests pin the historical
 # silent-fallback failures: missing FM_HOME, unresolved selectors, prefixless
 # herdr pane ids, dead explicit endpoints, and the healthy exact/fm-id paths.
+# They also pin the other side of the loud-failure boundary: an inconclusive
+# submit verdict on a provably BUSY pane whose capture still shows the typed
+# text is a queued delivery (exit 0), never a "retype it" failure (the loop
+# audit 2026-08-02 double-queue false negative), while absent text keeps the
+# nonzero refusal.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -163,9 +168,72 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+# A minimal herdr CLI fake for the read-back boundary: server always running,
+# agent get always "working" (busy pane), pane read prints the file named by
+# FM_FAKE_HERDR_PANEFILE. send-text/send-keys succeed silently like the real
+# CLI. jq stays real (a required tool for the herdr adapter, same stance as
+# tests/fm-backend-herdr.test.sh).
+make_herdr_stub() {  # <fakebin-dir>
+  cat > "$1/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"server":{"running":true}}\n'; exit 0 ;;
+  "agent get") printf '{"result":{"agent":{"agent_status":"working"}}}\n'; exit 0 ;;
+  "pane read") cat "${FM_FAKE_HERDR_PANEFILE:?}"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$1/herdr"
+}
+
+setup_readback_home() {  # <name> -> echoes home dir
+  local home
+  home=$(setup_home "$1")
+  fm_write_meta "$home/state/rb-lane.meta" \
+    "window=default:wB:p2" "backend=herdr" "herdr_session=default" \
+    "herdr_pane_id=wB:p2" "kind=ship"
+  printf '%s\n' "$home"
+}
+
+test_busy_pane_queued_text_readback_exits_zero() {
+  command -v jq >/dev/null 2>&1 || { echo "note: jq not found; read-back cases not exercised"; return 0; }
+  local dir fb home err out rc
+  dir="$TMP_ROOT/readback-queued"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); make_herdr_stub "$fb"; home=$(setup_readback_home rbq)
+  err="$dir/send.err"; out="$dir/send.out"
+  # The pane shows the steer wrapped in a bordered composer, split across rows:
+  # the condensed comparison must still find it.
+  printf '│ ship the fix, push github, │\n│ open PR, done: PR url │\n' > "$dir/pane.txt"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0 FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 \
+    FM_FAKE_HERDR_PANEFILE="$dir/pane.txt" \
+    "$SEND" rb-lane "ship the fix, push github, open PR, done: PR url" >"$out" 2>"$err"; rc=$?
+  expect_code 0 "$rc" "busy pane with queued text should read back as delivered"$'\n'"$(cat "$err")"
+  assert_contains "$(cat "$out")" "queued while pane busy" "read-back success should say the message was queued"
+  pass "fm-send strict: busy-pane queued text read-back exits zero"
+}
+
+test_busy_pane_absent_text_readback_still_fails() {
+  command -v jq >/dev/null 2>&1 || { echo "note: jq not found; read-back cases not exercised"; return 0; }
+  local dir fb home err rc
+  dir="$TMP_ROOT/readback-absent"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); make_herdr_stub "$fb"; home=$(setup_readback_home rba)
+  err="$dir/send.err"
+  printf 'some unrelated transcript output\n' > "$dir/pane.txt"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0 FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 \
+    FM_FAKE_HERDR_PANEFILE="$dir/pane.txt" \
+    "$SEND" rb-lane "ship the fix, push github, open PR" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "absent text should keep the nonzero refusal"
+  assert_contains "$(cat "$err")" "delivery unconfirmed" "absent-text failure should keep the unconfirmed diagnostic"
+  assert_contains "$(cat "$err")" "read-back: text absent from capture" "absent-text failure should name the read-back result"
+  pass "fm-send strict: busy-pane absent text keeps the loud refusal"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
+test_busy_pane_queued_text_readback_exits_zero
+test_busy_pane_absent_text_readback_still_fails
