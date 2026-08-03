@@ -33,6 +33,7 @@ run_open() {
 }
 
 # Prefer native wezterm open when it succeeds.
+# shellcheck disable=SC2016  # single quotes are deliberate: this is a stub script body, so $1 must expand when the stub runs, not when the test writes it.
 make_stub_bin wezterm \
   '#!/usr/bin/env bash' \
   'if [ "$1" = open ]; then echo native > "'"$MARKER"'" ; exit 0; fi' \
