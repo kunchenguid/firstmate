@@ -820,11 +820,11 @@ missing_tool_diagnostic() {
   echo "MISSING: $tool (install: $(install_cmd "$tool"))"
 }
 
-# Required-tool detection follows the RESOLVED backend, not a one-size default:
-# a universal toolchain every home needs plus the backend-specific delta owned by
-# fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
-# never told tmux is missing, and only orca drops treehouse. A backend value with
-# no verified dependency set is reported before the universal checks continue.
+# Required-tool detection combines the universal toolchain, the provider tools
+# derived from registered project origins, and the resolved backend's delta from
+# fm_backend_required_tools (bin/fm-backend.sh). Thus GitLab-only homes do not
+# require GitHub tooling, inactive backends do not add tools, and an invalid
+# backend is reported before the universal checks continue.
 COMMON_TOOLS="node git no-mistakes chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 FORGE_PROJECTS=$(fm_forge_scan_registered_projects "$PROJECTS")
 FORGE_PROVIDERS_SEEN=$(printf '%s\n' "$FORGE_PROJECTS" | awk '{print $2}' | sort -u)
