@@ -362,9 +362,27 @@ clear_pause_tracking() {  # <window>
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
+# 0 while this window's declared pause has ALREADY been surfaced once inside the
+# current PAUSE_RESURFACE_SECS window, reusing the same .paused-resurfaced-<key>
+# marker handle_paused_stale already paces the bounded recheck with, so the
+# cadence keeps one owner rather than gaining a second copy here.
+# The live-agent gate in pause_state_class deliberately surfaces a declared pause
+# once, so an active external-decision gate is never hidden behind the long
+# cadence. That gate was evaluated per distinct PANE HASH, though, and a first
+# sight is only "first" for a pane that holds still: a crew polling CI in a
+# foreground loop is idle and alive but repaints an elapsed-time footer, so every
+# repaint minted a new hash, read as another first sight, and re-escalated as a
+# possible wedge every few minutes despite the crew having declared exactly what
+# it was waiting for. Bounding the gate per pause EPISODE keeps the one intended
+# surface and drops the repeats.
+pause_already_surfaced() {  # <key>
+  [ "$(age_of "$STATE/.paused-resurfaced-$1")" -lt "$PAUSE_RESURFACE_SECS" ]
+}
+
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# fm-crew-state has fallen back to stopped or unknown; a corroborated pause that
+# has already had its one live-agent surface falls to the bounded cadence instead.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -378,7 +396,7 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
+    if [ "$(window_kind "$win")" != secondmate ] && ! pause_already_surfaced "$key"; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
@@ -395,7 +413,11 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
-  if [ "$(window_kind "$win")" != secondmate ]; then
+  # A `none` class means fm-crew-state could not corroborate the declared wait, so
+  # it stays liveness-gated on every sighting; only a corroborated `paused` may
+  # spend its single live surface and then settle onto the bounded cadence.
+  if [ "$(window_kind "$win")" != secondmate ] \
+     && { [ "$class" != paused ] || ! pause_already_surfaced "$key"; }; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"

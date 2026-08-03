@@ -786,6 +786,56 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# The 2026-08-02 CI-polling case: a live crew waiting on a merge queue declared
+# `paused: <what clears it>` and still re-escalated as a possible wedge roughly
+# every five minutes, twelve times, while its checks ran normally end to end.
+# The live-agent gate above is meant to surface a declared pause ONCE so an active
+# external-decision gate is never hidden behind the long cadence - but it was
+# evaluated per distinct pane HASH, and a first sight is only "first" for a pane
+# that holds still. A CI-polling pane is idle and alive while repainting an
+# elapsed-time footer, so every repaint minted a new hash that read as another
+# first sight. The single intended surface must stand and every later repaint must
+# ride the bounded pause cadence instead of buying another wedge escalation.
+test_live_declared_pause_surfaces_once_across_pane_repaints() {
+  local dir state fakebin out statusf capture_file window key round text pane_hash sig pid wakes wedges
+  dir=$(make_case live-paused-repaint); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/cipoll.status"
+  window="test:fm-cipoll"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/cipoll.meta"
+  printf 'paused: waiting on the CI merge queue to finish\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-cipoll_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  round=1
+  while [ "$round" -le 4 ]; do
+    # Repaint the footer exactly as a foreground CI poll loop does, and prime the
+    # counter so the resulting new hash is immediately stale on the next poll.
+    text="waiting on checks... elapsed ${round}m"
+    printf '%s' "$text" > "$capture_file"
+    pane_hash=$(hash_text "$text")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+      FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the CI merge queue to finish' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if wait_live "$pid" 15; then reap "$pid"; else wait "$pid" || true; fi
+    round=$((round + 1))
+  done
+
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] \
+    || fail "a live declared pause surfaced $wakes times across four pane repaints (expected exactly 1)"
+  wedges=$(grep -c 'possible wedge' "$state/.wake-queue" 2>/dev/null || true)
+  [ "${wedges:-0}" -eq 0 ] || fail "a declared pause was wedge-escalated $wedges times across repaints"
+  [ -e "$state/.paused-$key" ] || fail "the repainting declared pause lost its bounded pause cadence marker"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a declared pause retained the wedge timer across repaints"
+  pass "a live declared pause surfaces once and holds the bounded cadence while its pane keeps repainting"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1826,6 +1876,7 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_live_declared_pause_surfaces_once_across_pane_repaints
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
