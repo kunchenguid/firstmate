@@ -412,6 +412,135 @@ test_spawn_refuses_a_brief_that_names_a_different_pair() {
   pass "fm-spawn: a brief naming a different base pair is refused before any endpoint exists"
 }
 
+test_local_only_spawn_uses_the_local_trunk_as_its_contribution_target() {
+  local repo wt home fakebin id out status slot branch
+  repo=$(make_fork_repo local-only 2)
+  wt="$TMP_ROOT/local-only/wt"
+  home="$TMP_ROOT/local-only/home"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/local-only/fake")
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'codex\n' > "$home/config/crew-harness"
+  touch "$home/state/.last-watcher-beat"
+  slot=$(git -C "$repo" rev-parse main)
+  git -C "$repo" worktree add --quiet --detach "$wt" main~1
+  id='base-local-e5'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$BRIEF" "$id" fixture --mode local-only --slot-base "$slot" --contribution-target "$slot" >/dev/null \
+    || fail "local-only: brief scaffold failed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$wt" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$repo" --mode local-only --yolo off 2>&1); status=$?
+  expect_code 0 "$status" "local-only: spawn should succeed (got: $out)"
+  assert_grep "contribution_target=$slot" "$home/state/$id.meta" \
+    "local-only: contribution target must be the local trunk"
+  assert_grep 'base_state=coincident' "$home/state/$id.meta" \
+    "local-only: local delivery must collapse both bases onto the local trunk"
+  branch='fm/local-only-check'
+  git_q "$repo" branch "$branch" "$(sed -n 's/^contribution_target=//p' "$home/state/$id.meta")"
+  git -C "$repo" merge-base --is-ancestor main "$branch" \
+    || fail "local-only: the derived branch base would fail fm-merge-local's ancestor check"
+  pass "fm-spawn: local-only delivery derives a contribution target accepted by the local merge guard"
+}
+
+test_ship_without_a_required_base_contract_is_refused() {
+  local repo home fakebin id out status slot contrib wt
+  repo=$(make_fork_repo missing-contract 2)
+  home="$TMP_ROOT/missing-contract/home"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/missing-contract/fake")
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'codex\n' > "$home/config/crew-harness"
+  touch "$home/state/.last-watcher-beat"
+  id='base-missing-f6'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$BRIEF" "$id" fixture --mode no-mistakes >/dev/null \
+    || fail "missing-contract: legacy brief scaffold failed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "missing-contract: a distinct-base ship brief without a contract must be refused"
+  assert_contains "$out" "$id brief records no base contract line" \
+    "missing-contract: the refusal must name the task and missing contract"
+  assert_contains "$out" "re-scaffold the brief with --slot-base/--contribution-target" \
+    "missing-contract: the refusal must give the safe repair"
+  assert_absent "$home/state/$id.meta" "missing-contract: a refused spawn wrote task metadata"
+
+  id='base-present-g7'
+  wt="$TMP_ROOT/missing-contract/wt"
+  slot=$(git -C "$repo" rev-parse main)
+  contrib=$(git -C "$repo" rev-parse origin/main)
+  git -C "$repo" worktree add --quiet --detach "$wt" main~1
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$BRIEF" "$id" fixture --mode no-mistakes --slot-base "$slot" --contribution-target "$contrib" >/dev/null \
+    || fail "missing-contract: positive-control brief scaffold failed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$wt" PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off 2>&1); status=$?
+  expect_code 0 "$status" "missing-contract: a matching contract must still pass (got: $out)"
+  pass "fm-spawn: a distinct-base ship requires a matching base contract before launch"
+}
+
+test_scout_refuses_a_mismatched_base_contract() {
+  local repo home fakebin id out status wrong_slot slot
+  repo=$(make_fork_repo scout-mismatch 2)
+  home="$TMP_ROOT/scout-mismatch/home"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/scout-mismatch/fake")
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'codex\n' > "$home/config/crew-harness"
+  touch "$home/state/.last-watcher-beat"
+  id='base-scout-h8'
+  slot=$(git -C "$repo" rev-parse main)
+  wrong_slot=$(git -C "$repo" rev-parse main~1)
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$BRIEF" "$id" fixture --scout --slot-base "$wrong_slot" >/dev/null \
+    || fail "scout-mismatch: brief scaffold failed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$repo" --scout 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "scout-mismatch: a false citation base must be refused"
+  assert_contains "$out" "base mismatch for $id" \
+    "scout-mismatch: the refusal must name the false base claim"
+  assert_absent "$home/state/$id.meta" "scout-mismatch: a refused scout wrote task metadata"
+  [ "$wrong_slot" != "$slot" ] || fail "scout-mismatch: fixture did not create a real mismatch"
+  pass "fm-spawn: a scout's false citation-base contract is refused before launch"
+}
+
+test_batch_forwards_explicit_base_overrides() {
+  local repo wt home fakebin id out status slot contrib
+  repo=$(make_fork_repo batch-overrides 2)
+  wt="$TMP_ROOT/batch-overrides/wt"
+  home="$TMP_ROOT/batch-overrides/home"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/batch-overrides/fake")
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'codex\n' > "$home/config/crew-harness"
+  touch "$home/state/.last-watcher-beat"
+  slot=$(git -C "$repo" rev-parse main~1)
+  contrib=$(git -C "$repo" rev-parse origin/main)
+  git -C "$repo" worktree add --quiet --detach "$wt" main~2
+  id='base-batch-i9'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$BRIEF" "$id" fixture --mode no-mistakes --slot-base "$slot" --contribution-target "$contrib" >/dev/null \
+    || fail "batch-overrides: brief scaffold failed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$wt" PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id=$repo" --mode no-mistakes --yolo off \
+    --slot-base "$slot" --contribution-target "$contrib" 2>&1); status=$?
+  expect_code 0 "$status" "batch-overrides: forwarded overrides must pass (got: $out)"
+  assert_grep "slot_base=$slot" "$home/state/$id.meta" \
+    "batch-overrides: batch must forward the slot override"
+  assert_grep "contribution_target=$contrib" "$home/state/$id.meta" \
+    "batch-overrides: batch must forward the contribution override"
+  pass "fm-spawn: batch dispatch forwards both explicit base overrides"
+}
+
 test_resolves_two_distinct_references_on_a_fork
 test_coincident_when_there_is_no_distinct_upstream
 test_unresolved_when_the_upstream_trunk_is_unreadable
@@ -425,3 +554,7 @@ test_brief_refuses_incoherent_base_inputs
 test_spawn_records_both_references_and_places_the_slot_at_the_fleet_trunk
 test_scout_gets_a_read_base_and_no_contribution_target
 test_spawn_refuses_a_brief_that_names_a_different_pair
+test_local_only_spawn_uses_the_local_trunk_as_its_contribution_target
+test_ship_without_a_required_base_contract_is_refused
+test_scout_refuses_a_mismatched_base_contract
+test_batch_forwards_explicit_base_overrides
