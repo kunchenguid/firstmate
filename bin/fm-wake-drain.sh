@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, optionally acknowledge handled records,
-# annotate validated signal status keys, then assert liveness.
+# annotate validated signal status keys, record the wake-outcome ledger's wake
+# half (bin/fm-wake-ledger.sh), then assert liveness.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,6 +46,17 @@ esac
 # watcher. Never let a guard hiccup change the drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
+}
+
+# The deterministic half of the wake-outcome ledger: one durable wake record per
+# deduped row this drain handed to the coordinator, so measured attention cost
+# has a denominator that moves only when wakes actually happen.
+# bin/fm-wake-ledger.sh owns the format. Its one call site sits below the
+# authoritative print-and-delete boundary, with stdout discarded and failure
+# ignored, so the ledger can never block, delay, alter, or fail a wake.
+record_wake_ledger() {
+  [ -n "$RAW_ROWS" ] || return 0
+  printf '%s\n' "$RAW_ROWS" | "$SCRIPT_DIR/fm-wake-ledger.sh" drain-record >/dev/null || true
 }
 
 # Print the consolidated OPEN DECISIONS section: every still-open
@@ -219,5 +231,6 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
 
 (fm_wake_print_annotations "$RAW_ROWS") || true
 (print_open_decisions_section) || true
+record_wake_ledger
 assert_watcher_liveness
 exit 0
