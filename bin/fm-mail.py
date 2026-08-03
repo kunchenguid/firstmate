@@ -142,6 +142,10 @@ ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+# Renderers break a line on these, but str.split("\n") does not, so an
+# unfolded separator would put text on a visually new line that print_envelope
+# never prefixed - and that line could impersonate the envelope end marker.
+# Folding them into real newlines first is what keeps the prefix guarantee.
 LINE_BREAK_RE = re.compile("[\u2028\u2029]")
 URL_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"')]+", re.IGNORECASE)
 LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{16,}\b")
