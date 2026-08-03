@@ -77,6 +77,17 @@ When a program's source spec or tickets carry them, they are the upstream draft 
 
 For a paired ticket, the navigator independently challenges and refines the approved test contract at the plan gate; `paired-review` owns that gate.
 
+## Cross-ticket decisions
+
+A program settles things that outlive the ticket that settled them: which package owns a concern, which contract or route is authoritative, which shape was rejected and why.
+Keep them in the program's decision record alongside the durable private records above, each decision identified so a brief can name it and a worker can read it, and each carrying its reason, because the reason is what a later challenge is measured against.
+Record a decision as soon as a ticket settles something a later ticket would otherwise re-decide.
+
+When dispatching a paired ticket, hand the decisions bearing on it to both the driver and the navigator, named by absolute path in each brief; `paired-review` owns what the navigator does with them.
+
+Hold cross-package and whole-solution direction yourself.
+It reaches no single ticket's worker or navigator, for the field-of-view reason `paired-review` records, so this is where it is caught or it is not caught at all.
+
 ## Remote-host ramp
 
 Treat every remote host as untrusted capacity until it completes the ramp below.
@@ -128,6 +139,6 @@ A handoff with a missing worker, conflicting branch, changed SHA, unexplained di
 
 ## Completion checks
 
-This procedure is complete only when the orchestrator pin is isolated from worker profiles, every dispatched ticket has exactly one custody record, every selected host has verified capability evidence, every remote host obeys the onboarding and widening limits, and every handoff worker has a reconciled inventory and custody notification.
+This procedure is complete only when the orchestrator pin is isolated from worker profiles, every dispatched ticket has exactly one custody record, every selected host has verified capability evidence, every remote host obeys the onboarding and widening limits, every dispatched paired ticket carries the decisions bearing on it, and every handoff worker has a reconciled inventory and custody notification.
 Retain the program ledger and evidence references needed for recovery, delivery review, and cleanup under the existing private-record and delivery owners.
 When a worker reaches a delivery milestone or terminal result, follow the ordinary lifecycle and approval rules instead of adding a program-specific merge, cleanup, or evidence gate.
