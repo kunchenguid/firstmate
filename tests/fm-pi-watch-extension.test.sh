@@ -2263,11 +2263,17 @@ printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
 while [ ! -e "${FM_STOP_FILE:?}.$cycle" ] && [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 if [ -e "$FM_STOP_FILE.$cycle" ]; then
-  printf 'signal: demo.status done: fixture finished\n'
+  if [ "$cycle" -eq 1 ] && [ -e "$FM_HOME/state/.afk" ]; then
+    printf '%s\t1\tcheck\tadapter-transition\tcheck: adapter transition: needs-decision: choose route\n' "$(date +%s)" >> "$FM_HOME/state/.wake-queue"
+    printf 'check: adapter transition: needs-decision: choose route\n'
+  else
+    printf 'signal: demo.status done: fixture finished\n'
+  fi
 fi
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_DAEMON="$ROOT/bin/fm-supervise-daemon.sh" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -2313,6 +2319,22 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 500));
   if (prompt) throw new Error(`away mode still delivered an ordinary wake: ${prompt}`);
   if (armRows() !== 1) throw new Error(`away mode re-armed the watcher: ${armRows()} cycles`);
+  execFileSync("bash", ["-c", '. "$FM_DAEMON"; housekeeping "$FM_HOME/state"'], {
+    env: {
+      ...process.env,
+      FM_STATE_OVERRIDE: `${process.env.FM_HOME}/state`,
+      FM_ESCALATE_BATCH_SECS: "999999",
+      FM_MAX_DEFER_SECS: "999999",
+    },
+  });
+  const queued = readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8");
+  const escalations = readFileSync(`${process.env.FM_HOME}/state/.subsuper-escalations`, "utf8");
+  if (!queued.includes("check: adapter transition: needs-decision: choose route")) {
+    throw new Error(`Pi handoff lost the durable wake: ${queued}`);
+  }
+  if (!escalations.includes("check: adapter transition: needs-decision: choose route")) {
+    throw new Error(`Pi handoff did not reach daemon classification: ${escalations}`);
+  }
 
   // Away mode ends: ordinary supervision and wake delivery resume unchanged.
   rmSync(`${process.env.FM_HOME}/state/.afk`);
@@ -2358,11 +2380,17 @@ printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
 while [ ! -e "${FM_STOP_FILE:?}.$cycle" ] && [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 if [ -e "$FM_STOP_FILE.$cycle" ]; then
-  printf 'signal: demo.status done: fixture finished\n'
+  if [ "$cycle" -eq 1 ] && [ -e "$FM_HOME/state/.afk" ]; then
+    printf '%s\t1\tcheck\tadapter-transition\tcheck: adapter transition: needs-decision: choose route\n' "$(date +%s)" >> "$FM_HOME/state/.wake-queue"
+    printf 'check: adapter transition: needs-decision: choose route\n'
+  else
+    printf 'signal: demo.status done: fixture finished\n'
+  fi
 fi
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_DAEMON="$ROOT/bin/fm-supervise-daemon.sh" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -2406,6 +2434,22 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 500));
   if (prompt) throw new Error(`away mode still delivered an ordinary wake: ${prompt}`);
   if (armRows() !== 1) throw new Error(`away mode re-armed the watcher: ${armRows()} cycles`);
+  execFileSync("bash", ["-c", '. "$FM_DAEMON"; housekeeping "$FM_HOME/state"'], {
+    env: {
+      ...process.env,
+      FM_STATE_OVERRIDE: `${process.env.FM_HOME}/state`,
+      FM_ESCALATE_BATCH_SECS: "999999",
+      FM_MAX_DEFER_SECS: "999999",
+    },
+  });
+  const queued = readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8");
+  const escalations = readFileSync(`${process.env.FM_HOME}/state/.subsuper-escalations`, "utf8");
+  if (!queued.includes("check: adapter transition: needs-decision: choose route")) {
+    throw new Error(`OpenCode handoff lost the durable wake: ${queued}`);
+  }
+  if (!escalations.includes("check: adapter transition: needs-decision: choose route")) {
+    throw new Error(`OpenCode handoff did not reach daemon classification: ${escalations}`);
+  }
 
   // An idle event while away mode is active must still arm nothing.
   await hooks.event(idle);

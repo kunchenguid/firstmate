@@ -34,7 +34,7 @@ Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/f
 An explicit Pi `fm_watch_arm_pi` call returns the same stand-down line as a successful no-op rather than arming.
 A `watcher: stood-down` close is classified as benign, never as a wake and never as a failure, which is what makes the race between an in-flight spawn and the arm's own gate safe.
 A genuine arm or spawn failure still surfaces once with no retry loop behind it, because the daemon owns the watcher and a retry storm would be the same wasted turn.
-Nothing is lost: the watcher enqueues each wake to `state/.wake-queue` before advancing its suppression markers, so the daemon and the next `bin/fm-wake-drain.sh` both still see it.
+Nothing is lost: the watcher enqueues each wake to `state/.wake-queue` before advancing its suppression markers, housekeeping classifies each unseen record without consuming it, and the next `bin/fm-wake-drain.sh` remains the sole consumer.
 
 Claude's Stop auto-arm (`bin/fm-claude-stop-autoarm.sh`) already exits before claiming the home while `state/.afk` exists, and Codex's foreground checkpoint protocol is model-driven with no adapter injection at all.
 Away mode ends by clearing the flag, after which the primary re-arms through its emitted supervision protocol and every layer above returns to ordinary behavior.

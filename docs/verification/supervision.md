@@ -395,10 +395,10 @@ tests/fm-claude-stop-autoarm.test.sh
 ```
 
 `tests/fm-watch-arm.test.sh` starts a real watcher as the daemon's singleton holder, runs a real `bin/fm-watch-arm.sh --restart` against it with `state/.afk` present, and proves the arm stands down, leaves the daemon's watcher process and lock untouched, and arms normally again once the flag is cleared.
-`tests/fm-pi-watch-extension.test.sh` drives the tracked Pi extension and OpenCode plugin with real arm children: an away-mode arm request starts no cycle and delivers no wake, a cycle already live when away mode begins is stood down without a wake or a successor, an away-mode OpenCode idle event arms nothing, and clearing the flag restores ordinary arming and wake delivery in the same run.
+`tests/fm-pi-watch-extension.test.sh` drives the tracked Pi extension and OpenCode plugin with real arm children: an away-mode arm request starts no cycle and delivers no wake, a cycle already live when away mode begins is stood down without a wake or a successor while its queued captain-relevant record is classified by daemon housekeeping, an away-mode OpenCode idle event arms nothing, and clearing the flag restores ordinary arming and wake delivery in the same run.
 `tests/fm-claude-stop-autoarm.test.sh` continues to cover Claude's unchanged away-mode boundary, including the flag appearing mid-cycle.
 
-Each new case was confirmed to fail against the pre-fix adapters and arm layer before the fix was applied.
+The stand-down cases were confirmed to fail against the pre-fix adapters and arm layer before the fix was applied.
 
 ## Wedge-alarm channels
 

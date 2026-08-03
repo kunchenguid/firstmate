@@ -17,10 +17,10 @@
 # the /afk skill sets that flag and starts this daemon; any real (unmarked)
 # user message clears it and firstmate resumes full responsiveness.
 # When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
-# While it is on, bin/fm-watch-arm.sh and every automatic primary adapter stand
-# down so this daemon keeps the watcher singleton and its wakes never reach the
-# primary pane; docs/watcher-continuity.md "Away-mode stand-down" owns that
-# contract.
+# While it is on, bin/fm-watch-arm.sh and every automatic primary adapter park
+# ordinary supervision so this daemon keeps the watcher singleton and its wakes
+# never reach the primary pane; docs/watcher-continuity.md "Away-mode parking"
+# owns that contract.
 # Any buffered daemon escalations that remain while afk is off survive in
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
@@ -41,8 +41,9 @@
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
-#     After a watcher cycle, the daemon handles every durable row through that
-#     drain and acknowledges it only after routing completes.
+#     The daemon classifies unseen queue records without consuming them, while
+#     fm-wake-drain.sh remains the only consumer and post-return acknowledgement
+#     owner after routing completes.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
@@ -949,7 +950,8 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 }
 
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
-# Four cheap jobs, each guarded so an empty/quiet fleet costs near zero:
+# Five cheap jobs, each guarded so an empty/quiet fleet costs near zero:
+#  0) queue catch-up: classify durable records not yet seen by this away session.
 #  1) batch flush: if the escalation buffer's oldest content is older than
 #     ESCALATE_BATCH_SECS (or batching is disabled), inject one digest.
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
@@ -966,6 +968,7 @@ housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
   now=$(_now)
   migrate_watcher_pause_markers "$state"
+  classify_queued_wakes "$state" || true
 
   # (1) batch flush
   if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
@@ -1284,37 +1287,25 @@ handle_wake() {  # <reason> <state>
   esac
 }
 
-handle_durable_wakes() {  # <watcher-reason> <state>
-  local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 ack_through ack_generation
-  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
-  err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
-  if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
-    cat "$err" >&2
-    rm -f "$out" "$err"
-    return 1
-  fi
-
-  tab=$(printf '\t')
-  while IFS="$tab" read -r epoch sequence kind key payload rest; do
+classify_queued_wakes() {  # <state>
+  local state=$1 queue cursor_file seen epoch seq kind key payload extra
+  queue="$state/.wake-queue"
+  cursor_file="$state/.subsuper-seen-wake-seq"
+  afk_active "$state" || return 0
+  seen=$(cat "$cursor_file" 2>/dev/null || echo 0)
+  case "$seen" in ''|*[!0-9]*) seen=0 ;; esac
+  [ -s "$queue" ] || return 0
+  while IFS="$(printf '\t')" read -r epoch seq kind key payload extra; do
     case "$epoch" in ''|*[!0-9]*) continue ;; esac
-    case "$sequence" in ''|*[!0-9]*) continue ;; esac
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    [ -z "$extra" ] || continue
     case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
+    [ -n "$key" ] && [ -n "$payload" ] || continue
+    [ "$seq" -gt "$seen" ] || continue
     handle_wake "$payload" "$state"
-    handled=$((handled + 1))
-  done < "$out"
-  [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
-
-  ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
-  ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
-  grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
-  rm -f "$out" "$err"
-  if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
-    log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
-    return 1
-  fi
-  "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
-    --recovery-generation "$ack_generation"
+    printf '%s\n' "$seq" > "$cursor_file" || return 1
+    seen=$seq
+  done < "$queue"
 }
 
 # --- log --------------------------------------------------------------------
@@ -1543,9 +1534,7 @@ fm_super_main() {
           continue
         fi
         log "wake: $reason"
-        if ! handle_durable_wakes "$reason" "$STATE"; then
-          log "durable wake handling was not acknowledged; restarting for recovery"
-        fi
+        classify_queued_wakes "$STATE" || true
         trim_log
       fi
       start_watcher || continue
