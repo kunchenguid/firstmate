@@ -2272,9 +2272,9 @@ if [ -e "$FM_STOP_FILE.$cycle" ]; then
 fi
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_DAEMON="$ROOT/bin/fm-supervise-daemon.sh" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_AFK_RESUME_POLL_MS=20 node --input-type=module 2>&1 <<'EOF'
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_AFK_RESUME_POLL_MS=20 node --input-type=module 2>&1 <<'EOF'
+import fs, { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
@@ -2302,6 +2302,22 @@ const waitFor = async (predicate, ticks = 250) => {
   }
   return predicate();
 };
+const afkPath = `${process.env.FM_HOME}/state/.afk`;
+const realExistsSync = fs.existsSync.bind(fs);
+let afkRaceActive = false;
+let afkRaceChecks = 0;
+fs.existsSync = (path) => {
+  if (afkRaceActive && path === afkPath) {
+    afkRaceChecks += 1;
+    if (afkRaceChecks === 1) return false;
+    if (afkRaceChecks === 2) {
+      fs.rmSync(afkPath, { force: true });
+      return true;
+    }
+  }
+  return realExistsSync(path);
+};
+syncBuiltinESMExports();
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -2311,34 +2327,18 @@ try {
   // A live watcher cycle already exists when the captain goes away.
   await tool.execute("tool-call-first", {}, undefined, undefined, {});
   if (!(await waitFor(() => armRows() === 1))) throw new Error("first arm cycle never started");
-  writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
+  writeFileSync(afkPath, "1\n");
+  afkRaceActive = true;
   writeFileSync(`${process.env.FM_STOP_FILE}.1`, "release\n");
 
-  // That cycle output belongs to the away-mode daemon: no delivery to
-  // the primary, and no successor cycle competing for the watcher singleton.
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  if (prompt) throw new Error(`away mode still delivered an ordinary wake: ${prompt}`);
-  if (armRows() !== 1) throw new Error(`away mode re-armed the watcher: ${armRows()} cycles`);
-  execFileSync("bash", ["-c", '. "$FM_DAEMON"; housekeeping "$FM_HOME/state"'], {
-    env: {
-      ...process.env,
-      FM_STATE_OVERRIDE: `${process.env.FM_HOME}/state`,
-      FM_ESCALATE_BATCH_SECS: "999999",
-      FM_MAX_DEFER_SECS: "999999",
-    },
-  });
+  if (!(await waitFor(() => armRows() === 2))) throw new Error("parked restoration did not resume after away mode cleared");
+  if (afkRaceChecks < 2) throw new Error(`restoration did not observe the AFK race: ${afkRaceChecks} checks`);
+  if (prompt) throw new Error(`mid-restore AFK clear replayed the suppressed wake: ${prompt}`);
   const queued = readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8");
-  const escalations = readFileSync(`${process.env.FM_HOME}/state/.subsuper-escalations`, "utf8");
   if (!queued.includes("check: adapter transition: needs-decision: choose route")) {
     throw new Error(`Pi handoff lost the durable wake: ${queued}`);
   }
-  if (!escalations.includes("check: adapter transition: needs-decision: choose route")) {
-    throw new Error(`Pi handoff did not reach daemon classification: ${escalations}`);
-  }
 
-  // Away mode ends: ordinary supervision and wake delivery resume unchanged.
-  rmSync(`${process.env.FM_HOME}/state/.afk`);
-  if (!(await waitFor(() => armRows() === 2))) throw new Error("arm did not resume after away mode ended");
   writeFileSync(`${process.env.FM_STOP_FILE}.2`, "release\n");
   if (!(await waitFor(() => prompt.length > 0))) {
     throw new Error("no wake was delivered after away mode ended");
@@ -2355,9 +2355,9 @@ try {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must not deliver a live cycle's ordinary wake once away mode is active"
+  expect_code 0 "$status" "Pi must retain suppression when away mode clears mid-restoration"
   [ -z "$out" ] || fail "Pi away-mode live-child test printed output: $out"
-  pass "Pi stands a live watcher cycle down at away-mode entry without delivering its wake"
+  pass "Pi re-arms without replay when away mode clears mid-restoration"
 }
 
 test_opencode_away_mode_suppresses_wake_from_live_arm_child() {
@@ -2388,9 +2388,9 @@ if [ -e "$FM_STOP_FILE.$cycle" ]; then
 fi
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_DAEMON="$ROOT/bin/fm-supervise-daemon.sh" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_AFK_RESUME_POLL_MS=20 node 2>&1 <<'EOF'
-import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_WATCH_AFK_RESUME_POLL_MS=20 node 2>&1 <<'EOF'
+import fs, { readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { pathToFileURL } from "node:url";
 
 let prompt = "";
@@ -2414,6 +2414,22 @@ const waitFor = async (predicate, ticks = 250) => {
   }
   return predicate();
 };
+const afkPath = `${process.env.FM_HOME}/state/.afk`;
+const realExistsSync = fs.existsSync.bind(fs);
+let afkRaceActive = false;
+let afkRaceChecks = 0;
+fs.existsSync = (path) => {
+  if (afkRaceActive && path === afkPath) {
+    afkRaceChecks += 1;
+    if (afkRaceChecks === 1) return false;
+    if (afkRaceChecks === 2) {
+      fs.rmSync(afkPath, { force: true });
+      return true;
+    }
+  }
+  return realExistsSync(path);
+};
+syncBuiltinESMExports();
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const hooks = await mod.FmPrimaryWatchArm({
@@ -2427,37 +2443,18 @@ const idle = { event: { type: "session.idle", properties: { sessionID: "session-
 try {
   await hooks.event(idle);
   if (!(await waitFor(() => armRows() === 1))) throw new Error("first arm cycle never started");
-  writeFileSync(`${process.env.FM_HOME}/state/.afk`, "1\n");
+  writeFileSync(afkPath, "1\n");
+  afkRaceActive = true;
   writeFileSync(`${process.env.FM_STOP_FILE}.1`, "release\n");
 
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  if (prompt) throw new Error(`away mode still delivered an ordinary wake: ${prompt}`);
-  if (armRows() !== 1) throw new Error(`away mode re-armed the watcher: ${armRows()} cycles`);
-  execFileSync("bash", ["-c", '. "$FM_DAEMON"; housekeeping "$FM_HOME/state"'], {
-    env: {
-      ...process.env,
-      FM_STATE_OVERRIDE: `${process.env.FM_HOME}/state`,
-      FM_ESCALATE_BATCH_SECS: "999999",
-      FM_MAX_DEFER_SECS: "999999",
-    },
-  });
+  if (!(await waitFor(() => armRows() === 2))) throw new Error("parked restoration did not resume after away mode cleared");
+  if (afkRaceChecks < 2) throw new Error(`restoration did not observe the AFK race: ${afkRaceChecks} checks`);
+  if (prompt) throw new Error(`mid-restore AFK clear replayed the suppressed wake: ${prompt}`);
   const queued = readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8");
-  const escalations = readFileSync(`${process.env.FM_HOME}/state/.subsuper-escalations`, "utf8");
   if (!queued.includes("check: adapter transition: needs-decision: choose route")) {
     throw new Error(`OpenCode handoff lost the durable wake: ${queued}`);
   }
-  if (!escalations.includes("check: adapter transition: needs-decision: choose route")) {
-    throw new Error(`OpenCode handoff did not reach daemon classification: ${escalations}`);
-  }
 
-  // An idle event while away mode is active must still arm nothing.
-  await hooks.event(idle);
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  if (armRows() !== 1) throw new Error(`an away-mode idle event armed a cycle: ${armRows()}`);
-  if (prompt) throw new Error(`an away-mode idle event delivered a wake: ${prompt}`);
-
-  rmSync(`${process.env.FM_HOME}/state/.afk`);
-  if (!(await waitFor(() => armRows() === 2))) throw new Error("arm did not resume after away mode ended");
   writeFileSync(`${process.env.FM_STOP_FILE}.2`, "release\n");
   if (!(await waitFor(() => prompt.length > 0))) {
     throw new Error("no wake was delivered after away mode ended");
@@ -2473,9 +2470,9 @@ try {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode must not deliver a live cycle's ordinary wake once away mode is active"
+  expect_code 0 "$status" "OpenCode must retain suppression when away mode clears mid-restoration"
   [ -z "$out" ] || fail "OpenCode away-mode live-child test printed output: $out"
-  pass "OpenCode stands a live watcher cycle down at away-mode entry without delivering its wake"
+  pass "OpenCode re-arms without replay when away mode clears mid-restoration"
 }
 
 test_pi_away_mode_parks_pending_retry() {
