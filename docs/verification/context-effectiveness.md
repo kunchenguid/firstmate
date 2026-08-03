@@ -136,17 +136,31 @@ Resume, clone, fork, alternate-model, split-turn, retry, and overflow checks rem
 
 ## Primary-home local settings handoff
 
-The tracked change does not modify `/Users/tiago/Workspace/firstmate/.pi/settings.json`.
+The tracked change does not modify the primary home's private `.pi/settings.json`.
 After the tracked branch is ready, Firstmate applies this local-only merge from the active primary root.
-The command preserves every unrelated top-level key, every unrelated package, unknown fields on the matching package object, and unknown compaction fields.
-It refuses an absent or duplicate package declaration, writes an exact private backup before replacement, and changes no global setting or package clone.
+The captain approved superseding the originally named `jq` handoff with the `python3` handoff below, so `python3` is the binding mechanism for this record.
+`jq` cannot rewrite its own input file, so a `jq` handoff needs either an unguarded redirect or a hand-rolled temporary-file dance that can truncate live settings when it is interrupted.
+This handoff instead replaces the file atomically, restores the original file mode, creates the backup exclusively so an existing backup is never overwritten, refuses an absent or duplicate package declaration, and filters only the matching package.
+It preserves every unrelated top-level key, every unrelated package, unknown fields on the matching package object, and unknown compaction fields, and it changes no global setting or package clone.
 
-```sh
-cd /Users/tiago/Workspace/firstmate
+Set the handoff context once in the shell that runs the blocks below.
+`FM_PRIMARY_HOME` is the absolute path of the active Firstmate primary root, so this record stays runnable from any home.
+`tests/fm-context-effectiveness.test.sh` extracts and executes these labelled blocks directly, so editing one without rerunning that test fails.
+
+```sh fm-handoff=context
+cd "${FM_PRIMARY_HOME:?set FM_PRIMARY_HOME to the active Firstmate primary root}"
 SETTINGS=.pi/settings.json
 BACKUP=data/pi-settings-before-native-12k.json
+SOURCE=git:github.com/algal/pi-openai-server-compaction
+PI_PACKAGE_DIR="${FM_PI_PACKAGE_DIR:-$(npm root -g)/@earendil-works/pi-coding-agent}"
+PI_AGENT_DIR="${FM_PI_AGENT_DIR:-$HOME/.pi/agent}"
 umask 077
-python3 - "$SETTINGS" "$BACKUP" <<'PY'
+```
+
+Apply the narrow merge:
+
+```sh fm-handoff=apply
+python3 - "$SETTINGS" "$BACKUP" "$SOURCE" <<'PY'
 import json
 import os
 import stat
@@ -156,7 +170,7 @@ from pathlib import Path
 
 settings = Path(sys.argv[1])
 backup = Path(sys.argv[2])
-source = "git:github.com/algal/pi-openai-server-compaction"
+source = sys.argv[3]
 raw = settings.read_bytes()
 document = json.loads(raw.decode("utf-8"))
 if not isinstance(document, dict):
@@ -215,15 +229,15 @@ PY
 
 Verify the merge against the backup and confirm the package clone remains present:
 
-```sh
-python3 - "$SETTINGS" "$BACKUP" <<'PY'
+```sh fm-handoff=verify
+python3 - "$SETTINGS" "$BACKUP" "$SOURCE" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 settings = Path(sys.argv[1])
 backup = Path(sys.argv[2])
-source = "git:github.com/algal/pi-openai-server-compaction"
+source = sys.argv[3]
 current = json.loads(settings.read_text(encoding="utf-8"))
 prior = json.loads(backup.read_text(encoding="utf-8"))
 expected = dict(prior)
@@ -248,7 +262,7 @@ expected["compaction"] = {
     "keepRecentTokens": 12000,
 }
 assert current == expected, "current settings differ from the narrow expected merge"
-clone = settings.parent / "git/github.com/algal/pi-openai-server-compaction"
+clone = settings.parent / "git" / source.split(":", 1)[1]
 assert clone.is_dir(), "installed remote package clone is missing"
 print("settings merge exact; unrelated keys preserved; package clone present")
 PY
@@ -256,35 +270,34 @@ PY
 
 Use Pi 0.83.0's current package resolver to prove that the installed package still resolves but none of its extensions is enabled:
 
-```sh
-PI_PACKAGE_DIR="$(npm root -g)/@earendil-works/pi-coding-agent"
-PI_OFFLINE=1 node --input-type=module - "$PWD" "$PI_PACKAGE_DIR" <<'NODE'
-import { homedir } from "node:os";
+```sh fm-handoff=resolve
+PI_OFFLINE=1 node --input-type=module - "$PWD" "$PI_PACKAGE_DIR" "$PI_AGENT_DIR" "$SOURCE" <<'NODE'
 import { join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const root = process.argv[2];
 const packageDir = process.argv[3];
+const agentDir = process.argv[4];
+const source = process.argv[5];
 const settingsModule = await import(pathToFileURL(join(packageDir, "dist/core/settings-manager.js")));
 const packagesModule = await import(pathToFileURL(join(packageDir, "dist/core/package-manager.js")));
-const settings = settingsModule.SettingsManager.create(root, join(homedir(), ".pi", "agent"));
-const manager = new packagesModule.DefaultPackageManager({
-  cwd: root,
-  agentDir: join(homedir(), ".pi", "agent"),
-  settingsManager: settings,
-});
+const settings = settingsModule.SettingsManager.create(root, agentDir);
+const manager = new packagesModule.DefaultPackageManager({ cwd: root, agentDir, settingsManager: settings });
 const resolvedResources = await manager.resolve();
-const clone = resolve(root, ".pi/git/github.com/algal/pi-openai-server-compaction");
-const packageExtensions = resolvedResources.extensions.filter((entry) => {
+const clone = resolve(root, ".pi/git", source.split(":", 2)[1]);
+const isFromPackage = (entry) => {
   const candidate = resolve(entry.path);
   return candidate === clone || candidate.startsWith(`${clone}${sep}`);
-});
+};
+const packageExtensions = resolvedResources.extensions.filter(isFromPackage);
+const packageSkills = resolvedResources.skills.filter(isFromPackage);
 if (packageExtensions.length === 0) throw new Error("installed package exposed no extension inventory");
 if (packageExtensions.some((entry) => entry.enabled)) throw new Error("remote compaction extension is still enabled");
+if (packageSkills.some((entry) => !entry.enabled)) throw new Error("non-extension package resources were disabled too");
 if (!settings.getCompactionEnabled()) throw new Error("native automatic compaction is disabled");
 if (settings.getCompactionReserveTokens() !== 16384) throw new Error("reserveTokens mismatch");
 if (settings.getCompactionKeepRecentTokens() !== 12000) throw new Error("keepRecentTokens mismatch");
-console.log(`package extensions disabled=${packageExtensions.length}; native compaction=16384/12000`);
+console.log(`package extensions=${packageExtensions.length} disabled; package skills=${packageSkills.length} enabled; native compaction=16384/12000`);
 NODE
 ```
 
@@ -293,7 +306,7 @@ Never compact, resume, clone, fork, or threshold-test the active primary session
 
 Rollback restores the exact backup and leaves the package clone untouched:
 
-```sh
+```sh fm-handoff=rollback
 python3 - "$SETTINGS" "$BACKUP" <<'PY'
 import os
 import stat

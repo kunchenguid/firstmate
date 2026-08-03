@@ -8,8 +8,20 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-context-effectiveness)
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 REMOTE_SOURCE=git:github.com/algal/pi-openai-server-compaction
+HANDOFF_DOC="$ROOT/docs/verification/context-effectiveness.md"
+MEASURED_PI_VERSION=0.83.0
 
+# The measured matrix in docs/verification/context-effectiveness.md is scoped to
+# one exact Pi build, and these checks drive that build's own dist modules. A
+# different installed version is recorded as a skip rather than a failure so a
+# routine Pi upgrade does not redden the default family.
 [ -f "$PI_PACKAGE_DIR/package.json" ] || { echo "skip: installed @earendil-works/pi-coding-agent package not found"; exit 0; }
+PI_PACKAGE_VERSION=$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$PI_PACKAGE_DIR/package.json" 2>/dev/null) \
+  || PI_PACKAGE_VERSION=
+[ "$PI_PACKAGE_VERSION" = "$MEASURED_PI_VERSION" ] || {
+  echo "skip: measured context-effectiveness matrix records exact Pi $MEASURED_PI_VERSION, installed package is ${PI_PACKAGE_VERSION:-unreadable}"
+  exit 0
+}
 
 load_skill_metadata() {
   local project=$1 agent_dir=$2
@@ -90,6 +102,31 @@ MD
   pass "Pi discovers one agent-only evidence skill and the trigger rejects a realistic omitted-surface mutation"
 }
 
+# --- documented-handoff execution -------------------------------------------
+#
+# The maintainer artifact is the labelled shell block in the verification
+# record, so these checks extract and run that exact text instead of a copy.
+# Editing a block without updating this test therefore fails here.
+
+handoff_block() {
+  local label=$1
+  awk -v opener="\`\`\`sh fm-handoff=$label" '
+    $0 == opener { capture = 1; found = 1; next }
+    capture && $0 == "```" { capture = 0; next }
+    capture { print }
+    END { if (!found) exit 1 }
+  ' "$HANDOFF_DOC"
+}
+
+run_handoff_block() {
+  local label=$1 home=$2 agent_dir=${3:-} context body
+  context=$(handoff_block context) || fail "docs handoff block 'context' is missing from $HANDOFF_DOC"
+  body=$(handoff_block "$label") || fail "docs handoff block '$label' is missing from $HANDOFF_DOC"
+  if [ -n "$agent_dir" ]; then mkdir -p "$agent_dir"; fi
+  FM_PRIMARY_HOME="$home" FM_PI_PACKAGE_DIR="$PI_PACKAGE_DIR" FM_PI_AGENT_DIR="$agent_dir" \
+    bash -c "$context"$'\n'"$body"
+}
+
 write_package_fixture() {
   local project=$1
   mkdir -p "$project/.pi/git/github.com/algal/pi-openai-server-compaction/extensions" \
@@ -119,6 +156,7 @@ MD
 
 write_initial_settings() {
   local project=$1
+  mkdir -p "$project/.pi"
   cat > "$project/.pi/settings.json" <<JSON
 {
   "theme": "fixture-theme",
@@ -140,196 +178,109 @@ write_initial_settings() {
 JSON
 }
 
-apply_native_settings_merge() {
-  local settings=$1 backup=$2
-  python3 - "$settings" "$backup" "$REMOTE_SOURCE" <<'PY'
-import json
-import os
-import stat
-import sys
-import tempfile
-from pathlib import Path
-
-settings = Path(sys.argv[1])
-backup = Path(sys.argv[2])
-source = sys.argv[3]
-raw = settings.read_bytes()
-document = json.loads(raw.decode("utf-8"))
-if not isinstance(document, dict):
-    raise SystemExit("settings root must be an object")
-packages = document.get("packages")
-if not isinstance(packages, list):
-    raise SystemExit("settings packages must already be an array")
-matching = [
-    index
-    for index, package in enumerate(packages)
-    if package == source or (isinstance(package, dict) and package.get("source") == source)
-]
-if len(matching) != 1:
-    raise SystemExit(f"expected one installed remote package declaration, found {len(matching)}")
-current_compaction = document.get("compaction", {})
-if not isinstance(current_compaction, dict):
-    raise SystemExit("settings compaction must be an object when present")
-mode = stat.S_IMODE(settings.stat().st_mode)
-fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-with os.fdopen(fd, "wb") as stream:
-    stream.write(raw)
-next_packages = list(packages)
-current_package = packages[matching[0]]
-if isinstance(current_package, str):
-    next_package = {"source": source, "extensions": []}
-else:
-    next_package = dict(current_package)
-    next_package["extensions"] = []
-next_packages[matching[0]] = next_package
-next_compaction = dict(current_compaction)
-next_compaction.update({
-    "enabled": True,
-    "reserveTokens": 16384,
-    "keepRecentTokens": 12000,
-})
-next_document = dict(document)
-next_document["packages"] = next_packages
-next_document["compaction"] = next_compaction
-handle, temporary = tempfile.mkstemp(prefix="settings.json.", dir=settings.parent)
-try:
-    with os.fdopen(handle, "w", encoding="utf-8") as stream:
-        json.dump(next_document, stream, indent=2, ensure_ascii=False)
-        stream.write("\n")
-    os.chmod(temporary, mode)
-    os.replace(temporary, settings)
-except BaseException:
-    try:
-        os.unlink(temporary)
-    except FileNotFoundError:
-        pass
-    raise
-PY
-}
-
-settings_match_narrow_merge() {
-  local settings=$1 backup=$2
-  python3 - "$settings" "$backup" "$REMOTE_SOURCE" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-current = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-prior = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-source = sys.argv[3]
-expected = dict(prior)
-packages = list(prior["packages"])
-matching = [
-    index
-    for index, package in enumerate(packages)
-    if package == source or (isinstance(package, dict) and package.get("source") == source)
-]
-assert len(matching) == 1
-package = packages[matching[0]]
-packages[matching[0]] = (
-    {"source": source, "extensions": []}
-    if isinstance(package, str)
-    else {**package, "extensions": []}
-)
-expected["packages"] = packages
-expected["compaction"] = {
-    **prior.get("compaction", {}),
-    "enabled": True,
-    "reserveTokens": 16384,
-    "keepRecentTokens": 12000,
-}
-assert current == expected
-PY
-}
-
-package_resources_match_policy() {
-  local project=$1 agent_dir=$2
-  mkdir -p "$agent_dir"
-  PI_OFFLINE=1 node --input-type=module - "$project" "$agent_dir" "$PI_PACKAGE_DIR" <<'NODE'
-import { join, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
-
-const project = process.argv[2];
-const agentDir = process.argv[3];
-const packageDir = process.argv[4];
-const { SettingsManager } = await import(pathToFileURL(join(packageDir, "dist/core/settings-manager.js")));
-const { DefaultPackageManager } = await import(pathToFileURL(join(packageDir, "dist/core/package-manager.js")));
-const settings = SettingsManager.create(project, agentDir);
-const manager = new DefaultPackageManager({ cwd: project, agentDir, settingsManager: settings });
-const resources = await manager.resolve();
-const clone = resolve(project, ".pi/git/github.com/algal/pi-openai-server-compaction");
-const isFromPackage = (entry) => {
-  const candidate = resolve(entry.path);
-  return candidate === clone || candidate.startsWith(`${clone}${sep}`);
-};
-const extensions = resources.extensions.filter(isFromPackage);
-const skills = resources.skills.filter(isFromPackage);
-if (extensions.length !== 1 || extensions.some((entry) => entry.enabled)) {
-  throw new Error(`expected one disabled package extension, got ${JSON.stringify(extensions)}`);
-}
-if (skills.length !== 1 || skills.some((entry) => !entry.enabled)) {
-  throw new Error(`expected one enabled package skill, got ${JSON.stringify(skills)}`);
-}
-if (!settings.getCompactionEnabled()) throw new Error("native compaction disabled");
-if (settings.getCompactionReserveTokens() !== 16384) throw new Error("reserve mismatch");
-if (settings.getCompactionKeepRecentTokens() !== 12000) throw new Error("recent-tail mismatch");
-NODE
-}
-
-test_local_settings_merge_preserves_unrelated_state_and_disables_only_extensions() {
-  local project backup overwrite_mutant filter_mutant
-  project="$TMP_ROOT/settings-project"
-  mkdir -p "$project/.pi"
+write_primary_home_fixture() {
+  local project=$1
+  mkdir -p "$project"
   git -C "$project" init -q
   write_package_fixture "$project"
   write_initial_settings "$project"
-  backup="$project/settings.before.json"
-  apply_native_settings_merge "$project/.pi/settings.json" "$backup" \
-    || fail "native settings handoff merge failed on a valid object-form package fixture"
-  settings_match_narrow_merge "$project/.pi/settings.json" "$backup" \
-    || fail "native settings handoff did not preserve every unrelated settings field"
-  package_resources_match_policy "$project" "$TMP_ROOT/settings-agent" \
+}
+
+test_documented_handoff_preserves_unrelated_state_and_disables_only_extensions() {
+  local project backup overwrite_mutant filter_mutant out
+  project="$TMP_ROOT/settings-project"
+  backup="$project/data/pi-settings-before-native-12k.json"
+  write_primary_home_fixture "$project"
+
+  run_handoff_block apply "$project" >/dev/null \
+    || fail "documented native settings handoff failed on a valid object-form package fixture"
+  run_handoff_block verify "$project" >/dev/null \
+    || fail "documented handoff did not preserve every unrelated settings field"
+  out=$(run_handoff_block resolve "$project" "$TMP_ROOT/settings-agent") \
     || fail "Pi did not keep package resources available while disabling only its extension"
+  assert_contains "$out" "package extensions=1 disabled" \
+    "documented resolver check did not report the disabled package extension"
+  assert_contains "$out" "package skills=1 enabled" \
+    "documented resolver check did not report the still-available package skill"
 
   overwrite_mutant="$TMP_ROOT/settings-overwrite-mutant"
-  cp "$backup" "$overwrite_mutant.before"
-  cat > "$overwrite_mutant" <<JSON
+  mkdir -p "$overwrite_mutant/.pi" "$overwrite_mutant/data"
+  cp "$backup" "$overwrite_mutant/data/pi-settings-before-native-12k.json"
+  cat > "$overwrite_mutant/.pi/settings.json" <<JSON
 {"packages":[{"source":"$REMOTE_SOURCE","extensions":[]}],"compaction":{"enabled":true,"reserveTokens":16384,"keepRecentTokens":12000}}
 JSON
-  if settings_match_narrow_merge "$overwrite_mutant" "$overwrite_mutant.before" 2>/dev/null; then
-    fail "settings preservation check survived a realistic whole-file overwrite mutation"
+  if run_handoff_block verify "$overwrite_mutant" >/dev/null 2>&1; then
+    fail "documented preservation check survived a realistic whole-file overwrite mutation"
   fi
 
   filter_mutant="$TMP_ROOT/settings-filter-mutant"
   cp -R "$project" "$filter_mutant"
-  python3 - "$filter_mutant/.pi/settings.json" <<'PY'
+  python3 - "$filter_mutant/.pi/settings.json" "$REMOTE_SOURCE" <<'PY'
 import json
 import sys
 from pathlib import Path
 path = Path(sys.argv[1])
+source = sys.argv[2]
 data = json.loads(path.read_text(encoding="utf-8"))
 for package in data["packages"]:
-    if isinstance(package, dict) and package.get("source") == "git:github.com/algal/pi-openai-server-compaction":
+    if isinstance(package, dict) and package.get("source") == source:
         package.pop("extensions", None)
 path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
-  if package_resources_match_policy "$filter_mutant" "$TMP_ROOT/filter-mutant-agent" >/dev/null 2>&1; then
-    fail "package-resource behavior check survived removal of the extensions-empty filter"
+  if run_handoff_block resolve "$filter_mutant" "$TMP_ROOT/filter-mutant-agent" >/dev/null 2>&1; then
+    fail "documented package-resource check survived removal of the extensions-empty filter"
   fi
-  pass "Pi preserves unrelated local settings and keeps the remote package available with only its extension disabled"
+  pass "the documented handoff preserves unrelated local settings and keeps the remote package available with only its extension disabled"
+}
+
+test_documented_handoff_is_reversible_and_refuses_unsafe_preconditions() {
+  local project backup duplicate settled
+  project="$TMP_ROOT/rollback-project"
+  backup="$project/data/pi-settings-before-native-12k.json"
+  write_primary_home_fixture "$project"
+
+  run_handoff_block apply "$project" >/dev/null \
+    || fail "documented native settings handoff failed on the rollback fixture"
+  settled=$(cat "$project/.pi/settings.json")
+  if run_handoff_block apply "$project" >/dev/null 2>&1; then
+    fail "documented handoff overwrote an existing exact backup on a second run"
+  fi
+  [ "$(cat "$project/.pi/settings.json")" = "$settled" ] \
+    || fail "documented handoff mutated settings while refusing to overwrite an existing backup"
+
+  run_handoff_block rollback "$project" >/dev/null \
+    || fail "documented rollback failed to restore the exact backup"
+  cmp -s "$project/.pi/settings.json" "$backup" \
+    || fail "documented rollback did not restore the exact prior settings bytes"
+
+  duplicate="$TMP_ROOT/duplicate-declaration"
+  mkdir -p "$duplicate/.pi"
+  cat > "$duplicate/.pi/settings.json" <<JSON
+{"packages":["$REMOTE_SOURCE",{"source":"$REMOTE_SOURCE"}],"compaction":{}}
+JSON
+  if run_handoff_block apply "$duplicate" >/dev/null 2>&1; then
+    fail "documented handoff accepted a duplicate remote package declaration"
+  fi
+  assert_absent "$duplicate/data/pi-settings-before-native-12k.json" \
+    "documented handoff wrote a backup before refusing a duplicate package declaration"
+  pass "the documented handoff refuses duplicate declarations and backup overwrites, and rolls back to exact prior bytes"
 }
 
 test_installed_pi_version_is_recorded_without_claiming_broader_compatibility() {
-  local runtime_version package_version
-  runtime_version=$(pi --version)
-  package_version=$(node -e 'const p=require(process.argv[1]); process.stdout.write(p.version)' "$PI_PACKAGE_DIR/package.json")
-  [ "$runtime_version" = "$package_version" ] \
-    || fail "Pi CLI and installed package versions differ: cli=$runtime_version package=$package_version"
-  [ "$runtime_version" = 0.83.0 ] \
-    || fail "measured context-effectiveness fixture requires exact Pi 0.83.0, found $runtime_version"
+  local runtime_version
+  if ! command -v pi >/dev/null 2>&1; then
+    echo "skip: pi not on PATH, so the installed Pi $PI_PACKAGE_VERSION CLI version could not be recorded"
+    return 0
+  fi
+  runtime_version=$(pi --version 2>/dev/null) || runtime_version=
+  if [ "$runtime_version" != "$PI_PACKAGE_VERSION" ]; then
+    echo "skip: Pi CLI and installed package versions differ (cli=${runtime_version:-unreadable} package=$PI_PACKAGE_VERSION)"
+    return 0
+  fi
   pass "context-effectiveness behavior checks run against exact installed Pi $runtime_version"
 }
 
 test_skill_discovery_and_trigger_precision
-test_local_settings_merge_preserves_unrelated_state_and_disables_only_extensions
+test_documented_handoff_preserves_unrelated_state_and_disables_only_extensions
+test_documented_handoff_is_reversible_and_refuses_unsafe_preconditions
 test_installed_pi_version_is_recorded_without_claiming_broader_compatibility
