@@ -1115,6 +1115,35 @@ test_oversized_pr_aggregates_stream_through_model() {
   pass "oversized PR aggregates stream through enrichment and projection"
 }
 
+test_oversized_repository_target_refuses_before_enrichment() {
+  local home fakebin padding json err bytes
+  home=$(make_home oversized-repository-target)
+  padding=$(printf '%0140000d' 0 | tr 0 x)
+  mkdir -p "$home/projects/oversized-target"
+  printf '%s\n' '## In flight' \
+    '- [ ] oversized-target - Synthetic target (repo: sample) (kind: ship)' \
+    > "$home/data/backlog.md"
+  fm_write_meta "$home/state/oversized-target.meta" \
+    "window=firstmate:fm-oversized-target" \
+    "worktree=$home/projects/oversized-target" \
+    "project=sample" "harness=codex" "kind=ship" "mode=ship" \
+    "pr=https://github.com/acme/$padding/pull/1"
+  fakebin=$(make_fakebin "$home")
+  : > "$home/net.log"
+  err="$home/oversized-repository.err"
+  json=$(run "$home" "$fakebin" --include-prs --all-pr-repos --json 2> "$err")
+  bytes=$(printf '%s' "$json" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$bytes" -gt 131072 ] \
+    || fail "synthetic repository metadata did not cross the single-argument ceiling: $bytes bytes"
+  assert_contains "$(cat "$err")" "repository target exceeds 4096 bytes; skipping enrichment" \
+    "oversized repository target should emit an explicit diagnostic"
+  [ ! -s "$home/net.log" ] \
+    || fail "oversized repository target reached an external command"
+  printf '%s' "$json" | jq -e '.candidate_prs | length == 0' >/dev/null \
+    || fail "oversized repository target should not create enrichment rows"
+  pass "oversized repository metadata refuses before enrichment"
+}
+
 test_per_repository_pr_cap_is_disclosed() {
   local home fakebin json toon
   home=$(make_home pr-row-cap); write_fixture "$home"
@@ -1960,5 +1989,6 @@ test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags
 test_pr_repository_cap_and_expansion
 test_oversized_pr_aggregates_stream_through_model
+test_oversized_repository_target_refuses_before_enrichment
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed

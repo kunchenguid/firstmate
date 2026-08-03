@@ -183,10 +183,22 @@ PR_REPOS_TOTAL=0
 PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
 PR_ROWS_MIN_TOTAL=0
+FM_BEARINGS_PR_ARGUMENT_BYTES=${FM_BEARINGS_PR_ARGUMENT_BYTES:-4096}
+validate_bound FM_BEARINGS_PR_ARGUMENT_BYTES "$FM_BEARINGS_PR_ARGUMENT_BYTES"
 
 # Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
 repo_slug() {  # <url>
   printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p' | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
+}
+
+pr_argument_bounded() {  # <label> <value>
+  local label=$1 value=$2 bytes
+  bytes=$(printf '%s' "$value" | LC_ALL=C wc -c | tr -d ' ')
+  if [ "$bytes" -gt "$FM_BEARINGS_PR_ARGUMENT_BYTES" ]; then
+    printf 'fm-bearings-snapshot: %s exceeds %s bytes; skipping enrichment\n' \
+      "$label" "$FM_BEARINGS_PR_ARGUMENT_BYTES" >&2
+    return 1
+  fi
 }
 
 # Bounded gh call; prints stdout, non-zero on timeout/failure. gh only.
@@ -217,6 +229,7 @@ $(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
 EOF
     while IFS= read -r wt; do
       [ -n "$wt" ] || continue
+      pr_argument_bounded "repository worktree path" "$wt" || continue
       [ -d "$wt" ] || continue
       u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
       s=$(repo_slug "$u"); [ -n "$s" ] || continue
@@ -231,12 +244,19 @@ EOF
     for repo in $repos; do
       if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
       nrepos=$((nrepos + 1))
+      if ! pr_argument_bounded "repository target" "$repo"; then
+        nwarn=$((nwarn + 1))
+        continue
+      fi
       out=$(gh_bounded pr list --repo "$repo" --state open --limit "$pr_fetch_limit" \
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
-        [ .[] | {
+      repo_json=$(printf '%s' "$repo" | jq -Rs '.') \
+        || { nwarn=$((nwarn + 1)); continue; }
+      repo_result=$(printf '%s\n%s\n' "$repo_json" "$out" | jq -s --argjson limit "$FM_BEARINGS_PR_LIMIT" '
+        .[0] as $repo | .[1] as $result
+        | [ $result[] | {
           num:(.number|tostring),
           repo:$repo,
           task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
