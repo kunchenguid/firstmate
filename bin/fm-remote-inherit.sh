@@ -75,7 +75,7 @@ cleanup() {
 trap cleanup EXIT
 
 commit_generation() {
-  local existing_generation existing_bytes existing_hash existing_command extra
+  local existing_generation existing_bytes existing_hash existing_command
   if [ -e "$GENERATION_FILE" ] || [ -L "$GENERATION_FILE" ]; then
     [ -f "$GENERATION_FILE" ] && [ ! -L "$GENERATION_FILE" ] || die "inheritance generation record is unsafe"
     {
@@ -83,7 +83,7 @@ commit_generation() {
         && IFS= read -r existing_bytes \
         && IFS= read -r existing_hash \
         && IFS= read -r existing_command \
-        && ! IFS= read -r extra
+        && ! IFS= read -r
     } < "$GENERATION_FILE" || die "inheritance generation record is malformed"
     case "$existing_generation" in ''|*[!0-9]*) die "inheritance generation record is malformed" ;; esac
     [ "${#existing_generation}" -le 18 ] || die "inheritance generation record is malformed"

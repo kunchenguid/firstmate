@@ -119,7 +119,7 @@ GENERATION_FILE="$PARENT_REAL/.$ID.upload-generation"
   IFS= read -r STORED_GENERATION \
     && IFS= read -r STORED_BYTES \
     && IFS= read -r STORED_HASH \
-    && ! IFS= read -r EXTRA
+    && ! IFS= read -r
 } < "$GENERATION_FILE" || die "delivered outbox generation is malformed"
 case "$STORED_GENERATION" in ''|*[!0-9]*) die "delivered outbox generation is malformed" ;; esac
 [ "${#STORED_GENERATION}" -le 18 ] || die "delivered outbox generation is malformed"

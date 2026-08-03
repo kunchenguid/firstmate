@@ -86,7 +86,7 @@ directory_identity() {
 put_handoff_file() { # <home-real> <name> <max-bytes> <relative-path> <bytes> <sha256> <generation>
   local home_real=$1 name=$2 max=$3 rel=$4 expected_bytes=$5 expected_hash=$6 generation=$7
   local state_real handoff_real pinned named tmp bytes actual_hash lock generation_file generation_tmp
-  local stored_generation stored_bytes stored_hash extra
+  local stored_generation stored_bytes stored_hash
   (
     CDPATH='' cd -- "$home_real" 2>/dev/null || exit 3
     [ "$(pwd -P)" = "$home_real" ] || exit 3
@@ -134,7 +134,7 @@ put_handoff_file() { # <home-real> <name> <max-bytes> <relative-path> <bytes> <s
         IFS= read -r stored_generation \
           && IFS= read -r stored_bytes \
           && IFS= read -r stored_hash \
-          && ! IFS= read -r extra
+          && ! IFS= read -r
       } < "$generation_file" || exit 3
       case "$stored_generation" in ''|*[!0-9]*) exit 3 ;; esac
       [ "${#stored_generation}" -le 18 ] || exit 3
@@ -163,7 +163,7 @@ put_handoff_file() { # <home-real> <name> <max-bytes> <relative-path> <bytes> <s
       rm -f -- "./$name"
       exit 3
     fi
-    fm_lock_release "$lock" || exit 5
+    cleanup_put
     trap - EXIT
     printf 'stored: %s bytes=%s\n' "$rel" "$bytes"
   )
