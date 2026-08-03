@@ -33,6 +33,41 @@ resolve_file() { # <relative-path>
   printf '%s\n' "$path"
 }
 
+snapshot_bounded_file() { # <file> <max-bytes> <destination> <size-file>
+  local file=$1 max=$2 destination=$3 size_file=$4 parent base actual_parent
+  parent=$(dirname "$file")
+  base=$(basename "$file")
+  (
+    CDPATH='' cd -- "$parent" 2>/dev/null || exit 3
+    actual_parent=$(pwd -P) || exit 3
+    [ "$actual_parent" = "$parent" ] || exit 3
+    perl -MFcntl=:DEFAULT -e '
+      my ($path, $max, $destination, $size_file) = @ARGV;
+      sysopen(my $source, $path, O_RDONLY | O_NOFOLLOW) or exit 3;
+      my @stat = stat $source or exit 3;
+      exit 3 unless -f _;
+      my $size = $stat[7];
+      exit 3 unless $size =~ /\A\d+\z/;
+      exit 4 if $size > $max;
+      open(my $output, ">", $destination) or exit 5;
+      binmode $source;
+      binmode $output;
+      my $remaining = $size;
+      while ($remaining > 0) {
+        my $wanted = $remaining > 65536 ? 65536 : $remaining;
+        my $read = read($source, my $buffer, $wanted);
+        exit 5 unless defined $read && $read > 0;
+        print {$output} $buffer or exit 5;
+        $remaining -= $read;
+      }
+      close $output or exit 5;
+      open(my $size_output, ">", $size_file) or exit 5;
+      print {$size_output} "$size\n" or exit 5;
+      close $size_output or exit 5;
+    ' "$base" "$max" "$destination" "$size_file"
+  )
+}
+
 COMMAND=${1:-}
 [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
 REL=$2
@@ -42,9 +77,21 @@ case "$MAX" in ''|*[!0-9]*|0) die "max-bytes must be a positive integer" ;; esac
 case "$COMMAND" in
   get)
     FILE=$(resolve_file "$REL")
-    BYTES=$(LC_ALL=C wc -c < "$FILE" | tr -d ' ')
-    [ "$BYTES" -le "$MAX" ] || die "file exceeds max-bytes: $REL ($BYTES > $MAX)"
-    cat "$FILE"
+    TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-file.XXXXXX") \
+      || die "cannot create file staging directory"
+    trap 'rm -rf -- "$TMP"' EXIT
+    if snapshot_bounded_file "$FILE" "$MAX" "$TMP/file" "$TMP/size"; then
+      BYTES=$(tr -d ' ' < "$TMP/size")
+    else
+      rc=$?
+      case "$rc" in
+        3) die "file changed into an unsafe file: $REL" ;;
+        4) die "file exceeds max-bytes: $REL" ;;
+        *) die "file could not be captured safely: $REL" ;;
+      esac
+    fi
+    [ "$BYTES" -le "$MAX" ] || die "file exceeds max-bytes: $REL"
+    cat "$TMP/file"
     ;;
   put)
     case "$REL" in state/handoff/*.outbox.md) ;; *) die "put is confined to state/handoff/<id>.outbox.md" ;; esac

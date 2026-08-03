@@ -36,6 +36,43 @@ copy_prefix() { # <file> <bytes> <destination>
   fi
 }
 
+snapshot_log() { # <file> <destination> <size-file>
+  local file=$1 destination=$2 size_file=$3 parent base actual_parent
+  parent=$(dirname "$file")
+  base=$(basename "$file")
+  (
+    CDPATH='' cd -- "$parent" 2>/dev/null || exit 1
+    actual_parent=$(pwd -P) || exit 1
+    [ "$actual_parent" = "$parent" ] || exit 1
+    perl -MFcntl=:DEFAULT -e '
+      my ($path, $destination, $size_file, $offset, $max_bytes) = @ARGV;
+      sysopen(my $source, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+      my @stat = stat $source or exit 1;
+      exit 1 unless -f _;
+      my $size = $stat[7];
+      exit 1 unless $size =~ /\A\d+\z/;
+      my $limit = $size;
+      my $bound = $offset + $max_bytes;
+      $limit = $bound if $limit > $bound;
+      open(my $output, ">", $destination) or exit 1;
+      binmode $source;
+      binmode $output;
+      my $remaining = $limit;
+      while ($remaining > 0) {
+        my $wanted = $remaining > 65536 ? 65536 : $remaining;
+        my $read = read($source, my $buffer, $wanted);
+        exit 1 unless defined $read && $read > 0;
+        print {$output} $buffer or exit 1;
+        $remaining -= $read;
+      }
+      close $output or exit 1;
+      open(my $size_output, ">", $size_file) or exit 1;
+      print {$size_output} "$size\n" or exit 1;
+      close $size_output or exit 1;
+    ' "$base" "$destination" "$size_file" "$OFFSET" "$MAX_BYTES"
+  )
+}
+
 resolve_log() { # <relative-path>
   local rel=$1 home_real parent_real parent base path
   case "$rel" in ''|/*|*'//'*) die "log must be a nonempty relative path" ;; esac
@@ -89,21 +126,23 @@ START=$(date +%s)
 while :; do
   if [ -e "$LOG" ] || [ -L "$LOG" ]; then
     [ -f "$LOG" ] && [ ! -L "$LOG" ] || die "log changed into an unsafe file: $REL"
-    SIZE=$(LC_ALL=C wc -c < "$LOG" | tr -d ' ')
+    snapshot_log "$LOG" "$TMP/source" "$TMP/size" \
+      || die "log could not be captured safely: $REL"
+    SIZE=$(tr -d ' ' < "$TMP/size")
     if [ "$SIZE" -lt "$OFFSET" ]; then
-      copy_prefix "$LOG" "$SIZE" "$TMP/prefix"
+      copy_prefix "$TMP/source" "$SIZE" "$TMP/prefix"
       ACTUAL=$(sha256_file "$TMP/prefix")
       emit_break truncated "$SIZE" "$ACTUAL"
       exit 0
     fi
-    copy_prefix "$LOG" "$OFFSET" "$TMP/prefix"
+    copy_prefix "$TMP/source" "$OFFSET" "$TMP/prefix"
     ACTUAL=$(sha256_file "$TMP/prefix")
     if [ "$ACTUAL" != "$PREFIX" ]; then
       emit_break prefix-changed "$SIZE" "$ACTUAL"
       exit 0
     fi
     if [ "$SIZE" -gt "$OFFSET" ]; then
-      tail -c "+$((OFFSET + 1))" "$LOG" | head -c "$MAX_BYTES" > "$TMP/chunk" || true
+      tail -c "+$((OFFSET + 1))" "$TMP/source" | head -c "$MAX_BYTES" > "$TMP/chunk" || true
       COMPLETE_BYTES=$(LC_ALL=C od -An -v -tu1 "$TMP/chunk" | awk '
         { for (i = 1; i <= NF; i++) { bytes++; if ($i == 10) complete=bytes } }
         END { print complete + 0 }
@@ -112,7 +151,7 @@ while :; do
       BYTES=$(LC_ALL=C wc -c < "$TMP/payload" | tr -d ' ')
       if [ "$BYTES" -gt 0 ]; then
         TO=$((OFFSET + BYTES))
-        copy_prefix "$LOG" "$TO" "$TMP/to-prefix"
+        copy_prefix "$TMP/source" "$TO" "$TMP/to-prefix"
         TO_HASH=$(sha256_file "$TMP/to-prefix")
         PAYLOAD_HASH=$(sha256_file "$TMP/payload")
         printf 'schema=fm-remote-delta.v1\n'

@@ -55,6 +55,13 @@ argv_b64=$4
 command_name=$(perl -MMIME::Base64=decode_base64 -e '$d=decode_base64($ARGV[0]); ($c)=split(/\0/, $d); print $c' "$argv_b64")
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name" in
   unreachable:*) exit 255 ;;
+  serialize:fm-backlog-receive.sh)
+    if mkdir "$FM_FAKE_SERIALIZE_ONCE" 2>/dev/null; then
+      touch "$FM_FAKE_SERIALIZE_ENTERED"
+      while [ ! -f "$FM_FAKE_SERIALIZE_RELEASE" ]; do sleep 0.02; done
+    fi
+    exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
+    ;;
   after-put:fm-remote-file.sh)
     "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
     exit 255
@@ -73,6 +80,9 @@ handoff_env() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   FM_FAKE_SSH_COUNT="$SSH_COUNT" \
+  FM_FAKE_SERIALIZE_ONCE="$TMP_ROOT/serialize.once" \
+  FM_FAKE_SERIALIZE_ENTERED="$TMP_ROOT/serialize.entered" \
+  FM_FAKE_SERIALIZE_RELEASE="$TMP_ROOT/serialize.release" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
   "$@"
 }
@@ -144,6 +154,38 @@ handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending >/dev/null \
 assert_grep 'transfer-cut' "$REMOTE/data/backlog.md" "recovery after dropped transfer lost the item"
 assert_absent "$PARENT/data/handoff/ios.outbox.md" "recovery after dropped transfer left the local outbox"
 pass "dropped transfer recovery overwrites scratch and delivers exactly once"
+
+rm -f "$REMOTE/data/backlog.md" "$TMP_ROOT/serialize.entered" "$TMP_ROOT/serialize.release"
+rm -rf "$TMP_ROOT/serialize.once"
+write_backlog '- [ ] serialized-a - first concurrent handoff (repo: alpha)'
+FM_FAKE_SSH_MODE=serialize handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios serialized-a \
+  > "$TMP_ROOT/serialized-a.out" 2>&1 &
+handoff_a=$!
+wait_for_serialization=0
+while [ ! -f "$TMP_ROOT/serialize.entered" ]; do
+  kill -0 "$handoff_a" 2>/dev/null || fail "first serialized handoff exited before receipt"
+  wait_for_serialization=$((wait_for_serialization + 1))
+  [ "$wait_for_serialization" -le 250 ] || fail "first serialized handoff never reached receipt"
+  sleep 0.02
+done
+write_backlog '- [ ] serialized-b - second concurrent handoff (repo: alpha)'
+FM_FAKE_SSH_MODE=serialize handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios serialized-b \
+  > "$TMP_ROOT/serialized-b.out" 2>&1 &
+handoff_b=$!
+sleep 0.2
+assert_grep 'serialized-b' "$PARENT/data/backlog.md" "concurrent handoff staged while the first transaction was in flight"
+assert_no_grep 'serialized-b' "$PARENT/data/handoff/ios.outbox.md" "concurrent handoff mutated the in-flight outbox"
+touch "$TMP_ROOT/serialize.release"
+wait "$handoff_a" || fail "first serialized handoff failed"
+wait "$handoff_b" || fail "second serialized handoff failed"
+assert_no_grep 'serialized-a' "$PARENT/data/backlog.md" "first serialized handoff remained dispatchable"
+assert_no_grep 'serialized-b' "$PARENT/data/backlog.md" "second serialized handoff remained dispatchable"
+[ "$(grep -cF serialized-a "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "first serialized handoff was lost or duplicated"
+[ "$(grep -cF serialized-b "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "second serialized handoff was lost or duplicated"
+assert_absent "$PARENT/data/handoff/ios.outbox.md" "serialized handoffs left a pending outbox"
+pass "concurrent handoffs serialize staging through confirmed cleanup"
 
 # A stale tasks-axi lock is removed only on the destination host after the first
 # move refusal proves a retry is needed. The dead pid and age satisfy the same

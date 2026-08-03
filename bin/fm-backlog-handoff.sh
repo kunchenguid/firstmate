@@ -60,6 +60,18 @@ MAIN_BACKLOG="$DATA/backlog.md"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+ACTIVE_HANDOFF_LOCK=
+release_handoff_lock() {
+  if [ -n "$ACTIVE_HANDOFF_LOCK" ]; then
+    fm_lock_release "$ACTIVE_HANDOFF_LOCK"
+    ACTIVE_HANDOFF_LOCK=
+  fi
+}
+trap release_handoff_lock EXIT
+trap 'exit 1' HUP INT TERM
 
 RESUME_PENDING=0
 if [ "${1:-}" = --resume-pending ]; then
@@ -363,16 +375,32 @@ remote_handoff() { # <secondmate-id> <keys...>
   [ "${#already[@]}" -eq 0 ] || echo "  already staged (recovered): ${already[*]}"
 }
 
+with_remote_handoff_lock() { # <secondmate-id> <function> <args...>
+  local id=$1 operation=$2 rc
+  shift 2
+  case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe remote handoff id: $id" >&2; return 1 ;; esac
+  ACTIVE_HANDOFF_LOCK="$STATE/.backlog-handoff-$id.lock"
+  fm_lock_acquire_wait "$ACTIVE_HANDOFF_LOCK"
+  if "$operation" "$@"; then rc=0; else rc=$?; fi
+  release_handoff_lock
+  return "$rc"
+}
+
+resume_remote_outbox() { # <secondmate-id> <outbox-path>
+  local id=$1 outbox=$2
+  [ -e "$outbox" ] || [ -L "$outbox" ] || return 0
+  if [ ! -f "$outbox" ] || [ -L "$outbox" ]; then
+    echo "error: unsafe pending handoff outbox: $outbox" >&2
+    return 1
+  fi
+  remote_deliver_outbox "$id" "$outbox"
+}
+
 resume_pending_outboxes() {
   local outbox id failed=0 remote
   [ -d "$DATA/handoff" ] || return 0
   for outbox in "$DATA/handoff"/*.outbox.md; do
-    [ -e "$outbox" ] || continue
-    if [ ! -f "$outbox" ] || [ -L "$outbox" ]; then
-      echo "error: unsafe pending handoff outbox: $outbox" >&2
-      failed=1
-      continue
-    fi
+    [ -e "$outbox" ] || [ -L "$outbox" ] || continue
     id=$(basename "$outbox" .outbox.md)
     case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe pending handoff id: $id" >&2; failed=1; continue ;; esac
     remote=$(secondmate_registry_field "$REG" "$id" remote 2>/dev/null || true)
@@ -381,7 +409,7 @@ resume_pending_outboxes() {
       failed=1
       continue
     fi
-    remote_deliver_outbox "$id" "$outbox" || failed=1
+    with_remote_handoff_lock "$id" resume_remote_outbox "$id" "$outbox" || failed=1
   done
   return "$failed"
 }
@@ -393,7 +421,7 @@ fi
 
 REMOTE=$(secondmate_registry_field "$REG" "$ID" remote 2>/dev/null || true)
 if [ "$REMOTE" = 1 ]; then
-  remote_handoff "$ID" "$@"
+  with_remote_handoff_lock "$ID" remote_handoff "$ID" "$@"
   exit $?
 fi
 
