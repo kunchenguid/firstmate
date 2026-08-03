@@ -58,10 +58,15 @@ The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 millis
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
+Claude mode also allows the stop, with an advisory rather than the repair banner, whenever a different live harness process holds this home's `state/.lock`.
+A session that does not own the session lock must not arm, drain, or repair supervision, and `bin/fm-claude-stop-autoarm.sh` refuses to arm from it on the same predicate, so blocking it would demand a repair it may never perform and would re-block every turn indefinitely.
+That allow requires positive proof of a live foreign owner; a missing, malformed, or stale lock keeps the ordinary blocking path.
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override).
 In Claude mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
 The one loud attended fail-open is available only when the auto-arm has recorded an exhausted failure, its one notice is already consumed, the block budget is exhausted, and a final check finds neither a healthy watcher nor an automatic continuation.
-Each epoch identity is accounted at most once under the budget lock.
+Each epoch identity is accounted at most once under the budget lock on the allow paths, so one event epoch still yields exactly one recovery turn.
+A genuine block instead consumes one count per blocked stop, because a stalled auto-arm stops rewriting `state/.claude-autoarm-epoch` and an epoch-gated counter would then never reach the ceiling in exactly the stalled case the bound exists to cover.
+A stop accounts at most once in total, so an allow path that already advanced the count for this stop is not charged again at the block.
 Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.

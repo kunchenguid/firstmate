@@ -58,6 +58,19 @@
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
 #      fail-open only for an already verified failure episode.
+#      That bound counts BLOCKS, not epochs: a stalled auto-arm stops rewriting
+#      state/.claude-autoarm-epoch, and an epoch-gated counter would then never
+#      advance, leaving the documented ceiling unbounded in the stalled case it
+#      exists to cover. The allow paths still account per epoch, so one event
+#      epoch yields exactly one recovery turn.
+#
+# Session-lock ownership, --claude mode: a session that does not hold this
+# home's session lock must not arm, drain, or repair supervision (AGENTS.md
+# section 3), and bin/fm-claude-stop-autoarm.sh refuses to arm from it on the
+# same predicate. Blocking it would demand a repair it may never perform, so a
+# --claude stop is ALLOWED with an advisory whenever a different LIVE harness
+# process holds state/.lock. A missing, malformed, or stale lock keeps the
+# ordinary blocking path.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,6 +99,8 @@ done
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -184,11 +199,51 @@ if [ "$CLAUDE_MODE" -eq 0 ]; then
   block_stop
 fi
 
+# A session that does not hold this home's session lock is forbidden from
+# arming, draining, or repairing supervision (AGENTS.md section 3), and
+# bin/fm-claude-stop-autoarm.sh refuses to arm from it for the same reason.
+# Blocking such a session therefore demands a repair it may never perform: the
+# auto-arm never claims, its epoch never advances, and the guard re-blocks every
+# turn forever. Allow with an advisory instead, but only on positive proof that
+# a DIFFERENT live harness process owns the lock. A missing, malformed, or stale
+# lock keeps the ordinary blocking path, so this never widens into a general
+# fail-open.
+foreign_session_lock_owner() {
+  local lock_pid
+  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_harness_pid_alive "$lock_pid" || return 1
+  ! fm_session_lock_owned_by_self "$STATE"
+}
+
+if foreign_session_lock_owner; then
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER SESSION: this session does not hold this home'"'"'s session lock, so it must not arm, drain, or repair supervision. The lock-owning session restores supervision when it ends its next turn. Stay read-only here."}\n'
+  exit 0
+fi
+
 # --- --claude cooperative path -----------------------------------------------
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
+# Set when an accounting call in THIS invocation actually moved the count, so
+# the block path below can tell "the epoch was already counted for this stop"
+# apart from "nothing counted it", and advance exactly once per stop either way.
+BUDGET_ADVANCED=0
+
+# Account one observation of the current auto-arm epoch against this session's
+# block budget. Pass 1 as $1 to advance even when the epoch is unchanged.
+#
+# The allow paths call this with epoch idempotence ON, so one event epoch yields
+# exactly one recovery turn. The genuine block path calls it with idempotence
+# OFF, because there the count IS the bound: an auto-arm that stalls stops
+# rewriting state/.claude-autoarm-epoch, and an epoch-gated counter then never
+# advances, so the documented "bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
+# consecutive blocks" ceiling silently became unbounded in exactly the stalled
+# case the bound exists to cover.
 budget_account_current_epoch() {
+  local advance_same_epoch=${1:-0}
   local current_epoch outcome old_session old_count old_epoch tmp initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
@@ -204,10 +259,12 @@ budget_account_current_epoch() {
     esac
     if [ "$old_session" = "$SESSION_ID" ]; then
       COUNT=$old_count
-      if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
+      if [ "$advance_same_epoch" -eq 0 ] && [ -n "$current_epoch" ] \
+        && [ "$old_epoch" = "$current_epoch" ]; then
         :
       else
         COUNT=$((COUNT + 1))
+        BUDGET_ADVANCED=1
       fi
     fi
   fi
@@ -223,6 +280,7 @@ budget_account_current_epoch() {
         ;;
       *) COUNT=1 ;;
     esac
+    BUDGET_ADVANCED=1
   fi
   tmp="$BUDGET_FILE.tmp.$$"
   if ! printf 'session=%s\ncount=%s\nepoch=%s\n' "$SESSION_ID" "$COUNT" "$current_epoch" > "$tmp" 2>/dev/null \
@@ -357,8 +415,15 @@ if autoarm_owns_recovery; then
 fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
-# budget before considering the verified one-time attended fail-open.
-budget_account_current_epoch || block_stop
+# budget before considering the verified one-time attended fail-open. This
+# consumption is per BLOCK, not per epoch, so a stalled auto-arm that stops
+# advancing its epoch still exhausts the bound instead of re-blocking forever.
+# An allow path that already accounted for this epoch during the same stop has
+# consumed the stop's one advance, so forcing a second one here would double-
+# count a single blocked stop.
+if [ "$BUDGET_ADVANCED" -eq 0 ]; then
+  budget_account_current_epoch 1 || block_stop
+fi
 terminal_fail_open
 terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then

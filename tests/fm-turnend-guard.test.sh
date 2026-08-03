@@ -115,6 +115,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -1535,6 +1536,84 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# Start a live process whose command name reads as a verified harness, so the
+# session-lock owner it stands in for is a genuine live harness rather than this
+# test's own shell. Sets FAKE_LOCK_OWNER_PID rather than printing it: a command
+# substitution would not return until the background child released the captured
+# pipe, which is the whole lifetime of the child.
+FAKE_LOCK_OWNER_PID=''
+start_fake_lock_owner() {
+  local dir=$1 link
+  link="$dir/fake-claude-lock-owner"
+  ln -sf /bin/sleep "$link"
+  "$link" 60 >/dev/null 2>&1 &
+  FAKE_LOCK_OWNER_PID=$!
+}
+
+stop_fake_lock_owner() {
+  [ -n "$FAKE_LOCK_OWNER_PID" ] || return 0
+  kill "$FAKE_LOCK_OWNER_PID" 2>/dev/null || true
+  wait "$FAKE_LOCK_OWNER_PID" 2>/dev/null || true
+  FAKE_LOCK_OWNER_PID=''
+}
+
+# A session that does not hold the home's session lock is forbidden from arming,
+# draining, or repairing supervision, and the Stop-owned auto-arm refuses to arm
+# from it for the same reason. Blocking it demanded a repair it could never
+# perform, so the guard re-blocked every turn forever while the lock-owning
+# session stayed idle.
+test_hook_claude_mode_allows_when_another_live_session_owns_the_lock() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-foreign-lock")
+  : > "$dir/state/task1.meta"
+  start_fake_lock_owner "$dir"
+  printf '%s\n' "$FAKE_LOCK_OWNER_PID" > "$dir/state/.lock"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" false); status=$?
+  stop_fake_lock_owner
+  expect_code 0 "$status" "--claude mode must allow a stop it can never repair from a non-owning session"
+  assert_contains "$out" 'SUPERVISION IS OWNED BY ANOTHER SESSION' "non-owning allow must name the owning session"
+  assert_not_contains "$out" 'TURN WOULD END BLIND' "non-owning allow must not emit the repair banner"
+  pass "fm-turnend-guard --claude: a live foreign session-lock owner allows the stop with an advisory"
+}
+
+# The allow above is scoped to positive proof of a DIFFERENT live owner. A lock
+# left behind by a dead session proves nothing, so it must keep blocking rather
+# than widening into a general fail-open.
+test_hook_claude_mode_stale_session_lock_still_blocks() {
+  local dir out status dead
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stale-lock")
+  : > "$dir/state/task1.meta"
+  dead=$(nonexistent_pid)
+  printf '%s\n' "$dead" > "$dir/state/.lock"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "--claude mode must keep blocking when the session lock owner is dead"
+  assert_contains "$out" 'TURN WOULD END BLIND' "stale-lock block must carry the blind-turn banner"
+  assert_not_contains "$out" 'OWNED BY ANOTHER SESSION' "a dead lock owner must not read as a live foreign session"
+  pass "fm-turnend-guard --claude: a stale session lock keeps the ordinary blocking path"
+}
+
+# The documented ceiling is FM_CLAUDE_TURNEND_BLOCK_BUDGET consecutive blocks
+# followed by one attended fail-open. A stalled auto-arm stops rewriting its
+# epoch, and while the budget advanced only on an epoch CHANGE that ceiling
+# never arrived: the guard blocked forever in exactly the stalled case the bound
+# exists to cover.
+test_hook_claude_mode_frozen_epoch_still_exhausts_block_budget() {
+  local dir out status i
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-frozen-epoch")
+  : > "$dir/state/task1.meta"
+  seed_claude_failure "$dir" failed
+  seed_claude_budget "$dir" 3 3
+  for i in 1 2 3; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+    [ "$status" -eq 0 ] && break
+    expect_code 2 "$status" "--claude frozen-epoch block $i must exit 2 until the bound is reached"
+  done
+  expect_code 0 "$status" "a frozen auto-arm epoch must still reach the bounded attended fail-open"
+  assert_contains "$out" 'SUPERVISION IS GENUINELY DOWN' "exhausted frozen-epoch budget must emit the attended alarm"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "attended fail-open did not record its one-time alarm"
+  pass "fm-turnend-guard --claude: a frozen auto-arm epoch still exhausts the bounded block budget"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -1598,3 +1677,6 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+test_hook_claude_mode_allows_when_another_live_session_owns_the_lock
+test_hook_claude_mode_stale_session_lock_still_blocks
+test_hook_claude_mode_frozen_epoch_still_exhausts_block_budget
