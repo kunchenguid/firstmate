@@ -52,6 +52,11 @@
 #                          steered to rebase; one wake per conflict episode,
 #                          keyed by head commit and re-surfaced no more often
 #                          than PR_DIRTY_RESURFACE_SECS
+#   check: process-event result captured: <keys>
+#                          a durably captured process-to-event result is queued
+#                          and has not been surfaced yet; reported once per
+#                          captured generation, never again while that record
+#                          stays queued and never once it is acknowledged
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>

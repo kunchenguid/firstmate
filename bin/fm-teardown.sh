@@ -939,9 +939,6 @@ admission_release_reminder() {
   printf '%s\n' "Admission: $ID released its worker. Run bin/fm-admission.sh to recompute the fleet band before releasing any load-held request, then admit at most one at a time, re-evaluating between each."
 }
 
-registry_home_for_line() {
-  sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
-}
 
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
