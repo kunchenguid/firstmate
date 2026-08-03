@@ -129,23 +129,23 @@ assert_sources_disagree() {  # <target> <label>
     "$2: the two name sources were expected to disagree, but title=$t comms=$c (title='$(fm_backend_tmux_current_command "$1")' comms='$(fm_backend_tmux_foreground_comms "$1" | tr '\n' ' ')')"
 }
 
-# --- a harness-named foreground process, with the OTHER name source blind ----
-# Invoking the symlink by its harness name makes the executable identity and
-# the argv identity differ; tmux and ps read one each, so exactly one is blind.
+# --- a harness-named foreground process -------------------------------------
+# Invoking the symlink by its harness name proves the ordinary positive path
+# with a real process. macOS exposes different names for the symlink through
+# tmux and ps, while Linux can expose the symlink name through both, so the
+# version-string case below owns the cross-platform divergence assertion.
 
 new_window agent "$LAB/bin/claude" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
-assert_sources_disagree "$SESSION:agent" "harness-named foreground process"
-pass "tmux liveness: a harness-named foreground process classifies alive while one name source cannot see it"
+pass "tmux liveness: a harness-named foreground process classifies alive"
 
-# --- the same proof from the opposite side ----------------------------------
-# The case above blinds one name source; this one blinds the OTHER, on either
-# platform, by giving a genuine harness-named executable the version-string
-# argv[0] that Claude Code 2.1.220 reports. Together the two cases prove
-# neither source alone is load-bearing. This needs a real executable file
-# rather than a symlink, because macOS takes the title from the resolved
-# target's name, so it is skipped where no C compiler exists.
+# --- a version title blinds one source --------------------------------------
+# Giving a genuine harness-named executable the version-string argv[0] that
+# Claude Code 2.1.220 reports drives the two sources apart on both supported
+# platforms and proves the surviving source carries the verdict. This needs a
+# real executable file rather than a symlink, because macOS takes the title
+# from the resolved target's name, so it is skipped where no C compiler exists.
 
 CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 if [ -n "$CC_BIN" ] &&
