@@ -181,6 +181,9 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
+# The one derivation of a window's per-key state-file suffix (.hash-, .stale-,
+# .paused-, .paused-class-, ...). Every site that names those files routes
+# through this, so a sibling can never key the same file differently.
 pause_cache_key() {  # <window>
   printf '%s' "$1" | tr ':/.' '___'
 }
@@ -213,21 +216,13 @@ pause_class_fingerprint() {  # <window> <task>
     "$busy_gen" "$busy_state" "$deadline:$phase" | hash_pane
 }
 
-crew_absorb_class_from_line() {  # <canonical-current-state-line>
-  local line=$1 state src
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
-  state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
-  if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
-  fi
-  printf 'none'
-}
-
 # Reuse an unchanged canonical paused verdict until a local invalidator or the
 # bounded long deadline changes. Only paused is cached: active, parked, failed,
 # unknown, and resumed states keep the ordinary conservative read path.
+# Prints "<class> <source>" - both from fm-classify-lib.sh, the one owner of the
+# canonical-line vocabulary - because the caller must distinguish the current-
+# state owner's matched passive-monitor pause (source: run-step) from an
+# ordinary status-log pause, which keeps the live-worker fail-open below.
 paused_absorb_class_cached() {  # <window> <task>
   local win=$1 task=$2 key cache fingerprint cached_fingerprint line class tmp
   key=$(pause_cache_key "$win")
@@ -237,19 +232,19 @@ paused_absorb_class_cached() {  # <window> <task>
     cached_fingerprint=$(sed -n '1p' "$cache" 2>/dev/null || true)
     if [ "$cached_fingerprint" = "$fingerprint" ]; then
       line=$(sed -n '2p' "$cache" 2>/dev/null || true)
-      class=$(crew_absorb_class_from_line "$line")
+      class=$(crew_absorb_class_line "$line")
       if [ "$class" = paused ]; then
-        printf 'paused'
+        printf '%s %s' "$class" "$(crew_state_line_source "$line")"
         return
       fi
     fi
   fi
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
-  class=$(crew_absorb_class_from_line "$line")
+  class=$(crew_absorb_class_line "$line")
   if [ "$class" = paused ]; then
     tmp=$(umask 077; mktemp "$STATE/.paused-class.XXXXXX") || {
       rm -f "$cache"
-      printf '%s' "$class"
+      printf '%s %s' "$class" "$(crew_state_line_source "$line")"
       return
     }
     printf '%s\n%s\n' "$fingerprint" "$line" > "$tmp"
@@ -257,7 +252,7 @@ paused_absorb_class_cached() {  # <window> <task>
   else
     rm -f "$cache"
   fi
-  printf '%s' "$class"
+  printf '%s %s' "$class" "$(crew_state_line_source "$line")"
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through
@@ -405,7 +400,7 @@ busy_turn_over_age() {  # <task>
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
-  key=$(printf '%s' "$win" | tr ':/.' '___')
+  key=$(pause_cache_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
@@ -433,20 +428,27 @@ clear_pause_state() {  # <window>
 
 clear_pause_tracking() {  # <window>
   local win=$1 key
-  key=${win//:/_}
-  key=${key//\//_}
-  key=${key//./_}
+  key=$(pause_cache_key "$win")
   clear_pause_state "$win"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# A canonical paused verdict has already proved the matched passive-monitor and
-# semantic-idle boundary, so endpoint liveness cannot demote it. Only when the
-# canonical reader has no pause may a confidently dead ordinary crew recover the
-# legacy bounded-pause fallback.
+# Exactly ONE case bypasses the live-worker safeguard: a canonical paused verdict
+# sourced from run-step, which is fm-crew-state.sh's matched passive-CI-monitor
+# pause - it has already proved the exact-head run binding AND an affirmatively
+# idle or confidently gone worker, so re-testing endpoint liveness here would
+# only re-ask a question already answered. EVERY other pause (a status-log
+# `paused:` the crew declared for itself, a captain-held transfer, or a canonical
+# verdict that fell back to stopped/unknown) keeps the documented fail-open: an
+# ordinary crew is absorbed onto the long cadence only when the backend
+# confidently reports its agent dead, and a live or inconclusive one surfaces
+# once, so an active external-decision gate is never hidden behind the pause
+# cadence. The bounded recheck marker throttles that legacy path's crew-state
+# reads to one per STALE_ESCALATE_SECS; the run-step path never writes it,
+# because .paused-class-<key> is its own (longer, invalidated) throttle.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last class agent_alive=unknown
+  local win=$1 task=$2 key last verdict class src agent_alive=unknown
   key=$(pause_cache_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   if ! status_is_paused_or_captain_held "$last"; then
@@ -454,32 +456,49 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  class=$(paused_absorb_class_cached "$win" "$task")
-  case "$class" in
-    paused)
-      rm -f "$STATE/.paused-rechecked-$key"
-      printf 'paused'
-      return
-      ;;
-    working)
-      rm -f "$STATE/.paused-rechecked-$key"
-      printf 'working'
-      return
-      ;;
-  esac
+  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$STATE/.paused-rechecked-$key")" -lt "$STALE_ESCALATE_SECS" ]; then
+    if [ "$(window_kind "$win")" != secondmate ]; then
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if [ "$agent_alive" != dead ]; then
+        rm -f "$STATE/.paused-rechecked-$key"
+        printf 'none'
+        return
+      fi
+    fi
+    printf 'paused'
+    return
+  fi
+  verdict=$(paused_absorb_class_cached "$win" "$task")
+  class=${verdict%% *}
+  src=${verdict#* }
+  if [ "$class" = working ]; then
+    rm -f "$STATE/.paused-rechecked-$key"
+    printf 'working'
+    return
+  fi
+  if [ "$class" = paused ] && [ "$src" = run-step ]; then
+    rm -f "$STATE/.paused-rechecked-$key"
+    printf 'paused'
+    return
+  fi
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" = dead ]; then
-      printf 'paused'
+    if [ "$agent_alive" != dead ]; then
+      rm -f "$STATE/.paused-rechecked-$key"
+      printf 'none'
       return
     fi
+    [ "$class" = none ] && class=paused
   fi
-  printf 'none'
+  case "$class" in
+    paused) date +%s > "$STATE/.paused-rechecked-$key"; printf 'paused' ;;
+    *)      rm -f "$STATE/.paused-rechecked-$key"; printf 'none' ;;
+  esac
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last
-  key=$(printf '%s' "$win" | tr ':/.' '___')
+  key=$(pause_cache_key "$win")
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
@@ -992,9 +1011,7 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
-    key=${w//:/_}
-    key=${key//\//_}
-    key=${key//./_}
+    key=$(pause_cache_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
@@ -1004,7 +1021,7 @@ EOF
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
-    key=$(printf '%s' "$w" | tr ':/.' '___')
+    key=$(pause_cache_key "$w")
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"

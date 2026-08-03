@@ -363,9 +363,18 @@ signal_reason_is_actionable() {  # <file> ...
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  crew_absorb_class_line "$line"
+}
+
+# The canonical-line -> working/paused/none mapping itself, split out so a
+# caller holding an ALREADY-READ line (the watcher's cached paused verdict)
+# classifies it through this one owner instead of re-implementing the
+# vocabulary. crew_absorb_class is just this applied to a fresh read.
+crew_absorb_class_line() {  # <canonical-current-state-line>
+  local line=$1 state src
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
@@ -374,6 +383,18 @@ crew_absorb_class() {  # <id>
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
   printf 'none'
+}
+
+# The `source:` token of a canonical current-state line (run-step, pane,
+# status-log, none), empty when the line carries no source. Callers use it to
+# tell WHICH authority produced a class - e.g. a run-step pause is the
+# current-state owner's matched passive-monitor verdict, while a status-log
+# pause is only the crew's own last declared event.
+crew_state_line_source() {  # <canonical-current-state-line>
+  local line=$1 src
+  case "$line" in *"source: "*) ;; *) return 0 ;; esac
+  src=${line#*source: }
+  printf '%s' "${src%% *}"
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

@@ -684,7 +684,7 @@ test_passive_monitor_pause_cache_uses_long_cadence_without_wedge_reads() {
   verdict="$dir/current-state"; calls="$dir/current-state.calls"; window="test:fm-held"
   printf 'idle passive CI monitor\n' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/held.meta"
-  printf 'paused: external review wait on exact head abcdef1234\n' > "$statusf"
+  printf 'paused: external review wait; remain idle\n' > "$statusf"
   printf '%s\n' 'state: paused · source: run-step · external review wait · passive CI monitor remains attached (run 01KYXA52EDXCKVA15F61EX2BTJ, head abcdef1234)' > "$verdict"
   : > "$calls"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
@@ -706,8 +706,13 @@ test_passive_monitor_pause_cache_uses_long_cadence_without_wedge_reads() {
   grep -F "possible wedge" "$out" >/dev/null && fail "passive-monitor pause used the short wedge escalation"
   [ ! -e "$state/.stale-since-$key" ] || fail "passive-monitor pause retained the short wedge timer"
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "passive-monitor pause retained short wedge counters"
+  # FM_POLL=0.2 over the 6s window means ~30 polls: an uncached reader would
+  # read ~30 times. Bound it rather than pinning an exact 2, because a slow
+  # start can put the very first classification past the deadline already and
+  # collapse the classify read and the recheck read into one.
   count=$(awk 'END { print NR + 0 }' "$calls")
-  [ "$count" -eq 2 ] || fail "unchanged pause made $count current-state reads before one long recheck (expected 2)"
+  [ "$count" -ge 1 ] && [ "$count" -le 2 ] \
+    || fail "unchanged pause made $count current-state reads before one long recheck (expected at most 2)"
   pass "an unchanged passive-monitor pause skips short wedge reads and rechecks once on the long cadence"
 }
 
@@ -718,7 +723,7 @@ test_passive_monitor_pause_cache_invalidates_on_resumed_run_generation() {
   verdict="$dir/current-state"; calls="$dir/current-state.calls"; window="test:fm-held"
   printf 'idle passive CI monitor\n' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/held.meta"
-  printf 'paused: external review wait on exact head abcdef1234\n' > "$statusf"
+  printf 'paused: external review wait; remain idle\n' > "$statusf"
   printf '%s\n' 'state: paused · source: run-step · passive CI monitor remains attached (run 01OLD, head abcdef1234)' > "$verdict"
   : > "$calls"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
@@ -839,7 +844,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   # First sight must surface promptly so a live external-decision gate is not
   # hidden behind the pause cadence.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: parked · source: run-step · waiting at an active external-decision gate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
@@ -851,7 +856,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   # a second possible-wedge wake.
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: parked · source: run-step · waiting at an active external-decision gate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!

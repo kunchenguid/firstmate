@@ -35,11 +35,12 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
-#   3. A newest exact-head paused event can override only a full, matched passive
-#      CI monitor when that run predates the event and semantic worker state is
-#      affirmatively idle or the endpoint is gone. The run id and head remain in
-#      the paused detail. Active/fixing/gated/terminal work and busy or unknown
-#      workers retain run-step authority.
+#   3. A newest paused event can override only a full, matched passive CI monitor
+#      when the run's own structured head IS this worktree's head, that run
+#      predates the event, and semantic worker state is affirmatively idle or the
+#      endpoint is gone. No pause prose is parsed. The run id and head remain in
+#      the paused detail. Active/fixing/gated/terminal work, an ancestor-only head
+#      match, and busy or unknown workers retain run-step authority.
 #   4. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -143,29 +144,6 @@ map_log_state() {  # <line>
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
-# A run-attached external pause is conservatively code-bound by the explicit
-# grammar "exact head <7-40 hex>" in its note. We never match decision prose
-# such as "approval". General pauses without this binding keep their existing
-# no-run behavior, but cannot override a matched run.
-pause_exact_head() {
-  local bound
-  status_is_paused "$LOG_LINE" || return 1
-  bound=$(status_line_note "$LOG_LINE" \
-    | grep -oE 'exact head [0-9A-Fa-f]{7,40}' \
-    | tail -1 \
-    | awk '{ print $3 }')
-  [ -n "$bound" ] || return 1
-  printf '%s' "$bound"
-}
-pause_exact_head_matches_worktree() {
-  local bound local_full bound_full
-  bound=$(pause_exact_head) || return 1
-  [ -n "$bound" ] || return 1
-  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
-  bound_full=$(git -C "$WT" rev-parse --verify "${bound}^{commit}" 2>/dev/null) || return 1
-  [ "$bound_full" = "$local_full" ]
-}
-
 # no-mistakes run ids are ULIDs. Their first ten Crockford-base32 characters
 # encode the run creation time in milliseconds. Decoding that structured run
 # identity lets a pause override only a run that already existed when the event
@@ -194,11 +172,17 @@ nm_run_started_epoch() {  # <run-id>
   done
   echo $((value / 1000))
 }
-status_mtime() {
-  if [ "$(uname)" = Darwin ]; then stat -f %m "$LOG" 2>/dev/null
-  else stat -c %Y "$LOG" 2>/dev/null
-  fi
-}
+# Portable mtime. `uname` does not decide which stat this host actually runs:
+# GNU coreutils installed ahead of /usr/bin makes a Darwin box answer `stat -c`
+# and read `-f` as *filesystem* stat, which prints a multi-line dump instead of
+# an epoch (issue #1601). Probe the real binary once on a known path and bind
+# the right form, so the reader never guesses.
+if stat -c %Y . >/dev/null 2>&1; then
+  file_mtime() { stat -c %Y "$1" 2>/dev/null; }
+else
+  file_mtime() { stat -f %m "$1" 2>/dev/null; }
+fi
+status_mtime() { file_mtime "$LOG"; }
 pause_is_newer_than_run() {  # <run-id>
   local started event_mtime
   started=$(nm_run_started_epoch "$1") || return 1
@@ -459,6 +443,20 @@ nm_run_head_matches_worktree() {
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
+# 0 only when the matched run's own head IS this worktree's current head - the
+# structured "exact head" identity a pause override needs. Attribution above
+# also accepts an ancestor worktree head (pipeline fix commits advanced the run
+# tip past local code); that looser match must NOT let a pause outrank the run,
+# because the run is then validating code this worktree has not caught up to.
+nm_run_head_is_worktree_head() {
+  local run_head local_full run_full
+  run_head=$(strip_quotes "$(nm_field head)")
+  [ -n "$run_head" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  [ "$run_full" = "$local_full" ]
+}
+
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
 # sha for this branch row matches the worktree head under the same rules as
 # nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
@@ -555,14 +553,18 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
     else
       # The newest event can override only a passive CI monitor bound to this
-      # exact run lineage. Check worker activity before reading CI logs: an idle
-      # pause needs no repeated log inference, while a busy worker is active work
-      # even if checks were previously green.
+      # exact run lineage: the run's own structured head identity must BE this
+      # worktree's head, and the pause must postdate the run. No status prose is
+      # parsed, so an approval note carries no authority of its own. Check worker
+      # activity before reading CI logs: an idle pause needs no repeated log
+      # inference, while a busy worker is active work even if checks were
+      # previously green.
       PAUSE_BUSY_ACTIVE=0
       run_id=$(strip_quotes "$(nm_field id)")
       run_head=$(strip_quotes "$(nm_field head)")
-      if nm_passive_ci_monitor \
-        && pause_exact_head_matches_worktree \
+      if status_is_paused "$LOG_LINE" \
+        && nm_passive_ci_monitor \
+        && nm_run_head_is_worktree_head \
         && pause_is_newer_than_run "$run_id"; then
         if pane_readable "$BACKEND_TARGET"; then
           PAUSE_BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
@@ -676,10 +678,6 @@ fi
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
-  if status_is_paused "$LOG_LINE" && pause_exact_head >/dev/null 2>&1 \
-    && ! pause_exact_head_matches_worktree; then
-    emit unknown none "declared pause no longer matches current head"
-  fi
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"

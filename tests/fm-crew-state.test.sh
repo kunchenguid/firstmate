@@ -465,7 +465,9 @@ test_passive_ci_monitor_with_newer_exact_head_pause_is_paused() {
   fm_write_meta "$d/state/artemis-autosave-timer-disposal.meta" \
     "window=fm:fm-artemis-autosave-timer-disposal" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'done: implementation and checks complete\n' > "$d/state/artemis-autosave-timer-disposal.status"
-  printf 'paused: awaiting a qualifying human approval on exact head %.10s; remain idle\n' "$head" \
+  # Ordinary pause prose, with no head or run wording of its own: the binding
+  # comes entirely from the matched run's structured head identity below.
+  printf 'paused: awaiting a qualifying human approval; remain idle\n' \
     >> "$d/state/artemis-autosave-timer-disposal.status"
   arm_idle_record "$d/state" artemis-autosave-timer-disposal
   FM_FAKE_RUN_ID=01KYXA52EDXCKVA15F61EX2BTJ
@@ -489,7 +491,7 @@ test_passive_ci_pause_disconfirming_states() {
   head=$(git -C "$d/wt" rev-parse HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/passive-busy.meta" "window=fm:fm-passive-busy" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/passive-busy.status"
+  printf 'paused: external wait; remain idle\n' > "$d/state/passive-busy.status"
   record_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" passive-busy)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" passive-busy busy --gen "$record_gen" \
     --source claude-hook --event user-prompt-submit
@@ -506,7 +508,7 @@ test_passive_ci_pause_disconfirming_states() {
   head=$(git -C "$d/wt" rev-parse HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/paused-active-review.meta" "window=fm:fm-paused-active-review" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-active-review.status"
+  printf 'paused: external wait; remain idle\n' > "$d/state/paused-active-review.status"
   arm_idle_record "$d/state" paused-active-review
   FM_FAKE_AXI_STATUS="$(run_running fm/paused-active-review)"
   out=$(run_crew_state "$d" paused-active-review)
@@ -518,7 +520,7 @@ test_passive_ci_pause_disconfirming_states() {
   head=$(git -C "$d/wt" rev-parse HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/paused-fixing.meta" "window=fm:fm-paused-fixing" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-fixing.status"
+  printf 'paused: external wait; remain idle\n' > "$d/state/paused-fixing.status"
   arm_idle_record "$d/state" paused-fixing
   FM_FAKE_AXI_STATUS="$(run_ci_fixing fm/paused-fixing)"
   out=$(run_crew_state "$d" paused-fixing)
@@ -530,7 +532,7 @@ test_passive_ci_pause_disconfirming_states() {
   head=$(git -C "$d/wt" rev-parse HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/paused-gate.meta" "window=fm:fm-paused-gate" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-gate.status"
+  printf 'paused: external wait; remain idle\n' > "$d/state/paused-gate.status"
   arm_idle_record "$d/state" paused-gate
   FM_FAKE_AXI_STATUS="$(run_parked fm/paused-gate)"
   out=$(run_crew_state "$d" paused-gate)
@@ -542,7 +544,7 @@ test_passive_ci_pause_disconfirming_states() {
   head=$(git -C "$d/wt" rev-parse HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/paused-newer-run.meta" "window=fm:fm-paused-newer-run" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-newer-run.status"
+  printf 'paused: external wait; remain idle\n' > "$d/state/paused-newer-run.status"
   arm_idle_record "$d/state" paused-newer-run
   FM_FAKE_RUN_ID=01ZZZZZZZZZZZZZZZZZZZZZZZZ
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/paused-newer-run)"
@@ -555,21 +557,44 @@ test_passive_ci_pause_disconfirming_states() {
   old_head=$(git -C "$d/wt" rev-parse HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/paused-changed-head.meta" "window=fm:fm-paused-changed-head" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'paused: external wait on exact head %.10s\n' "$old_head" > "$d/state/paused-changed-head.status"
+  printf 'paused: external wait; remain idle\n' > "$d/state/paused-changed-head.status"
   arm_idle_record "$d/state" paused-changed-head
   git -C "$d/wt" commit -q --allow-empty -m 'new head after pause'
   FM_FAKE_RUN_HEAD="$old_head"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/paused-changed-head)"
   out=$(run_crew_state "$d" paused-changed-head)
-  assert_contains "$out" "state: unknown" "changed head invalidates an exact-head pause"
-  assert_not_contains "$out" "state: paused" "changed code cannot remain paused"
+  assert_contains "$out" "source: status-log" "changed code drops the run attribution entirely"
+  assert_not_contains "$out" "source: run-step" "changed code cannot claim run-step pause authority"
+  assert_not_contains "$out" "passive CI monitor remains attached" "changed code cannot borrow the passive-monitor override"
+
+  # The run tip advanced past this worktree (pipeline fix commits). Attribution
+  # still succeeds on the ancestor rule, but that is NOT the exact head identity
+  # a pause override requires, so the run keeps its own authority.
+  d=$(new_case paused-ancestor-head)
+  make_repo_on_branch "$d/wt" fm/paused-ancestor-head
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'run tip advanced past local head'
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$old_head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/paused-ancestor-head.meta" "window=fm:fm-paused-ancestor-head" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: external wait; remain idle\n' > "$d/state/paused-ancestor-head.status"
+  arm_idle_record "$d/state" paused-ancestor-head
+  FM_FAKE_RUN_HEAD="$head"
+  FM_FAKE_RUN_ID=01KYXA52EDXCKVA15F61EX2BTJ
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/paused-ancestor-head)"
+  FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed'
+  out=$(run_crew_state "$d" paused-ancestor-head)
+  assert_contains "$out" "source: run-step" "an ancestor-matched run keeps run-step authority"
+  assert_not_contains "$out" "state: paused" "an ancestor-only head match is not the exact head a pause needs"
+  assert_not_contains "$out" "passive CI monitor remains attached" "an ancestor-only head match cannot attach the passive-monitor override"
 
   d=$(new_case paused-failed)
   make_repo_on_branch "$d/wt" fm/paused-failed
   head=$(git -C "$d/wt" rev-parse HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/paused-failed.meta" "window=fm:fm-paused-failed" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-failed.status"
+  printf 'paused: external wait; remain idle\n' > "$d/state/paused-failed.status"
   arm_idle_record "$d/state" paused-failed
   FM_FAKE_RUN_HEAD="$head"
   FM_FAKE_AXI_STATUS="$(run_failed fm/paused-failed)"
@@ -581,14 +606,14 @@ test_passive_ci_pause_disconfirming_states() {
   head=$(git -C "$d/wt" rev-parse HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/paused-cancelled.meta" "window=fm:fm-paused-cancelled" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-cancelled.status"
+  printf 'paused: external wait; remain idle\n' > "$d/state/paused-cancelled.status"
   arm_idle_record "$d/state" paused-cancelled
   FM_FAKE_RUN_HEAD="$head"
   FM_FAKE_AXI_STATUS="$(run_cancelled fm/paused-cancelled)"
   out=$(run_crew_state "$d" paused-cancelled)
   assert_contains "$out" "state: failed" "cancelled run remains failed"
 
-  pass "pause override rejects busy, active, fixing, parked, changed-head, failed, and cancelled states"
+  pass "pause override rejects busy, active, fixing, parked, changed-head, ancestor-only-head, failed, and cancelled states"
 }
 
 test_ci_ready_done_log_beats_monitoring_run() {
