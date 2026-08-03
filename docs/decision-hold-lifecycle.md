@@ -23,6 +23,9 @@ The `fold` subcommand is the alternative path when the finding belongs to a deci
 It appends `Also raised by <origin>: <note>` to the target's body through `tasks-axi update --body-file`, skipping the write when the same marker is already present, and unions the target identity into the origin's `decision_folds=` metadata.
 It refuses a target that is not an actively held captain decision and refuses an origin folding into its own decision namespace.
 It also refuses, before writing anything to the target, an origin with no `state/<origin>.meta` to record the fold in, because a fold that cannot be recorded would report success and then be rejected by `complete --folded`.
+It transfers the origin's open keyed status decision to the target with the same `captain-held [key=<key>]: ...` event `complete` writes, because that live copy would otherwise stay open waiting for a key this origin never registers, and `complete --folded` would dead-end on it.
+`--key` names which open status decision the fold covers and is required while several are open, so one fold satisfies exactly the question it folded and never blanket-closes the rest; a key already transferred to the same target is skipped, which keeps repeating a fold idempotent.
+Coverage is resolved before any write, so a fold that cannot name it refuses with the target untouched.
 Reading the target body decodes the JSON string literal tasks-axi emits, so `jq` is required for `fold` and `resolve`.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
@@ -105,6 +108,8 @@ Retention therefore only changes where a decision's record lives, never whether 
 
 Every captain-actionable backlog row carries `waiting_days`, the whole days since its `since` date, and `decision_aging`, true once that reaches `FM_DECISION_AGING_DAYS` (default 3).
 That is one variable for one policy: `bin/fm-fleet-snapshot.sh` and `bin/fm-decision-hold.sh` read the same name, so the fleet view and `open --aging-only` cannot disagree about which decisions are ageing.
+They cannot disagree about the decision set either: the CLI listing applies the same `captain_actionable` predicate the fleet view applies - queued, kind `captain`, held for the captain with a reason, and carrying no unresolved blocker - so a refusal can never cite a decision Bearings does not show.
+Both day counts anchor each endpoint at midnight UTC explicitly, so two reads straddling a second boundary cannot shorten a decision's age by a day and drop it out of the ageing set.
 Both are computed in `bin/fm-fleet-snapshot.sh` from the existing `since` metadata that `tasks-axi add` already writes, so every decision registered before this behavior existed reports its age with no migration and no schema change.
 `bin/fm-bearings-snapshot.sh` carries `since`, `waiting_days`, and `aging` into `decisions_open` and orders it ageing-first then oldest-first, so an ageing decision leads the section and cannot be truncated away by the bounded cap.
 The threshold is three days because that is the shortest span that always covers a full working day plus a weekend edge, so it cannot fire on a decision the captain has simply not reached yet, while still surfacing a stalled decision long before the week-long silences it exists to prevent.
@@ -152,6 +157,8 @@ The final verification commands and their exact summarized outputs follow.
 $ bash tests/fm-decision-hold-lifecycle.test.sh
 ok - report-only unresolved decision is reproduced and completion refuses before loss
 ok - externally closed and archived decisions are durably resolved, recordless closure is not
+ok - a folded status decision satisfies completion without a second captain decision
+ok - a decision at exactly the ageing threshold is ageing and one below it is not
 ok - a fold that cannot be recorded refuses instead of reporting success
 ok - a firstmate-decided closure is first-class and attributed honestly
 ok - a second pass cannot silently duplicate an open decision and can fold into it

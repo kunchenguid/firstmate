@@ -21,7 +21,8 @@
 #   fm-decision-hold.sh open [--origin <origin-id>] [--aging-only]
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
 #     --title <title> --reason <reason> [--repo <repo>] [--distinct]
-#   fm-decision-hold.sh fold <origin-id> --into <hold-id> --note <note>
+#   fm-decision-hold.sh fold <origin-id> --into <hold-id> --note <note> \
+#     [--key <decision-key>...]
 #   fm-decision-hold.sh complete <origin-id> (--none | --folded | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
@@ -57,7 +58,12 @@
 # origin's metadata, so the origin still satisfies the completion gate without
 # creating a duplicate captain decision. It refuses up front, before touching the
 # target, when the origin has no metadata to record the fold in, so a reported
-# fold always satisfies `complete --folded`.
+# fold always satisfies `complete --folded`. It also transfers the origin's open
+# keyed status decision to the decision that now owns it, the same
+# `captain-held [key=...]` event `complete` writes, so a folded status decision is
+# not left open for a key this origin will never register. `--key` names which
+# open status decision this fold covers; it is required while several are open, so
+# one fold can never blanket-satisfy more than the question it folded.
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -292,8 +298,8 @@ today_utc() {
 }
 
 date_epoch() {  # <YYYY-MM-DD>
-  date -u -j -f '%Y-%m-%d' "$1" +%s 2>/dev/null \
-    || date -u -d "$1" +%s 2>/dev/null \
+  date -u -j -f '%Y-%m-%d %H:%M:%S' "$1 00:00:00" +%s 2>/dev/null \
+    || date -u -d "$1 00:00:00 UTC" +%s 2>/dev/null \
     || true
 }
 
@@ -335,13 +341,24 @@ TASKS_AXI_CSV_AWK='
 
 # Every open captain decision in the active home as
 # "<id>\t<since>\t<title>\t<reason>", ordered oldest first.
+#
+# The predicate is the same one bin/fm-fleet-snapshot.sh applies for
+# captain_actionable - queued, kind captain, held for the captain with a reason,
+# and carrying no unresolved blocker - so this listing and Bearings' Captain's
+# Call can never cite different decisions. tasks-axi drops a resolved blocker
+# from blocked_by and refuses an edge to a task that does not exist, so its
+# blocked_by is exactly the unresolved-blocker set the fleet view computes.
 list_open_captain_decisions() {
-  tasks_axi list --state held --kind captain --fields hold_reason,hold_kind,created 2>/dev/null \
+  tasks_axi list --state held --kind captain \
+      --fields hold_reason,hold_kind,created,blocked_by 2>/dev/null \
     | awk "
         function emit(line,   f, n) {
           n = parse_csv(line, f)
-          if (n < 8) return
+          if (n < 9) return
+          if (f[2] != \"queued\") return
+          if (f[6] == \"\") return
           if (f[7] != \"captain\") return
+          if (f[9] != \"\" && f[9] != \"none\") return
           printf \"%s\t%s\t%s\t%s\n\", f[1], f[8], clean(f[5]), clean(f[6])
         }
         $TASKS_AXI_CSV_AWK
@@ -397,6 +414,19 @@ origin_fold_ids() {  # <origin-id>
   local meta="$STATE/$1.meta"
   [ -f "$meta" ] || return 0
   meta_value "$meta" decision_folds
+}
+
+# The one fold check both the completion gate and the teardown gate apply, so the
+# two cannot drift apart.
+verify_folds() {  # <comma-separated-fold-ids>
+  local folds=$1 fold
+  [ -n "$folds" ] || return 0
+  while IFS= read -r fold; do
+    [ -n "$fold" ] || continue
+    verify_hold_durable "$fold"
+  done <<EOF
+$(printf '%s\n' "$folds" | tr ',' '\n')
+EOF
 }
 
 # The registration record a resolution must not erase. On a first resolution that
@@ -475,6 +505,44 @@ origin_open_decisions() {  # <origin-id>
     esac
   fi
   printf '%s' "$open"
+}
+
+status_transfer_line() {  # <key> <owner-hold-id>
+  printf 'captain-held [key=%s]: tracked by %s\n' "$1" "$2"
+}
+
+status_transfer_recorded() {  # <status-file> <key> <owner-hold-id>
+  [ -f "$1" ] || return 1
+  grep -Fxq -- "$(status_transfer_line "$2" "$3")" "$1"
+}
+
+# The origin's open structured decision keys this fold covers, one per line.
+# A fold closes the live status copy of the question it folded and nothing else,
+# so an explicit --key must name a decision that is open here, and an unqualified
+# fold covers a single open decision but refuses while several are open rather
+# than blanket-satisfying all of them. A key this fold already transferred to the
+# same owner is silently skipped, which keeps repeating a fold idempotent.
+fold_covered_keys() {  # <origin-id> <open-set> <requested-keys> <owner-hold-id>
+  local origin=$1 open=$2 requested=$3 into=$4 status_file="$STATE/$1.status" key open_keys count covered=''
+  open_keys=$(printf '%s' "$open" | awk -F'\t' 'NF { print $1 }')
+  if [ -n "$requested" ]; then
+    for key in $requested; do
+      if printf '%s\n' "$open_keys" | grep -Fxq -- "$key"; then
+        covered="${covered}${key}"$'\n'
+      elif status_transfer_recorded "$status_file" "$key" "$into"; then
+        :
+      else
+        fail "origin $origin has no open structured decision under key $key"
+      fi
+    done
+    printf '%s' "$covered"
+    return 0
+  fi
+  count=0
+  [ -z "$open_keys" ] || count=$(printf '%s\n' "$open_keys" | grep -c . || true)
+  [ "$count" -le 1 ] \
+    || fail "origin $origin has $count open structured decisions; name the one this fold covers with --key <decision-key>"
+  [ -z "$open_keys" ] || printf '%s\n' "$open_keys"
 }
 
 body_has_resolution_record() {  # <hold-body>
@@ -776,13 +844,14 @@ command_hold() {
 }
 
 command_fold() {
-  local origin=${1:-} into='' note='' meta previous folds body marker tmp
+  local origin=${1:-} into='' note='' requested='' meta previous folds body marker tmp status_file open covered key
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --into) shift; into=${1:-} ;;
       --note) shift; note=${1:-} ;;
+      --key) shift; validate_slug decision-key "${1:-}"; requested="${requested}${requested:+ }${1:-}" ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -806,6 +875,12 @@ command_fold() {
   [ -f "$meta" ] || fail "origin $origin has no runtime metadata at $meta, so the fold cannot be recorded; fold from the home that owns $origin"
   ( verify_hold_active "$into" ) >/dev/null 2>&1 \
     || fail "fold target $into is not an open captain decision; a resolved decision needs a new decision key"
+  # Which live status decisions this fold answers for is decided before anything is
+  # written, so a fold that cannot name its coverage refuses instead of leaving the
+  # target mutated and the origin still unable to complete.
+  status_file="$STATE/$origin.status"
+  open=$(origin_open_decisions "$origin")
+  covered=$(fold_covered_keys "$origin" "$open" "$requested" "$into")
 
   marker=$(printf 'Also raised by %s: %s' "$origin" "$note")
   body=$(read_body "$into")
@@ -823,11 +898,20 @@ command_fold() {
   previous=$(meta_value "$meta" decision_folds)
   folds=$(sorted_key_union "$previous" "$into")
   [ "$previous" = "$folds" ] || printf 'decision_folds=%s\n' "$folds" >> "$meta"
-  printf 'folded: %s -> %s\n' "$origin" "$into"
+
+  # The live status copy of a folded question is transferred to the decision that
+  # now owns it, exactly as `complete` transfers a question to its own hold, so
+  # `complete --folded` satisfies the per-key requirement instead of dead-ending
+  # on a status decision no key of this origin will ever cover.
+  for key in $covered; do
+    status_transfer_line "$key" "$into" >> "$status_file"
+  done
+  printf 'folded: %s -> %s%s\n' "$origin" "$into" \
+    "$(if [ -n "$covered" ]; then printf ' [keys=%s]' "$(printf '%s\n' "$covered" | sed '/^$/d' | paste -sd, -)"; fi)"
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' key status_file open raw_open key_seen=0 has_meta=0 folds=''
+  local origin=${1:-} meta previous='' supplied='' keys='' key status_file open raw_open key_seen=0 has_meta=0 folds='' transfer_rc=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -859,14 +943,7 @@ command_complete() {
       shift
     done
   fi
-  if [ -n "$folds" ]; then
-    while IFS= read -r key; do
-      [ -n "$key" ] || continue
-      verify_hold_durable "$key"
-    done <<EOF
-$(printf '%s\n' "$folds" | tr ',' '\n')
-EOF
-  fi
+  verify_folds "$folds"
   if [ "$has_meta" = 1 ]; then
     previous=$(meta_value "$meta" decision_keys)
   fi
@@ -909,7 +986,7 @@ EOF
       list_has_key "$keys" "$key" || continue
       transfer_rc=0
       fm_wake_status_append_self_announced "$STATE" "$status_file" \
-        "captain-held [key=$key]: tracked by $(hold_id "$origin" "$key")" || transfer_rc=$?
+        "$(status_transfer_line "$key" "$(hold_id "$origin" "$key")")" || transfer_rc=$?
       [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
       key_seen=1
     done <<EOF
@@ -922,7 +999,7 @@ EOF
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys key open folds
+  local origin=${1:-} meta reviewed keys key open
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -930,15 +1007,7 @@ command_verify() {
   require_tasks_axi
   reviewed=$(meta_value "$meta" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed unresolved-decision inventory"
-  folds=$(meta_value "$meta" decision_folds)
-  if [ -n "$folds" ]; then
-    while IFS= read -r key; do
-      [ -n "$key" ] || continue
-      verify_hold_durable "$key"
-    done <<EOF
-$(printf '%s\n' "$folds" | tr ',' '\n')
-EOF
-  fi
+  verify_folds "$(origin_fold_ids "$origin")"
   keys=$(meta_value "$meta" decision_keys)
   if [ -n "$keys" ]; then
     while IFS= read -r key; do

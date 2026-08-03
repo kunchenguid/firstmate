@@ -128,6 +128,24 @@ run_decisions() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
 
+run_decisions_now() {  # <home> <today> <command args...>
+  local home=$1 now=$2
+  shift 2
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_DECISION_NOW="$now" \
+    "$ROOT/bin/fm-decision-hold.sh" "$@"
+}
+
+# Backdate one queued row's registration date, which is what tasks-axi reports as
+# its created date and what the ageing threshold is measured from.
+set_since() {  # <home> <id> <date>
+  local home=$1 id=$2 date=$3
+  sed "/^- \[ \] $id - /s/(since [0-9][0-9-]*)/(since $date)/" \
+    "$home/data/backlog.md" > "$home/backlog.since"
+  mv "$home/backlog.since" "$home/data/backlog.md"
+}
+
 write_origin_meta() {  # <home> <id> [kind]
   local home=$1 id=$2 kind=${3:-scout}
   fm_write_meta "$home/state/$id.meta" \
@@ -660,6 +678,23 @@ test_second_pass_cannot_silently_duplicate_an_open_decision() {
   open_out=$(run_decisions "$home" open) || fail "open listing failed"
   assert_contains "$open_out" "open captain decisions in" "open must report the current set"
   assert_contains "$open_out" "$first-decision-handbook-authority" "open must list the folded-into decision"
+
+  # The listing must cite only decisions the captain can actually see, so an
+  # unresolved blocker removes a decision here exactly as it does in Bearings.
+  tasks_in "$home" add sample-prerequisite "Land the prerequisite first" --kind ship --repo sample >/dev/null \
+    || fail "could not create the blocking prerequisite"
+  tasks_in "$home" block "$first-decision-handbook-authority" --by sample-prerequisite >/dev/null \
+    || fail "could not block the decision by its prerequisite"
+  open_out=$(run_decisions "$home" open) || fail "open listing failed while a decision was blocked"
+  case "$open_out" in
+    *"$first-decision-handbook-authority"*)
+      fail "open listed a blocked decision the fleet view does not show as actionable" ;;
+  esac
+  tasks_in "$home" unblock "$first-decision-handbook-authority" --by sample-prerequisite >/dev/null \
+    || fail "could not clear the prerequisite edge"
+  open_out=$(run_decisions "$home" open) || fail "open listing failed after unblocking"
+  assert_contains "$open_out" "$first-decision-handbook-authority" \
+    "clearing the blocker must return the decision to the actionable listing"
   pass "a second pass cannot silently duplicate an open decision and can fold into it"
 }
 
@@ -834,9 +869,125 @@ test_firstmate_decided_closure_is_first_class() {
     --decision "Firstmate decided: land the schema change first; the evidence settles it." \
     --decided-by firstmate --no-routed-work >/dev/null \
     || fail "a firstmate-decided closure must stay idempotent on retry"
+  if run_decisions "$home" resolve "$origin" merge-order \
+    --decision "Firstmate decided: land the schema change first; the evidence settles it." \
+    --decided-by captain --no-routed-work > "$home/attr.out" 2> "$home/attr.err"; then
+    fail "a retry reattributing the same answer to the captain reported success"
+  fi
+  assert_grep "different decider" "$home/attr.err" \
+    "attribution must be part of the retry identity, not outside it"
   run_decisions "$home" complete "$origin" merge-order >/dev/null \
     || fail "a firstmate-decided closure must satisfy the completion gate"
   pass "a firstmate-decided closure is first-class and attributed honestly"
+}
+
+# A finding folded into the decision that already owns the question must also close
+# that question's live status copy. Otherwise the origin's own keys never cover it,
+# `complete --folded` dead-ends, and the only way forward is the second captain
+# decision this whole path exists to prevent.
+test_folded_status_decision_satisfies_completion() {
+  local home owner origin hold rc
+  home=$(make_home folded-status)
+  owner=sample-policy-review
+  origin=sample-policy-audit
+  mkdir -p "$home/data/$owner" "$home/data/$origin"
+  printf '# owner\n' > "$home/data/$owner/report.md"
+  printf '# audit\n' > "$home/data/$origin/report.md"
+  write_origin_meta "$home" "$owner"
+  write_origin_meta "$home" "$origin"
+  hold=$(run_decisions "$home" hold "$owner" retention-window \
+    --title "How long should sample records be retained" \
+    --reason "policy the captain owns" --repo sample) \
+    || fail "could not register the owning decision"
+
+  # The later pass's crewmate raised the same question as a structured status
+  # decision, which is the shape that used to make the fold path a dead end.
+  printf 'working: auditing retention\nneeds-decision: how long are sample records retained\n' \
+    > "$home/state/$origin.status"
+
+  run_decisions "$home" fold "$origin" --into "$hold" \
+    --note "the audit pass reaches the same question" >/dev/null \
+    || fail "could not fold the audit finding into the owning decision"
+  assert_grep "captain-held [key=default]: tracked by $hold" "$home/state/$origin.status" \
+    "the fold must transfer the live status decision to the decision that now owns it"
+  run_decisions "$home" complete "$origin" --folded >/dev/null \
+    || fail "--folded must satisfy the gate for an origin whose status decision was folded"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "teardown verification must accept a folded status decision"
+  [ "$(grep -cE '^- \[ \] .*-decision-.* -' "$home/data/backlog.md")" = 1 ] \
+    || fail "satisfying the gate required a second captain decision"
+  run_decisions "$home" fold "$origin" --into "$hold" \
+    --note "the audit pass reaches the same question" >/dev/null \
+    || fail "repeating the fold must stay idempotent"
+  [ "$(grep -cF "captain-held [key=default]: tracked by $hold" "$home/state/$origin.status")" = 1 ] \
+    || fail "repeating the fold duplicated the status transfer"
+
+  # One fold covers exactly the question it folded, never the rest of the open set.
+  printf 'needs-decision [key=purge-cadence]: how often should the purge run\n' \
+    >> "$home/state/$origin.status"
+  printf 'needs-decision [key=export-shape]: which export shape is authoritative\n' \
+    >> "$home/state/$origin.status"
+  set +e
+  run_decisions "$home" fold "$origin" --into "$hold" --note "both open questions at once" \
+    > "$home/blanket.out" 2> "$home/blanket.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "one unqualified fold blanket-satisfied several open status decisions"
+  assert_grep "--key" "$home/blanket.err" "the refusal must ask which decision the fold covers"
+  run_decisions "$home" fold "$origin" --into "$hold" --key purge-cadence \
+    --note "the purge cadence is the same retention question" >/dev/null \
+    || fail "a keyed fold must cover the decision it names"
+  assert_grep "captain-held [key=purge-cadence]: tracked by $hold" "$home/state/$origin.status" \
+    "the keyed fold must transfer the decision it named"
+  assert_no_grep "captain-held [key=export-shape]" "$home/state/$origin.status" \
+    "a keyed fold must not close a decision it did not cover"
+  if run_decisions "$home" complete "$origin" --folded \
+    > "$home/rest.out" 2> "$home/rest.err"; then
+    fail "a status decision no fold covered passed the completion gate"
+  fi
+  assert_grep "export-shape" "$home/rest.err" "the refusal must name the decision still open"
+  pass "a folded status decision satisfies completion without a second captain decision"
+}
+
+# The threshold is inclusive, and both day-boundary reads are anchored at midnight,
+# so a decision at exactly FM_DECISION_AGING_DAYS cannot lose a day and drop out of
+# the set that resurfaces on its own.
+test_decision_at_exactly_the_ageing_threshold_is_ageing() {
+  local home origin at_threshold below out
+  home=$(make_home ageing-threshold)
+  origin=sample-threshold-review
+  mkdir -p "$home/data/$origin"
+  printf '# threshold\n' > "$home/data/$origin/report.md"
+  write_origin_meta "$home" "$origin"
+  at_threshold=$(run_decisions "$home" hold "$origin" cutover-date \
+    --title "Which cutover date is authoritative" \
+    --reason "schedule the captain owns" --repo sample) \
+    || fail "could not register the threshold decision"
+  below=$(run_decisions "$home" hold "$origin" rollout-shape \
+    --title "Which rollout shape should be used" \
+    --reason "shape the captain owns" --repo sample --distinct) \
+    || fail "could not register the younger decision"
+  set_since "$home" "$at_threshold" 2026-07-23
+  set_since "$home" "$below" 2026-07-24
+
+  out=$(run_decisions_now "$home" 2026-07-26 open --aging-only) \
+    || fail "the ageing listing failed"
+  assert_contains "$out" "$at_threshold" \
+    "a decision at exactly the threshold must be reported as ageing"
+  assert_contains "$out" "waiting 3 days" \
+    "the age at the threshold must be reported as the whole days waited"
+  case "$out" in
+    *"$below"*) fail "a decision below the threshold leaked into the ageing set" ;;
+  esac
+
+  out=$(run_decisions_now "$home" 2026-07-25 open --aging-only) \
+    || fail "the ageing listing failed one day earlier"
+  case "$out" in
+    *"$at_threshold"*) fail "a decision one day below the threshold was reported as ageing" ;;
+  esac
+  out=$(run_decisions_now "$home" 2026-07-26 open) || fail "the full listing failed"
+  assert_contains "$out" "$below" "the full listing must still carry the younger decision"
+  pass "a decision at exactly the ageing threshold is ageing and one below it is not"
 }
 
 # A captain who declines a held decision leaves no follow-up work to route, so the
@@ -1382,6 +1533,8 @@ SH
 
 test_uninventoried_report_decision_refuses_completion
 test_externally_closed_decisions_are_durably_resolved
+test_folded_status_decision_satisfies_completion
+test_decision_at_exactly_the_ageing_threshold_is_ageing
 test_unrecordable_fold_refuses_rather_than_reporting_success
 test_firstmate_decided_closure_is_first_class
 test_second_pass_cannot_silently_duplicate_an_open_decision
