@@ -185,6 +185,9 @@ out=$(
     if [ "${1:-}" = -v ] && [ "${2:-}" = git ]; then return 1; fi
     builtin command "$@"
   }
+  if command -v git >/dev/null 2>&1; then
+    fail "the missing-git fixture still resolved git"
+  fi
   export -f command
   fm_on ios fm-remote-doctor.sh 2>&1
 )
@@ -192,7 +195,7 @@ rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "the entrypoint passed when git did not resolve on its operator PATH"
 assert_contains "$out" 'required tool git does not resolve on the remote operator PATH' "the entrypoint did not name the missing prerequisite"
-assert_contains "$out" '~/.local/bin' "the entrypoint did not point at the wrapper escape hatch"
+assert_contains "$out" '/.local/bin' "the entrypoint did not point at the wrapper escape hatch"
 assert_not_contains "$out" 'command is not tracked by the configured remote root' "missing git was misreported as an untracked command"
 pass "the entrypoint gives an actionable missing-git diagnostic"
 
