@@ -114,9 +114,15 @@ done
 grep -Eq 'reason=actionable-signal' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null \
   || fail "Grok action cycle was not classified in the lifecycle ledger"
 sleep 5
-[ "$(count_text "Task completed in")" = "$completion_count" ] \
-  || fail "Grok surfaced a tracked-task completion while away mode was active"
-kill -0 "$arm_pid" 2>/dev/null || fail "Grok tracked arm completed instead of parking"
+[ "$(count_text "Task completed in")" = "$completion_count" ] || {
+  capture >&2
+  fail "Grok surfaced a tracked-task completion while away mode was active"
+}
+kill -0 "$arm_pid" 2>/dev/null || {
+  capture >&2
+  ps -o pid=,ppid=,state=,command= -p "$arm_pid" 2>/dev/null >&2 || true
+  fail "Grok tracked arm completed instead of parking"
+}
 grep -q 'grok-e2e.status' "$HOME_DIR/state/.wake-queue" 2>/dev/null \
   || fail "away-mode wake was not preserved in the durable queue"
 
@@ -145,8 +151,10 @@ while [ "$i" -lt 240 ]; do
   sleep 0.5
   i=$((i + 1))
 done
-[ "$(count_text "Task completed in")" -gt "$completion_count" ] \
-  || fail "Grok did not restore native background-task completion after away mode"
+[ "$(count_text "Task completed in")" -gt "$completion_count" ] || {
+  capture >&2
+  fail "Grok did not restore native background-task completion after away mode"
+}
 pane=$(capture)
 if printf '%s\n' "$pane" | grep -Fq 'bin/fm-watch-arm.sh &'; then
   fail "Grok used a shell ampersand instead of its tracked background task"

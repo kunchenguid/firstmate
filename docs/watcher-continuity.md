@@ -28,9 +28,10 @@ A stolen singleton is worse than a duplicate: the watcher deliberately one-shots
 Three layers hold the boundary, and each is independently sufficient for the case it covers.
 
 `bin/fm-watch-arm.sh` is the deterministic layer: it rechecks `state/.afk` before restart signaling or lock cleanup, attachment, and the watcher fork; while the flag exists it arms nothing, emits nothing, holds no watcher lock, and parks at the normal attach poll cadence.
-It applies the same recheck at the two points where an arm returns a wake to its caller - its own child's actionable close, and the durable delivery record an owned or attached arm resolves - so an arm that was already running when away mode began exits successfully with `watcher: stood-down` instead of handing that wake back.
+It applies the same recheck at the two points where an arm returns a wake to its caller - its own child's actionable close, and the durable delivery record an owned or attached arm resolves - so an arm that was already running when away mode began parks instead of completing or handing that wake back.
 That boundary is what covers a caller with no adapter of its own, where arm completion itself is the wake: a Grok tracked background task converts completion into a synthetic user message, and a manual recovery probe prints the reason.
 The parked process remains interruptible, and after the flag clears it replaces itself with a normal arm cycle under the same process id so the tracked task resumes supervision without a model turn.
+A manual recovery probe started while away mode is active therefore blocks until the flag clears instead of returning, and the existing signal traps remain available to interrupt it.
 Those checks cover every established-away-state case, but one deliberately accepted AFK-entry race remains across the arm layer and the Pi and OpenCode final-delivery paths.
 If `state/.afk` is created in the instant after the final flag check and before the immediately following completion or delivery, at most one spurious wake can reach firstmate during that away-mode transition.
 This fails safe toward one extra wake, never a missed wake: `state/.wake-queue` still retains every record and `bin/fm-wake-drain.sh` remains its sole consumer.
@@ -41,12 +42,12 @@ Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/f
 If a close or pending retry observes away mode during the AFK-entry window, the adapter records an owner-scoped parked resume and polls with an unreferenced timer until the flag clears.
 The live generation or lock owner then re-arms automatically without replaying the suppressed wake; a retired Pi generation and an OpenCode session that no longer owns the lock discard their parked resume.
 An explicit Pi `fm_watch_arm_pi` call returns a successful stand-down message rather than arming.
-An adapter that observes away mode before spawning still returns its own benign `watcher: stood-down` result, while an arm process that reaches an arming gate parks and one that reaches a wake-return boundary stands down.
+An adapter that observes away mode before spawning still returns its own benign `watcher: stood-down` result, while an arm process parks at both arming gates and wake-return boundaries.
 A genuine arm or spawn failure still surfaces once with no retry loop behind it, because the daemon owns the watcher and a retry storm would be the same wasted turn.
 Nothing is lost: the watcher enqueues each wake to `state/.wake-queue` before advancing its suppression markers, housekeeping classifies each unseen record without consuming it, and the next `bin/fm-wake-drain.sh` remains the sole consumer.
 
 Claude's Stop auto-arm (`bin/fm-claude-stop-autoarm.sh`) already exits before claiming the home while `state/.afk` exists, and Codex's foreground checkpoint protocol is model-driven with no adapter injection at all.
-Grok has no automatic watcher adapter, so the arm layer is its whole boundary: a new tracked background arm parks before arming, and one already live after the flag becomes observable stands down after preserving its wake.
+Grok has no automatic watcher adapter, so the arm layer is its whole boundary: a new tracked background arm parks before arming, and one already live after the flag becomes observable parks after preserving its wake.
 Away mode ends by clearing the flag, after which a parked arm resumes ordinary supervision itself and adapters return to ordinary behavior.
 
 ## Actionable wake ordering
