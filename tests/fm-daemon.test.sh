@@ -349,6 +349,141 @@ test_housekeeping_paused_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
 }
 
+# --- pause kind and the re-surface cadence ----------------------------------
+#
+# The cadence exists to recheck a wait that CAN change without the captain. A
+# captain-gated wait cannot: it clears only when the captain acts, and the captain
+# acting is already the away-mode exit, which runs the full return catch-up. The
+# next three tests pin BOTH directions on purpose, because a change that
+# suppressed every pause would look exactly like a fix while silencing the
+# external rechecks that do pay off.
+#
+# Seed a real backlog home so the captain/external distinction is read from the
+# tool that owns it rather than from a hand-built imitation of its output.
+seed_pause_backlog() {  # <home> [<task-id> <hold-kind>]...
+  local home=$1
+  shift
+  mkdir -p "$home/data"
+  cat > "$home/.tasks.toml" <<'TOML'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 10
+TOML
+  while [ "$#" -ge 2 ]; do
+    ( cd "$home" \
+      && tasks-axi add "$1" --title "pause cadence fixture" \
+      && tasks-axi hold "$1" --reason "pause cadence fixture hold" --kind "$2" ) >/dev/null 2>&1 \
+      || fail "could not seed a $2 backlog hold for $1"
+    shift 2
+  done
+}
+
+# A captain-gated pause is NOT re-surfaced on the cadence: rechecking it can only
+# ever cost a turn to answer "still waiting". It must still be TRACKED, and its
+# window must still reset, so it resumes rechecking the moment its kind stops
+# being captain-gated.
+test_housekeeping_captain_gated_pause_is_not_resurfaced() {
+  local dir state fakebin home win pane key age
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'skip - captain-gated pause cadence (tasks-axi not installed)\n'
+    return 0
+  fi
+  dir=$(make_supercase paused-captain-gated)
+  state="$dir/state"; fakebin="$dir/fakebin"; home="$dir/home"
+  win="sess:fm-held-cap1"; pane="$dir/pane.txt"
+  printf 'paused: ask-user finding escalated to the captain, review gate held\n' > "$state/held-cap1.status"
+  printf 'idle prompt $\n' > "$pane"
+  seed_pause_backlog "$home" held-cap1 captain
+  key=$(printf '%s' "held-cap1" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a captain-gated pause was re-surfaced on the cadence: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "suppressing the recheck also dropped the pause marker, so the wait stopped being tracked"
+  age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+  [ "$age" -lt 60 ] \
+    || fail "captain-gated pause window was not reset (age ${age}s), so it re-evaluates every tick"
+  pass "housekeeping does not re-surface a captain-gated pause, and keeps tracking it"
+}
+
+# The other direction, and the one that must not regress: a declared EXTERNAL wait
+# can clear without the captain, so it keeps its existing recheck exactly as before.
+test_housekeeping_external_pause_still_resurfaces() {
+  local dir state fakebin home win pane key age
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'skip - external pause cadence (tasks-axi not installed)\n'
+    return 0
+  fi
+  dir=$(make_supercase paused-external-kind)
+  state="$dir/state"; fakebin="$dir/fakebin"; home="$dir/home"
+  win="sess:fm-held-ext1"; pane="$dir/pane.txt"
+  printf 'paused: awaiting upstream maintainer approval for the checks to run\n' > "$state/held-ext1.status"
+  printf 'idle prompt $\n' > "$pane"
+  seed_pause_backlog "$home" held-ext1 external
+  key=$(printf '%s' "held-ext1" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a declared external wait stopped being re-surfaced on the cadence"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    && fail "a declared external wait was mislabeled a possible wedge"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "external pause marker cleared instead of reset"
+  age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+  [ "$age" -lt 60 ] || fail "external pause marker was not reset to now on re-surface (age ${age}s)"
+  pass "housekeeping still re-surfaces a declared external wait, unchanged"
+}
+
+# An UNKNOWN kind is not a captain-gated kind. Whether the backlog reader errors or
+# reports the item as not held at all, the pause must keep being rechecked rather
+# than silently dropped. Both shapes are driven through the reader on PATH, so this
+# guarantee holds even where the real backlog tool is absent.
+test_housekeeping_indeterminate_pause_kind_still_resurfaces() {
+  local case_name dir state fakebin win pane key
+  for case_name in reader-fails not-held; do
+    dir=$(make_supercase "paused-kind-$case_name")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    win="sess:fm-held-unk"; pane="$dir/pane.txt"
+    printf 'paused: idling while the kind of this wait cannot be established\n' > "$state/held-unk.status"
+    printf 'idle prompt $\n' > "$pane"
+    case "$case_name" in
+      reader-fails)
+        cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'error: "Task not found in this backlog"\n'
+exit 1
+SH
+        ;;
+      not-held)
+        cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+cat <<'OUT'
+task:
+  id: held-unk
+  state: in_flight
+  held: no
+  hold_reason: "-"
+  hold_kind: "-"
+OUT
+SH
+        ;;
+    esac
+    chmod +x "$fakebin/tasks-axi"
+    key=$(printf '%s' "held-unk" | tr ':/.' '___')
+    echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+    grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+      || fail "an indeterminate pause kind ($case_name) was dropped from the cadence instead of rechecked"
+  done
+  pass "an indeterminate pause kind keeps being re-surfaced, never silently suppressed"
+}
+
 # A pause whose pane became busy again (the crew resumed) drops its marker without
 # escalating, exactly like a resumed wedge.
 test_housekeeping_paused_resumed_cleared() {
@@ -1847,6 +1982,9 @@ test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
+test_housekeeping_captain_gated_pause_is_not_resurfaced
+test_housekeeping_external_pause_still_resurfaces
+test_housekeeping_indeterminate_pause_kind_still_resurfaces
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_stale_marker_transitions_to_pause

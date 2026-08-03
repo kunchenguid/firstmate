@@ -45,6 +45,9 @@
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     That recheck is skipped for a wait the backlog records as captain-gated,
+#     because only the captain can clear it and the captain's return already
+#     surfaces it.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -89,7 +92,8 @@
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
-#                                   re-surfaces as a recheck (default 3600)
+#                                   re-surfaces as a recheck (default 3600); a
+#                                   captain-gated wait is never re-surfaced on it
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -953,7 +957,8 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
 #     re-peek; busy/gone -> clear; still idle + still paused -> escalate a recheck
-#     digest and reset the window (repeating bounded re-surface, never a wedge).
+#     digest and reset the window (repeating bounded re-surface, never a wedge),
+#     except for a captain-gated wait, which resets its window without escalating.
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
@@ -1025,6 +1030,17 @@ housekeeping() {  # <state>
   # rot invisibly. Past the window: busy (resumed) or gone -> drop; still idle and
   # still declaring the pause -> escalate a recheck digest and reset the marker so
   # the window repeats.
+  #
+  # A CAPTAIN-GATED wait is the one exception, and it is a cadence exception only.
+  # It cannot clear without the captain, and the captain acting is already the
+  # away-mode exit signal, which runs the full return catch-up - so the recheck can
+  # never surface anything the exit does not, and only ever costs a turn to answer
+  # "still waiting". Its marker is still kept and its window still reset, so the
+  # wait stays tracked here and stays exactly as visible as before in the backlog
+  # digest, the fleet view, and the return catch-up; it also resumes ordinary
+  # rechecking within one window if its recorded kind stops being captain-gated.
+  # An indeterminate kind is NOT a captain-gated kind and keeps being rechecked
+  # (pause_is_captain_gated in bin/fm-classify-lib.sh).
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1048,7 +1064,11 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_paused "$last"; then
-          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          if pause_is_captain_gated "$task"; then
+            log "pause recheck suppressed for $win: captain-gated wait, only the captain can clear it"
+          else
+            escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          fi
           _now > "$marker"
         else
           rm -f "$marker"

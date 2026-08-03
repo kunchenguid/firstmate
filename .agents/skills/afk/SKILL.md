@@ -160,6 +160,8 @@ Classify each wake this way:
   Other signals with no captain-relevant status -> self-handle.
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
+  The recheck exists to re-ask a wait that can change without the captain, so it is skipped for a wait the backlog records as captain-gated (`hold_kind: captain`): that one clears only when the captain acts, and the captain acting is already the away-mode exit, which runs the full return catch-up.
+  Suppression is a cadence decision only - the wait is still tracked, still reset each window, and still as visible as before in the backlog digest, the fleet view, and the return catch-up - and any kind that cannot be established is rechecked normally rather than dropped.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
