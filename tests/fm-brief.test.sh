@@ -632,6 +632,47 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Crewmates never read firstmate's AGENTS.md, so the context-discipline rule
+# reaches them only through this scaffold. It must render identically in every
+# ship mode and in the scout contract, and must stay out of the secondmate
+# charter, whose home carries its own AGENTS.md copy of the same rule.
+test_context_discipline_rule_reaches_every_crewmate_scaffold() {
+  local home brief id
+  home="$TMP_ROOT/context-discipline-home"
+  write_registry "$home"
+
+  for id_proj in "brief-ctx-nomistakes:no-registry-proj" "brief-ctx-directpr:direct-proj" \
+    "brief-ctx-localonly:local-proj"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1 \
+      || fail "$id: fm-brief.sh exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_grep "8. Keep your context small and compact it deliberately." "$brief" \
+      "$id: ship brief lost the context-discipline rule"
+    assert_grep "never partway through" "$brief" \
+      "$id: ship brief lost the deliberate-boundary requirement"
+    assert_grep "goes into its durable file" "$brief" \
+      "$id: ship brief lost the durable-state-before-compacting requirement"
+    assert_grep "No threshold, no cadence" "$brief" \
+      "$id: ship brief lost the judgment-not-threshold requirement"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ctx-scout alpha --scout >/dev/null 2>&1 \
+    || fail "scout: fm-brief.sh exited non-zero"
+  brief="$home/data/brief-ctx-scout/brief.md"
+  assert_grep "8. Keep your context small and compact it deliberately." "$brief" \
+    "scout brief lost the context-discipline rule"
+  assert_grep "No threshold, no cadence" "$brief" \
+    "scout brief lost the judgment-not-threshold requirement"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ctx-mate --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate: fm-brief.sh exited non-zero"
+  assert_no_grep "Keep your context small" "$home/data/brief-ctx-mate/brief.md" \
+    "secondmate charter duplicated a rule its own AGENTS.md already owns"
+  pass "fm-brief.sh: every crewmate scaffold carries one context-discipline rule"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -649,3 +690,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_context_discipline_rule_reaches_every_crewmate_scaffold

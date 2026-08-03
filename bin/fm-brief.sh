@@ -39,6 +39,8 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Ship and scout scaffolds share one context-discipline rule, because crewmates
+# never read firstmate's AGENTS.md; a secondmate gets it from its own AGENTS.md.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -247,6 +249,19 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Context discipline reaches crewmates only through this scaffold, since they
+# never read firstmate's AGENTS.md. Ship and scout share one definition so the
+# two rule lists cannot drift; secondmates get the rule from their own AGENTS.md.
+IFS= read -r -d '' CONTEXT_RULE <<'EOF' || true
+8. Keep your context small and compact it deliberately. Read what the task needs, not what sits
+   near it, and point at an authoritative file instead of copying it. Compact at a seam you
+   choose - a finished investigation, a landed step, a closed decision - never partway through
+   one. Anything that must survive (findings, a decision, a blocker) goes into its durable file
+   or a status line BEFORE you compact, never only in this chat. No threshold, no cadence:
+   compact when you judge it right.
+EOF
+CONTEXT_RULE=${CONTEXT_RULE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -283,6 +298,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$CONTEXT_RULE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -398,6 +414,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$CONTEXT_RULE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

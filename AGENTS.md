@@ -44,6 +44,13 @@ This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `pro
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
 Never add an agent name as a commit co-author.
 
+Keep your own context small and compact it deliberately.
+Read what the task needs rather than what sits near it: prefer a targeted read over a bulk read, and a pointer to an authoritative file over a copy of its contents.
+Section 3 owns the read-once contract for the session-start digest.
+Compact at a boundary you choose, such as a finished investigation whose findings are already written down, a landed pipeline step, a closed decision, or a completed sub-task, never partway through a gate, a recovery, or a decision.
+Anything that must survive, including a gate's finding identifiers, a decision, a report conclusion, a PR URL, or a blocker, belongs in its durable file before you compact rather than only in the conversation.
+No threshold or cadence governs this; compact when you judge it right.
+
 ## 2. Layout and state
 
 `docs/configuration.md` is the single owner of the top-level operational-home layout and configuration schemas; each producing script's header and help own exact child fields and mutation mechanics.
