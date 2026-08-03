@@ -127,6 +127,33 @@ assert_contains "$out" 'already-handled: remote-reply-ios 1' "replayed generatio
   || fail "replayed ingest duplicated the parent status line"
 pass "replayed capture has one deduplicated append and one durable handling identity"
 
+printf 'working [corr=1111111111111111]: second generation\n' \
+  >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "second reply generation was not captured"
+RESULT_TWO="$PARENT/state/procevent-inbox/$SID.2.result"
+ln -s "$TMP_ROOT/missing-handled-marker" "$PARENT/state/procevent-inbox/$SID.2.handled"
+set +e
+remote_env "$ADAPTER" handle ios 2 "$RESULT_TWO" > "$TMP_ROOT/handle-two-unacked.out" 2>&1
+handle_two_rc=$?
+set -e
+[ "$handle_two_rc" -ne 0 ] || fail "second generation acknowledged through an unsafe handled marker"
+assert_grep 'working [corr=1111111111111111]' "$PARENT/state/ios.status" "unacknowledged generation was not ingested"
+printf 'done [corr=2222222222222222]: third generation\n' \
+  >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "third reply generation was not captured"
+RESULT_THREE="$PARENT/state/procevent-inbox/$SID.3.result"
+remote_env "$ADAPTER" handle ios 3 "$RESULT_THREE" >/dev/null \
+  || fail "third reply generation was not handled"
+rm -f "$PARENT/state/procevent-inbox/$SID.2.handled"
+out=$(remote_env "$ADAPTER" handle ios 2 "$RESULT_TWO")
+assert_contains "$out" 'ingested: ios appended=0' "earlier generation did not replay from its durable ingestion receipt"
+assert_contains "$out" 'handled: remote-reply-ios 2' "earlier generation remained unacknowledged after later cursor advancement"
+[ "$(grep -cF 'working [corr=1111111111111111]' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "earlier generation replay duplicated its parent status"
+pass "later generations cannot invalidate an unacknowledged ingested result"
+
 # A digest-valid but uncorrelated line is still rejected at the public ingest
 # boundary. Recalculate its payload commitment so the behavioral assertion is
 # specifically about status validation, not incidental digest failure.
@@ -155,18 +182,18 @@ printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-two.out" 2>&1 &
 RUNNER=$!
 wait "$RUNNER" || fail "continuity break was not captured as a structured result"
-RESULT_TWO=$(find "$PARENT/state/procevent-inbox" -name "$SID.2.result" -print -quit)
-[ -n "$RESULT_TWO" ] || fail "continuity break produced no durable result"
-[ "$(remote_env "$ADAPTER" classify "$RESULT_TWO")" = continuity-broken ] \
+RESULT_FOUR=$(find "$PARENT/state/procevent-inbox" -name "$SID.4.result" -print -quit)
+[ -n "$RESULT_FOUR" ] || fail "continuity break produced no durable result"
+[ "$(remote_env "$ADAPTER" classify "$RESULT_FOUR")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 set +e
-remote_env "$ADAPTER" handle ios 2 "$RESULT_TWO" > "$TMP_ROOT/handle-two.out" 2>&1
+remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" > "$TMP_ROOT/handle-four.out" 2>&1
 handle_rc=$?
 set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
-remote_env "$ADAPTER" ingest ios "$RESULT_TWO" >/dev/null 2>&1 || true
+remote_env "$ADAPTER" ingest ios "$RESULT_FOUR" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
 pass "truncation is detected, escalated once, and not silently rebased"

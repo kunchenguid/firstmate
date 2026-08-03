@@ -17,7 +17,7 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 SSH_COUNT="$TMP_ROOT/ssh.count"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE_ROOT/bin" \
   "$REMOTE/data" "$REMOTE/state" "$REMOTE/config" "$REMOTE/projects" "$REMOTE/bin"
-trap 'rm -rf -- "$TMP_ROOT"' EXIT
+trap 'touch "$TMP_ROOT/put.release" "$TMP_ROOT/route.release" 2>/dev/null || true; rm -rf -- "$TMP_ROOT"' EXIT
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cp "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-file.sh" \
   "$ROOT/bin/fm-backlog-receive.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" "$REMOTE_ROOT/bin/"
@@ -86,6 +86,37 @@ handoff_env() {
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
   "$@"
 }
+
+mkdir -p "$REMOTE/state/handoff" "$TMP_ROOT/external-handoff"
+(
+  set -o pipefail
+  (
+    while [ ! -f "$TMP_ROOT/put.release" ]; do sleep 0.02; done
+    printf 'race-safe handoff\n'
+  ) | FM_HOME="$REMOTE" "$REMOTE_ROOT/bin/fm-remote-file.sh" \
+    put state/handoff/race.outbox.md 1024
+) > "$TMP_ROOT/put-race.out" 2>&1 &
+put_race_pid=$!
+put_wait=0
+while ! find "$REMOTE/state/handoff" -maxdepth 1 -name '.put.*' -print -quit | grep -q .; do
+  kill -0 "$put_race_pid" 2>/dev/null || fail "confined put exited before staging input"
+  put_wait=$((put_wait + 1))
+  [ "$put_wait" -le 250 ] || fail "confined put never staged input"
+  sleep 0.02
+done
+mv "$REMOTE/state/handoff" "$TMP_ROOT/pinned-handoff"
+ln -s "$TMP_ROOT/external-handoff" "$REMOTE/state/handoff"
+touch "$TMP_ROOT/put.release"
+if wait "$put_race_pid"; then
+  fail "confined put reported success after its destination directory changed"
+fi
+if find "$TMP_ROOT/external-handoff" -mindepth 1 -print -quit | grep -q .; then
+  fail "confined put followed a replacement handoff symlink"
+fi
+assert_absent "$TMP_ROOT/pinned-handoff/race.outbox.md" "confined put retained a publication outside the named handoff directory"
+rm -f "$REMOTE/state/handoff"
+mv "$TMP_ROOT/pinned-handoff" "$REMOTE/state/handoff"
+pass "confined put rejects directory replacement without external writes"
 
 write_backlog() {
   cat > "$PARENT/data/backlog.md" <<EOF
@@ -218,6 +249,44 @@ assert_contains "$bootstrap_out" 'SECONDMATE_HANDOFF: secondmate ios: pending de
 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending >/dev/null \
   || fail "pending bootstrap-visible outbox did not later converge"
 pass "bootstrap detects pending outbox handoffs without a journal"
+
+write_backlog '- [ ] route-race - remains dispatchable through retirement (repo: alpha)'
+registry_lock="$PARENT/state/.secondmate-registry.lock"
+handoff_lock="$PARENT/state/.backlog-handoff-ios.lock"
+FM_HOME="$PARENT" /bin/bash -c '
+  . "$1"
+  fm_lock_acquire_wait "$2"
+  fm_lock_acquire_wait "$3"
+  touch "$4"
+  while [ ! -f "$5" ]; do sleep 0.02; done
+  tmp="$6.tmp.$$"
+  grep -vE "^- ios( |$)" "$6" > "$tmp" || true
+  mv -f -- "$tmp" "$6"
+  fm_lock_release "$3"
+  fm_lock_release "$2"
+' _ "$ROOT/bin/fm-wake-lib.sh" "$registry_lock" "$handoff_lock" \
+  "$TMP_ROOT/route.entered" "$TMP_ROOT/route.release" "$PARENT/data/secondmates.md" &
+route_holder_pid=$!
+route_wait=0
+while [ ! -f "$TMP_ROOT/route.entered" ]; do
+  kill -0 "$route_holder_pid" 2>/dev/null || fail "route lock holder exited before acquiring lifecycle locks"
+  route_wait=$((route_wait + 1))
+  [ "$route_wait" -le 250 ] || fail "route lock holder never acquired lifecycle locks"
+  sleep 0.02
+done
+handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios route-race \
+  > "$TMP_ROOT/route-race.out" 2>&1 &
+route_handoff_pid=$!
+sleep 0.2
+kill -0 "$route_handoff_pid" 2>/dev/null || fail "handoff bypassed the lifecycle lock boundary"
+touch "$TMP_ROOT/route.release"
+wait "$route_holder_pid" || fail "route lock holder failed to retire the route"
+if wait "$route_handoff_pid"; then
+  fail "handoff accepted a route removed at its lifecycle boundary"
+fi
+assert_grep 'route-race' "$PARENT/data/backlog.md" "route retirement stranded queued work outside the primary backlog"
+assert_absent "$PARENT/data/handoff/ios.outbox.md" "route retirement left an orphaned handoff outbox"
+pass "route classification serializes with retirement before staging"
 
 # With no handoff directory or remote route, bootstrap neither invokes SSH nor
 # emits a remote handoff line.

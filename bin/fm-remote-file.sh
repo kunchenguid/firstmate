@@ -68,6 +68,59 @@ snapshot_bounded_file() { # <file> <max-bytes> <destination> <size-file>
   )
 }
 
+directory_identity() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%d:%i' . 2>/dev/null
+  else
+    stat -c '%d:%i' . 2>/dev/null
+  fi
+}
+
+put_handoff_file() { # <home-real> <name> <max-bytes> <relative-path>
+  local home_real=$1 name=$2 max=$3 rel=$4 state_real handoff_real pinned named tmp bytes
+  (
+    CDPATH='' cd -- "$home_real" 2>/dev/null || exit 3
+    [ "$(pwd -P)" = "$home_real" ] || exit 3
+    if ! mkdir state 2>/dev/null; then
+      [ -d state ] && [ ! -L state ] || exit 3
+    fi
+    [ -d state ] && [ ! -L state ] || exit 3
+    CDPATH='' cd -- state 2>/dev/null || exit 3
+    state_real=$(pwd -P) || exit 3
+    [ "$state_real" = "$home_real/state" ] || exit 3
+    if ! mkdir handoff 2>/dev/null; then
+      [ -d handoff ] && [ ! -L handoff ] || exit 3
+    fi
+    [ -d handoff ] && [ ! -L handoff ] || exit 3
+    CDPATH='' cd -- handoff 2>/dev/null || exit 3
+    handoff_real=$(pwd -P) || exit 3
+    [ "$handoff_real" = "$home_real/state/handoff" ] || exit 3
+    pinned=$(directory_identity) || exit 3
+    [ ! -L "$name" ] || exit 3
+    tmp=$(umask 077; mktemp './.put.XXXXXX') || exit 5
+    trap 'rm -f -- "$tmp"' EXIT
+    head -c "$((max + 1))" > "$tmp" || exit 5
+    bytes=$(LC_ALL=C wc -c < "$tmp" | tr -d ' ')
+    [ "$bytes" -le "$max" ] || exit 4
+    chmod 600 "$tmp" || exit 5
+    named=$(CDPATH='' cd -- "$home_real/state/handoff" 2>/dev/null && directory_identity) || exit 3
+    [ "$named" = "$pinned" ] || exit 3
+    [ ! -L "$name" ] || exit 3
+    mv -f -- "$tmp" "./$name" || exit 5
+    tmp=
+    named=$(CDPATH='' cd -- "$home_real/state/handoff" 2>/dev/null && directory_identity) || {
+      rm -f -- "./$name"
+      exit 3
+    }
+    if [ "$named" != "$pinned" ]; then
+      rm -f -- "./$name"
+      exit 3
+    fi
+    trap - EXIT
+    printf 'stored: %s bytes=%s\n' "$rel" "$bytes"
+  )
+}
+
 COMMAND=${1:-}
 [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
 REL=$2
@@ -102,27 +155,16 @@ case "$COMMAND" in
     case "/$REL/" in */../*|*/./*) die "put path contains traversal" ;; esac
     case "$REL" in *'//'*) die "put path is malformed" ;; esac
     HOME_REAL=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || die "FM_HOME is unavailable"
-    STATE_DIR="$HOME_REAL/state"
-    [ ! -L "$STATE_DIR" ] || die "state directory must not be a symlink"
-    mkdir -p "$STATE_DIR" || die "cannot create state directory"
-    HANDOFF_DIR="$STATE_DIR/handoff"
-    [ ! -L "$HANDOFF_DIR" ] || die "handoff directory must not be a symlink"
-    mkdir -p "$HANDOFF_DIR" || die "cannot create handoff directory"
-    DEST="$HANDOFF_DIR/$(basename "$REL")"
-    [ ! -L "$DEST" ] || die "handoff destination must not be a symlink"
-    TMP=$(umask 077; mktemp "$HANDOFF_DIR/.put.XXXXXX") || die "cannot stage handoff transfer"
-    if ! head -c "$((MAX + 1))" > "$TMP"; then
-      rm -f -- "$TMP"
-      die "cannot read handoff transfer"
+    if put_handoff_file "$HOME_REAL" "$(basename "$REL")" "$MAX" "$REL"; then
+      :
+    else
+      rc=$?
+      case "$rc" in
+        3) die "handoff directory changed into an unsafe path" ;;
+        4) die "handoff transfer exceeds max-bytes" ;;
+        *) die "cannot publish handoff transfer" ;;
+      esac
     fi
-    BYTES=$(LC_ALL=C wc -c < "$TMP" | tr -d ' ')
-    if [ "$BYTES" -gt "$MAX" ]; then
-      rm -f -- "$TMP"
-      die "handoff transfer exceeds max-bytes"
-    fi
-    chmod 600 "$TMP" || { rm -f -- "$TMP"; die "cannot secure handoff transfer"; }
-    mv -f -- "$TMP" "$DEST" || { rm -f -- "$TMP"; die "cannot publish handoff transfer"; }
-    printf 'stored: %s bytes=%s\n' "$REL" "$BYTES"
     ;;
   *) usage ;;
 esac

@@ -71,6 +71,7 @@ source_id() {
 }
 
 cursor_path() { printf '%s/%s.cursor\n' "$CURSOR_DIR" "$1"; }
+ingest_receipt_path() { printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "$2"; }
 
 read_cursor() { # <id>; sets CURSOR_OFFSET and CURSOR_HASH
   local path=$1 offset hash schema
@@ -104,6 +105,40 @@ write_cursor() { # <id> <offset> <hash>
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$path"
+}
+
+ingest_receipt_matches() { # <id> <sequence> <result>
+  local path stored actual count
+  path=$(ingest_receipt_path "$1" "$2")
+  [ -e "$path" ] || [ -L "$path" ] || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || die "remote reply ingestion receipt is unsafe: $path"
+  count=$(grep -c '^result_sha256=' "$path" 2>/dev/null || true)
+  [ "$count" -eq 1 ] || die "remote reply ingestion receipt is malformed: $path"
+  stored=$(sed -n 's/^result_sha256=//p' "$path")
+  case "$stored" in *[!A-Fa-f0-9]*|'') die "remote reply ingestion receipt is malformed: $path" ;; esac
+  [ "${#stored}" -eq 64 ] || die "remote reply ingestion receipt is malformed: $path"
+  actual=$(sha256_file "$3") || die "cannot hash remote reply result"
+  [ "$stored" = "$actual" ] || die "remote reply generation conflicts with its ingestion receipt"
+}
+
+write_ingest_receipt() { # <id> <sequence> <result>
+  local id=$1 seq=$2 result=$3 path tmp hash
+  mkdir -p "$CURSOR_DIR" || return 1
+  chmod 700 "$CURSOR_DIR" 2>/dev/null || true
+  path=$(ingest_receipt_path "$id" "$seq")
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    ingest_receipt_matches "$id" "$seq" "$result"
+    return $?
+  fi
+  hash=$(sha256_file "$result") || return 1
+  tmp=$(umask 077; mktemp "$CURSOR_DIR/.ingested.XXXXXX") || return 1
+  printf 'result_sha256=%s\n' "$hash" > "$tmp" \
+    || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! mv -f -- "$tmp" "$path"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 result_field() { # <result> <field>
@@ -194,7 +229,7 @@ line_valid() { # <line>
 }
 
 cmd_ingest() {
-  local id=${1:-} result=${2:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
+  local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
@@ -226,17 +261,17 @@ cmd_ingest() {
   actual_hash=$(sha256_file "$payload")
   [ "$actual_bytes" -eq "$payload_bytes" ] && [ "$actual_hash" = "$payload_hash" ] \
     || die "result payload bytes do not match its committed digest"
+  status_file="$STATE/$id.status"
+  mkdir -p "$STATE" || die "cannot create parent state directory"
+  [ ! -L "$status_file" ] || die "parent status log is a symlink"
+  lock="$STATE/.remote-reply-ingest-$id.lock"
+  fm_lock_acquire_wait "$lock" || die "cannot lock remote reply ingest for $id"
   read_cursor "$id"
   if [ "$CURSOR_OFFSET" -eq "$to" ] && [ "$CURSOR_HASH" = "$to_hash" ]; then
     cursor_already=1
   elif [ "$CURSOR_OFFSET" -ne "$from" ] || [ "$CURSOR_HASH" != "$from_hash" ]; then
     die "result does not continue the current cursor for $id"
   fi
-  status_file="$STATE/$id.status"
-  mkdir -p "$STATE" || die "cannot create parent state directory"
-  [ ! -L "$status_file" ] || die "parent status log is a symlink"
-  lock="$STATE/.remote-reply-ingest-$id.lock"
-  fm_lock_acquire_wait "$lock" || die "cannot lock remote reply ingest for $id"
   if [ "$class" = continuity-broken ]; then
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
     if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
@@ -260,13 +295,17 @@ cmd_ingest() {
       appended=$((appended + 1))
     fi
   done < "$payload"
-  if [ "$cursor_already" -eq 0 ]; then
-    write_cursor "$id" "$to" "$to_hash" || { fm_lock_release "$lock"; die "cannot commit remote reply cursor"; }
-  fi
   while IFS= read -r corr; do
     [ -n "$corr" ] || continue
     fm_pending_reply_try_resolve "$STATE" "$corr" "$status_file" >/dev/null 2>&1 || true
   done < <(grep -Eo 'corr=[A-Fa-f0-9]{16}' "$payload" | cut -d= -f2- | tr 'A-F' 'a-f' | awk '!seen[$0]++')
+  if [ -n "$seq" ]; then
+    write_ingest_receipt "$id" "$seq" "$result" \
+      || { fm_lock_release "$lock"; die "cannot commit remote reply ingestion receipt"; }
+  fi
+  if [ "$cursor_already" -eq 0 ]; then
+    write_cursor "$id" "$to" "$to_hash" || { fm_lock_release "$lock"; die "cannot commit remote reply cursor"; }
+  fi
   fm_lock_release "$lock"
   trap - EXIT
   rm -rf -- "$tmp"
@@ -274,13 +313,18 @@ cmd_ingest() {
 }
 
 cmd_handle() {
-  local id=${1:-} seq=${2:-} result=${3:-} sid class rc=0
+  local id=${1:-} seq=${2:-} result=${3:-} sid class rc=0 to
   validate_id "$id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
   sid=$(source_id "$id")
   class=$(classify_result "$result")
   [ "$class" != malformed ] || die "remote reply result is malformed"
-  cmd_ingest "$id" "$result" || rc=$?
+  if ingest_receipt_matches "$id" "$seq" "$result"; then
+    to=$(result_field "$result" to_offset) || die "result end offset is ambiguous"
+    printf 'ingested: %s appended=0 offset=%s\n' "$id" "$to"
+  else
+    cmd_ingest "$id" "$result" "$seq" || rc=$?
+  fi
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
     return "$rc"
   fi
@@ -297,6 +341,7 @@ cmd_retire() {
   sid=$(source_id "$id")
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid"
   rm -f -- "$(cursor_path "$id")"
+  rm -f -- "$CURSOR_DIR/$id".*.ingested
 }
 
 case "${1:-}" in

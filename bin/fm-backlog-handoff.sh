@@ -64,13 +64,18 @@ MAIN_BACKLOG="$DATA/backlog.md"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 ACTIVE_HANDOFF_LOCK=
-release_handoff_lock() {
+ACTIVE_REGISTRY_LOCK=
+release_remote_locks() {
   if [ -n "$ACTIVE_HANDOFF_LOCK" ]; then
     fm_lock_release "$ACTIVE_HANDOFF_LOCK"
     ACTIVE_HANDOFF_LOCK=
   fi
+  if [ -n "$ACTIVE_REGISTRY_LOCK" ]; then
+    fm_lock_release "$ACTIVE_REGISTRY_LOCK"
+    ACTIVE_REGISTRY_LOCK=
+  fi
 }
-trap release_handoff_lock EXIT
+trap release_remote_locks EXIT
 trap 'exit 1' HUP INT TERM
 
 RESUME_PENDING=0
@@ -375,14 +380,21 @@ remote_handoff() { # <secondmate-id> <keys...>
   [ "${#already[@]}" -eq 0 ] || echo "  already staged (recovered): ${already[*]}"
 }
 
-with_remote_handoff_lock() { # <secondmate-id> <function> <args...>
+with_remote_route_locks() { # <secondmate-id> <function> <args...>
   local id=$1 operation=$2 rc
   shift 2
   case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe remote handoff id: $id" >&2; return 1 ;; esac
+  ACTIVE_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+  fm_lock_acquire_wait "$ACTIVE_REGISTRY_LOCK"
+  if [ "$(secondmate_registry_field "$REG" "$id" remote 2>/dev/null || true)" != 1 ]; then
+    echo "error: pending outbox has no matching remote secondmate route: $id" >&2
+    release_remote_locks
+    return 1
+  fi
   ACTIVE_HANDOFF_LOCK="$STATE/.backlog-handoff-$id.lock"
   fm_lock_acquire_wait "$ACTIVE_HANDOFF_LOCK"
   if "$operation" "$@"; then rc=0; else rc=$?; fi
-  release_handoff_lock
+  release_remote_locks
   return "$rc"
 }
 
@@ -397,19 +409,13 @@ resume_remote_outbox() { # <secondmate-id> <outbox-path>
 }
 
 resume_pending_outboxes() {
-  local outbox id failed=0 remote
+  local outbox id failed=0
   [ -d "$DATA/handoff" ] || return 0
   for outbox in "$DATA/handoff"/*.outbox.md; do
     [ -e "$outbox" ] || [ -L "$outbox" ] || continue
     id=$(basename "$outbox" .outbox.md)
     case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe pending handoff id: $id" >&2; failed=1; continue ;; esac
-    remote=$(secondmate_registry_field "$REG" "$id" remote 2>/dev/null || true)
-    if [ "$remote" != 1 ]; then
-      echo "error: pending outbox has no matching remote secondmate route: $id" >&2
-      failed=1
-      continue
-    fi
-    with_remote_handoff_lock "$id" resume_remote_outbox "$id" "$outbox" || failed=1
+    with_remote_route_locks "$id" resume_remote_outbox "$id" "$outbox" || failed=1
   done
   return "$failed"
 }
@@ -419,11 +425,17 @@ if [ "$RESUME_PENDING" -eq 1 ]; then
   exit $?
 fi
 
+ACTIVE_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+fm_lock_acquire_wait "$ACTIVE_REGISTRY_LOCK"
 REMOTE=$(secondmate_registry_field "$REG" "$ID" remote 2>/dev/null || true)
 if [ "$REMOTE" = 1 ]; then
-  with_remote_handoff_lock "$ID" remote_handoff "$ID" "$@"
-  exit $?
+  ACTIVE_HANDOFF_LOCK="$STATE/.backlog-handoff-$ID.lock"
+  fm_lock_acquire_wait "$ACTIVE_HANDOFF_LOCK"
+  if remote_handoff "$ID" "$@"; then rc=0; else rc=$?; fi
+  release_remote_locks
+  exit "$rc"
 fi
+release_remote_locks
 
 RAW_HOME=$(secondmate_home "$ID") || exit 1
 [ -n "$RAW_HOME" ] || { echo "error: secondmate $ID has no home in $REG" >&2; exit 1; }
