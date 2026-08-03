@@ -639,6 +639,22 @@ test_forge_provider_bootstrap_contracts() {
   [ "$out" = "FORGE_UNSUPPORTED: mystery (host: code.example)" ] \
     || fail "unknown forge must fail closed with its project and host, got: $out"
 
+  case_dir="$TMP_ROOT/forge-https-ignores-ssh-config"
+  project="$case_dir/home/projects/github-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'hostname ssh.github.com'
+SH
+  chmod +x "$fakebin/ssh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "HTTPS origin must ignore SSH hostname rewriting, got: $out"
+
   case_dir="$TMP_ROOT/forge-scp-no-user"
   project="$case_dir/home/projects/github-project"
   mkdir -p "$project" "$case_dir/home/config"
