@@ -531,7 +531,7 @@ Read \`$HOME_DIR/data/prior/report.md\` and \`data/prior/notes.md\`.
 Reproduce with \`$HOME_DIR/data/prior/repro.sh\`.
 Read all decisions at \`$HOME_DIR/data/plan-review/decisions/*.md\`.
 Read prior status at \`$HOME_DIR/state/prior.status\` and \`state/prior.status\`.
-The helper is \`$ROOT/bin/fm-ensure-agents-md.sh\`.
+The helper is \`$ROOT/bin/fm-ensure-agents-md.sh\` and the library is \`$ROOT/bin/fm-config-inherit-lib.sh\`.
 The task directory is \`$HOME_DIR/data/$id\` and the prior directory is \`$HOME_DIR/data/prior\`.
 Append your decision to \`$HOME_DIR/data/prior/new-decision.md\`.
 The whole home data root is \`$HOME_DIR/data\` and must never be staged.
@@ -550,11 +550,13 @@ EOF
   assert_present "$WT_DIR/.fm/refs/home/data/prior/notes.md" "spawn did not stage the transitive report reference"
   assert_present "$WT_DIR/.fm/refs/home/data/plan-review/decisions/one.md" "spawn did not expand the decision glob"
   assert_present "$WT_DIR/.fm/refs/home/state/prior.status" "spawn did not stage the prior status reference"
-  [ -e "$WT_DIR/.fm/refs/root/bin/fm-ensure-agents-md.sh" ] \
-    && fail "spawn copied a firstmate enforcement script into the writable task worktree"
+  [ -e "$WT_DIR/.fm/refs/root/bin" ] \
+    && fail "spawn copied firstmate's own bin/ tree into the writable task worktree"
   assert_present "$WT_DIR/.fm/refs/home/data/prior/repro.sh" \
     "spawn refused to stage an ordinary brief input that merely carries the exec bit"
   staged=$(cat "$WT_DIR/.fm/brief.md")
+  assert_contains "$staged" "$ROOT/bin/fm-config-inherit-lib.sh" \
+    "staged brief repointed a non-executable firstmate bin/ library away from its real path"
   assert_contains "$staged" "$WT_DIR/.fm/refs/home/data/prior/repro.sh" \
     "staged brief did not rewrite an executable data input to its staged copy"
   assert_not_contains "$staged" "$HOME_DIR/data/prior/report.md" "staged brief retained an absolute firstmate report input"

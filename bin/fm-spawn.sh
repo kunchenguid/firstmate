@@ -133,11 +133,11 @@
 # .fm/brief.md, together with every firstmate-home or firstmate-repo file it
 # references under .fm/refs/<home|root|secondmate>/, and the brief's input paths
 # are rewritten to the absolute path of those copies, so no launch-visible input
-# needs a directory grant outside that checkout. A trusted firstmate enforcement
-# script (an executable interpreter script under a firstmate root's own bin/) is
-# invoked rather than read, so it is never copied into the writable worktree and
-# keeps its real path; an ordinary input that merely carries mode 755 is still
-# staged. Directory references are bounded: a broad firstmate root (bin, data,
+# needs a directory grant outside that checkout. Anything under a firstmate
+# root's own bin/ is firstmate's own code, invoked or sourced in place rather
+# than read as input, so it is never copied into the writable worktree and keeps
+# its real path; an ordinary input outside bin/ that merely carries mode 755 is
+# still staged. Directory references are bounded: a broad firstmate root (bin, data,
 # state, ...) is never staged, and depth/file-count/byte caps skip the rest with
 # a warning. A directory or glob reference is rewritten only when every file it
 # covers was staged, so a partial copy is reported rather than silently handed
@@ -1833,25 +1833,26 @@ stage_target_for_reference() {
   printf '%s/.fm/refs/%s/%s\n' "$WT" "$kind" "$rel"
 }
 
-# A trusted firstmate enforcement script is invoked, never read as input.
-# Staging one would hand the crewmate a writable copy of a script such as
-# bin/fm-herdr-lab.sh inside the very laboratory that script isolates, and would
-# repoint an invocation that has to work from any directory. Execution needs no
-# read grant, so such a reference keeps its real absolute path. The test is
-# deliberately narrow - an executable interpreter script under a firstmate root's
-# own bin/ - so that an ordinary brief input that merely carries mode 755, such
-# as a repro script a prior scout wrote under data/<task>/, is still staged.
+# Nothing under a firstmate root's own bin/ is ever a brief input: it is
+# firstmate's own code, invoked or sourced in place. Staging any of it would hand
+# the crewmate a writable copy of trusted code - an enforcement script such as
+# bin/fm-herdr-lab.sh inside the very laboratory it isolates, or a library whose
+# `. "$(dirname "${BASH_SOURCE[0]}")/..."` sibling never came along - and would
+# repoint an invocation that has to work from any directory. The path is the
+# whole test, deliberately: the exec bit and a shebang do not distinguish
+# firstmate code from anything else (a third of bin/ is mode 644 and some of that
+# carries no shebang). An ordinary input outside bin/ that merely carries mode
+# 755, such as a repro script a prior scout wrote under data/<task>/, is still
+# staged.
 stage_is_program() {
   local path=$1 kind rel
   kind=$(stage_kind_for_path "$path" 2>/dev/null || true)
   [ -n "$kind" ] || return 1
   rel=$(stage_rel_for_path "$kind" "$path" 2>/dev/null || true)
   case "$rel" in
-    bin/*) ;;
-    *) return 1 ;;
+    bin/*) return 0 ;;
   esac
-  [ -f "$path" ] && [ -x "$path" ] || return 1
-  [ "$(head -c 2 "$path" 2>/dev/null)" = '#!' ]
+  return 1
 }
 
 stage_path_within_root() {
