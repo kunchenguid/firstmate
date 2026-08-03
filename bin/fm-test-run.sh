@@ -162,7 +162,9 @@ family_for_basename() {
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh)
       printf '%s\n' real-herdr-gated
       ;;
-    fm-backlog-handoff.test.sh|fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
+    fm-backlog-handoff.test.sh|fm-on.test.sh|fm-remote-backlog-handoff.test.sh|\
+    fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
+    fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|\
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
@@ -880,7 +882,8 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
-    bin/fm-secondmate*|bin/fm-home-seed.sh|bin/fm-backlog-handoff.sh|\
+    bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
+    bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
       ;;

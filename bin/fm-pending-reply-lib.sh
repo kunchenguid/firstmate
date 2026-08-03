@@ -337,6 +337,20 @@ fm_pending_reply_confirm_delivery() {  # <state-dir> <corr_id>
   return 2
 }
 
+# Preserve an expectation when a remote transport disconnect makes delivery
+# completion unknowable. This never resolves or retries the request; it moves
+# the existing prepared record to the owner's explicit unknown-delivery path.
+fm_pending_reply_mark_delivery_unknown() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec phase
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in awaiting_report|delivery_unknown) ;;
+    *) return 1 ;;
+  esac
+  fm_pending_reply_set "$rec" phase delivery_unknown
+}
+
 fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec delivered marker entry delivery_state value epoch
   local grace now age phase
@@ -941,7 +955,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness
+  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
@@ -1004,10 +1018,15 @@ fm_pending_reply_tick() {  # <state-dir>
     sm_home=
     harness=
     if [ -f "$meta" ]; then
+      remote_host=$(fm_meta_get "$meta" remote_host)
       backend=$(fm_backend_of_meta "$meta")
       target=$(fm_backend_target_of_meta "$meta")
       sm_home=$(fm_meta_get "$meta" home)
       harness=$(fm_meta_get "$meta" harness)
+      if [ -n "$remote_host" ]; then
+        target="remote:$task_id"
+        sm_home=
+      fi
       if [ -n "$target" ]; then
         label="fm-$task_id"
         observation=
@@ -1020,7 +1039,13 @@ fm_pending_reply_tick() {  # <state-dir>
           break
         done
         if [ "$found" = 0 ]; then
-          observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
+          if [ -n "$remote_host" ]; then
+            observation=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
+              fm-remote-secondmate-control.sh observe "$task_id" 2>/dev/null || printf 'unknown')
+            case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
+          else
+            observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
+          fi
           observation_tasks+=("$task_id")
           observation_values+=("$observation")
         fi
