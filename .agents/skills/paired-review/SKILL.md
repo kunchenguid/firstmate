@@ -188,7 +188,7 @@ The driver answers under each finding id, and answers every one:
 reason: moving the change to the owning module; the ownership test confirms the boundary.
 ```
 
-A navigator holding a question rather than a defect asks it as `Q<k>`, on its own sequence, carrying evidence the way a finding does:
+A navigator holding a question rather than a defect asks it as `Q<k>`, with a question id that runs its own sequence, sequential and never reused, carrying evidence the way a finding does:
 
 ```
 ## Q2 - plan gate - navigator
