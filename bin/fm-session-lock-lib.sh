@@ -159,6 +159,7 @@ fm_codex_thread_lease_fresh() {
 fm_harness_ancestry_pids() {
   local pid=$$ comm args ppid extending=0 printed=0
   FM_HARNESS_ANCESTRY_BLOCKED=0
+  FM_HARNESS_ANCESTRY_PIDS=
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     if ! comm=$(ps -o comm= -p "$pid" 2>/dev/null); then
       FM_HARNESS_ANCESTRY_BLOCKED=1
@@ -170,6 +171,7 @@ fm_harness_ancestry_pids() {
     fi
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
+      FM_HARNESS_ANCESTRY_PIDS="${FM_HARNESS_ANCESTRY_PIDS}${pid}"$'\n'
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
       extending=1
@@ -196,7 +198,8 @@ fm_harness_ancestry_pids() {
 # per-thread marker and publish a codex-thread identity instead of a numeric pid.
 fm_harness_ancestry_pid() {
   local pids pid outermost='' identity
-  if pids=$(fm_harness_ancestry_pids); then
+  if fm_harness_ancestry_pids >/dev/null; then
+    pids=$FM_HARNESS_ANCESTRY_PIDS
     while IFS= read -r pid; do
       [ -n "$pid" ] && outermost=$pid
     done <<EOF
@@ -224,7 +227,7 @@ fm_harness_pid_alive() {
   case "$pid" in
     "$FM_CODEX_THREAD_LOCK_PREFIX"*)
       fm_codex_thread_lock_valid "$pid" || return 1
-      [ "$(fm_codex_thread_identity 2>/dev/null)" = "$pid" ] && return 0
+      [ "$(fm_harness_ancestry_pid 2>/dev/null || true)" = "$pid" ] && return 0
       fm_codex_thread_lease_fresh "$lock"
       return
       ;;
@@ -246,7 +249,7 @@ fm_session_lock_owned_by_self() {
   case "$lock_identity" in
     ''|1) return 1 ;;
     "$FM_CODEX_THREAD_LOCK_PREFIX"*)
-      my_identity=$(fm_codex_thread_identity 2>/dev/null) || return 1
+      my_identity=$(fm_harness_ancestry_pid 2>/dev/null) || return 1
       [ "$my_identity" = "$lock_identity" ]
       return
       ;;
