@@ -148,6 +148,36 @@ Neither this per-source shape nor `state.authStatus` exists before quota-axi 0.1
 Grok also reports `credits.remaining: 0` alongside `percentRemaining: 41` on a healthy account.
 That zero is a prepaid balance, not the subscription window, and is never headroom.
 
+## Environment-injected credentials have no quota-axi source
+
+Verified 2026-08-03 against quota-axi 0.1.16 on Linux.
+
+A Claude seat can be bound by injecting its OAuth token into the worker's environment instead of writing a credential store.
+quota-axi models no such source, so the provider reads `auth_required` while its workers run normally.
+
+```sh
+quota-axi auth
+```
+
+```text
+claude,oauth-file,<seat-config-dir>/.credentials.json,invalid,none
+```
+
+Three properties follow and bound how that line may be read:
+
+- `CLAUDE_CONFIG_DIR` is already honored, so a non-default seat is not the cause.
+  The row names the active seat rather than `<home>/.claude`, and `providers/claude.js` reads `process.env.CLAUDE_CONFIG_DIR`.
+- The Claude provider reads only `oauth-file` and the macOS keychain, so on Linux a seat whose credential never reaches `.credentials.json` leaves `oauth-file` as the sole source with no Claude OAuth block in it.
+  `credentials_invalid` is then an accurate report of an unreadable surface, not a sign-out.
+- Placing a synthetic `claudeAiOauth` block in a throwaway `CLAUDE_CONFIG_DIR` moves the error to `Claude sign-in required`, which confirms quota-axi reads that directory, parses the token, and reaches the vendor.
+  The custom-config-dir path is sound end to end.
+
+`claude auth status --json` does not substitute for the missing source, because it reports the calling process's own auth state.
+A shell that does not carry the seat token reads `{"loggedIn": false, "authMethod": "none"}` while seat-bound workers run, so any future source must not assume the ambient environment is authenticated.
+
+`dist/src/providers/claude.js` is byte-identical between 0.1.16 and 0.1.17, so raising the version floor does not resolve this.
+Tracked upstream as https://github.com/kunchenguid/quota-axi/issues/25; re-check this section when that issue closes or a Claude credential source is added.
+
 ## Standalone Grok discovery probe
 
 Verified 2026-07-30 on `grok 0.2.117 (f1c06093089f) [stable]`.

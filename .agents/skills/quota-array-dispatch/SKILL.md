@@ -56,6 +56,8 @@ A candidate authenticates through its own tuple's surface; another harness's CLI
 `quota-axi auth --json` lists each provider's credential sources independently, so read the one source the candidate actually uses rather than collapsing a provider to a single status.
 A provider can carry a healthy source beside a missing or expired one; the unused source's state is not the candidate's state.
 A Pi-hosted family may authenticate through the vendor's own store with no `pi:`-prefixed source at all, which is normal and never evidence against the candidate.
+A credential injected into a worker's environment rather than written to a credential store has no source at all, because quota-axi reads only `oauth-file` and the macOS keychain for Claude.
+An environment-bound Claude seat therefore reports `auth_required` with `credentials_invalid` while its workers run normally, which is a surface quota-axi does not model rather than a sign-out.
 
 Uncertainty and ineligibility are different findings:
 
