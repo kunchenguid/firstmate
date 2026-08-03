@@ -187,7 +187,74 @@ test_explicit_new_remote_branch_passes() {
   pass "fm-push-guard: explicit first push passes when the remote branch is provably absent"
 }
 
+test_explicit_target_disagreeing_with_upstream_refuses() {
+  local dir worker reviewer branch out status
+  dir=$(new_case explicit-mismatch)
+  worker="$dir/worker"
+  reviewer="$dir/reviewer"
+  branch=fm/task-1
+
+  git -C "$worker" checkout -qb "$branch"
+  commit_file "$worker" worker.txt local "local continuation"
+
+  git -C "$reviewer" checkout -qb "$branch"
+  commit_file "$reviewer" review.txt reviewed "review fix that must not be lost"
+  git -C "$reviewer" push -q -u origin "$branch"
+  track_remote_task_branch "$worker" "$branch"
+
+  out=$(cd "$worker" && "$GUARD" origin fm/task-01 2>&1); status=$?
+  [ "$status" -ne 0 ] \
+    || fail "guard cleared a mistyped explicit target instead of the configured upstream"
+  assert_contains "$out" "origin/fm/task-1" \
+    "mismatch refusal did not name the configured upstream being pushed"
+  pass "fm-push-guard: explicit target disagreeing with the configured upstream fails closed"
+}
+
+test_missing_patch_id_verbatim_refuses() {
+  local dir worker reviewer branch shim real_git out status
+  real_git=$(command -v git)
+  dir=$(new_case no-verbatim)
+  worker="$dir/worker"
+  reviewer="$dir/reviewer"
+  branch=fm/task
+  shim="$dir/shim"
+
+  git -C "$reviewer" checkout -qb "$branch"
+  commit_file "$reviewer" reviewed.txt preserved "reviewed content"
+  git -C "$reviewer" push -q -u origin "$branch"
+
+  git -C "$worker" checkout -qb "$branch"
+  commit_file "$worker" local.txt local "local work before replay"
+  track_remote_task_branch "$worker" "$branch"
+  git -C "$worker" cherry-pick "$(git -C "$reviewer" rev-parse HEAD)" >/dev/null
+
+  mkdir -p "$shim"
+  cat > "$shim/git" <<'SHIM'
+#!/usr/bin/env bash
+if [ "${1:-}" = "patch-id" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "--verbatim" ]; then
+      echo "error: unknown option --verbatim" >&2
+      exit 129
+    fi
+  done
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SHIM
+  chmod +x "$shim/git"
+
+  out=$(cd "$worker" && PATH="$shim:$PATH" FM_TEST_REAL_GIT="$real_git" "$GUARD" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "guard passed a diverged history while patch equivalence could not be computed"
+  assert_contains "$out" "patch-id --verbatim" \
+    "unavailable patch-id capability was not reported explicitly"
+  pass "fm-push-guard: a git without patch-id --verbatim fails closed and says so"
+}
+
 test_dropped_remote_commits_are_named
+test_explicit_target_disagreeing_with_upstream_refuses
+test_missing_patch_id_verbatim_refuses
 test_clean_descendant_push_passes
 test_patch_equivalent_rebase_passes
 test_whitespace_different_patch_refuses

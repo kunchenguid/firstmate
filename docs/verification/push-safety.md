@@ -26,6 +26,16 @@ After repairing that fixture, the genuine patch-equivalent history passed. This
 counterfactual confirms that the pass depends on reproduced patch content, not
 on merely presenting a rebuilt history.
 
+## Review-round hardening
+
+Two further fail-closed conditions are covered by `tests/fm-push-guard.test.sh`
+after the first review round:
+
+| Condition | Exit | Guard result |
+| --- | ---: | --- |
+| Explicit `<remote> <branch>` arguments disagree with the branch's configured upstream | 1 | Names the configured upstream and refuses, so a mistyped target cannot report a branch it never inspected as safe |
+| `git patch-id --verbatim` is unavailable (git older than 2.39) | 1 | Refuses before any equivalence claim and says the capability is missing, rather than silently reporting every remote-only commit as unproven |
+
 ## Regression baseline
 
 The focused guard, brief, test-runner, lint, and documentation checks passed on

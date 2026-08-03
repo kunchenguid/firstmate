@@ -7,7 +7,9 @@
 #
 # With no arguments, the current branch's configured upstream is the target.
 # The explicit form is for a first push before an upstream exists; both the
-# configured remote name and exact remote branch must be supplied.
+# configured remote name and exact remote branch must be supplied. When the
+# branch already has an upstream, explicit arguments must name exactly that
+# upstream, so a mistyped target cannot clear a branch it never inspected.
 #
 # The guard contacts the remote immediately before the push and fetches the
 # exact target ref into a temporary private ref. It passes when that remote tip
@@ -15,7 +17,8 @@
 # remote-only single-parent commit has a verbatim patch-equivalent commit in the
 # local-only history, which permits a content-preserving rebase or cherry-pick.
 # A merge, empty patch, unreachable remote, missing upstream, malformed target,
-# or any other result that cannot prove preservation fails closed.
+# a git too old to compute verbatim patch ids, or any other result that cannot
+# prove preservation fails closed.
 #
 # A provably absent remote branch passes only in the explicit two-argument form,
 # allowing the first push of a new task branch without treating an offline
@@ -26,7 +29,7 @@ GIT_TERMINAL_PROMPT=0
 export GIT_TERMINAL_PROMPT
 
 usage() {
-  sed -n '2,24{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,26{s/^# \{0,1\}//;p;}' "$0"
 }
 
 fail() {
@@ -48,20 +51,32 @@ git rev-parse --git-dir >/dev/null 2>&1 \
 
 local_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) \
   || fail "HEAD is detached; cannot determine the task branch"
+configured_remote=$(git config --get "branch.$local_branch.remote" 2>/dev/null || true)
+configured_merge=$(git config --get "branch.$local_branch.merge" 2>/dev/null || true)
+configured_branch=
+if [ -n "$configured_remote" ] || [ -n "$configured_merge" ]; then
+  [ -n "$configured_remote" ] && [ -n "$configured_merge" ] \
+    || fail "upstream for '$local_branch' is partially configured; repair branch.$local_branch.remote and branch.$local_branch.merge before pushing"
+  case "$configured_merge" in
+    refs/heads/*) configured_branch=${configured_merge#refs/heads/} ;;
+    *) fail "upstream for '$local_branch' is ambiguous: expected refs/heads/*, got '$configured_merge'" ;;
+  esac
+fi
+
 explicit_target=0
 if [ "$#" -eq 2 ]; then
   explicit_target=1
   remote=$1
   remote_branch=${2#refs/heads/}
+  if [ -n "$configured_branch" ]; then
+    { [ "$remote" = "$configured_remote" ] && [ "$remote_branch" = "$configured_branch" ]; } \
+      || fail "explicit target '$remote/$remote_branch' disagrees with the configured upstream '$configured_remote/$configured_branch' of '$local_branch'; the explicit form is only for a first push before an upstream exists"
+  fi
 else
-  remote=$(git config --get "branch.$local_branch.remote" 2>/dev/null || true)
-  merge_ref=$(git config --get "branch.$local_branch.merge" 2>/dev/null || true)
-  [ -n "$remote" ] && [ -n "$merge_ref" ] \
+  [ -n "$configured_branch" ] \
     || fail "branch '$local_branch' has no upstream; name the exact configured remote and remote branch for a first push"
-  case "$merge_ref" in
-    refs/heads/*) remote_branch=${merge_ref#refs/heads/} ;;
-    *) fail "upstream for '$local_branch' is ambiguous: expected refs/heads/*, got '$merge_ref'" ;;
-  esac
+  remote=$configured_remote
+  remote_branch=$configured_branch
 fi
 
 [ -n "$remote" ] && [ "$remote" != . ] \
@@ -130,6 +145,9 @@ if git merge-base --is-ancestor "$remote_head" "$local_head"; then
     "$remote" "$remote_branch"
   exit 0
 fi
+
+git patch-id --verbatim < /dev/null > /dev/null 2>&1 \
+  || fail "this git cannot run 'patch-id --verbatim' (needs git 2.39+); patch equivalence is unprovable, refusing the push to '$remote/$remote_branch'"
 
 local_patches="$tmp_root/local-patches"
 : > "$local_patches"

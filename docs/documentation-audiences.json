@@ -337,6 +337,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/push-safety.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },
