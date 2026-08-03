@@ -6,8 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--slot-base <sha> [--contribution-target <sha|unresolved>]]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--slot-base <sha>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -40,6 +40,20 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# --slot-base and --contribution-target are the task's two base references, resolved
+# by bin/fm-spawn.sh and passed in here; bin/fm-task-base-lib.sh owns the contract.
+# This script is TOLD them rather than deriving them, exactly like --mode: its
+# <repo-name> argument is a caller-supplied string, not a checkout it could read.
+# They are stated only when they DIFFER, so a project with one base keeps a
+# byte-identical brief. When they differ the brief carries a machine-readable
+# "Base contract: slot=<sha> contribution=<sha|unresolved>" line that fm-spawn.sh
+# checks against its own resolution, plus the read-here/write-there rule: read the
+# slot base because it is the code the fleet runs and what the task's citations were
+# taken against, and cut the branch from the contribution target so the PR carries no
+# commit that target never had. A ship brief's branch step then names that commit
+# explicitly instead of branching from wherever the worktree happens to sit. A scout
+# cuts no branch and takes only --slot-base, which its report cites its findings
+# against. Both are refused on a secondmate charter.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -106,6 +120,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+SLOT_BASE=
+CONTRIB_TARGET=
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +131,8 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      slot-base) SLOT_BASE=$a ;;
+      contribution-target) CONTRIB_TARGET=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +145,10 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --slot-base) want_value=slot-base ;;
+    --slot-base=*) SLOT_BASE=${a#--slot-base=} ;;
+    --contribution-target) want_value=contribution-target ;;
+    --contribution-target=*) CONTRIB_TARGET=${a#--contribution-target=} ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -154,6 +176,31 @@ elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
+
+# A worker needs TWO base references whenever they differ (bin/fm-task-base-lib.sh
+# owns the contract, bin/fm-spawn.sh resolves them). This script is handed the
+# resolved pair rather than deriving it, exactly like --mode: its REPO argument is
+# a caller-supplied name, not a checkout it could read.
+if [ "$KIND" = secondmate ] && { [ -n "$SLOT_BASE" ] || [ -n "$CONTRIB_TARGET" ]; }; then
+  echo "error: --slot-base and --contribution-target apply only to crewmate ship or scout briefs; a secondmate charter cuts no contribution branch" >&2
+  exit 1
+fi
+if [ -n "$CONTRIB_TARGET" ] && [ -z "$SLOT_BASE" ]; then
+  echo "error: --contribution-target requires --slot-base; stating where to write without stating where to read is the confusion this contract exists to prevent" >&2
+  exit 1
+fi
+if [ "$KIND" = scout ] && [ -n "$CONTRIB_TARGET" ]; then
+  echo "error: --contribution-target applies only to ship briefs; a scout delivers a report and cuts no branch, so it has only a slot base to read and cite" >&2
+  exit 1
+fi
+case "$SLOT_BASE" in
+  ''|*[!0-9a-f]*) [ -z "$SLOT_BASE" ] || { echo "error: --slot-base must be a full commit SHA (got '$SLOT_BASE')" >&2; exit 1; } ;;
+esac
+case "$CONTRIB_TARGET" in
+  ''|unresolved) ;;
+  *[!0-9a-f]*) echo "error: --contribution-target must be a full commit SHA or the literal 'unresolved' (got '$CONTRIB_TARGET')" >&2; exit 1 ;;
+esac
+
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -297,6 +344,62 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Base-reference section. Emitted ONLY when the two references actually differ,
+# so a project whose read base and contribution base are the same commit keeps a
+# byte-identical brief and nothing about today's single-reference flow changes.
+# BRANCH_FROM makes the branch step cut from the contribution base explicitly
+# rather than from wherever the worktree happens to sit.
+BASE_SECTION=
+BRANCH_FROM=
+if [ -n "$SLOT_BASE" ]; then
+  SLOT_SHORT=${SLOT_BASE:0:12}
+  if [ "$KIND" = scout ]; then
+    # A scout cuts no branch, but its report's file and line citations are the
+    # deliverable, and citations taken against the wrong trunk have already
+    # nearly corrupted one report.
+    BASE_SECTION=$(printf '%s\n' \
+'# Base reference' \
+'Base contract: slot='"$SLOT_BASE"' contribution=n/a' \
+'' \
+'This worktree is placed at `'"$SLOT_SHORT"'`, which is the code the fleet ACTUALLY RUNS.' \
+'Read it, grep it, run it, and trust its line numbers.' \
+'Cite that commit next to any file or line number in your report, so a reader can tell which trunk the citation was taken against.')
+  elif [ "$CONTRIB_TARGET" = unresolved ]; then
+    # shellcheck disable=SC2016 # Backticks here are Markdown code spans in worker-facing prose, not command substitution.
+    BASE_SECTION=$(printf '%s\n' \
+'# Base references - CONTRIBUTION BASE UNRESOLVED' \
+'Base contract: slot='"$SLOT_BASE"' contribution=unresolved' \
+'' \
+'This worktree is placed at `'"$SLOT_SHORT"'`, which is the code the fleet ACTUALLY RUNS: read it, grep it, run it, and trust its line numbers.' \
+'The base your work should be CONTRIBUTED to could not be resolved, so the branch step below has nothing verified to cut from.' \
+'Implement and commit as normal, but do NOT push or open a PR: append `blocked: contribution base unresolved` and stop before pushing, and firstmate will tell you which commit to branch from.')
+  elif [ -n "$CONTRIB_TARGET" ] && [ "$CONTRIB_TARGET" != "$SLOT_BASE" ]; then
+    CONTRIB_SHORT=${CONTRIB_TARGET:0:12}
+    # shellcheck disable=SC2016 # Backticks here are Markdown code spans in worker-facing prose, not command substitution.
+    BASE_SECTION=$(printf '%s\n' \
+'# Base references - read here, write there' \
+'Base contract: slot='"$SLOT_BASE"' contribution='"$CONTRIB_TARGET"'' \
+'' \
+'This task has TWO base commits and they are NOT the same. Confusing them is the failure this section exists to prevent.' \
+'' \
+'- **Read at `'"$SLOT_SHORT"'`.** That is the code the fleet ACTUALLY RUNS, and it is where this worktree starts.' \
+'  Any file path or line number in your task description was taken against it.' \
+'- **Write at `'"$CONTRIB_SHORT"'`.** That is the base your work is CONTRIBUTED to, and the branch step below cuts from it.' \
+'' \
+'Once you branch, your working tree holds the contribution base, not the running fleet code.' \
+'From then on read the running code with `git show '"$SLOT_SHORT"':<path>` instead of assuming the file in front of you is what the fleet runs.' \
+'Never cut or rebase your branch onto `'"$SLOT_SHORT"'`: that silently carries every commit the fleet has landed but never contributed into your PR, which is exactly what this separation prevents.' \
+'Verify your branch before pushing: `git merge-base --is-ancestor '"$CONTRIB_SHORT"' HEAD` must succeed.' \
+'' \
+'If a file your task names does not exist at `'"$CONTRIB_SHORT"'` at all, then this task cannot be a contribution to that base.' \
+'Do NOT recreate the file and do not rebase onto the running trunk to make it appear: append `blocked: <file> absent from the contribution base` and stop.')
+    BRANCH_FROM=" $CONTRIB_SHORT"
+  fi
+fi
+[ -z "$BASE_SECTION" ] || BASE_SECTION="$BASE_SECTION
+
+"
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -306,7 +409,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
-# Setup
+$BASE_SECTION# Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
@@ -415,14 +518,14 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
-# Setup
+$BASE_SECTION# Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID$BRANCH_FROM\`$SETUP2
 
 # Rules
 $RULE1

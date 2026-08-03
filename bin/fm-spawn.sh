@@ -16,6 +16,25 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   --slot-base <commit-ish> and --contribution-target <commit-ish> are this
+#   task's TWO base references (bin/fm-task-base-lib.sh owns the contract). Both
+#   are DERIVED per spawn and these flags only override that derivation, so an
+#   ordinary spawn passes neither. The slot base is the commit the task's
+#   worktree is placed at, so the worker reads the code the fleet ACTUALLY RUNS
+#   and the brief's file and line citations resolve; it is the project checkout's
+#   local default-branch tip, and the slot is placed there rather than left at
+#   whatever commit the pool last used. The contribution target is the commit the
+#   task's branch is cut from, so the PR carries no commit the target never had;
+#   on a fork layout that is the upstream trunk, which is NOT the slot base.
+#   Derivation cannot see the task's target files, so a task editing code that
+#   exists only on the fork declares its target with the flag instead. When the
+#   two coincide nothing changes. When the upstream trunk exists but cannot be
+#   read locally the target is recorded as "unresolved" rather than guessed onto
+#   the slot base, because that guess is the pollution this separates. A ship or
+#   scout spawn additionally reads the brief's recorded "Base contract:" line and
+#   REFUSES a mismatch, exactly like the delivery contract above. A slot holding
+#   uncommitted work, or sitting on a task branch, is left untouched and launched
+#   as-is with a notice. Refused on --secondmate, which syncs its whole home.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -149,6 +168,11 @@
 #   identity is owned by the parent home that holds its task metadata, while the
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
+# Every ship and scout spawn records slot_base=, contribution_target= (a commit, or the
+# literal "unresolved", or "n/a" for a scout), and base_state=
+# (coincident|distinct|unresolved|read-only), so which commit a task read and which it
+# contributed to stays inspectable after the fact. A scout cuts no branch, so it records
+# base_state=read-only and takes no --contribution-target.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -193,6 +217,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-task-base-lib.sh
+. "$SCRIPT_DIR/fm-task-base-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
@@ -225,6 +251,8 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+SLOT_BASE_ARG=
+CONTRIB_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -232,6 +260,8 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+SLOT_BASE_SET=0
+CONTRIB_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -247,6 +277,8 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      slot-base) SLOT_BASE_ARG=$a; SLOT_BASE_SET=1 ;;
+      contribution-target) CONTRIB_ARG=$a; CONTRIB_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -269,6 +301,10 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --slot-base) want_value=slot-base ;;
+    --slot-base=*) SLOT_BASE_ARG=${a#--slot-base=}; SLOT_BASE_SET=1 ;;
+    --contribution-target) want_value=contribution-target ;;
+    --contribution-target=*) CONTRIB_ARG=${a#--contribution-target=}; CONTRIB_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -293,6 +329,8 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
     exit 1
   }
 fi
+[ "$SLOT_BASE_SET" -eq 0 ] || [ -n "$SLOT_BASE_ARG" ] || { echo "error: --slot-base requires a non-empty value" >&2; exit 1; }
+[ "$CONTRIB_SET" -eq 0 ] || [ -n "$CONTRIB_ARG" ] || { echo "error: --contribution-target requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -585,6 +623,18 @@ if [ "$KIND" = secondmate ]; then
   fi
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
 fi
+# A secondmate is a firstmate home, not a task worktree: it already runs the
+# primary's local-HEAD sync below and cuts no contribution branch at all.
+if [ "$KIND" = secondmate ]; then
+  [ "$SLOT_BASE_SET" -eq 0 ] && [ "$CONTRIB_SET" -eq 0 ] || {
+    echo "error: --slot-base and --contribution-target apply only to ship and scout spawns; a secondmate home syncs to the primary default branch and cuts no contribution branch" >&2
+    exit 1
+  }
+fi
+if [ "$KIND" = scout ] && [ "$CONTRIB_SET" -eq 1 ]; then
+  echo "error: --contribution-target applies only to ship spawns; a scout delivers a report and cuts no branch, so it has only a slot base to read and cite" >&2
+  exit 1
+fi
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -752,6 +802,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  [ "$SLOT_BASE_SET" -eq 0 ] || shared_args+=(--slot-base "$SLOT_BASE_ARG")
+  if [ "$KIND" = ship ] && [ "$CONTRIB_SET" -eq 1 ]; then
+    shared_args+=(--contribution-target "$CONTRIB_ARG")
+  fi
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1238,6 +1292,83 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+# The task's TWO base references (bin/fm-task-base-lib.sh owns the contract).
+# Resolved from the PROJECT checkout, before any endpoint exists, so a spawn that
+# cannot tell them apart stops here rather than handing a worker a brief whose
+# file and line citations do not resolve against the code the fleet runs.
+SLOT_BASE=
+CONTRIB_TARGET=
+BASE_STATE=
+if [ "$KIND" != secondmate ]; then
+  if task_base_resolve "$PROJ_ABS"; then
+    SLOT_BASE=$TASK_BASE_SLOT
+    CONTRIB_TARGET=$TASK_BASE_CONTRIB
+    BASE_STATE=$TASK_BASE_STATE
+  else
+    echo "warning: $ID base references unresolved for $PROJ_ABS ($TASK_BASE_ERROR); the worktree is left at whatever commit the pool last used" >&2
+    BASE_STATE=unresolved
+  fi
+  if [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ "$CONTRIB_SET" -eq 0 ] && [ -n "$SLOT_BASE" ]; then
+    CONTRIB_TARGET=$SLOT_BASE
+    BASE_STATE=coincident
+  fi
+  # An explicit override is firstmate's per-task answer and wins over derivation.
+  # The derivation cannot see the task's target files; firstmate can, so a task
+  # editing code that exists only on the fork is declared here rather than guessed.
+  if [ "$SLOT_BASE_SET" -eq 1 ]; then
+    SLOT_BASE=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$SLOT_BASE_ARG^{commit}" 2>/dev/null) || {
+      echo "error: --slot-base '$SLOT_BASE_ARG' is not a commit in $PROJ_ABS" >&2
+      exit 1
+    }
+  fi
+  if [ "$CONTRIB_SET" -eq 1 ]; then
+    CONTRIB_TARGET=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$CONTRIB_ARG^{commit}" 2>/dev/null) || {
+      echo "error: --contribution-target '$CONTRIB_ARG' is not a commit in $PROJ_ABS" >&2
+      exit 1
+    }
+  fi
+  if [ "$SLOT_BASE_SET" -eq 1 ] || [ "$CONTRIB_SET" -eq 1 ]; then
+    if [ -z "$CONTRIB_TARGET" ]; then
+      BASE_STATE=unresolved
+    elif [ "$SLOT_BASE" = "$CONTRIB_TARGET" ]; then
+      BASE_STATE=coincident
+    else
+      BASE_STATE=distinct
+    fi
+  fi
+  # A scout delivers a report and cuts no branch, so it has no contribution
+  # target to be right or wrong about - only the commit its findings cite. Its
+  # slot is still placed at the fleet trunk, which is the whole fix for a report
+  # whose file and line citations must resolve against the running code.
+  if [ "$KIND" = scout ] && [ -n "$SLOT_BASE" ]; then
+    CONTRIB_TARGET=n/a
+    BASE_STATE=read-only
+  fi
+fi
+
+# Brief/spawn base agreement, the same drift guard the delivery contract uses
+# above. fm-brief.sh records the pair it told the worker about; a spawn that
+# resolved a different pair would hand that worker citations against one commit
+# and a branch cut from another.
+if [ "$KIND" != secondmate ]; then
+  BRIEF_BASE=$(sed -n 's/^Base contract: slot=\([0-9a-f]*\) contribution=\([^ ]*\).*$/\1 \2/p' "$BRIEF" | head -n 1)
+  if [ -z "$BRIEF_BASE" ]; then
+    if [ "$KIND" = ship ] && [ "$BASE_STATE" != coincident ]; then
+      echo "error: $ID brief records no base contract line but this task's read and contribution bases differ (${SLOT_BASE:0:12} vs ${CONTRIB_TARGET:-unresolved}); re-scaffold the brief with --slot-base/--contribution-target before spawning" >&2
+      exit 1
+    elif [ "$KIND" = scout ]; then
+      echo "warning: $BRIEF records no base contract line; the scout will read and cite the resolved slot base ${SLOT_BASE:-unresolved}" >&2
+    fi
+  else
+    BRIEF_SLOT=${BRIEF_BASE%% *}
+    BRIEF_CONTRIB=${BRIEF_BASE##* }
+    if [ "$BRIEF_SLOT" != "$SLOT_BASE" ] || [ "$BRIEF_CONTRIB" != "${CONTRIB_TARGET:-unresolved}" ]; then
+      echo "error: base mismatch for $ID: the brief says slot=$BRIEF_SLOT contribution=$BRIEF_CONTRIB but this spawn resolved slot=$SLOT_BASE contribution=${CONTRIB_TARGET:-unresolved}; re-scaffold the brief or pass matching --slot-base/--contribution-target so the worker's instructions and the task record agree" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -1743,6 +1874,33 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+# Place the slot at the resolved slot base, so the worker reads the code the
+# fleet ACTUALLY RUNS instead of whatever commit the pool last left there. A
+# pooled slot is disposable, so this is a reset rather than the secondmate path's
+# fast-forward - a fast-forward would silently skip a diverged slot and leave the
+# stale base in place, which is the defect. Purely local, no fetch.
+#
+# It is still guarded, because "disposable" is a claim about the pool, not proof
+# about THIS directory: a slot carrying uncommitted work, or sitting on a task
+# branch, may hold work that was never landed. Either one is left untouched and
+# launched as-is with a loud notice rather than reset over.
+if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -n "$SLOT_BASE" ]; then
+  slot_head=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ "$slot_head" = "$SLOT_BASE" ]; then
+    :
+  elif [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
+    echo "warning: $ID slot at $WT has uncommitted changes; left at ${slot_head:0:12} instead of the slot base ${SLOT_BASE:0:12} - the brief's file and line citations may not match it" >&2
+  else
+    slot_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    slot_default=$(default_branch "$WT" 2>/dev/null || true)
+    if [ -n "$slot_branch" ] && [ "$slot_branch" != "$slot_default" ]; then
+      echo "warning: $ID slot at $WT is on branch '$slot_branch', which may hold unlanded work; left at ${slot_head:0:12} instead of the slot base ${SLOT_BASE:0:12}" >&2
+    elif ! git -C "$WT" checkout --quiet --detach "$SLOT_BASE" 2>/dev/null; then
+      echo "warning: $ID slot at $WT could not be placed at the slot base ${SLOT_BASE:0:12}; left at ${slot_head:0:12} - the brief's file and line citations may not match it" >&2
+    fi
+  fi
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2041,6 +2199,13 @@ META_WINDOW=$T
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  # Both base references, so which commit a task read and which it contributed
+  # to is inspectable after the fact rather than inferred from the branch.
+  # base_state names the relationship in one word; an unresolved contribution
+  # target is recorded as the literal "unresolved" and never as a commit.
+  [ -z "$SLOT_BASE" ] || echo "slot_base=$SLOT_BASE"
+  [ -z "$BASE_STATE" ] || echo "contribution_target=${CONTRIB_TARGET:-unresolved}"
+  [ -z "$BASE_STATE" ] || echo "base_state=$BASE_STATE"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
