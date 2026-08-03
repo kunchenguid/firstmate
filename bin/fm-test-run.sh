@@ -197,6 +197,9 @@ family_for_basename() {
     fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
+    fm-notes-channel.test.sh|fm-notes-bridge-build.test.sh)
+      printf '%s\n' apple-notes
+      ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
@@ -240,6 +243,7 @@ backend-dispatch
 pr-forge
 afk
 snapshot-bearings
+apple-notes
 cmux
 zellij
 orca
@@ -869,6 +873,10 @@ families_for_changed_path() {
     bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-notes-*|libexec/FirstmateNotesBridge/*|\
+    .agents/skills/apple-notes-channel/SKILL.md)
+      printf '%s\n' apple-notes
       ;;
     bin/fm-watch*|bin/fm-wake*|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>Firstmate Notes Bridge</string>
+  <key>CFBundleExecutable</key>
+  <string>FirstmateNotesBridge</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.firstmate.notes-bridge</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Firstmate Notes Bridge</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSBackgroundOnly</key>
+  <true/>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Firstmate reads finalized requests only from the dedicated Firstmate Inbox and writes redacted receipts only to the dedicated Acknowledgments and Outbox folders.</string>
+</dict>
+</plist>

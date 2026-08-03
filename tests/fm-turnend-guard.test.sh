@@ -88,6 +88,17 @@ test_predicate_x_mode_needs_supervision() {
   pass "fm_supervision_needed: X-mode relay poll needs supervision"
 }
 
+test_predicate_notes_channel_needs_supervision() {
+  local state="$TMP_ROOT/pred-notes-channel/state"
+  mkdir -p "$state"
+  : > "$state/notes-watch.check.sh"
+  fm_supervision_needed "$state" 300 || fail "Apple Notes bounded check did not register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "Apple Notes bounded check must not count as an in-flight task"
+  [ "$FM_SUP_NEEDED" = true ] || fail "Apple Notes bounded check must set FM_SUP_NEEDED"
+  fm_supervision_unhealthy "$state" 300 || fail "Apple Notes bounded check with no beacon must be unhealthy"
+  pass "fm_supervision_needed: activated Apple Notes bounded check needs supervision"
+}
+
 test_predicate_source_needs_supervision() {
   local state="$TMP_ROOT/pred-source/state"
   mkdir -p "$state/procevent"
@@ -1541,6 +1552,7 @@ test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
+test_predicate_notes_channel_needs_supervision
 test_predicate_source_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
