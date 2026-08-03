@@ -128,6 +128,16 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+# Brief staging: before launch, the brief is copied into the launch checkout (the
+# task worktree, or the secondmate home for --secondmate) as gitignored
+# .fm/brief.md, together with every firstmate-home or firstmate-repo file it
+# references under .fm/refs/<home|root|secondmate>/, and the brief's input paths
+# are rewritten to those copies, so no launch-visible input needs a directory
+# grant outside that checkout. The deliberate external writes keep their real
+# outside paths: state/<id>.status and a scout's data/<id>/report.md. For
+# opencode, the launch config additionally allows exactly those two output
+# directories through permission.external_directory (opencode 1.18.10), scoped to
+# this launch so the captain's own opencode config is never touched.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
