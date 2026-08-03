@@ -118,6 +118,33 @@ test_patch_equivalent_rebase_passes() {
   pass "fm-push-guard: content-preserving rebase passes despite changed commit ids"
 }
 
+test_whitespace_different_patch_refuses() {
+  local dir worker reviewer branch out status lost
+  dir=$(new_case whitespace-different)
+  worker="$dir/worker"
+  reviewer="$dir/reviewer"
+  branch=fm/task
+
+  git -C "$reviewer" checkout -qb "$branch"
+  commit_file "$reviewer" format.txt "alpha beta" "preserve deliberate spacing"
+  lost=$(git -C "$reviewer" rev-parse HEAD)
+  git -C "$reviewer" push -q -u origin "$branch"
+
+  git -C "$worker" checkout -qb "$branch"
+  commit_file "$worker" local.txt local "local work before replay"
+  track_remote_task_branch "$worker" "$branch"
+  commit_file "$worker" format.txt alphabeta "different compact spelling"
+
+  out=$(cd "$worker" && "$GUARD" 2>&1); status=$?
+  [ "$status" -ne 0 ] \
+    || fail "guard treated whitespace-different content as a reproduced remote commit"
+  assert_contains "$out" "$(printf '%.12s' "$lost")" \
+    "whitespace-sensitive refusal did not name the lost commit"
+  assert_contains "$out" "preserve deliberate spacing" \
+    "whitespace-sensitive refusal did not include the lost commit subject"
+  pass "fm-push-guard: whitespace-different content is never patch-equivalent"
+}
+
 test_no_upstream_refuses() {
   local dir worker out status
   dir=$(new_case no-upstream)
@@ -163,6 +190,7 @@ test_explicit_new_remote_branch_passes() {
 test_dropped_remote_commits_are_named
 test_clean_descendant_push_passes
 test_patch_equivalent_rebase_passes
+test_whitespace_different_patch_refuses
 test_no_upstream_refuses
 test_offline_remote_refuses
 test_explicit_new_remote_branch_passes
