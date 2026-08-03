@@ -114,8 +114,9 @@ fi
 wait_for_text "FM_GROK_ARMED_READY" 240 || fail "Grok did not settle the arming turn before the away-mode transition"
 
 arm_pid=$(ps -p "$initial_watcher" -o ppid= 2>/dev/null | tr -d ' ' || true)
-[ -n "$arm_pid" ] && kill -0 "$arm_pid" 2>/dev/null \
-  || fail "Grok tracked arm process was not live"
+if [ -z "$arm_pid" ] || ! kill -0 "$arm_pid" 2>/dev/null; then
+  fail "Grok tracked arm process was not live"
+fi
 completion_count=$(count_text "Task completed in")
 date '+%s' > "$HOME_DIR/state/.afk"
 printf 'done: grok away-mode watcher fire\n' > "$HOME_DIR/state/grok-e2e.status"

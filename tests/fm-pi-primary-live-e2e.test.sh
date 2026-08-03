@@ -324,8 +324,9 @@ while [ "$i" -lt 120 ]; do
   sleep 0.5
   i=$((i + 1))
 done
-[ -n "$initial_watcher_pid" ] && kill -0 "$initial_watcher_pid" 2>/dev/null \
-  || fail "initial Pi watcher pid was not recorded live"
+if [ -z "$initial_watcher_pid" ] || ! kill -0 "$initial_watcher_pid" 2>/dev/null; then
+  fail "initial Pi watcher pid was not recorded live"
+fi
 date '+%s' > "$HOME_DIR/state/.afk"
 printf 'done: pi away-mode live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
 i=0
@@ -358,9 +359,10 @@ while [ "$i" -lt 240 ]; do
   sleep 0.5
   i=$((i + 1))
 done
-[ -n "$resumed_watcher_pid" ] && [ "$resumed_watcher_pid" != "$initial_watcher_pid" ] \
-  && kill -0 "$resumed_watcher_pid" 2>/dev/null \
-  || fail "Pi extension did not resume supervision after away mode"
+if [ -z "$resumed_watcher_pid" ] || [ "$resumed_watcher_pid" = "$initial_watcher_pid" ] \
+  || ! kill -0 "$resumed_watcher_pid" 2>/dev/null; then
+  fail "Pi extension did not resume supervision after away mode"
+fi
 sleep 2
 capture | grep -Fxq ' HANDLED' && fail "Pi replayed the suppressed away-mode wake after return"
 

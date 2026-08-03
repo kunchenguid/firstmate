@@ -30,6 +30,8 @@ OPENCODE_VERSION=$(opencode --version)
 OPENCODE_LIVE_MODEL=${FM_OPENCODE_LIVE_E2E_MODEL:-}
 MODEL_ARGS=()
 [ -z "$OPENCODE_LIVE_MODEL" ] || MODEL_ARGS=(-m "$OPENCODE_LIVE_MODEL")
+OPENCODE_MODEL_CLI=
+[ -z "$OPENCODE_LIVE_MODEL" ] || OPENCODE_MODEL_CLI=" -m '$OPENCODE_LIVE_MODEL'"
 AHOY_PROJECT="$LAB/ahoy-project"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
@@ -262,7 +264,7 @@ run_native_ahoy_regressions() {
   [ "$session_count" = 1 ] || fail "OpenCode native first-message Ahoy left the original session"
 
   "$TMUX" -L "$SOCKET" new-session -d -s "$native_session" -c "$AHOY_PROJECT" \
-    "env OPENCODE_DB='$later_db' FM_HOME='$later_home' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --auto ${OPENCODE_LIVE_MODEL:+-m '$OPENCODE_LIVE_MODEL'}"
+    "env OPENCODE_DB='$later_db' FM_HOME='$later_home' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --auto$OPENCODE_MODEL_CLI"
   i=0
   while [ "$i" -lt 120 ]; do
     "$TMUX" -L "$SOCKET" capture-pane -p -t "$native_session" 2>/dev/null | grep -Fq "$OPENCODE_VERSION" && break
@@ -318,7 +320,7 @@ printf 'project=fixture\n' > "$HOME_DIR/state/opencode-e2e.meta"
 # shellcheck disable=SC2016 # The model, not this test shell, expands FM_HOME.
 PROMPT='Use the terminal to run `printf ready > "$FM_HOME/state/opencode-model-initial"`, then respond briefly. If a later watcher wake arrives, run bin/fm-wake-drain.sh, then run `printf handled > "$FM_HOME/state/opencode-model-handled"`. Never run or request any watcher arm command.'
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --auto ${OPENCODE_LIVE_MODEL:+-m '$OPENCODE_LIVE_MODEL'}; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
+  "env OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --auto$OPENCODE_MODEL_CLI; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
 
 # Send the initial prompt through the ready composer so this exercises the same
 # persistent TUI path as a primary session.
@@ -380,9 +382,10 @@ while [ "$i" -lt 240 ]; do
   sleep 0.5
   i=$((i + 1))
 done
-[ -n "$resumed_watcher_pid" ] && [ "$resumed_watcher_pid" != "$initial_watcher_pid" ] \
-  && kill -0 "$resumed_watcher_pid" 2>/dev/null \
-  || fail "OpenCode plugin did not resume supervision after away mode"
+if [ -z "$resumed_watcher_pid" ] || [ "$resumed_watcher_pid" = "$initial_watcher_pid" ] \
+  || ! kill -0 "$resumed_watcher_pid" 2>/dev/null; then
+  fail "OpenCode plugin did not resume supervision after away mode"
+fi
 sleep 2
 [ ! -f "$HOME_DIR/state/opencode-model-handled" ] \
   || fail "OpenCode replayed the suppressed away-mode wake after return"
