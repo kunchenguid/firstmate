@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -30,11 +30,20 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # and kimi are markerless, so a foreign marker retained in a terminal
-  # multiplexer's stored environment can silently misidentify one of them before
-  # ancestry is consulted. This is a precedence hazard, not evidence that
-  # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
+  # omp (Oh My Pi) sets BOTH OMPCODE=1 and CLAUDECODE=1 for its own child
+  # processes (verified empirically: launching omp with CLAUDECODE explicitly
+  # unset beforehand still yields CLAUDECODE=1 in its bash-tool children),
+  # presumably for Claude-ecosystem tool compatibility. OMPCODE must therefore
+  # be checked BEFORE CLAUDECODE, or every omp session would misidentify as
+  # claude. omp does NOT set PI_CODING_AGENT despite being built on the same
+  # underlying @oh-my-pi/pi-coding-agent package as pi/pi-signed.
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
+  # Only claude, pi, grok, and omp set verified markers of their own; codex,
+  # opencode, and kimi are markerless, so a foreign marker retained in a
+  # terminal multiplexer's stored environment can silently misidentify one of
+  # them before ancestry is consulted. This is a precedence hazard, not
+  # evidence that CLAUDECODE inheritance into a kimi child was observed; it
+  # was not observed.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -56,8 +65,13 @@ detect_own() {
       kimi) echo kimi; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
-      node*|python*)
-        # Bare interpreter: match the harness name in its script path.
+      omp) echo omp; return ;;
+      node*|python*|bun*)
+        # Bare interpreter: match the harness name in its script path. bun is
+        # here because omp ships as a bun-run script whose comm gets renamed
+        # to "omp" at runtime (a live ps read sees "omp" directly, matched
+        # above), but a caller that only sees the pre-rename "bun" comm - or a
+        # snapshot taken before the rename lands - still needs this fallback.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
           *claude*) echo claude; return ;;
@@ -65,6 +79,7 @@ detect_own() {
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
           *" pi "*|*/pi) echo pi; return ;;
+          *" omp "*|*/omp) echo omp; return ;;
         esac ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')

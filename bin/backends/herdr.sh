@@ -2516,6 +2516,117 @@ $cap
 EOF
 }
 
+# omp's composer collapses its top and bottom border into dual-purpose rows
+# (verified live, omp 17.2.5, both idle and busy, identical shape under tmux -
+# see bin/fm-tmux-lib.sh's fm_tmux_omp_composer_find for the full structural
+# rationale): the TOP row embeds the model/thinking/dir/branch/context/cost
+# status bar AND the standing "▶" prompt/run marker inside its own border
+# ("╭── π > ... ▶───...───╮"), and the BOTTOM row embeds the actual typed
+# text between its own border glyphs ("╰─ <text> ─╯") with no intervening
+# │...│ row when the text fits on one line; wrapped text adds genuine
+# │ text │ rows and moves the final line's overflow into the bottom row the
+# same way. Bound the structural candidate like the Pi separator scan.
+FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES:-8}
+
+fm_backend_herdr_omp_top_row() {  # <plain-row>
+  case "$1" in
+    '╭'*'▶'*'╮'|'┌'*'▶'*'┐'|'╔'*'▶'*'╗'|'┏'*'▶'*'┓') return 0 ;;
+  esac
+  return 1
+}
+
+fm_backend_herdr_omp_bottom_row() {  # <plain-row>
+  case "$1" in
+    '╰'*'╯'|'└'*'┘'|'╚'*'╝'|'┗'*'┛') return 0 ;;
+  esac
+  return 1
+}
+
+# fm_backend_herdr_omp_border_content: strip one omp box border row's own
+# edge glyphs, leaving the (possibly empty) inner text with its dash padding
+# collapsed to spaces - the same trick fm_tmux_omp_border_content uses,
+# safe here for the same reason (real typed content never contains a raw
+# "─"/"-" run). Ghost-strips first so ANSI de-emphasis never counts as text.
+fm_backend_herdr_omp_border_content() {  # <raw-row>
+  local stripped
+  stripped=$(printf '%s\n' "$1" | fm_composer_strip_ghost)
+  case "$stripped" in
+    '╭'*'╮') stripped=${stripped#╭}; stripped=${stripped%╮} ;;
+    '┌'*'┐') stripped=${stripped#┌}; stripped=${stripped%┐} ;;
+    '╔'*'╗') stripped=${stripped#╔}; stripped=${stripped%╗} ;;
+    '┏'*'┓') stripped=${stripped#┏}; stripped=${stripped%┓} ;;
+    '╰'*'╯') stripped=${stripped#╰}; stripped=${stripped%╯} ;;
+    '└'*'┘') stripped=${stripped#└}; stripped=${stripped%┘} ;;
+    '╚'*'╝') stripped=${stripped#╚}; stripped=${stripped%╝} ;;
+    '┗'*'┛') stripped=${stripped#┗}; stripped=${stripped%┛} ;;
+    '│'*'│') stripped=${stripped#│}; stripped=${stripped%│} ;;
+    '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
+    '║'*'║') stripped=${stripped#║}; stripped=${stripped%║} ;;
+    '|'*'|') stripped=${stripped#|}; stripped=${stripped%|} ;;
+  esac
+  stripped=${stripped//─/ }
+  stripped=${stripped//-/ }
+  printf '%s' "$stripped"
+}
+
+# Locate the bottom-most complete omp composer box: a top row carrying "▶"
+# inside its own border, followed by zero or more │ content │ rows, closed
+# by a bottom row whose own inner text is itself the final content chunk.
+# Sets globals so the caller can compare this shape's screen position
+# against the generic bordered/bare candidates, exactly like the Pi
+# separator-pair scan. FM_BACKEND_HERDR_OMP_CONTENT joins every content row
+# (middle │ rows plus the bottom row) with a space, already border-stripped
+# and dash-collapsed; empty when the composer is genuinely empty.
+fm_backend_herdr_omp_composer_find() {  # <ansi-capture>
+  local cap=$1 line plain top=-1 lines=0 max row=0 chunk candidate=""
+  max=$FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES
+  case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
+  FM_BACKEND_HERDR_OMP_PAIR_FOUND=0
+  FM_BACKEND_HERDR_OMP_PAIR_VALID=0
+  FM_BACKEND_HERDR_OMP_PAIR_OPEN_LINE=0
+  FM_BACKEND_HERDR_OMP_PAIR_LINE=0
+  FM_BACKEND_HERDR_OMP_CONTENT=""
+  while IFS= read -r line; do
+    row=$((row + 1))
+    plain=$(fm_backend_herdr_strip_ansi "$line")
+    plain="${plain#"${plain%%[![:space:]]*}"}"
+    plain="${plain%"${plain##*[![:space:]]}"}"
+    if fm_backend_herdr_omp_top_row "$plain"; then
+      top=$row
+      lines=0
+      candidate=""
+    elif [ "$top" -ge 0 ] && fm_backend_herdr_omp_bottom_row "$plain"; then
+      FM_BACKEND_HERDR_OMP_PAIR_FOUND=1
+      FM_BACKEND_HERDR_OMP_PAIR_OPEN_LINE=$top
+      FM_BACKEND_HERDR_OMP_PAIR_LINE=$row
+      if [ "$lines" -le "$max" ]; then
+        chunk=$(fm_backend_herdr_omp_border_content "$line")
+        chunk="${chunk#"${chunk%%[![:space:]]*}"}"
+        chunk="${chunk%"${chunk##*[![:space:]]}"}"
+        FM_BACKEND_HERDR_OMP_PAIR_VALID=1
+        FM_BACKEND_HERDR_OMP_CONTENT="${candidate:+$candidate }$chunk"
+      else
+        FM_BACKEND_HERDR_OMP_PAIR_VALID=0
+        FM_BACKEND_HERDR_OMP_CONTENT=""
+      fi
+      top=-1
+    elif [ "$top" -ge 0 ]; then
+      case "$plain" in
+        '│'*'│'|'┃'*'┃'|'║'*'║'|'|'*'|')
+          lines=$((lines + 1))
+          chunk=$(fm_backend_herdr_omp_border_content "$line")
+          chunk="${chunk#"${chunk%%[![:space:]]*}"}"
+          chunk="${chunk%"${chunk##*[![:space:]]}"}"
+          [ -z "$chunk" ] || candidate="${candidate:+$candidate }$chunk"
+          ;;
+        *) top=-1 ;;
+      esac
+    fi
+  done <<EOF
+$cap
+EOF
+}
+
 fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out
   out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
@@ -2592,6 +2703,38 @@ EOF
     # not provide the complete Pi composer structure required for injection.
     found=0
   fi
+  # omp's composer neither has side borders (the generic bordered scan above
+  # never matches its ╭/╰ corners) nor Pi's separator shape, so it needs its
+  # own bottom-anchored pair scan, gated on native identity like Pi's. Compare
+  # against whichever candidate line is currently authoritative (the generic
+  # match, possibly already overridden by the Pi branch above) so an earlier
+  # row of either other shape can never outrank the live omp composer.
+  fm_backend_herdr_omp_composer_find "$cap"
+  if [ "$FM_BACKEND_HERDR_OMP_PAIR_FOUND" -eq 1 ] \
+     && [ "$FM_BACKEND_HERDR_OMP_PAIR_LINE" -gt "$generic_line" ] \
+     && [ "$generic_line" -lt "$FM_BACKEND_HERDR_OMP_PAIR_OPEN_LINE" ]; then
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent:$agent_status" in
+      omp:idle|omp:done|omp:blocked)
+        if [ "$FM_BACKEND_HERDR_OMP_PAIR_VALID" -eq 1 ]; then
+          shape=omp
+          raw_match=$FM_BACKEND_HERDR_OMP_CONTENT
+          found=1
+        else
+          found=0
+        fi
+        ;;
+      omp:*|:*)
+        # A working omp or unreadable identity cannot authorize injection,
+        # and the lower pair proves any generic row above is not current.
+        found=0
+        ;;
+      *) : ;; # A known non-omp agent keeps its established generic verdict.
+    esac
+  fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
@@ -2615,6 +2758,13 @@ EOF
     # The native Pi identity plus the complete separator pair is the genuine
     # composer container, equivalent to a bordered box for shared content
     # classification. ANSI stripping keeps real text and drops only styling.
+    bordered=1
+  elif [ "$shape" = omp ]; then
+    # FM_BACKEND_HERDR_OMP_CONTENT is already border-stripped, ghost-stripped,
+    # and dash-collapsed per row by fm_backend_herdr_omp_composer_find; the
+    # re-application of fm_composer_strip_ghost above is a harmless no-op on
+    # already-plain text. The native omp identity plus the complete top/bottom
+    # pair is the genuine composer container, equivalent to a bordered box.
     bordered=1
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare

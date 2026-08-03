@@ -124,6 +124,28 @@ Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identiti
 Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
+omp 17.2.5 (the `@oh-my-pi/pi-coding-agent` bun package under the `omp` bin name) was checked the same way on 2026-08-03, with a real interactive launch in a plain tmux window (automatic-rename left on, unlike a real `fm-spawn` window, to let tmux's own renaming reveal the raw comm value):
+
+```sh
+tmux new-session -d -s ompcomm -c "$scratch_repo"
+tmux send-keys -t ompcomm 'omp --auto-approve' Enter
+tmux display-message -p -t ompcomm '#{pane_current_command}'
+pane_pid=$(tmux list-panes -t ompcomm -F '#{pane_pid}')
+ps -o pid,comm,args -p "$(pgrep -P "$pane_pid" | head -1)"
+```
+
+Observed output:
+
+```text
+bun
+94100 omp             bun /home/srouwen/.bun/bin/omp --auto-approve
+```
+
+`#{pane_current_command}` reported `bun` continuously - stable across six 1-second resamples, a resize, and `refresh-client` while the process stayed the same, and while busy running a tool call - even though `/proc/<pid>/comm` for the exact same live process read `omp` (bun renames its own process title after tmux's window/pane bookkeeping has already captured its pre-rename identity, and tmux never resamples again while the same process keeps running).
+Exiting with `/exit` correctly reverted `#{pane_current_command}` to `bash`, so the alive-to-dead transition tmux liveness recovery depends on remains correct; only the "still alive" display name is stale.
+Because bare `bun` is too generic to trust fleet-wide (any bun-run script would match), `fm_backend_tmux_agent_state` treats a `bun` comm as provisional and confirms it by reading the pane's live child process args for a script path ending in `/omp`, mirroring `fm-harness.sh`'s own node/python/bun bare-interpreter ancestry check; a `bun` pane whose child args do not end in `/omp` classifies `ambiguous`, never `alive`.
+Herdr needed no equivalent branch: `herdr agent get` reported `"agent":"omp"` natively for the same process (see the Herdr section below), so its liveness classifier - which already accepts any registered `agent_status` regardless of the agent name - required no change.
+
 The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
 
 ```sh
@@ -402,6 +424,40 @@ The U+2063 operational and routed-request separators were exercised through a re
 FM_SEND_MARKER_HERDR_E2E=1 \
   tests/fm-send-secondmate-marker-herdr-e2e.test.sh
 ```
+
+### omp native identity and composer shape
+
+omp 17.2.5 was checked live on 2026-08-03 inside a guarded lab pane:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
+"$HERDR_LAB_HELPER" run "$LAB" pane run "$PANE" "omp --auto-approve"
+"$HERDR_LAB_HELPER" run "$LAB" agent get "$PANE"
+```
+
+Observed `agent get` result: `"agent":"omp"` with an ordinary `agent_status` (`idle`/`working`), the same registered-agent shape every other native-identified harness gets - Herdr needed no version gate or new liveness branch for omp, only the composer classifier below.
+
+omp's own composer collapses its top and bottom border into dual-purpose rows instead of the top-border/`│ content │`/bottom-border shape every other verified adapter (including Pi's own separator-pair shape) uses: the top row embeds the model/thinking/dir/branch/context/cost status bar and the standing `▶` prompt/run marker inside its own border (`╭── π > ... ▶───...───╮`), and the bottom row embeds the actual typed text between its own border glyphs (`╰─ <text> ─╯`) with no intervening `│...│` row when the text fits on one line; wrapped text adds genuine `│ text │` rows and moves the final line's overflow into the bottom row the same way.
+This shape is identical under tmux and Herdr (same underlying TUI), reproduced with:
+
+```sh
+tmux send-keys -t "$w" 'omp --auto-approve' Enter
+tmux send-keys -t "$w" 'hello unsent text'
+tmux capture-pane -p -t "$w"
+```
+
+Observed idle/pending/busy captures (abbreviated):
+
+```text
+╭── π  > ⬢ Sonnet 5 · ◒ high > 🗑 .../omp-test1 > ⑂ main ?2 > ◫ 2.8%/1M ⟲ > $0.01 (sub) ▶──...──╮
+╰─                                                                                    ─╯
+
+╭── ... ▶──...──╮
+╰─ hello unsent text                                                                  ─╯
+```
+
+`fm_backend_herdr_omp_composer_find` (`bin/backends/herdr.sh`) and `fm_tmux_omp_composer_find` (`bin/fm-tmux-lib.sh`) both locate this bottom-anchored pair independently (Herdr additionally gates on the native `omp` identity, mirroring the Pi separator-pair gate); a live idle-to-pending-to-cleared cycle and a wrapped multi-line composer were confirmed through both backends' `..._composer_state` entry points during this same session.
+The rendered busy indicator is `Working…` with a single horizontal-ellipsis glyph (U+2026), not three literal dots like Pi's `Working...`, confirmed byte-for-byte with `od -c`; `bin/fm-tmux-lib.sh`'s `FM_TMUX_OMP_BUSY_REGEX_DEFAULT` matches the ellipsis form.
 
 ### Native blocked event
 

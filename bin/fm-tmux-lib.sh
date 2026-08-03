@@ -82,13 +82,17 @@
 # busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Working…|Ctrl\+c:cancel'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+# omp renders "Working" followed by a single horizontal-ellipsis glyph (U+2026),
+# NOT three literal dots like Pi's "Working..." - verified byte-for-byte live
+# on omp 17.2.5, so Pi's regex does not match it.
+FM_TMUX_OMP_BUSY_REGEX_DEFAULT='Working…'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -103,6 +107,7 @@ fm_busy_lines_match() {  # [harness]
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
+      omp) regex=$FM_TMUX_OMP_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -302,6 +307,117 @@ EOF
   return 1
 }
 
+# omp's composer collapses its top and bottom border into dual-purpose rows
+# instead of the three-plus-row shape (top border / │ content │ / bottom
+# border) every other verified adapter uses (verified live, omp 17.2.5, both
+# idle and busy): the TOP row embeds the model/thinking/dir/branch/context/
+# cost status bar AND the standing "▶" prompt/run marker inside its own
+# border ("╭── π > ... ▶───...───╮"), and the BOTTOM row embeds the actual
+# typed text between its own border glyphs ("╰─ <text> ─╯") with NO
+# intervening │...│ row when the text fits on one line. Wrapped text adds
+# genuine │ text │ rows in between and moves the final line's overflow into
+# the bottom row exactly the same way. This shape structurally fails
+# fm_tmux_find_composer_box's generic scan (it requires at least one │...│
+# content row between top and bottom), so omp needs its own finder, tried
+# first and bounded like Pi's herdr separator-pair scan.
+FM_TMUX_OMP_COMPOSER_MAX_LINES=${FM_TMUX_OMP_COMPOSER_MAX_LINES:-8}
+
+# fm_tmux_omp_composer_find: locate the bottom-most instance of omp's own
+# composer shape in <plain-pane>. Prints "<top_row> <bottom_row>" (0-based)
+# on a match; both indices are needed by the caller to re-read the RAW
+# (styled) rows for ghost-aware content extraction. Keeping the LAST match
+# (scanning forward, always overwriting) means an earlier decorative box
+# (e.g. a tool-result box, which never contains "▶") can never outrank the
+# live bottom composer.
+fm_tmux_omp_composer_find() {  # <plain-pane>
+  local pane=$1 line trimmed row=0 top=-1 lines=0 max=$FM_TMUX_OMP_COMPOSER_MAX_LINES
+  local found_top=-1 found_bottom=-1
+  case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    case "$trimmed" in
+      '╭'*'▶'*'╮'|'┌'*'▶'*'┐'|'╔'*'▶'*'╗'|'┏'*'▶'*'┓'|'+'*'▶'*'+')
+        top=$row
+        lines=0
+        ;;
+      '╰'*'╯'|'└'*'┘'|'╚'*'╝'|'┗'*'┛')
+        if [ "$top" -ge 0 ] && [ "$lines" -le "$max" ]; then
+          found_top=$top
+          found_bottom=$row
+        fi
+        top=-1
+        ;;
+      '│'*'│'|'┃'*'┃'|'║'*'║'|'|'*'|')
+        [ "$top" -ge 0 ] && lines=$((lines + 1))
+        ;;
+      *)
+        [ "$top" -ge 0 ] && top=-1
+        ;;
+    esac
+    row=$((row + 1))
+  done <<EOF
+$pane
+EOF
+  [ "$found_top" -ge 0 ] || return 1
+  printf '%s %s' "$found_top" "$found_bottom"
+}
+
+# fm_tmux_omp_border_content: strip one omp box border row's own edge glyphs,
+# leaving the (possibly empty) inner text with its dash padding collapsed to
+# spaces - the same trick fm_tmux_find_composer_box uses for top_spaces,
+# safe here because real typed content never contains a raw "─"/"-" run.
+# Ghost-strips first, so this handles both the top border (never actually
+# fed real composer text, but harmless) and the content-bearing bottom
+# border/│ rows alike.
+fm_tmux_omp_border_content() {  # <raw-row>
+  local stripped
+  stripped=$(printf '%s\n' "$1" | fm_composer_strip_ghost)
+  case "$stripped" in
+    '╭'*'╮') stripped=${stripped#╭}; stripped=${stripped%╮} ;;
+    '┌'*'┐') stripped=${stripped#┌}; stripped=${stripped%┐} ;;
+    '╔'*'╗') stripped=${stripped#╔}; stripped=${stripped%╗} ;;
+    '┏'*'┓') stripped=${stripped#┏}; stripped=${stripped%┓} ;;
+    '╰'*'╯') stripped=${stripped#╰}; stripped=${stripped%╯} ;;
+    '└'*'┘') stripped=${stripped#└}; stripped=${stripped%┘} ;;
+    '╚'*'╝') stripped=${stripped#╚}; stripped=${stripped%╝} ;;
+    '┗'*'┛') stripped=${stripped#┗}; stripped=${stripped%┛} ;;
+    '│'*'│') stripped=${stripped#│}; stripped=${stripped%│} ;;
+    '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
+    '║'*'║') stripped=${stripped#║}; stripped=${stripped%║} ;;
+    '|'*'|') stripped=${stripped#|}; stripped=${stripped%|} ;;
+  esac
+  stripped=${stripped//─/ }
+  stripped=${stripped//-/ }
+  printf '%s' "$stripped"
+}
+
+# fm_tmux_omp_composer_state: classify omp's own composer shape as
+# empty|pending|unknown|no-match, given an already-captured <styled-pane>
+# (caller's fm_tmux_composer_state already captured it once; this avoids a
+# second tmux capture-pane round trip on every check). Only the BOTTOM row's
+# own content counts as composer text - the top row's embedded status bar is
+# never composer input, so it is read purely for the structural "▶" match,
+# never for content. A middle │ text │ row (present only while wrapping)
+# also counts.
+fm_tmux_omp_composer_state() {  # <styled-pane> <plain-pane>
+  local pane=$1 plain=$2 box top bottom row row_raw content joined=""
+  box=$(fm_tmux_omp_composer_find "$plain") || { printf 'no-match'; return 0; }
+  top=${box%% *}
+  bottom=${box#* }
+  row=$((top + 1))
+  while [ "$row" -le "$bottom" ]; do
+    row_raw=$(printf '%s\n' "$pane" | sed -n "$((row + 1))p")
+    content=$(fm_tmux_omp_border_content "$row_raw")
+    content="${content#"${content%%[![:space:]]*}"}"
+    content="${content%"${content##*[![:space:]]}"}"
+    [ -n "$content" ] || { row=$((row + 1)); continue; }
+    joined="${joined:+$joined }$content"
+    row=$((row + 1))
+  done
+  fm_composer_classify_content 1 "$joined" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$joined"
+}
+
 # fm_tmux_composer_state classification contract:
 # A row is structural only when its first or last non-whitespace character is a
 # composer edge. A complete box has matching border families and bounded top and
@@ -320,6 +436,11 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || { printf 'unknown'; return 0; }
   plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
+  state=$(fm_tmux_omp_composer_state "$pane" "$plain")
+  if [ "$state" != no-match ]; then
+    printf '%s' "$state"
+    return 0
+  fi
   if box=$(fm_tmux_find_composer_box "$cy" "$plain"); then
     top=${box%% *}
     box=${box#* }

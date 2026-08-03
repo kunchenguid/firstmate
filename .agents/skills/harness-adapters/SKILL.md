@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and omp.
 user-invocable: false
 metadata:
   internal: true
@@ -127,6 +127,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| omp | `--model <value>` (fuzzy match) | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-08-03 on omp 17.2.5. `--thinking` also accepts `off\|minimal\|auto`, a superset of the shared vocabulary; all five firstmate levels ran with no error. An unmatched `--model` value fails with a clear error rather than silently falling back. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -144,6 +145,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| omp | Run `omp models`, which lists, searches, and refreshes available models. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -163,6 +165,7 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- omp: `/<skill>`, for example `/no-mistakes`; firstmate skills are discovered (verified live: typing `/` surfaced `skill:no-mistakes` in the autocomplete popup). A no-argument command (`/exit`) submitted cleanly on the first Enter in testing, but an argument-taking skill invocation was not separately verified against the same popup-swallow hazard every other slash-popup adapter has, so treat it as exposed to that hazard until proven otherwise and let the retried-Enter submit core absorb it.
 
 ## Submission acknowledgement hazards
 
@@ -397,3 +400,66 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
+
+## omp (VERIFIED 2026-08-03, omp 17.2.5)
+
+omp ("Oh My Pi", binary `omp`, bun-installed) is literally the `@oh-my-pi/pi-coding-agent` npm package under a different bin name and CLI identity - the installed `omp` binary resolves (`readlink -f`) to `.../node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js`, and its `--help` env-var list documents `PI_CODING_AGENT_DIR`, `PI_SMOL_MODEL`, `PI_SLOW_MODEL`, `PI_PLAN_MODEL`, `PI_PACKAGE_DIR`.
+It is nonetheless empirically distinct from `pi`/`pi-signed`: a different executable name, different environment markers, and a genuinely different extension-lifecycle API (no `agent_settled` event exists in this version).
+Every fact below was established empirically for this task rather than assumed from that shared ancestry.
+
+| Fact | Value |
+|---|---|
+| Busy state | The Firstmate-owned extension's `agent_start` (busy) and `agent_end` confirmed `!willContinue` plus a deferred `ctx.setTimeout(fn, 0)` + `ctx.isIdle()` reconfirmation (idle). |
+| Exit command | `/exit` |
+| Interrupt | single Escape |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`); firstmate skills are discovered |
+
+### Environment markers and detection precedence
+
+omp sets **both** `OMPCODE=1` and `CLAUDECODE=1` for its own child processes - verified with `CLAUDECODE` explicitly unset before invoking omp, confirming omp itself sets it rather than merely inheriting it, presumably for Claude-ecosystem tool compatibility.
+It does **not** set `PI_CODING_AGENT` (Pi's own marker) or `GROK_AGENT`.
+`bin/fm-harness.sh` therefore checks `OMPCODE` before `CLAUDECODE` in `detect_own`, or every omp session would misidentify as claude.
+Process-ancestry fallback matches the exact `omp` comm (a live `ps` read sees the renamed comm directly), plus a bare-interpreter args check for `bun`/`node`/`python` ancestors naming an `/omp` script path, mirroring the existing node/python bare-interpreter pattern.
+
+### Extension API differs from Pi
+
+omp exposes `-e`/`--extension=<file>` with the same flag shape as Pi, and the loaded extension receives an `ExtensionAPI` with `pi.on(event, handler)` - but the event set is not Pi's.
+There is no `agent_settled` event in this version.
+The closest analogues, live-verified with a logging probe extension in both `omp -p` print mode and an interactive TUI (tmux and Herdr), across ordinary completed turns, multi-tool-call turns, and a manual Escape interrupt:
+
+- `agent_start` - fires once per user prompt; used as the busy signal, same as Pi.
+- `agent_end` - fires when an agent loop ends, carrying an optional `willContinue: true` when an automatic continuation (auto-retry, empty/unexpected-stop retry) is already scheduled; subscribers must not treat a `willContinue` end as a terminal settle.
+- `session_stop` - fires when a main-agent turn is about to settle, letting a handler request one continuation turn (`SessionStopEventResult.continue`); this is the closer analogue of Claude's/Codex's Stop hooks and is the natural integration point for a future omp primary turn-end guard, but it is **not** used by the crewmate busy-state wiring below and is not otherwise built or verified in this change (see `docs/verification/supervision.md` "Turn-end guard").
+- `turn_end` - fires at every inner turn boundary; used for the turn-end NOTIFICATION touch, same as Pi.
+- `ctx.isIdle()` - present on `ExtensionContext`, but reads `false` at the exact synchronous instant `agent_end` fires (verified repeatedly) and only flips `true` within the same event-loop tick. Checking it synchronously inside the `agent_end` handler would permanently misclassify idle as busy; `bin/fm-spawn.sh`'s extension defers the check one tick via `ctx.setTimeout(fn, 0)` before reconfirming, the same "don't trust a settle that might race a fresh run" guard Pi's synchronous `ctx.isIdle()` check encodes, adapted for omp's event-vs-flag ordering.
+
+A manual Escape interrupt during a running tool call fired `turn_end` then `agent_end` (`willContinue` unset) with no `session_stop`, so - unlike Claude, which fires no hook on a manual interrupt - omp's own `agent_end` handling covers the interrupt path with no separate firstmate-controlled clear needed.
+`fm-spawn` keeps the extension file in `state/`, outside the worktree, matching Pi's pattern; omp shows no project-trust dialog to dodge (see below), so this is precautionary rather than required.
+
+### Trust dialog
+
+No trust or confirmation dialog was observed on the first launch in any of four distinct, genuinely fresh git repositories (never previously touched by omp), each with `--auto-approve`.
+Whether some untested condition (no `--auto-approve`, a different filesystem shape) can still trigger one was not established either way.
+
+### Composer shape (tmux and Herdr)
+
+omp's composer collapses its top and bottom border into dual-purpose rows instead of the top-border/`│ content │`/bottom-border shape every other verified adapter uses, identical under both backends (same underlying TUI): the top row embeds the model/thinking/dir/branch/context/cost status bar and the standing `▶` prompt/run marker inside its own border (`╭── π > ... ▶───...───╮`), and the bottom row embeds the actual typed text between its own border glyphs (`╰─ <text> ─╯`) with no intervening `│...│` row when the text fits on one line; wrapped text adds genuine `│ text │` rows and moves the final line's overflow into the bottom row the same way.
+This structurally fails the generic tmux/Herdr multi-row box scan (both require at least one `│...│` content row between top and bottom), so `fm_tmux_omp_composer_find` (`bin/fm-tmux-lib.sh`) and `fm_backend_herdr_omp_composer_find` (`bin/backends/herdr.sh`) locate this shape independently, each keeping the bottom-most match like Pi's separator-pair scan; Herdr's additionally gates on the native `omp` identity, mirroring Pi's `separated`-shape gate.
+The rendered busy indicator is `Working…` with a single horizontal-ellipsis glyph (U+2026), not three literal dots like Pi's `Working...` - confirmed byte-for-byte, so Pi's busy-footer regex does not match it; `FM_TMUX_OMP_BUSY_REGEX_DEFAULT` owns the correct pattern.
+No ghost or placeholder text was observed in an empty composer.
+
+### Herdr native identity
+
+Herdr natively recognizes omp and reports `"agent":"omp"` from `agent get`, with an ordinary `agent_status` (`idle`/`working`/etc.) - the same shape every other native-identified harness gets.
+`fm_backend_herdr_pane_agent_state` (liveness/husk classification) needed no change: it already accepts any registered `agent_status` regardless of the agent name.
+
+### Tmux liveness quirk
+
+Under tmux, `#{pane_current_command}` reports **`bun`**, not `omp`, for a running omp process - stable across resamples, a resize, and `refresh-client`, even though `/proc/<pid>/comm` for the same live process reads `omp` (bun renames its own process title after tmux's window/pane bookkeeping already captured the pre-rename identity, and tmux never resamples again while the same process keeps running).
+Exiting correctly reverts the reported command to the shell, so the alive-to-dead transition liveness recovery depends on remains correct; only the "still alive" display name is stale.
+Bare `bun` is too generic to trust fleet-wide (any bun-run script would match it), so `fm_backend_tmux_agent_state` treats a `bun` comm as provisional and confirms it by reading the pane's live child process args for a script path ending in `/omp` before classifying `alive`; otherwise it classifies `ambiguous`, never a guessed `alive` or `dead`.
+
+### Secondmate
+
+omp survives idling (confirmed a real 25-second idle gap, then a fresh message processed correctly with no restart) and exits with a `/exit` + `--resume <session-id>` mechanism, so it is spawned as a secondmate the same as every other verified harness.
+A secondmate launches bare (`--auto-approve` plus model/effort flags, no `-e` extension): busy-state wiring is not armed for secondmates fleet-wide (AGENTS.md - a secondmate's idle endpoint is healthy, and parent supervision relies on routed status), and building omp's own primary-role turn-end-guard/watcher extension pair (the equivalent of `.pi/extensions/fm-primary-turnend-guard.ts`/`fm-primary-pi-watch.ts`) was out of scope for this change and is not built - see `docs/verification/supervision.md` "Turn-end guard".

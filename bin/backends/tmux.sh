@@ -317,11 +317,42 @@ EOF
 
   case "$comm" in
     '') printf 'unreadable'; return 0 ;;
+    bun)
+      # omp ships as a bun-run script; tmux's #{pane_current_command} keeps
+      # reporting the bun interpreter's own pre-launch name rather than the
+      # renamed "omp" comm the running process actually reports to /proc
+      # (verified empirically and stable across resamples, resize, and
+      # refresh-client - not a transient race). Bare "bun" is too generic to
+      # trust on its own (any bun-run script would match), so confirm via the
+      # pane's live child process args, mirroring fm-harness.sh's own
+      # bare-interpreter args check for node/python/bun ancestry.
+      if fm_backend_tmux_bun_child_is_omp "$target"; then
+        printf 'alive'
+      else
+        printf 'ambiguous'
+      fi
+      return 0
+      ;;
   esac
   case "$(fm_backend_tmux_classify_process_name "$comm")" in
     shell) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac
+}
+
+# fm_backend_tmux_bun_child_is_omp: confirm a "bun" pane_current_command is
+# genuinely omp by inspecting the pane shell's live child process args for a
+# script path ending in "/omp" (mirrors fm-harness.sh's own node/python/bun
+# bare-interpreter args check). Fails closed (false) on any read failure.
+fm_backend_tmux_bun_child_is_omp() {  # <target>
+  local target=$1 pane_pid args
+  pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || return 1
+  case "$pane_pid" in ''|*[!0-9]*) return 1 ;; esac
+  args=$(ps -o args= --ppid "$pane_pid" 2>/dev/null) || return 1
+  case "$args" in
+    *' '*/omp|*' '*/omp' '*) return 0 ;;
+  esac
+  return 1
 }
 
 # Backward-compatible three-state view for callers that only need a yes/no

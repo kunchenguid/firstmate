@@ -73,6 +73,13 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
+| omp | 17.2.5 | Extension `agent_start` / `agent_end` (`willContinue`) with a deferred `ctx.setTimeout(fn, 0)` + `ctx.isIdle()` reconfirmation | See below; the event names and `isIdle()` timing differ from Pi even though omp ships the same underlying `@oh-my-pi/pi-coding-agent` package. |
+
+omp's extension API was probed live on 2026-08-03 with a logging-only probe extension loaded via `-e`, both in `omp -p` print mode and in an interactive TUI pane (tmux and Herdr), against real turns including a tool call, a multi-tool-call turn, and a manual Escape interrupt.
+There is no `agent_settled` event in this version; the closest analogues are `agent_end` (fires once an agent loop ends, carrying an optional `willContinue: true` when an automatic continuation - auto-retry, empty/unexpected-stop retry - is already scheduled) and a new `session_stop` event (fires when a main-agent turn is about to settle, letting a handler request one continuation turn; not used for the busy-state wiring here, closer to the primary-turn-end-guard shape other adapters get through their own hook systems).
+Observed sequence for an ordinary completed turn: `session_start`, `agent_start` (`ctx.isIdle()` reads `false`), one `turn_start`/`turn_end` pair per inner turn, `session_stop`, then `agent_end` (`willContinue=undefined`).
+`ctx.isIdle()` read `false` at the exact synchronous instant `agent_end` fired in every completed-turn observation, then flipped to `true` within the same event-loop tick (`ctx.setTimeout(fn, 0)` observed the flip; `+50ms` and `+500ms` checks stayed `true`) - reading it synchronously inside the `agent_end` handler would permanently misclassify idle as busy, so the busy-state extension defers the check exactly as `bin/fm-spawn.sh` writes it.
+A manual Escape interrupt during a running bash tool call fired `turn_end` then `agent_end` (`willContinue=undefined`, `ctx.isIdle()` reading `true` synchronously that time) with no `session_stop`, so - unlike Claude, which fires no hook on a manual interrupt - omp's own `agent_end` handling covers the interrupt path without a separate firstmate-controlled clear.
 
 Codex was probed two ways, both refused:
 
@@ -122,6 +129,9 @@ ok - grok 0.2.112 (9bbd559437aa) [stable] native Stop kept one session across fa
 ok - grok 0.2.73 (9ff14c43bbe5) [stable] legacy Stop omitted capability, resumed exactly once, and stopped normally
 ok - Grok adaptive Stop real-process matrix passed with exact target cleanup and control-window survival
 ```
+
+**omp is not in this table.** Building and verifying a primary-role turn-end guard plus watcher-arm integration for a firstmate instance running natively on omp - installing the guard, proving `session_stop`'s continuation-request result actually forces one blocking follow-up the way Claude's/Codex's exit-2 `Stop` hooks or Pi's `agent_settled` callback do, and wiring the equivalent of `.pi/extensions/fm-primary-turnend-guard.ts`/`fm-primary-pi-watch.ts` for a secondmate running on omp - was out of scope for the crewmate/scout busy-state work above and was not attempted.
+Only omp's per-task crewmate busy-state extension (the row in the Semantic busy state table) is verified; a secondmate spawned on omp launches bare, with no primary-role extension pair, until this gap is closed.
 
 The same run proved the Claude-compatible Stop entries stay inert under `GROK_AGENT`, the legacy resume carries `GROK_TURNEND_GUARD_ACTIVE=1`, and every replacement root is removed after exact target cleanup while its control window survives.
 
