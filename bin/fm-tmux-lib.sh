@@ -68,10 +68,28 @@
 
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
-# Claude's current spinner has a rotating glyph and word, but every active-turn
-# line has an ellipsis followed by a parenthesized elapsed duration. Keep this
-# signature separate from the shared default because that shape is not generic
-# enough to classify arbitrary harness output safely.
+# Claude renders THREE busy footers and only one carries a token counter:
+# a streaming turn "<Gerund>... (4m 39s . 17.0k tokens)", a tool wait
+# "<Gerund> for 53s . 1 shell still running" with neither a counter nor a
+# parenthesized duration, and extended thinking "<Gerund>... (2m 50s .
+# thinking some more with xhigh effort)" with neither a counter nor a wait
+# hint. The gerund is randomised, is not always ASCII ("Sauteed"), and each
+# release adds shapes, so it is never matched.
+# The elapsed timer is NOT the discriminator either: a FINISHED turn renders
+# the same timer ("Baked for 8m 42s"), so a bare timer alternative reports a
+# genuinely idle pane as busy - the direction that makes the submit guard
+# treat a swallowed Enter as delivered. What actually separates busy from
+# idle is a PARENTHESIZED duration (streaming and thinking) or the "still
+# running" wait hint; a finished turn renders neither. The wait hint counts
+# arbitrary tool nouns ("5 shells, 1 monitor still running"), so it is matched
+# by count-plus-nouns rather than "shells?".
+# The parenthesized-duration arm rejects lines containing a path separator
+# before it, because a completed tool call leaves its own elided path and
+# duration in the transcript ("/private/tmp/...- ... (6m 8s)").
+# Every alternative is ASCII: the spinner glyph, the middot, and the ellipsis
+# are all locale-fragile, which is the lesson the grok adapter already taught.
+# Keep this signature separate from the shared default because that shape is
+# not generic enough to classify arbitrary harness output safely.
 # Kimi's anchored moon-phase spinner is separate because bare moon glyphs in
 # ordinary output must not classify another harness as busy. Leading whitespace is
 # OPTIONAL; whitespace on both sides of the separator is REQUIRED because every
@@ -83,7 +101,7 @@
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
-FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
+FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|^[^/]*\([0-9]+[hms]|[0-9]+ [a-z][a-z, 0-9]* still running'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
