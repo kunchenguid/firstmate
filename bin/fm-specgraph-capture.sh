@@ -265,7 +265,43 @@ read_meta_field() {
 
 capture_cleanup() {
   [ -z "${tmp_root:-}" ] || rm -rf "$tmp_root"
-  [ -z "${lock:-}" ] || rmdir "$lock" 2>/dev/null || true
+  if [ -n "${lock:-}" ]; then
+    rm -f "$lock/pid" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
+  fi
+}
+
+capture_lock_stale() {
+  local dir=$1 pid mtime now
+  [ -d "$dir" ] || return 1
+  pid=$(cat "$dir/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *) kill -0 "$pid" 2>/dev/null && return 1; return 0 ;;
+  esac
+  if [ "$(uname)" = Darwin ]; then
+    mtime=$(stat -f %m "$dir" 2>/dev/null) || return 1
+  else
+    mtime=$(stat -c %Y "$dir" 2>/dev/null) || return 1
+  fi
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s) || return 1
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  [ $((now - mtime)) -ge 900 ]
+}
+
+capture_lock_acquire() {
+  local dir=$1 stale
+  if ! mkdir "$dir" 2>/dev/null; then
+    capture_lock_stale "$dir" || fail "capture lock is busy: $dir"
+    stale="$dir.stale.$$"
+    if mv "$dir" "$stale" 2>/dev/null; then
+      rm -rf "$stale"
+    fi
+    mkdir "$dir" 2>/dev/null || fail "capture lock is busy: $dir"
+  fi
+  lock=$dir
+  printf '%s\n' "$$" > "$dir/pid" 2>/dev/null || true
 }
 
 command_capture() {
@@ -371,8 +407,7 @@ command_capture() {
     return 0
   fi
 
-  lock="$OUT_DIR/.capture.lock"
-  mkdir "$lock" 2>/dev/null || fail "capture lock is busy: $lock"
+  capture_lock_acquire "$OUT_DIR/.capture.lock"
   existing=$(find "$OUT_DIR" -maxdepth 1 -type f -name "*-$key_short.json" -print 2>/dev/null \
     | LC_ALL=C sort | head -1 || true)
   if [ -n "$existing" ]; then
@@ -389,6 +424,13 @@ command_capture() {
       || fail "sequence record is unsafe"
     sequence=$(cat "$OUT_DIR/.sequence")
     case "$sequence" in ''|*[!0-9]*) fail "sequence record is invalid" ;; esac
+  else
+    for existing in "$OUT_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-*.json; do
+      [ -f "$existing" ] && [ ! -L "$existing" ] || continue
+      existing=${existing##*/}
+      existing=$((10#${existing%%-*}))
+      [ "$existing" -le "$sequence" ] || sequence=$existing
+    done
   fi
   sequence=$((sequence + 1))
   sequence_tmp="$OUT_DIR/.sequence.tmp.$$"
