@@ -130,6 +130,29 @@ test_supported_backend_endpoint_records_validate() {
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Orca endpoint refused"
   [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca validation did not select its terminal"
 
+  id=orca-composite-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term_7f3e" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=284dc4d4-dd13-4a07-9406-b5cd59a55aeb::$dir/worktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "fm-spawn-written composite Orca endpoint refused"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = term_7f3e ] \
+    || fail "composite Orca validation did not select its terminal"
+
+  for garbage in \
+    "284dc4d4-dd13-4a07-9406-b5cd59a55aeb::$dir/worktree/../escape" \
+    "284dc4d4-dd13-4a07-9406-b5cd59a55aeb::$dir/worktree with-space" \
+    "284dc4d4-dd13-4a07-9406-b5cd59a55aeb::$dir/worktree;touch"; do
+    fm_write_meta "$dir/home/state/orca-garbage-task.meta" \
+      "window=fm-orca-garbage-task" "endpoint_task_id=orca-garbage-task" \
+      "terminal=term_garbage" "worktree=$dir/worktree" "project=$dir/project" \
+      "backend=orca" "orca_worktree_id=$garbage"
+    if fm_backend_validate_task_endpoint "$dir/home/state/orca-garbage-task.meta" orca-garbage-task; then
+      fail "malformed composite Orca endpoint unexpectedly validated: $garbage"
+    fi
+  done
+
   id=cmux-task
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=workspace-1:surface-2" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
