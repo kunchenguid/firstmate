@@ -293,9 +293,10 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
 
-**Primary-session guard fact (verified 2026-07-09, Pi 0.80.5).**
-The firstmate PRIMARY's own `.pi/extensions/fm-primary-turnend-guard.ts` listens for logical-run `agent_settled`, not per-tool-loop `turn_end`, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one guarded follow-up when `bin/fm-turnend-guard.sh` returns 2.
-Without `deliverAs: "followUp"`, Pi rejects the send while the agent is still processing.
+**Primary-session guard fact (verified 2026-07-09, Pi 0.80.5; delivery path re-verified 2026-08-03, Pi 0.83.0).**
+The firstmate PRIMARY's own `.pi/extensions/fm-primary-turnend-guard.ts` listens for logical-run `agent_settled`, not per-tool-loop `turn_end`, and delivers one guarded follow-up when `bin/fm-turnend-guard.sh` returns 2.
+Never call `pi.sendUserMessage` directly from a Firstmate Pi extension: route every operational follow-up through `.pi/extensions/lib/fm-followup-delivery.ts`, which owns when the send is safe and why.
+A raw send from inside an `agent_settled` handler skips Pi's queueing branch and starts a nested agent run inside the parent run's still-open frame, which wedged Pi primaries on "Working..." for every turn.
 Pi's primary watcher protocol also requires the tracked `.pi/extensions/fm-primary-pi-watch.ts` extension, same trust-once discovery as the turn-end guard.
 The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watcher tool result and clean-exit fallback are owned by `docs/supervision-protocols/pi.md`.
 `bin/fm-session-start.sh` reports when the live Pi-family session has not loaded both the turn-end guard and watcher extensions, and points at the selected executable after project trust as the fix, with `-e` as a trust-free fallback.
