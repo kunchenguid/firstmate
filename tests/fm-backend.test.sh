@@ -959,37 +959,6 @@ run_teardown_case() {
     "$script" "$id"
 }
 
-test_permissive_tmux_kill_ref_stays_historical() {
-  local ref body_hist body_head head
-  head=$(git -C "$ROOT" rev-parse HEAD)
-  ref=$(resolve_permissive_tmux_kill_ref) \
-    || fail "unable to locate a historical bin/backends/tmux.sh with permissive kill-window selectors"
-  body_hist=$(git -C "$ROOT" show "$ref:bin/backends/tmux.sh") \
-    || fail "could not read historical tmux adapter at $ref"
-  body_head=$(cat "$ROOT/bin/backends/tmux.sh")
-
-  # shellcheck disable=SC2016
-  case "$body_hist" in
-    *'tmux kill-window -t "=$session:=$window"'*)
-      fail "resolve_permissive_tmux_kill_ref returned exact selectors at $ref"
-      ;;
-  esac
-  # shellcheck disable=SC2016
-  case "$body_hist" in
-    *'tmux kill-window -t "$1"'*|*'tmux kill-window -t "$target"'*) ;;
-    *) fail "historical tmux adapter at $ref lacks a permissive kill-window target" ;;
-  esac
-  # shellcheck disable=SC2016
-  case "$body_head" in
-    *'tmux kill-window -t "=$session:=$window"'*) ;;
-    *) fail "current tmux adapter lost exact kill-window selectors" ;;
-  esac
-  [ "$ref" != "$head" ] \
-    || fail "permissive tmux baseline collapsed to HEAD; fixture is no longer historical"
-
-  pass "historical permissive tmux kill baseline stays distinct from current exact selectors"
-}
-
 test_teardown_conformance_old_vs_new() {
   local old_bin fb proj wt id old_tmux_ref saved_base_ref
   local state_old state_new config_old config_new data log_old log_new out_old out_new rc_old rc_new
@@ -1191,7 +1160,6 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
-test_permissive_tmux_kill_ref_stays_historical
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag

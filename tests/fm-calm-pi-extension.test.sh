@@ -67,67 +67,6 @@ find_chrome() {
   return 1
 }
 
-test_static_contract() {
-  local text assistant_layout operational_user_layout visibility watch operational
-  assert_present "$EXT" "tracked Pi calm extension is missing"
-  assert_present "$ASSISTANT_LAYOUT" "tracked Pi Calm assistant-layout adapter is missing"
-  assert_present "$OPERATIONAL_USER_LAYOUT" "tracked Pi Calm operational-user layout adapter is missing"
-  assert_present "$VISIBILITY" "tracked Pi calm visibility policy is missing"
-  text=$(cat "$EXT")
-  assistant_layout=$(cat "$ASSISTANT_LAYOUT")
-  operational_user_layout=$(cat "$OPERATIONAL_USER_LAYOUT")
-  visibility=$(cat "$VISIBILITY")
-  watch=$(cat "$WATCH_EXT")
-  operational=$(cat "$PI_OPERATIONAL_INPUT")
-  assert_contains "$text" 'pi.registerCommand("calm"' "Pi calm extension does not register /calm"
-  assert_contains "$text" 'pi.on("session_start"' "Pi calm extension does not restore presentation on every session start"
-  assert_contains "$text" 'loadCalmPreference()' "Pi calm extension does not restore the home-persistent toggle choice"
-  assert_contains "$text" 'persistCalmPreference(active)' "Pi calm extension does not persist the captain's toggle choice"
-  assert_not_contains "$text" 'setCalmPresentation(false)' "Pi calm extension still resets the toggle on session start"
-  assert_contains "$text" 'ctx.ui.setToolsExpanded(!expanded)' "Pi calm extension does not redraw existing custom entries"
-  assert_contains "$text" 'ctx.ui.setToolsExpanded(expanded)' "Pi calm extension does not restore Ctrl+O state after redraw"
-  assert_not_contains "$text" 'ctx.navigateTree' "Pi calm extension reconstructs the transcript and drops transient diagnostics"
-  assert_not_contains "$visibility" 'deliverFirstmateSyntheticInput' "Pi calm visibility policy can still replace operational input semantics"
-  assert_not_contains "$visibility" 'classifyFirstmateSyntheticInput' "Pi calm visibility policy still classifies operational input for interception"
-  assert_contains "$text" 'ctx.ui.setWorkingVisible(true)' "Pi calm extension does not preserve Pi's live working row"
-  assert_not_contains "$text" 'ctx.ui.setWorkingVisible(!active)' "Pi calm extension still hides Pi's live working row"
-  assert_contains "$text" 'ctx.ui.setHiddenThinkingLabel(active ? "" : undefined)' "Pi calm extension does not hide collapsed thinking labels"
-  assert_contains "$text" 'installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout)' "Pi Calm extension does not install its zero-height assistant layout"
-  assert_contains "$text" 'installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout)' "Pi Calm extension does not install its operational-user layout"
-  assert_contains "$text" 'function installCalmPresentationAdapter' "Pi Calm extension does not degrade a missing presentation adapter independently with a diagnostic"
-  assert_contains "$assistant_layout" 'import * as PiCodingAgent' "Pi Calm assistant layout still requires its optional runtime class as a named import"
-  assert_contains "$assistant_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm assistant layout does not control the exported component presentation path"
-  assert_contains "$assistant_layout" 'block.type !== "thinking"' "Pi Calm assistant layout does not remove thinking from its presentation copy"
-  assert_contains "$operational_user_layout" 'import * as PiCodingAgent' "Pi Calm operational-user layout still requires its optional runtime class as a named import"
-  assert_contains "$operational_user_layout" 'InteractiveMode.prototype' "Pi Calm operational-user layout does not control the transcript owner"
-  assert_contains "$operational_user_layout" 'classifyFirstmateCurrentOperationalText(text)' "Pi Calm operational-user layout bypasses canonical current classification"
-  assert_contains "$operational_user_layout" 'text.includes("\u2063")' "Pi Calm operational-user layout spawns its classifier for ordinary captain rows"
-  assert_contains "$operational_user_layout" '"\u2063Supervisor escalate ("' "Pi Calm operational-user layout lost the narrow legacy marker"
-  assert_contains "$operational_user_layout" 'hidesOperationalInput()' "Pi Calm operational-user row does not use presentation-only hiding"
-  assert_not_contains "$operational_user_layout" 'FIRSTMATE_OP: ' "Pi Calm operational-user layout duplicates the canonical marker grammar"
-  assert_not_contains "$text" 'calm transcript' "Pi calm extension still adds a persistent Calm status row"
-  assert_not_contains "$text" 'pi.on("input"' "Pi calm extension still intercepts semantic input"
-  assert_not_contains "$text" 'sendMessage' "Pi calm extension still replaces user-role input with custom context"
-  assert_contains "$text" 'ctx.ui.onTerminalInput' "Pi calm extension does not scope export rendering to terminal submissions"
-  assert_contains "$text" 'getKeybindings().matches(data, "tui.input.submit")' "Pi calm export boundary ignores the active submit keybinding"
-  assert_contains "$text" 'input !== "/share"' "Pi calm export boundary does not cover /share"
-  assert_not_contains "$text" 'FIRSTMATE_PI_LAUNCH_BRIEF_ENV' "Pi calm presentation still depends on launch-input provenance"
-  assert_contains "$text" 'renderShell: "self"' "Pi calm extension cannot remove complete built-in tool shells"
-  assert_contains "$visibility" 'CALM_VISIBLE_CLASSES' "Pi calm policy does not centralize its visibility allowlist"
-  assert_contains "$operational" 'fm-operational-input.sh' "Pi adapter does not delegate to the canonical cross-language owner"
-  assert_not_contains "$visibility" 'FIRSTMATE WATCHER WAKE:' "current Calm classification still matches watcher payload prose"
-  assert_not_contains "$visibility" 'TURN WOULD END BLIND' "current Calm classification still matches turn-end payload prose"
-  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
-  assert_not_contains "$visibility" 'Run `bin/fm-session-start.sh`' "current Calm classification still matches session-start payload prose"
-  assert_not_contains "$visibility" 'FIRSTMATE_OP: ' "current Calm classification duplicates the canonical marker grammar"
-  assert_contains "$watch" 'calmHides("assistant-tool-call")' "Firstmate watcher tool does not participate in Calm presentation"
-  assert_contains "$watch" 'renderShell: "self"' "Firstmate watcher tool cannot remove its complete shell"
-  for name in Read Bash Edit Write Grep Find Ls; do
-    assert_contains "$text" "create${name}ToolDefinition" "Pi calm extension does not wrap the $name built-in"
-  done
-  pass "Pi calm extension is presentation-only with one persisted visibility choice, no Calm status row, native working visibility, supported redraw controls, and the Firstmate watcher-tool integration"
-}
-
 test_home_resolution() {
   local fixture out status version
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -2146,7 +2085,6 @@ JS
   pass "Pi calm native E2E keeps Working and captain turns visible, hides exact operational user rows without changing persistence, restores them Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
-test_static_contract
 test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter

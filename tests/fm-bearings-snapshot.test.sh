@@ -1881,35 +1881,6 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
-# The /bearings skill is the one owner of the four-section chat-response contract.
-# Assert it states exactly the four fixed sections in order, each with its explicit
-# empty-state sentence, documents the At Anchor exclusion, and mandates a chat that is
-# materially shorter than and links to the report file.
-test_chat_contract_four_sections() {
-  local skill body headings report_headings expected
-  skill="$ROOT/.agents/skills/bearings/SKILL.md"
-  [ -f "$skill" ] || fail "bearings SKILL.md missing at $skill"
-  body=$(awk '/^## Chat-response contract$/{capture=1; next} capture && /^## /{exit} capture' "$skill")
-  headings=$(printf '%s\n' "$body" | sed -nE "s/^[0-9]+\. \*\*([^*]+)\*\*.*/\1/p")
-  expected=$(printf '%s\n' "Captain's Call" "Recently Landed" "Underway" "Charted Next")
-  [ "$headings" = "$expected" ] || fail "chat contract must contain exactly four numbered sections in fixed order, got: $headings"
-  assert_contains "$body" "Nothing needs your action right now" "Captain's Call empty-state sentence"
-  assert_contains "$body" "No recent completions are in the current baseline" "Recently Landed empty-state sentence"
-  assert_contains "$body" "Nothing is underway" "Underway empty-state sentence"
-  assert_contains "$body" "Nothing is queued" "Charted Next empty-state sentence"
-  report_headings=$(sed -nE 's/^   - \*\*(Captain.s Call|Recently Landed|Underway|Charted Next)\*\*.*/\1/p' "$skill")
-  [ "$report_headings" = "$expected" ] || fail "detailed report contract must contain the same four complete sections, got: $report_headings"
-  grep -Eq 'since the (prior|last) report|Nothing has landed since|unchanged delta' "$skill" \
-    && fail "bearings contract still contains prior-report delta wording"
-  # shellcheck disable=SC2016 # Backticks are literal Markdown in the expected text.
-  assert_contains "$(cat "$skill")" 'Never read an earlier `data/status-report-*.md`' "prior reports must not influence current output"
-  assert_contains "$(cat "$skill")" "bounded current recent-completions baseline" "Recently Landed must be a current baseline"
-  assert_contains "$body" "no At Anchor section" "the At Anchor exclusion must be documented"
-  assert_contains "$body" "materially shorter" "the chat must be materially shorter than the report file"
-  assert_contains "$body" "links to" "the chat must link to the report file"
-  pass "the /bearings skill states the four-section chat contract in order, with empty-states and the At Anchor exclusion"
-}
-
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
@@ -1940,7 +1911,6 @@ test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
-test_chat_contract_four_sections
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface

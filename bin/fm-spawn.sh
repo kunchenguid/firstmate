@@ -181,6 +181,26 @@ esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+
+resolve_directory_input() {
+  local name=$1 path=$2 resolved
+  case "$path" in
+    /*) printf '%s\n' "$path"; return 0 ;;
+  esac
+  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || {
+    echo "error: $name directory cannot be resolved: $path" >&2
+    return 1
+  }
+  printf '%s\n' "$resolved"
+}
+
+FM_HOME=$(resolve_directory_input FM_HOME "$FM_HOME") || exit 1
+if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+  FM_STATE_OVERRIDE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
+fi
+if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+  FM_DATA_OVERRIDE=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
+fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"

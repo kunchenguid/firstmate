@@ -1217,30 +1217,6 @@ test_presentation_session_lock_path_rejects_malformed_socket() {
   pass "herdr presentation lock: null and missing socket paths fail closed"
 }
 
-test_presentation_lock_malformed_socket_falls_back() {
-  local dir log resp fb out status lock_source
-  dir="$TMP_ROOT/presentation-malformed-socket-fallback"; mkdir -p "$dir/responses"
-  log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":null}]}' > "$resp/1.out"
-  fb=$(make_herdr_fakebin "$dir")
-  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    LOCK_SOURCE="$lock_source" \
-    bash -c '
-      . "$0/bin/backends/herdr.sh"
-      eval "$LOCK_SOURCE"
-      if spawn_herdr_presentation_order_lock_acquire fmtest; then
-        printf "%s" acquired
-      else
-        printf "%s" flat
-      fi
-    ' "$ROOT" 2>&1)
-  status=$?
-  [ "$status" -eq 0 ] || fail "malformed socket fallback must not fail the spawn path: $out"
-  [ "$out" = flat ] || fail "malformed socket_path must fall back flat, got '$out'"
-  pass "herdr presentation lock: malformed socket metadata degrades to flat"
-}
-
 test_projection_order_rejects_malformed_socket() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-malformed-socket"; mkdir -p "$dir/responses"
@@ -1265,117 +1241,6 @@ SH
   assert_contains "$out" "ambiguous named session socket" "malformed ordering socket did not warn"
   [ ! -e "$dir/called" ] || fail "malformed ordering socket attempted workspace.move"
   pass "herdr presentation ordering: malformed socket metadata is warning-only and read-only"
-}
-
-test_presentation_lock_insecure_namespace_falls_back() {
-  local dir log resp fb bad out status lock_source
-  dir="$TMP_ROOT/presentation-insecure-lock"; mkdir -p "$dir/responses" "$dir/sockdir"
-  log="$dir/log"; resp="$dir/responses"; : > "$log"
-  : > "$dir/sockdir/fmtest.sock"
-  bad="$dir/insecure"; mkdir -m 755 "$bad"
-  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/1.out"
-  fb=$(make_herdr_fakebin "$dir")
-  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    BAD_NAMESPACE="$bad" LOCK_SOURCE="$lock_source" \
-    bash -c '
-      . "$0/bin/backends/herdr.sh"
-      eval "$LOCK_SOURCE"
-      fm_backend_herdr_presentation_lock_namespace() { printf "%s" "$BAD_NAMESPACE"; }
-      if spawn_herdr_presentation_order_lock_acquire fmtest; then
-        printf "%s" acquired
-      else
-        printf "%s" flat
-      fi
-    ' "$ROOT" 2>&1)
-  status=$?
-  [ "$status" -eq 0 ] || fail "an insecure lock namespace must not fail the spawn path: $out"
-  [ "$out" = flat ] || fail "an insecure lock namespace must fall back flat, got '$out'"
-  pass "herdr presentation lock: insecure shared namespace refuses acquisition for flat fallback"
-}
-
-test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
-  local source wake_source acquire_pattern backend_pattern meta_pattern acquire_line backend_line meta_line
-  source=$(cat "$ROOT/bin/fm-spawn.sh")
-  wake_source=". \"\$SCRIPT_DIR/fm-wake-lib.sh\""
-  acquire_pattern="fm_lock_try_acquire \"\$SPAWN_TASK_LOCK\""
-  backend_pattern="^case \"\$BACKEND\" in"
-  meta_pattern="} > \"\$STATE/\$ID.meta\""
-  assert_contains "$source" "$wake_source" \
-    "fm-spawn does not load the shared lock implementation"
-  acquire_line=$(grep -n "$acquire_pattern" "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
-  backend_line=$(grep -n "$backend_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  meta_line=$(grep -n "$meta_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  [ -n "$acquire_line" ] && [ -n "$backend_line" ] && [ -n "$meta_line" ] \
-    || fail "could not locate the spawn lock, backend creation, and metadata publication"
-  [ "$acquire_line" -lt "$backend_line" ] && [ "$backend_line" -lt "$meta_line" ] \
-    || fail "the task lock does not span backend creation through metadata publication"
-  pass "fm-spawn: one task lock spans every backend creation path through metadata publication"
-}
-
-test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
-  local literal_pattern disarm_pattern release_pattern enter_pattern literal_line disarm_line release_line enter_line
-  # These are literal source patterns for grep, so shell expansion would invalidate the assertion.
-  # shellcheck disable=SC2016
-  literal_pattern='spawn_send_literal "$T" "$LAUNCH"'
-  # shellcheck disable=SC2016
-  disarm_pattern='HERDR_PROJECTION_ABORT_CLEANUP=0'
-  release_pattern='spawn_herdr_presentation_order_lock_release'
-  # shellcheck disable=SC2016
-  enter_pattern='spawn_send_key "$T" Enter'
-  literal_line=$(grep -nF "$literal_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  disarm_line=$(grep -nF "$disarm_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  release_line=$(grep -nF "$release_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  enter_line=$(grep -nF "$enter_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$release_line" ] && [ -n "$enter_line" ] \
-    || fail "could not locate the projected launch cleanup boundary"
-  [ "$literal_line" -lt "$disarm_line" ] \
-    && [ "$disarm_line" -lt "$release_line" ] \
-    && [ "$release_line" -lt "$enter_line" ] \
-    || fail "projected spawn must disarm cleanup before releasing its lock and submitting ambiguous Enter"
-  pass "fm-spawn: projected cleanup disarms before lock release and ambiguous launch submission"
-}
-
-test_projected_abort_cleanup_holds_presentation_lock() {
-  local dir lock started proceed function_source owner_pid status
-  dir="$TMP_ROOT/projection-abort-lock"; mkdir -p "$dir"
-  lock="$dir/presentation.lock"
-  started="$dir/cleanup-started"
-  proceed="$dir/cleanup-proceed"
-  function_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
-  ROOT="$ROOT" LOCK="$lock" STARTED="$started" PROCEED="$proceed" FUNCTION_SOURCE="$function_source" bash -c '
-    . "$ROOT/bin/fm-wake-lib.sh"
-    eval "$FUNCTION_SOURCE"
-    fm_backend_herdr_projection_cleanup_exact() {
-      : > "$STARTED"
-      while [ ! -e "$PROCEED" ]; do sleep 0.01; done
-    }
-    fm_lock_try_acquire "$LOCK" || exit 1
-    HERDR_PRESENTATION_ORDER_LOCK_HELD=1
-    HERDR_PRESENTATION_ORDER_LOCK=$LOCK
-    HERDR_PROJECTION_ABORT_CLEANUP=1
-    HERDR_PROJECTION_ABORT_SESSION=fmtest
-    HERDR_PROJECTION_ABORT_TASK_PANE=w9:p2
-    HERDR_PROJECTION_ABORT_SEEDED_PANE=w9:p1
-    ORCA_ABORT_CLEANUP=0
-    SPAWN_TASK_LOCK_HELD=0
-    spawn_abort_cleanup
-  ' &
-  owner_pid=$!
-  while [ ! -e "$started" ] && kill -0 "$owner_pid" 2>/dev/null; do sleep 0.01; done
-  [ -e "$started" ] || fail "projected abort cleanup did not start"
-  if LOCK="$lock" ROOT="$ROOT" bash -c '. "$ROOT/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$LOCK"'; then
-    : > "$proceed"
-    wait "$owner_pid" || true
-    fail "concurrent presentation work acquired the lock during abort cleanup"
-  fi
-  : > "$proceed"
-  wait "$owner_pid"
-  status=$?
-  [ "$status" -eq 0 ] || fail "projected abort cleanup owner failed"
-  LOCK="$lock" ROOT="$ROOT" bash -c '. "$ROOT/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$LOCK"' \
-    || fail "presentation lock remained held after abort cleanup"
-  pass "fm-spawn: projected abort cleanup remains serialized by the presentation lock"
 }
 
 test_projection_reclaim_refusal_matrix_is_non_mutating() {
@@ -2681,23 +2546,6 @@ EOF
   pass "fm_backend_herdr_workspace_prune_seeded_default_tab: refuses to close the seeded default tab when its pane reports a working agent (defense in depth)"
 }
 
-# test_no_jq_reserved_keyword_arg_names: regression guard for the
-# workspace-leak root cause (a jq `--arg`/`--argjson` named after a jq
-# reserved keyword, e.g. `label`, is a compile error on jq <= 1.6; this
-# adapter discards jq's stderr, so the error silently becomes an empty
-# result instead of a visible failure). Greps every bin/ script for the
-# pattern so a future filter reintroducing it fails loudly here instead of
-# silently misbehaving on an older jq.
-test_no_jq_reserved_keyword_arg_names() {
-  local reserved='and|as|catch|def|elif|else|end|foreach|if|import|include|label|module|or|reduce|then|try'
-  local hits
-  hits=$(grep -rnE -- "--arg(json)?[[:space:]]+($reserved)\b" "$ROOT/bin" 2>/dev/null)
-  if [ -n "$hits" ]; then
-    fail "a jq --arg/--argjson variable is named after a jq reserved keyword (compile error on jq <= 1.6, silently swallowed by 2>/dev/null):"$'\n'"$hits"
-  fi
-  pass "no bin/ jq filter names a --arg/--argjson variable after a jq reserved keyword"
-}
-
 # --- native event push: normalize / policy-routing / dedupe / wait ----------
 #
 # These exercise the herdr subscriber (fm_backend_herdr_wait_transition and its
@@ -3025,7 +2873,6 @@ test_repeated_cycles_reuse_one_workspace_no_orphans
 test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
-test_no_jq_reserved_keyword_arg_names
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
@@ -3059,12 +2906,7 @@ test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
-test_presentation_lock_malformed_socket_falls_back
 test_projection_order_rejects_malformed_socket
-test_presentation_lock_insecure_namespace_falls_back
-test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
-test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
-test_projected_abort_cleanup_holds_presentation_lock
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk

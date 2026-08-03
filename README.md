@@ -49,7 +49,7 @@ Launching a supported harness inside it instantiates your first mate - and makes
 - **Optional secondmates** - opt in to persistent second mates that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, supervising project clones or a project-less firstmate-repo domain, kept on the primary firstmate version by guarded local fast-forwards and checked for live agent processes at session start.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
-- **Guarded by construction** - the first mate is read-only over your projects except for the guarded paths authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), with fleet sync's safe branch pruning remaining part of the fleet-sync exception; crewmates make every project change behind the configured merge authority.
+- **Strict project boundary** - the first mate is read-only over your projects except for the narrow guarded and captain-approved operations authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), including fleet sync's guarded safe branch pruning; crewmates make every other project change behind the configured merge authority.
 - **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected); kill the session anytime and the next one reconciles, including confirmed-dead secondmate agents, and carries on.
 
 Full detail on every feature lives in [docs/architecture.md](docs/architecture.md).
@@ -172,12 +172,17 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, falling back to Bearings when invoked as the session's first real captain message |
-| `/bearings`        | Generate a standalone current-status report from bounded local fleet and registered-secondmate state, with live PR enrichment only when requested, written to a dated file in `data/` and surfaced concisely in chat; read-mostly, mutates no task state |
+| `/bearings`        | Generate a concise four-section chat digest from bounded local fleet and registered-secondmate state, always replacing today's dated report in `data/` and linking it from the digest; add `include PRs` when live PR enrichment is wanted |
 | `/grill`           | Interview the captain to sharpen a fuzzy feature request into a short spec at `data/spec-<project>-<slug>.md` - the problem, the smallest thing that fixes it, the scope boundary, and the open questions - before any work is dispatched; it plans and never builds |
 | `/decompose`       | Break a sharpened spec into dependency-ordered, independently shippable vertical-slice backlog items sized to one crewmate, wiring `blocked-by` edges between slices via `tasks-axi`, before any work is dispatched; it plans and never builds |
 | `/updatefirstmate` | Merge upstream origin into this fleet's `fork/main`, self-update the running firstmate and its secondmates to it with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset; it also owns the context-recycling cadence for a long-running supervision session, refusing the reset while any in-flight wake, decision, or landing still lives only in the conversation |
 | `/watch`           | Vendored third-party skill (MIT, [bradautomates/claude-video](https://github.com/bradautomates/claude-video)), not firstmate's own: watch a video from a URL or local path by extracting frames and a transcript. Needs external `ffmpeg` and `yt-dlp`, and its first run installs them on macOS and can upload audio to Groq or OpenAI, so it needs the captain's consent before first use |
+
+Bearings invocation examples:
+
+- `/bearings` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and returns the fresh four-section digest linked to it.
+- `/bearings include PRs` does the same and opts into live PR enrichment.
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
