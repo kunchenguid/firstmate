@@ -20,7 +20,7 @@ TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
-trap 'touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" "$TMP_ROOT/inherit.release" 2>/dev/null || true; FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true; FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT
 
 # Materialize the current branch as the remote host's tracked code root. The
 # fixture is a real git repository because provisioning and guarded sync exercise
@@ -136,6 +136,11 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     while [ ! -f "$FM_FAKE_SEED_RELEASE" ]; do sleep 0.02; done
     exit 1
     ;;
+  launch-block:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    touch "$FM_FAKE_LAUNCH_ENTERED"
+    while [ ! -f "$FM_FAKE_LAUNCH_RELEASE" ]; do sleep 0.02; done
+    ;;
 esac
 case "${FM_FAKE_SSH_MODE:-normal}" in
   unreachable) exit 255 ;;
@@ -170,6 +175,8 @@ remote_env() {
   FM_FAKE_INHERIT_ENTERED="$TMP_ROOT/inherit.entered" \
   FM_FAKE_INHERIT_RELEASE="$TMP_ROOT/inherit.release" \
   FM_FAKE_INHERIT_PAYLOAD="$TMP_ROOT/inherit.payload" \
+  FM_FAKE_LAUNCH_ENTERED="$TMP_ROOT/launch.entered" \
+  FM_FAKE_LAUNCH_RELEASE="$TMP_ROOT/launch.release" \
   FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
   "$@"
 }
@@ -632,11 +639,29 @@ while [ ! -f "$TMP_ROOT/handoff.entered" ]; do
   [ "$handoff_wait" -le 250 ] || fail "handoff lock holder never acquired the route lock"
   sleep 0.02
 done
+rm -f "$TMUX_STATE" "$TMP_ROOT/launch.entered" "$TMP_ROOT/launch.release"
+FM_FAKE_SSH_MODE=launch-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-retirement.out" 2>&1 &
+spawn_retirement_pid=$!
+launch_wait=0
+while [ ! -f "$TMP_ROOT/launch.entered" ]; do
+  kill -0 "$spawn_retirement_pid" 2>/dev/null || fail "remote respawn exited before its blocked launch"
+  launch_wait=$((launch_wait + 1))
+  [ "$launch_wait" -le 250 ] || fail "remote respawn never reached its blocked launch"
+  sleep 0.02
+done
 remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-serialized.out" 2>&1 &
 teardown_pid=$!
 sleep 0.2
+kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active remote respawn"
+assert_present "$REMOTE_HOME" "remote retirement removed the home during an active remote respawn"
+touch "$TMP_ROOT/launch.release"
+if ! wait "$spawn_retirement_pid"; then
+  printf 'serialized respawn output:\n%s\n' "$(cat "$TMP_ROOT/spawn-retirement.out")" >&2
+  fail "serialized remote respawn failed"
+fi
+sleep 0.2
 kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active backlog handoff"
-assert_present "$REMOTE_HOME" "remote retirement removed the home during an active backlog handoff"
 touch "$TMP_ROOT/handoff.release"
 wait "$handoff_holder_pid" || fail "handoff lock holder failed to release"
 if ! wait "$teardown_pid"; then

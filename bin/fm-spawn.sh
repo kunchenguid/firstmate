@@ -300,16 +300,34 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness remote_lock remote_generation
+  local remote_backend remote_target remote_harness registry_lock remote_lock remote_generation
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
+  mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
+  SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
+  if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+    echo "error: another spawn is already creating task $id" >&2
+    return 1
+  fi
+  registry_lock=$(secondmate_registry_lock_path "$STATE")
+  if ! fm_lock_acquire_wait "$registry_lock"; then
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: secondmate registry could not be locked for remote spawn" >&2
+    return 1
+  fi
   remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
-  [ "$remote" = 1 ] || return 3
+  if [ "$remote" != 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 3
+  fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
   positional=${POS[1]:-}
   if [ "${#POS[@]}" -gt 2 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote secondmate spawn accepts no local home positional argument" >&2
     return 2
   fi
@@ -322,7 +340,12 @@ spawn_remote_secondmate() {
   fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
-    *) echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2; return 1 ;;
+    *)
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
+      return 1
+      ;;
   esac
   model=${MODEL:--}
   effort=${EFFORT:--}
@@ -337,13 +360,15 @@ spawn_remote_secondmate() {
     fi
   fi
   backend=${BACKEND_ARG:--}
-  case "$effort" in -|low|medium|high|xhigh|max) ;; *) echo "error: invalid configured remote secondmate effort: $effort" >&2; return 1 ;; esac
-  mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
-  SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
-  if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
-    echo "error: another spawn is already creating task $id" >&2
-    return 1
-  fi
+  case "$effort" in
+    -|low|medium|high|xhigh|max) ;;
+    *)
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: invalid configured remote secondmate effort: $effort" >&2
+      return 1
+      ;;
+  esac
   meta="$STATE/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if [ ! -f "$meta" ] || [ -L "$meta" ] \
@@ -351,6 +376,7 @@ spawn_remote_secondmate() {
       || [ "$(fm_meta_get "$meta" remote_host)" != "$host" ] \
       || [ "$(fm_meta_get "$meta" remote_root)" != "$root" ] \
       || [ "$(fm_meta_get "$meta" home)" != "$home" ]; then
+      fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
       echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
       return 1
@@ -358,6 +384,7 @@ spawn_remote_secondmate() {
   fi
   remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id")
   if ! fm_lock_acquire_wait "$remote_lock"; then
+    fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote secondmate $id inheritance transaction could not be locked" >&2
     return 1
@@ -365,6 +392,7 @@ spawn_remote_secondmate() {
   remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
   if [ -z "$remote_generation" ]; then
     fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote secondmate $id inheritance generation could not be published" >&2
     return 1
@@ -374,6 +402,7 @@ spawn_remote_secondmate() {
   else
     rc=$?
     fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     if [ "$rc" -eq 255 ]; then
       echo "error: remote secondmate $id inheritance completion is unknown; launch refused and route preserved for reconciliation" >&2
@@ -390,6 +419,7 @@ spawn_remote_secondmate() {
   fi
   if [ "$rc" -ne 0 ]; then
     fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     if [ "$rc" -eq 255 ]; then
@@ -402,6 +432,7 @@ spawn_remote_secondmate() {
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   [ -n "$remote_backend" ] && [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
     fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
     return 1
@@ -428,6 +459,7 @@ spawn_remote_secondmate() {
   } > "$tmp"
   mv -f -- "$tmp" "$meta"
   fm_lock_release "$remote_lock" || true
+  fm_lock_release "$registry_lock" || true
   fm_lock_release "$SPAWN_TASK_LOCK" || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
