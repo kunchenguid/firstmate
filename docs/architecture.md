@@ -17,8 +17,10 @@ When a canonical validated PR poll returns exactly `merged`, the watcher appends
 The receipt makes retirement safely retryable across restarts: fixed-path recovery revalidates the same evidence, removes the runnable check first, removes its registration and data sidecars, removes the receipt last, and preserves task metadata including `pr=` and `pr_head=`.
 A concurrent replacement remains armed, every non-merged or invalid observation remains unchanged, and retirement never performs task or persistent-secondmate cleanup.
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
-No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
-A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: active no-mistakes work attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
+A matched no-mistakes CI monitor is passive rather than active when its structured run state has completed every pre-CI step, has only `ci,running` attached, and has no gate, fixing state, or worker activity.
+A newer `paused:` event bound to the exact current head may override only that passive state when the semantic worker is affirmatively idle or confidently gone.
+The watcher absorbs that canonical pause and re-surfaces it only on the longer pause cadence, rather than treating it as a possible wedge.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
@@ -33,7 +35,10 @@ Because of that, a per-wake read of only the latest line can bury an earlier sti
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
-The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
+The most recent recognized ci log marker wins for an unpaused monitor, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
+Before that log inference, the current-state reader recognizes the narrow passive-monitor pause using structured phase, ULID run time, run id, exact code head, and semantic worker activity.
+Fixing, active pre-CI steps, parked gates, terminal outcomes, a busy or unknown worker, a newer run, and a changed head retain their ordinary authoritative classifications.
+The watcher caches only an unchanged canonical paused verdict, including its matched run identity, and invalidates it on a status event, code head, semantic worker generation, or long recheck deadline change.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.

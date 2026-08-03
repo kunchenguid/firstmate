@@ -35,15 +35,20 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
-#   3. Reconcile the status log: if its last line says needs-decision/blocked but
+#   3. A newest exact-head paused event can override only a full, matched passive
+#      CI monitor when that run predates the event and semantic worker state is
+#      affirmatively idle or the endpoint is gone. The run id and head remain in
+#      the paused detail. Active/fixing/gated/terminal work and busy or unknown
+#      workers retain run-step authority.
+#   4. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
+#   5. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
+#   6. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
@@ -137,6 +142,70 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+
+# A run-attached external pause is conservatively code-bound by the explicit
+# grammar "exact head <7-40 hex>" in its note. We never match decision prose
+# such as "approval". General pauses without this binding keep their existing
+# no-run behavior, but cannot override a matched run.
+pause_exact_head() {
+  local bound
+  status_is_paused "$LOG_LINE" || return 1
+  bound=$(status_line_note "$LOG_LINE" \
+    | grep -oE 'exact head [0-9A-Fa-f]{7,40}' \
+    | tail -1 \
+    | awk '{ print $3 }')
+  [ -n "$bound" ] || return 1
+  printf '%s' "$bound"
+}
+pause_exact_head_matches_worktree() {
+  local bound local_full bound_full
+  bound=$(pause_exact_head) || return 1
+  [ -n "$bound" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  bound_full=$(git -C "$WT" rev-parse --verify "${bound}^{commit}" 2>/dev/null) || return 1
+  [ "$bound_full" = "$local_full" ]
+}
+
+# no-mistakes run ids are ULIDs. Their first ten Crockford-base32 characters
+# encode the run creation time in milliseconds. Decoding that structured run
+# identity lets a pause override only a run that already existed when the event
+# was appended. Unknown/non-ULID ids are intentionally ineligible.
+ulid_char_value() {  # <character>
+  case "$1" in
+    0) echo 0 ;; 1) echo 1 ;; 2) echo 2 ;; 3) echo 3 ;; 4) echo 4 ;;
+    5) echo 5 ;; 6) echo 6 ;; 7) echo 7 ;; 8) echo 8 ;; 9) echo 9 ;;
+    A|a) echo 10 ;; B|b) echo 11 ;; C|c) echo 12 ;; D|d) echo 13 ;;
+    E|e) echo 14 ;; F|f) echo 15 ;; G|g) echo 16 ;; H|h) echo 17 ;;
+    J|j) echo 18 ;; K|k) echo 19 ;; M|m) echo 20 ;; N|n) echo 21 ;;
+    P|p) echo 22 ;; Q|q) echo 23 ;; R|r) echo 24 ;; S|s) echo 25 ;;
+    T|t) echo 26 ;; V|v) echo 27 ;; W|w) echo 28 ;; X|x) echo 29 ;;
+    Y|y) echo 30 ;; Z|z) echo 31 ;;
+    *) return 1 ;;
+  esac
+}
+nm_run_started_epoch() {  # <run-id>
+  local id=$1 prefix i=0 value=0 digit
+  [ "${#id}" -eq 26 ] || return 1
+  prefix=${id:0:10}
+  while [ "$i" -lt 10 ]; do
+    digit=$(ulid_char_value "${prefix:$i:1}") || return 1
+    value=$((value * 32 + digit))
+    i=$((i + 1))
+  done
+  echo $((value / 1000))
+}
+status_mtime() {
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$LOG" 2>/dev/null
+  else stat -c %Y "$LOG" 2>/dev/null
+  fi
+}
+pause_is_newer_than_run() {  # <run-id>
+  local started event_mtime
+  started=$(nm_run_started_epoch "$1") || return 1
+  event_mtime=$(status_mtime) || return 1
+  case "$event_mtime" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$event_mtime" -gt "$started" ]
+}
 
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
@@ -256,6 +325,22 @@ nm_ci_step_status() {
   row=$(trim "$row")
   rest=${row#*,}
   strip_quotes "$(trim "${rest%%,*}")"
+}
+
+nm_passive_ci_monitor() {
+  local top pr active
+  top=${RUN_STATUS:-}
+  case "$top" in running|ci) ;; *) return 1 ;; esac
+  pr=$(strip_quotes "$(nm_field pr)")
+  [ -n "$pr" ] || return 1
+  [ "$(nm_effective_ci_step_status)" = running ] || return 1
+  # A non-CI step that is running, fixing, or parked proves validation work is
+  # still active even if a stale ci row also exists.
+  active=$(printf '%s\n' "$RUN_OUT" \
+    | grep -E '^[[:space:]]*[^,]+,[[:space:]]*"?(running|fixing|awaiting_approval|fix_review)"?[[:space:]]*,' \
+    | grep -Ev '^[[:space:]]*ci,[[:space:]]*"?running"?[[:space:]]*,' \
+    | head -1 || true)
+  [ -z "$active" ]
 }
 
 nm_effective_ci_step_status() {
@@ -469,6 +554,33 @@ if [ "$HAVE_RUN" = 1 ]; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
       fi
     else
+      # The newest event can override only a passive CI monitor bound to this
+      # exact run lineage. Check worker activity before reading CI logs: an idle
+      # pause needs no repeated log inference, while a busy worker is active work
+      # even if checks were previously green.
+      PAUSE_BUSY_ACTIVE=0
+      run_id=$(strip_quotes "$(nm_field id)")
+      run_head=$(strip_quotes "$(nm_field head)")
+      if nm_passive_ci_monitor \
+        && pause_exact_head_matches_worktree \
+        && pause_is_newer_than_run "$run_id"; then
+        if pane_readable "$BACKEND_TARGET"; then
+          PAUSE_BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+          case "${PAUSE_BUSY_VERDICT%% *}" in
+            idle)
+              emit paused run-step "$(status_line_note "$LOG_LINE")${SEP}passive CI monitor remains attached (run $run_id, head $run_head)"
+              ;;
+            busy) PAUSE_BUSY_ACTIVE=1 ;;
+          esac
+        else
+          PAUSE_AGENT_ALIVE=$(fm_backend_agent_alive "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null) \
+            || PAUSE_AGENT_ALIVE=unknown
+          if [ "$PAUSE_AGENT_ALIVE" = dead ]; then
+            emit paused run-step "$(status_line_note "$LOG_LINE")${SEP}passive CI monitor remains attached (run $run_id, head $run_head; worker gone)"
+          fi
+        fi
+      fi
+
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
@@ -478,7 +590,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
-      if [ "$RUN_STATE" = working ]; then
+      if [ "$RUN_STATE" = working ] && [ "$PAUSE_BUSY_ACTIVE" != 1 ]; then
         CI_STEP_STATUS=$(nm_effective_ci_step_status)
         case "$CI_STEP_STATUS" in
           running)
@@ -564,6 +676,10 @@ fi
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
+  if status_is_paused "$LOG_LINE" && pause_exact_head >/dev/null 2>&1 \
+    && ! pause_exact_head_matches_worktree; then
+    emit unknown none "declared pause no longer matches current head"
+  fi
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"

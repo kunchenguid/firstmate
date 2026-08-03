@@ -677,6 +677,89 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+test_passive_monitor_pause_cache_uses_long_cadence_without_wedge_reads() {
+  local dir state fakebin out capture_file statusf verdict calls window key pane_hash sig pid count
+  dir=$(make_case passive-monitor-pause-cache); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  verdict="$dir/current-state"; calls="$dir/current-state.calls"; window="test:fm-held"
+  printf 'idle passive CI monitor\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/held.meta"
+  printf 'paused: external review wait on exact head abcdef1234\n' > "$statusf"
+  printf '%s\n' 'state: paused · source: run-step · external review wait · passive CI monitor remains attached (run 01KYXA52EDXCKVA15F61EX2BTJ, head abcdef1234)' > "$verdict"
+  : > "$calls"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle passive CI monitor")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '8\n' > "$state/.wedge-escalations-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE_FILE="$verdict" FM_FAKE_CREW_STATE_CALLS="$calls" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=0 \
+    FM_PAUSE_RESURFACE_SECS=6 FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 80 || { reap "$pid"; fail "cached passive-monitor pause did not re-surface on its long deadline"; }
+  grep -F "awaiting external" "$out" >/dev/null || fail "passive-monitor pause did not use the long external-wait recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "passive-monitor pause used the short wedge escalation"
+  [ ! -e "$state/.stale-since-$key" ] || fail "passive-monitor pause retained the short wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "passive-monitor pause retained short wedge counters"
+  count=$(awk 'END { print NR + 0 }' "$calls")
+  [ "$count" -eq 2 ] || fail "unchanged pause made $count current-state reads before one long recheck (expected 2)"
+  pass "an unchanged passive-monitor pause skips short wedge reads and rechecks once on the long cadence"
+}
+
+test_passive_monitor_pause_cache_invalidates_on_resumed_run_generation() {
+  local dir state fakebin out capture_file statusf verdict calls window key pane_hash sig pid i count
+  dir=$(make_case passive-monitor-pause-resumed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  verdict="$dir/current-state"; calls="$dir/current-state.calls"; window="test:fm-held"
+  printf 'idle passive CI monitor\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/held.meta"
+  printf 'paused: external review wait on exact head abcdef1234\n' > "$statusf"
+  printf '%s\n' 'state: paused · source: run-step · passive CI monitor remains attached (run 01OLD, head abcdef1234)' > "$verdict"
+  : > "$calls"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle passive CI monitor")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE_FILE="$verdict" FM_FAKE_CREW_STATE_CALLS="$calls" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -e "$state/.paused-class-$key" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.paused-class-$key" ] || { reap "$pid"; fail "initial passive-monitor pause was not cached"; }
+  printf '%s\n' 'state: working · source: run-step · validating resumed run 01NEW' > "$verdict"
+  printf '%s\n' 'generation-two' > "$state/held.busy-gen"
+  printf '%s\n' 'v1 gen=generation-two seq=2 state=idle source=claude-hook event=stop ts=1' > "$state/held.busy-state"
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ ! -e "$state/.paused-$key" ] && [ -s "$state/.stale-since-$key" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "resumed run unexpectedly surfaced: $(cat "$out")"; }
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "resumed run retained paused tracking"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "resumed run did not restore working wedge tracking"; }
+  count=$(awk 'END { print NR + 0 }' "$calls")
+  [ "$count" -ge 2 ] || { reap "$pid"; fail "semantic generation change did not invalidate cached run identity"; }
+  reap "$pid"
+  pass "a resumed run's semantic generation invalidates the cached pause and restores working supervision"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -756,7 +839,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   # First sight must surface promptly so a live external-decision gate is not
   # hidden behind the pause cadence.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: parked · source: run-step · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
@@ -768,7 +851,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   # a second possible-wedge wake.
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: parked · source: run-step · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
@@ -1825,6 +1908,8 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_passive_monitor_pause_cache_uses_long_cadence_without_wedge_reads
+test_passive_monitor_pause_cache_invalidates_on_resumed_run_generation
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

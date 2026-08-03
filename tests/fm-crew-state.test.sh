@@ -170,8 +170,9 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_RUN_ID="01RUN"
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_RUN_ID
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -291,10 +292,23 @@ outcome: failed
 EOF
 }
 
-run_ci_monitoring() {  # <branch>
+run_cancelled() {  # <branch>
   cat <<EOF
 run:
   id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: cancelled
+EOF
+}
+
+run_ci_monitoring() {  # <branch>
+  cat <<EOF
+run:
+  id: "${FM_FAKE_RUN_ID:-01RUN}"
   branch: $1
   status: running
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
@@ -439,6 +453,142 @@ test_gate_block_parked_not_superseded() {
   assert_contains "$out" "1 finding(s)" "gate block wait includes finding count"
   assert_not_contains "$out" "superseded" "gate block wait not flagged stale"
   pass "gate block parked run is not flagged superseded"
+}
+
+test_passive_ci_monitor_with_newer_exact_head_pause_is_paused() {
+  reset_fakes
+  local d head out
+  d=$(new_case passive-ci-paused)
+  make_repo_on_branch "$d/wt" fm/artemis-autosave-timer-disposal
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/artemis-autosave-timer-disposal.meta" \
+    "window=fm:fm-artemis-autosave-timer-disposal" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: implementation and checks complete\n' > "$d/state/artemis-autosave-timer-disposal.status"
+  printf 'paused: awaiting a qualifying human approval on exact head %.10s; remain idle\n' "$head" \
+    >> "$d/state/artemis-autosave-timer-disposal.status"
+  arm_idle_record "$d/state" artemis-autosave-timer-disposal
+  FM_FAKE_RUN_ID=01KYXA52EDXCKVA15F61EX2BTJ
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/artemis-autosave-timer-disposal)"
+  FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed'
+  out=$(run_crew_state "$d" artemis-autosave-timer-disposal)
+  assert_contains "$out" "state: paused" "matched passive ci monitor + newer exact-head pause + idle worker -> paused"
+  assert_contains "$out" "source: run-step" "passive-monitor pause remains bound to the matched run"
+  assert_contains "$out" "passive CI monitor remains attached" "paused detail names the attached passive monitor"
+  assert_contains "$out" "$FM_FAKE_RUN_ID" "paused detail carries the matched run identity"
+  assert_contains "$out" "${head:0:10}" "paused detail carries the matched head identity"
+  pass "PR #3996 shape: an idle exact-head pause outranks only its matched passive CI monitor"
+}
+
+test_passive_ci_pause_disconfirming_states() {
+  reset_fakes
+  local d head out old_head record_gen
+
+  d=$(new_case passive-ci-paused-busy)
+  make_repo_on_branch "$d/wt" fm/passive-busy
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/passive-busy.meta" "window=fm:fm-passive-busy" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/passive-busy.status"
+  record_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" passive-busy)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" passive-busy busy --gen "$record_gen" \
+    --source claude-hook --event user-prompt-submit
+  FM_FAKE_RUN_ID=01KYXA52EDXCKVA15F61EX2BTJ
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/passive-busy)"
+  FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed'
+  out=$(run_crew_state "$d" passive-busy)
+  assert_contains "$out" "state: working" "busy worker must outrank a passive-monitor pause"
+  assert_not_contains "$out" "state: paused" "busy worker cannot remain paused"
+  assert_not_contains "$out" "state: done" "busy worker cannot be hidden by an older green marker"
+
+  d=$(new_case paused-active-review)
+  make_repo_on_branch "$d/wt" fm/paused-active-review
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/paused-active-review.meta" "window=fm:fm-paused-active-review" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-active-review.status"
+  arm_idle_record "$d/state" paused-active-review
+  FM_FAKE_AXI_STATUS="$(run_running fm/paused-active-review)"
+  out=$(run_crew_state "$d" paused-active-review)
+  assert_contains "$out" "state: working" "active pre-CI review remains working"
+  assert_not_contains "$out" "state: paused" "a pause cannot override active review"
+
+  d=$(new_case paused-fixing)
+  make_repo_on_branch "$d/wt" fm/paused-fixing
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/paused-fixing.meta" "window=fm:fm-paused-fixing" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-fixing.status"
+  arm_idle_record "$d/state" paused-fixing
+  FM_FAKE_AXI_STATUS="$(run_ci_fixing fm/paused-fixing)"
+  out=$(run_crew_state "$d" paused-fixing)
+  assert_contains "$out" "state: working" "fixing remains working"
+  assert_not_contains "$out" "state: paused" "a pause cannot override fixing"
+
+  d=$(new_case paused-gate)
+  make_repo_on_branch "$d/wt" fm/paused-gate
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/paused-gate.meta" "window=fm:fm-paused-gate" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-gate.status"
+  arm_idle_record "$d/state" paused-gate
+  FM_FAKE_AXI_STATUS="$(run_parked fm/paused-gate)"
+  out=$(run_crew_state "$d" paused-gate)
+  assert_contains "$out" "state: parked" "an active decision remains parked"
+  assert_not_contains "$out" "state: paused" "a pause cannot override an active decision"
+
+  d=$(new_case paused-newer-run)
+  make_repo_on_branch "$d/wt" fm/paused-newer-run
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/paused-newer-run.meta" "window=fm:fm-paused-newer-run" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-newer-run.status"
+  arm_idle_record "$d/state" paused-newer-run
+  FM_FAKE_RUN_ID=01ZZZZZZZZZZZZZZZZZZZZZZZZ
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/paused-newer-run)"
+  FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed'
+  out=$(run_crew_state "$d" paused-newer-run)
+  assert_not_contains "$out" "state: paused" "a run newer than the pause invalidates it"
+
+  d=$(new_case paused-changed-head)
+  make_repo_on_branch "$d/wt" fm/paused-changed-head
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/paused-changed-head.meta" "window=fm:fm-paused-changed-head" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: external wait on exact head %.10s\n' "$old_head" > "$d/state/paused-changed-head.status"
+  arm_idle_record "$d/state" paused-changed-head
+  git -C "$d/wt" commit -q --allow-empty -m 'new head after pause'
+  FM_FAKE_RUN_HEAD="$old_head"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/paused-changed-head)"
+  out=$(run_crew_state "$d" paused-changed-head)
+  assert_contains "$out" "state: unknown" "changed head invalidates an exact-head pause"
+  assert_not_contains "$out" "state: paused" "changed code cannot remain paused"
+
+  d=$(new_case paused-failed)
+  make_repo_on_branch "$d/wt" fm/paused-failed
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/paused-failed.meta" "window=fm:fm-paused-failed" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-failed.status"
+  arm_idle_record "$d/state" paused-failed
+  FM_FAKE_RUN_HEAD="$head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/paused-failed)"
+  out=$(run_crew_state "$d" paused-failed)
+  assert_contains "$out" "state: failed" "failed run remains failed"
+
+  d=$(new_case paused-cancelled)
+  make_repo_on_branch "$d/wt" fm/paused-cancelled
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/paused-cancelled.meta" "window=fm:fm-paused-cancelled" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: external wait on exact head %.10s\n' "$head" > "$d/state/paused-cancelled.status"
+  arm_idle_record "$d/state" paused-cancelled
+  FM_FAKE_RUN_HEAD="$head"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/paused-cancelled)"
+  out=$(run_crew_state "$d" paused-cancelled)
+  assert_contains "$out" "state: failed" "cancelled run remains failed"
+
+  pass "pause override rejects busy, active, fixing, parked, changed-head, failed, and cancelled states"
 }
 
 test_ci_ready_done_log_beats_monitoring_run() {
@@ -1315,6 +1465,8 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
+test_passive_ci_monitor_with_newer_exact_head_pause_is_paused
+test_passive_ci_pause_disconfirming_states
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
