@@ -1021,9 +1021,14 @@ test_queued_operational_presentation() {
   # The captain reproduction ran with Calm already persisted on, so the session below loads
   # it the same way rather than toggling into it.
   printf '%s\n' on >"$fixture/home/config/calm"
+  # The same probe the classifier-failure fixture uses: a flag file stands in for a classifier
+  # subprocess that could not run at all, so the restore can be driven through that window.
   cat >"$fixture/operational-input-probe.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "${1-}" >>"$FM_OPERATIONAL_INPUT_CALLS"
+if [ -e "$FM_CLASSIFIER_UNRUNNABLE" ]; then
+  exit 2
+fi
 exec "$FM_OPERATIONAL_INPUT_OWNER" "$@"
 SH
   chmod +x "$fixture/operational-input-probe.sh"
@@ -1034,9 +1039,10 @@ SH
     FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" \
     FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" \
     FM_OPERATIONAL_INPUT_CALLS="$fixture/operational-input-calls" \
+    FM_CLASSIFIER_UNRUNNABLE="$fixture/classifier-unrunnable" \
     PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
     node --input-type=module 2>&1 <<'JS'
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
@@ -1678,12 +1684,84 @@ if (JSON.stringify(compactionOnly.compaction()) !== JSON.stringify([
     `a compaction-only queue lost its notifications: ${JSON.stringify(compactionOnly.compaction())}`,
   );
 }
+
+// 11. The restore retains what the row filter actually suppressed, so the one window where a
+// fresh classification cannot answer - the bounded presentation memo evicted by a long
+// supervised session after the row was hidden, and the classifier subprocess unable to run at
+// the instant the captain presses Escape - still cannot leak a hidden notification into the
+// editor or drop it.
+const unrunnable = process.env.FM_CLASSIFIER_UNRUNNABLE;
+rmSync(unrunnable, { force: true });
+const evicted = restorableMode([watcherStale], [captainFollowUp]);
+if (evicted.rows().join("\n").includes("⁣")) {
+  throw new Error("the memo-eviction fixture never hid its notification in the first place");
+}
+// Every distinct marker-carrying text a session classifies shares one bounded memo, and enough
+// of them evict the answer this notification was hidden on. They pass through the very queue
+// the notification is still waiting in, exactly as a real session's do.
+const memoFill = [];
+for (let index = 0; index <= 512; index += 1) {
+  memoFill.push(`⁣Supervisor escalate (MEMO_FILL_${index})`);
+  await evicted.session._queueFollowUp(memoFill[index]);
+}
+if (evicted.rows().join("\n").includes("⁣")) {
+  throw new Error("the memo-eviction renders listed operational text");
+}
+// From here the classifier cannot run at all.
+writeFileSync(unrunnable, "");
+// Mutation witness: re-asking the predicate in exactly this window - the pre-fix restore
+// decision - answers "not operational" for the notification that was hidden, which is what
+// filtered it into the editor. Without this the assertions below cannot fail.
+if (operationalInput.isFirstmateOperationalPresentationText(watcherStale) !== false) {
+  throw new Error(
+    "the reclassification witness could not reproduce the unanswerable classification, so the retention regression cannot fail",
+  );
+}
+const evictedRestored = evicted.mode.restoreQueuedMessagesToEditor({ abort: true });
+if (evictedRestored !== 1 || evicted.editorText() !== captainFollowUp) {
+  throw new Error(
+    `the restore returned ${evictedRestored} messages into ${JSON.stringify(evicted.editorText())}`,
+  );
+}
+if (evicted.editorText().includes("⁣")) {
+  throw new Error(
+    `a hidden notification came back as raw editor text once its memoized classification was evicted: ${JSON.stringify(evicted.editorText())}`,
+  );
+}
+if (!evicted.queue().steering.includes(watcherStale)) {
+  throw new Error("a hidden notification was dropped once its memoized classification was evicted");
+}
+if (JSON.stringify(evicted.queue().followUp) !== JSON.stringify(memoFill)) {
+  throw new Error("the retention lost, duplicated, or reordered the rest of the hidden queue");
+}
+if (evicted.statuses.length !== 1) {
+  throw new Error(
+    `the retaining restore emitted ${evicted.statuses.length} continuation notices instead of exactly one`,
+  );
+}
+assertContinuationNoticeIsContentFree(evicted.statuses[0], [watcherStale]);
+// The record survives the restore's own re-render, which sees a queue mid-rebuild, so a
+// second Escape in the same window retains the same notification rather than leaking it.
+const secondRestored = evicted.mode.restoreQueuedMessagesToEditor({ abort: true });
+if (secondRestored !== 0 || evicted.editorText().includes("⁣")) {
+  throw new Error(
+    `a second restore in the same window leaked ${secondRestored} hidden messages into ${JSON.stringify(evicted.editorText())}`,
+  );
+}
+if (!evicted.queue().steering.includes(watcherStale)) {
+  throw new Error("a second restore in the same window dropped the hidden notification");
+}
+// Once the classifier can run again the rows go back to being hidden on their own.
+rmSync(unrunnable, { force: true });
+if (evicted.rows().length !== 0) {
+  throw new Error("the queued rows did not resume hiding after the classifier recovered");
+}
 JS
 )
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm queued-operational presentation failed: $out"
   [ -z "$out" ] || fail "Pi calm queued-operational test printed output: $out"
-  pass "Calm hides marker-authenticated notifications queued during an active turn - alone, as a batch, and once delivered - restores only genuine captain input on Escape or dequeue while keeping every notification queued in order, never lets a hidden notification return as raw editor text or be dropped, announces the resulting continuation exactly once in one content-free line and never for compaction-held retention, and keeps queued captain messages, near misses, Calm-off rendering, and export/share stock, with bypassing mutations reproducing both the visible Follow-up rows and the raw restored editor text"
+  pass "Calm hides marker-authenticated notifications queued during an active turn - alone, as a batch, and once delivered - restores only genuine captain input on Escape or dequeue while keeping every notification queued in order, never lets a hidden notification return as raw editor text or be dropped even once its memoized classification is evicted and the classifier cannot run, announces the resulting continuation exactly once in one content-free line and never for compaction-held retention, and keeps queued captain messages, near misses, Calm-off rendering, and export/share stock, with bypassing mutations reproducing the visible Follow-up rows, the raw restored editor text, and the unanswerable reclassification"
 }
 
 test_queued_operational_capability_preflight() {

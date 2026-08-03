@@ -17,6 +17,10 @@
 // Calm it restores only genuinely captain-authored messages and re-queues the
 // marker-authenticated notifications in their original order, so they are still delivered
 // on the next turn instead of appearing as raw text the captain is likely to discard.
+// Which of them was hidden is not asked again there: the row filter records what it actually
+// suppressed and the restore reads that record, so retention never depends on a classifier
+// subprocess answering a second time. A message the filter never suppressed is still asked
+// about, which is the same question the visible render path acts on.
 //
 // Retaining them across an abort means Pi settles the aborted run, sees a non-empty queue,
 // and continues into a new turn to deliver them. That delivery is wanted, but a turn that
@@ -146,6 +150,20 @@ export function installCalmPendingOperationalLayout(): void {
   // Counts only what one restore handed back to Pi's agent queue, because that queue alone is
   // what makes Pi continue into another turn. Compaction-held retention never reaches it.
   let retainedByRestore = 0;
+  // Every text the queued-row filter below actually kept off the pending listing. It is the
+  // record the restore retains from, so a row the captain never saw is retained on the
+  // suppression that really happened rather than on a fresh classification, which a classifier
+  // that cannot run answers as captain-authored. A render sees the whole queue, so anything
+  // remembered that is no longer in it has already been delivered and can never reach a
+  // restore; dropping those keeps this bounded by the queue itself.
+  const suppressedQueuedRows = new Set<string>();
+  function forgetSuppressedRowsNoLongerQueued(queued: QueuedMessages): void {
+    if (suppressedQueuedRows.size === 0) return;
+    const stillQueued = new Set([...queued.steering, ...queued.followUp]);
+    for (const text of suppressedQueuedRows) {
+      if (!stillQueued.has(text)) suppressedQueuedRows.delete(text);
+    }
+  }
   // The capability answer for this process, decided the first time suppression is considered
   // and never revisited: the entry points belong to the AgentSession class, so a later session
   // in the same process cannot answer differently.
@@ -172,7 +190,14 @@ export function installCalmPendingOperationalLayout(): void {
   prototype.getAllQueuedMessages = function (this: unknown): QueuedMessages {
     const queued = originalGetAllQueuedMessages.call(this);
     if (!renderingPendingRows) return queued;
-    const stays = (message: string): boolean => !patch.isOperationalInput(message);
+    // A render nested inside the restore below sees a queue mid-rebuild, which is not the
+    // queue anything was delivered out of, so it is never allowed to forget a suppression.
+    if (!restoringQueuedMessages) forgetSuppressedRowsNoLongerQueued(queued);
+    const stays = (message: string): boolean => {
+      if (!patch.isOperationalInput(message)) return true;
+      suppressedQueuedRows.add(message);
+      return false;
+    };
     return {
       ...queued,
       steering: queued.steering.filter(stays),
@@ -232,7 +257,11 @@ export function installCalmPendingOperationalLayout(): void {
     const sessionSteeringBefore = [...session.getSteeringMessages()];
     const sessionFollowUpBefore = [...session.getFollowUpMessages()];
 
-    const isOperational = (text: string): boolean => patch.isOperationalInput(text);
+    // A row this adapter hid is retained on the record of that suppression alone. Anything it
+    // never hid is asked about, and an unanswerable classification there means the same thing
+    // it means on the render path: treat it as the captain's and hand it to the editor.
+    const isOperational = (text: string): boolean =>
+      suppressedQueuedRows.has(text) || patch.isOperationalInput(text);
     const retainedSteering = sessionSteeringBefore.filter(isOperational);
     const retainedFollowUp = sessionFollowUpBefore.filter(isOperational);
     const retainedCompaction = compactionBefore.filter((message) =>

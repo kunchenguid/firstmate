@@ -28,7 +28,7 @@ type OperationalInputAnswer =
   | { outcome: "unavailable" };
 
 function askOperationalInputCommand(
-  command: "encode" | "classify" | "kind",
+  command: "encode" | "kind",
   content: string,
   kind?: FirstmateCurrentOperationalKind,
 ): OperationalInputAnswer {
@@ -38,43 +38,19 @@ function askOperationalInputCommand(
     input: content,
     maxBuffer: 1024 * 1024,
   });
-  if (result.status === 0) {
-    return {
-      outcome: "matched",
-      value: command === "classify" ? result.stdout.replace(/\n$/, "") : result.stdout,
-    };
-  }
+  if (result.status === 0) return { outcome: "matched", value: result.stdout };
   return result.status === 1 ? { outcome: "no-match" } : { outcome: "unavailable" };
-}
-
-function runOperationalInputCommand(
-  command: "encode" | "classify" | "kind",
-  content: string,
-  kind?: FirstmateCurrentOperationalKind,
-): string | undefined {
-  const answer = askOperationalInputCommand(command, content, kind);
-  return answer.outcome === "matched" ? answer.value : undefined;
 }
 
 export function encodeFirstmateOperationalInput(
   kind: FirstmateCurrentOperationalKind,
   content: string,
 ): string {
-  const encoded = runOperationalInputCommand("encode", content, kind);
-  if (encoded === undefined) {
+  const encoded = askOperationalInputCommand("encode", content, kind);
+  if (encoded.outcome !== "matched") {
     throw new Error(`could not encode Firstmate operational input kind ${kind}`);
   }
-  return encoded;
-}
-
-export function classifyFirstmateOperationalText(content: string): string | undefined {
-  return runOperationalInputCommand("classify", content);
-}
-
-export function classifyFirstmateCurrentOperationalText(
-  content: string,
-): string | undefined {
-  return runOperationalInputCommand("kind", content);
+  return encoded.value;
 }
 
 // The only legacy operational shape Firstmate presentation authenticates on top of the

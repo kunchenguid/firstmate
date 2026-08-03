@@ -20,6 +20,7 @@ Calm keeps canonically classified operational notifications out of that queued l
 A genuinely queued captain message stays listed exactly as Pi lists it, and the queue itself is untouched, so delivery order and the model's view of every notification are unchanged.
 Because a hidden row is a row the captain never saw, aborting a running turn with `Escape` and the `Option+Up` dequeue shortcut both restore only genuinely captain-authored messages to the editor.
 Every hidden notification stays queued in its original order and is delivered on the next turn instead of arriving as raw editor text.
+What is kept queued is decided by what Calm actually hid rather than by classifying the queue again, so a classifier that cannot answer at that moment can neither leak a hidden notification into the editor nor drop one.
 Because that queue is still waiting when the aborted run settles, Pi continues into a new turn on its own to deliver it, so Calm prints one short line saying supervision is continuing.
 That line carries no notification text, marker, kind, path, or identifier; it is never printed with Calm off, never printed when nothing was retained, and never repeated.
 Keeping a notification queued this way depends on a Pi capability, so Calm proves that capability before it hides its first queued row.
