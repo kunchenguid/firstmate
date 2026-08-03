@@ -396,6 +396,7 @@ tests/fm-claude-stop-autoarm.test.sh
 
 `tests/fm-watch-arm.test.sh` starts real watcher processes and proves both a pre-existing away flag and flags introduced after restart begins park the arm before signaling or forking, preserve the daemon's watcher process and lock, emit nothing while parked, exit promptly on `TERM`, and resume normal arming from the same process once the flag is cleared.
 It also forks real owned and attached watcher cycles, creates `state/.afk` while each child is live, and proves the tracked arm remains alive without returning a wake while the wake remains in the durable queue, with an away-mode-off control proving the same cycle still returns its wake to its caller.
+The owned and attached delivery-record cases prove both paths park through their shared resolver when the wake reason is unavailable from the arm's child output.
 `tests/fm-pi-watch-extension.test.sh` drives the tracked Pi extension and OpenCode plugin with real arm children: an away-mode arm request starts no cycle and delivers no wake, a close that observes away mode parks without delivery and automatically re-arms after the flag clears, clearing the flag mid-restoration cannot replay the suppressed wake, pending retries resume without replay, and queued captain-relevant records remain available to daemon housekeeping.
 `tests/fm-claude-stop-autoarm.test.sh` continues to cover Claude's unchanged away-mode boundary, including the flag appearing mid-cycle.
 

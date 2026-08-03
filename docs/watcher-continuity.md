@@ -28,7 +28,7 @@ A stolen singleton is worse than a duplicate: the watcher deliberately one-shots
 Three layers hold the boundary, and each is independently sufficient for the case it covers.
 
 `bin/fm-watch-arm.sh` is the deterministic layer: it rechecks `state/.afk` before restart signaling or lock cleanup, attachment, and the watcher fork; while the flag exists it arms nothing, emits nothing, holds no watcher lock, and parks at the normal attach poll cadence.
-It applies the same recheck at the two points where an arm returns a wake to its caller - its own child's actionable close, and the durable delivery record an attached arm resolves - so an arm that was already running when away mode began parks instead of completing or handing that wake back.
+It applies the same recheck at the two points where an arm returns a wake to its caller - its own child's actionable close, and the durable delivery record an owned or attached arm resolves - so an arm that was already running when away mode began parks instead of completing or handing that wake back.
 That boundary is what covers a caller with no adapter of its own, where arm completion itself is the wake: a Grok tracked background task converts completion into a synthetic user message, and a manual recovery probe prints the reason.
 The parked process remains interruptible, and after the flag clears it replaces itself with a normal arm cycle under the same process id so the tracked task resumes supervision without a model turn.
 Those checks cover every established-away-state case, but one deliberately accepted AFK-entry race remains across the arm layer and the Pi and OpenCode final-delivery paths.
