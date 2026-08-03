@@ -900,6 +900,33 @@ SH
   pass "a genuine snapshot failure exits nonzero, says what failed, and emits nothing"
 }
 
+test_scout_report_sort_failure_exits_nonzero() {
+  local home fakebin out rc err real_sort
+  home=$(make_home scout-sort-failure)
+  mkdir -p "$home/data/reported-scout"
+  printf '# Reported Scout\n' > "$home/data/reported-scout/report.md"
+  fakebin=$(make_fakebin "$home")
+  real_sort=$(command -v sort)
+  cat > "$fakebin/sort" <<SH
+#!/usr/bin/env bash
+set -u
+input=\$(cat)
+case "\$input" in
+  *"/data/reported-scout/report.md"*) exit 1 ;;
+esac
+printf '%s' "\$input" | "$real_sort" "\$@"
+SH
+  chmod +x "$fakebin/sort"
+  err="$home/snapshot.err"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json 2>"$err")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a scout report sort failure must not exit 0"
+  [ -z "$out" ] || fail "a scout report sort failure must not emit a partial document: $out"
+  assert_contains "$(cat "$err")" "fm-fleet-snapshot: scout report scan failed" \
+    "a scout report sort failure must identify the failed scan"
+  pass "a scout report sort failure aborts the snapshot"
+}
+
 test_empty_fleet_is_success_not_failure() {
   local home out rc view view_rc
   home=$(make_home empty-success)
@@ -936,4 +963,5 @@ test_view_renders_dead_secondmate_agent_status
 test_oversized_backlog_renders_instead_of_dying
 test_oversized_task_decisions_keep_the_task_visible
 test_snapshot_failure_exits_nonzero_with_diagnostic
+test_scout_report_sort_failure_exits_nonzero
 test_empty_fleet_is_success_not_failure

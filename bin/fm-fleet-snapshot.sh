@@ -1397,7 +1397,8 @@ scout_report_lines() {
   # Capture before sorting so the scan's own exit status is not masked by sort.
   reports=$(LC_ALL=C find "$DATA" -mindepth 2 -maxdepth 2 -type f -name report.md -print) \
     || { echo "fm-fleet-snapshot: scout report scan failed" >&2; return 1; }
-  reports=$(printf '%s' "$reports" | sort)
+  reports=$(printf '%s' "$reports" | sort) \
+    || { echo "fm-fleet-snapshot: scout report scan failed" >&2; return 1; }
   while IFS= read -r report; do
     [ -n "$report" ] || continue
     id=$(basename "$(dirname "$report")")
