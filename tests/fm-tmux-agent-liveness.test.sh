@@ -97,7 +97,7 @@ wait_for_state() {  # <target> <expected> [tries]
   return 1
 }
 
-# Does the tmux process-title source, on its own, name a verified harness?
+# Does the tmux current-command source, on its own, name a verified harness?
 title_classifies_agent() {  # <target>
   local name
   name=$(fm_backend_tmux_current_command "$1" 2>/dev/null)
@@ -144,7 +144,7 @@ wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
 
-# --- a version title blinds one source --------------------------------------
+# --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that
 # Claude Code 2.1.220 reports drives the two sources apart on both supported
 # platforms and proves the surviving source carries the verdict. This needs a

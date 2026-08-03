@@ -51,9 +51,9 @@ The deeper tmux agent-liveness probe first verifies exact window membership, the
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
-The probe reads two independent name sources and never depends on either alone.
-`#{pane_current_command}` is a process TITLE that a harness can rewrite, and Claude Code does: at 2.1.220 it reports its version string, which attributes nothing.
-The second source is the executable identity of every process in the pane tty's foreground process group, using the full kernel `comm` path and argv[0] so either platform can retain an exact harness install-path component.
+For positive attribution, the probe combines two independent name sources rather than making either one load-bearing.
+`#{pane_current_command}` and the pane tty foreground process group's kernel `comm` values expose different name fields, and which one retains executable identity is platform-dependent.
+The foreground probe also reads argv[0] so an exact harness install-path component can carry the verdict when the other fields expose a rewritten process name.
 Either source naming a verified harness is enough for `alive`, because a false `dead` is the one verdict that can start a duplicate agent on a live worktree, while a readable foreground process group settles the negative verdicts.
 
 Scoping the second source to the foreground process group rather than to the pane's descendants is deliberate: a harness-named process left running in the background of an otherwise idle pane must not read as an agent.
