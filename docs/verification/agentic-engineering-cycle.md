@@ -24,7 +24,7 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=1244
 FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=1177 failed=0
 
 $ bin/fm-doc-audience-check.sh
-fm-doc-audience-check: ok surfaces=63 local_links=171
+fm-doc-audience-check: ok surfaces=66 local_links=185
 
 $ lint_bin_dir=$(mktemp -d /tmp/fm-cycle-shellcheck.XXXXXX) && bin/fm-install-shellcheck.sh "$lint_bin_dir" && PATH="$lint_bin_dir:$PATH" bin/fm-lint.sh
 ShellCheck - shell script analysis tool
