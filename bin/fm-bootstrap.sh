@@ -19,23 +19,25 @@
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
-#          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
-#          own current default-branch commit (a purely LOCAL fast-forward, never
-#          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
-#          or .agents/skills/) actually changed, bootstrap immediately nudges it
+#          When a RUNNING local secondmate worktree is fast-forwarded to
+#          firstmate's own current default-branch commit, that update is a
+#          purely local fast-forward and never an origin fetch. Remote routes
+#          instead converge the persistent home to their configured remote code
+#          root. If either placement changes its loaded instruction surface
+#          (AGENTS.md, bin/, or .agents/skills/), bootstrap immediately nudges it
 #          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
-#          current backend target and the standard from-firstmate marker is
-#          applied. A successful send prints one BOOTSTRAP_INFO line with the
-#          exact target and message sent; a failed send leaves an idempotent
-#          retry marker under state/.secondmate-nudge-pending/ and prints an
-#          actionable NUDGE_SECONDMATES line.
+#          current route and the standard from-firstmate marker is applied. A
+#          successful send prints one BOOTSTRAP_INFO line with the exact target
+#          and message sent; a failed send leaves an idempotent retry marker
+#          under state/.secondmate-nudge-pending/ and prints an actionable
+#          NUDGE_SECONDMATES line.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
-#          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs or
-#          inheritance failures for live secondmate homes, plus quarantine
-#          diagnostics for divergent shared captain-preference copies;
-#          no-op/current and successful updates stay quiet.
+#          SECONDMATE_SYNC lines report actionable skipped placement-specific
+#          syncs or inheritance failures for live secondmate homes, plus
+#          quarantine diagnostics for divergent shared captain-preference
+#          copies; no-op/current and successful updates stay quiet.
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
 #          recovery-grade state owned by bin/fm-backend.sh's
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
@@ -85,8 +87,8 @@
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          PR-check artifacts, secondmate homes, X-mode artifacts, project
-#          clones, or repair instructions.
+#          PR-check artifacts, secondmate homes, pending handoff outboxes,
+#          X-mode artifacts, project clones, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #        fm-bootstrap.sh install <tool>...

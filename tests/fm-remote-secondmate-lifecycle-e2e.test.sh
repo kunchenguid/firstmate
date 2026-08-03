@@ -113,6 +113,7 @@ entry=$2
 shift 2
 [ "$host" = remote-mac ] || exit 91
 [ "$entry" = fm-remote-entrypoint.sh ] || exit 92
+cd "$FM_FAKE_REMOTE_CWD" || exit 93
 argv_b64=$4
 command_fields=$(perl -MMIME::Base64=decode_base64 -e '
   my $data=decode_base64($ARGV[0]);
@@ -170,6 +171,7 @@ remote_env() {
   FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   FM_FAKE_SSH_COUNT="$SSH_COUNT" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_FAKE_REMOTE_CWD="$TMP_ROOT" \
   FM_FAKE_SEED_ENTERED="$TMP_ROOT/seed.entered" \
   FM_FAKE_SEED_RELEASE="$TMP_ROOT/seed.release" \
   FM_FAKE_INHERIT_ENTERED="$TMP_ROOT/inherit.entered" \
@@ -192,6 +194,7 @@ seed_env() {
   FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   FM_FAKE_SSH_COUNT="$SSH_COUNT" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_FAKE_REMOTE_CWD="$TMP_ROOT" \
   FM_FAKE_SEED_ENTERED="$TMP_ROOT/seed.entered" \
   FM_FAKE_SEED_RELEASE="$TMP_ROOT/seed.release" \
   "$@"
