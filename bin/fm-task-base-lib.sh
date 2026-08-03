@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Single owner of a task's TWO base references. A dispatched worker needs two
-# different commits and today's spawn path supplies only one, so a brief citing
-# a file or a line number is silently unreliable whenever they differ:
+# different commits and the previous spawn path supplied only one, so a brief
+# citing a file or a line number is silently unreliable whenever they differ:
 #
 #   slot base           the commit the task's worktree is placed at, so reads,
 #                       greps, line citations and running the code all resolve
