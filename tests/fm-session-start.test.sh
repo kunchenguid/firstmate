@@ -1261,7 +1261,12 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "away-mode supervision is active" "AFK digest did not report away mode"
+  # The flag alone is not evidence of supervision: this world has the flag and no
+  # daemon, so the digest must report the real (degraded) verdict, not claim
+  # supervision from the flag's existence.
+  assert_contains "$out" "present but NOT SUPERVISED" "AFK digest did not report the flag-without-daemon verdict"
+  assert_contains "$out" "AFK_DEGRADED" "AFK digest did not surface the health verdict"
+  assert_not_contains "$out" "away-mode supervision is active" "AFK digest claimed supervision with no live daemon"
   assert_contains "$out" "Away mode is active" "next step did not switch to AFK guidance"
   assert_contains "$out" "daemon owns the watcher" "next step did not delegate watcher ownership to the daemon"
   assert_contains "$out" "- Away mode: active" "supervision block did not include active AFK state"

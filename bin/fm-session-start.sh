@@ -402,7 +402,7 @@ subsection "AFK"
 # drops to one-shot and hands triage to the daemon, so a flag with a dead daemon
 # means nothing is triaging at all. bin/fm-afk-health.sh owns that verdict.
 if [ -e "$STATE/.afk" ]; then
-  if AFK_HEALTH=$("$FM_ROOT/bin/fm-afk-health.sh" 2>&1); then
+  if AFK_HEALTH=$("$SCRIPT_DIR/fm-afk-health.sh" 2>&1); then
     case "$AFK_HEALTH" in
       AFK_STARTING*)
         printf 'present - away mode is still arming, not yet supervising.\n' ;;

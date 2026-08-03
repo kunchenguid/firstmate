@@ -1374,10 +1374,13 @@ fm_super_main() {
   #      looks instead of in a harness task-output file nobody reads;
   #   2. an EXIT trap records the exit code, so a gone process always leaves a
   #      reason behind. bin/fm-afk-health.sh reads both.
+  # stderr is rebound to the log only after startup validation (below), so a
+  # launcher that starts the daemon in the foreground still SEES an unsupported
+  # backend or an unresolvable target on its own stderr instead of having the
+  # refusal disappear into a log file it never reads.
   local READY="$STATE/.subsuper-daemon-ready"
   local EXITED="$STATE/.subsuper-daemon-exit"
   rm -f "$READY" "$EXITED" 2>/dev/null || true
-  exec 2>>"$LOG"
   record_exit() {
     local rc=$?
     printf '%s\texit=%s\tpid=%s\tready=%s\n' \
@@ -1461,6 +1464,11 @@ fm_super_main() {
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
   fi
+
+  # Startup validation has passed: from here on this process is long-lived and
+  # nobody is reading its stderr, so bind fd 2 to the log (see the durability
+  # note above the EXIT trap).
+  exec 2>>"$LOG"
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
