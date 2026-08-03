@@ -191,7 +191,7 @@ run_spawn() {
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_AGY_READY_POLLS=5 FM_AGY_DELIVERY_POLLS=3 FM_AGY_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness agy "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 read_spawn_record() {
