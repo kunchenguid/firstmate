@@ -25,6 +25,8 @@
 #   (k) a task released before landing records existed has its record rebuilt
 #       from a forge read of the PR itself
 #   (l) a PR that resolves to nothing at its forge is still refused
+#   (m) a landing record naming another PR refuses before any forge or merge read
+#   (n) a malformed landing record refuses without being reconstructed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -66,6 +68,7 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
@@ -127,6 +130,7 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
@@ -162,6 +166,7 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_LOG="$case_dir/gh.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -263,6 +268,7 @@ test_landing_record_lands_released_task() {
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   add_gh_mocks_forge_state "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb OPEN
   : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/20 \
@@ -304,6 +310,59 @@ test_landing_record_refuses_when_pr_is_not_open() {
   assert_present "$case_dir/state/task-x1.landing" \
     "landing-record-merged: a refused merge must not discard the landing record"
   pass "fm-pr-merge re-reads the forge and refuses a landing record whose PR is not open"
+}
+
+test_landing_record_refuses_different_requested_pr() {
+  local case_dir rc recorded_url requested_url
+  recorded_url=https://github.com/example/repo/pull/20
+  requested_url=https://github.com/example/repo/pull/21
+  case_dir=$(make_released_case landing-record-mismatch)
+  write_landing_record "$case_dir" task-x1 "$recorded_url" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  add_gh_mocks_forge_state "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb OPEN
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$requested_url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "landing-record-mismatch: fm-pr-merge should refuse a different PR"
+  assert_grep "$recorded_url" "$case_dir/stderr" \
+    "landing-record-mismatch: refusal did not name the recorded URL"
+  assert_grep "$requested_url" "$case_dir/stderr" \
+    "landing-record-mismatch: refusal did not name the requested URL"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "landing-record-mismatch: gh-axi pr merge was invoked"
+  [ ! -s "$case_dir/gh.log" ] || fail "landing-record-mismatch: the forge was read"
+  assert_grep "pr=$recorded_url" "$case_dir/state/task-x1.landing" \
+    "landing-record-mismatch: the landing record was rebound"
+  pass "fm-pr-merge refuses a requested PR that differs from the landing record"
+}
+
+test_malformed_landing_record_refuses_without_rebuild() {
+  local case_dir rc url=https://github.com/example/repo/pull/20
+  case_dir=$(make_released_case malformed-landing-record)
+  printf '%s\n' fm-landing-v1 'pr=not-a-url' > "$case_dir/state/task-x1.landing"
+  chmod 0600 "$case_dir/state/task-x1.landing"
+  add_gh_mocks_forge_state "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb OPEN
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "malformed-landing-record: fm-pr-merge should refuse"
+  assert_grep 'error: task landing record is invalid' "$case_dir/stderr" \
+    "malformed-landing-record: refusal did not identify invalid state"
+  [ ! -s "$case_dir/gh.log" ] || fail "malformed-landing-record: the forge was read"
+  assert_grep 'pr=not-a-url' "$case_dir/state/task-x1.landing" \
+    "malformed-landing-record: malformed state was reconstructed"
+  pass "fm-pr-merge refuses a malformed landing record without rebuilding it"
 }
 
 test_reconstructs_landing_record_from_pr_url() {
@@ -486,5 +545,7 @@ test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_landing_record_lands_released_task
 test_landing_record_refuses_when_pr_is_not_open
+test_landing_record_refuses_different_requested_pr
+test_malformed_landing_record_refuses_without_rebuild
 test_reconstructs_landing_record_from_pr_url
 test_reconstruction_refuses_when_pr_is_not_open

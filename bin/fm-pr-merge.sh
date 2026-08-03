@@ -7,8 +7,9 @@
 # A task released before its pull request lands keeps a durable landing record
 # instead of a meta, and this path lands it through that record. A task released
 # before landing records existed keeps neither, so its record is rebuilt from a
-# forge read of the request. Either way the request must still be open at its
-# forge, and a request that resolves to nothing is refused as before.
+# forge read of the request. An existing landing record must be valid and name
+# the requested URL before any forge read or merge. Either way the request must
+# still be open at its forge, and a request that resolves to nothing is refused.
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
@@ -78,7 +79,14 @@ reject_repo_overrides "$@" || exit 1
 # identity and the record is rebuilt from a forge read, never from the caller.
 LANDING="$STATE/$ID.landing"
 REBUILD=0
-RECORD=$(fm_pr_identity_record_path "$STATE" "$ID") || { RECORD=$LANDING; REBUILD=1; }
+if ! RECORD=$(fm_pr_identity_record_path "$STATE" "$ID"); then
+  if [ -e "$LANDING" ] || [ -L "$LANDING" ]; then
+    echo "error: task landing record is invalid" >&2
+    exit 1
+  fi
+  RECORD=$LANDING
+  REBUILD=1
+fi
 
 if [ "$RECORD" != "$LANDING" ]; then
   if [ ! -f "$RECORD" ] || [ -L "$RECORD" ]; then
@@ -87,6 +95,17 @@ if [ "$RECORD" != "$LANDING" ]; then
   fi
   "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 else
+  if [ "$REBUILD" = 0 ]; then
+    fm_pr_metadata_identity_parse "$RECORD" || {
+      echo "error: task landing record is invalid" >&2
+      exit 1
+    }
+    RECORD_URL=$FM_PR_META_URL
+    if [ "$RECORD_URL" != "$URL" ]; then
+      echo "error: task landing record names $RECORD_URL, but $URL was requested" >&2
+      exit 1
+    fi
+  fi
   # A released task has no worktree, no worker, and nothing left to tear down,
   # and the merge below is synchronous, so no merge poll is armed for it. The
   # forge decides here instead: the request must still be open, and the landing

@@ -11,7 +11,9 @@
 # task is released with its request still unlanded, so releasing a worker before
 # its request lands no longer ends the watch. When neither exists - a task
 # released before landing records did - the record is rebuilt from a forge read
-# of the request itself. A request the forge cannot resolve refuses instead.
+# of the request itself. An existing landing record must be valid and name the
+# requested URL before any forge read or poll mutation. A request the forge
+# cannot resolve refuses instead.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -48,6 +50,11 @@ NUMBER=$FM_PR_NUMBER
 # cannot resolve still refuses: absence is never treated as evidence.
 RECONSTRUCTED=0
 if ! RECORD=$(fm_pr_identity_record_path "$STATE" "$ID"); then
+  LANDING="$STATE/$ID.landing"
+  if [ -e "$LANDING" ] || [ -L "$LANDING" ]; then
+    echo "error: task landing record is invalid" >&2
+    exit 1
+  fi
   if ! fm_pr_forge_view "$URL"; then
     echo "error: task metadata is unavailable" >&2
     echo "No record for task $ID, and $URL could not be resolved at its forge." >&2
@@ -68,6 +75,17 @@ fi
 if [ ! -f "$RECORD" ] || [ -L "$RECORD" ] || [ "$(fm_pr_file_link_count "$RECORD")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
+fi
+if [ "$RECORD" = "$STATE/$ID.landing" ]; then
+  fm_pr_metadata_identity_parse "$RECORD" || {
+    echo "error: task landing record is invalid" >&2
+    exit 1
+  }
+  RECORD_URL=$FM_PR_META_URL
+  if [ "$RECORD_URL" != "$URL" ]; then
+    echo "error: task landing record names $RECORD_URL, but $URL was requested" >&2
+    exit 1
+  fi
 fi
 
 # A prior exact merged result may have queued its durable wake immediately
