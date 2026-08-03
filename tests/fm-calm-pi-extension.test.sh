@@ -1040,11 +1040,13 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ InteractiveMode }, { initTheme }, { Container, Text, setCapabilities }] = await Promise.all([
-  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/interactive-mode.js`).href),
-  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
-  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
-]);
+const [{ InteractiveMode }, { AgentSession }, { initTheme }, { Container, Text, setCapabilities }] =
+  await Promise.all([
+    import(pathToFileURL(`${packageRoot}/dist/modes/interactive/interactive-mode.js`).href),
+    import(pathToFileURL(`${packageRoot}/dist/core/agent-session.js`).href),
+    import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+    import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+  ]);
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 
@@ -1114,6 +1116,18 @@ const ctx = {
 };
 await handlers.get("session_start")[0]({ reason: "startup" }, ctx);
 
+// The session-instance queueing entry points Pi 0.82.1 exposes and the safe restore retains
+// through. Suppression is only ever allowed on a session that has both, so every fixture that
+// expects suppression must carry them exactly as the real AgentSession does.
+if (
+  typeof AgentSession.prototype._queueSteer !== "function" ||
+  typeof AgentSession.prototype._queueFollowUp !== "function"
+) {
+  throw new Error(
+    "fixture precondition failed: installed Pi lacks the AgentSession queueing entry points",
+  );
+}
+
 // One Pi interactive mode holding a queue, exactly as Pi assembles it while a turn runs.
 function pendingMode(steering, followUp) {
   const mode = Object.create(InteractiveMode.prototype);
@@ -1124,6 +1138,8 @@ function pendingMode(steering, followUp) {
     value: {
       getSteeringMessages: () => steering,
       getFollowUpMessages: () => followUp,
+      async _queueSteer() {},
+      async _queueFollowUp() {},
     },
   });
   return mode;
@@ -1592,53 +1608,297 @@ if (
   throw new Error("the restore mutation witness left the adapted restore path uninstalled");
 }
 
-// 9. Last, because it deliberately ends the queued-row hiding for the rest of this process:
-// if a future Pi drops the already-expanded queueing entry point, retention is impossible,
-// and a queued row must never stay hidden behind a restore this adapter cannot complete.
-const stillHidden = renderQueued([], [watcherStale, captainFollowUp]);
-if (JSON.stringify(stillHidden.rows) === JSON.stringify(renderStockQueued([], [watcherStale, captainFollowUp]))) {
-  throw new Error("the retention-unavailable case started with the queued notification already visible");
+// 9. The whole point of retaining rather than restoring is that nothing this adapter hid can
+// come back as raw text. Every restore shape exercised above is replayed here as one sweep:
+// whatever was hidden must never be found in the editor afterwards, and must still be queued.
+// The marker opens every operational message, so it survives Pi row truncation and is the one
+// token that decides whether anything operational is on screen or in the editor.
+for (const queue of [
+  [[captainSteer, watcherStale], [watcherSignal, captainFollowUp, legacyAway]],
+  [marked.slice(0, 2), marked.slice(2)],
+  [[], [watcherStale]],
+  [[turnEndGuard], []],
+]) {
+  const [steering, followUp] = queue;
+  const queued = [...steering, ...followUp];
+  const notifications = queued.filter((message) => marked.includes(message));
+  if (notifications.length === 0) {
+    throw new Error(`the hide-then-restore sweep queued no notification for ${JSON.stringify(queue)}`);
+  }
+  if (renderQueued(steering, followUp).rows.join("\n").includes("⁣")) {
+    throw new Error(`Calm listed operational text for ${JSON.stringify(queue)}`);
+  }
+  for (const abort of [true, false]) {
+    const swept = restorableMode(steering, followUp);
+    swept.mode.restoreQueuedMessagesToEditor({ abort });
+    if (swept.editorText().includes("⁣")) {
+      throw new Error(
+        `a hidden notification came back as raw editor text: ${JSON.stringify(swept.editorText())}`,
+      );
+    }
+    const stillQueued = [...swept.queue().steering, ...swept.queue().followUp];
+    for (const message of notifications) {
+      if (!stillQueued.includes(message)) {
+        throw new Error(`a hidden notification was dropped instead of retained: ${JSON.stringify(message)}`);
+      }
+    }
+    for (const message of queued.filter((entry) => !notifications.includes(entry))) {
+      if (!swept.editorText().includes(message)) {
+        throw new Error(`genuine captain input was not restored: ${JSON.stringify(message)}`);
+      }
+    }
+  }
 }
-const withoutRetention = restorableMode([], [watcherStale, captainFollowUp]);
-delete withoutRetention.session._queueFollowUp;
-const withoutRetentionCount = withoutRetention.mode.restoreQueuedMessagesToEditor({ abort: true });
-if (withoutRetentionCount !== 2 || !withoutRetention.editorText().includes("FIRSTMATE_OP:")) {
+
+// 10. Compaction-held retention never reaches the agent queue, so it cannot make Pi continue
+// and must not claim or announce a turn that never starts.
+const compactionOnly = restorableMode([], [], [
+  { text: watcherStale, mode: "followUp" },
+  { text: turnEndGuard, mode: "steer" },
+]);
+const compactionOnlyRestored = compactionOnly.mode.restoreQueuedMessagesToEditor({ abort: true });
+if (compactionOnlyRestored !== 0 || compactionOnly.editorText() !== "") {
   throw new Error(
-    "a Pi without the queueing entry point did not fall back to the stock restore, so a notification could be dropped",
+    `a compaction-only queue restored ${compactionOnlyRestored} messages into ${JSON.stringify(compactionOnly.editorText())}`,
   );
 }
-if (withoutRetention.statuses.length !== 0) {
-  throw new Error("the stock fallback restore announced a continuation it cannot cause");
+if (compactionOnly.statuses.length !== 0) {
+  throw new Error(
+    `compaction-held retention announced a continuation Pi never starts: ${JSON.stringify(compactionOnly.statuses)}`,
+  );
 }
-// From here on Pi lists its own rows again, so no hidden row outlives the restore that could
-// not keep it hidden safely.
-const afterFallbackQueue = [[], [watcherStale, captainFollowUp]];
-if (JSON.stringify(renderQueued(...afterFallbackQueue).rows)
-  !== JSON.stringify(renderStockQueued(...afterFallbackQueue))) {
-  throw new Error("queued operational rows stayed hidden after a restore the adapter could not complete");
+if (compactionOnly.delivery.length !== 0) {
+  throw new Error("compaction-held retention reached the agent queue");
 }
-if (renderQueued([], [watcherStale]).rows.length === 0) {
-  throw new Error("an all-notification queue still collapsed to no rows after retention became impossible");
-}
-const afterFallback = restorableMode([], [watcherStale, captainFollowUp]);
-const afterFallbackStock = restorableMode([], [watcherStale, captainFollowUp]);
-const afterFallbackCount = afterFallback.mode.restoreQueuedMessagesToEditor({ abort: true });
-const afterFallbackStockCount = stockRestoreQueuedMessagesToEditor.call(
-  afterFallbackStock.mode,
-  { abort: true },
-);
-if (
-  afterFallbackCount !== afterFallbackStockCount ||
-  JSON.stringify(restoreOutcome(afterFallback)) !== JSON.stringify(restoreOutcome(afterFallbackStock))
-) {
-  throw new Error("the restore did not return to Pi byte for byte after retention became impossible");
+if (JSON.stringify(compactionOnly.compaction()) !== JSON.stringify([
+  { text: watcherStale, mode: "followUp" },
+  { text: turnEndGuard, mode: "steer" },
+])) {
+  throw new Error(
+    `a compaction-only queue lost its notifications: ${JSON.stringify(compactionOnly.compaction())}`,
+  );
 }
 JS
 )
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm queued-operational presentation failed: $out"
   [ -z "$out" ] || fail "Pi calm queued-operational test printed output: $out"
-  pass "Calm hides marker-authenticated notifications queued during an active turn - alone, as a batch, and once delivered - restores only genuine captain input on Escape or dequeue while keeping every notification queued in order, announces the resulting continuation exactly once in one content-free line and never otherwise, stops hiding queued rows outright when retention becomes impossible, and keeps queued captain messages, near misses, Calm-off rendering, and export/share stock, with bypassing mutations reproducing both the visible Follow-up rows and the raw restored editor text"
+  pass "Calm hides marker-authenticated notifications queued during an active turn - alone, as a batch, and once delivered - restores only genuine captain input on Escape or dequeue while keeping every notification queued in order, never lets a hidden notification return as raw editor text or be dropped, announces the resulting continuation exactly once in one content-free line and never for compaction-held retention, and keeps queued captain messages, near misses, Calm-off rendering, and export/share stock, with bypassing mutations reproducing both the visible Follow-up rows and the raw restored editor text"
+}
+
+test_queued_operational_capability_preflight() {
+  local fixture out status version capability
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm queued-operational preflight test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi calm queued-operational preflight"
+
+  # One process per missing capability: the preflight answer is deliberately decided once and
+  # never revisited, so each case needs its own freshly installed adapter.
+  for capability in _queueSteer _queueFollowUp both; do
+    fixture="$TMP_ROOT/preflight-$capability"
+    mkdir -p "$fixture/home/config" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+    cp "$EXT" "$fixture/fm-calm.ts"
+    cp "$ROOT"/.pi/extensions/lib/*.ts "$fixture/lib/"
+    ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+    ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+    ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+    printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+    printf '%s\n' on >"$fixture/home/config/calm"
+
+    out=$(cd "$fixture" && \
+      EXT="$fixture/fm-calm.ts" \
+      FM_HOME="$fixture/home" \
+      FM_OPERATIONAL_INPUT_SCRIPT="$OPERATIONAL_INPUT" \
+      FM_MISSING_CAPABILITY="$capability" \
+      PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+      node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const missing = process.env.FM_MISSING_CAPABILITY;
+const [{ InteractiveMode }, { initTheme }, { Container, setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/interactive-mode.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+const stockUpdatePendingMessagesDisplay = InteractiveMode.prototype.updatePendingMessagesDisplay;
+const stockRestoreQueuedMessagesToEditor = InteractiveMode.prototype.restoreQueuedMessagesToEditor;
+
+const operationalInput = await import(
+  `${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?preflight=${Date.now()}`
+);
+const pending = await import(
+  `${pathToFileURL(`${process.cwd()}/lib/fm-calm-pending-operational-layout.ts`).href}?preflight=${Date.now()}`
+);
+
+const diagnostics = [];
+const originalConsoleError = console.error;
+console.error = (...args) => diagnostics.push(args.join(" "));
+const handlers = new Map();
+const pi = {
+  events: { emit() {}, on() {} },
+  on(event, handler) {
+    const list = handlers.get(event) ?? [];
+    list.push(handler);
+    handlers.set(event, list);
+  },
+  registerCommand() {},
+  registerEntryRenderer() {},
+  registerTool() {},
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?preflight=${Date.now()}`);
+extension.default(pi);
+const ctx = {
+  ui: {
+    getEditorText: () => "",
+    getToolsExpanded: () => false,
+    onTerminalInput: () => () => {},
+    setHiddenThinkingLabel() {},
+    setStatus() {},
+    setToolsExpanded() {},
+    setWidget() {},
+    setWorkingVisible() {},
+  },
+};
+await handlers.get("session_start")[0]({ reason: "startup" }, ctx);
+
+const watcher = operationalInput.encodeFirstmateOperationalInput(
+  "watcher",
+  "FIRSTMATE WATCHER WAKE: stale: default:w2:pC (idle 241s)",
+);
+const captain = "captain: also re-check the failing CI job";
+
+// A session missing one or both queueing entry points cannot retain a queued message across
+// the restore, so the adapter must never suppress a row on it in the first place.
+function unsupportedMode(steering, followUp) {
+  const mode = Object.create(InteractiveMode.prototype);
+  const steeringQueue = [...steering];
+  const followUpQueue = [...followUp];
+  let editorValue = "";
+  const statuses = [];
+  mode.pendingMessagesContainer = new Container();
+  mode.compactionQueuedMessages = [];
+  mode.editor = { getText: () => editorValue, setText: (text) => { editorValue = text; } };
+  mode.showStatus = (message) => statuses.push(message);
+  const session = {
+    agent: { abort() {} },
+    getSteeringMessages: () => steeringQueue,
+    getFollowUpMessages: () => followUpQueue,
+    clearQueue() {
+      const cleared = { steering: [...steeringQueue], followUp: [...followUpQueue] };
+      steeringQueue.length = 0;
+      followUpQueue.length = 0;
+      return cleared;
+    },
+  };
+  if (missing !== "_queueSteer" && missing !== "both") {
+    session._queueSteer = async (text) => { steeringQueue.push(text); };
+  }
+  if (missing !== "_queueFollowUp" && missing !== "both") {
+    session._queueFollowUp = async (text) => { followUpQueue.push(text); };
+  }
+  Object.defineProperty(mode, "session", { configurable: true, value: session });
+  return { mode, statuses, editorText: () => editorValue };
+}
+
+function rows(built) {
+  built.mode.updatePendingMessagesDisplay();
+  return built.mode.pendingMessagesContainer.render(150);
+}
+
+function stockRows(built) {
+  built.mode.pendingMessagesContainer.clear();
+  stockUpdatePendingMessagesDisplay.call(built.mode);
+  return built.mode.pendingMessagesContainer.render(150);
+}
+
+// 1. Suppression never starts: the queued listing is the Pi one from the very first render.
+const first = unsupportedMode([], [watcher, captain]);
+const suppressed = rows(first);
+const stock = stockRows(first);
+if (JSON.stringify(suppressed) !== JSON.stringify(stock)) {
+  throw new Error(
+    `Calm suppressed a queued row on a session that cannot retain it: ${JSON.stringify(suppressed)}`,
+  );
+}
+if (!suppressed.join("\n").includes("FIRSTMATE_OP:")) {
+  throw new Error("the unsupported-session fixture never listed the notification at all");
+}
+
+// 2. Exactly one generic compatibility diagnostic, naming a Pi capability and quoting nothing.
+const emitted = [...first.statuses, ...diagnostics];
+if (emitted.length !== 1) {
+  throw new Error(`the preflight emitted ${emitted.length} diagnostics instead of exactly one: ${JSON.stringify(emitted)}`);
+}
+for (const fragment of ["⁣", "FIRSTMATE_OP", "watcher", "Supervisor escalate", "241s", captain]) {
+  if (emitted[0].includes(fragment)) {
+    throw new Error(`the compatibility diagnostic exposed ${JSON.stringify(fragment)}`);
+  }
+}
+if (emitted[0].length > 120 || emitted[0].split("\n").length !== 1) {
+  throw new Error(`the compatibility diagnostic is not one short line: ${JSON.stringify(emitted[0])}`);
+}
+if (!emitted[0].includes("Calm")) {
+  throw new Error(`the compatibility diagnostic does not identify itself: ${JSON.stringify(emitted[0])}`);
+}
+
+// 3. Repeated renders and a restore never repeat it, and never start suppressing later.
+for (let index = 0; index < 5; index += 1) rows(unsupportedMode([], [watcher, captain]));
+const restored = unsupportedMode([], [watcher, captain]);
+const restoredStock = unsupportedMode([], [watcher, captain]);
+const count = restored.mode.restoreQueuedMessagesToEditor({ abort: true });
+const stockCount = stockRestoreQueuedMessagesToEditor.call(restoredStock.mode, { abort: true });
+if (count !== stockCount || restored.editorText() !== restoredStock.editorText()) {
+  throw new Error("the unsupported session did not get the Pi restore byte for byte");
+}
+if (!restored.editorText().includes(captain)) {
+  throw new Error("the unsupported session dropped genuine captain input from the restore");
+}
+const repeated = [...first.statuses, ...restored.statuses, ...diagnostics];
+if (repeated.length !== 1) {
+  throw new Error(`the compatibility diagnostic repeated: ${JSON.stringify(repeated)}`);
+}
+if (JSON.stringify(rows(unsupportedMode([], [watcher]))) !== JSON.stringify(stockRows(unsupportedMode([], [watcher])))) {
+  throw new Error("the unsupported session started suppressing rows after its first restore");
+}
+
+// 4. Nothing about the rest of Calm changed: the delivered-row adapter still hides its rows,
+// so project work and the other Calm presentations continue unaffected.
+const chat = { children: [], addChild(component) { this.children.push(component); } };
+InteractiveMode.prototype.addMessageToChat.call(
+  {
+    chatContainer: chat,
+    editor: { addToHistory() {} },
+    getMarkdownThemeWithSettings: () => undefined,
+    getUserMessageText: (message) => message.content,
+    outputPad: 1,
+  },
+  { role: "user", content: watcher },
+);
+if (chat.children.flatMap((component) => component.render(150)).length !== 0) {
+  throw new Error("the queued-row preflight disabled the delivered-row Calm adapter too");
+}
+if (typeof pending.CALM_SUPERVISION_CONTINUES_NOTICE !== "string") {
+  throw new Error("the queued-operational adapter stopped owning its continuation notice");
+}
+console.error = originalConsoleError;
+JS
+)
+    status=$?
+    [ "$status" -eq 0 ] || fail "Pi calm queued-operational preflight ($capability) failed: $out"
+    [ -z "$out" ] || fail "Pi calm queued-operational preflight ($capability) printed output: $out"
+  done
+  pass "a Pi session that cannot retain a queued message never gets queued-row suppression at all, says so once in a generic line that quotes no notification, keeps Pi's own rows and restore, and leaves the rest of Calm working"
 }
 
 test_operational_presentation_classifier_failure() {
@@ -4300,6 +4560,7 @@ test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
 test_rendering_and_session_lifecycle
 test_queued_operational_presentation
+test_queued_operational_capability_preflight
 test_operational_presentation_classifier_failure
 test_operational_followup_turn_e2e
 test_queued_operational_turn_e2e

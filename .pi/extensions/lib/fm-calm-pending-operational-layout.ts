@@ -23,10 +23,15 @@
 // emits one short generic status line when that happens. The line carries no notification
 // text, marker, kind, path, or identifier - it says only that supervision is continuing.
 //
-// Hiding a queued row is only ever safe while this restore stays adapted. If the queueing
-// entry point the retention needs is missing at runtime, the adapter stops hiding queued
-// rows for the rest of the process and hands the seam back to Pi, rather than leaving rows
-// hidden behind a restore it cannot complete.
+// Hiding a queued row is only ever safe while this restore stays adapted, and two rules are
+// absolute: a notification this adapter hid may never reappear as raw text, and no
+// notification may ever be dropped to keep presentation clean. Deciding that at restore time
+// forces a choice between them, so the capability is instead proven before the first row is
+// ever hidden. The two already-expanded queueing entry points the retention needs live on the
+// session rather than the prototype, so they cannot be probed at install; they are checked on
+// the first render that would suppress anything, with `this` bound to the interactive mode. A
+// session that lacks either one never gets any suppression at all, and says so once.
+// See https://github.com/kunchenguid/firstmate/issues/1588.
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
 import { isFirstmateOperationalPresentationText } from "./fm-operational-input.ts";
@@ -39,14 +44,17 @@ type CompactionQueuedMessage = {
   text: string;
   mode: "steer" | "followUp";
 };
+// The two already-expanded queueing entry points the safe restore retains through. They are
+// session-instance members, so the only place to prove they exist is a live interactive mode.
+type QueueRetainingSession = {
+  getSteeringMessages(): string[];
+  getFollowUpMessages(): string[];
+  _queueSteer(text: string): unknown;
+  _queueFollowUp(text: string): unknown;
+};
 // The queue owners Pi's own clearAllQueues reads and empties.
 type InteractiveModeQueueOwner = {
-  session: {
-    getSteeringMessages(): string[];
-    getFollowUpMessages(): string[];
-    _queueSteer?(text: string): unknown;
-    _queueFollowUp?(text: string): unknown;
-  };
+  session: QueueRetainingSession;
   compactionQueuedMessages: CompactionQueuedMessage[];
 };
 type RestoreQueuedMessagesOptions = {
@@ -55,15 +63,16 @@ type RestoreQueuedMessagesOptions = {
 };
 // Pi's own transient chat status line, the same one it uses for "Restored N queued messages
 // to editor". It is not a session entry, so it never reaches persistence, export, or share.
-type CalmRestoreHost = {
+type CalmQueuedRowHost = {
+  session?: Partial<QueueRetainingSession>;
   showStatus?(message: string): void;
 };
 type InteractiveModePendingPrototype = {
   getAllQueuedMessages(this: unknown): QueuedMessages;
-  updatePendingMessagesDisplay(this: unknown): void;
+  updatePendingMessagesDisplay(this: CalmQueuedRowHost): void;
   clearAllQueues(this: InteractiveModeQueueOwner): QueuedMessages;
   restoreQueuedMessagesToEditor(
-    this: CalmRestoreHost,
+    this: CalmQueuedRowHost,
     options?: RestoreQueuedMessagesOptions,
   ): number;
 };
@@ -76,6 +85,10 @@ type CalmPendingOperationalLayoutPatch = {
 // notification text, no U+2063 marker, no FIRSTMATE_OP, no kind, no path, no identifier.
 export const CALM_SUPERVISION_CONTINUES_NOTICE =
   "Firstmate supervision continues in a new turn.";
+// The compatibility diagnostic for a Pi whose session cannot retain a queued message across
+// the restore. Names no notification and quotes none: it reports a Pi capability only.
+export const CALM_QUEUED_ROW_SUPPRESSION_UNAVAILABLE_NOTICE =
+  "Firstmate Calm: this Pi cannot retain queued messages, so queued rows stay visible.";
 
 // Keep the introduction-version symbol stable so a compatible upgrade cannot
 // double-patch a live process.
@@ -129,14 +142,32 @@ export function installCalmPendingOperationalLayout(): void {
   // Scoped to the synchronous restore below, so a future caller of clearAllQueues that is
   // not restoring to the editor keeps Pi's stock clearing semantics.
   let restoringQueuedMessages = false;
-  // Counts what one restore actually retained, so the continuation notice is emitted only
-  // when retained notifications are what makes Pi continue.
+  // Counts only what one restore handed back to Pi's agent queue, because that queue alone is
+  // what makes Pi continue into another turn. Compaction-held retention never reaches it.
   let retainedByRestore = 0;
-  // Latched for the rest of the process once retention proves impossible: a queued row may
-  // never stay hidden behind a restore this adapter cannot complete.
-  let queuedHidingUnavailable = false;
-  const hidesQueuedOperational = (): boolean =>
-    !queuedHidingUnavailable && patch.hidesOperationalInput();
+  // The capability answer for this process, decided the first time suppression is considered
+  // and never revisited: the entry points belong to the AgentSession class, so a later session
+  // in the same process cannot answer differently.
+  let queueRetentionSupported: boolean | undefined;
+  function sessionRetainsQueuedMessages(host: CalmQueuedRowHost): boolean {
+    if (queueRetentionSupported !== undefined) return queueRetentionSupported;
+    const session = host.session;
+    queueRetentionSupported =
+      typeof session?._queueSteer === "function" &&
+      typeof session?._queueFollowUp === "function";
+    if (!queueRetentionSupported) {
+      // Emitted once, before anything has been hidden, so the captain learns why queued rows
+      // look stock rather than watching them silently change behaviour later.
+      if (typeof host.showStatus === "function") {
+        host.showStatus(CALM_QUEUED_ROW_SUPPRESSION_UNAVAILABLE_NOTICE);
+      } else {
+        console.error(CALM_QUEUED_ROW_SUPPRESSION_UNAVAILABLE_NOTICE);
+      }
+    }
+    return queueRetentionSupported;
+  }
+  const hidesQueuedOperational = (host: CalmQueuedRowHost): boolean =>
+    patch.hidesOperationalInput() && sessionRetainsQueuedMessages(host);
   prototype.getAllQueuedMessages = function (this: unknown): QueuedMessages {
     const queued = originalGetAllQueuedMessages.call(this);
     if (!renderingPendingRows) return queued;
@@ -147,8 +178,8 @@ export function installCalmPendingOperationalLayout(): void {
       followUp: queued.followUp.filter(stays),
     };
   };
-  prototype.updatePendingMessagesDisplay = function (this: unknown): void {
-    if (!hidesQueuedOperational()) {
+  prototype.updatePendingMessagesDisplay = function (this: CalmQueuedRowHost): void {
+    if (!hidesQueuedOperational(this)) {
       originalUpdatePendingMessagesDisplay.call(this);
       return;
     }
@@ -166,10 +197,10 @@ export function installCalmPendingOperationalLayout(): void {
     return clearQueuesRetainingOperational(this);
   };
   prototype.restoreQueuedMessagesToEditor = function (
-    this: CalmRestoreHost,
+    this: CalmQueuedRowHost,
     options?: RestoreQueuedMessagesOptions,
   ): number {
-    if (!hidesQueuedOperational()) {
+    if (!hidesQueuedOperational(this)) {
       return originalRestoreQueuedMessagesToEditor.call(this, options);
     }
     restoringQueuedMessages = true;
@@ -191,9 +222,9 @@ export function installCalmPendingOperationalLayout(): void {
   };
 
   // Clears exactly what Pi clears, then puts the marker-authenticated messages back in their
-  // original order and reports only the captain-authored ones as restorable. Whether that is
-  // possible is decided before anything is cleared, so a Pi without the already-expanded
-  // queueing entry point ends the hiding first and then gets its own untouched restore.
+  // original order and reports only the captain-authored ones as restorable. This runs only
+  // for a queue whose rows were suppressed, which the preflight already proved retainable, so
+  // it never has to choose between leaking a hidden notification and dropping one.
   function clearQueuesRetainingOperational(mode: InteractiveModeQueueOwner): QueuedMessages {
     const session = mode.session;
     const compactionBefore = [...mode.compactionQueuedMessages];
@@ -206,14 +237,11 @@ export function installCalmPendingOperationalLayout(): void {
     const retainedCompaction = compactionBefore.filter((message) =>
       isOperational(message.text),
     );
-    const retainedCount =
-      retainedSteering.length + retainedFollowUp.length + retainedCompaction.length;
-    if (retainedCount === 0) return originalClearAllQueues.call(mode);
     if (
-      (retainedSteering.length > 0 && typeof session._queueSteer !== "function") ||
-      (retainedFollowUp.length > 0 && typeof session._queueFollowUp !== "function")
+      retainedSteering.length === 0 &&
+      retainedFollowUp.length === 0 &&
+      retainedCompaction.length === 0
     ) {
-      queuedHidingUnavailable = true;
       return originalClearAllQueues.call(mode);
     }
 
@@ -224,10 +252,12 @@ export function installCalmPendingOperationalLayout(): void {
     const requeue = (queued: unknown): void => {
       void Promise.resolve(queued).catch(() => {});
     };
-    for (const message of retainedSteering) requeue(session._queueSteer?.(message));
-    for (const message of retainedFollowUp) requeue(session._queueFollowUp?.(message));
+    for (const message of retainedSteering) requeue(session._queueSteer(message));
+    for (const message of retainedFollowUp) requeue(session._queueFollowUp(message));
     mode.compactionQueuedMessages.push(...retainedCompaction);
-    retainedByRestore = retainedCount;
+    // Only the agent-queue retention can make Pi continue on its own; compaction-held
+    // messages stay inside this interactive mode until a compaction flush sends them.
+    retainedByRestore = retainedSteering.length + retainedFollowUp.length;
     return {
       ...cleared,
       steering: cleared.steering.filter((message) => !isOperational(message)),

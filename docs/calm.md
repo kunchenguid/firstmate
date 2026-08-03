@@ -22,6 +22,8 @@ Because a hidden row is a row the captain never saw, aborting a running turn wit
 Every hidden notification stays queued in its original order and is delivered on the next turn instead of arriving as raw editor text.
 Because that queue is still waiting when the aborted run settles, Pi continues into a new turn on its own to deliver it, so Calm prints one short line saying supervision is continuing.
 That line carries no notification text, marker, kind, path, or identifier; it is never printed with Calm off, never printed when nothing was retained, and never repeated.
+Keeping a notification queued this way depends on a Pi capability, so Calm proves that capability before it hides its first queued row.
+On a Pi that lacks it, Calm never hides a queued row at all and says so once, rather than hiding a notification it could not later return or deliver.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Calm changes presentation only.
