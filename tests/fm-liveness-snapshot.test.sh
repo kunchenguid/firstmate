@@ -9,7 +9,7 @@ set -u
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-LIVENESS="$ROOT/bin/fm-liveness-snapshot.sh"
+LIVENESS=${FM_LIVENESS_UNDER_TEST:-$ROOT/bin/fm-liveness-snapshot.sh}
 TMP_ROOT=$(fm_test_tmproot fm-liveness-snapshot)
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 trap fm_test_cleanup EXIT
@@ -58,6 +58,11 @@ case "${E_PROCESS:-working}" in
     if [ "$n" -eq 1 ]; then real=5000; else real=5002; fi
     printf '10\t40\tnode\t%s\n' "$wt"
     printf '11\t%s\t%s\t%s\n' "$real" "$worker" "$wt"
+    ;;
+  same-family-max)
+    if [ "$n" -eq 1 ]; then high=5000; else high=5002; fi
+    printf '10\t40\t%s\t%s\n' "$worker" "$wt"
+    printf '11\t%s\t%s\t%s\n' "$high" "$worker" "$wt"
     ;;
   parked-high-total)
     printf '11\t500000\t%s\t%s\n' "$worker" "$wt"
@@ -124,11 +129,42 @@ test_max_cpu_launcher_and_two_sample_delta() {
   printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.sample_1_max_ms==5000 and .cpu.sample_2_max_ms==5002' >/dev/null \
     || fail "max-CPU guard trusted the thin launcher instead of the real child: $json"
 
+  dir=$(make_case same-family-max claude); install_evidence "$dir"
+  json=$(E_FAMILY=claude E_PROCESS=same-family-max run_case "$dir")
+  printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.sample_1_max_ms==5000 and .cpu.sample_2_max_ms==5002' >/dev/null \
+    || fail "max-CPU guard trusted the first same-family wrapper instead of the busy worker: $json"
+
   dir=$(make_case cumulative-not-percent claude); install_evidence "$dir"
   json=$(E_FAMILY=claude E_PROCESS=parked-high-total run_case "$dir")
   printf '%s' "$json" | jq -e '.records[0] | .activity=="parked" and .cpu.sample_1_max_ms==500000 and .cpu.delta_ms==0' >/dev/null \
     || fail "two-sample guard mistook a high lifetime total for current activity: $json"
   pass "max CPU crosses launcher wrappers and only a two-sample delta establishes activity"
+}
+
+test_real_process_snapshot_accepts_partial_lsof_output() {
+  local dir json real_lsof
+  command -v lsof >/dev/null 2>&1 || { echo "skip: lsof not found (real process snapshot)"; return; }
+  real_lsof=$(command -v lsof)
+  dir=$(make_case real-process-snapshot codex); install_evidence "$dir"
+  cat > "$dir/bin/lsof" <<SH
+#!/usr/bin/env bash
+"$real_lsof" "\$@"
+rc=\$?
+[ -t 1 ] || exit 1
+exit "\$rc"
+SH
+  chmod +x "$dir/bin/lsof"
+  rm -f "$dir"/*.count
+  json=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 \
+    FM_LIVENESS_NOW=2026-08-03T12:00:00Z \
+    FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" \
+    FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
+    E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json)
+  printf '%s' "$json" | jq -e '
+    .process_samples.sample_1_readable == true
+    and .process_samples.sample_2_readable == true
+  ' >/dev/null || fail "real ps/lsof process snapshot discarded nonempty evidence after a nonzero lsof exit: $json"
+  pass "real process_snapshot accepts live process-table evidence when lsof emits output and exits nonzero"
 }
 
 test_cwd_binding_and_shell_amplifier_refusals() {
@@ -202,6 +238,7 @@ test_neutralization_matrix_goes_red() {
 
 test_harness_relative_cpu_rows
 test_max_cpu_launcher_and_two_sample_delta
+test_real_process_snapshot_accepts_partial_lsof_output
 test_cwd_binding_and_shell_amplifier_refusals
 test_endpoint_three_way_and_output_activity
 test_neutralization_matrix_goes_red

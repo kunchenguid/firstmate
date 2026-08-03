@@ -10,7 +10,7 @@ set -u
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
+BEARINGS=${FM_BEARINGS_UNDER_TEST:-$ROOT/bin/fm-bearings-snapshot.sh}
 TMP_ROOT=$(fm_test_tmproot fm-bearings)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -60,7 +60,8 @@ echo "gh-axi $*" >> "$NET_LOG"
 [ "${FAKE_GH_FAIL:-0}" = 1 ] && exit 1
 [ "${FAKE_GH_SLEEP:-0}" = 1 ] && sleep 30
 emit_body() {
-  printf 'api_response:\n  body: %s\n  truncated: false\n' "$(printf '%s' "$1" | jq -Rs .)"
+  printf 'api_response:\n  body: %s\n  truncated: %s\n' \
+    "$(printf '%s' "$1" | jq -Rs .)" "${FAKE_GH_TRUNCATED:-false}"
 }
 case "$*" in
   api\ repos/*/pulls\?state=open*)
@@ -81,7 +82,21 @@ https://github.com/$repo/pull/3"
     if [ "${FAKE_CHECKS_TALLY_ONLY:-0}" = 1 ]; then
       emit_body "$(printf '%s\t%s\t%s' 2 2 '1 passed, 1 failed')"
     else
-      emit_body "$(printf '%s\t%s\t%s' 2 2 'CI[event=pull_request attempt=1 created=2026-08-03T10:00:00Z updated=2026-08-03T10:05:00Z status=completed conclusion=success url=https://github.com/acme/repo/actions/runs/1]; CI[event=pull_request_target attempt=2 created=2026-08-03T10:06:00Z updated=2026-08-03T10:08:00Z status=completed conclusion=failure url=https://github.com/acme/repo/actions/runs/2]')"
+      query=
+      previous=
+      for arg in "$@"; do
+        [ "$previous" = --jq ] && query=$arg
+        previous=$arg
+      done
+      [ -n "$query" ] || exit 2
+      rendered=$(jq -n '{
+        total_count:2,
+        workflow_runs:[
+          {name:"CI",event:"pull_request",run_attempt:1,created_at:"2026-08-03T10:00:00Z",updated_at:"2026-08-03T10:05:00Z",status:"completed",conclusion:"success",html_url:"https://github.com/acme/repo/actions/runs/1"},
+          {name:"CI",event:"pull_request_target",run_attempt:2,created_at:"2026-08-03T10:06:00Z",updated_at:"2026-08-03T10:08:00Z",status:"completed",conclusion:"failure",html_url:"https://github.com/acme/repo/actions/runs/2"}
+        ]
+      }' | jq -r "$query") || exit 1
+      emit_body "$rendered"
     fi
     ;;
 esac
@@ -1070,13 +1085,26 @@ test_partial_github_failure_degrades() {
   pass "a partial GitHub failure degrades gracefully"
 }
 
+test_truncated_github_evidence_is_refused() {
+  local home fakebin json
+  home=$(make_home truncated-github); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(FAKE_GH_TRUNCATED=true run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.candidate_prs | length) == 3
+    and ([.candidate_prs[].verification] | all(. == "NOT_VERIFIABLE"))
+    and (.prs | test("NOT_VERIFIABLE"))
+  ' >/dev/null || fail "truncated gh-axi evidence was accepted as complete: $json"
+  pass "truncated gh-axi bodies remain NOT_VERIFIABLE"
+}
+
 test_perl_fallback_bounds_github_call() {
   local home fakebin toolbin cmd json started elapsed
   home=$(make_home perl-timeout); write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
   mkdir -p "$toolbin"
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find; do
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm; do
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
@@ -2003,6 +2031,7 @@ test_superseded_queued_item_dropped_by_default
 test_include_prs_adds_discovery_after_mandatory_verification
 test_firstmate_check_tally_is_refused
 test_partial_github_failure_degrades
+test_truncated_github_evidence_is_refused
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags
 test_pr_repository_cap_and_expansion

@@ -168,6 +168,34 @@ test_empty_fleet_json() {
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
+test_large_snapshot_payloads_never_cross_exec_argv() {
+  local home arg_max payload_bytes oversized out_file
+  home=$(make_home large-payload)
+  arg_max=$(getconf ARG_MAX)
+  case "$arg_max" in ''|*[!0-9]*) fail "ARG_MAX unavailable for large-payload regression" ;; esac
+  payload_bytes=$((arg_max + 65536))
+  awk -v n="$payload_bytes" 'BEGIN {
+    print "## Queued"
+    printf "- [ ] oversized-task - "
+    for (i=0; i<n; i++) printf "x"
+    printf "\n"
+  }' > "$home/data/backlog.md"
+  oversized=$(awk -v n="$payload_bytes" 'BEGIN { for (i=0; i<n; i++) printf "x" }')
+  if jq -n --arg payload "$oversized" '$payload | length' >/dev/null 2>&1; then
+    fail "large-payload fixture did not exceed the host exec argv bound"
+  fi
+  out_file="$home/snapshot.json"
+  FM_HOME="$home" "$SNAPSHOT" --json > "$out_file" \
+    || fail "fleet snapshot passed its growing JSON payloads through exec argv"
+  jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+    and .backlog.present == true
+    and (.backlog.records | length) == 1
+    and .backlog.records[0].id == "oversized-task"
+  ' "$out_file" >/dev/null || fail "large off-argv snapshot output was incomplete"
+  pass "fleet snapshot keeps backlog and task JSON off exec argv beyond ARG_MAX"
+}
+
 test_fixture_snapshot_json() {
   local home fakebin out ids
   home=$(make_home fixture)
@@ -797,6 +825,7 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_large_snapshot_payloads_never_cross_exec_argv
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
