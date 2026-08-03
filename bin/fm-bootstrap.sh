@@ -426,16 +426,22 @@ secondmate_sync() {
   # Remote routes converge through the generic transport. Their code root and
   # inherited files are authoritative on that host; no local path probe or
   # local fast-forward is attempted for them.
-  local remote_host sync_out inherit_out nudge_needed remote_marker remote_pending converged out
+  local remote_host sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
+    remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
+      continue
+    fi
     remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
     remote_pending=0
     if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
     if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
       "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
+      fm_lock_release "$remote_lock" || true
       continue
     fi
     nudge_needed=0
@@ -464,6 +470,7 @@ secondmate_sync() {
     elif [ "$converged" -eq 1 ]; then
       rm -f "$remote_marker"
     fi
+    fm_lock_release "$remote_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }

@@ -14,6 +14,12 @@ fm_secondmate_nudge_marker_path() { # <state-dir> <id>
   printf '%s/.secondmate-nudge-pending/%s.pending\n' "$state" "$id"
 }
 
+fm_remote_inherit_transaction_lock_path() { # <state-dir> <id>
+  local state=$1 id=$2
+  case "$id" in *[!/A-Za-z0-9._-]*|''|*/*) return 1 ;; esac
+  printf '%s/.remote-inherit-%s.lock\n' "$state" "$id"
+}
+
 fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <message> <remote:0|1>
   local state=$1 id=$2 home=$3 commit=$4 instructions=$5 message=$6 remote=$7
   local marker parent tmp

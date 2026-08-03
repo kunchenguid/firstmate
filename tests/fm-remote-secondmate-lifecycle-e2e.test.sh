@@ -20,7 +20,7 @@ TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
-trap 'touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" 2>/dev/null || true; FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" "$TMP_ROOT/inherit.release" 2>/dev/null || true; FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT
 
 # Materialize the current branch as the remote host's tracked code root. The
 # fixture is a real git repository because provisioning and guarded sync exercise
@@ -124,6 +124,13 @@ $command_fields
 EOF
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   inherit-partial:fm-remote-inherit.sh:config/crew-harness) exit 255 ;;
+  inherit-block:fm-remote-inherit.sh:data/captain-shared.md)
+    cat > "$FM_FAKE_INHERIT_PAYLOAD"
+    touch "$FM_FAKE_INHERIT_ENTERED"
+    while [ ! -f "$FM_FAKE_INHERIT_RELEASE" ]; do sleep 0.02; done
+    "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" < "$FM_FAKE_INHERIT_PAYLOAD"
+    exit $?
+    ;;
   provision-block-fail:fm-remote-home-provision.sh:*)
     touch "$FM_FAKE_SEED_ENTERED"
     while [ ! -f "$FM_FAKE_SEED_RELEASE" ]; do sleep 0.02; done
@@ -160,6 +167,9 @@ remote_env() {
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
   FM_FAKE_SEED_ENTERED="$TMP_ROOT/seed.entered" \
   FM_FAKE_SEED_RELEASE="$TMP_ROOT/seed.release" \
+  FM_FAKE_INHERIT_ENTERED="$TMP_ROOT/inherit.entered" \
+  FM_FAKE_INHERIT_RELEASE="$TMP_ROOT/inherit.release" \
+  FM_FAKE_INHERIT_PAYLOAD="$TMP_ROOT/inherit.payload" \
   FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
   "$@"
 }
@@ -368,6 +378,43 @@ remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 2 "$PARTIAL_CONFI
   || fail "converged remote config acknowledgment was not ingested"
 pass "partial remote inheritance retains reread intent through bootstrap convergence"
 
+rm -f "$TMP_ROOT/inherit.entered" "$TMP_ROOT/inherit.release" "$TMP_ROOT/inherit.payload"
+cat > "$PARENT/data/captain-shared.md" <<'EOF'
+# Shared captain preferences
+This file is main-authoritative and maintained by the main firstmate.
+It is read-only in secondmate homes and must not be edited there.
+Changes return through a marked status document pointer.
+stale concurrent preference
+EOF
+FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-config-push.sh" \
+  > "$TMP_ROOT/config-concurrent-first.out" 2>&1 &
+config_first=$!
+inherit_wait=0
+while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
+  kill -0 "$config_first" 2>/dev/null || fail "first inheritance transaction exited before its blocked write"
+  inherit_wait=$((inherit_wait + 1))
+  [ "$inherit_wait" -le 250 ] || fail "first inheritance transaction never reached its blocked write"
+  sleep 0.02
+done
+cat > "$PARENT/data/captain-shared.md" <<'EOF'
+# Shared captain preferences
+This file is main-authoritative and maintained by the main firstmate.
+It is read-only in secondmate homes and must not be edited there.
+Changes return through a marked status document pointer.
+current concurrent preference
+EOF
+remote_env "$ROOT/bin/fm-bootstrap.sh" > "$TMP_ROOT/config-concurrent-second.out" 2>&1 &
+config_second=$!
+sleep 0.2
+kill -0 "$config_second" 2>/dev/null \
+  || fail "bootstrap bypassed the active remote inheritance transaction"
+touch "$TMP_ROOT/inherit.release"
+wait "$config_first" || fail "first serialized inheritance transaction failed"
+wait "$config_second" || fail "bootstrap inheritance transaction failed after waiting"
+[ "$(tail -1 "$REMOTE_HOME/data/captain-shared.md")" = 'current concurrent preference' ] \
+  || fail "later bootstrap convergence was overwritten by stale inherited bytes"
+pass "config push and bootstrap serialize remote inheritance convergence"
+
 printf 'codex\n' > "$PARENT/config/crew-harness"
 touch "$TMP_ROOT/tmux-send-fail"
 if remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-fail.out" 2>&1; then
@@ -392,6 +439,22 @@ CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.3.result"
 remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 3 "$CONFIG_RESULT" >/dev/null \
   || fail "remote config reread acknowledgement was not ingested"
 pass "remote inherited config retains and retries a failed live reread nudge"
+
+for pending_record in "$PARENT/state/pending-replies"/*; do
+  [ -f "$pending_record" ] || continue
+  [ "$(grep '^task_id=' "$pending_record" | cut -d= -f2-)" = ios ] || continue
+  [ "$(grep '^phase=' "$pending_record" | cut -d= -f2-)" != resolved ] || continue
+  pending_corr=$(basename "$pending_record")
+  printf 'done [corr=%s]: concurrent inherited data re-read\n' "$pending_corr" \
+    >> "$REMOTE_HOME/state/parent-replies.status"
+  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+    || fail "remote reply source did not capture a concurrent inheritance acknowledgment"
+  pending_result=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" -print | sort | tail -1)
+  pending_seq=${pending_result%.result}
+  pending_seq=${pending_seq##*.}
+  remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios "$pending_seq" "$pending_result" >/dev/null \
+    || fail "concurrent inheritance acknowledgment was not ingested"
+done
 
 # Structured fleet state comes from each home's own snapshot. The remote host is
 # explicit, and the local route remains alongside it.
@@ -496,7 +559,10 @@ kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an activ
 assert_present "$REMOTE_HOME" "remote retirement removed the home during an active backlog handoff"
 touch "$TMP_ROOT/handoff.release"
 wait "$handoff_holder_pid" || fail "handoff lock holder failed to release"
-wait "$teardown_pid" || fail "safe remote retirement failed after handoff serialization"
+if ! wait "$teardown_pid"; then
+  printf 'serialized retirement output:\n%s\n' "$(cat "$TMP_ROOT/teardown-serialized.out")" >&2
+  fail "safe remote retirement failed after handoff serialization"
+fi
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"

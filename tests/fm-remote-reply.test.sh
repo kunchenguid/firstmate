@@ -198,8 +198,18 @@ remote_env "$ADAPTER" ingest ios "$RESULT_FOUR" >/dev/null 2>&1 || true
   || fail "continuity replay duplicated the escalation"
 pass "truncation is detected, escalated once, and not silently rebased"
 
+rm -f "$PARENT/state/procevent-inbox/$SID.4.handled"
+if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
+  fail "remote reply retirement accepted an unhandled captured result"
+fi
+assert_grep 'unhandled captured result' "$TMP_ROOT/retire-pending.out" \
+  "remote reply retirement did not explain its pending-result refusal"
+assert_absent "$PARENT/state/procevent/$SID.source" \
+  "refused retirement left the reply source running past its pending-result check"
+remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
+  || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
-pass "remote reply source retires through the existing process-event cleanup path"
+pass "remote reply retirement quiesces and refuses unhandled captured results"
 
 echo "ALL TESTS PASSED"

@@ -167,7 +167,7 @@ remote_route_exists() {
   [ "$remote" = 1 ] || die "secondmate $id is not a configured remote route"
 }
 
-cmd_arm() {
+cmd_arm_locked() {
   local id=${1:-} sid
   validate_id "$id"
   remote_route_exists "$id"
@@ -176,6 +176,17 @@ cmd_arm() {
   "$SCRIPT_DIR/fm-procevent.sh" register remote-reply "$sid" -- \
     "$SCRIPT_DIR/fm-procevent-remote-reply.sh" source "$id" || return 1
   printf 'armed: %s offset=%s\n' "$sid" "$CURSOR_OFFSET"
+}
+
+cmd_arm() {
+  local id=${1:-} lock
+  validate_id "$id"
+  lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
+  (
+    fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
+    trap 'fm_lock_release "$lock"' EXIT
+    cmd_arm_locked "$id"
+  )
 }
 
 cmd_source() {
@@ -312,7 +323,7 @@ cmd_ingest() {
   printf 'ingested: %s appended=%s offset=%s\n' "$id" "$appended" "$to"
 }
 
-cmd_handle() {
+cmd_handle_locked() {
   local id=${1:-} seq=${2:-} result=${3:-} sid class rc=0 to
   validate_id "$id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
@@ -329,30 +340,118 @@ cmd_handle() {
     return "$rc"
   fi
   if [ "$class" = delta ]; then
-    cmd_arm "$id" || return 1
+    cmd_arm_locked "$id" || return 1
   fi
   "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" || return 1
   return "$rc"
 }
 
-cmd_retire() {
-  local id=${1:-} sid
+cmd_handle() {
+  local id=${1:-} lock
   validate_id "$id"
+  lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
+  (
+    fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
+    trap 'fm_lock_release "$lock"' EXIT
+    cmd_handle_locked "$@"
+  )
+}
+
+retirement_capture_scan() {
+  local id=$1 sid inbox path base seq pending=0
   sid=$(source_id "$id")
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$sid"
+  inbox="$STATE/procevent-inbox"
+  [ -e "$inbox" ] || return 1
+  [ -d "$inbox" ] && [ ! -L "$inbox" ] || die "remote reply inbox is unsafe"
+  for path in "$inbox/$sid".*.result "$inbox/$sid".*.adapter "$inbox/$sid".*.handled; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    [ -f "$path" ] && [ ! -L "$path" ] || die "remote reply capture is unsafe: $path"
+  done
+  for path in "$inbox/$sid".*.result; do
+    [ -e "$path" ] || continue
+    base=${path%.result}
+    seq=${base##*.}
+    case "$seq" in ''|*[!0-9]*) die "remote reply capture has an invalid generation: $path" ;; esac
+    [ -f "$base.adapter" ] && [ ! -L "$base.adapter" ] \
+      || die "remote reply capture has no safe adapter record: $path"
+    [ -e "$base.handled" ] || pending=$((pending + 1))
+  done
+  RETIREMENT_PENDING=$pending
+  RETIREMENT_INBOX=$inbox
+  return 0
+}
+
+cmd_retire_quiesce_locked() {
+  local id=${1:-} force=${2:-} sid
+  validate_id "$id"
+  [ -z "$force" ] || [ "$force" = --force ] || die "invalid retirement option: $force"
+  sid=$(source_id "$id")
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" || return 1
+  RETIREMENT_PENDING=0
+  retirement_capture_scan "$id" || true
+  if [ "$force" != --force ] && [ "$RETIREMENT_PENDING" -gt 0 ]; then
+    die "remote reply retirement refused with $RETIREMENT_PENDING unhandled captured result(s)"
+  fi
+}
+
+cmd_retire_finalize_locked() {
+  local id=${1:-} force=${2:-} sid path
+  validate_id "$id"
+  [ -z "$force" ] || [ "$force" = --force ] || die "invalid retirement option: $force"
+  sid=$(source_id "$id")
+  RETIREMENT_PENDING=0
+  if retirement_capture_scan "$id"; then
+    if [ "$force" != --force ] && [ "$RETIREMENT_PENDING" -gt 0 ]; then
+      die "remote reply retirement refused with $RETIREMENT_PENDING unhandled captured result(s)"
+    fi
+    if [ "$force" = --force ]; then
+      for path in "$RETIREMENT_INBOX/$sid".*.result "$RETIREMENT_INBOX/$sid".*.adapter "$RETIREMENT_INBOX/$sid".*.handled; do
+        [ -e "$path" ] || continue
+        rm -f -- "$path" || die "cannot discard remote reply capture: $path"
+      done
+    fi
+  fi
   rm -f -- "$(cursor_path "$id")"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
 }
 
+cmd_retire() {
+  local id=${1:-} force=${2:-} lock
+  validate_id "$id"
+  lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
+  (
+    fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
+    trap 'fm_lock_release "$lock"' EXIT
+    cmd_retire_quiesce_locked "$id" "$force" || return 1
+    cmd_retire_finalize_locked "$id" "$force"
+  )
+}
+
+require_parent_lifecycle_lock() {
+  local id=$1 lock owner pid
+  lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
+  if [ -L "$lock" ]; then
+    owner=$(fm_lock_link_owner "$lock" 2>/dev/null || true)
+    [ -n "$owner" ] || die "remote reply lifecycle lock ownership is invalid"
+  else
+    owner=$lock
+  fi
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  [ "$pid" = "$PPID" ] || die "remote reply lifecycle lock is not held by the caller"
+}
+
 case "${1:-}" in
   arm) shift; [ "$#" -eq 1 ] || usage; cmd_arm "$@" ;;
+  arm-locked) shift; [ "$#" -eq 1 ] || usage; require_parent_lifecycle_lock "$1"; cmd_arm_locked "$@" ;;
   source) shift; [ "$#" -eq 1 ] || usage; cmd_source "$@" ;;
   handle) shift; [ "$#" -eq 3 ] || usage; cmd_handle "$@" ;;
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
-  retire) shift; [ "$#" -eq 1 ] || usage; cmd_retire "$@" ;;
+  retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
+  retire-quiesce-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_quiesce_locked "$@" ;;
+  retire-finalize-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_finalize_locked "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

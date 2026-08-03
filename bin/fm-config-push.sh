@@ -122,6 +122,12 @@ while IFS='|' read -r id home _window meta; do
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
     printf 'secondmate %s (%s:%s):\n' "$id" "$remote_host" "$home"
+    remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
+      echo "  config-reread: transaction lock failed"
+      errors=1
+      continue
+    fi
     remote_marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id" 2>/dev/null || true)
     remote_pending=0
     if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
@@ -129,6 +135,7 @@ while IFS='|' read -r id home _window meta; do
       "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
       echo "  config-reread: retry marker failed"
       errors=1
+      fm_lock_release "$remote_lock" || true
       continue
     fi
     if remote_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" 2>&1); then
@@ -152,6 +159,7 @@ while IFS='|' read -r id home _window meta; do
       [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'
       errors=1
     fi
+    fm_lock_release "$remote_lock" || true
     continue
   fi
   if ! validate_secondmate_home "$id" "$home"; then

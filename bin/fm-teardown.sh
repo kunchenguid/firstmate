@@ -133,8 +133,13 @@ REMOTE_PENDING_DIR_PRESENT=0
 REMOTE_PENDING_DIR_REAL=
 REMOTE_HANDOFF_LOCK=
 REMOTE_REGISTRY_LOCK=
+REMOTE_REPLY_LIFECYCLE_LOCK=
 
 remote_teardown_locks_release() {
+  if [ -n "$REMOTE_REPLY_LIFECYCLE_LOCK" ]; then
+    fm_lock_release "$REMOTE_REPLY_LIFECYCLE_LOCK"
+    REMOTE_REPLY_LIFECYCLE_LOCK=
+  fi
   if [ -n "$REMOTE_HANDOFF_LOCK" ]; then
     fm_lock_release "$REMOTE_HANDOFF_LOCK"
     REMOTE_HANDOFF_LOCK=
@@ -258,6 +263,10 @@ remote_secondmate_teardown() {
       }
     done
   fi
+  "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-quiesce-locked "$ID" "$FORCE" >/dev/null 2>&1 || {
+    echo "REFUSED: remote secondmate $ID still has an unhandled captured reply" >&2
+    return 1
+  }
   "$FM_ROOT/bin/fm-guard.sh" || true
   if [ "$FORCE" = --force ]; then
     if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force 2>&1); then rc=0; else rc=$?; fi
@@ -268,6 +277,8 @@ remote_secondmate_teardown() {
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     if [ "$rc" -eq 255 ]; then
       echo "error: remote retirement completion is unknown; preserving the route and local records for same-host reconciliation" >&2
+    elif ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$ID" >/dev/null 2>&1; then
+      echo "error: remote retirement failed and the reply source could not be re-armed" >&2
     fi
     return "$rc"
   fi
@@ -275,7 +286,7 @@ remote_secondmate_teardown() {
     echo "error: remote home retired but local recovery paths changed; preserving the local route for retry" >&2
     return 1
   }
-  "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire "$ID" >/dev/null 2>&1 || {
+  "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-finalize-locked "$ID" "$FORCE" >/dev/null 2>&1 || {
     echo "error: remote home retired but reply-source cleanup is incomplete; preserving the local route for retry" >&2
     return 1
   }
@@ -299,6 +310,11 @@ remote_secondmate_teardown_locked() {
   fm_lock_acquire_wait "$REMOTE_REGISTRY_LOCK" || return 1
   REMOTE_HANDOFF_LOCK="$STATE/.backlog-handoff-$ID.lock"
   fm_lock_acquire_wait "$REMOTE_HANDOFF_LOCK" || {
+    remote_teardown_locks_release
+    return 1
+  }
+  REMOTE_REPLY_LIFECYCLE_LOCK=$(secondmate_reply_lifecycle_lock_path "$STATE" "$ID")
+  fm_lock_acquire_wait "$REMOTE_REPLY_LIFECYCLE_LOCK" || {
     remote_teardown_locks_release
     return 1
   }
