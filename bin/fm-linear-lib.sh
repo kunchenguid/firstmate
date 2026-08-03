@@ -228,7 +228,7 @@ FML_ROWS_FILTER='
 # as "no issue"). The server-side filter narrows the fetch; the exact first-line
 # match happens here, so "004" never matches "004-something-else".
 fml_find_issue() {
-  local id=$1 body vars rc rows
+  local id=$1 body vars rc rows cursor page
   fml_available || return 2
   body=$(mktemp "${TMPDIR:-/tmp}/fm-linear-find.XXXXXX") || return 2
   vars=$(jq -cn --arg needle "firstmate: $id" '{needle:$needle}') || { rm -f "$body"; return 2; }
@@ -240,16 +240,33 @@ fml_find_issue() {
   }' "$vars" "$body" "${FML_TIMEOUT:-10}"
   rc=$?
   # The server-side description filter is only an optimisation. If Linear ever
-  # rejects it, fall back to scanning recent issues and matching here, so a
+  # rejects it, fall back to scanning issues page by page and matching here, so a
   # schema change degrades to "slower" rather than "silently never links".
   if [ "$rc" = 6 ]; then
-    # shellcheck disable=SC2016
-    fml_graphql 'query fmFindAll {
-      issues(first: 250, orderBy: updatedAt) {
-        nodes { id identifier url description state { name type } }
-      }
-    }' '{}' "$body" "${FML_TIMEOUT:-10}"
-    rc=$?
+    cursor=null
+    page=0
+    while :; do
+      page=$((page + 1))
+      vars=$(jq -cn --argjson after "$cursor" '{after:$after}') || { rm -f "$body"; return 2; }
+      # shellcheck disable=SC2016
+      fml_graphql 'query fmFindAll($after: String) {
+        issues(first: 100, after: $after, orderBy: updatedAt) {
+          pageInfo { hasNextPage endCursor }
+          nodes { id identifier url description state { name type } }
+        }
+      }' "$vars" "$body" "${FML_TIMEOUT:-10}"
+      rc=$?
+      [ "$rc" = 0 ] || break
+      rows=$(jq -r "$FML_ROWS_FILTER" "$body" 2>/dev/null | awk -F'\t' -v id="$id" '$1 == id {print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6; exit}')
+      if [ -n "$rows" ]; then
+        rm -f "$body"
+        printf '%s\n' "$rows"
+        return 0
+      fi
+      [ "$(jq -r '.data.issues.pageInfo.hasNextPage' "$body")" = true ] || { rm -f "$body"; return 1; }
+      [ "$page" -lt 50 ] || { rm -f "$body"; return 2; }
+      cursor=$(jq -c '.data.issues.pageInfo.endCursor' "$body")
+    done
   fi
   if [ "$rc" != 0 ]; then rm -f "$body"; return 2; fi
   rows=$(jq -r "$FML_ROWS_FILTER" "$body" 2>/dev/null | awk -F'\t' -v id="$id" '$1 == id {print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6}')

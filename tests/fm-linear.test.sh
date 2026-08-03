@@ -147,6 +147,22 @@ assert_contains "$out" "no mirrored issue for 070-unmirrored" "missing issue is 
 assert_no_grep "pr edit" "$FAKE_DIR/gh.log" "missing issue must not edit the PR"
 pass "no mirrored issue: reported, PR untouched, exit 0"
 
+# A rejected server-side filter falls back to a bounded full scan.
+# Reaching that bound while Linear still advertises another page is unknown,
+# never proof that no mirrored issue exists.
+new_home lookupbound
+printf 'LINEAR_API_KEY=lin_api_test\n' > "$HOME_DIR/.env"
+printf 'body from the pipeline\n' > "$FAKE_DIR/pr-body"
+jq -cn '{errors:[{message:"Unknown argument contains"}]}' > "$FAKE_DIR/fmFind.json"
+jq -cn '{data:{issues:{pageInfo:{hasNextPage:true,endCursor:"next"},nodes:[]}}}' > "$FAKE_DIR/fmFindAll.json"
+out=$(FM_HOME="$HOME_DIR" run_link 070-unmirrored https://github.com/o/r/pull/1); rc=$?
+expect_code 0 "$rc" "bounded fallback remains non-gating"
+assert_contains "$out" "lookup unavailable" "a bounded incomplete scan is reported as unavailable"
+n=$(grep -c '^fmFindAll' "$FAKE_DIR/calls.log" || true)
+[ "$n" = 50 ] || fail "expected the fallback page bound of 50, got $n"
+assert_no_grep "no mirrored issue" <(printf '%s\n' "$out") "an incomplete scan must not claim no issue exists"
+pass "lookup fallback reports unavailable when its page bound is reached"
+
 # --- 3. a mirrored issue gets a strictly additive reference -----------------
 
 new_home match
@@ -397,7 +413,7 @@ mv "$HOME_DIR/list-without-attachment.json" "$FAKE_DIR/fmList.json"
 : > "$FAKE_DIR/calls.log"
 out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-linear-refresh.sh" 2>&1); rc=$?
 expect_code 0 "$rc" "attachment retry exits 0"
-assert_contains "$out" "unchanged 3" "matching fingerprints remain unchanged"
+assert_contains "$out" "unchanged 2" "only fully converged issues remain unchanged"
 assert_contains "$out" "PR links 1" "the missing PR attachment is reconciled"
 n=$(grep -c '^fmAttach' "$FAKE_DIR/calls.log" || true)
 [ "$n" = 1 ] || fail "expected exactly one attachment retry, got $n"

@@ -179,17 +179,8 @@ fi
 # instead, accepting that risk in exchange for richer rendering.
 BODY_STYLE=${LINEAR_BODY_STYLE:-preserve}
 
-# A content fingerprint written into the description as an HTML comment. It is
-# what makes refresh convergent: an issue already carrying the fingerprint for
-# the current backlog content is left completely alone, so a second refresh is a
-# genuine no-op and a hand-edit the captain made is not overwritten every run.
-fingerprint() {
-  printf '%s\037%s\037%s\037%s\037%s\037%s' "$1" "$2" "$3" "$4" "$5" "$BODY_STYLE" \
-    | sha256sum | cut -c1-16
-}
-
 compose_description() {
-  local id=$1 blocked=$2 body=$3 link=$4 fp=$5 out=$6
+  local id=$1 blocked=$2 body=$3 link=$4 out=$5
   {
     printf '`firstmate: %s`\n' "$id"
     if [ -n "$blocked" ]; then
@@ -208,7 +199,6 @@ compose_description() {
         printf '```\n'
       fi
     fi
-    printf '\n<!-- firstmate-sync: %s -->\n' "$fp"
   } > "$out"
 }
 
@@ -238,11 +228,12 @@ while IFS= read -r row; do
   case "$row" in *$'\t'*) ;; *) continue ;; esac
   split_row "$row"
   [ -n "$id" ] || continue
-  fp=$(fingerprint "$state" "$id" "$title" "$link" "$blocked$body")
-  compose_description "$id" "$blocked" "$body" "$link" "$fp" "$TMP/desc"
+  compose_description "$id" "$blocked" "$body" "$link" "$TMP/desc"
   desc=$(cat "$TMP/desc")
   existing=$(awk -F'\t' -v id="$id" '$1 == id {print; exit}' "$TMP/linear.tsv")
   attachment_urls=
+  was_existing=
+  item_changed=0
 
   if [ -z "$existing" ]; then
     if [ -z "$TEAM_ID" ]; then
@@ -276,17 +267,19 @@ while IFS= read -r row; do
       fi
     fi
   else
+    was_existing=1
     ident=$(printf '%s' "$existing" | cut -f2)
     issue_uuid=$(printf '%s' "$existing" | cut -f3)
     cur_state_type=$(printf '%s' "$existing" | cut -f5)
     cur_title=$(printf '%s' "$existing" | cut -f8)
     cur_desc=$(printf '%s' "$existing" | cut -f9 | base64 -d 2>/dev/null || true)
     attachment_urls=$(printf '%s' "$existing" | cut -f10 | base64 -d 2>/dev/null || true)
-    if [ "$cur_title" = "$title" ] && case "$cur_desc" in *"firstmate-sync: $fp"*) true ;; *) false ;; esac; then
-      unchanged=$((unchanged + 1))
+    if [ "$cur_title" = "$title" ] && [ "$cur_desc" = "$desc" ]; then
+      :
     elif [ -n "$DRY" ]; then
       report "update" "$ident" "$id"
       updated=$((updated + 1))
+      item_changed=1
     else
       vars=$(jq -cn --arg i "$issue_uuid" --arg ti "$title" --arg d "$desc" '{i:$i, ti:$ti, d:$d}')
       if fml_graphql 'mutation fmUpdate($i: String!, $ti: String!, $d: String!) {
@@ -295,9 +288,11 @@ while IFS= read -r row; do
         && fml_mutation_succeeded "$TMP/updated.json" issueUpdate; then
         report "updated" "$ident" "$id"
         updated=$((updated + 1))
+        item_changed=1
       else
         report "FAILED" "$ident" "update rejected by Linear"
         failed=$((failed + 1))
+        item_changed=1
       fi
     fi
   fi
@@ -311,6 +306,7 @@ while IFS= read -r row; do
   # by hand on anything still in flight is never touched.
   if [ "$state" = "done" ]; then
     if [ "$cur_state_type" != completed ]; then
+      item_changed=1
       if [ -z "$DONE_STATE" ]; then
         report "SKIP" "$ident" "is done in the backlog but the team has no completed status"
         failed=$((failed + 1))
@@ -333,29 +329,34 @@ while IFS= read -r row; do
     fi
     case "$link" in
       http://*|https://*)
-        printf '%s\n' "$attachment_urls" | grep -Fxq "$link" && continue
-        if [ -n "$DRY" ]; then
-          attached=$((attached + 1))
-        else
-          # attachmentLinkURL is keyed on (issue, url), so re-running the refresh
-          # updates the same attachment instead of stacking duplicates.
-          vars=$(jq -cn --arg i "$issue_uuid" --arg u "$link" --arg t "Pull request" '{i:$i, u:$u, t:$t}')
-          if { fml_graphql 'mutation fmAttach($i: String!, $u: String!, $t: String!) {
-            attachmentLinkURL(issueId: $i, url: $u, title: $t) { success }
-          }' "$vars" "$TMP/attach.json" \
-              && fml_mutation_succeeded "$TMP/attach.json" attachmentLinkURL; } \
-            || { fml_graphql 'mutation fmAttachCreate($i: String!, $u: String!, $t: String!) {
-            attachmentCreate(input: { issueId: $i, url: $u, title: $t }) { success }
-          }' "$vars" "$TMP/attach.json" \
-              && fml_mutation_succeeded "$TMP/attach.json" attachmentCreate; }; then
+        if ! printf '%s\n' "$attachment_urls" | grep -Fxq "$link"; then
+          item_changed=1
+          if [ -n "$DRY" ]; then
             attached=$((attached + 1))
           else
-            report "FAILED" "$ident" "could not attach $link"
-            failed=$((failed + 1))
+            # attachmentLinkURL is keyed on (issue, url), so re-running the refresh
+            # updates the same attachment instead of stacking duplicates.
+            vars=$(jq -cn --arg i "$issue_uuid" --arg u "$link" --arg t "Pull request" '{i:$i, u:$u, t:$t}')
+            if { fml_graphql 'mutation fmAttach($i: String!, $u: String!, $t: String!) {
+              attachmentLinkURL(issueId: $i, url: $u, title: $t) { success }
+            }' "$vars" "$TMP/attach.json" \
+                && fml_mutation_succeeded "$TMP/attach.json" attachmentLinkURL; } \
+              || { fml_graphql 'mutation fmAttachCreate($i: String!, $u: String!, $t: String!) {
+              attachmentCreate(input: { issueId: $i, url: $u, title: $t }) { success }
+            }' "$vars" "$TMP/attach.json" \
+                && fml_mutation_succeeded "$TMP/attach.json" attachmentCreate; }; then
+              attached=$((attached + 1))
+            else
+              report "FAILED" "$ident" "could not attach $link"
+              failed=$((failed + 1))
+            fi
           fi
         fi
         ;;
     esac
+  fi
+  if [ -n "$was_existing" ] && [ "$item_changed" = 0 ]; then
+    unchanged=$((unchanged + 1))
   fi
 done < "$TMP/backlog.tsv"
 

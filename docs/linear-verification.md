@@ -94,7 +94,6 @@ Before:
 
 ```
 mirrored issues BEFORE: 45
-PSY-7 firstmate-sync fingerprint lines present: 0
 ```
 
 Run 1:
