@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness-session identity found from the shell's ancestry, which
-# lives as long as the firstmate session - unlike the transient subshell PID of
-# any one tool call, which is dead moments after it is written.
+# Writes the harness-session identity, normally the long-lived harness pid from
+# shell ancestry and, for ps-denied Codex sessions, a leased thread identity.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -17,9 +16,8 @@ mkdir -p "$STATE" 2>/dev/null || {
   exit 1
 }
 
-# Harness identity (FM_HARNESS_RE, ancestry walk, holder liveness) is owned by
-# the shared session-lock lib so the Claude Stop auto-arm applies the exact
-# same identity contract.
+# Harness identity is owned by the shared session-lock lib so the Claude Stop
+# auto-arm and every lock caller apply the exact same identity contract.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 

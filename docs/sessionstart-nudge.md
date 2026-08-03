@@ -13,7 +13,7 @@ It shares `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so the h
 The Shared Predicate section of [`turnend-guard.md`](turnend-guard.md#shared-predicate) owns marker validation, plain-checkout detection, and required Firstmate-shaped paths.
 
 Before printing, the wrapper asks `bin/fm-session-lock-lib.sh` whether `state/.lock` already names the current harness-session identity.
-That shared predicate covers numeric process owners plus Codex's `codex-thread:<CODEX_THREAD_ID>` identity when Codex's seatbelt blocks `ps`.
+That shared predicate covers numeric process owners plus Codex's `codex-thread:<CODEX_THREAD_ID>` identity when process inspection is unavailable.
 If the lock names this same harness session, session start already ran and the wrapper stays silent.
 Every path exits 0, including malformed state and adapter errors, because a Claude SessionStart exit 2 blocks session initialization.
 

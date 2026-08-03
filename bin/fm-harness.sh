@@ -18,8 +18,9 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers first, then process ancestry.
-# Record each newly verified env marker here.
+# Detection layers: verified environment markers, process ancestry, then the
+# Codex thread-marker fallback when process inspection is unavailable.
+# Record each newly verified marker here.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,7 +32,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
-  # Keep marker detection before ancestry detection as an explicit precedence rule.
+  # Keep non-Codex marker detection before ancestry detection as an explicit
+  # precedence rule.
   # Claude, Pi, Grok, and Codex set verified markers of their own. Keep markers
   # with verified precedence before ancestry, but leave Codex's marker as a
   # post-ancestry fallback because it can be inherited by markerless child
