@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
+ANNOTATIONS=
 
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert supervision health here too. A
@@ -126,7 +127,19 @@ DRAIN_LOCK_HELD=false
 
 # Raw output and queue deletion are authoritative. Everything below is
 # best-effort and cannot restore, duplicate, hide, or fail the consumed rows.
-(fm_wake_print_annotations "$RAW_ROWS") || true
+#
+# The annotation is consumed through a command substitution rather than run
+# inline, so its process death is a status this script inspects instead of an
+# event that reaches the drain's own output. Whatever kills that process -
+# an unexpected row shape, an unreadable status file, or an abnormal
+# termination - degrades here to a skipped annotation and one stderr note.
+# The raw records above are already printed and the queue is already committed,
+# so a skipped annotation costs context, never a wake.
+if ANNOTATIONS=$(fm_wake_print_annotations "$RAW_ROWS" 2>/dev/null); then
+  [ -z "$ANNOTATIONS" ] || printf '%s\n' "$ANNOTATIONS"
+else
+  printf 'fm-wake-drain: wake annotation skipped; raw wake records above are complete\n' >&2
+fi
 (print_open_decisions_section) || true
 assert_watcher_liveness
 exit 0

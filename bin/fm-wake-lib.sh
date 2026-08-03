@@ -15,6 +15,29 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 mkdir -p "$STATE"
 
+# Locale convention for this library.
+#
+# Bash restores LC_ALL when an `LC_ALL=C <cmd>` prefix or a `local LC_ALL=C`
+# goes out of scope, and that restore calls setlocale(LC_ALL, ""). With no
+# concrete ambient locale - the macOS default, where LC_CTYPE is the bare
+# "UTF-8" and LANG is unset - resolving "" asks CoreFoundation for the user's
+# preferred language. CoreFoundation is not fork-safe, so that restore
+# intermittently segfaults whatever forked child it runs in: a command
+# substitution, a pipeline stage, or an explicit subshell. This library forks on
+# every wake, so the consequence is not cosmetic. It killed the drain's
+# annotation phase outright, and it made the identity read below return a
+# correct answer and then die, which its callers could only read as a live
+# watcher having vanished.
+#
+# A bash-level locale prefix is therefore safe here only where the ambient
+# locale is already C, so that the restore is C to C and never resolves "".
+# Everything else reaches the C locale one of two ways:
+#   - `env LC_ALL=C <cmd>` when only the external command needs it. This never
+#     moves this shell's own locale, so there is nothing to restore.
+#   - an exported pin inside a subshell that exits without restoring it, when
+#     bash itself needs C semantics; see fm_wake_print_annotations, which is
+#     what makes the prefixes beneath it safe.
+
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }
@@ -59,7 +82,7 @@ fm_pid_identity() {
   # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
   # written under one locale but re-read under the machine's ambient locale, which
   # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
-  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  out=$(env LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
@@ -516,7 +539,7 @@ fm_failure_episode_reset() {
 }
 
 fm_wake_clean_field() {
-  LC_ALL=C tr '\t\r\n' '   '
+  env LC_ALL=C tr '\t\r\n' '   '
 }
 
 fm_wake_append() {
@@ -689,11 +712,29 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 # Print supplemental drain-time context only after the caller has committed the
 # raw queue consumption and released the append lock. The limits are constants,
 # so status-file volume cannot turn a drain into an unbounded context read.
+#
+# The byte budgets below are enforced with bash's own ${#line} and ${line:0:n},
+# so this is the one place in this library where bash itself - not just a child
+# command - needs the C locale. Per the locale convention at the top of this
+# file, the pin therefore lives in a subshell that exits without restoring it:
+# a restoring `local LC_ALL=C` here segfaulted the drain's annotation phase.
+# The subshell is also why this renderer only prints and never publishes state
+# back to its caller.
+#
+# Exporting the pin, rather than keeping it shell-local, is what lets everything
+# under this boundary - fm_wake_render_annotations and fm_wake_latest_event -
+# keep using plain `LC_ALL=C <cmd>` prefixes safely: inside this subshell the
+# ambient locale is already C, so those restores are C to C and never reach the
+# resolution of "" that crashes. Nothing below this boundary may be called from
+# outside it without restoring that guarantee some other way.
 fm_wake_print_annotations() {  # <deduped-raw-rows>
+  ( export LC_ALL=C; fm_wake_render_annotations "$1" )
+}
+
+fm_wake_render_annotations() {  # <deduped-raw-rows>
   local rows=$1 manifest status_key mode path prefix line suffix keep bytes
   local output='' used=0 omitted=0 read_omitted=0 annotation_marker marker_reserve=192
   local tail_bytes=8192 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0
-  local LC_ALL=C
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
     {
