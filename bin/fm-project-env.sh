@@ -89,7 +89,10 @@ is_work_tree() {
 store_files() {  # <store-project-dir>
   local root=$1 f
   find "$root" -type f -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-    case "${f##*/}" in .DS_Store) continue ;; esac
+    case "${f##*/}" in
+      .DS_Store) continue ;;
+      *.fm-adopt-tmp.*) continue ;;
+    esac
     printf '%s\n' "${f#"$root"/}"
   done
 }
@@ -227,7 +230,10 @@ EOF
 }
 
 cmd_adopt() {  # [--force] <project> <source-dir> <rel>...
-  local force=0 project source_in source rel src dst tmp
+  local force=0 project source_in source rel src dst tmp=''
+  trap 'rm -f -- "${tmp:-}" 2>/dev/null' EXIT
+  trap 'rm -f -- "${tmp:-}" 2>/dev/null; trap - EXIT; exit 130' INT
+  trap 'rm -f -- "${tmp:-}" 2>/dev/null; trap - EXIT; exit 143' TERM
   if [ "${1:-}" = --force ]; then
     force=1
     shift
@@ -259,15 +265,20 @@ cmd_adopt() {  # [--force] <project> <source-dir> <rel>...
     # Written through a temp file and renamed into place: the store is the
     # fleet's source of truth and lives outside every repo, so unlike a
     # worktree it can hold a temp name, and a failed write must never leave a
-    # truncated file that every later apply would propagate.
-    tmp="$dst.fm-adopt.$$"
+    # truncated file that every later apply would propagate. The temp uses the
+    # reserved .fm-adopt-tmp. marker that store_files() filters, so a crash
+    # between write and rename can never inject debris into the manifest.
+    tmp="$dst.fm-adopt-tmp.$$"
     if ! (umask 077; cat -- "$src" > "$tmp") || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$dst"; then
       rm -f -- "$tmp"
+      tmp=''
       warn "refused $rel: could not write it into the store; left $dst unchanged"
       return 1
     fi
+    tmp=''
     note "stored $project/$rel at $dst"
   done
+  trap - EXIT INT TERM
   return 0
 }
 
