@@ -1687,6 +1687,14 @@ exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
+  # git prints --git-path relative to its own working directory, so a checkout
+  # whose git dir is a plain `.git` (a secondmate home clone) answers
+  # `.git/info/exclude`, while a linked worktree answers an absolute common-dir
+  # path. fm-spawn.sh never cds into $WT, so a relative answer has to be
+  # anchored there - otherwise the entry lands in a stray .git next to the
+  # spawn's cwd and the launch checkout reads dirty to every sync and teardown
+  # dirty check.
+  case "$EXCL" in /*) ;; *) EXCL="$WT/$EXCL" ;; esac
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }

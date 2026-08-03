@@ -126,7 +126,16 @@ phase_spawn() {
   assert_grep "FM_HOME='$SUB_ABS'" "$LOG" "secondmate launch did not set FM_HOME to the subhome"
   assert_grep 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$LOG" "launch did not clear operational overrides"
   assert_grep 'FM_CONFIG_OVERRIDE=' "$LOG" "launch did not clear the config override"
-  assert_grep "$SUB_ABS/data/charter.md" "$LOG" "launch did not use the persistent charter"
+  # The launch reads the charter staged inside the subhome (bin/fm-spawn.sh brief
+  # staging), so no launch-visible input sits outside the checkout. It must still
+  # be this home's persistent charter, not an ephemeral or parent-home brief, and
+  # the staged copy must stay out of git's view so the home reads clean to every
+  # sync and teardown dirty check.
+  assert_grep "$SUB_ABS/.fm/brief.md" "$LOG" "launch did not use the staged persistent charter"
+  cmp -s "$SUB_ABS/data/charter.md" "$SUB_ABS/.fm/brief.md" \
+    || fail "the staged launch brief is not the persistent charter"
+  [ -z "$(git -C "$SUB_ABS" status --porcelain)" ] \
+    || fail "spawn left the secondmate home dirty: $(git -C "$SUB_ABS" status --porcelain)"
   assert_no_grep 'notify=' "$LOG" "secondmate codex launch included the parent turn-end notify hook"
   assert_no_grep 'turn-ended' "$LOG" "secondmate codex launch referenced a parent turn-ended signal"
   assert_no_grep 'treehouse get' "$LOG" "secondmate spawn ran a project treehouse get"
