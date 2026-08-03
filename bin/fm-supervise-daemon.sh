@@ -452,9 +452,10 @@ stale_marker_remove() {  # <window> <state>
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared pause was
 # first observed idle. Housekeeping ages it against PAUSE_RESURFACE_SECS (much
-# longer than a wedge) and re-surfaces the pause once per window. Recording is
-# create-if-absent so the timestamp is stable across a churny idle pane (many
-# distinct stale hashes map to one marker), keeping the cadence hash-immune.
+# longer than a wedge) and applies the pause-kind cadence decision once per window.
+# Recording is create-if-absent so the timestamp is stable across a churny idle
+# pane (many distinct stale hashes map to one marker), keeping the cadence
+# hash-immune.
 pause_marker_record() {  # <window> <state> - create if absent
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win" "$state")")
