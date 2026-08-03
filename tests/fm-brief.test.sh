@@ -651,8 +651,10 @@ test_context_discipline_rule_reaches_every_crewmate_scaffold() {
       "$id: ship brief lost the context-discipline rule"
     assert_grep "never partway through" "$brief" \
       "$id: ship brief lost the deliberate-boundary requirement"
-    assert_grep "goes into its durable file" "$brief" \
+    assert_grep "goes into a durable file" "$brief" \
       "$id: ship brief lost the durable-state-before-compacting requirement"
+    assert_grep "Rule 4 still governs the status file" "$brief" \
+      "$id: ship brief lost the status-file precedence over rule 4"
     assert_grep "No threshold, no cadence" "$brief" \
       "$id: ship brief lost the judgment-not-threshold requirement"
   done
@@ -662,6 +664,8 @@ test_context_discipline_rule_reaches_every_crewmate_scaffold() {
   brief="$home/data/brief-ctx-scout/brief.md"
   assert_grep "8. Keep your context small and compact it deliberately." "$brief" \
     "scout brief lost the context-discipline rule"
+  assert_grep "Rule 4 still governs the status file" "$brief" \
+    "scout brief lost the status-file precedence over rule 4"
   assert_grep "No threshold, no cadence" "$brief" \
     "scout brief lost the judgment-not-threshold requirement"
 
