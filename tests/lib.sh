@@ -226,6 +226,50 @@ fm_git_worktree() {
   git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
 }
 
+# --- validation-pipeline state database -------------------------------------
+
+# fm_test_pipeline_db <db> <repo working path> <review>...: build a stand-in for
+# the validation pipeline's state database, holding exactly the tables and
+# columns the wake ledger's critic resolver joins. Each <review> is
+# "<branch>|<provider>|<model>"; an empty provider or model writes SQL NULL, the
+# shape the real database uses when it recorded no such fact. Returns nonzero
+# when python3 is unavailable, which callers report as a skipped case.
+fm_test_pipeline_db() {
+  local db=$1 repo=$2
+  shift 2
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$db" "$repo" "$@" <<'PY'
+import sqlite3
+import sys
+
+db, repo, reviews = sys.argv[1], sys.argv[2], sys.argv[3:]
+conn = sqlite3.connect(db)
+conn.executescript(
+    "create table repos (id text primary key, working_path text);"
+    "create table runs (id text primary key, repo_id text, branch text);"
+    "create table agent_invocations ("
+    "  id text primary key, run_id text, step_name text,"
+    "  agent text, model_provider text, model text);"
+)
+conn.execute("insert into repos values ('r1', ?)", (repo,))
+for n, spec in enumerate(reviews):
+    branch, provider, model = spec.split("|")
+    run = "run%d" % n
+    conn.execute("insert into runs values (?, 'r1', ?)", (run, branch))
+    conn.execute(
+        "insert into agent_invocations values (?, ?, 'review', 'codex', ?, ?)",
+        ("inv%d" % n, run, provider or None, model or None),
+    )
+# A non-review invocation on the same run must never be read as a review.
+conn.execute(
+    "insert into agent_invocations"
+    " values ('other', 'run0', 'test', 'codex', 'nobody', 'no-model')"
+)
+conn.commit()
+conn.close()
+PY
+}
+
 # --- state/<id>.meta writers ------------------------------------------------
 
 # fm_write_meta <file> <key=val> ...: write the given key=val lines to a meta

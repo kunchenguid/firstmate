@@ -433,6 +433,11 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+LEDGER_CRITIC_BRANCH=
+if [ -n "$WT" ] && [ -d "$WT" ]; then
+  LEDGER_CRITIC_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  [ "$LEDGER_CRITIC_BRANCH" != HEAD ] || LEDGER_CRITIC_BRANCH=
+fi
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -2533,6 +2538,43 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+LEDGER_PATH=${FM_WAKE_LEDGER:-$DATA/wake-ledger.tsv}
+LEDGER_DERIVED=$(FM_WAKE_LEDGER="$LEDGER_PATH" \
+  "$SCRIPT_DIR/fm-wake-ledger.sh" derive "$STATE/$ID.status" 2>/dev/null) \
+  || LEDGER_DERIVED=""
+case "$LEDGER_DERIVED" in
+  'landed '*|'failed '*) ;;
+  *) LEDGER_DERIVED="landed assumed" ;;
+esac
+LEDGER_OUTCOME=${LEDGER_DERIVED%% *}
+LEDGER_SOURCE=${LEDGER_DERIVED##* }
+if [ "$FORCE" = "--force" ]; then
+  LEDGER_OUTCOME=abandoned
+  LEDGER_SOURCE=discarded
+fi
+LEDGER_ESCALATED=$(meta_value "$META" escalated)
+case "$LEDGER_ESCALATED" in
+  yes|no) ;;
+  *) LEDGER_ESCALATED=unknown ;;
+esac
+FM_WAKE_LEDGER="$LEDGER_PATH" \
+"$SCRIPT_DIR/fm-wake-ledger.sh" task "$ID" \
+  --outcome "$LEDGER_OUTCOME" \
+  --source "$LEDGER_SOURCE" \
+  --harness "$(meta_value "$META" harness)" \
+  --model "$(meta_value "$META" model)" \
+  --effort "$(meta_value "$META" effort)" \
+  --mode "$MODE" \
+  --role "$ROLE" \
+  --deliverable "$DELIVERABLE" \
+  --project "$PROJ" \
+  --backend "$BACKEND" \
+  --route "$(meta_value "$META" route)" \
+  --escalated "$LEDGER_ESCALATED" \
+  --critic-repo "$PROJ" \
+  --critic-branch "$LEDGER_CRITIC_BRANCH" \
+  --pr "$PR_URL" >/dev/null \
+  || echo "warning: wake ledger terminal line not recorded for $ID" >&2
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
