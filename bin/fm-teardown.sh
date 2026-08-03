@@ -32,8 +32,9 @@
 # reachable from a remote (or, for a local-only task, from the local default
 # branch). Any real edit, any staged-then-modified file, and any untracked file
 # changes that tree, so it matches nothing and the refusal stands. The only paths
-# left out of that tree are firstmate's own untracked scaffolding, the same paths
-# the dirty check already forgives (TOLERATED_UNTRACKED_SCAFFOLD owns the list).
+# left out of that tree are the EXACT untracked files firstmate itself wrote, the
+# same paths the dirty check already forgives (FM_WORKTREE_SCAFFOLD_PATHS owns the
+# list); anything else a crewmate authored beside them still refuses.
 # FM_TEARDOWN_STALE_CONTENT_SCAN_LIMIT (default 500) bounds the ancestry scan; a
 # too-small bound can only cost a refusal, never a false clearance.
 # local-only projects additionally accept work merged into the local default
@@ -680,6 +681,20 @@ remove_kimi_turnend_auth() {
   rm -f -- "$path"
 }
 
+# The EXACT paths firstmate itself writes inside a worktree. This array is the one
+# owner of that list: removal below, the dirty check's untracked tolerance, and the
+# stale-content proof all derive from it, so they can never disagree.
+# Exact paths only, never a directory. A directory entry would classify anything a
+# crewmate authors under it as firstmate's - a new `.claude/` command, agent, or
+# skill is real unlanded work, and the guard must still refuse it.
+FM_WORKTREE_SCAFFOLD_PATHS=(
+  .claude/settings.local.json
+  .opencode/plugins/fm-turn-end.js
+  .opencode/plugins/fm-busy-state.js
+  .fm-grok-turnend
+  .fm-kimi-turnend
+)
+
 # Remove firstmate's own per-task scaffolding from a worktree so a reused pool copy
 # cannot fire signals for a dead task. Any path the project TRACKS is left alone:
 # these names are firstmate's by convention only, and `.claude/settings.local.json`
@@ -688,8 +703,7 @@ remove_kimi_turnend_auth() {
 remove_worktree_scaffold_files() {
   local wt=$1 rel
   [ -n "$wt" ] && [ -d "$wt" ] || return 0
-  for rel in .claude/settings.local.json .opencode/plugins/fm-turn-end.js \
-    .opencode/plugins/fm-busy-state.js .fm-grok-turnend .fm-kimi-turnend; do
+  for rel in "${FM_WORKTREE_SCAFFOLD_PATHS[@]}"; do
     [ -e "$wt/$rel" ] || continue
     if git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
       continue
@@ -927,38 +941,30 @@ work_is_landed() {
 # keeps the scan cheap on a large history and can only ever cost a refusal.
 STALE_CONTENT_SCAN_LIMIT=${FM_TEARDOWN_STALE_CONTENT_SCAN_LIMIT:-500}
 
-# Firstmate's own worktree-resident scaffolding, which the dirty check forgives
-# while it is UNTRACKED: it is firstmate's material, not the project's work. This
-# is the single owner of that list - both the dirty filter and the content proof
-# below derive from it, so they can never disagree and leave a residual false
-# refusal on a copy carrying leftover scaffolding.
-TOLERATED_UNTRACKED_SCAFFOLD=(.claude .fm-grok-turnend .fm-kimi-turnend)
-
-# Echo the porcelain-line pattern that matches an untracked tolerated path.
+# Echo the porcelain-line pattern matching an UNTRACKED firstmate scaffold path.
+# The dirty check reads porcelain with --untracked-files=all, so every untracked
+# path arrives on its own line and this anchors on the whole path: a sibling the
+# crewmate authored under the same directory keeps its own line and still refuses.
 tolerated_untracked_pattern() {
   local rel alt=''
-  for rel in "${TOLERATED_UNTRACKED_SCAFFOLD[@]}"; do
-    alt="${alt:+$alt|}${rel//./\\.}(/|\$)"
+  for rel in "${FM_WORKTREE_SCAFFOLD_PATHS[@]}"; do
+    alt="${alt:+$alt|}${rel//./\\.}"
   done
-  printf '^\\?\\? (%s)' "$alt"
+  printf '^\\?\\? (%s)$' "$alt"
 }
 
-# Drop from an index COPY every tolerated scaffold path the project does not
-# track, so the content proof forgives exactly what the dirty filter forgives.
+# Drop from an index COPY every scaffold path the project does not track, so the
+# content proof forgives exactly what the dirty filter forgives - no more.
 # A path the project TRACKS is real project content and stays in the tree.
-drop_tolerated_untracked_scaffold() {
-  local index_copy=$1 rel staged
-  staged=$(GIT_INDEX_FILE="$index_copy" git -C "$WT" ls-files -- "${TOLERATED_UNTRACKED_SCAFFOLD[@]}" 2>/dev/null) || return 1
-  [ -n "$staged" ] || return 0
-  while IFS= read -r rel; do
-    [ -n "$rel" ] || continue
+drop_untracked_scaffold_from_index() {
+  local index_copy=$1 rel
+  for rel in "${FM_WORKTREE_SCAFFOLD_PATHS[@]}"; do
+    GIT_INDEX_FILE="$index_copy" git -C "$WT" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || continue
     ! git -C "$WT" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || continue
     # update-index --force-remove touches only the index copy; `git rm --cached`
     # would refuse a path whose staged content differs from HEAD.
     GIT_INDEX_FILE="$index_copy" git -C "$WT" update-index --force-remove -- "$rel" >/dev/null 2>&1 || return 1
-  done <<EOF
-$staged
-EOF
+  done
 }
 
 # Echo "<index-tree> <worktree-tree>": the tree of the current index, and the tree
@@ -988,7 +994,7 @@ worktree_content_trees() {
     GIT_INDEX_FILE="$index_copy" git -C "$WT" add -A >/dev/null 2>&1 || rc=1
   fi
   if [ "$rc" -eq 0 ]; then
-    drop_tolerated_untracked_scaffold "$index_copy" || rc=1
+    drop_untracked_scaffold_from_index "$index_copy" || rc=1
   fi
   if [ "$rc" -eq 0 ]; then
     work_tree=$(GIT_INDEX_FILE="$index_copy" git -C "$WT" write-tree 2>/dev/null) || rc=1
@@ -1289,7 +1295,10 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  # --untracked-files=all so an entirely untracked directory does not collapse to a
+  # single `?? .claude/` line. Only then can the tolerance below name exact paths,
+  # and a crewmate's new file beside firstmate's scaffolding still refuses.
+  if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi

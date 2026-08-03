@@ -48,6 +48,7 @@
 #   (aa) same, plus a genuine uncommitted edit                  -> REFUSE (safety)
 #   (ab) same, plus an untracked file                           -> REFUSE (safety)
 #   (ad) same, plus leftover firstmate hook scaffolding         -> ALLOW  (collision fix)
+#   (af) same, plus a crewmate's new file under .claude/        -> REFUSE (safety)
 #   (ae) same, but the project TRACKS that scaffold path        -> REFUSE (safety)
 #   (ac) same shape, content on no remote                       -> REFUSE (safety)
 #
@@ -1068,6 +1069,35 @@ test_stale_index_with_leftover_scaffold_allows() {
   grep -q "already landed" "$case_dir/stderr" \
     || fail "stale-index-scaffold: teardown did not clear the stale signal"
   pass "leftover firstmate scaffolding does not defeat the stale-content proof"
+}
+
+# (af) A crewmate's own new file under `.claude/`, beside firstmate's scaffolding.
+# A new slash command, agent, or skill lives exactly there and is real unlanded
+# work, so the tolerance must name firstmate's exact files and refuse this.
+test_stale_index_with_crewmate_file_under_claude_dir_refuses() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-claude-sibling)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  advance_branch_from_second_worktree "$case_dir"
+  git -C "$case_dir/wt" config core.excludesFile /dev/null
+  mkdir -p "$case_dir/wt/.claude/commands"
+  printf '%s\n' '{"hooks":{}}' > "$case_dir/wt/.claude/settings.local.json"
+  printf '%s\n' "# new slash command the crewmate wrote" > "$case_dir/wt/.claude/commands/new-cmd.md"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-index-claude-sibling: a crewmate's new file under .claude/ is unlanded work and must refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "stale-index-claude-sibling: no REFUSED line in stderr"
+  [ -f "$case_dir/wt/.claude/commands/new-cmd.md" ] \
+    || fail "stale-index-claude-sibling: teardown discarded the crewmate's file"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-index-claude-sibling: teardown completed despite real work"
+  pass "a crewmate's new file under .claude/ is never treated as firstmate scaffolding"
 }
 
 # (ae) The same path names, but the PROJECT tracks them and one is modified. Then
@@ -2816,6 +2846,7 @@ test_stale_index_from_second_worktree_allows
 test_stale_index_with_real_edit_refuses
 test_stale_index_with_untracked_file_refuses
 test_stale_index_with_leftover_scaffold_allows
+test_stale_index_with_crewmate_file_under_claude_dir_refuses
 test_stale_index_with_tracked_scaffold_path_refuses
 test_stale_index_content_not_on_any_remote_refuses
 test_gh_error_and_content_absent_refuses

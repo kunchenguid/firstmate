@@ -195,7 +195,8 @@ That styled capture is internal to the boolean detector only.
 A crewmate's per-task hooks are written to `state/<task-id>.claude-settings.json` and loaded with `claude --settings <path>`, never into the copy's `.claude/settings.local.json`.
 That path is a generic one some projects TRACK, so writing scaffolding there destroyed the project's own hook config and left the copy permanently dirty.
 Hooks supplied through `--settings` fire, and the project's own `.claude/settings.json` hooks still fire alongside them; a missing `--settings` path is fatal, so a secondmate launch (which writes no per-task hook file) carries no such flag.
-Because the wiring rides that flag, a raw claude launch command (the unverified-adapter escape hatch) gets the flag inserted right after its command word; if the operator already passes their own `--settings`, firstmate installs no hook file and does not arm the busy-state contract, since a second flag would silently lose and leave a busy record no hook could ever clear.
+Because the wiring rides that flag, a raw launch command (the unverified-adapter escape hatch) gets the flag inserted right after its command word, but only when that word is exactly `claude`.
+A wrapper such as `claude-yolo` keeps its argv untouched, and an operator who already passes their own `--settings` keeps theirs; in both cases firstmate installs no hook file and does not arm the busy-state contract, since wiring it cannot guarantee would leave a busy record no hook could ever clear.
 `docs/verification/supervision.md` "Claude hook delivery through `--settings`" owns the evidence.
 
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204; Stop-owned auto-arm revalidated 2026-07-24, Claude Code 2.1.219).**

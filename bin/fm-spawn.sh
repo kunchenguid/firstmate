@@ -1211,10 +1211,13 @@ fi
 # Claude's per-task turn-end and busy-state hooks are loaded by `--settings`, so
 # the wiring exists only on a launch that carries the flag. The template adds it;
 # a raw launch command is the operator's own string, so the flag is inserted right
-# after the command word. An operator who already passes --settings owns claude's
-# settings for that task - a second flag would silently lose to theirs, so
-# firstmate installs no wiring at all rather than arm a busy record no hook can
-# ever clear, exactly as it does for any other unverified adapter.
+# after the command word - but only when that word IS `claude`. A wrapper whose
+# name merely starts with claude is an unverified adapter firstmate does not know:
+# rewriting its argv could stop it launching at all, so firstmate leaves the
+# command untouched and installs no wiring. An operator who already passes
+# --settings owns claude's settings for that task - a second flag would silently
+# lose to theirs, so again firstmate installs no wiring at all rather than arm a
+# busy record no hook can ever clear.
 CLAUDE_HOOK_SETTINGS=0
 case "$HARNESS" in
   claude*)
@@ -1222,6 +1225,8 @@ case "$HARNESS" in
       :
     elif [ "$RAW_LAUNCH" != 1 ]; then
       CLAUDE_HOOK_SETTINGS=1
+    elif [ "$HARNESS" != claude ]; then
+      echo "warn: raw launch command '$HARNESS' is an unverified claude wrapper; firstmate leaves its argv untouched and installs no turn-end or busy-state hooks for this task" >&2
     else
       case " $LAUNCH " in
         *' --settings '*|*' --settings='*)
