@@ -99,13 +99,18 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # "Blocks: ...") to stdout before failing, so the fallback's correct output gets
 # appended to that garbage. Arithmetic under `set -u` then aborts on the stray
 # token (e.g. the word "File" read as an unset variable), which silently kills the
-# watcher mid-cycle. Detect the platform once and pick the right form.
-if [ "$(uname)" = Darwin ]; then
-  stat_mtime() { stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
-  stat_sig()   { stat -f '%z:%Fm' "$1" 2>/dev/null; }   # size:mtime signature
+# watcher mid-cycle. `uname` does not answer which stat this host actually runs
+# either - GNU coreutils installed ahead of /usr/bin makes a Darwin box speak
+# `-c` and read `-f` as that same filesystem dump (issue #1601), which would
+# collapse the pause fingerprint's deadline to a constant and strand a pause on
+# its long recheck. Probe the real binary once on a path that always exists and
+# bind the right form.
+if stat -c %Y / >/dev/null 2>&1; then
+  stat_mtime() { stat -c %Y "$1" 2>/dev/null; }        # epoch seconds of mtime
+  stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }    # size:mtime signature
 else
-  stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
-  stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
+  stat_mtime() { stat -f %m "$1" 2>/dev/null; }
+  stat_sig()   { stat -f '%z:%Fm' "$1" 2>/dev/null; }
 fi
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
@@ -217,14 +222,21 @@ pause_class_fingerprint() {  # <window> <task>
 }
 
 # Reuse an unchanged canonical paused verdict until a local invalidator or the
-# bounded long deadline changes. Only paused is cached: active, parked, failed,
-# unknown, and resumed states keep the ordinary conservative read path.
+# bounded long deadline changes. ONLY the run-step-sourced passive-monitor pause
+# is cacheable, because it is the only verdict whose own authority is the
+# attributed run: it cannot be invalidated by a run STARTING underneath it.
+# A status-log pause is merely the crew's last declared event, and a crew handed
+# to a validation appends nothing more (AGENTS.md's sparse-status contract) while
+# its pane, head, and semantic generation all hold still - caching that verdict
+# would serve `paused` over the true `working · run-step` and strand the wedge
+# timer for a whole recheck window. Everything else (active, parked, failed,
+# unknown, resumed, and status-log pauses) keeps the conservative fresh read.
 # Prints "<class> <source>" - both from fm-classify-lib.sh, the one owner of the
 # canonical-line vocabulary - because the caller must distinguish the current-
 # state owner's matched passive-monitor pause (source: run-step) from an
 # ordinary status-log pause, which keeps the live-worker fail-open below.
 paused_absorb_class_cached() {  # <window> <task>
-  local win=$1 task=$2 key cache fingerprint cached_fingerprint line class tmp
+  local win=$1 task=$2 key cache fingerprint cached_fingerprint line class src tmp
   key=$(pause_cache_key "$win")
   cache="$STATE/.paused-class-$key"
   fingerprint=$(pause_class_fingerprint "$win" "$task")
@@ -233,18 +245,20 @@ paused_absorb_class_cached() {  # <window> <task>
     if [ "$cached_fingerprint" = "$fingerprint" ]; then
       line=$(sed -n '2p' "$cache" 2>/dev/null || true)
       class=$(crew_absorb_class_line "$line")
-      if [ "$class" = paused ]; then
-        printf '%s %s' "$class" "$(crew_state_line_source "$line")"
+      src=$(crew_state_line_source "$line")
+      if [ "$class" = paused ] && [ "$src" = run-step ]; then
+        printf '%s %s' "$class" "$src"
         return
       fi
     fi
   fi
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
   class=$(crew_absorb_class_line "$line")
-  if [ "$class" = paused ]; then
+  src=$(crew_state_line_source "$line")
+  if [ "$class" = paused ] && [ "$src" = run-step ]; then
     tmp=$(umask 077; mktemp "$STATE/.paused-class.XXXXXX") || {
       rm -f "$cache"
-      printf '%s %s' "$class" "$(crew_state_line_source "$line")"
+      printf '%s %s' "$class" "$src"
       return
     }
     printf '%s\n%s\n' "$fingerprint" "$line" > "$tmp"
@@ -252,7 +266,7 @@ paused_absorb_class_cached() {  # <window> <task>
   else
     rm -f "$cache"
   fi
-  printf '%s %s' "$class" "$(crew_state_line_source "$line")"
+  printf '%s %s' "$class" "$src"
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through

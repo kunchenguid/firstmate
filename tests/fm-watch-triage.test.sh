@@ -765,6 +765,66 @@ test_passive_monitor_pause_cache_invalidates_on_resumed_run_generation() {
   pass "a resumed run's semantic generation invalidates the cached pause and restores working supervision"
 }
 
+# A status-log pause is only the crew's last declared EVENT. Once firstmate hands
+# that crew to a validation it appends nothing more, and its pane, head, and
+# semantic generation all hold still - so nothing local would ever invalidate a
+# cached copy of it. Caching it would therefore serve `paused` over the true
+# `working · run-step` and strand the wedge timer for a whole recheck window.
+test_status_log_pause_is_never_cached_over_a_later_run() {
+  local dir state fakebin out capture_file statusf verdict calls window key pane_hash sig pid i
+  dir=$(make_case status-log-pause-uncached); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  verdict="$dir/current-state"; calls="$dir/current-state.calls"; window="test:fm-held"
+  printf 'idle declared pause\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/held.meta"
+  printf 'paused: waiting on an external answer\n' > "$statusf"
+  printf '%s\n' 'state: paused · source: status-log · waiting on an external answer' > "$verdict"
+  : > "$calls"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle declared pause")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Already surfaced once through the live-worker fail-open, so this run exercises
+  # the unchanged-hash path rather than the first sight.
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  : > "$state/.paused-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE_FILE="$verdict" FM_FAKE_CREW_STATE_CALLS="$calls" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -s "$calls" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$calls" ] || { reap "$pid"; fail "status-log pause was never classified"; }
+  [ ! -e "$state/.paused-class-$key" ] || { reap "$pid"; fail "a status-log pause must never be cached"; }
+
+  # The run attaches with NO local invalidator: the crew appends no status, and
+  # head, busy-gen, and busy-state are all untouched, so only a fresh read can
+  # see it. Supervision must return to the wedge timer.
+  printf '%s\n' 'state: working · source: run-step · validating (running)' > "$verdict"
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ ! -e "$state/.paused-$key" ] && [ -s "$state/.stale-since-$key" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "attached run unexpectedly surfaced: $(cat "$out")"; }
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "attached run retained paused tracking"; }
+  [ -s "$state/.stale-since-$key" ] \
+    || { reap "$pid"; fail "a cached status-log pause hid the attached run and silenced its wedge timer"; }
+  reap "$pid"
+  pass "a status-log pause is never cached, so a run attaching underneath it still restores wedge detection"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -1915,6 +1975,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_passive_monitor_pause_cache_uses_long_cadence_without_wedge_reads
 test_passive_monitor_pause_cache_invalidates_on_resumed_run_generation
+test_status_log_pause_is_never_cached_over_a_later_run
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

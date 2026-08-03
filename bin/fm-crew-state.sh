@@ -177,7 +177,7 @@ nm_run_started_epoch() {  # <run-id>
 # and read `-f` as *filesystem* stat, which prints a multi-line dump instead of
 # an epoch (issue #1601). Probe the real binary once on a known path and bind
 # the right form, so the reader never guesses.
-if stat -c %Y . >/dev/null 2>&1; then
+if stat -c %Y / >/dev/null 2>&1; then
   file_mtime() { stat -c %Y "$1" 2>/dev/null; }
 else
   file_mtime() { stat -f %m "$1" 2>/dev/null; }
