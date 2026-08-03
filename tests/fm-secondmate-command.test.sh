@@ -730,8 +730,8 @@ test_the_handback_request_can_still_be_retried() {
     fm_pending_reply_set "$rec" request_turn_completed_epoch 2 || exit 1
     fm_pending_reply_set "$rec" grace_secs 0 || exit 1
     printf '%s\n' "$corr" > "$home/corr"
-    export PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0
-    fm_pending_reply_send_recovery "$home/state" "$corr"
+    PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_SEND_SETTLE=0 \
+      fm_pending_reply_send_recovery "$home/state" "$corr"
   )
   rc=$?
   [ "$rc" = 0 ] || fail "the handback request's own retry must be deliverable to a captain-commanded lane, got $rc"
