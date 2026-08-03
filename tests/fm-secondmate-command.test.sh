@@ -426,6 +426,25 @@ test_offramp_request_records_the_expected_report_and_asks_the_lane() {
   pass "offramp-request records and asks for an explicit position report"
 }
 
+# A re-request while the lane is mid-answer must not move the target, or the
+# report it is already writing would land at a path firstmate no longer accepts.
+test_offramp_request_reuses_an_unanswered_request() {
+  local home first second third report
+  home=$(make_fleet offramp-rerequest)
+  run_cmd "$home" onramp sm-alpha >/dev/null
+  first=$(run_cmd "$home" offramp-request sm-alpha | sed -n 's/^HANDBACK_REQUESTED: sm-alpha report=//p')
+  second=$(run_cmd "$home" offramp-request sm-alpha | sed -n 's/^HANDBACK_REQUESTED: sm-alpha report=//p')
+  [ "$first" = "$second" ] \
+    || fail "re-requesting an unanswered handback must keep the same report path"$'\n'"$first"$'\n'"$second"
+  printf 'position report\n' > "$first"
+  third=$(run_cmd "$home" offramp-request sm-alpha | sed -n 's/^HANDBACK_REQUESTED: sm-alpha report=//p')
+  [ "$third" != "$first" ] \
+    || fail "once a report exists, a new request must ask for a fresh position, not reuse the answered one"
+  report=$(sed -n 's/^report=//p' "$home/state/sm-alpha.command-handback" | tail -1)
+  [ "$report" = "$third" ] || fail "the record must pin the newest expected report path"
+  pass "a re-requested handback reuses an unanswered path and supersedes an answered one"
+}
+
 test_offramp_request_refuses_a_firstmate_commanded_lane() {
   local home out rc
   home=$(make_fleet offramp-request-wrong-state)
@@ -817,6 +836,7 @@ test_onramp_keeps_every_other_registry_field
 
 test_offramp_complete_refuses_without_a_position_report
 test_offramp_request_records_the_expected_report_and_asks_the_lane
+test_offramp_request_reuses_an_unanswered_request
 test_offramp_request_refuses_a_firstmate_commanded_lane
 test_offramp_complete_refuses_a_report_it_did_not_ask_for
 test_offramp_complete_refuses_a_stale_report

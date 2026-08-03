@@ -25,6 +25,9 @@
 #                   Already-captain is an idempotent success.
 # offramp-request   Ask a captain-commanded lane for the position report the
 #                   offramp requires, and record which report path is expected.
+#                   Re-requesting reuses an open request's path so a report the
+#                   lane is already writing is never orphaned; once that report
+#                   exists, a new request asks for a fresh position instead.
 # offramp-complete  Captain command -> firstmate command, refused until that
 #                   exact report exists and postdates the request.
 #
@@ -79,7 +82,7 @@ CREW_STATE_BIN="${FM_SECONDMATE_COMMAND_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-stat
 SEND_BIN="${FM_SECONDMATE_COMMAND_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 
 help_text() {
-  sed -n '2,57p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 usage() {
@@ -103,6 +106,21 @@ now_epoch() { date +%s; }
 
 file_mtime_epoch() {  # <path>
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true
+}
+
+# A path that does not exist yet, from a one-second-granularity stamp. Two
+# transfers inside the same second are ordinary (a handback re-request, an
+# offramp immediately followed by an onramp), and silently reusing one path
+# would let a fresh record overwrite the one it is supposed to supersede.
+unique_path() {  # <dir> <prefix> <suffix>
+  local dir=$1 prefix=$2 suffix=$3 base candidate n=2
+  base="$dir/$prefix-$(stamp_utc)"
+  candidate="$base$suffix"
+  while [ -e "$candidate" ] && [ "$n" -le 999 ]; do
+    candidate="$base-$n$suffix"
+    n=$((n + 1))
+  done
+  printf '%s' "$candidate"
 }
 
 # Every registered secondmate id, in registry order.
@@ -323,7 +341,7 @@ write_position_record() {  # <id> <home> <endpoint-note>; echoes the record path
   local id=$1 home=$2 endpoint=$3 record dir meta cid line
   dir="$DATA/$id"
   mkdir -p "$dir"
-  record="$dir/command-position-$(stamp_utc).md"
+  record=$(unique_path "$dir" command-position .md)
   {
     printf '# Command position record - %s\n\n' "$id"
     printf 'Recorded %s, at the transfer from firstmate command to captain command.\n' "$(iso_utc)"
@@ -409,20 +427,33 @@ cmd_onramp() {  # <id>
 handback_record_path() { printf '%s/%s.command-handback' "$STATE" "$1"; }
 
 cmd_offramp_request() {  # <id>
-  local id=$1 home report rec msg
+  local id=$1 home report rec msg prior
   require_registered "$id"
   fm_secondmate_command_is_captain "$id" "$REG" \
     || refuse "$id is not under captain command; there is nothing to hand back"
   require_valid_home "$id"
   home=$VALIDATED_LANE_HOME
-  report="$home/data/command-handback-$(stamp_utc).md"
   rec=$(handback_record_path "$id")
   mkdir -p "$STATE"
-  {
-    printf 'requested_epoch=%s\n' "$(now_epoch)"
-    printf 'requested_iso=%s\n' "$(iso_utc)"
-    printf 'report=%s\n' "$report"
-  } > "$rec"
+  # Re-requesting while an answer is still outstanding must not move the target:
+  # a second request that minted a fresh path would orphan a report the lane was
+  # already writing to the first one. Reuse the open request until it is answered;
+  # once the report exists, a new request deliberately asks for a fresh position.
+  prior=""
+  if [ -f "$rec" ]; then
+    prior=$(sed -n 's/^report=//p' "$rec" | tail -1)
+    [ -n "$prior" ] && [ ! -e "$prior" ] || prior=""
+  fi
+  if [ -n "$prior" ]; then
+    report="$prior"
+  else
+    report=$(unique_path "$home/data" command-handback .md)
+    {
+      printf 'requested_epoch=%s\n' "$(now_epoch)"
+      printf 'requested_iso=%s\n' "$(iso_utc)"
+      printf 'report=%s\n' "$report"
+    } > "$rec"
+  fi
   msg="Command handback requested: write your full position report to $report - what changed under captain command, what is under way, what is unresolved, and anything the main firstmate must know before it resumes supervising you - then append a status line pointing at that file."
   if FM_SECONDMATE_COMMAND_OPERATIONAL="$id" "$SEND_BIN" "$id" "$msg" >/dev/null 2>&1; then
     printf 'HANDBACK_REQUESTED: %s report=%s\n' "$id" "$report"
