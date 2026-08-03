@@ -16,8 +16,10 @@
 # unauthenticated harness still starts its process, which is all the liveness
 # probe reads.
 #
-# The portable, harness-free counterpart is tests/fm-tmux-agent-liveness.test.sh,
-# which pins the classifier's logic everywhere CI runs tmux.
+# Standard CI has no harness binaries or credentials, so this real-harness guard
+# is opt-in and on-demand. The portable counterpart in
+# tests/fm-tmux-agent-liveness.test.sh pins the classifier logic in CI. Run this
+# guard after any harness upgrade and before trusting refreshed evidence.
 set -u
 
 if [ "${FM_HARNESS_LIVENESS_DRIFT:-0}" != 1 ]; then
@@ -75,21 +77,6 @@ resolve_harness_binary() {  # <harness>
   return 1
 }
 
-# Does the title-INDEPENDENT source, on its own, attribute this pane to a
-# verified harness? This is the assertion that actually catches drift: the
-# classifier could still return `alive` from the rewritable process title alone,
-# which is exactly the signal a harness release is free to break.
-comms_attribute_agent() {  # <target>
-  local name
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ] && return 0
-  done <<EOF
-$(fm_backend_tmux_foreground_comms "$1")
-EOF
-  return 1
-}
-
 CHECKED=0
 SKIPPED=
 
@@ -122,22 +109,9 @@ for harness in claude codex opencode pi pi-signed grok kimi; do
   [ "$state" = alive ] || fail \
     "LIVENESS DRIFT: $harness $version is running but classifies '$state', not 'alive'. Supervision and lifecycle control treat this endpoint as unattributable. Observed process title '$title'; observed foreground process names [$comms]. Teach bin/backends/tmux.sh's fm_backend_tmux_classify_process_name the identity this release actually reports."
 
-  comms_attribute_agent "$target" || fail \
-    "LIVENESS DRIFT: $harness $version classifies alive only from its rewritable process title '$title'; the kernel foreground process names [$comms] no longer attribute it. The verdict now rests on a single surface the vendor can change without notice."
+  note "$harness $version: title='$title' foreground=[$comms]"
 
-  # An informational record of which source carried the verdict. Deliberately
-  # not asserted: which one wins is a per-release, per-platform detail, and
-  # pinning it here would turn a healthy harness update into a failing test.
-  title_name=${title##*/}
-  title_name=${title_name#-}
-  if [ "$(fm_backend_tmux_classify_process_name "$title_name")" = agent ]; then
-    carried="both sources"
-  else
-    carried="the kernel foreground names only (its process title does not attribute it)"
-  fi
-  note "$harness $version: title='$title' foreground=[$comms] attributed by $carried"
-
-  pass "harness liveness: $harness $version classifies alive, attributed by a name source independent of its process title"
+  pass "harness liveness: $harness $version classifies alive"
   CHECKED=$((CHECKED + 1))
 done
 

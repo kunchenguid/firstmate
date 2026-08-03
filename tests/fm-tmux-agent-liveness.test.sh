@@ -38,7 +38,7 @@ trap cleanup_all EXIT
 
 # A `tmux` shim on PATH so bin/backends/tmux.sh's bare `tmux` calls reach the
 # private socket and never touch the host's real sessions.
-mkdir -p "$LAB/shim" "$LAB/bin" "$LAB/wt"
+mkdir -p "$LAB/shim" "$LAB/bin" "$LAB/bin/claude" "$LAB/bin/decoy" "$LAB/wt"
 cat > "$LAB/shim/tmux" <<SH
 #!/usr/bin/env bash
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
@@ -51,7 +51,7 @@ export PATH
 # binary, never copies: a copied platform binary fails code-signing validation
 # and is killed on macOS arm64. The symlink name is what the kernel records as
 # the executable identity, which is exactly the signal under test.
-ln -s "$SLEEP_BIN" "$LAB/bin/claude"
+ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 
@@ -101,12 +101,10 @@ wait_for_state() {  # <target> <expected> [tries]
 title_classifies_agent() {  # <target>
   local name
   name=$(fm_backend_tmux_current_command "$1" 2>/dev/null)
-  name=${name##*/}
-  name=${name#-}
   [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ]
 }
 
-# Does the kernel foreground-process-group source, on its own, name one?
+# Does the foreground-process-group identity, including argv[0], name one?
 comms_classify_agent() {  # <target>
   local name
   while IFS= read -r name; do
@@ -114,6 +112,12 @@ comms_classify_agent() {  # <target>
     [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ] && return 0
   done <<EOF
 $(fm_backend_tmux_foreground_comms "$1")
+EOF
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ] && return 0
+  done <<EOF
+$(fm_backend_tmux_foreground_argv0s "$1")
 EOF
   return 1
 }
@@ -135,7 +139,7 @@ assert_sources_disagree() {  # <target> <label>
 # tmux and ps, while Linux can expose the symlink name through both, so the
 # version-string case below owns the cross-platform divergence assertion.
 
-new_window agent "$LAB/bin/claude" 900
+new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
@@ -150,12 +154,18 @@ pass "tmux liveness: a harness-named foreground process classifies alive"
 CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 if [ -n "$CC_BIN" ] &&
   printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c" &&
-  "$CC_BIN" -o "$LAB/bin/claude-spin" "$LAB/spin.c" 2>/dev/null; then
-  new_window titled bash -c "exec -a 2.1.220 '$LAB/bin/claude-spin'"
+  "$CC_BIN" -o "$LAB/bin/claude/2.1.220" "$LAB/spin.c" 2>/dev/null &&
+  "$CC_BIN" -o "$LAB/bin/decoy/2.1.220" "$LAB/spin.c" 2>/dev/null; then
+  new_window titled "$LAB/bin/claude/2.1.220"
   wait_for_state "$SESSION:titled" alive \
-    || fail "a harness whose reported name is a version string must still classify alive"
+    || fail "a version-named executable under a harness install path must classify alive"
   assert_sources_disagree "$SESSION:titled" "version-string process name"
-  pass "tmux liveness: a harness whose reported name is a version string still classifies alive from the other source"
+  pass "tmux liveness: a version-named executable under a harness install path classifies alive"
+
+  new_window path-decoy "$LAB/bin/decoy/2.1.220"
+  wait_for_state "$SESSION:path-decoy" ambiguous \
+    || fail "a version-named executable without a whole harness path component must stay ambiguous"
+  pass "tmux liveness: a version-named executable under a decoy path stays ambiguous"
 else
   echo "skip: no C compiler, so the version-string process-name case cannot build its executable"
 fi
@@ -190,7 +200,7 @@ pass "tmux liveness: an idle shell pane classifies dead"
 # `set -m` gives the background job its own process group, which is what an
 # interactive shell does for a job an exited agent left behind.
 
-new_window background bash -c "set -m; '$LAB/bin/claude' 900 & printf '%s\n' \"\$!\" > '$LAB/bg.pid'; exec /bin/sh"
+new_window background bash -c "set -m; '$LAB/bin/claude-link' 900 & printf '%s\n' \"\$!\" > '$LAB/bg.pid'; exec /bin/sh"
 bg_pid=
 for _ in $(seq 1 100); do
   [ -s "$LAB/bg.pid" ] && bg_pid=$(cat "$LAB/bg.pid") && break

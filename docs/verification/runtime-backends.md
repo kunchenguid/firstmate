@@ -59,13 +59,12 @@ Claude Code is the harness whose title no longer attributes it at all; every oth
 Codex reported `codex-aarch64-a` at 0.145.0 and `codex` at 0.146.0, and Kimi Code reported `kimi-code` as its foreground `comm` at 0.29.1 and `kimi` at 0.31.1, so these identities move between ordinary patch releases in both directions.
 That is the evidence for treating any single process name as a surface under vendor control rather than a stable contract.
 
-The two sources are independent because they read different fields.
-On macOS `#{pane_current_command}` resolves to the 16-byte kernel name a process rewrites when it sets its own title, while `ps -o comm=` reports the executable identity it was launched with; a title rewrite moves one and not the other.
-On Linux the two fields are read the other way round, which is why the classifier requires only that SOME source attributes the pane and never depends on a specific one.
+The process-title and foreground executable identities read different fields.
+On macOS the full install path can survive in `ps -o comm=`, while on Linux a version-named native executable can leave only that path in argv[0].
+The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
 
-Both are still process names, so neither is drift-proof on its own.
-`tests/fm-harness-liveness-drift-live-e2e.test.sh` is the guard: it relaunches every installed harness, refuses a pass unless the title-independent source attributes it, and names the harness and version in the failure.
-Re-run it after any harness upgrade and refresh the table above from its output:
+The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
+Run the live guard after any harness upgrade and before trusting or refreshing the table above:
 
 ```sh
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
@@ -74,8 +73,8 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 Bounded output from the run that produced the table:
 
 ```text
-ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive, attributed by a name source independent of its process title
-# claude 2.1.220 (Claude Code): title='2.1.220' foreground=[claude ] attributed by the kernel foreground names only (its process title does not attribute it)
+ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive
+# claude 2.1.220 (Claude Code): title='2.1.220' foreground=[claude ]
 # checked 7 installed harness(es)
 ```
 

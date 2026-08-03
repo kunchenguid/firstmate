@@ -53,16 +53,15 @@ Only `dead` and `missing` authorize recovery because a false dead result could l
 
 The probe reads two independent name sources and never depends on either alone.
 `#{pane_current_command}` is a process TITLE that a harness can rewrite, and Claude Code does: at 2.1.220 it reports its version string, which attributes nothing.
-The second source is the kernel `comm` of every process in the pane tty's foreground process group, which a title rewrite does not move.
+The second source is the executable identity of every process in the pane tty's foreground process group, using the full kernel `comm` path and argv[0] so either platform can retain an exact harness install-path component.
 Either source naming a verified harness is enough for `alive`, because a false `dead` is the one verdict that can start a duplicate agent on a live worktree, while a readable foreground process group settles the negative verdicts.
 
 Scoping the second source to the foreground process group rather than to the pane's descendants is deliberate: a harness-named process left running in the background of an otherwise idle pane must not read as an agent.
 The same scoping covers multi-process launchers without a special case, so the Pi Launcher path is attributed through its `pi-signed` wrapper and `pi` engine even though its title is the exact foreground command `pi-launcher`.
 Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
 
-Both sources are still process names, which a harness release can change in either direction.
-`tests/fm-harness-liveness-drift-live-e2e.test.sh` is the guard that keeps that from degrading silently: it relaunches every installed harness and fails, naming the harness and version, when one stops being attributed by a source independent of its title.
-Run it after any harness upgrade.
+The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
+Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
 
 ### Composer, busy state, and delivery
 

@@ -20,6 +20,8 @@
 # duplicating it, so the two consumers cannot drift apart.
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -153,26 +155,35 @@ fm_backend_tmux_current_command() {  # <target>
 # harness, `shell` for an idle login/interactive shell, `other` for anything
 # else. Keeping one classifier means the two independent name sources can never
 # drift into disagreeing about what a given name means.
-fm_backend_tmux_classify_process_name() {  # <name> -> agent|shell|other
-  case "$1" in
+fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
+  local path=$1 argv0=${2:-} base
+  base=${path##*/}
+  base=${base#-}
+  case "$base" in
     *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
-    *) printf 'other' ;;
+    *)
+      if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
+        printf 'agent'
+      else
+        printf 'other'
+      fi
+      ;;
   esac
 }
 
 # fm_backend_tmux_foreground_comms: the kernel-side names of every process in
-# <target>'s pane tty foreground process group, one per line, normalized to a
-# bare basename with any login-shell dash stripped. Empty on any failure.
+# <target>'s pane tty foreground process group, one full value per line.
+# Empty on any failure.
 #
 # This is the title-INDEPENDENT half of the liveness probe, and it exists
 # because `#{pane_current_command}` is a rewritable process title, not a
 # structural fact: tmux reads the same 16-byte kernel name field a harness
 # overwrites when it sets its own process title, so a harness that displays its
 # version there (Claude Code 2.1.220 reports `2.1.220`) becomes unattributable
-# on a signal firstmate never controls. `ps -o comm=` reads a different name
-# source on both supported platforms, so the two disagree only when one of them
-# has been rewritten - which is exactly when the other is needed.
+# on a signal firstmate never controls. The foreground executable identity uses
+# both `ps -o comm=` and argv[0], because macOS and Linux expose the identifying
+# install path through different fields.
 #
 # Scoping to the foreground process group rather than to the pane's descendants
 # is what keeps the probe honest in the other direction: a harness-named process
@@ -187,15 +198,29 @@ fm_backend_tmux_classify_process_name() {  # <name> -> agent|shell|other
 # must confirm exact window membership first, exactly as the classifier below
 # does, or they will describe some other pane entirely.
 fm_backend_tmux_foreground_comms() {  # <target>
-  local target=$1 tty pgid tpgid comm
+  local target=$1 tty pid pgid tpgid comm
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pgid=,tpgid=,comm= 2>/dev/null \
-    | while read -r pgid tpgid comm; do
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
-        comm=${comm##*/}
-        printf '%s\n' "${comm#-}"
+        printf '%s\n' "$comm"
+      done
+}
+
+fm_backend_tmux_foreground_argv0s() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args argv0
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+        args=${args#"${args%%[![:space:]]*}"}
+        argv0=${args%%[[:space:]]*}
+        [ -n "$argv0" ] && printf '%s\n' "$argv0"
       done
 }
 
@@ -217,7 +242,7 @@ fm_backend_tmux_foreground_comms() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground name fg_seen=0 fg_shell=0 fg_other=0
+  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -259,12 +284,21 @@ fm_backend_tmux_agent_state() {  # <target>
 $foreground
 EOF
 
+  argv0s=$(fm_backend_tmux_foreground_argv0s "$target")
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ]; then
+      printf 'alive'
+      return 0
+    fi
+  done <<EOF
+$argv0s
+EOF
+
   comm=$(fm_backend_tmux_current_command "$target") || {
     printf 'unreadable'
     return 0
   }
-  comm=${comm##*/}
-  comm=${comm#-}
   if [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
     printf 'alive'
     return 0
