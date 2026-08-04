@@ -18,6 +18,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project compact TOON bearings, live-verifying every named PR; `--include-prs` adds open-PR discovery |
 | `fm-liveness-snapshot.sh` | Measure endpoint presence, exact-worktree worker presence, output change, and harness-relative cumulative CPU delta |
+| `fm-evidence-run.sh`     | Run one evidence producer with total-time or progress-sensitive timeout and descendant reaping |
+| `fm-liveness-process-snapshot.sh` | Emit exact-CWD cumulative process evidence for the bounded liveness owner |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes       |
 | `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote secondmate home, using its job worker except for the doctor bootstrap |
 | `fm-remote-job-lib.sh`   | Shared bounded remote job queue, worker readiness, LaunchAgent contract, and filesystem-composed PATH |

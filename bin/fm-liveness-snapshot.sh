@@ -52,6 +52,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EVIDENCE_RUN="$SCRIPT_DIR/fm-evidence-run.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -101,13 +102,21 @@ command -v jq >/dev/null 2>&1 || { echo "fm-liveness-snapshot: jq not found" >&2
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness.XXXXXX") || exit 1
 OWNED_PIDS="$TMP/owned-pids"
 : > "$OWNED_PIDS"
+PENDING_EVIDENCE_PID=
 cleanup() {
-  local job_pid
+  local job_pid cleanup_pids
+  cleanup_pids=${PENDING_EVIDENCE_PID:-}
+  cleanup_pids="${cleanup_pids}${cleanup_pids:+
+}$(cat "$OWNED_PIDS" 2>/dev/null || true)"
+  cleanup_pids="${cleanup_pids}${cleanup_pids:+
+}$(jobs -pr 2>/dev/null || true)"
   while IFS= read -r job_pid; do
     [ -n "$job_pid" ] || continue
     kill "$job_pid" 2>/dev/null || true
     wait "$job_pid" 2>/dev/null || true
-  done < "$OWNED_PIDS"
+  done <<EOF
+$cleanup_pids
+EOF
   rm -rf -- "$TMP"
 }
 cleanup_signal() { local rc=$1; trap - EXIT HUP INT TERM; cleanup; exit "$rc"; }
@@ -121,81 +130,49 @@ forget_owned_pid() {  # <pid>
   mv "$OWNED_PIDS.next" "$OWNED_PIDS"
 }
 
-run_bounded_reaping() {  # <seconds> <command...>
-  local seconds=$1
-  shift
-  if command -v timeout >/dev/null 2>&1; then
-    exec timeout -k 1 "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout -k 1 "$seconds" "$@"
-  elif command -v perl >/dev/null 2>&1; then
-    exec perl -e 'my $t = shift; my $pid = 0; my $stopping = 0; my $stop = sub { my $code = shift; return if $stopping++; alarm 0; if ($pid > 0) { kill "TERM", $pid; kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", $pid; kill "KILL", -$pid; waitpid $pid, 0 } exit $code }; local $SIG{ALRM} = sub { $stop->(124) }; local $SIG{HUP} = sub { $stop->(129) }; local $SIG{INT} = sub { $stop->(130) }; local $SIG{TERM} = sub { $stop->(143) }; $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } alarm $t; waitpid $pid, 0; my $status = $?; alarm 0; exit(($status & 127) ? 128 + ($status & 127) : ($status >> 8))' "$seconds" "$@"
-  else
-    return 124
-  fi
-}
-
 meta_value() {  # <meta> <key>
   fm_meta_get "$1" "$2"
 }
 
-cpu_time_ms_awk='function ms(t, a,n,d,h,m,s) {
-  d=0
-  if (t ~ /-/) { split(t,a,"-"); d=a[1]+0; t=a[2] }
-  n=split(t,a,":")
-  if (n==3) { h=a[1]+0; m=a[2]+0; s=a[3]+0 }
-  else if (n==2) { h=0; m=a[1]+0; s=a[2]+0 }
-  else { h=0; m=0; s=a[1]+0 }
-  return int((((d*24+h)*60+m)*60+s)*1000+0.5)
-}'
-
 process_snapshot() {  # <output>
-  local output=$1 ps_raw cwd_raw pid_list
+  local output=$1
   if [ -n "${FM_LIVENESS_PROCESS_SNAPSHOT_BIN:-}" ]; then
-    "$FM_LIVENESS_PROCESS_SNAPSHOT_BIN" > "$output"
-    return $?
+    "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" "$FM_LIVENESS_PROCESS_SNAPSHOT_BIN" > "$output" 2>/dev/null
+  else
+    "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" "$SCRIPT_DIR/fm-liveness-process-snapshot.sh" > "$output" 2>/dev/null
   fi
-  command -v lsof >/dev/null 2>&1 || return 1
-  ps_raw="$TMP/ps.$$.raw"
-  cwd_raw="$TMP/lsof.$$.raw"
-  LC_ALL=C ps -Ao pid=,time=,comm= > "$ps_raw" 2>/dev/null || return 1
-  awk "$cpu_time_ms_awk
-    { pid=\$1; cpu=\$2; \$1=\$2=\"\"; sub(/^[[:space:]]+/,\"\"); print pid \"\\t\" ms(cpu) \"\\t\" \$0 }
-  " "$ps_raw" > "$TMP/ps.$$.tsv"
-  pid_list=$(awk -F '\t' 'BEGIN{sep=""} {printf "%s%s",sep,$1; sep=","}' "$TMP/ps.$$.tsv")
-  [ -n "$pid_list" ] || { : > "$output"; return 0; }
-  # `-p` binds every enumerated PID to its kernel-reported cwd. A task or pane
-  # label is never searched in the command line because it is not ownership.
-  # lsof returns non-zero when any requested PID is inaccessible, even while
-  # emitting complete cwd records for every accessible process. macOS ps -A
-  # includes root-owned processes such as launchd, so judge this evidence by
-  # the emitted records rather than by that aggregate exit status.
-  lsof -a -d cwd -p "$pid_list" -Fn > "$cwd_raw" 2>/dev/null || true
-  [ -s "$cwd_raw" ] || return 1
-  awk '
-    /^p[0-9]+$/ { pid=substr($0,2); next }
-    /^n/ && pid != "" { print pid "\t" substr($0,2) }
-  ' "$cwd_raw" > "$TMP/cwd.$$.tsv"
-  awk -F '\t' '
-    NR==FNR { cwd[$1]=$2; next }
-    ($1 in cwd) { print $1 "\t" $2 "\t" $3 "\t" cwd[$1] }
-  ' "$TMP/cwd.$$.tsv" "$TMP/ps.$$.tsv" > "$output"
 }
 
-endpoint_verdict() {  # <backend> <target> <label>
+bounded_endpoint_verdict() {  # <output> <backend> <target> <label>
+  local output=$1 backend=$2 target=$3 label=$4
   if [ -n "${FM_LIVENESS_ENDPOINT_BIN:-}" ]; then
-    "$FM_LIVENESS_ENDPOINT_BIN" "$@"
+    "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" "$FM_LIVENESS_ENDPOINT_BIN" "$backend" "$target" "$label" > "$output" 2>/dev/null
   else
-    fm_backend_agent_state "$1" "$2"
+    "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" bash -c ". \"\$1\"; fm_backend_agent_state \"\$2\" \"\$3\"" \
+      fm-endpoint-verdict "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" > "$output" 2>/dev/null
   fi
 }
 
-capture_output() {  # <backend> <target> <label>
+bounded_capture_output() {  # <output> <backend> <target> <label>
+  local output=$1 backend=$2 target=$3 label=$4
   if [ -n "${FM_LIVENESS_CAPTURE_BIN:-}" ]; then
-    "$FM_LIVENESS_CAPTURE_BIN" "$@"
+    "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" "$FM_LIVENESS_CAPTURE_BIN" "$backend" "$target" "$label" > "$output" 2>/dev/null
   else
-    fm_backend_capture "$1" "$2" 80 "$3"
+    "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" bash -c ". \"\$1\"; fm_backend_capture \"\$2\" \"\$3\" 80 \"\$4\"" \
+      fm-output-capture "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$label" > "$output" 2>/dev/null
   fi
+}
+
+monotonic_ms() {
+  if command -v perl >/dev/null 2>&1; then
+    perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.0f\n", clock_gettime(CLOCK_MONOTONIC) * 1000'
+    return
+  fi
+  if [ -r /proc/uptime ]; then
+    awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime
+    return
+  fi
+  return 1
 }
 
 hash_output() {
@@ -294,7 +271,7 @@ if [ ! -s "$METAS" ]; then
   NOW=${FM_LIVENESS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
   jq -n --arg observed "$NOW" --argjson interval "$INTERVAL_MS" \
     '{schema:"fm-liveness.v1",observed_at:$observed,interval_ms:$interval,
-      process_samples:{sample_1_readable:true,sample_2_readable:true},records:[]}'
+      sample_elapsed_ms:0,process_samples:{sample_1_readable:true,sample_2_readable:true},records:[]}'
   exit 0
 fi
 
@@ -302,7 +279,9 @@ SAMPLE1="$TMP/process-1.tsv"
 SAMPLE2="$TMP/process-2.tsv"
 PROCESS1_OK=true
 PROCESS2_OK=true
+TIMING_OK=true
 process_snapshot "$SAMPLE1" || { PROCESS1_OK=false; : > "$SAMPLE1"; }
+SAMPLE1_AT_MS=$(monotonic_ms) || { TIMING_OK=false; SAMPLE1_AT_MS=0; }
 
 REMOTE_JOBS="$TMP/remote-jobs.tsv"
 REMOTE_RECORDS="$TMP/remote-records.jsonl"
@@ -317,15 +296,20 @@ while IFS=$(printf '\t') read -r id harness worktree backend target route; do
   fi
   remote_file="$TMP/remote-$id.json"
   if [ -n "${FM_LIVENESS_REMOTE_BIN:-}" ]; then
-    run_bounded_reaping "$REMOTE_ACQUISITION_TIMEOUT" \
+    "$EVIDENCE_RUN" --total "$REMOTE_ACQUISITION_TIMEOUT" \
       "$FM_LIVENESS_REMOTE_BIN" "$id" "$INTERVAL_MS" > "$remote_file" 2>/dev/null &
   else
-    run_bounded_reaping "$REMOTE_ACQUISITION_TIMEOUT" \
+    "$EVIDENCE_RUN" --total "$REMOTE_ACQUISITION_TIMEOUT" \
       "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh liveness "$id" "$INTERVAL_MS" \
       > "$remote_file" 2>/dev/null &
   fi
-  remote_pid=$!
+  PENDING_EVIDENCE_PID=$!
+  if [ -n "${FM_LIVENESS_BEFORE_REGISTER_BIN:-}" ]; then
+    "$FM_LIVENESS_BEFORE_REGISTER_BIN" "$id" "$PENDING_EVIDENCE_PID"
+  fi
+  remote_pid=$PENDING_EVIDENCE_PID
   printf '%s\n' "$remote_pid" >> "$OWNED_PIDS"
+  PENDING_EVIDENCE_PID=
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$remote_pid" "$remote_file" "$harness" "$worktree" "$backend" "$target" >> "$REMOTE_JOBS"
 done < "$METAS"
 
@@ -339,7 +323,12 @@ while IFS=$(printf '\t') read -r id harness worktree backend target route; do
   if [ -z "$target" ]; then
     verdict=unreadable
   else
-    verdict=$(endpoint_verdict "$backend" "$target" "fm-$id" 2>/dev/null) || verdict=unreadable
+    endpoint_file="$TMP/endpoint-verdict.out"
+    if bounded_endpoint_verdict "$endpoint_file" "$backend" "$target" "fm-$id"; then
+      verdict=$(cat "$endpoint_file")
+    else
+      verdict=unreadable
+    fi
   fi
   case "$verdict" in alive|dead|missing|unreadable|ambiguous) ;; *) verdict=unreadable ;; esac
   printf '%s\t%s\n' "$id" "$verdict" >> "$ENDPOINTS"
@@ -347,7 +336,9 @@ while IFS=$(printf '\t') read -r id harness worktree backend target route; do
   readable=false
   case "$verdict" in
     alive|dead|ambiguous)
-      if output=$(capture_output "$backend" "$target" "fm-$id" 2>/dev/null); then
+      capture_file="$TMP/capture-output.out"
+      if bounded_capture_output "$capture_file" "$backend" "$target" "fm-$id"; then
+        output=$(cat "$capture_file")
         hash=$(printf '%s' "$output" | hash_output)
         readable=true
       fi
@@ -359,6 +350,13 @@ done < "$METAS"
 sleep_seconds=$(awk -v ms="$INTERVAL_MS" 'BEGIN { printf "%.3f", ms/1000 }')
 sleep "$sleep_seconds"
 process_snapshot "$SAMPLE2" || { PROCESS2_OK=false; : > "$SAMPLE2"; }
+SAMPLE2_AT_MS=$(monotonic_ms) || { TIMING_OK=false; SAMPLE2_AT_MS=0; }
+SAMPLE_ELAPSED_MS=$((SAMPLE2_AT_MS - SAMPLE1_AT_MS))
+if [ "$TIMING_OK" != true ] || [ "$SAMPLE_ELAPSED_MS" -le 0 ]; then
+  TIMING_OK=false
+  SAMPLE_ELAPSED_MS=1
+fi
+if [ "$TIMING_OK" = true ]; then SAMPLE_ELAPSED_JSON=$SAMPLE_ELAPSED_MS; else SAMPLE_ELAPSED_JSON=null; fi
 
 while IFS=$(printf '\t') read -r id remote_pid remote_file harness worktree backend target; do
   [ -n "$id" ] || continue
@@ -402,7 +400,9 @@ EOF
   hash2=
   case "$verdict" in
     alive|dead|ambiguous)
-      if output=$(capture_output "$backend" "$target" "fm-$id" 2>/dev/null); then
+      capture_file="$TMP/capture-output.out"
+      if bounded_capture_output "$capture_file" "$backend" "$target" "fm-$id"; then
+        output=$(cat "$capture_file")
         hash2=$(printf '%s' "$output" | hash_output)
         output2_ok=true
       fi
@@ -426,13 +426,13 @@ EOF
 
   delta=$((cpu2 - cpu1))
   [ "$delta" -ge 0 ] || delta=0
-  rate=$((delta * 60000 / INTERVAL_MS))
+  if [ "$TIMING_OK" = true ]; then rate=$((delta * 60000 / SAMPLE_ELAPSED_MS)); else rate=0; fi
   output_changed=false
   if [ "$output1_ok" = true ] && [ "$output2_ok" = true ] && [ "$hash1" != "$hash2" ]; then
     output_changed=true
   fi
   baseline=unverified
-  [ -z "$threshold" ] || baseline=verified
+  if [ -n "$threshold" ] && [ "$TIMING_OK" = true ]; then baseline=verified; fi
 
   if [ "$endpoint" = verified_absent ]; then
     activity=absent
@@ -477,8 +477,9 @@ NOW=${FM_LIVENESS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 jq -s \
   --arg observed "$NOW" \
   --argjson interval "$INTERVAL_MS" \
+  --argjson elapsed "$SAMPLE_ELAPSED_JSON" \
   --argjson p1 "$PROCESS1_OK" \
   --argjson p2 "$PROCESS2_OK" \
-  '{schema:"fm-liveness.v1",observed_at:$observed,interval_ms:$interval,
+  '{schema:"fm-liveness.v1",observed_at:$observed,interval_ms:$interval,sample_elapsed_ms:$elapsed,
     process_samples:{sample_1_readable:$p1,sample_2_readable:$p2},records:(sort_by(.id))}' \
   "$RECORDS"
