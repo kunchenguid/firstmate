@@ -831,9 +831,11 @@ wedge_alarm_via_osascript() {  # <summary>
 # delivers on this host short of a live away-mode incident. jq is already a
 # hard dependency of the herdr backend (bin/backends/herdr.sh), so parsing the
 # result here adds no new dependency; when jq is unavailable the exit code is
-# the only signal available and is trusted as before.
+# the only signal available and is still trusted, but that fallback now logs
+# that delivery went unverified rather than passing silently for the same
+# reason: an unverified channel must never read as a confirmed one.
 wedge_alarm_via_herdr() {  # <summary>
-  local summary=$1 rc out shown reason capture
+  local summary=$1 rc out verdict shown reason capture
   wedge_alarm_os_notifier_override herdr "$summary"
   rc=$?
   case "$rc" in
@@ -865,15 +867,21 @@ wedge_alarm_via_herdr() {  # <summary>
   # `shown` would become a multi-line $'true\ntrue' that matches neither '' nor
   # 'true' below, turning a genuinely delivered notification into a logged
   # failure with a garbled multi-line log line.
-  command -v jq >/dev/null 2>&1 || return 0
-  shown=$(printf '%s' "$out" \
-    | jq -n -r 'first(inputs | .result | objects | select(has("shown")) | .shown | tostring)' 2>/dev/null)
-  case "$shown" in
-    ''|true) return 0 ;;
-  esac
-  reason=$(printf '%s' "$out" \
-    | jq -n -r 'first(inputs | .result | objects | .reason | values | tostring)' 2>/dev/null)
-  [ -n "$reason" ] || reason=unknown
+  #
+  # `shown` and `reason` are taken from the SAME document in that one pass. Two
+  # independent passes could resolve to two different objects in a multi-object
+  # stream, and log a reason belonging to something other than the result that
+  # actually reported the failure.
+  command -v jq >/dev/null 2>&1 || {
+    log "wedge alarm: herdr notification delivery NOT verified - jq is unavailable, so herdr's own JSON result went unread; falling back to the exit code, which herdr can return 0 for without showing anything"
+    return 0; }
+  verdict=$(printf '%s' "$out" \
+    | jq -n -r 'first(inputs | .result | objects | select(has("shown")) | [(.shown | tostring), (.reason // "" | tostring)] | @tsv)' 2>/dev/null)
+  [ -n "$verdict" ] || return 0
+  shown=${verdict%%$'\t'*}
+  reason=${verdict#*$'\t'}
+  [ "$shown" != true ] || return 0
+  [ -n "$reason" ] && [ "$reason" != "$verdict" ] || reason=unknown
   # rate_limited, no_foreground_client, and busy are transient - herdr's own
   # NotificationShowReason enum documents them as conditions that clear on
   # their own, unlike disabled (a structural host limitation) or an unknown

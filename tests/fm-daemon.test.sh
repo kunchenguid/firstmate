@@ -1391,6 +1391,22 @@ assert_fake_herdr_ran() {  # <dir> <context>
     || fail "$2: the fake herdr recorded no invocation - a real system herdr may have run and posted a notification"
 }
 
+# A success verdict must not log a delivery failure. On a host without jq the
+# result cannot be parsed at all, so the one permitted line there is the
+# "not verified" notice - never a claim that anything failed or was delivered.
+assert_no_failure_logged() {  # <daemon-log> <context>
+  local daemon_log=$1 context=$2
+  if command -v jq >/dev/null 2>&1; then
+    [ ! -s "$daemon_log" ] || fail "$context: logged a spurious failure: $(cat "$daemon_log")"
+    return
+  fi
+  grep -F 'delivery NOT verified' "$daemon_log" >/dev/null \
+    || fail "$context: the jq-less path did not record that delivery went unverified: $(cat "$daemon_log" 2>/dev/null)"
+  grep -F 'not shown' "$daemon_log" >/dev/null \
+    && fail "$context: the jq-less path claimed a non-delivery it could not have observed: $(cat "$daemon_log")"
+  return 0
+}
+
 # The active-alert channel must not lie about delivery. `herdr notification
 # show` can exit 0 while its own structured result reports shown=false
 # (verified live on Linux/WSL2, herdr 0.7.4: reason "disabled" - the captain
@@ -1426,7 +1442,7 @@ test_wedge_alarm_herdr_shown_true_succeeds() {
   rc=$?
   assert_fake_herdr_ran "$dir" "shown=true verdict"
   [ "$rc" -eq 0 ] || fail "a genuine shown=true herdr result was treated as a failure ($rc)"
-  [ ! -s "$daemon_log" ] || fail "a genuine shown=true herdr result logged a spurious failure: $(cat "$daemon_log")"
+  assert_no_failure_logged "$daemon_log" "a genuine shown=true herdr result"
   pass "wedge_alarm_via_herdr: a shown=true herdr result succeeds without a spurious failure log"
 }
 
@@ -1456,26 +1472,35 @@ test_wedge_alarm_herdr_multi_object_stdout_is_bounded() {
 
 # The same bounding must not swallow a genuine failure that arrives after a
 # leading progress object, and the logged reason must stay a single line.
+#
+# The two documents deliberately carry DIFFERENT reasons. `shown` and `reason`
+# have to come from the same document: pulling them in two independent passes
+# reads the leading object's transient "busy" while the object that actually
+# reported the failure said "disabled", which downgrades a permanently broken
+# channel to a "try again later" log line and sends the captain chasing a
+# channel that will never deliver on this host.
 test_wedge_alarm_herdr_multi_object_not_shown_is_a_failure() {
   local dir daemon_log rc lines
   command -v jq >/dev/null 2>&1 || { pass "herdr multi-object shown=false verdict skipped without jq"; return; }
   dir="$TMP_ROOT/wedge-herdr-multi-object-not-shown"
   daemon_log="$dir/daemon.log"
   install_fake_herdr "$dir" \
-    '{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}
+    '{"id":"cli:notification:show","result":{"reason":"busy","type":"notification_progress"}}
 {"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}'
   PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
     wedge_alarm_via_herdr "away-mode WEDGED 900s"
   rc=$?
   assert_fake_herdr_ran "$dir" "multi-object shown=false verdict"
   [ "$rc" -ne 0 ] \
-    || fail "a shown=false result repeated across two JSON objects was treated as a successful delivery"
+    || fail "a shown=false result behind a leading progress object was treated as a successful delivery"
   grep -F 'not shown (reason: disabled)' "$daemon_log" >/dev/null \
-    || fail "a multi-object shown=false result did not log its reason: $(cat "$daemon_log" 2>/dev/null)"
+    || fail "the logged reason did not come from the document that reported the result: $(cat "$daemon_log" 2>/dev/null)"
+  grep -F 'busy' "$daemon_log" >/dev/null \
+    && fail "the logged reason came from the leading progress object, not the result that reported shown=false: $(cat "$daemon_log")"
   lines=$(wc -l < "$daemon_log")
   [ "$lines" -eq 1 ] \
     || fail "a multi-object shown=false result logged a garbled multi-line reason: $(cat "$daemon_log")"
-  pass "wedge_alarm_via_herdr: multi-object shown=false still fails with a single-line reason"
+  pass "wedge_alarm_via_herdr: multi-object shown=false fails with the reason from the reporting document"
 }
 
 # herdr's NotificationShowReason enum also allows rate_limited,
@@ -1536,9 +1561,41 @@ test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code() {
   rc=$?
   assert_fake_herdr_ran "$dir" "unparseable-output fallback"
   [ "$rc" -eq 0 ] || fail "unparseable herdr output was treated as a proven non-delivery ($rc)"
-  [ ! -s "$daemon_log" ] \
-    || fail "unparseable herdr output logged a false non-delivery: $(cat "$daemon_log")"
+  assert_no_failure_logged "$daemon_log" "unparseable herdr output"
   pass "wedge_alarm_via_herdr: output it cannot parse trusts the exit code instead of claiming non-delivery"
+}
+
+# A host without jq cannot read herdr's result at all, so the exit code is the
+# only signal left and is still trusted. Doing that SILENTLY would recreate the
+# exact invisibility this verification exists to remove: the captain would have
+# no record that delivery was never actually confirmed on a channel that can
+# exit 0 without showing anything. The fallback must say so, without ever
+# reading as a confirmed delivery or as an observed failure.
+test_wedge_alarm_herdr_missing_jq_logs_unverified() {
+  local dir daemon_log rc bare tool tool_path
+  dir="$TMP_ROOT/wedge-herdr-no-jq"
+  daemon_log="$dir/daemon.log"
+  install_fake_herdr "$dir" \
+    '{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}'
+  bare="$dir/nojqbin"
+  mkdir -p "$bare" || fail "could not create the jq-less bindir $bare"
+  ln -sf "$FAKE_HERDR_BIN/herdr" "$bare/herdr" || fail "could not link the fake herdr into $bare"
+  for tool in env bash cat date mktemp rm sleep; do
+    tool_path=$(command -v "$tool") || fail "the jq-less path test needs $tool on PATH"
+    ln -sf "$tool_path" "$bare/$tool" || fail "could not link $tool into $bare"
+  done
+  PATH="$bare" command -v jq >/dev/null 2>&1 \
+    && fail "the jq-less bindir still exposes jq, so this test would not exercise the fallback"
+  PATH="$bare" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  assert_fake_herdr_ran "$dir" "jq-less fallback"
+  [ "$rc" -eq 0 ] || fail "the jq-less path must trust the exit code, not invent a non-delivery ($rc)"
+  grep -F 'delivery NOT verified' "$daemon_log" >/dev/null \
+    || fail "the jq-less path left no record that delivery went unverified: $(cat "$daemon_log" 2>/dev/null)"
+  grep -F 'not shown' "$daemon_log" >/dev/null \
+    && fail "the jq-less path claimed a non-delivery it could not have parsed: $(cat "$daemon_log")"
+  pass "wedge_alarm_via_herdr: a jq-less host records that delivery went unverified instead of passing silently"
 }
 
 test_wedge_alarm_herdr_notifier_pid_survives_capture() {
@@ -2143,6 +2200,7 @@ test_wedge_alarm_herdr_multi_object_not_shown_is_a_failure
 test_wedge_alarm_herdr_transient_reason_avoids_permanent_advice
 test_wedge_alarm_herdr_permanent_reason_keeps_command_channel_advice
 test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code
+test_wedge_alarm_herdr_missing_jq_logs_unverified
 test_wedge_alarm_herdr_notifier_pid_survives_capture
 test_wedge_alarm_herdr_capture_is_not_leaked
 test_wedge_alarm_command_channel_receives_summary
