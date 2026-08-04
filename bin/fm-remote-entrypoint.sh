@@ -7,12 +7,12 @@
 # then stages it for the Firstmate-owned remote job worker. It never accepts a
 # shell command string.
 #
-# Every command, including fm-remote-doctor.sh, is staged after the worker is
-# ready. The shared job library installs or repairs the Aqua LaunchAgent from
-# this SSH bootstrap only when needed, then the target runs in the account's GUI
-# session. On Darwin, a missing Aqua session fails before staging with the
-# doctor-actionable console-login diagnostic. Linux uses the same queue and
-# worker shape without an Aqua requirement.
+# The readiness-owning fm-remote-doctor.sh runs in this plain SSH bootstrap so
+# check mode can inspect worker gaps without changing them and --fix can repair
+# them. Every other command is staged after the worker is ready. On Darwin, a
+# missing Aqua session fails before staging with the doctor-actionable
+# console-login diagnostic. Linux uses the same queue and worker shape without
+# an Aqua requirement.
 #
 # stdin is captured as bounded job input. The completed worker result is relayed
 # with stdout and stderr kept separate and its exit status preserved. An SSH
@@ -81,6 +81,26 @@ COMMAND_PATH="$ROOT/bin/$COMMAND"
 unset HOME
 ACCOUNT_HOME=$(CDPATH='' cd ~ 2>/dev/null && pwd -P) || die "cannot resolve the remote account home"
 fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+if [ "$COMMAND" = fm-remote-doctor.sh ]; then
+  fm_remote_job_build_child_path "$ROOT" >/dev/null
+  DOCTOR_ENV=(
+    /usr/bin/env -i
+    "PATH=$FM_REMOTE_JOB_CHILD_PATH"
+    "HOME=$ACCOUNT_HOME"
+    "FM_HOME=$HOME_PATH"
+    "FM_ROOT_OVERRIDE=$ROOT"
+    FM_REMOTE_DOCTOR_BOOTSTRAP=1
+  )
+  if [ -n "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" ]; then
+    DOCTOR_ENV+=("FM_REMOTE_JOB_PLATFORM_OVERRIDE=$FM_REMOTE_JOB_PLATFORM_OVERRIDE")
+  fi
+  if [ -n "${FM_REMOTE_JOB_STATE_ROOT:-}" ]; then
+    DOCTOR_ENV+=("FM_REMOTE_JOB_STATE_ROOT=$FM_REMOTE_JOB_STATE_ROOT")
+  fi
+  trap - EXIT
+  rm -rf -- "$TMP"
+  exec "${DOCTOR_ENV[@]}" "$COMMAND_PATH" "${ARGV[@]:1}"
+fi
 GIT_BIN=$(fm_remote_job_operator_tool git 2>/dev/null || true)
 [ -n "$GIT_BIN" ] || die "required tool git does not resolve on the remote operator PATH; install git there or put a wrapper for it in ~/.local/bin using the recipe in docs/remote-secondmates.md"
 "$GIT_BIN" -C "$ROOT" ls-files --error-unmatch "bin/$COMMAND" >/dev/null 2>&1 \

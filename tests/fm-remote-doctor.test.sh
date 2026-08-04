@@ -514,6 +514,9 @@ pass "a non-darwin host skips launch agents and starts its herdr server directly
 new_case Linux with-herdr no-gui
 MANAGER_BIN="$CASE_HOME/.nvm/versions/node/v24/bin"
 mkdir -p "$MANAGER_BIN"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$MANAGER_BIN/codex"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$MANAGER_BIN/grok"
+chmod +x "$MANAGER_BIN/codex" "$MANAGER_BIN/grok"
 mv "$CASE_BIN/tasks-axi" "$MANAGER_BIN/tasks-axi"
 doctor
 expect_code 1 "$DOCTOR_RC" "a version-manager-only required tool was reported ready"
@@ -527,6 +530,14 @@ assert_grep '# Firstmate remote tool wrapper v1' "$CASE_HOME/.local/bin/tasks-ax
   "the generated wrapper is not marked Firstmate-owned"
 assert_grep "$MANAGER_BIN/tasks-axi" "$CASE_HOME/.local/bin/tasks-axi" \
   "the generated wrapper does not execute the discovered absolute target"
+assert_absent "$CASE_HOME/.local/bin/codex" "--fix wrapped an alternate harness when claude already satisfied readiness"
+assert_absent "$CASE_HOME/.local/bin/grok" "--fix wrapped an alternate harness when claude already satisfied readiness"
+
+rm -f "$CASE_BIN/claude"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not wrap one discoverable harness when none resolved"
+assert_present "$CASE_HOME/.local/bin/codex" "--fix did not create the first needed harness wrapper"
+assert_absent "$CASE_HOME/.local/bin/grok" "--fix created more harness wrappers than readiness requires"
 
 mv "$CASE_BIN/treehouse" "$MANAGER_BIN/treehouse"
 mkdir -p "$CASE_HOME/.local/bin"

@@ -198,27 +198,19 @@ for candidate in "${MANAGER_DIRS[@]}" "${OPTIONAL_DIRS[@]}"; do
 done
 pass "the entrypoint composes a deduplicated discovered child PATH (kept $PRESENT_CHECKED existing, omitted $ABSENT_CHECKED absent)"
 
+WORKER_PID=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
+kill -TERM "$WORKER_PID"
+for _ in $(seq 1 100); do
+  [ ! -f "$TMP_ROOT/remote-jobs/worker.pid" ] && break
+  sleep 0.05
+done
+assert_absent "$TMP_ROOT/remote-jobs/worker.pid" "the worker did not stop for the doctor bootstrap fixture"
 set +e
-out=$(
-  # The entrypoint's subprocess invokes this indirectly through export -f.
-  # shellcheck disable=SC2329
-  command() {
-    if [ "${1:-}" = -v ] && [ "${2:-}" = git ]; then return 1; fi
-    builtin command "$@"
-  }
-  if command -v git >/dev/null 2>&1; then
-    fail "the missing-git fixture still resolved git"
-  fi
-  export -f command
-  fm_on ios fm-remote-doctor.sh 2>&1
-)
-rc=$?
+out=$(fm_on ios fm-remote-doctor.sh 2>&1)
 set -e
-[ "$rc" -ne 0 ] || fail "the entrypoint passed when git did not resolve on its operator PATH"
-assert_contains "$out" 'required tool git does not resolve on the remote operator PATH' "the entrypoint did not name the missing prerequisite"
-assert_contains "$out" '/.local/bin' "the entrypoint did not point at the wrapper escape hatch"
-assert_not_contains "$out" 'command is not tracked by the configured remote root' "missing git was misreported as an untracked command"
-pass "the entrypoint gives an actionable missing-git diagnostic"
+assert_contains "$out" 'check remote-job-worker=fixable:' "read-only doctor did not report the stopped worker"
+assert_absent "$TMP_ROOT/remote-jobs/worker.pid" "read-only doctor repaired the stopped worker"
+pass "read-only doctor inspects worker gaps over plain SSH without repair"
 
 # The doctor's readiness verdict depends on the host it runs on, which is this
 # developer's or runner's real account here, so this transport test asserts only
@@ -231,6 +223,8 @@ assert_contains "$out" "path=$EXPECTED_PATH" "the remote doctor did not report t
 assert_contains "$out" 'entrypoint=yes' "the remote doctor did not detect its entrypoint launch"
 assert_contains "$out" 'required git=' "the remote doctor did not report the required tool"
 pass "the remote doctor reports the same PATH the entrypoint hands its children"
+
+fm_on ios fm-probe-two.sh >/dev/null
 
 DOCTOR_BIN="$TMP_ROOT/doctor-bin"
 DOCTOR_HOME="$TMP_ROOT/doctor-home"

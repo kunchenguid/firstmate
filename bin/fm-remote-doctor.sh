@@ -4,10 +4,10 @@
 # Usage:
 #   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix]
 #
-# Run it through fm-on.sh so the fixed entrypoint stages this doctor in the
-# remote job worker. The command reports the PATH it inherits rather than
-# recomposing it, so the entrypoint and worker remain the single owners of that
-# runtime environment.
+# Run it through fm-on.sh so the fixed entrypoint invokes this readiness owner
+# over its plain SSH bootstrap. The command reports the same filesystem-composed
+# PATH used by worker jobs while retaining authority to inspect and repair the
+# worker itself.
 #
 # A remote second mate always runs on the Herdr backend in the dedicated
 # fm-remote session. Its account therefore needs the Firstmate-owned Aqua Herdr
@@ -321,17 +321,17 @@ repair_tool_wrapper() { # <tool>
   resolved=$(command -v "$tool" 2>/dev/null || true)
   [ -n "$resolved" ] && [ -x "$resolved" ] && return 0
   target=$(fm_remote_job_manager_tool "${HOME:-}" "$tool" 2>/dev/null || true)
-  [ -n "$target" ] || return 0
+  [ -n "$target" ] || return 1
   wrapper="${HOME:-}/.local/bin/$tool"
   if [ -e "$wrapper" ] || [ -L "$wrapper" ]; then
     if ! wrapper_is_firstmate_owned "$wrapper"; then
       fix_report "required-$tool" failed "$wrapper exists and is not Firstmate-owned"
-      return 0
+      return 1
     fi
   else
     if ! mkdir -p "${HOME:-}/.local/bin" 2>/dev/null || [ -L "${HOME:-}/.local/bin" ]; then
       fix_report "required-$tool" failed "cannot create ${HOME:-}/.local/bin"
-      return 0
+      return 1
     fi
   fi
   tmp="${HOME:-}/.local/bin/.$tool.tmp.$$"
@@ -339,19 +339,27 @@ repair_tool_wrapper() { # <tool>
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' '# Firstmate remote tool wrapper v1'
     printf 'exec %q "$@"\n' "$target"
-  } > "$tmp" || { rm -f -- "$tmp"; fix_report "required-$tool" failed "cannot write $wrapper"; return 0; }
+  } > "$tmp" || { rm -f -- "$tmp"; fix_report "required-$tool" failed "cannot write $wrapper"; return 1; }
   if ! chmod 0700 "$tmp" || ! mv -f -- "$tmp" "$wrapper"; then
     rm -f -- "$tmp"
     fix_report "required-$tool" failed "cannot publish $wrapper"
-    return 0
+    return 1
   fi
   fix_report "required-$tool" applied "linked the discoverable version-manager tool at $wrapper"
 }
 
 repair_required_wrappers() {
-  local tool
-  for tool in "${REQUIRED_TOOLS[@]}" "${HARNESS_TOOLS[@]}"; do
-    repair_tool_wrapper "$tool"
+  local tool resolved
+  for tool in "${REQUIRED_TOOLS[@]}"; do
+    repair_tool_wrapper "$tool" || true
+  done
+  for tool in "${HARNESS_TOOLS[@]}"; do
+    resolved=$(command -v "$tool" 2>/dev/null || true)
+    [ -z "$resolved" ] || [ ! -x "$resolved" ] || return 0
+  done
+  for tool in "${HARNESS_TOOLS[@]}"; do
+    fm_remote_job_manager_tool "${HOME:-}" "$tool" >/dev/null 2>&1 || continue
+    repair_tool_wrapper "$tool" && return 0
   done
 }
 

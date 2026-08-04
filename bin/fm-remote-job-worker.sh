@@ -402,6 +402,14 @@ worker_cleanup_output_capture() { # <job-dir> <stdout-reader> <stderr-reader>
   rm -f -- "$job/.stdout.pipe" "$job/.stderr.pipe"
 }
 
+worker_capture_output() { # <fifo> <destination>
+  local fifo=$1 destination=$2
+  {
+    head -c "$FM_REMOTE_JOB_MAX_BYTES"
+    cat >/dev/null
+  } < "$fifo" > "$destination"
+}
+
 worker_run_job() { # <account-home> <job-dir>
   local account_home=$1 job=$2 root home command command_path git_bin rc deadline remaining
   local stdout_pipe stderr_pipe stdout_reader stderr_reader
@@ -452,9 +460,9 @@ worker_run_job() { # <account-home> <job-dir>
     worker_publish_result "$job" 125
     return
   }
-  head -c "$FM_REMOTE_JOB_MAX_BYTES" < "$stdout_pipe" > "$job/stdout" &
+  worker_capture_output "$stdout_pipe" "$job/stdout" &
   stdout_reader=$!
-  head -c "$FM_REMOTE_JOB_MAX_BYTES" < "$stderr_pipe" > "$job/stderr" &
+  worker_capture_output "$stderr_pipe" "$job/stderr" &
   stderr_reader=$!
   child_env=(
     /usr/bin/env -i
