@@ -876,10 +876,20 @@ pass "unreachable remote state remains unknown with no local respawn or failover
 
 # Retirement delegates its safety check to the remote home. An in-flight child
 # record refuses cleanup and preserves both machines' durable routes.
+# A sibling remote secondmate workspace shares fm-remote and must survive every
+# refusal and the eventual successful retirement of ios.
 # This fixture overrides FM_ROOT for transport, so teardown's root-owned guard
 # sees the fixture root rather than the source script path used by fm-send.
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
 resolve_ios_pending
+SIBLING_CREATE=$("$REMOTE_ROOT/bin/herdr" workspace create --cwd "$REMOTE_ROOT" \
+  --label 2ndmate-macos --no-focus --session fm-remote)
+SIBLING_WORKSPACE=$(printf '%s' "$SIBLING_CREATE" | jq -r '.result.workspace.workspace_id')
+SIBLING_PANE=$(printf '%s' "$SIBLING_CREATE" | jq -r '.result.root_pane.pane_id')
+[ -n "$SIBLING_WORKSPACE" ] && [ "$SIBLING_WORKSPACE" != null ] \
+  || fail "the shared-session sibling fixture did not create a workspace"
+[ -n "$SIBLING_PANE" ] && [ "$SIBLING_PANE" != null ] \
+  || fail "the shared-session sibling fixture did not create a pane"
 printf 'kind=ship\n' > "$REMOTE_HOME/state/child.meta"
 rm -rf "$PARENT/state/procevent"
 : > "$PARENT/state/procevent"
@@ -964,6 +974,13 @@ fi
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
-pass "remote retirement refuses child work, then cleans the same host through existing guards"
+jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
+  any(.workspaces[]; .workspace_id == $workspace and .label == "2ndmate-macos")
+  and any(.tabs[]; .workspace_id == $workspace and .pane_id == $pane)
+' "$HERDR_STATE" >/dev/null \
+  || fail "remote retirement removed the sibling secondmate workspace or pane from fm-remote"
+assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote session"
+assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
+pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
 
 echo "ALL TESTS PASSED"

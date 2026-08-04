@@ -24,6 +24,8 @@
 # A private parent-route state directory stores only the remote secondmate
 # agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
+# Retirement closes only this secondmate's panes or workspace and never
+# stops fm-remote or removes a sibling secondmate's workspace or panes.
 #
 # The optional launch traceparent is the per-task W3C trace-context carrier the
 # PARENT home resolved for this secondmate; this host only delivers it to the
