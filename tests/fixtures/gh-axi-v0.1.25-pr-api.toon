@@ -2,6 +2,7 @@ number: 72
 state: open
 title: "feat: observed contract fixture"
 merged: false
+draft: false
 labels[1]{id,name,color,default,description}:
   4307347680,bug,d73a4a,true,Something isn't working
 head:

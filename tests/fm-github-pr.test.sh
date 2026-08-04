@@ -46,6 +46,8 @@ case "$*" in
           -e 's/^  4307347680,bug,d73a4a,true,.*$/  bogus/' \
           "$FM_TEST_API_FIXTURE"
         ;;
+      draft) sed 's/^draft: false$/draft: true/' "$FM_TEST_API_FIXTURE" ;;
+      missing-draft) sed '/^draft: false$/d' "$FM_TEST_API_FIXTURE" ;;
       timeout-child)
         (sleep 2; printf leaked > "$FM_TEST_CHILD_MARKER") &
         sleep 30
@@ -63,7 +65,11 @@ case "$*" in
     esac
     ;;
   "api PUT /repos/ruby-dlee/firstmate/pulls/72/merge --field sha=c9cbe79154013efcec9aa478f1476d0eff6c63df --field merge_method=squash")
-    cat "$FM_TEST_MERGE_FIXTURE"
+    case "${FM_TEST_MERGE_MODE:-merged}" in
+      merged) cat "$FM_TEST_MERGE_FIXTURE" ;;
+      enqueued) cat "$FM_TEST_QUEUE_FIXTURE" ;;
+      *) exit 98 ;;
+    esac
     ;;
   *)
     echo "unsupported fake gh-axi invocation: $*" >&2
@@ -78,8 +84,31 @@ export FM_TEST_GH_AXI_LOG="$TMP_ROOT/gh-axi.log"
 export FM_TEST_API_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-pr-api.toon"
 export FM_TEST_CLAIMS_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-pr-view-full.toon"
 export FM_TEST_MERGE_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-merge-success.toon"
+export FM_TEST_QUEUE_FIXTURE="$ROOT/tests/fixtures/gh-axi-merge-enqueued.toon"
 PR_URL=https://github.com/ruby-dlee/firstmate/pull/72
 BOOLEAN_PR_URL=https://github.com/ruby-dlee/firstmate/pull/1
+
+call_merge_exact() {
+  python3 - "$ADAPTER" "$PR_URL" <<'PY'
+import importlib.util
+import json
+import sys
+
+path, url = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("firstmate_github_pr_test_adapter", path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+result = module.merge_exact(
+    url,
+    "c9cbe79154013efcec9aa478f1476d0eff6c63df",
+    "squash",
+    None,
+    None,
+)
+print(json.dumps(result, sort_keys=True))
+PY
+}
 
 test_snapshot_uses_observed_contract() {
   local output
@@ -141,6 +170,59 @@ test_public_merge_subcommand_is_unavailable() {
   pass "GitHub mutation is unavailable from the read-only adapter CLI"
 }
 
+test_merge_outcomes_distinguish_merged_from_enqueued() {
+  local output
+  : > "$FM_TEST_GH_AXI_LOG"
+  output=$(FM_TEST_MERGE_MODE=merged call_merge_exact) \
+    || fail "confirmed merge response was rejected"
+  assert_contains "$output" '"merged": true' \
+    "confirmed merge did not report merged"
+  assert_contains "$output" '"outcome": "merged"' \
+    "confirmed merge did not carry the merged outcome"
+  assert_contains "$output" '"observed_state": "merged"' \
+    "confirmed merge did not carry the merged observed state"
+  [ "$(wc -l < "$FM_TEST_GH_AXI_LOG" | tr -d ' ')" -eq 2 ] \
+    || fail "confirmed merge did not perform exactly one draft preflight"
+
+  : > "$FM_TEST_GH_AXI_LOG"
+  output=$(FM_TEST_MERGE_MODE=enqueued call_merge_exact) \
+    || fail "successful queue submission was reported as a failure"
+  assert_contains "$output" '"merged": false' \
+    "queue submission claimed the PR was merged"
+  assert_contains "$output" '"outcome": "enqueued/unconfirmed"' \
+    "queue submission did not report enqueued/unconfirmed"
+  assert_contains "$output" '"observed_state": "open"' \
+    "queue submission did not report the independent open readback"
+  assert_no_grep '"merged": true' <(printf '%s\n' "$output") \
+    "queue submission claimed merged success"
+  [ "$(wc -l < "$FM_TEST_GH_AXI_LOG" | tr -d ' ')" -eq 3 ] \
+    || fail "queue submission did not perform one draft preflight and one readback"
+  sed -n '3p' "$FM_TEST_GH_AXI_LOG" \
+    | grep -qxF 'api /repos/ruby-dlee/firstmate/pulls/72' \
+    || fail "queue readback did not inspect the same PR"
+  pass "GitHub merge outcomes distinguish merged from enqueued/unconfirmed"
+}
+
+test_draft_refusal_is_fail_closed() {
+  local mode rc
+  for mode in draft missing-draft; do
+    : > "$FM_TEST_GH_AXI_LOG"
+    set +e
+    FM_TEST_API_MODE=$mode call_merge_exact \
+      > "$TMP_ROOT/$mode.out" 2> "$TMP_ROOT/$mode.err"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "$mode merge preflight"
+    assert_no_grep '^api PUT ' "$FM_TEST_GH_AXI_LOG" \
+      "$mode merge preflight reached the merge mutation"
+  done
+  assert_grep 'because it is a draft' "$TMP_ROOT/draft.err" \
+    "draft refusal did not identify the draft"
+  assert_grep 'draft status could not be determined' "$TMP_ROOT/missing-draft.err" \
+    "missing draft status was not refused explicitly"
+  pass "draft and undeterminable draft status both refuse before merge"
+}
+
 test_malformed_array_subtrees_fail_closed() {
   local mode rc
   for mode in malformed-array malformed-fieldless-array; do
@@ -200,7 +282,9 @@ test_boolean_pr_numbers_fail_closed() {
 if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
     test_malformed_array_subtrees_fail_closed|test_boolean_pr_numbers_fail_closed|\
-    test_timeout_reaps_gh_axi_children|test_public_merge_subcommand_is_unavailable)
+    test_timeout_reaps_gh_axi_children|test_public_merge_subcommand_is_unavailable|\
+    test_merge_outcomes_distinguish_merged_from_enqueued|\
+    test_draft_refusal_is_fail_closed)
       "$FM_TEST_CASE"
       exit 0
       ;;
@@ -214,6 +298,8 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-3 ]; then
   test_boolean_pr_numbers_fail_closed
   test_timeout_reaps_gh_axi_children
   test_public_merge_subcommand_is_unavailable
+  test_merge_outcomes_distinguish_merged_from_enqueued
+  test_draft_refusal_is_fail_closed
   exit 0
 fi
 
@@ -223,3 +309,5 @@ test_public_merge_subcommand_is_unavailable
 test_malformed_array_subtrees_fail_closed
 test_boolean_pr_numbers_fail_closed
 test_timeout_reaps_gh_axi_children
+test_merge_outcomes_distinguish_merged_from_enqueued
+test_draft_refusal_is_fail_closed

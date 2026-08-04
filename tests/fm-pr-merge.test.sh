@@ -14,6 +14,7 @@ PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 API_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-pr-api.toon"
 CLAIMS_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-pr-view-full.toon"
 MERGE_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-merge-success.toon"
+QUEUE_FIXTURE="$ROOT/tests/fixtures/gh-axi-merge-enqueued.toon"
 PR_URL=https://github.com/ruby-dlee/firstmate/pull/72
 HEAD_SHA=c9cbe79154013efcec9aa478f1476d0eff6c63df
 BASE_SHA=68f014697d0eea733a4e7c0294becff4e76c7bcf
@@ -43,10 +44,29 @@ install_gh_axi_fake() {
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "api /repos/ruby-dlee/firstmate/pulls/72")
-    sed \
-      -e "s/c9cbe79154013efcec9aa478f1476d0eff6c63df/$FM_TEST_HEAD/" \
-      -e "s/68f014697d0eea733a4e7c0294becff4e76c7bcf/$FM_TEST_BASE/" \
-      "$FM_TEST_API_FIXTURE"
+    case "${FM_TEST_DRAFT_MODE:-ready}" in
+      ready)
+        sed \
+          -e "s/c9cbe79154013efcec9aa478f1476d0eff6c63df/$FM_TEST_HEAD/" \
+          -e "s/68f014697d0eea733a4e7c0294becff4e76c7bcf/$FM_TEST_BASE/" \
+          "$FM_TEST_API_FIXTURE"
+        ;;
+      draft)
+        sed \
+          -e 's/^draft: false$/draft: true/' \
+          -e "s/c9cbe79154013efcec9aa478f1476d0eff6c63df/$FM_TEST_HEAD/" \
+          -e "s/68f014697d0eea733a4e7c0294becff4e76c7bcf/$FM_TEST_BASE/" \
+          "$FM_TEST_API_FIXTURE"
+        ;;
+      missing)
+        sed \
+          -e '/^draft: false$/d' \
+          -e "s/c9cbe79154013efcec9aa478f1476d0eff6c63df/$FM_TEST_HEAD/" \
+          -e "s/68f014697d0eea733a4e7c0294becff4e76c7bcf/$FM_TEST_BASE/" \
+          "$FM_TEST_API_FIXTURE"
+        ;;
+      *) exit 98 ;;
+    esac
     ;;
   "pr view")
     [ "$*" = "pr view 72 --repo ruby-dlee/firstmate --full" ] || exit 97
@@ -60,11 +80,15 @@ case "${1:-} ${2:-}" in
         exit 96
         ;;
     esac
-    [ "${FM_TEST_MERGE_MODE:-success}" = success ] || {
-      echo "error: HEAD WAS MODIFIED" >&2
-      exit 41
-    }
-    cat "$FM_TEST_MERGE_FIXTURE"
+    case "${FM_TEST_MERGE_MODE:-success}" in
+      success) cat "$FM_TEST_MERGE_FIXTURE" ;;
+      enqueued) cat "$FM_TEST_QUEUE_FIXTURE" ;;
+      race)
+        echo "error: HEAD WAS MODIFIED" >&2
+        exit 41
+        ;;
+      *) exit 98 ;;
+    esac
     ;;
   *)
     echo "unsupported fake gh-axi invocation: $*" >&2
@@ -118,6 +142,7 @@ run_pr_merge() {
   FM_TEST_API_FIXTURE="$API_FIXTURE" \
   FM_TEST_CLAIMS_FIXTURE="$CLAIMS_FIXTURE" \
   FM_TEST_MERGE_FIXTURE="$MERGE_FIXTURE" \
+  FM_TEST_QUEUE_FIXTURE="$QUEUE_FIXTURE" \
   FM_TEST_HEAD="${FM_TEST_HEAD:-$HEAD_SHA}" \
   FM_TEST_BASE="$BASE_SHA" \
     "$PR_MERGE" "$@"
@@ -130,6 +155,10 @@ test_exact_head_is_recorded_and_merged_atomically() {
   output=$(run_pr_merge "$case_dir" task-x1 "$PR_URL") \
     || fail "exact-head merge should succeed"
   assert_contains "$output" '"merged": true' "merge success was not confirmed"
+  assert_contains "$output" '"outcome": "merged"' \
+    "merge success did not report the merged outcome"
+  assert_contains "$output" '"observed_state": "merged"' \
+    "merge success did not report the merged observed state"
   assert_grep "pr=$PR_URL" "$case_dir/state/task-x1.meta" \
     "PR URL was not recorded before merge"
   assert_grep "pr_head=$HEAD_SHA" "$case_dir/state/task-x1.meta" \
@@ -143,6 +172,51 @@ test_exact_head_is_recorded_and_merged_atomically() {
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "merge regressed to the unguarded gh-axi pr merge surface"
   pass "merge records and atomically submits the exact crosschecked SHA"
+}
+
+test_merge_queue_acceptance_is_enqueued_unconfirmed() {
+  local case_dir output
+  case_dir=$(make_case merge-queue)
+  : > "$case_dir/gh-axi.log"
+  output=$(FM_TEST_MERGE_MODE=enqueued run_pr_merge "$case_dir" task-x1 "$PR_URL") \
+    || fail "successful queue submission was reported as a merge failure"
+  assert_contains "$output" '"merged": false' \
+    "queue submission claimed the PR was merged"
+  assert_contains "$output" '"outcome": "enqueued/unconfirmed"' \
+    "queue submission did not report enqueued/unconfirmed"
+  assert_contains "$output" '"observed_state": "open"' \
+    "queue submission did not report the independent open readback"
+  case "$output" in
+    *'"merged": true'*) fail "queue submission claimed merged success" ;;
+  esac
+  [ "$(grep -c '^api /repos/ruby-dlee/firstmate/pulls/72$' "$case_dir/gh-axi.log")" -eq 5 ] \
+    || fail "queue submission did not add exactly one independent PR readback"
+  pass "merge queue acceptance is enqueued/unconfirmed, not merged or failed"
+}
+
+test_draft_and_undeterminable_status_refuse_before_merge() {
+  local mode case_dir rc
+  for mode in draft missing; do
+    case_dir=$(make_case "draft-$mode")
+    : > "$case_dir/gh-axi.log"
+    set +e
+    FM_TEST_DRAFT_MODE=$mode run_pr_merge "$case_dir" task-x1 "$PR_URL" \
+      > "$case_dir/out" 2> "$case_dir/err"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "draft mode $mode"
+    assert_grep "pr=$PR_URL" "$case_dir/state/task-x1.meta" \
+      "draft mode $mode did not preserve PR metadata before refusal"
+    assert_grep "pr_head=$HEAD_SHA" "$case_dir/state/task-x1.meta" \
+      "draft mode $mode did not preserve the live head before refusal"
+    assert_no_grep '^api PUT ' "$case_dir/gh-axi.log" \
+      "draft mode $mode reached the merge mutation"
+  done
+  assert_grep 'because it is a draft' "$TMP_ROOT/draft-draft/err" \
+    "draft merge refusal did not name the draft"
+  assert_grep 'draft status could not be determined' "$TMP_ROOT/draft-missing/err" \
+    "undeterminable draft status did not fail closed"
+  pass "draft and undeterminable draft status refuse after recording, before merge"
 }
 
 test_missing_or_malformed_ledger_blocks_merge() {
@@ -259,6 +333,8 @@ test_missing_meta_and_malformed_url_fail_fast() {
 }
 
 test_exact_head_is_recorded_and_merged_atomically
+test_draft_and_undeterminable_status_refuse_before_merge
+test_merge_queue_acceptance_is_enqueued_unconfirmed
 test_missing_or_malformed_ledger_blocks_merge
 test_changed_head_blocks_before_merge
 test_post_verify_race_is_rejected_by_github

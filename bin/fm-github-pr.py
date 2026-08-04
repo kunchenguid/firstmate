@@ -10,6 +10,10 @@ Observed against gh-axi 0.1.25 on 2026-08-02:
 * ``gh-axi api PUT .../merge --field sha=<sha> --field merge_method=<method>``
   emits root ``sha``, ``merged``, and ``message`` fields on success.
 
+A successful merge request can enqueue a pull request instead of merging it.
+That outcome is reported as ``enqueued/unconfirmed`` only after a fresh API
+read confirms that the same reviewed head remains open and unmerged.
+
 The adapter deliberately does not pass raw-gh ``--json`` or ``-q`` flags.
 It fails closed when gh-axi exits nonzero or its observed document shape is
 missing, duplicated, malformed, or inconsistent with the requested PR.
@@ -372,6 +376,7 @@ def fetch_pr_api(url: str) -> dict[str, Any]:
     actual_number = _required(values, "number")
     state = _required(values, "state")
     merged = _required(values, "merged")
+    draft = values.get(("draft",))
     head_sha = _required(values, "head", "sha")
     head_ref = _required(values, "head", "ref")
     head_repo = _required(values, "head", "repo", "full_name")
@@ -389,6 +394,8 @@ def fetch_pr_api(url: str) -> dict[str, Any]:
         )
     if state not in {"open", "closed"} or not isinstance(merged, bool):
         raise GitHubContractError("gh-axi returned invalid PR state fields")
+    if draft is not None and not isinstance(draft, bool):
+        raise GitHubContractError("gh-axi returned an invalid draft field")
     if not isinstance(head_sha, str) or SHA_RE.fullmatch(head_sha) is None:
         raise GitHubContractError("gh-axi returned an invalid head.sha")
     if not isinstance(base_sha, str) or SHA_RE.fullmatch(base_sha) is None:
@@ -409,6 +416,7 @@ def fetch_pr_api(url: str) -> dict[str, Any]:
         "number": number,
         "state": state,
         "merged": merged,
+        "draft": draft,
         "head_sha": head_sha,
         "head_ref": head_ref,
         "head_repo": head_repo,
@@ -463,6 +471,26 @@ def merge_exact(
         raise GitHubContractError("expected merge head must be one 40-hex SHA")
     if method not in {"merge", "squash", "rebase"}:
         raise GitHubContractError("merge method must be merge, squash, or rebase")
+
+    pre_merge = fetch_pr_api(url)
+    draft = pre_merge["draft"]
+    if draft is not False:
+        if draft is True:
+            raise GitHubContractError(
+                f"refusing to merge {owner}/{repo}#{number} because it is a draft"
+            )
+        raise GitHubContractError(
+            f"refusing to merge {owner}/{repo}#{number} because its draft status "
+            "could not be determined"
+        )
+    if pre_merge["head_sha"] != expected_sha:
+        raise GitHubContractError("PR head changed before the merge request")
+    if pre_merge["merged"] or pre_merge["state"] != "open":
+        raise GitHubContractError(
+            f"refusing to merge PR with state={pre_merge['state']!r}, "
+            f"merged={pre_merge['merged']!r}"
+        )
+
     arguments = [
         "api",
         "PUT",
@@ -481,11 +509,43 @@ def merge_exact(
     merge_sha = _required(values, "sha")
     merged = _required(values, "merged")
     message = _required(values, "message")
-    if not isinstance(merge_sha, str) or SHA_RE.fullmatch(merge_sha) is None:
+    if not isinstance(merged, bool):
+        raise GitHubContractError("gh-axi merge response has an invalid merged field")
+    if not isinstance(message, str) or not message:
+        raise GitHubContractError("gh-axi merge response has an invalid message")
+    if merged:
+        if not isinstance(merge_sha, str) or SHA_RE.fullmatch(merge_sha) is None:
+            raise GitHubContractError("gh-axi merge response has an invalid sha")
+        return {
+            "sha": merge_sha,
+            "merged": True,
+            "message": message,
+            "outcome": "merged",
+            "observed_state": "merged",
+        }
+
+    if merge_sha is not None and (
+        not isinstance(merge_sha, str) or SHA_RE.fullmatch(merge_sha) is None
+    ):
         raise GitHubContractError("gh-axi merge response has an invalid sha")
-    if merged is not True or not isinstance(message, str) or not message:
-        raise GitHubContractError("gh-axi merge response did not confirm merged: true")
-    return {"sha": merge_sha, "merged": True, "message": message}
+
+    observed = fetch_pr_api(url)
+    if observed["head_sha"] != expected_sha:
+        raise GitHubContractError(
+            "PR head changed before the queued merge request could be confirmed"
+        )
+    if observed["merged"] or observed["state"] != "open":
+        raise GitHubContractError(
+            "gh-axi merge response did not confirm merged: true and GitHub "
+            f"readback reported state={observed['state']!r}, merged={observed['merged']!r}"
+        )
+    return {
+        "sha": merge_sha,
+        "merged": False,
+        "message": message,
+        "outcome": "enqueued/unconfirmed",
+        "observed_state": "open",
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
