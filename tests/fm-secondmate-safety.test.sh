@@ -1259,7 +1259,7 @@ test_home_seed_refuses_operational_dirs_outside_subhome() {
   pass "home seeding refuses operational directories outside the subhome"
 }
 
-test_home_seed_refuses_symlinked_leaf_files() {
+test_home_seed_refuses_unsafe_leaf_files() {
   local home subhome sink err leaf target expected
   home="$TMP_ROOT/symlink-leaf-home"
   err="$TMP_ROOT/symlink-leaf.err"
@@ -1269,7 +1269,7 @@ test_home_seed_refuses_symlinked_leaf_files() {
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink leaf seed test"
 
-  for leaf in data/projects.md data/charter.md .fm-secondmate-home; do
+  for leaf in data/projects.md data/charter.md .fm-secondmate-home .fm-secondmate-parent; do
     subhome="$TMP_ROOT/symlink-leaf-subhome-${leaf//\//-}"
     sink="$home/data/symlink-leaf-${leaf//\//-}"
     rm -rf "$subhome" "$sink"
@@ -1290,7 +1290,21 @@ test_home_seed_refuses_symlinked_leaf_files() {
     [ "$target" = "$expected" ] || fail "seed overwrote outside symlink target for $leaf"
     [ ! -f "$subhome/.fm-secondmate-home" ] || [ "$leaf" = ".fm-secondmate-home" ] || fail "seed marked subhome after symlinked leaf refusal"
   done
-  pass "home seeding refuses symlinked leaf files"
+  for leaf in data/projects.md data/charter.md .fm-secondmate-home .fm-secondmate-parent; do
+    subhome="$TMP_ROOT/directory-leaf-subhome-${leaf//\//-}"
+    rm -rf "$subhome"
+    git clone --quiet "$ROOT" "$subhome"
+    mkdir -p "$subhome/$leaf"
+    if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+      fail "seed accepted directory leaf $leaf"
+    fi
+    grep -F 'secondmate leaf file must be a regular file:' "$err" >/dev/null \
+      || fail "seed did not explain directory leaf refusal for $leaf"
+    [ -d "$subhome/$leaf" ] || fail "seed changed directory leaf $leaf"
+    [ ! -f "$subhome/.fm-secondmate-home" ] \
+      || fail "seed published an identity marker after directory leaf refusal for $leaf"
+  done
+  pass "home seeding refuses symlinked and non-regular leaf files"
 }
 
 test_secondmate_spawn_requires_seeded_matching_home() {
@@ -2640,7 +2654,7 @@ test_home_seed_skips_initialized_existing_no_mistakes_projects
 test_home_seed_refuses_uninitialized_existing_no_mistakes_project
 test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome
-test_home_seed_refuses_symlinked_leaf_files
+test_home_seed_refuses_unsafe_leaf_files
 test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta

@@ -292,6 +292,10 @@ validate_seed_leaf_files() {
       return 1
     fi
     [ -e "$path" ] || continue
+    if [ ! -f "$path" ]; then
+      echo "error: secondmate leaf file must be a regular file: $path" >&2
+      return 1
+    fi
     abs_path=$(resolved_path "$path")
     case "$abs_path" in
       "$abs_home"/*) ;;
