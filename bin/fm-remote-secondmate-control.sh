@@ -62,30 +62,59 @@ validate_home() { # <id> [allow-absent]
 
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
 
+remote_endpoint_load() {
+  local id=$1 herdr_session
+  REMOTE_ENDPOINT_ERROR=
+  REMOTE_ENDPOINT_META=$(meta_path "$id")
+  if ! fm_backend_validate_task_endpoint "$REMOTE_ENDPOINT_META" "$id" 2>/dev/null; then
+    REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint metadata is invalid; refusing access until it is explicitly migrated"
+    return 1
+  fi
+  REMOTE_ENDPOINT_BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  REMOTE_ENDPOINT_TARGET=$FM_BACKEND_VALIDATED_TARGET
+  if [ "$REMOTE_ENDPOINT_BACKEND" != herdr ]; then
+    REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded on backend '$REMOTE_ENDPOINT_BACKEND', expected 'herdr'; refusing access until it is explicitly migrated"
+    return 1
+  fi
+  herdr_session=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" herdr_session 2>/dev/null || true)
+  if [ "$herdr_session" != "$REMOTE_HERDR_SESSION" ]; then
+    REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded in Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'; refusing access until it is explicitly migrated"
+    return 1
+  fi
+  case "$REMOTE_ENDPOINT_TARGET" in
+    "$REMOTE_HERDR_SESSION":?*) ;;
+    *)
+      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint target '$REMOTE_ENDPOINT_TARGET' is outside Herdr session '$REMOTE_HERDR_SESSION'; refusing access until it is explicitly migrated"
+      return 1
+      ;;
+  esac
+}
+
+remote_endpoint_require() {
+  remote_endpoint_load "$1" || die "$REMOTE_ENDPOINT_ERROR"
+}
+
 state_value() { # <id>; prints recovery-grade state
-  local id=$1 meta backend target
+  local id=$1 meta
   meta=$(meta_path "$id")
   [ -f "$meta" ] && [ ! -L "$meta" ] || { printf 'missing\n'; return 0; }
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  [ -n "$target" ] || { printf 'unreadable\n'; return 0; }
-  fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf 'unreadable\n'
+  if ! remote_endpoint_load "$id"; then
+    printf 'error: %s\n' "$REMOTE_ENDPOINT_ERROR" >&2
+    printf 'unverified\n'
+    return 0
+  fi
+  fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
 }
 
 print_route() { # <id>
-  local meta=$1 backend target harness traceparent herdr_session
-  meta=$(meta_path "$meta")
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  harness=$(fm_meta_get "$meta" harness)
-  traceparent=$(fm_meta_get "$meta" traceparent)
+  local id=$1 harness traceparent
+  remote_endpoint_require "$id"
+  harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'
-  printf 'backend=%s\n' "$backend"
-  printf 'target=%s\n' "$target"
-  [ "$backend" != herdr ] || {
-    herdr_session=$(fm_meta_get "$meta" herdr_session)
-    printf 'herdr_session=%s\n' "$herdr_session"
-  }
+  printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
+  printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
+  printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
@@ -103,7 +132,7 @@ cmd_route() {
 
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out backend target herdr_session
+  local current meta out herdr_session
 
   validate_id "$id"
   validate_home "$id"
@@ -116,22 +145,16 @@ cmd_launch() {
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
-    current=$(state_value "$id")
+    remote_endpoint_require "$id"
+    current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
       alive)
-        backend=$(fm_backend_of_meta "$meta")
-        [ "$backend" = herdr ] \
-          || die "remote secondmate $id has an alive endpoint recorded on backend '$backend'; refusing reuse until it is explicitly migrated or retired"
-        herdr_session=$(fm_meta_get "$meta" herdr_session)
-        [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
-          || die "remote secondmate $id has an alive endpoint in Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'; refusing reuse until it is explicitly migrated or retired"
         print_route "$id"
         return 0
         ;;
       dead)
-        backend=$(fm_backend_of_meta "$meta")
-        target=$(fm_backend_target_of_meta "$meta")
-        fm_backend_kill "$backend" "$target" 2>/dev/null || die "could not remove the confirmed agent-less endpoint"
+        fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
+          || die "could not remove the confirmed agent-less endpoint"
         ;;
       missing) ;;
       *) die "remote endpoint state is $current; refusing duplicate launch" ;;
@@ -156,53 +179,40 @@ cmd_launch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 meta backend target
+  local id=$1 message=$2
   validate_id "$id"
   validate_home "$id"
-  meta=$(meta_path "$id")
-  [ -f "$meta" ] || die "remote secondmate has no endpoint metadata"
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  [ -n "$target" ] || die "remote secondmate endpoint is unreadable"
+  remote_endpoint_require "$id"
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
-    "$SCRIPT_DIR/fm-send.sh" "$target" "$message"
+    "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$message"
 }
 
 cmd_key() {
-  local id=$1 key=$2 meta target
+  local id=$1 key=$2
   validate_id "$id"
   validate_home "$id"
-  meta=$(meta_path "$id")
-  [ -f "$meta" ] || die "remote secondmate has no endpoint metadata"
-  target=$(fm_backend_target_of_meta "$meta")
+  remote_endpoint_require "$id"
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
-    "$SCRIPT_DIR/fm-send.sh" "$target" --key "$key"
+    "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" --key "$key"
 }
 
 cmd_capture() {
-  local id=$1 lines=${2:-20} meta backend target
+  local id=$1 lines=${2:-20}
   validate_id "$id"
   validate_home "$id"
   case "$lines" in ''|*[!0-9]*|0) die "capture line count must be positive" ;; esac
   [ "$lines" -le 100 ] || die "capture line count exceeds 100"
-  meta=$(meta_path "$id")
-  [ -f "$meta" ] || die "remote secondmate has no endpoint metadata"
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  fm_backend_capture "$backend" "$target" "$lines" "fm-$id" | head -c 65536
+  remote_endpoint_require "$id"
+  fm_backend_capture "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$lines" "fm-$id" | head -c 65536
 }
 
 cmd_observe() {
-  local id=$1 meta backend target harness
+  local id=$1 harness
   validate_id "$id"
   validate_home "$id"
-  meta=$(meta_path "$id")
-  [ -f "$meta" ] || die "remote secondmate has no endpoint metadata"
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  harness=$(fm_meta_get "$meta" harness)
-  [ -n "$target" ] || die "remote secondmate endpoint is unreadable"
-  fm_pending_reply_backend_observation "$backend" "$target" "fm-$id" "$harness"
+  remote_endpoint_require "$id"
+  harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
   printf '\n'
 }
 
@@ -258,7 +268,7 @@ cmd_retire() {
     return 0
   fi
   [ -z "$force" ] || [ "$force" = --force ] || usage
-  [ -f "$(meta_path "$id")" ] || die "remote secondmate has no endpoint metadata to retire safely"
+  remote_endpoint_require "$id"
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" "$SCRIPT_DIR/fm-guard.sh" || true
   if [ -n "$force" ]; then

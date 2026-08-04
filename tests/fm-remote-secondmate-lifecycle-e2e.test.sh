@@ -504,6 +504,42 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
+legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
+awk -v pane="$legacy_pane" '
+  /^window=/ { print "window=default:" pane; next }
+  /^herdr_session=/ { print "herdr_session=default"; next }
+  { print }
+' "$TMP_ROOT/remote-ios-before-default-session.meta" > "$remote_route_meta"
+cp "$HERDR_LOG" "$TMP_ROOT/herdr-before-default-session.log"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios 2>/dev/null)" = unverified ] \
+  || fail "legacy default-session metadata was not classified unverified"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh send ios probe >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh key ios Enter >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh capture ios >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr >/dev/null 2>&1; then
+  fail "legacy default-session metadata remained operational"
+fi
+cmp -s "$TMP_ROOT/herdr-before-default-session.log" "$HERDR_LOG" \
+  || fail "legacy default-session metadata caused a Herdr operation"
+assert_present "$REMOTE_HOME" "refused legacy retirement removed the remote home"
+assert_grep 'herdr_session=default' "$remote_route_meta" "refused legacy retirement rewrote endpoint metadata"
+
+awk -v pane="$legacy_pane" '
+  /^window=/ { print "window=default:" pane; next }
+  { print }
+' "$TMP_ROOT/remote-ios-before-default-session.meta" > "$remote_route_meta"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios 2>/dev/null)" = unverified ] \
+  || fail "mismatched fm-remote target was not classified unverified"
+cmp -s "$TMP_ROOT/herdr-before-default-session.log" "$HERDR_LOG" \
+  || fail "mismatched fm-remote target caused a Herdr operation"
+mv -f "$TMP_ROOT/remote-ios-before-default-session.meta" "$remote_route_meta"
+pass "legacy and mismatched remote endpoints fail closed before backend access"
+
 cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-nonherdr.meta"
 cp "$PARENT/data/secondmates.md" "$TMP_ROOT/registry-before-nonherdr.md"
 set +e
@@ -548,8 +584,8 @@ remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios c
 legacy_alive_rc=$?
 set -e
 [ "$legacy_alive_rc" -ne 0 ] || fail "remote control reused an alive legacy tmux endpoint"
-assert_grep "alive endpoint recorded on backend 'tmux'" "$TMP_ROOT/legacy-alive-refusal.out" \
-  "remote refusal did not name the alive endpoint's recorded backend"
+assert_grep "endpoint is recorded on backend 'tmux', expected 'herdr'" "$TMP_ROOT/legacy-alive-refusal.out" \
+  "remote refusal did not name the endpoint's recorded backend"
 cmp -s "$TMP_ROOT/remote-ios-legacy-before-refusal.meta" "$remote_route_meta" \
   || fail "remote refusal changed the legacy endpoint metadata"
 assert_present "$TMUX_STATE" "remote refusal killed the alive legacy endpoint"
@@ -802,7 +838,7 @@ printf 'fm-ios|%s\n' "$REMOTE_HOME" > "$TMUX_STATE"
 tmux_state_before=$(cat "$TMUX_STATE")
 launches_before_legacy=$(grep -c '^tab create' "$HERDR_LOG" || true)
 BOOT_LEGACY=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
-assert_contains "$BOOT_LEGACY" "SECONDMATE_LIVENESS: secondmate ios: skipped: alive remote endpoint is recorded on backend 'tmux'; migrate or retire it explicitly" \
+assert_contains "$BOOT_LEGACY" "SECONDMATE_LIVENESS: secondmate ios: skipped: remote endpoint state is unverified on remote-mac" \
   "liveness accepted an alive legacy remote backend"
 cmp -s "$TMP_ROOT/remote-ios-liveness-legacy.meta" "$remote_route_meta" \
   || fail "liveness rewrote the alive legacy endpoint metadata"
