@@ -155,8 +155,22 @@ read_workspace_path() {
 }
 
 # Directory modification time in epoch seconds; BSD stat first, GNU fallback.
+# Each probe's output is accepted only when it is a bare epoch. A failing probe
+# can still write to stdout: GNU stat reads `-f` as "print filesystem status"
+# and `%m` as a file operand, so it emits a multi-line filesystem summary and
+# exits non-zero. Chaining that straight into the fallback would capture the
+# summary concatenated with the epoch, and the caller's age arithmetic would
+# then abort the run under `set -u`.
 dir_mtime() {
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+  local candidate
+  candidate=$(stat -f %m "$1" 2>/dev/null || true)
+  case "$candidate" in
+    ''|*[!0-9]*) candidate=$(stat -c %Y "$1" 2>/dev/null || true) ;;
+  esac
+  case "$candidate" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$candidate"
 }
 
 is_protected_cache() {

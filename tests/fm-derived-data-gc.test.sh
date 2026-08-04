@@ -19,6 +19,8 @@
 #   (l) a missing DerivedData root is a quiet no-op
 #   (m) no mode is a usage error (exit 2)
 #   (n) a plist without a WorkspacePath key counts as no-plist (age gate applies)
+#   (o) the mtime probe survives a GNU stat that answers `-f` on stdout and still
+#       fails, instead of concatenating that text with the fallback epoch
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -161,3 +163,49 @@ assert_present "$DD/SDKStatCaches.noindex" "SDKStatCaches.noindex must never be 
 assert_present "$DD/SymbolCache.noindex" "SymbolCache.noindex must never be removed"
 assert_present "$DD/OtherCache.noindex" "any *.noindex entry must never be removed"
 pass "protected *.noindex caches are never removed"
+
+# (o) mtime probe under GNU stat.
+# GNU coreutils stat has no BSD-style `-f <format>`: it reads `-f` as "print
+# filesystem status" and treats `%m` as a file operand, so it writes a
+# multi-line filesystem summary for the real operand to STDOUT and still exits
+# non-zero. A probe that pipes that failure into a `||` fallback captures the
+# summary text concatenated with the fallback epoch, and the age arithmetic then
+# aborts the whole run under `set -u` with "File: unbound variable".
+# This stub reproduces that stat flavor on any host, so the case is a real
+# regression guard on macOS rather than something only Linux CI would catch.
+GNU_STAT_ROOT=$(fm_test_tmproot fm-derived-data-gc-gnustat)
+GNU_DD="$GNU_STAT_ROOT/DerivedData"
+mkdir -p "$GNU_DD/App-aged-gnu"
+age_dir "$GNU_DD/App-aged-gnu"
+FAKEBIN=$(fm_fakebin "$GNU_STAT_ROOT")
+cat > "$FAKEBIN/stat" <<'SH'
+#!/usr/bin/env bash
+# GNU-coreutils stat emulation, narrowed to the two probes the GC issues.
+case "$1" in
+  -c)
+    [ "$2" = "%Y" ] || exit 1
+    # Fixed epoch (2020-01-01), far past any age gate the tests use.
+    printf '%s\n' 1577836800
+    exit 0
+    ;;
+  -f)
+    printf "stat: cannot read file system information for '%%m': No such file or directory\n" >&2
+    printf '  File: "%s"\n    ID: 0        Namelen: 255     Type: apfs\n' "$3"
+    exit 1
+    ;;
+esac
+exit 1
+SH
+chmod +x "$FAKEBIN/stat"
+
+set +e
+out=$(PATH="$FAKEBIN:$PATH" FM_DERIVED_DATA_ROOT="$GNU_DD" \
+  "$GC" --orphans --include-no-plist 2>&1)
+rc=$?
+set -e
+expect_code 0 "$rc" "GNU-stat mtime probe should not abort the run"
+assert_not_contains "$out" "unbound variable" \
+  "GNU stat's filesystem summary must not reach the age arithmetic"
+assert_absent "$GNU_DD/App-aged-gnu" \
+  "aged no-plist dir should still be removed under GNU stat"
+pass "mtime probe tolerates a GNU stat that answers -f on stdout and fails"
