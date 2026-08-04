@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--resume-worktree <path>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--resume-worktree <path>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -109,6 +109,24 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   --resume-worktree <path> relaunches THIS task id in the isolated copy it
+#   already owns instead of allocating a second one, which is what a
+#   cross-provider handoff or any other keep-the-work recovery needs. It runs
+#   `cd <path>` in place of `treehouse get`, keeps every later step identical
+#   (settle poll, isolation assertion, hook installation, recorded worktree=),
+#   and additionally refuses unless the pane settles on that exact copy, so one
+#   task can never end up split across two. It is a single-task ship/scout flag:
+#   refused with --secondmate (a secondmate relaunches into its own persistent
+#   home), refused in batch dispatch (one path cannot serve several tasks), and
+#   refused on backend=orca (Orca owns the worktree itself and addresses it by
+#   orca_worktree_id=, so path reuse needs Orca-side resume semantics that do not
+#   exist yet). The relaunch is transactional: the previous state/<id>.meta is
+#   snapshotted first, and any failure removes only the endpoint this invocation
+#   created and restores that record, leaving the copy's dirty files, commits,
+#   and branch untouched. Nothing here decides WHEN to hand a task over;
+#   bin/fm-provider-continuity.sh owns the handoff license and
+#   .agents/skills/provider-outage-continuity/SKILL.md owns the procedure.
+#   A successful resume adds resumed=1 to the success line.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -225,6 +243,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+RESUME_WT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -232,6 +251,7 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+RESUME_WT_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -247,6 +267,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      resume-worktree) RESUME_WT_ARG=$a; RESUME_WT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -269,6 +290,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --resume-worktree) want_value=resume-worktree ;;
+    --resume-worktree=*) RESUME_WT_ARG=${a#--resume-worktree=}; RESUME_WT_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -280,6 +303,18 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$RESUME_WT_SET" -eq 0 ] || [ -n "$RESUME_WT_ARG" ] || { echo "error: --resume-worktree requires a non-empty value" >&2; exit 1; }
+# A resume relaunches ONE existing task into the isolated copy it already owns,
+# so it is refused for every shape that would either allocate a second copy or
+# apply one path to several tasks (docs/configuration.md "Provider outage
+# continuity"). Backend support is checked once the backend is resolved.
+if [ "$RESUME_WT_SET" -eq 1 ]; then
+  [ "$KIND" != secondmate ] || {
+    echo "error: --resume-worktree applies only to ship and scout spawns; a secondmate already relaunches into its own persistent home" >&2
+    exit 1
+  }
+  RESUME_WT_ARG=$(resolve_directory_input --resume-worktree "$RESUME_WT_ARG") || exit 1
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -598,6 +633,16 @@ if [ "$BACKEND_SET" -eq 1 ]; then
 else
   BACKEND=$(fm_backend_name)
 fi
+# Orca owns both the worktree and the terminal, so an isolated copy created by
+# treehouse for another backend is not an Orca worktree it can adopt, and Orca's
+# own worktree is addressed by orca_worktree_id= rather than by path. Reusing one
+# needs Orca-side resume semantics that do not exist yet. Refuse the unsupported
+# shape before probing tool availability, so the reported blocker is the real one
+# rather than a missing CLI (docs/orca-backend.md).
+if [ "$RESUME_WT_SET" -eq 1 ] && [ "$BACKEND" = orca ]; then
+  echo "error: --resume-worktree is not supported on backend=orca; Orca owns the task worktree itself, so resume the task on its recorded Orca worktree or move it to a treehouse-backed backend" >&2
+  exit 1
+fi
 fm_backend_validate_spawn "$BACKEND" || exit 1
 fm_backend_source "$BACKEND" || exit 1
 if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
@@ -612,6 +657,10 @@ if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
 ORCA_ABORT_CLEANUP=0
+RESUME_WT=
+RESUME_META_BACKUP=
+RESUME_META_RESTORE=0
+RESUME_ENDPOINT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
@@ -690,6 +739,24 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  # Resume transaction: a failed relaunch must leave the task exactly as
+  # recoverable as it was before, so remove only the endpoint this invocation
+  # created and put the previous authoritative record back byte for byte. The
+  # isolated copy, its dirty files, its commits, and its branch are never
+  # touched by either step.
+  if [ "$RESUME_ENDPOINT_CLEANUP" = 1 ]; then
+    RESUME_ENDPOINT_CLEANUP=0
+    if [ "$HERDR_PROJECTION_ABORT_CLEANUP" != 1 ] && [ -n "${T:-}" ]; then
+      fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+    fi
+  fi
+  if [ "$RESUME_META_RESTORE" = 1 ]; then
+    RESUME_META_RESTORE=0
+    if [ -f "$RESUME_META_BACKUP" ]; then
+      mv -f "$RESUME_META_BACKUP" "$STATE/$ID.meta" 2>/dev/null \
+        || echo "warning: could not restore the previous task record for $ID; it is preserved at $RESUME_META_BACKUP" >&2
+    fi
+  fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -739,6 +806,10 @@ idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+    exit 1
+  fi
+  if [ "$RESUME_WT_SET" -eq 1 ]; then
+    echo "error: --resume-worktree names one task's existing isolated copy, so it cannot be shared across a batch; resume each task in its own invocation" >&2
     exit 1
   fi
   rc=0
@@ -1367,6 +1438,36 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+# --- resume into the isolated copy this task already owns --------------------
+#
+# A provider handoff, and any other recovery that must keep one task's work,
+# relaunches the SAME task id in the SAME isolated copy rather than allocating a
+# second one. Prove the copy is a real worktree root distinct from the primary
+# checkout BEFORE any endpoint exists, and snapshot the previous authoritative
+# record so a failed relaunch restores it (spawn_abort_cleanup).
+RESUME_WT_REAL=
+if [ "$RESUME_WT_SET" -eq 1 ]; then
+  RESUME_WT=$RESUME_WT_ARG
+  RESUME_WT_REAL=$(real_path_or_raw "$RESUME_WT")
+  WT=$RESUME_WT
+  validate_spawn_worktree "--resume-worktree" "$RESUME_WT"
+  # The live pane read below is what actually records worktree=, so clear the
+  # candidate again and let the same settle poll prove where the pane landed.
+  WT=""
+  if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+    if [ ! -f "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+      echo "error: the existing task record for $ID is not a regular file; refusing to resume against an unreadable identity" >&2
+      exit 1
+    fi
+    RESUME_META_BACKUP="$STATE/.resume-$ID.meta.bak"
+    cp "$STATE/$ID.meta" "$RESUME_META_BACKUP" || {
+      echo "error: could not snapshot the existing task record for $ID; refusing to resume without a recoverable record" >&2
+      exit 1
+    }
+    RESUME_META_RESTORE=1
+  fi
+fi
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -1606,6 +1707,9 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+# From here on a resume owns an endpoint it created, so an abort must remove
+# exactly that endpoint before restoring the previous record.
+[ "$RESUME_WT_SET" -eq 0 ] || RESUME_ENDPOINT_CLEANUP=1
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -1694,7 +1798,16 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # A resume enters the copy this task already owns instead of allocating a new
+  # one, so it never runs treehouse get. Everything after this point - the
+  # settle poll, the isolation assertion, hook installation, and the recorded
+  # worktree= - is deliberately identical for both entries, and the resume adds
+  # one stricter check: the pane must settle on the EXACT requested copy.
+  if [ "$RESUME_WT_SET" -eq 1 ]; then
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$RESUME_WT")"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -1736,11 +1849,25 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    if [ "$RESUME_WT_SET" -eq 1 ]; then
+      echo "error: the pane did not enter the requested isolated copy within 60s; inspect window $T" >&2
+    else
+      echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    fi
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  if [ "$RESUME_WT_SET" -eq 1 ]; then
+    validate_spawn_worktree "--resume-worktree" "$T"
+    # Same-copy proof: a pane that settled on any OTHER worktree would silently
+    # split one task across two copies, so refuse rather than record it.
+    if [ "$(real_path_or_raw "$WT")" != "$RESUME_WT_REAL" ]; then
+      echo "error: the pane settled on '$WT' instead of the requested isolated copy '$RESUME_WT'; refusing to split task $ID across two copies. Inspect window $T" >&2
+      exit 1
+    fi
+  else
+    validate_spawn_worktree "treehouse get" "$T"
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -2176,6 +2303,16 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   fi
 fi
 
+# The relaunch landed: commit the resume transaction so the abort path stops
+# owning this endpoint and the previous record's snapshot is dropped.
+if [ "$RESUME_WT_SET" -eq 1 ]; then
+  RESUME_ENDPOINT_CLEANUP=0
+  RESUME_META_RESTORE=0
+  [ -z "$RESUME_META_BACKUP" ] || rm -f "$RESUME_META_BACKUP" 2>/dev/null || true
+fi
+
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+SPAWN_RESUMED=
+[ "$RESUME_WT_SET" -eq 0 ] || SPAWN_RESUMED=" resumed=1"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY$SPAWN_RESUMED window=$META_WINDOW worktree=$WT"

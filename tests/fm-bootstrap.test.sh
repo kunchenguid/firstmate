@@ -821,13 +821,24 @@ default array is accepted^{"default":[{"harness":"pi","model":"anthropic/claude-
 one-element default array is accepted^{"default":[{"harness":"codex"}]}^empty^
 empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each rule needs at least one use profile
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
-array profile with malformed model is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","model":5}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings when present
+array profile with malformed model is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","model":5}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model, effort, and provider must be non-empty strings when present
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
 array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default needs at least one profile
 non-object default array entry is flagged^{"default":["codex"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile must be an object
 default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile needs harness
-default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings when present
+default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model, effort, and provider must be non-empty strings when present
+explicit provider tokens are accepted^{"rules":[{"when":"visual work","use":[{"harness":"codex","model":"gpt-5","provider":"vendor-one"}]}],"default":[{"harness":"claude","provider":"vendor-two"}]}^empty^
+outage fallback profiles are accepted^{"rules":[{"when":"visual work","use":[{"harness":"codex","provider":"vendor-one"}],"fallback":[{"harness":"claude","effort":"high","provider":"vendor-two"}]}],"default_fallback":[{"harness":"claude"}]}^empty^
+independent review flag is accepted^{"rules":[{"when":"review or audit","use":[{"harness":"claude","provider":"vendor-two"}],"independent":true}]}^empty^
+empty fallback array is flagged^{"rules":[{"when":"visual work","use":[{"harness":"codex"}],"fallback":[]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - fallback needs at least one profile
+fallback profile without harness is flagged^{"rules":[{"when":"visual work","use":[{"harness":"codex"}],"fallback":[{"model":"gpt-5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each fallback profile needs harness
+unverified fallback harness is flagged^{"rules":[{"when":"visual work","use":[{"harness":"codex"}],"fallback":[{"harness":"spaceship"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
+fallback unsupported effort is flagged^{"rules":[{"when":"visual work","use":[{"harness":"codex"}],"fallback":[{"harness":"grok","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
+malformed fallback provider is flagged^{"rules":[{"when":"visual work","use":[{"harness":"codex"}],"fallback":[{"harness":"claude","provider":""}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - fallback profile model, effort, and provider must be non-empty strings when present
+non-boolean independent is flagged^{"rules":[{"when":"review","use":[{"harness":"claude"}],"independent":"yes"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - independent must be true or false
+empty default_fallback array is flagged^{"default_fallback":[]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default_fallback needs at least one profile
+default_fallback without harness is flagged^{"default_fallback":[{"model":"gpt-5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default_fallback profile needs harness
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
