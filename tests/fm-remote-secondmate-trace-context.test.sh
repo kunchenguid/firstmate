@@ -7,12 +7,14 @@
 # spawn_remote_secondmate, which hands the launch to the remote host. These
 # assertions drive the real chain - parent fm-spawn -> fm-on -> the real remote
 # entrypoint -> fm-remote-secondmate-control -> the remote host's own fm-spawn -
-# against a fake tmux, so the carrier the remote pane receives is observable.
+# against a fake herdr CLI, so the carrier the remote pane receives is observable.
 # See docs/verification/trace-context.md for the maintained coverage inventory.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/remote-herdr-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
@@ -25,6 +27,8 @@ REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
 SECOND_HOME="$TMP_ROOT/remote-home-2"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
+HERDR_LOG="$TMP_ROOT/remote-herdr.log"
+HERDR_STATE="$TMP_ROOT/remote-herdr.state"
 TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
@@ -39,9 +43,11 @@ trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-proceven
   tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config -cf - .
 ) | (cd "$REMOTE_ROOT" && tar -xf -)
 
-# Fake tmux on the remote host. Every invocation is logged verbatim, so the
-# pre-launch `export TRACEPARENT=` line and the launch literal's
-# FM_TRACE_CONTEXT prefix are both observable exactly as the pane received them.
+# The remote host runs the Herdr fixture, whose every invocation is logged
+# verbatim, so the pre-launch `export TRACEPARENT=` line and the launch
+# literal's FM_TRACE_CONTEXT prefix are both observable exactly as the pane
+# received them. The tmux fixture below only keeps the remote home's own
+# non-second-mate tooling resolvable.
 cat > "$REMOTE_ROOT/bin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
@@ -84,6 +90,8 @@ esac
 exit 0
 SH
 chmod +x "$REMOTE_ROOT/bin/tmux"
+install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
+  "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
@@ -101,6 +109,13 @@ shift 2
 [ "$host" = remote-mac ] || exit 91
 [ "$entry" = fm-remote-entrypoint.sh ] || exit 92
 cd "$FM_FAKE_REMOTE_CWD" || exit 93
+# The readiness gate is answered here rather than by the real doctor, which
+# would inspect the RUNNER's own account; tests/fm-remote-doctor.test.sh owns
+# the doctor's behavior against controlled account fixtures.
+if printf '%s' "$4" | base64 --decode 2>/dev/null | tr '\0' '\n' | head -1 | grep -q '^fm-remote-doctor.sh$'; then
+  printf 'ok: remote second-mate readiness confirmed on this host\n'
+  exit 0
+fi
 exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
 SH
 chmod +x "$FAKEBIN/fake-ssh"
@@ -133,10 +148,10 @@ freeze_parent_session() {
 
 # What the remote pane actually received, read back from the remote tmux log.
 remote_injected_traceparent() {
-  sed -n 's/.*export TRACEPARENT=\([0-9a-f-]*\).*/\1/p' "$TMUX_LOG" | tail -1
+  sed -n 's/.*export TRACEPARENT=\([0-9a-f-]*\).*/\1/p' "$HERDR_LOG" | tail -1
 }
 remote_launch_snapshot() {
-  grep -o 'FM_TRACE_CONTEXT=[a-z]*' "$TMUX_LOG" | tail -1 | cut -d= -f2
+  grep -o 'FM_TRACE_CONTEXT=[a-z]*' "$HERDR_LOG" | tail -1 | cut -d= -f2
 }
 meta_traceparent() { sed -n 's/^traceparent=//p' "$1"; }
 
@@ -148,27 +163,27 @@ FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
 
 # --- disabled: the remote route must stay byte-identically untraced ----------
 freeze_parent_session
-: > "$TMUX_LOG"
+: > "$HERDR_LOG"
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "default-off remote secondmate spawn failed"
 assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no parent metadata"
 ! grep -q '^traceparent=' "$PARENT/state/ios.meta" \
   || fail "default-off remote spawn must not record a traceparent= line"
-! grep -q 'export TRACEPARENT=' "$TMUX_LOG" \
+! grep -q 'export TRACEPARENT=' "$HERDR_LOG" \
   || fail "default-off remote spawn must not export a carrier into the remote pane"
 ! grep -q '^traceparent=' "$REMOTE_HOME/state/parent-route/ios.meta" \
   || fail "default-off remote spawn must not record a carrier on the remote host"
 [ "$(remote_launch_snapshot)" = off ] \
   || fail "default-off remote spawn must deliver FM_TRACE_CONTEXT=off (got '$(remote_launch_snapshot)')"
 assert_absent "$REMOTE_HOME/config/trace-context" "default-off remote spawn inherited an enablement flag"
-grep -q 'export GOTMPDIR=' "$TMUX_LOG" || fail "the remote spawn should still run (GOTMPDIR is always exported)"
+grep -q 'export GOTMPDIR=' "$HERDR_LOG" || fail "the remote spawn should still run (GOTMPDIR is always exported)"
 pass "disabled: a remote-routed second mate records and receives no carrier and stays enabled-off end to end"
 
 # --- enabled: one carrier is recorded by the parent and received remotely ----
 : > "$PARENT/config/trace-context"
 freeze_parent_session
-rm -f "$TMUX_STATE"   # the previous endpoint is gone; this is an ordinary relaunch
-: > "$TMUX_LOG"
+reset_remote_herdr_fixture "$HERDR_STATE"   # the previous endpoint is gone; this is an ordinary relaunch
+: > "$HERDR_LOG"
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "enabled remote secondmate spawn failed"
 
@@ -187,9 +202,9 @@ fm_trace_context_valid "$INJECTED_TP" \
   || fail "an enabled remote spawn must deliver FM_TRACE_CONTEXT=on (got '$(remote_launch_snapshot)')"
 assert_present "$REMOTE_HOME/config/trace-context" \
   "an enabled remote launch did not inherit the enablement flag into the remote home"
-GOTMP_LINE=$(grep -n 'export GOTMPDIR=' "$TMUX_LOG" | tail -1 | cut -d: -f1)
-TP_LINE=$(grep -n 'export TRACEPARENT=' "$TMUX_LOG" | tail -1 | cut -d: -f1)
-LAUNCH_LINE=$(grep -n 'FM_TRACE_CONTEXT=' "$TMUX_LOG" | tail -1 | cut -d: -f1)
+GOTMP_LINE=$(grep -n 'export GOTMPDIR=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
+TP_LINE=$(grep -n 'export TRACEPARENT=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
+LAUNCH_LINE=$(grep -n 'FM_TRACE_CONTEXT=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
 [ -n "$GOTMP_LINE" ] && [ -n "$TP_LINE" ] && [ -n "$LAUNCH_LINE" ] \
   || fail "remote pane log missing GOTMPDIR/TRACEPARENT/launch lines"
 [ "$TP_LINE" -gt "$GOTMP_LINE" ] \
@@ -199,8 +214,8 @@ LAUNCH_LINE=$(grep -n 'FM_TRACE_CONTEXT=' "$TMUX_LOG" | tail -1 | cut -d: -f1)
 pass "enabled: a remote-routed second mate receives one carrier in its pane, identical to the parent's recorded identity, before launch"
 
 # --- relaunch stability on the remote path ----------------------------------
-rm -f "$TMUX_STATE"
-: > "$TMUX_LOG"
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "enabled remote secondmate relaunch failed"
 RELAUNCH_TP=$(meta_traceparent "$PARENT/state/ios.meta")
@@ -221,8 +236,8 @@ FM_SECONDMATE_CHARTER='Own the second build Mac.' \
   TRACEPARENT="$AMBIENT" \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios2 remote-mac "$REMOTE_ROOT" "$SECOND_HOME" --no-projects >/dev/null \
   || fail "second remote seed failed"
-rm -f "$TMUX_STATE"
-: > "$TMUX_LOG"
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
 TRACEPARENT="$AMBIENT" remote_env "$ROOT/bin/fm-spawn.sh" ios2 --secondmate >/dev/null 2>&1 \
   || fail "second remote secondmate spawn failed"
 SECOND_TP=$(meta_traceparent "$PARENT/state/ios2.meta")

@@ -209,6 +209,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-remote-readiness-lib.sh
+. "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -394,7 +396,19 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
-  backend=${BACKEND_ARG:--}
+  # A remote second mate always runs on Herdr: its server belongs to the host's
+  # own GUI login session, so the endpoint outlives every SSH connection that
+  # supervises it. bin/fm-remote-doctor.sh gates that host on the same
+  # requirement, and the remote home's config/backend never overrides it.
+  case "${BACKEND_ARG:--}" in
+    -|herdr) backend=herdr ;;
+    *)
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: a remote secondmate runs only on the herdr backend, not '$BACKEND_ARG'" >&2
+      return 1
+      ;;
+  esac
   case "$effort" in
     -|low|medium|high|xhigh|max) ;;
     *)
@@ -416,6 +430,27 @@ spawn_remote_secondmate() {
       echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
       return 1
     fi
+  fi
+  # Gate the host before anything is published or transferred, so a host that
+  # cannot hold a durable Herdr endpoint refuses here rather than half-way
+  # through a launch. This is also the readiness gate every liveness relaunch
+  # passes through, because recovery respawns through this same route.
+  rc=0
+  fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    # Summary first, then the doctor's own text: a caller that reports only the
+    # first line, such as the startup liveness sweep, must still say something
+    # actionable.
+    if [ "$rc" -eq 255 ]; then
+      echo "error: remote secondmate $id readiness could not be confirmed; preserved route $host:$home" >&2
+    else
+      echo "error: remote secondmate $id host $host is not ready for a remote second mate; launch refused" >&2
+    fi
+    [ -z "$FM_REMOTE_READINESS_OUT" ] || printf '%s\n' "$FM_REMOTE_READINESS_OUT" >&2
+    [ "$rc" -ne 255 ] || return 255
+    return 1
   fi
   remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id")
   if ! fm_lock_acquire_wait "$remote_lock"; then
@@ -478,7 +513,14 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
-  [ -n "$remote_backend" ] && [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
+  if [ "$remote_backend" != herdr ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
+  [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true

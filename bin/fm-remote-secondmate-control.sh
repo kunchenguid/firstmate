@@ -2,8 +2,9 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> <backend|-> [traceparent]
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
 #   fm-remote-secondmate-control.sh state <id>
+#   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message>
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
@@ -12,9 +13,12 @@
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
-# Remote placement ends here. The home still chooses its ordinary local runtime
-# backend through its own config/backend, and fm-spawn/fm-send/fm-teardown keep
-# owning those local endpoint mechanics. A private parent-route state directory
+# Remote placement ends here, but the second-mate agent itself always runs on
+# the Herdr backend, so launch refuses any other selection rather than reading
+# this home's config/backend; fm-spawn/fm-send/fm-teardown keep owning the local
+# endpoint mechanics, and the home's own workers keep its ordinary backend
+# selection. bin/fm-remote-doctor.sh owns that host's readiness for Herdr, and
+# docs/remote-secondmates.md owns why. A private parent-route state directory
 # stores only the remote secondmate agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
 #
@@ -38,7 +42,7 @@ CONTROL_DATA="$TARGET_HOME/data/.parent-route"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
 
 validate_home() { # <id> [allow-absent]
@@ -78,6 +82,17 @@ print_route() { # <id>
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
+cmd_route() {
+  local id=$1 meta
+  validate_id "$id"
+  validate_home "$id"
+  meta=$(meta_path "$id")
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    die "remote secondmate has no endpoint metadata"
+  fi
+  print_route "$id"
+}
+
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
   local current meta out backend target
@@ -86,12 +101,22 @@ cmd_launch() {
   validate_home "$id"
   case "$harness" in claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate harness: $harness" ;; esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  # Herdr is required on this host, not merely preferred: its server belongs to
+  # the GUI login session, so the endpoint survives every SSH disconnection that
+  # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
+  case "$selected_backend" in herdr) ;; *) die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
     current=$(state_value "$id")
     case "$current" in
-      alive) print_route "$id"; return 0 ;;
+      alive)
+        backend=$(fm_backend_of_meta "$meta")
+        [ "$backend" = herdr ] \
+          || die "remote secondmate $id has an alive endpoint recorded on backend '$backend'; refusing reuse until it is explicitly migrated or retired"
+        print_route "$id"
+        return 0
+        ;;
       dead)
         backend=$(fm_backend_of_meta "$meta")
         target=$(fm_backend_target_of_meta "$meta")
@@ -101,10 +126,9 @@ cmd_launch() {
       *) die "remote endpoint state is $current; refusing duplicate launch" ;;
     esac
   fi
-  ARGS=("$id" "$TARGET_HOME" --secondmate --harness "$harness")
+  ARGS=("$id" "$TARGET_HOME" --secondmate --harness "$harness" --backend "$selected_backend")
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
-  [ "$selected_backend" = - ] || ARGS+=(--backend "$selected_backend")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
   if ! out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
@@ -239,6 +263,7 @@ cmd_retire() {
 case "${1:-}" in
   launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
+  route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -eq 2 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;

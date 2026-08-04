@@ -6,12 +6,12 @@
 #
 # The SSH alias must already reach a host whose non-interactive PATH exposes the
 # fixed fm-remote-entrypoint.sh from <remote-root>. The command records the
-# remote host dimension in data/secondmates.md, preflights the remote runtime
-# with fm-remote-doctor.sh before touching that host, sends a bounded provisioning
+# remote host dimension in data/secondmates.md, gates the host on
+# fm-remote-doctor.sh readiness before touching it, sends a bounded provisioning
 # manifest through fm-on.sh, and lets the remote host clone its own Firstmate
 # home and project origins. No project tree or secret environment is copied.
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
-# the route because completion is unknown and a same-route rerun converges.
+# the route and any newly scaffolded brief because completion is unknown and a same-route rerun converges.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +29,8 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-remote-readiness-lib.sh
+. "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -184,17 +186,22 @@ restore_registry_and_brief() {
   [ "$BRIEF_CREATED" -eq 0 ] || rm -f -- "$BRIEF"
 }
 
-# Preflight the remote runtime before anything is created on that host. The
-# doctor runs through the same fixed entrypoint as every later call, so it sees
-# the exact PATH the remote home will run under.
+# Preflight and, where it can, repair the remote runtime before anything is
+# created on that host. The doctor runs through the same fixed entrypoint as
+# every later call, so it sees the exact PATH the remote home will run under.
 set +e
-PREFLIGHT_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-doctor.sh 2>&1)
+fm_remote_readiness_ensure "$SCRIPT_DIR" "$ID"
 PREFLIGHT_RC=$?
 set -e
 if [ "$PREFLIGHT_RC" -ne 0 ]; then
-  restore_registry_and_brief
-  [ -z "$PREFLIGHT_OUT" ] || printf '%s\n' "$PREFLIGHT_OUT" >&2
-  die "remote runtime preflight failed; nothing was provisioned. Fix the reported tools, or update the remote code root if it predates fm-remote-doctor.sh"
+  if [ "$PREFLIGHT_RC" -ne 255 ]; then
+    restore_registry_and_brief
+  fi
+  [ -z "$FM_REMOTE_READINESS_OUT" ] || printf '%s\n' "$FM_REMOTE_READINESS_OUT" >&2
+  if [ "$PREFLIGHT_RC" -eq 255 ]; then
+    die "remote readiness completion is unknown; route and brief preserved for same-host reconciliation"
+  fi
+  die "remote runtime preflight failed; nothing was provisioned. Close the gaps listed above, or update the remote code root if it predates the current fm-remote-doctor.sh"
 fi
 
 set +e

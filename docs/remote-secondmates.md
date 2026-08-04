@@ -1,9 +1,12 @@
 # Remote second mates
 
 Remote second mates place a whole persistent Firstmate home on another SSH-reachable host.
-The primary still owns routing and supervision, while the remote home owns its own projects, backlog, workers, and local session backend.
-Remote placement is a separate dimension from that host-local backend: a route can target one SSH host while the remote home uses tmux, Herdr, or another secondmate-capable backend.
+The primary still owns routing and supervision, while the remote home owns its own projects, backlog, and workers.
 Firstmate does not support placing an individual worker remotely or failing a remote route over to a local replacement.
+
+The remote second-mate agent itself always runs on the [Herdr backend](herdr-backend.md), and every path that provisions or launches one refuses a host that is not ready for it.
+Herdr's server belongs to the host's own GUI login session rather than to the SSH connection, so the agent's endpoint survives every disconnection the primary's supervision depends on.
+Local second mates are unaffected and keep their ordinary backend selection, as do the workers a remote second mate supervises inside its own home.
 
 ## Prerequisites
 
@@ -57,15 +60,39 @@ Replace the placeholder with the remote account's selected nvm version.
 For asdf or mise, use the same shape with the selected version's absolute `bin` directory, one wrapper per tool the remote home actually needs.
 The wrapper must execute that absolute target rather than resolving its own name again through `~/.local/bin`.
 
-Check any host against the real contract:
+## Readiness, repair, and the human steps
+
+`bin/fm-remote-doctor.sh` is the single owner of what "ready for a remote second mate" means.
+Check any host against it directly:
 
 ```sh
 bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh
 ```
 
-The doctor is read-only.
-It prints the exact `PATH` its own entrypoint launch produced, then reports where each required and optional tool resolved.
-It exits non-zero and names every required tool that did not resolve, so the output is the install-or-shim list for that host.
+That run is read-only.
+It prints the exact `PATH` its own entrypoint launch produced, reports where each required and optional tool resolved, then reports one line per readiness check.
+Each gap is tagged `fixable:` when `--fix` can close it or `human:` when only a person at that machine can, and every gap is followed by an `action:` line naming the exact step.
+Any remaining gap exits non-zero.
+The script's own header owns the full line protocol.
+
+`--fix` repairs only the automatable gaps and is safe to rerun:
+
+```sh
+bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
+```
+
+It writes and reloads the Firstmate-owned launch agent `dev.firstmate.herdr` at `~/Library/LaunchAgents/dev.firstmate.herdr.plist`, scoped with `LimitLoadToSessionType=Aqua` so it belongs to the GUI login session, bootstraps and starts it in `gui/<uid>`, starts the herdr server directly on a host where no launch agent applies, and recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent.
+It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
+
+These steps are never automated and are always reported rather than silently attempted, because SSH cannot create a GUI session from nothing:
+
+- The first console login on that Mac, and automatic login in System Settings > Users & Groups when the machine runs headless and must come back on its own after a reboot.
+- FileVault, which holds a reboot at pre-boot authentication before any login session exists.
+- Installing herdr from [herdr.dev](https://herdr.dev), and any required tool a wrapper cannot resolve.
+- Each worker runtime's own `/login`, and any keychain password prompt that login needs.
+
+Firstmate never writes an auto-login password, never changes FileVault, and never stores an account password.
+A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own symlink is reported for the operator to inspect and is never overwritten.
 
 ## Provision a route
 
@@ -77,8 +104,9 @@ bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<projec
 
 `<remote-root>` is the remote Firstmate code clone that supplies tracked scripts.
 `<remote-home>` is a separate absolute path for the persistent secondmate home and must not overlap the code root.
-The seed records `host:`, `root:`, and `home:` in `data/secondmates.md`, preflights the host with `fm-remote-doctor.sh`, sends a bounded manifest, and lets the remote host clone its own Firstmate home and project origins.
-A failing preflight prints the doctor's missing-tool list, restores the registry, and creates nothing on the remote host.
+The seed records `host:`, `root:`, and `home:` in `data/secondmates.md`, gates the host on readiness, sends a bounded manifest, and lets the remote host clone its own Firstmate home and project origins.
+Readiness starts with a read-only check; when that check reports a gap, it runs `--fix` and then a second read-only check whose verdict decides, so the operator never has to run the repair by hand and a repair is never trusted on its own word.
+A host that stays red prints the doctor's remaining gaps and their operator steps, restores the registry, and creates nothing on the remote host.
 It does not copy project trees or the primary process environment.
 A known provisioning failure rolls back the new route, while SSH exit 255 preserves it because remote completion is unknown and must be reconciled on the same host.
 
@@ -94,9 +122,13 @@ Launch or recover the remote second mate with the same command used for a local 
 bin/fm-spawn.sh <id> --secondmate
 ```
 
-The primary resolves the verified secondmate harness and optional model and effort, transfers the inherited-material allowlist, and asks the remote host to launch through that home's ordinary backend selection.
+The primary resolves the verified secondmate harness and optional model and effort, runs the same readiness gate the seed runs, transfers the inherited-material allowlist, and asks the remote host to launch on Herdr.
+An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.
+A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 Raw launch commands are not accepted for remote secondmates.
 Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
+
+Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
 
 Send routed requests normally:
 
@@ -153,15 +185,18 @@ No generic remote delete or write surface exists: remote writes are confined to 
 
 ## Verification
 
-The portable tests use the real entrypoint protocol, real git repositories, a deterministic SSH boundary, and a host-local backend fixture:
+The portable tests use the real entrypoint protocol, real git repositories, a deterministic SSH boundary, a stateful host-local Herdr CLI fixture, and a controlled account fixture for the readiness gate:
 
 ```sh
 bin/fm-test-run.sh tests/fm-on.test.sh
+bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 ```
 
-For a real-host smoke test, provision a disposable remote account and project, launch the second mate, send one marked request, verify its correlated reply and structured fleet projection, simulate an unreachable host to confirm unknown-without-failover behavior, then retire only after the remote queue is empty.
+The account-level checks the doctor performs - a real Aqua login session, a real `launchctl` domain, and a real herdr server - are only ever exercised against fixtures here, so the readiness gate's behavior on a genuine Mac remains an operator-run smoke test.
+
+For a real-host smoke test, provision a disposable remote account and project, run the doctor and its repair against that account, launch the second mate, send one marked request, verify its correlated reply and structured fleet projection, simulate an unreachable host to confirm unknown-without-failover behavior, then retire only after the remote queue is empty.
 The deterministic suite is automated; real-host validation is still an operator-run smoke test and is not claimed by the repository tests.
