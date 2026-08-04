@@ -375,6 +375,45 @@ fm_backend_target_exists tmux "$SESSION:age" \
   && fail "a window name that is only a PREFIX of a live window must not read as present"
 pass "tmux presence: only the exact recorded window reads present, never tmux's fallback, a gone session, or a prefix match"
 
+# tmux resolves the SESSION axis by prefix too, so a recorded session name that
+# merely starts a live one binds that live session's same-named window and the
+# torn-down endpoint reads live. The raw read below is what makes this case
+# non-vacuous: it is the fuzziness the predicate has to refuse.
+SESSION_PREFIX=${SESSION%?}
+[ "$(tmux list-panes -t "$SESSION_PREFIX:agent" -F '#{window_name}' 2>/dev/null | head -1)" = agent ] \
+  || fail "tmux no longer resolves a session name by prefix, so this case proves nothing"
+fm_backend_target_exists tmux "$SESSION_PREFIX:agent" \
+  && fail "a session name that is only a PREFIX of a live session must not read as present"
+pass "tmux presence: a session name that is only a prefix of a live session reads absent"
+
+# A tmux target may legally carry a pane suffix, and both operator-supplied
+# entry points (FM_SUPERVISOR_TARGET, an explicit `fm send` target) accept one,
+# so the predicate must resolve the pane rather than refuse the shape.
+AGENT_PANE_INDEX=$(tmux list-panes -t "$SESSION:agent" -F '#{pane_index}' | head -1)
+[ -n "$AGENT_PANE_INDEX" ] || fail "could not read a real pane index for the pane-qualified case"
+fm_backend_target_exists tmux "$SESSION:agent.$AGENT_PANE_INDEX" \
+  || fail "a pane-qualified target naming a live pane must read as present"
+fm_backend_target_exists tmux "$SESSION:agent.99" \
+  && fail "a pane-qualified target naming a pane that does not exist must not read as present"
+pass "tmux presence: a pane-qualified target resolves the pane, live and absent"
+
+# Exact matching applies to NAMES, so the shapes that are not names have to keep
+# resolving under the same binding: a window index, and a @window-id both bare
+# and session-qualified.
+AGENT_WINDOW_INDEX=$(tmux list-panes -t "$SESSION:agent" -F '#{window_index}' | head -1)
+AGENT_WINDOW_ID=$(tmux list-panes -t "$SESSION:agent" -F '#{window_id}' | head -1)
+[ -n "$AGENT_WINDOW_INDEX" ] && [ -n "$AGENT_WINDOW_ID" ] \
+  || fail "could not read a real window index and id for the non-name target cases"
+fm_backend_target_exists tmux "$SESSION:$AGENT_WINDOW_INDEX" \
+  || fail "a live window index must read as present"
+fm_backend_target_exists tmux "$SESSION:999" \
+  && fail "a window index that does not exist must not read as present"
+fm_backend_target_exists tmux "$SESSION:$AGENT_WINDOW_ID" \
+  || fail "a session-qualified live @window-id must read as present"
+fm_backend_target_exists tmux "$AGENT_WINDOW_ID" \
+  || fail "a bare live @window-id must read as present"
+pass "tmux presence: window-index and @window-id targets still resolve, live and absent"
+
 # The away-mode supervisor pane is recorded as a %pane id, not session:window,
 # so the non-name target shapes must keep resolving exactly.
 PANE_ID=$(tmux list-panes -t "$SESSION:idle" -F '#{pane_id}' | head -1)

@@ -156,12 +156,10 @@ case "${1:-}" in
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
   list-panes)
-    # The endpoint-presence check asks which window the target resolved to; a
-    # live pane resolves to exactly the window its target names.
+    # The endpoint-presence check answers from list-panes' exit status alone, so
+    # FM_FAKE_TMUX_PANE_ALIVE is the whole fixture: resolvable, or not.
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
-    _t=""; _prev=""
-    for _a in "$@"; do [ "$_prev" = "-t" ] && _t=$_a; _prev=$_a; done
-    printf '%s\n' "${_t#*:}"
+    printf '%%1\n'
     exit 0 ;;
   capture-pane)
     # Honor a single-line band capture (-S N -E M, both non-negative) for the
@@ -251,11 +249,9 @@ case "${1:-}" in
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   list-windows) exit 0 ;;
   list-panes)
-    # The endpoint-presence check asks which window the target resolved to; this
+    # The endpoint-presence check answers from the exit status alone; this
     # fixture's pane is always live.
-    target= prev=
-    for a in "$@"; do [ "$prev" = -t ] && target=$a; prev=$a; done
-    printf '%s\n' "${target#*:}"
+    printf '%%1\n'
     exit 0 ;;
   send-keys)
     shift

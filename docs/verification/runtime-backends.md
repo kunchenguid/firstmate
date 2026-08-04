@@ -33,7 +33,7 @@ Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-
 ### Target resolution
 
 Endpoint-presence resolution was verified on 2026-08-04 with tmux 3.7b on macOS 15.5 arm64, on a private socket started with `-f /dev/null`.
-The session held one window, `fm-live`.
+Session `fmtest` held one window, `fm-live`, with one pane.
 
 ```sh
 tmux display-message -p -t fmtest:fm-live '#{window_name}'
@@ -43,6 +43,8 @@ tmux list-panes -t fmtest:fm-live -F '#{window_name}'
 tmux list-panes -t fmtest:fm-gone -F '#{window_name}'
 tmux list-panes -t nosuch:fm-gone -F '#{window_name}'
 tmux list-panes -t fmtest:fm-li -F '#{window_name}'
+tmux list-panes -t fmtes:fm-live -F '#{window_name}'
+tmux list-panes -t fmtest:fm-live.0 -F '#{window_name}'
 ```
 
 Observed output:
@@ -55,11 +57,46 @@ fm-live (exit 0)
 can't find window: fm-gone (exit 1)
 can't find session: nosuch (exit 1)
 fm-live (exit 0)
+fm-live (exit 0)
+fm-live (exit 0)
 ```
 
 `display-message` never failed: an absent window was answered from another window entirely, and an absent session returned an empty expansion, both with exit 0.
-`list-panes` failed on both absent targets, and its remaining fuzziness is name matching, which the last line shows resolving a prefix to a different window.
-Exit status alone therefore answers presence only for a pane id, a window id, or a window index, so a recorded `session:window-name` is confirmed by asking `list-panes` which window it landed on and requiring that same name back.
+`list-panes` failed on both absent targets, but its remaining fuzziness is name matching on BOTH axes: row 7 resolved a window-name prefix to a different window, and row 8 resolved a SESSION-name prefix the same way, so a torn-down endpoint whose recorded name merely starts a live one still read live.
+Row 9 is why comparing `#{window_name}` back is not the fix either: a legal pane-qualified target answers with the bare window name, which no recorded `session:window.pane` string ever equals, so that comparison reads a live pane as absent.
+
+The shipped form instead makes each axis exact with tmux's `=` prefix and answers from the exit status alone.
+The same session was reverified with a second pane in `fm-live`, so the pane axis is observable.
+
+```sh
+tmux list-panes -t '=fmtest:=fm-live' -F '#{pane_id}'
+tmux list-panes -t '=fmtes:=fm-live' -F '#{pane_id}'
+tmux list-panes -t '=fmtest:=fm-li' -F '#{pane_id}'
+tmux list-panes -t '=fmtest:=fm-live.1' -F '#{pane_id}'
+tmux list-panes -t '=fmtest:=fm-live.9' -F '#{pane_id}'
+tmux list-panes -t '=fmtest:=0' -F '#{pane_id}'
+tmux list-panes -t '=fmtest:=@0' -F '#{pane_id}'
+tmux list-panes -t '%0' -F '#{pane_id}'
+tmux list-panes -t '=%0' -F '#{pane_id}'
+```
+
+Observed output:
+
+```text
+%0 %1 (exit 0)
+can't find session: fmtes (exit 1)
+can't find window: fm-li (exit 1)
+%0 %1 (exit 0)
+can't find pane: 9 (exit 1)
+%0 %1 (exit 0)
+%0 %1 (exit 0)
+%0 %1 (exit 0)
+can't find window: %0 (exit 1)
+```
+
+Both prefix matches became failures, so the exit status is the whole answer and no output has to be parsed.
+Exact matching applies to NAMES only, so the shapes that are not names survive it: a window index, an `@window-id`, and a legal pane suffix all still resolved, while a pane index that does not exist failed.
+The last two rows are why a colonless target keeps the plain form: `=` is rejected in front of a `%pane` id, which already resolves exactly without it.
 
 ### Agent liveness name sources
 

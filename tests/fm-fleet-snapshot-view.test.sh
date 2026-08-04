@@ -33,10 +33,10 @@ case "${1:-}" in
     sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
     ;;
   list-panes)
-    # The endpoint-presence check asks which window the target resolved to; every
-    # window here is present, including the dead-secondmate fixture, whose pane is
-    # live and whose exited AGENT the pane_current_command branch below reports.
-    printf '%s\n' "${target#*:}"
+    # The endpoint-presence check answers from the exit status alone; every window
+    # here is present, including the dead-secondmate fixture, whose pane is live
+    # and whose exited AGENT the pane_current_command branch below reports.
+    printf '%%1\n'
     ;;
   display-message)
     case "$*" in

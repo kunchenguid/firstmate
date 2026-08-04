@@ -87,13 +87,10 @@ case "${1:-}" in
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
   list-panes)
-    # The endpoint check asks which window the target resolved to.
-    # FM_FAKE_TMUX_MISSING is the gone-endpoint switch; otherwise every recorded
-    # target resolves to exactly the window it names.
+    # The endpoint check answers from the exit status alone; FM_FAKE_TMUX_MISSING
+    # is the gone-endpoint switch, and otherwise every recorded target resolves.
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    target= prev=
-    for a in "$@"; do [ "$prev" = -t ] && target=$a; prev=$a; done
-    printf '%s\n' "${target#*:}" ;;
+    printf '%%1\n' ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"

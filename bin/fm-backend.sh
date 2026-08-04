@@ -835,23 +835,23 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      # tmux's `-t` resolution is fail-open and fuzzy, so no command's exit
-      # status alone answers this: display-message is CMD_FIND_CANFAIL and
-      # answers an absent target from the client's active window instead of
-      # failing, and a window NAME also resolves by fnmatch and by prefix. Both
-      # make a torn-down endpoint read live. list-panes does fail on a target it
-      # cannot resolve, and asking it which window it landed on turns the
-      # remaining fuzzy match into an exact one: a recorded session:window-name
-      # must resolve to that same name. Every other shape (%pane, @window,
-      # session:index) already resolves exactly, so its exit status is enough,
-      # except a target that names no window at all (empty, or "session:"),
-      # which tmux answers from whatever window is current.
+      # tmux's `-t` resolution is fail-open and fuzzy, so a plain probe cannot
+      # answer this: display-message is CMD_FIND_CANFAIL and answers an absent
+      # target from the client's active window instead of failing, and a SESSION
+      # name and a window NAME each also resolve by fnmatch and by prefix, so a
+      # recorded sess:fm-x binds a live sess2:fm-x2. list-panes does fail on a
+      # target it cannot resolve, and tmux's `=` exact-match prefix on each axis
+      # removes the fuzzy matching, so its exit status alone is the answer -
+      # verified against tmux 3.7b for a window name, a window index, an
+      # @window-id, and a pane-qualified name (see
+      # docs/verification/runtime-backends.md "Target resolution"). A bare pane
+      # id rejects `=`, so colonless shapes (%pane, @window) keep the plain form,
+      # under which they already resolve exactly. A target naming no window at
+      # all (empty, or "session:") is refused outright because tmux answers
+      # those from whatever window is current.
       case "$target" in
         ''|*:) return 1 ;;
-        *:*[!0-9]*)
-          [ "$(LC_ALL=C tmux list-panes -t "$target" -F '#{window_name}' 2>/dev/null \
-            | head -1)" = "${target#*:}" ]
-          ;;
+        *:*) tmux list-panes -t "=${target%%:*}:=${target#*:}" -F '#{pane_id}' >/dev/null 2>&1 ;;
         *) tmux list-panes -t "$target" -F '#{pane_id}' >/dev/null 2>&1 ;;
       esac
       ;;
