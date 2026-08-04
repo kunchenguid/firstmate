@@ -31,7 +31,7 @@
 #                    because the remedy is different.
 #   link broken    - the symlink exists but its target does not.
 #   target invalid - a declared location resolves without the OKF marker, or a
-#                    recognized bundle is not in a Git repository.
+#                    recognized bundle is not in a separate Git repository.
 #   in-repo vault stale   - fixable inside an ordinary project worktree.
 #   external vault stale  - NOT fixable from a project worktree: the vault is a
 #                    separate repo, so the work belongs to that repo's own clone.
@@ -181,7 +181,7 @@ report_stale() {
 
 # check_external <name> <proj> <rel> <vault-repo-dir> <detail-suffix> <declared>
 check_external() {
-  local name=$1 proj=$2 rel=$3 dir=$4 suffix=$5 declared=$6 top vault_ts vault_date head_ts behind
+  local name=$1 proj=$2 rel=$3 dir=$4 suffix=$5 declared=$6 top vault_repo project_repo vault_ts vault_date head_ts behind
   if [ ! -f "$dir/$VAULT_MARKER" ]; then
     if [ "$declared" -eq 1 ]; then
       report "$name" "external vault target invalid at $rel$suffix - $VAULT_MARKER marker missing, so this declared location is not a valid OKF bundle and vault drift cannot be measured"
@@ -190,6 +190,12 @@ check_external() {
   fi
   if ! top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null); then
     report "$name" "external vault target invalid at $rel$suffix - the OKF bundle is not in a Git repository, so vault drift cannot be measured"
+    return 0
+  fi
+  vault_repo=$(git -C "$top" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  project_repo=$(git -C "$proj" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  if [ "$vault_repo" = "$project_repo" ]; then
+    report "$name" "external vault target invalid at $rel$suffix - the resolved Git repository is the project repository, not a separate vault repository, so vault drift cannot be measured"
     return 0
   fi
   vault_ts=$(git -C "$top" log -1 --format=%ct 2>/dev/null) || return 0

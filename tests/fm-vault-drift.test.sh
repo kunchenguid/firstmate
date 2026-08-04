@@ -234,6 +234,25 @@ test_declared_external_target_without_marker_reports_invalid() {
   pass "a declared external target without the marker reports invalid"
 }
 
+test_declared_external_directory_in_project_repo_reports_invalid() {
+  local home proj out
+  home=$(new_home declared-external-directory-in-project-repo-reports-invalid)
+  proj="$home/projects/arknode"
+  init_repo "$proj" "$T0"
+  declare_external "$proj" /vault
+  mkdir -p "$proj/vault"
+  printf '%s\n' '# Vault home' > "$proj/vault/00-Home.md"
+  project_commits "$proj" 30 $((T0 + 30 * DAY))
+
+  out=$(run_drift "$home")
+  assert_contains "$out" \
+    "VAULT_DRIFT: arknode: external vault target invalid at vault - the resolved Git repository is the project repository, not a separate vault repository" \
+    "a declared ignored vault directory must resolve to a separate repository"
+  assert_not_contains "$out" "vault stale at" \
+    "a declared directory inside the project repository must never be measured as external"
+  pass "a declared external directory in the project repository reports invalid"
+}
+
 test_undeclared_root_symlink_to_non_vault_repo_is_silent() {
   local home proj target out
   home=$(new_home undeclared-root-symlink-to-non-vault-repo-is-silent)
@@ -400,6 +419,7 @@ test_in_repo_vault_stale_by_drift_window
 test_external_symlinked_vault_stale_reports_the_separate_repo_remedy
 test_current_external_symlinked_vault_is_silent
 test_declared_external_target_without_marker_reports_invalid
+test_declared_external_directory_in_project_repo_reports_invalid
 test_undeclared_root_symlink_to_non_vault_repo_is_silent
 test_broken_link_reports_distinctly_from_staleness
 test_absent_link_reports_distinctly_from_staleness
