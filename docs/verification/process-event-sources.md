@@ -75,11 +75,28 @@ Re-verified on 2026-08-04 on macOS (Darwin 25.5.0 arm64) with GNU Bash 3.2.57 ag
 The executable regression starts with a registration and no owner, invokes the public Lavish `arm`, and accepts success only after the stand-in listener has started and the exact source reports `owner=live` through the public list command.
 It repeats arm against that listener to prove one process and one registration generation, forces startup to exit before a durable wait to prove a nonzero diagnostic, and then proves ordinary `reconcile` recovers that same retained source.
 
+A session that already ended is covered as its own end-user case, because it cannot accept the feedback the handoff waits for.
+Against a stand-in that returns an ended session at once, `arm` fails and names the target session as what ended, never firstmate's own state, while that terminal result is still captured once, announced once, and left retired.
+The same distinction is proved directly on the runner's public `await-live`: exit 3 for a source its adapter classified terminal - whether its registration is already gone or its terminal retirement is still pending - and the separate missing-registration diagnostic for a source that was never registered.
+The bound is proved to be elapsed time by holding the per-source boundary from another process while the confirmation runs: it returns nonzero with a concrete diagnostic and its registration intact instead of waiting out the holder.
+Measured directly against a holder that kept that boundary for 30 seconds:
+
+```text
+timeout=1s rc=1 elapsed=1.51s
+timeout=5s rc=1 elapsed=5.95s
+```
+
+The overshoot is the one-second resolution of the configured unit plus process startup, never the holder.
+
 ```text
 $ tests/fm-procevent.test.sh
 ...
+ok - failed terminal retirement is fail-closed and idempotently recoverable
 ok - Lavish arm reports success only after the exact source listener is live, and repeated arm stays idempotent
 ok - failed Lavish listener startup is reported and the durable source recovers through reconcile
+ok - Lavish arm fails with a target-session diagnostic when that session already ended, and still keeps its captured result
+ok - await-live distinguishes a source that ended terminally from a registration that is not there
+ok - the liveness confirmation bound is elapsed time that a held source boundary cannot stretch
 ...
 all procevent tests passed
 ```
@@ -96,9 +113,11 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | proactive-delivery crash and drain boundaries | dotted and underscored source ids at the same sequence receive distinct markers; a concurrent drain cannot consume between queue revalidation and marker commit; failed output, failed marker commit, and a crash before marker commit leave replay available, while successful output still ends the actionable cycle and a crash after marker commit suppresses a duplicate |
 | adapter-owned terminal verdict | two fixture adapters - one that ends on any result, one with no terminal knowledge - decide the outcome alone: the first has its registration and claim retired automatically after one capture and is never restarted, the second stays armed |
 | terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |
-| registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, performs no second poll, and completes idempotently once removal recovers |
+| registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, reports that claim as `terminal` through both `list` and the liveness confirmation, performs no second poll, and completes idempotently once removal recovers |
 | one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
 | live Lavish arm handoff | the public arm command starts the exact source through ordinary reconciliation, withholds success until the listener is invoked and ownership is stably live, converges an identical repeat on one owner and registration generation, returns nonzero when startup cannot hold liveness, and leaves that failed registration recoverable by ordinary reconciliation |
+| an ended target session is a diagnosed arm failure | a stand-in session that has already ended makes the public arm command fail naming the ended target rather than missing firstmate state, polls exactly once, and still captures, announces, and retires that one terminal result; the runner's own `await-live` reports it as exit 3 whether retirement finished or is still pending, and keeps a separate diagnostic for a registration that is simply not there |
+| liveness confirmation bound | holding the per-source boundary from another process while a one-second confirmation runs returns nonzero at that bound with a concrete diagnostic and the registration retained, so the configured bound is elapsed time rather than a count of reads a concurrent ownership change can stretch |
 | bounded re-announcement until handled | a durably captured result with no handled acknowledgement is re-announced by `reconcile` with the same source and sequence on every call - not only the first restart after a crash - and a drained-but-unhandled wake resurfaces identically after a simulated replacement session |
 | handled acknowledgement | `fm-procevent.sh handled <source-id> <sequence>` atomically and idempotently records handling at mode `0600`, fails without leaving a marker when private-mode enforcement fails, reports the first call distinctly from every repeat, stops further re-announcement once recorded, and never authorizes a paired effect twice across repeat calls |
 | publication-and-acknowledgement serialization | a concurrent `reconcile` cannot append a wake after `handled` wins the shared per-source boundary, so an acknowledged result is not re-announced by a publication race |

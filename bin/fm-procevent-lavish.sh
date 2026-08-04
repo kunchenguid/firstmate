@@ -11,7 +11,11 @@
 # arm        Register the canonical source, reconcile it through the generic
 #            runner, and report armed only after that exact source has a live
 #            owner. A failed confirmation returns nonzero and stays registered
-#            for the runner's ordinary restart recovery.
+#            for the runner's ordinary restart recovery. A target session that
+#            has already ended or is missing is a hard failure too, reported as
+#            exactly that: it cannot accept feedback, so it never becomes live,
+#            and re-arming it only polls an ended session again. Its terminal
+#            result is still captured, announced, and handled normally.
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
 # terminal   Exit 0 when the captured result means this Lavish source will never
@@ -51,7 +55,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -71,7 +75,7 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local artifact=${1-} id real
+  local artifact=${1-} id real live_status=0
   [ -n "$artifact" ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   id=$(cmd_source_id "$artifact") || exit 1
@@ -80,7 +84,14 @@ cmd_arm() {
   # The plain blocking form: no --timeout-ms, so completion is a server event.
   "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- lavish-axi poll "$real" || exit 1
   "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null || exit 1
-  "$SCRIPT_DIR/fm-procevent.sh" await-live "$id" >/dev/null || exit 1
+  # Exit 3 is the runner's distinct "this source already ended" verdict. For
+  # Lavish that means the review session ended or was never there, which is a
+  # failed handoff however durably its terminal result was captured: an ended
+  # session cannot receive the feedback this arm was asked to wait for.
+  "$SCRIPT_DIR/fm-procevent.sh" await-live "$id" >/dev/null || live_status=$?
+  [ "$live_status" -ne 3 ] \
+    || die "the Lavish session for $real ended or was missing before a live listener was established, so it cannot accept feedback and this handoff did not arm: $id"
+  [ "$live_status" -eq 0 ] || exit 1
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
 }

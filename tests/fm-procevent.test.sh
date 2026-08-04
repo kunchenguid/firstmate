@@ -427,6 +427,19 @@ assert_present "$HRETFAIL/state/procevent/retire-fail-src.source" \
   "failed retirement preserves the exact registration"
 assert_present "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
   "failed retirement preserves its terminal ownership claim"
+retfail_owner=$(pe_adapter "$HRETFAIL" list | awk '$1 == "retire-fail-src" { print $3 }')
+[ "$retfail_owner" = terminal ] \
+  || fail "list reported owner=$retfail_owner for a claim awaiting terminal retirement"
+retfail_started=$(date +%s)
+retfail_status=0
+retfail_out=$(FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT=60 FM_ROOT_OVERRIDE="$ADAPTER_ROOT" \
+  FM_HOME="$HRETFAIL" "$ROOT/bin/fm-procevent.sh" await-live retire-fail-src 2>&1) || retfail_status=$?
+[ "$retfail_status" -eq 3 ] \
+  || fail "await-live exited $retfail_status for a source awaiting terminal retirement"
+assert_contains "$retfail_out" "ended before a live listener" \
+  "await-live named the terminal claim differently from list"
+[ "$(( $(date +%s) - retfail_started ))" -lt 10 ] \
+  || fail "await-live burned its confirmation window on a source that had already ended"
 out=$(PATH="$FAIL_RM_BIN:$PATH" pe_adapter "$HRETFAIL" reconcile)
 assert_contains "$out" "started=0" "failed terminal retirement never restarts the poll"
 [ "$(count_results "$HRETFAIL" retire-fail-src)" = 1 ] \
@@ -537,6 +550,100 @@ arm_owner=$(pe "$HARMFAIL" list | awk -v id="$lavish_fail_id" '$1 == id { print 
 [ "$arm_owner" = live ] || fail "reconcile recovered the listener process but owner=$arm_owner"
 pe "$HARMFAIL" retire "$lavish_fail_id" >/dev/null
 pass "failed Lavish listener startup is reported and the durable source recovers through reconcile"
+
+# A target session that already ended cannot accept the feedback arm exists to
+# wait for, so it stays a hard failure - but it must be reported as the target
+# ending, not as firstmate's own state going missing. A caller told its state is
+# corrupt re-arms, and each re-arm polls the ended session and announces again.
+HARMEND="$TMP_ROOT/harm-end"; new_home "$HARMEND"
+LAVISH_END_BIN=$(fm_fakebin "$TMP_ROOT/lavish-ended-stub")
+LAVISH_END_COUNT="$TMP_ROOT/lavish-ended-count"
+export LAVISH_END_COUNT
+cat > "$LAVISH_END_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>` against a session that already ended: it
+# returns at once, so the runner captures a terminal result and retires the
+# source while arm is still confirming liveness.
+[ "${1-}" = poll ] && [ -f "${2-}" ] || exit 64
+count=$(cat "$LAVISH_END_COUNT" 2>/dev/null || echo 0)
+printf '%s\n' "$((count + 1))" > "$LAVISH_END_COUNT"
+printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n'
+SH
+chmod +x "$LAVISH_END_BIN/lavish-axi"
+LAVISH_END_ART="$TMP_ROOT/lavish-ended.html"
+printf '<h1>ended review</h1>\n' > "$LAVISH_END_ART"
+lavish_end_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_END_ART")
+PE_TRACKED+=("$HARMEND|$lavish_end_id")
+arm_end_status=0
+arm_end_out=$(PATH="$LAVISH_END_BIN:$PATH" FM_HOME="$HARMEND" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_END_ART" 2>&1) || arm_end_status=$?
+[ "$arm_end_status" -ne 0 ] || fail "Lavish arm reported an ended target session as an armed handoff"
+assert_not_contains "$arm_end_out" "armed: $lavish_end_id" \
+  "arm printed a ready result for an ended target session"
+assert_contains "$arm_end_out" "ended or was missing" \
+  "arm did not diagnose that the target session ended before a live listener"
+assert_not_contains "$arm_end_out" "registration disappeared" \
+  "arm blamed its own state for a target session that simply ended"
+[ "$(cat "$LAVISH_END_COUNT")" = 1 ] \
+  || fail "arm polled the ended session $(cat "$LAVISH_END_COUNT") times"
+[ "$(count_results "$HARMEND" "$lavish_end_id")" = 1 ] \
+  || fail "the ended session's terminal result was not captured exactly once"
+assert_contains "$(wake_payloads "$HARMEND")" "procevent lavish $lavish_end_id 1" \
+  "the ended session's captured result was not announced"
+assert_absent "$HARMEND/state/procevent/$lavish_end_id.source" \
+  "the ended session's source did not retire itself"
+pass "Lavish arm fails with a target-session diagnostic when that session already ended, and still keeps its captured result"
+
+# The generic runner owns that distinction, so it is proved on its own public
+# command too: a source that ended terminally reads differently from one whose
+# registration is simply not there.
+HAWAIT="$TMP_ROOT/hawait"; new_home "$HAWAIT"
+PE_TRACKED+=("$HAWAIT|await-ends-src")
+pe_adapter "$HAWAIT" register endnow await-ends-src -- /bin/echo "terminal payload" >/dev/null
+pe_adapter "$HAWAIT" start await-ends-src >/dev/null
+assert_absent "$HAWAIT/state/procevent/await-ends-src.source" \
+  "the fixture terminal source did not retire itself"
+await_end_status=0
+await_end_out=$(pe_adapter "$HAWAIT" await-live await-ends-src 2>&1) || await_end_status=$?
+[ "$await_end_status" -eq 3 ] \
+  || fail "await-live exited $await_end_status for a source that ended terminally"
+assert_contains "$await_end_out" "ended before a live listener" \
+  "await-live did not report the adapter's terminal verdict"
+assert_not_contains "$await_end_out" "registration disappeared" \
+  "await-live blamed missing state for a source that ended"
+await_absent_status=0
+await_absent_out=$(pe_adapter "$HAWAIT" await-live await-never-src 2>&1) || await_absent_status=$?
+[ "$await_absent_status" -eq 1 ] \
+  || fail "await-live exited $await_absent_status for a source that was never registered"
+assert_contains "$await_absent_out" "registration disappeared" \
+  "a source with no registration and no captured result lost its own diagnostic"
+pass "await-live distinguishes a source that ended terminally from a registration that is not there"
+
+# The bound is real elapsed time: a concurrent ownership change holding the
+# per-source boundary must not stretch a confirmation the caller is waiting on.
+HCONT="$TMP_ROOT/hcont"; new_home "$HCONT"
+CONT_TRIGGER="$TMP_ROOT/contended-trigger"
+pe_register "$HCONT" lavish contended-src -- "$BLOCKER" "$CONT_TRIGGER" "contended payload" >/dev/null
+CONT_READY="$TMP_ROOT/contended-ready"
+CONT_RELEASE="$TMP_ROOT/contended-release"
+hold_source_lock contended-src "$CONT_READY" "$CONT_RELEASE"
+wait_for "$CONT_READY" || fail "the source boundary holder never started"
+cont_started=$(date +%s)
+cont_status=0
+cont_out=$(FM_HOME="$HCONT" FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT=1 \
+  "$ROOT/bin/fm-procevent.sh" await-live contended-src 2>&1) || cont_status=$?
+cont_elapsed=$(( $(date +%s) - cont_started ))
+[ "$cont_status" -ne 0 ] || fail "await-live confirmed liveness it never managed to read"
+[ "$cont_elapsed" -le 5 ] \
+  || fail "await-live waited ${cont_elapsed}s on a held source boundary despite its 1s bound"
+assert_contains "$cont_out" "cannot read ownership" \
+  "a confirmation blocked by the source boundary omitted its concrete diagnostic"
+assert_present "$HCONT/state/procevent/contended-src.source" \
+  "a blocked confirmation discarded the registration needed for reconcile recovery"
+: > "$CONT_RELEASE"
+wait "$HOLDER_PID" 2>/dev/null || true
+pe "$HCONT" retire contended-src >/dev/null
+pass "the liveness confirmation bound is elapsed time that a held source boundary cannot stretch"
 
 # --- end-user-aligned regression: one Send & End, one captured result -------
 # The dogfood defect: a real armed Lavish source received one human `Send & End`
@@ -1163,6 +1270,8 @@ pass "the adapter owns which Lavish results end a source, and payload text canno
 adapter_help=$("$ROOT/bin/fm-procevent-lavish.sh" --help 2>&1 || true)
 assert_contains "$adapter_help" "report armed only after" \
   "the adapter's help makes live ownership the arm success boundary"
+assert_contains "$adapter_help" "cannot accept feedback" \
+  "the adapter's help states that an ended or missing target session is a failed arm"
 assert_contains "$adapter_help" "destructively clears" \
   "the adapter's help states the destructive-source loss limitation"
 assert_contains "$adapter_help" "Never describe" \
@@ -1171,6 +1280,10 @@ assert_contains "$adapter_help" "Never describe" \
 runner_help=$("$ROOT/bin/fm-procevent.sh" --help 2>&1 || true)
 assert_contains "$runner_help" "await-live" \
   "the runner's help exposes its bounded exact-source liveness confirmation"
+assert_contains "$runner_help" "elapsed wall-clock bound" \
+  "the runner's help states that the confirmation bound is elapsed time"
+assert_contains "$runner_help" "Exit 3" \
+  "the runner's help distinguishes an ended source from a listener that never became live"
 assert_contains "$runner_help" "Durability boundary" \
   "the runner's help scopes what it actually proves"
 assert_not_contains "$runner_help" "exactly-once" \

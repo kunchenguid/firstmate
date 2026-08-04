@@ -32,8 +32,14 @@
 #            This is liveness repair only - it never discovers results by
 #            polling the source, because the child blocks on the source itself.
 # await-live Verify that the exact registered source has a live owner, requiring
-#            five consecutive checks within FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT
-#            seconds (default 5). It never starts a runner; call reconcile first.
+#            five consecutive checks inside an elapsed wall-clock bound of
+#            FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT seconds (default 5) that a
+#            concurrent ownership change cannot stretch. It never starts a
+#            runner; call reconcile first. Exit 0 confirms liveness. Exit 3 means
+#            the source ENDED before any live listener was confirmed - its own
+#            adapter classified the captured result terminal - so it can never
+#            become live and retrying cannot help. Any other nonzero exit leaves
+#            the registration in place for ordinary reconcile recovery.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -85,7 +91,7 @@ MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 LIVE_CONFIRM_TIMEOUT=${FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT:-5}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,68p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,74p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -103,6 +109,50 @@ adapter_result_is_terminal() {  # <adapter> <result-file>
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
+
+# The one operator vocabulary for claim states, so every command that reports
+# ownership names the same state identically.
+claim_state_label() {  # <fm_procevent_claim_state_locked exit code>
+  case "$1" in
+    0) printf 'live\n' ;;
+    1) printf 'none\n' ;;
+    2) printf 'uncertain\n' ;;
+    3) printf 'orphaned\n' ;;
+    4) printf 'terminal\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# The newest generation this source has durably captured, if any.
+latest_captured_result() {  # <source-id>
+  local id=$1 inbox result seq newest='' newest_seq=0
+  inbox=$(fm_procevent_inbox_dir "$STATE")
+  [ -d "$inbox" ] || return 1
+  for result in "$inbox/$id".*.result; do
+    [ -f "$result" ] && [ ! -L "$result" ] || continue
+    [ "$(fm_procevent_result_source_id "$result")" = "$id" ] || continue
+    seq=$(fm_procevent_result_sequence "$result")
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    if [ "$seq" -gt "$newest_seq" ]; then
+      newest_seq=$seq
+      newest=$result
+    fi
+  done
+  [ -n "$newest" ] || return 1
+  printf '%s\n' "$newest"
+}
+
+# Whether this source ended itself: its own adapter classified its newest
+# captured result terminal, which is the exact verdict this runner acts on when
+# it retires a source. A source that has ended is a different outcome from a
+# listener that never became live, and only the adapter's verdict tells them
+# apart once the registration is already gone.
+source_ended_terminally() {  # <source-id>
+  local id=$1 result adapter
+  result=$(latest_captured_result "$id") || return 1
+  adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null) || return 1
+  adapter_result_is_terminal "$adapter" "$result"
+}
 
 read_adapter() {  # <source-id>
   local f; f=$(source_file "$1")
@@ -499,8 +549,16 @@ cmd_reconcile() {
 # source's claim under the same per-source boundary as list and ownership changes.
 # Requiring five consecutive live reads prevents a runner that exits immediately
 # without establishing a durable wait from being reported as ready.
+#
+# Two properties are what make this safe to call inside a conversational turn.
+# The bound is elapsed wall-clock time, and the boundary is taken with the
+# non-blocking acquire, so a concurrent retire or reconcile holding it cannot
+# stretch the wait past the configured timeout. And a source whose own adapter
+# already classified its captured result terminal has ENDED: no amount of waiting
+# produces a live listener for it, so it exits 3 immediately and distinctly
+# rather than burning the window and reporting missing state.
 cmd_await_live() {
-  local id=${1-} i=0 limit state=none claim_state live_reads=0
+  local id=${1-} state=unread claim_state live_reads=0
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$LIVE_CONFIRM_TIMEOUT" in
@@ -508,40 +566,46 @@ cmd_await_live() {
   esac
   [ "$LIVE_CONFIRM_TIMEOUT" -le 300 ] \
     || die "FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT must be an integer from 1 to 300"
-  limit=$((LIVE_CONFIRM_TIMEOUT * 10))
-  while [ "$i" -lt "$limit" ]; do
-    fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  SECONDS=0
+  while [ "$SECONDS" -le "$LIVE_CONFIRM_TIMEOUT" ]; do
+    if ! fm_procevent_source_lock_try_acquire "$id"; then
+      sleep 0.1
+      continue
+    fi
     if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
       state=unregistered
     else
       fm_procevent_claim_state_locked "$id"
       claim_state=$?
-      case "$claim_state" in
-        0) state=live ;;
-        1) state=none ;;
-        2) state=uncertain ;;
-        3) state=orphaned ;;
-        4) state=terminal ;;
-        *) state=unknown ;;
-      esac
+      state=$(claim_state_label "$claim_state")
     fi
     fm_procevent_source_lock_release "$id"
-    if [ "$state" = live ]; then
-      live_reads=$((live_reads + 1))
-      if [ "$live_reads" -ge 5 ]; then
-        printf 'live: %s\n' "$id"
-        return 0
-      fi
-    else
-      live_reads=0
-      [ "$state" = unregistered ] && break
-    fi
+    case "$state" in
+      live)
+        live_reads=$((live_reads + 1))
+        if [ "$live_reads" -ge 5 ]; then
+          printf 'live: %s\n' "$id"
+          return 0
+        fi
+        ;;
+      unregistered|terminal) break ;;
+      *) live_reads=0 ;;
+    esac
     sleep 0.1
-    i=$((i + 1))
   done
-  if [ "$state" = unregistered ]; then
-    die "source registration disappeared before listener liveness was confirmed: $id"
+  if [ "$state" = terminal ] || { [ "$state" = unregistered ] && source_ended_terminally "$id"; }; then
+    printf 'error: source %s ended before a live listener was confirmed: its own adapter classified the captured result terminal, so it will never produce another one\n' \
+      "$id" >&2
+    exit 3
   fi
+  case "$state" in
+    unregistered)
+      die "source registration disappeared before listener liveness was confirmed: $id" ;;
+    unread)
+      die "cannot read ownership of source $id within ${LIVE_CONFIRM_TIMEOUT}s: its per-source boundary stayed unavailable; registration remains for reconcile" ;;
+    live)
+      die "listener ownership of source $id did not stay live for the whole ${LIVE_CONFIRM_TIMEOUT}s confirmation window; registration remains for reconcile" ;;
+  esac
   die "listener did not become live for source $id within ${LIVE_CONFIRM_TIMEOUT}s (owner=$state); registration remains for reconcile"
 }
 
@@ -753,7 +817,7 @@ cmd_sweep_home() {
 }
 
 cmd_list() {
-  local rec id adapter owner pending
+  local rec id adapter owner pending claim_state
   if ! fm_procevent_any_registered "$STATE"; then
     printf 'no sources registered\n'
     return 0
@@ -765,7 +829,8 @@ cmd_list() {
     adapter=$(read_adapter "$id" 2>/dev/null || echo '?')
     fm_procevent_source_lock_acquire "$id" || continue
     fm_procevent_claim_state_locked "$id"
-    case "$?" in 0) owner=live ;; 1) owner=none ;; 3) owner=orphaned ;; *) owner=uncertain ;; esac
+    claim_state=$?
+    owner=$(claim_state_label "$claim_state")
     fm_procevent_source_lock_release "$id"
     pending=$(fm_procevent_pending "$STATE" | grep -c "/$id\." || true)
     printf '%-28s %-12s %-10s %s\n' "$id" "$adapter" "$owner" "$pending"

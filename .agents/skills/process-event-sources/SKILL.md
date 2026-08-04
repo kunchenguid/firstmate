@@ -34,9 +34,12 @@ A continuity break is escalated once and stays unarmed until an operator deliber
 
 `bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
 
+`arm` reports success only once that exact source has a live listener, so a nonzero `arm` is a real failed handoff and never a source you may treat as armed.
+
 Two rules the commands cannot enforce for you:
 
 - **Never run the source's blocking command yourself in a conversational turn.** That is the problem the runner exists to remove, and for a destructive source it also consumes the result where nothing durable can capture it.
+- **Never re-arm on a diagnostic that says the target itself ended or was missing.** That target cannot accept feedback, so re-arming only polls an ended session again and announces another result. Read the diagnostic: a listener that failed to start is what ordinary reconciliation recovers, and a target that ended needs a new review surface instead.
 - **A source is a wait on an external process, not a task.** It gets no task metadata and no backlog entry. If the wait itself needs tracking, file it as its own work item.
 
 ## Handling a wake

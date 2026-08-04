@@ -80,13 +80,26 @@ fm_procevent_source_lock_path() {
   printf '%s/%s.lock\n' "$(fm_procevent_claim_root)" "$1"
 }
 
-fm_procevent_source_lock_acquire() {
+fm_procevent_source_lock_prepare() {
   local id=$1 root
   fm_procevent_source_id_valid "$id" || return 1
   root=$(fm_procevent_claim_root)
   (umask 077; mkdir -p "$root") || return 1
-  [ -d "$root" ] && [ ! -L "$root" ] || return 1
-  fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$id")"
+  [ -d "$root" ] && [ ! -L "$root" ]
+}
+
+fm_procevent_source_lock_acquire() {
+  fm_procevent_source_lock_prepare "$1" || return 1
+  fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$1")"
+}
+
+# The non-blocking form of the same boundary, for a caller that owns a real
+# wall-clock bound instead of waiting for however long an ownership change holds
+# it. Reading state is the only supported use: every mutation here waits, so no
+# transition can be skipped just because the boundary was momentarily busy.
+fm_procevent_source_lock_try_acquire() {
+  fm_procevent_source_lock_prepare "$1" || return 1
+  fm_lock_try_acquire "$(fm_procevent_source_lock_path "$1")"
 }
 
 fm_procevent_source_lock_release() {
