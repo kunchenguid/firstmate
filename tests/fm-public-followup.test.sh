@@ -638,6 +638,116 @@ test_secondmate_teardown_requires_parent_binding() {
   pass "marked secondmate teardown resolves its parent and fails closed when unavailable"
 }
 
+# The three tests below exercise the durable .fm-secondmate-parent record a real
+# bin/fm-home-seed.sh seed now writes next to .fm-secondmate-home (fm-remote-sm-
+# cleanup-parent-binding-s1 report, section 7). Before this record existed, the
+# marked-child gate above could only ever see the parent through the launch-time
+# FM_PUBLIC_FOLLOWUP_PRIMARY_HOME env var: a restart that dropped that prefix made
+# the guard silently treat an actually-active parent relay as off, which could
+# drop a real public-reply obligation without anyone noticing. Each test drives
+# the real bin/fm-teardown.sh cleanup path against a home real fm-home-seed.sh
+# produced, never a hand-crafted marker.
+
+test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
+  local parent child parent_resolved
+  parent=$(make_home teardown-durable-parent)
+  child="$TMP_ROOT/teardown-durable-child"
+  FM_SECONDMATE_CHARTER='Durable-record regression charter.' \
+    FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \
+    || fail "real secondmate seeding failed"
+  child=$(cd "$child" && pwd -P)
+  parent_resolved=$(cd "$parent" && pwd -P)
+  make_fake_curl "$child" >/dev/null
+  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+
+  assert_present "$child/.fm-secondmate-parent" \
+    "real secondmate seeding must write a durable parent record"
+  assert_grep 'route=local' "$child/.fm-secondmate-parent" \
+    "a same-filesystem secondmate must be recorded with a local route"
+  assert_grep "parent_home=$parent_resolved" "$child/.fm-secondmate-parent" \
+    "the durable record must name the real resolved parent home"
+
+  seed_commitment "$parent" pf-durable req-durable x secondmate:mate work-child
+  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  fm_write_meta "$child/state/work-child.meta" \
+    "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+
+  # No FM_PUBLIC_FOLLOWUP_PRIMARY_HOME at all here: a restart of the secondmate
+  # agent that drops the launch-time prefix must still find the real parent
+  # through the durable record instead of silently treating the relay as off.
+  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+    expect_failure "teardown with a lost launch binding must still find the real parent" \
+    "$TEARDOWN" work-child
+  assert_contains "$EXPECT_OUT" "still owes a public reply" \
+    "the durable record must resolve to the real parent's owed commitment"
+  case "$EXPECT_OUT" in
+    *"cannot resolve the primary home"*) fail "the durable local record was not used to resolve the parent" ;;
+  esac
+  assert_present "$child/state/work-child.meta" \
+    "a durably-resolved owed commitment must preserve the child work metadata"
+  pass "a lost launch-time parent binding is recovered from the durable local record"
+}
+
+test_secondmate_teardown_durable_record_missing_parent_registration_still_refuses() {
+  local parent child
+  parent=$(make_home teardown-durable-missing-parent)
+  child="$TMP_ROOT/teardown-durable-missing-child"
+  FM_SECONDMATE_CHARTER='Durable-record missing-registration regression charter.' \
+    FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \
+    || fail "real secondmate seeding failed"
+  child=$(cd "$child" && pwd -P)
+  make_fake_curl "$child" >/dev/null
+  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_write_meta "$child/state/work-child.meta" \
+    "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+  # No parent/state/mate.meta at all: the parent never recorded this secondmate's
+  # own agent, so its side of the binding is genuinely missing. A durable LOCAL
+  # record naming the real parent path must not be enough on its own to bypass
+  # the check; the real protection this guard exists for must survive the fix.
+
+  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+    expect_failure "a durable local record with no parent-side registration must still refuse" \
+    "$TEARDOWN" work-child
+  assert_contains "$EXPECT_OUT" "cannot resolve the primary home for marked secondmate mate" \
+    "a genuinely missing parent-side registration must remain an actionable teardown refusal"
+  assert_present "$child/state/work-child.meta" \
+    "a genuinely missing parent binding must preserve the child work metadata"
+  pass "a durable local parent record does not bypass a genuinely missing parent-side registration"
+}
+
+test_secondmate_teardown_durable_record_with_no_commitment_succeeds() {
+  local parent child rc out
+  parent=$(make_home teardown-durable-clean-parent)
+  child="$TMP_ROOT/teardown-durable-clean-child"
+  FM_SECONDMATE_CHARTER='Durable-record clean-cleanup regression charter.' \
+    FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \
+    || fail "real secondmate seeding failed"
+  child=$(cd "$child" && pwd -P)
+  make_fake_curl "$child" >/dev/null
+  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  fm_git_init_commit "$child/projects/worktree"
+  printf 'manual\n' > "$child/config/backlog-backend"
+  fm_write_meta "$child/state/work-clean.meta" \
+    "window=firstmate:fm-work-clean" "endpoint_task_id=work-clean" \
+    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "kind=ship" "mode=local-only"
+
+  rc=0
+  out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+    FM_CONFIG_OVERRIDE="$child/config" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
+    "$TEARDOWN" work-clean 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a resolved parent with no owed commitment must allow cleanup (rc=$rc): $out"
+  assert_not_contains "$out" "cannot resolve the primary home" \
+    "a real durable-record-backed parent must resolve cleanly"
+  pass "a resolved parent through the durable local record allows cleanup with nothing owed"
+}
+
 test_relay_disabled_unmarked_teardown_skips_public_path() {
   local home tasks_log out rc
   home=$(make_home teardown-disabled-unmarked relay-off)
@@ -1027,6 +1137,9 @@ test_interrupted_delivery_refuses_to_repost
 test_outward_delivery_stays_with_the_owning_home
 test_delivery_requires_registration_before_posting
 test_secondmate_teardown_requires_parent_binding
+test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost
+test_secondmate_teardown_durable_record_missing_parent_registration_still_refuses
+test_secondmate_teardown_durable_record_with_no_commitment_succeeds
 test_relay_disabled_unmarked_teardown_skips_public_path
 test_relay_disabled_parent_allows_marked_child_teardown
 test_secondmate_parent_binding_matches_literal_id

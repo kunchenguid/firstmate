@@ -40,6 +40,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-charter-lib.sh
@@ -284,7 +285,7 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER"; do
+  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
@@ -507,6 +508,7 @@ SEED_PARENT_BRIEF_DIR_CREATED=0
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
 SEED_MARKER_EXISTED=0
+SEED_PARENT_MARKER_EXISTED=0
 
 restore_seed_file() {
   local existed=$1 backup=$2 path=$3
@@ -626,6 +628,7 @@ seed_rollback() {
       fi
       if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
+        restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
@@ -869,6 +872,10 @@ seed_home() {
     SEED_MARKER_EXISTED=1
     cp "$home/$SUB_HOME_MARKER" "$SEED_BACKUP_DIR/marker"
   fi
+  if [ -f "$home/$SUB_HOME_PARENT_MARKER" ]; then
+    SEED_PARENT_MARKER_EXISTED=1
+    cp "$home/$SUB_HOME_PARENT_MARKER" "$SEED_BACKUP_DIR/parent-marker"
+  fi
   SEED_HOME_BACKED_UP=1
 
   if [ ! -f "$SEED_PARENT_BRIEF" ]; then
@@ -918,6 +925,16 @@ seed_home() {
 
   projects_csv=$(join_projects "$@")
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
+  # Durable record of this home's route to its parent, written once here next
+  # to the identity marker: the cleanup check in fm-teardown.sh reads it so a
+  # restart that drops the launch-time FM_PUBLIC_FOLLOWUP_PRIMARY_HOME prefix
+  # can still resolve the real parent instead of silently treating its relay
+  # as inactive.
+  {
+    printf 'schema=fm-secondmate-parent.v1\n'
+    printf 'route=local\n'
+    printf 'parent_home=%s\n' "$(resolved_path "$FM_HOME")"
+  } > "$home/$SUB_HOME_PARENT_MARKER"
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
   SEED_COMMITTED=1
