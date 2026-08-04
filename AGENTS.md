@@ -475,6 +475,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
+Load `moss-pr` before briefing or spawning any Moss (usemoss product) feature implementation, before calling a Moss PR ready for human re-review or merge consideration, and when the captain invokes `/moss-pr`; it owns intent, surface matrix, budgeted hardening, artifact lockstep, thread ledger, and GO/NO-GO attestation.
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
@@ -511,7 +512,6 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
-- `moss-pr` - load before briefing or spawning any Moss (usemoss product) feature implementation, before calling a Moss PR ready for human re-review or merge consideration, and when the captain invokes `/moss-pr`; owns intent, surface matrix, budgeted hardening, artifact lockstep, thread ledger, and GO/NO-GO attestation.
 
 ## 14. X mode
 

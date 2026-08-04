@@ -129,10 +129,13 @@ Run on the final tip SHA.
 4. **Deterministic gate** - green with named commands/suites (not "tests passed" without identity).
 5. **CI** - required checks green on that SHA.
 6. **Artifact lockstep** - if the repo commits or releases binaries for this change, rebuild/verify from **this** SHA and commit only when mismatch is proven; never call ready when source and shipped binary disagree.
+   For every source change the artifact represents, record the base and final-tip artifact hashes, require the final-tip artifact to differ from base, and exercise the changed behavior through the packaged artifact so a build that silently used base-era source cannot pass.
+   Compare the final-tip rebuild bytes with the checked-in or released bytes and block GO on any mismatch.
 7. **Thread ledger** - every human thread, **resolved or not**, is FIXED (evidence read from the code at *this* tip, not quoted from an earlier reply), OUTDATED, DEFERRED (named external dependency), or STILL_BUG (blocks GO).
    Threads resolved at an earlier head are re-verified, not carried.
    Prefer reply-in-thread + resolve when project norms and captain prefs require it.
 8. **Consumer probe** - for each surface this change gates or newly requires something from, name one real consumer (published manifest, checked-in demo/benchmark, example, README quick start, downstream package) and state how you proved it still works at this tip.
+   When the change modifies behavior, the probe must exercise that behavior through the packaged surface; a build-only or import-only probe is insufficient.
 9. **Negative controls** - list every guard, gate, assertion, and regression this change added, and for each give the mutation that made it fail and the failure observed.
    Any control with no recorded red run is reported as an uncovered surface.
 10. **Claim audit** - every SHA, run link, benchmark, and "verified" statement in the PR body and in thread replies is re-checked at this tip.
@@ -198,9 +201,11 @@ Extend this list when humans teach us.
   Where the real endpoint 404s, refuses, or filters, the double does too.
   A green suite over a fake more permissive than the real service proves nothing.
   *(PR 349: a release-API fake returned drafts from a by-tag endpoint that 404s in reality, so the retry path was broken while tests passed.)*
-- **A verifier hashes what it approves, and a race test proves it raced** - an inventory, manifest, identity, or provenance check that approves an artifact binds to that artifact's actual bytes; a concurrency regression asserts the operations actually overlapped, not merely that the run finished.
-  Prove each by substituting a stub artifact, or by running the operations serially, and showing the check go red.
-  *(PR 348: the identity manifest never checksums the archive it approves. PR 351: inventory guards accept real drift, and the Windows close-race test passes when nothing overlaps `close()`.)*
+- **A verifier hashes exactly what it approves, including complete stitched output, and a race test proves it raced** - an inventory, manifest, identity, provenance, or interrupted-response check hashes the exact final bytes consumed as one complete value, including every fragment of a stitched response in order; a concurrency regression asserts the operations actually overlapped, not merely that the run finished.
+  Prove artifact binding by substituting a stub artifact, prove stitching by dropping, duplicating, reordering, or truncating a fragment, and prove concurrency by serializing the operations; each negative control must make the check go red.
+  *(PR 348: the identity manifest never checksums the archive it approves.)*
+  *(PR 351: inventory guards accept real drift, and the Windows close-race test passes when nothing overlaps `close()`.)*
+  *(PR 353: interrupted-response verification did not bind approval to the complete stitched response.)*
 - **Fixes must not invert an earlier fix** - when a fix round edits a function an earlier resolved finding also edited, name both findings and state the invariant that satisfies each.
   If a new regression test asserts the exact property an earlier reviewer called a defect, that is the defect, not the proof.
 - **Checked-in callers are consumers** - demo apps, test apps, benchmarks, examples, and README quick starts are consumers of the API you changed.
@@ -220,6 +225,7 @@ Extend this list when humans teach us.
 
 - **Multi-binding SDK monorepo** (e.g. moss-sdks-internal) - full matrix + artifact lockstep + package-consumer gates.
   Surfaces with no PR CI at all (today: everything under `bindings/ios/` - the only iOS workflow is `workflow_dispatch`) get a manual consumer probe named in the closeout, not an N/A.
+  For iOS, that probe must link the checked-in XCFramework, exercise the source change's behavior, and record the base and final-tip framework hashes required by Mode C so a byte-identical base-era package cannot pass as current.
 - **Services** (identity, index-manager, event-ingestor, dashboard) - API/authz, migrations, contract tests, deploy boundary honesty.
 - **Infra** (infra-moss-tf) - plan identity, no apply-as-ready, blast-radius checklist.
 - **Docs/samples** - thinner path; still intent + link/build check when samples compile.
