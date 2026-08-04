@@ -708,8 +708,86 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Crewmate branch prefix. Projects whose CI enforces a closed set of branch-name
+# prefixes need the scaffold to name a branch they accept; every project that does
+# not pass --branch-prefix must keep the historical fm/<id> branch untouched.
+test_branch_prefix_defaults_to_fm() {
+  local home id brief mode
+  home="$TMP_ROOT/branch-default-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-branch-default-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode: brief without --branch-prefix should exit 0"
+    brief="$home/data/$id/brief.md"
+    assert_grep "git checkout -b fm/$id" "$brief" \
+      "$mode: omitting --branch-prefix must still create the fm/ branch"
+    assert_no_grep "checkout -b karl/" "$brief" "$mode: brief leaked an unrelated prefix"
+  done
+  pass "fm-brief.sh: omitting --branch-prefix keeps the historical fm/<id> branch"
+}
+
+# With the flag, every site that hardcoded fm/<id> uses the configured prefix, in
+# each delivery mode's own set of branch mentions.
+test_branch_prefix_substitutes_at_every_site() {
+  local home id brief
+  home="$TMP_ROOT/branch-override-home"
+  mkdir -p "$home/data"
+
+  id="brief-branch-nm"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --branch-prefix karl/ >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b karl/$id" "$brief" "no-mistakes brief did not use the configured prefix"
+  assert_no_grep "fm/$id" "$brief" "no-mistakes brief still names an fm/ branch"
+
+  id="brief-branch-direct"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --branch-prefix=karl/ >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b karl/$id" "$brief" "direct-PR brief did not use the configured prefix"
+  assert_grep "push only your \`karl/$id\` branch" "$brief" "direct-PR rule 1 did not use the configured prefix"
+  assert_no_grep "fm/$id" "$brief" "direct-PR brief still names an fm/ branch"
+
+  id="brief-branch-local"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --branch-prefix karl/ >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b karl/$id" "$brief" "local-only brief did not use the configured prefix"
+  assert_grep "Work only on your \`karl/$id\` branch" "$brief" "local-only rule 1 did not use the configured prefix"
+  assert_grep "committed on your branch \`karl/$id\`" "$brief" "local-only done did not use the configured prefix"
+  assert_grep "done: ready in branch karl/$id" "$brief" "local-only ready-report did not use the configured prefix"
+  assert_no_grep "fm/$id" "$brief" "local-only brief still names an fm/ branch"
+  pass "fm-brief.sh: --branch-prefix replaces fm/ at every branch site"
+}
+
+# A prefix reaches a git command and the generated brief, so a malformed value must
+# stop the scaffold rather than be passed through to the worker.
+test_branch_prefix_rejects_unusable_values() {
+  local home out status
+  home="$TMP_ROOT/branch-refused-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain why"
+  done <<'ROWS'
+path traversal|brief-bad-p1 some-proj --mode no-mistakes --branch-prefix ../evil|plain branch-name prefix
+absolute-looking prefix|brief-bad-p2 some-proj --mode no-mistakes --branch-prefix /etc/|plain branch-name prefix
+empty prefix value|brief-bad-p3 some-proj --mode no-mistakes --branch-prefix=|plain branch-name prefix
+missing prefix value|brief-bad-p4 some-proj --mode no-mistakes --branch-prefix|requires a value
+prefix on a scout brief|brief-bad-p5 some-proj --scout --branch-prefix karl/|applies only to ship briefs
+prefix on a secondmate charter|brief-bad-p6 --secondmate --no-projects --branch-prefix karl/|applies only to ship briefs
+ROWS
+  assert_absent "$home/data/brief-bad-p1/brief.md" "refused prefix still wrote a brief"
+  pass "fm-brief.sh: an unusable --branch-prefix is refused, never passed to the worker"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
+test_branch_prefix_defaults_to_fm
+test_branch_prefix_substitutes_at_every_site
+test_branch_prefix_rejects_unusable_values
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
