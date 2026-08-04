@@ -244,17 +244,18 @@ tests/fm-turnend-guard.test.sh
 ### External Codex no-pane AFK boundary
 
 The external-Codex AFK boundary was verified on 2026-08-04 with the installed tmux and Herdr transports.
-`tests/fm-afk-launch.test.sh` reconstructs the bounded no-pane Codex checkpoint, retains an actionable wake, rejects both normal and native daemon entry before away state exists, and refuses an explicit worker-looking target.
-The same test keeps the established tmux and Herdr detached-daemon lifetime and exact cleanup coverage, while `tests/fm-afk-return.test.sh` covers return catch-up cleanup.
+`tests/fm-afk-launch.test.sh` reconstructs the bounded no-pane Codex checkpoint, retains an actionable wake, rejects both launcher paths before away state exists, and refuses an explicit worker-looking target.
+`tests/fm-daemon.test.sh` also invokes the common `bin/fm-afk-start.sh` entry directly and confirms that it refuses before it writes away state.
+The focused coverage retains the established tmux and Herdr detached-daemon lifetime and exact cleanup assertions.
 
 ```sh
-bin/fm-test-run.sh tests/fm-afk-launch.test.sh tests/fm-watch-checkpoint.test.sh tests/fm-afk-return.test.sh tests/fm-supervision-instructions.test.sh
+bin/fm-test-run.sh tests/fm-daemon.test.sh tests/fm-afk-launch.test.sh
 ```
 
 Observed output:
 
 ```text
-FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=13718
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=22837
 ```
 
 The supported external-Codex result is an early refusal with no away flag, daemon record, or daemon lock because the surface has no safe asynchronous callback into its active thread.

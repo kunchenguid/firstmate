@@ -31,7 +31,7 @@ test_afk_start_refuses_when_flag_cannot_be_written() {
   state="$dir/state"
   mkdir -p "$state/.afk"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(env -u CODEX_THREAD_ID FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should fail when state/.afk cannot be written"
@@ -40,13 +40,31 @@ test_afk_start_refuses_when_flag_cannot_be_written() {
   pass "fm-afk-start.sh fails before daemon startup when the afk flag cannot be written"
 }
 
+test_afk_start_refuses_external_codex_without_pane_before_state() {
+  local dir state out status
+  dir=$(make_supercase afk-start-external-codex-no-pane)
+  state="$dir/state"
+
+  out=$(env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID \
+    CODEX_THREAD_ID=fixture FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported \
+    "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should reject an external Codex thread without a pane"
+  assert_contains "$out" "no safe asynchronous callback" "fm-afk-start.sh did not explain the external Codex refusal"
+  assert_absent "$state/.afk" "fm-afk-start.sh wrote away state before rejecting an external Codex thread"
+  assert_absent "$state/.supervise-daemon.lock" "fm-afk-start.sh created a daemon lock before rejecting an external Codex thread"
+  assert_not_contains "$out" "starting supervise daemon" "fm-afk-start.sh continued into daemon startup after rejecting an external Codex thread"
+  pass "fm-afk-start.sh rejects no-pane external Codex before away state"
+}
+
 test_afk_start_ignores_stale_pidfile_without_lock() {
   local dir state out status
   dir=$(make_supercase afk-start-stale-pidfile)
   state="$dir/state"
   printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(env -u CODEX_THREAD_ID FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup instead of trusting a pidfile-only live pid"
@@ -66,7 +84,7 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   printf '%s\n' "$$" > "$lock/pid"
   printf '%s\n' "stale daemon identity" > "$lock/pid-identity"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(env -u CODEX_THREAD_ID FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup after rejecting a reused-pid lock"
@@ -1828,6 +1846,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 }
 
 test_afk_start_refuses_when_flag_cannot_be_written
+test_afk_start_refuses_external_codex_without_pane_before_state
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
