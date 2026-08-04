@@ -181,9 +181,7 @@ models_match() {  # <normalized-recorded> <normalized-actual>
 # outside [A-Za-z0-9] with `-` (verified on this host against paths containing
 # `/`, `.`, `_`, and a space).
 #
-# <config> is $CLAUDE_CONFIG_DIR when set, else ~/.claude. bin/fm-spawn.sh
-# forwards firstmate's own CLAUDE_CONFIG_DIR onto a claude launch, so resolving
-# it the same way here reads the same store the worker wrote to.
+# <config> is the canonical evidence store persisted by bin/fm-spawn.sh.
 #
 # `<synthetic>` is a runtime placeholder the CLI records for messages no model
 # served (injected notices and the like). It names no model and is dropped, so
@@ -193,22 +191,61 @@ claude_config_dir() {
   printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 }
 
+canonical_path() {
+  local input=$1 absolute normalized=/ cursor suffix= base part
+  local parts=() stack=()
+  [ -n "$input" ] || return 1
+  case "$input" in
+    *$'\n'*) return 1 ;;
+    /*) absolute=$input ;;
+    *) absolute=$PWD/$input ;;
+  esac
+  IFS=/ read -r -a parts <<< "$absolute"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|.) ;;
+      ..)
+        [ "${#stack[@]}" -eq 0 ] || unset "stack[$((${#stack[@]} - 1))]"
+        ;;
+      *) stack+=("$part") ;;
+    esac
+  done
+  if [ "${#stack[@]}" -gt 0 ]; then
+    normalized=/$(IFS=/; printf '%s' "${stack[*]}")
+  fi
+  cursor=$normalized
+  while [ ! -e "$cursor" ]; do
+    [ "$cursor" != / ] || return 1
+    part=${cursor##*/}
+    suffix="/$part$suffix"
+    cursor=${cursor%/*}
+    [ -n "$cursor" ] || cursor=/
+  done
+  [ -d "$cursor" ] || return 1
+  base=$(CDPATH='' cd -- "$cursor" 2>/dev/null && pwd -P) || return 1
+  printf '%s%s' "$base" "$suffix"
+}
+
 # mtime_of: a file's modification time in epoch seconds, GNU stat then BSD stat.
 mtime_of() {  # <file>
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
-claude_transcript_dir() {  # <worker-cwd>
-  local cwd=$1 encoded
+claude_transcript_dir() {  # <config-store> <worker-cwd>
+  local store=$1 cwd=$2 encoded
   encoded=$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')
-  printf '%s/projects/%s' "$(claude_config_dir)" "$encoded"
+  printf '%s/projects/%s' "$store" "$encoded"
 }
 
 capture_claude_watermark() {  # <worker-cwd>
-  local dir listing f name names=()
-  dir=$(claude_transcript_dir "$1")
+  local store dir listing f name names=()
+  if ! store=$(canonical_path "$(claude_config_dir)"); then
+    printf 'fm-model-verify: Claude evidence store could not be canonicalized\n' >&2
+    return 4
+  fi
+  dir=$(claude_transcript_dir "$store" "$1")
   if [ ! -d "$dir" ]; then
-    printf 'model_evidence_watermark=claude-transcript-v1\n'
+    printf 'model_evidence_store=%s\nmodel_evidence_watermark=claude-transcript-v1\n' "$store"
     return 0
   fi
   if [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
@@ -241,7 +278,7 @@ capture_claude_watermark() {  # <worker-cwd>
   done <<EOF
 $listing
 EOF
-  printf 'model_evidence_watermark=claude-transcript-v1\n'
+  printf 'model_evidence_store=%s\nmodel_evidence_watermark=claude-transcript-v1\n' "$store"
   for name in "${names[@]:-}"; do
     [ -n "$name" ] || continue
     printf 'model_evidence_before=%s\n' "$name"
@@ -361,7 +398,7 @@ SOURCE=
 DETAIL=
 
 verify_one() {  # <id>
-  local id=$1 meta cwd harness kind anchor watermark baseline models n before
+  local id=$1 meta cwd harness kind anchor anchor_present watermark baseline models n before store store_present
   VERDICT=; RECORDED=; ACTUAL=; SOURCE=none; DETAIL=
 
   meta="$STATE/$id.meta"
@@ -380,9 +417,13 @@ verify_one() {  # <id>
   harness=$(fm_meta_get "$meta" harness)
   kind=$(fm_meta_get "$meta" kind)
   anchor=$(fm_meta_get "$meta" spawned_at)
-  case "$anchor" in ''|*[!0-9]*) anchor= ;; esac
+  anchor_present=0
+  grep -q '^spawned_at=' "$meta" 2>/dev/null && anchor_present=1
   watermark=$(fm_meta_get "$meta" model_evidence_watermark)
   baseline=$(grep '^model_evidence_before=' "$meta" 2>/dev/null | cut -d= -f2- || true)
+  store=$(fm_meta_get "$meta" model_evidence_store)
+  store_present=0
+  grep -q '^model_evidence_store=' "$meta" 2>/dev/null && store_present=1
 
   # A secondmate runs in its own home; every other worker runs in the isolated
   # worktree the backend opened its endpoint in. `project=` is the registered
@@ -394,9 +435,13 @@ verify_one() {  # <id>
   fi
   [ -n "$cwd" ] || cwd=$(fm_meta_get "$meta" project)
 
-  if [ -z "$RECORDED" ] || [ "$RECORDED" = default ]; then
+  if [ -z "$RECORDED" ]; then
+    VERDICT=unverifiable
+    DETAIL="durable record names no dispatched model"
+    return
+  fi
+  if [ "$RECORDED" = default ]; then
     VERDICT=unpinned
-    RECORDED=${RECORDED:-default}
     DETAIL="no model pinned at dispatch; nothing recorded for the runtime to contradict"
     return
   fi
@@ -407,6 +452,35 @@ verify_one() {  # <id>
     return
   fi
   SOURCE=claude-transcript
+
+  if [ "$anchor_present" -eq 1 ]; then
+    case "$anchor" in
+      ''|*[!0-9]*)
+        VERDICT=unverifiable
+        DETAIL="dispatch timestamp is malformed"
+        return
+        ;;
+    esac
+  fi
+
+  if [ "$store_present" -eq 1 ]; then
+    case "$store" in
+      /*) ;;
+      *)
+        VERDICT=unverifiable
+        DETAIL="dispatch model-evidence store is malformed"
+        return
+        ;;
+    esac
+  elif [ "$anchor_present" -eq 1 ] || [ -n "$watermark" ]; then
+    VERDICT=unverifiable
+    DETAIL="durable record names no model-evidence store for this dispatch"
+    return
+  elif ! store=$(canonical_path "$(claude_config_dir)"); then
+    VERDICT=unverifiable
+    DETAIL="legacy model-evidence store could not be canonicalized"
+    return
+  fi
 
   case "$watermark" in
     '') ;;
@@ -450,7 +524,7 @@ EOF
   fi
 
   local dir
-  dir=$(claude_transcript_dir "$cwd")
+  dir=$(claude_transcript_dir "$store" "$cwd")
   models=$(claude_models "$dir" "$anchor" "$watermark" "$baseline")
   case "$models" in
     ERR:*)

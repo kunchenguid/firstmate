@@ -103,3 +103,27 @@ firstmate-watcher-lock-flake · verdict: unverifiable · recorded: opus · actua
 The `unverifiable` rows are the reusable-worktree case, not a fleet fault: those pool slots still carry a previous occupant's `claude-opus-4-8` transcripts, and without a dispatch binding the two occupants cannot be told apart.
 This is the observation that motivated recording a pre-dispatch transcript-identity watermark at spawn, with `spawned_at=` retained only for compatibility with earlier records.
 It is also the shape of the intended behavior: the verifier reports what it cannot attribute rather than picking whichever model would have looked right.
+
+## 2026-08-04: dispatch identity remains stable through restart and teardown
+
+The focused regression matrix uses temporary Firstmate homes and temporary Claude stores only.
+It binds a mismatched worker to store A, invokes verification under store B containing an older matching transcript, and requires the mismatch from store A.
+It also requires missing `model=`, malformed `spawned_at=`, and watermark enumeration failure to remain loud, while a genuinely old record without binding fields retains its disclosed weaker attribution.
+
+The lifecycle cases require base endpoint metadata to exist when watermark capture fails, require forced teardown to print a mismatch without losing discard authority, and require recursive secondmate cleanup to print each child's verdict before removing its record.
+
+Focused command:
+
+```sh
+tests/fm-model-verify.test.sh && tests/fm-spawn-dispatch-profile.test.sh && tests/fm-fleet-snapshot-view.test.sh && tests/fm-teardown.test.sh
+```
+
+Observed success markers:
+
+```text
+all fm-model-verify tests passed
+# all fm-spawn-dispatch-profile tests passed
+ok - bounded secondmate home summary skips model enrichment
+ok - forced teardown surfaces a mismatch before retaining its discard authority
+ok - forced secondmate teardown retains Herdr child identity until exact pane disappearance
+```

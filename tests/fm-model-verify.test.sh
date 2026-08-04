@@ -66,6 +66,7 @@ meta() {
     "harness=claude" \
     "kind=ship" \
     "model=$model" \
+    "model_evidence_store=$CFG" \
     "$@"
   printf '%s' "$wt"
 }
@@ -157,6 +158,16 @@ out=$(run_verify never-dispatched); code=$?
 expect_code 4 "$code" "absent durable record exits 4"
 assert_contains "$out" "verdict: unverifiable" "no record means no verdict, loudly"
 pass "absent durable record fails loudly"
+
+wt=$(meta missing-model opus)
+sed -i.bak '/^model=/d' "$HOME_DIR/state/missing-model.meta"
+rm -f "$HOME_DIR/state/missing-model.meta.bak"
+write_transcript "$wt" s1 claude-opus-5
+out=$(run_verify missing-model); code=$?
+expect_code 4 "$code" "missing model record exits 4"
+assert_contains "$out" "verdict: unverifiable" "a missing model record is not unpinned"
+assert_not_contains "$out" "verdict: unpinned" "only model=default is unpinned"
+pass "missing model metadata fails loudly"
 
 # A harness with no verified evidence source must say so rather than pass.
 wt=$(meta other-harness opus)
@@ -260,6 +271,14 @@ expect_code 0 "$code" "terminal verification allows an unpinned dispatch"
 assert_contains "$out" "verdict: unpinned" "terminal unpinned output stays explicit"
 pass "terminal verification allows unpinned without calling it verified"
 
+wt=$(meta malformed-spawn-time opus spawned_at=not-an-epoch)
+write_transcript "$wt" s1 claude-opus-5
+out=$(run_verify malformed-spawn-time); code=$?
+expect_code 4 "$code" "malformed dispatch timestamp exits 4"
+assert_contains "$out" "verdict: unverifiable" "a malformed dispatch timestamp is not treated as legacy"
+assert_not_contains "$out" "verdict: match" "malformed dispatch metadata cannot manufacture a match"
+pass "malformed dispatch timestamps fail loudly"
+
 # --- (g) spawned_at binds evidence to this dispatch -------------------------
 #
 # A worktree from a reusable pool can still carry the transcripts of a previous
@@ -310,18 +329,34 @@ assert_contains "$out" "actual: claude-sonnet-5" "only the current transcript id
 assert_not_contains "$out" "claude-opus-5" "the baseline transcript identity is excluded"
 pass "identity watermark disambiguates transcripts sharing the spawn second"
 
+wt=$(meta persisted-store opus spawned_at=1 model_evidence_watermark=claude-transcript-v1)
+write_transcript "$wt" current claude-sonnet-5
+other_cfg="$TMP_ROOT/other-claude"
+other_dir="$other_cfg/projects/$(printf '%s' "$wt" | sed 's/[^A-Za-z0-9]/-/g')"
+mkdir -p "$other_dir"
+printf '{"type":"assistant","message":{"model":"claude-opus-5"}}\n' > "$other_dir/older-match.jsonl"
+out=$(CLAUDE_CONFIG_DIR="$other_cfg" run_verify persisted-store); code=$?
+expect_code 3 "$code" "verification remains bound to the persisted evidence store"
+assert_contains "$out" "verdict: mismatch" "ambient config cannot replace the dispatch evidence store"
+assert_contains "$out" "claude-sonnet-5" "the persisted store supplies the actual model"
+assert_not_contains "$out" "actual: claude-opus-5" "an ambient matching transcript cannot manufacture a match"
+pass "persisted evidence-store identity survives ambient config changes"
+
 capture_wt="$TMP_ROOT/wt/capture-watermark"
 mkdir -p "$capture_wt"
 write_transcript "$capture_wt" existing claude-opus-5
 out=$(FM_HOME="$HOME_DIR" "$VERIFY" --capture-watermark "$capture_wt" 2>&1); code=$?
 expect_code 0 "$code" "watermark capture succeeds"
 assert_contains "$out" "model_evidence_watermark=claude-transcript-v1" "watermark format is recorded"
+assert_contains "$out" "model_evidence_store=$CFG" "canonical evidence store is recorded"
 assert_contains "$out" "model_evidence_before=existing.jsonl" "existing transcript identity is recorded"
 pass "spawn-time watermark capture records existing transcript identities"
 
 # Without a timestamp, disagreeing evidence cannot be attributed. Guessing which
 # half belongs to this task would be exactly the silent pass to avoid.
 wt=$(meta unbound-ambiguous opus)
+sed -i.bak '/^model_evidence_store=/d' "$HOME_DIR/state/unbound-ambiguous.meta"
+rm -f "$HOME_DIR/state/unbound-ambiguous.meta.bak"
 write_transcript "$wt" a claude-opus-5
 write_transcript "$wt" b claude-opus-4-8
 out=$(run_verify unbound-ambiguous); code=$?
@@ -332,6 +367,8 @@ pass "unattributable evidence fails loudly instead of guessing"
 # Unbound but unanimous evidence is still attributable, and discloses that the
 # scan was not time-bounded.
 wt=$(meta unbound-agreed opus)
+sed -i.bak '/^model_evidence_store=/d' "$HOME_DIR/state/unbound-agreed.meta"
+rm -f "$HOME_DIR/state/unbound-agreed.meta.bak"
 write_transcript "$wt" a claude-opus-5
 write_transcript "$wt" b claude-opus-5
 out=$(run_verify unbound-agreed); code=$?
@@ -346,6 +383,7 @@ SM_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p "$SM_HOME"
 fm_write_secondmate_meta "$HOME_DIR/state/sm.meta" "$SM_HOME" "firstmate:fm-sm" alpha claude
 printf 'model=opus\n' >> "$HOME_DIR/state/sm.meta"
+printf 'model_evidence_store=%s\n' "$CFG" >> "$HOME_DIR/state/sm.meta"
 write_transcript "$SM_HOME" s1 claude-opus-5
 out=$(run_verify sm); code=$?
 expect_code 0 "$code" "secondmate evidence resolves from its home"
@@ -368,7 +406,8 @@ mkdir -p "$CLEAN_HOME/state"
 clean_wt="$TMP_ROOT/wt/clean-task"
 mkdir -p "$clean_wt"
 fm_write_meta "$CLEAN_HOME/state/clean-task.meta" \
-  "worktree=$clean_wt" "harness=claude" "kind=ship" "model=opus" "spawned_at=1"
+  "worktree=$clean_wt" "harness=claude" "kind=ship" "model=opus" \
+  "model_evidence_store=$CFG" "spawned_at=1"
 write_transcript "$clean_wt" s1 claude-opus-5
 out=$(FM_HOME="$CLEAN_HOME" FM_STATE_OVERRIDE="$CLEAN_HOME/state" "$VERIFY" --all 2>&1); code=$?
 expect_code 0 "$code" "a correctly routed fleet exits 0"

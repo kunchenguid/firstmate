@@ -148,6 +148,7 @@ write_model_task() {
     "kind=ship" \
     "mode=ship" \
     "model=$recorded" \
+    "model_evidence_store=$cfg" \
     "spawned_at=1"
   dir="$cfg/projects/$(printf '%s' "$wt" | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$dir"
@@ -856,7 +857,8 @@ test_secondmate_home_summary_skips_model_enrichment() {
   printf '%s\n' '## In flight' '- [ ] worker - Worker (repo: alpha) (kind: ship)' > "$home/data/backlog.md"
   fm_write_meta "$home/state/worker.meta" \
     "window=firstmate:fm-worker" "worktree=$wt" "project=alpha" \
-    "harness=claude" "kind=ship" "model=opus" "spawned_at=1"
+    "harness=claude" "kind=ship" "model=opus" \
+    "model_evidence_store=$cfg" "spawned_at=1"
   dir="$cfg/projects/$(printf '%s' "$wt" | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$dir"
   find_log="$home/model-find.log"

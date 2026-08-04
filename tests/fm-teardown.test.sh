@@ -160,7 +160,8 @@ write_meta() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
-    "mode=$mode"
+    "mode=$mode" \
+    "model=default"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -503,11 +504,12 @@ test_terminal_model_verdict_blocks_cleanup_then_allows_match() {
   local case_dir cfg dir rc
   case_dir=$(make_case terminal-model-verdict)
   write_meta "$case_dir" local-only ship
+  cfg="$case_dir/claude-config"
   printf '%s\n' \
     'harness=claude' \
     'model=opus' \
+    "model_evidence_store=$cfg" \
     'model_evidence_watermark=claude-transcript-v1' >> "$case_dir/state/task-x1.meta"
-  cfg="$case_dir/claude-config"
   dir="$cfg/projects/$(printf '%s' "$case_dir/wt" | sed 's/[^A-Za-z0-9]/-/g')"
   mkdir -p "$dir"
   printf '{"type":"assistant","message":{"model":"claude-sonnet-5"}}\n' > "$dir/current.jsonl"
@@ -527,6 +529,29 @@ test_terminal_model_verdict_blocks_cleanup_then_allows_match() {
     || fail "matching terminal model verdict blocked teardown"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "matching terminal verdict left task metadata behind"
   pass "terminal teardown preserves mismatches and proceeds on a model match"
+}
+
+test_forced_teardown_surfaces_mismatch_before_discarding() {
+  local case_dir cfg dir
+  case_dir=$(make_case forced-terminal-model-verdict)
+  write_meta "$case_dir" local-only ship
+  cfg="$case_dir/claude-config"
+  printf '%s\n' \
+    'harness=claude' \
+    'model=opus' \
+    "model_evidence_store=$cfg" \
+    'model_evidence_watermark=claude-transcript-v1' >> "$case_dir/state/task-x1.meta"
+  dir="$cfg/projects/$(printf '%s' "$case_dir/wt" | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$dir"
+  printf '{"type":"assistant","message":{"model":"claude-sonnet-5"}}\n' > "$dir/current.jsonl"
+
+  FM_TEST_CLAUDE_CONFIG_DIR="$cfg" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forced teardown lost its discard authority on a model mismatch"
+  assert_grep "verdict: mismatch" "$case_dir/stderr" \
+    "forced teardown did not surface the terminal model mismatch"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "forced teardown left task metadata behind"
+  pass "forced teardown surfaces a mismatch before retaining its discard authority"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1568,6 +1593,7 @@ configure_secondmate_with_herdr_child() {  # <case-dir>
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=local-only" \
+    "model=default" \
     "backend=herdr" \
     "herdr_session=childsession" \
     "herdr_workspace_id=wC" \
@@ -1654,6 +1680,8 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   [ -d "$home" ] || fail "herdr-child-unconfirmed-close: failed child cleanup removed the secondmate home"
   assert_grep "retaining that child's durable identity records" "$case_dir/stderr" \
     "herdr-child-unconfirmed-close: refusal did not explain child record retention"
+  assert_grep "child-herdr · verdict: unpinned" "$case_dir/stderr" \
+    "herdr-child-unconfirmed-close: recursive forced cleanup did not surface the child's model verdict"
   pass "forced secondmate teardown retains Herdr child identity until exact pane disappearance"
 }
 
@@ -1857,6 +1885,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
 
 test_local_only_fork_remote_allows
 test_terminal_model_verdict_blocks_cleanup_then_allows_match
+test_forced_teardown_surfaces_mismatch_before_discarding
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses

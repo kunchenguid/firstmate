@@ -398,9 +398,47 @@ test_claude_records_pre_dispatch_transcript_identities() {
   expect_code 0 "$status" "claude spawn should capture its transcript watermark"
   assert_grep "model_evidence_watermark=claude-transcript-v1" "$HOME_DIR/state/$id.meta" \
     "claude spawn did not record the watermark format"
+  assert_grep "model_evidence_store=$cfg" "$HOME_DIR/state/$id.meta" \
+    "claude spawn did not record the canonical evidence store"
   assert_grep "model_evidence_before=existing.jsonl" "$HOME_DIR/state/$id.meta" \
     "claude spawn did not record the existing transcript identity"
   pass "claude spawn records pre-dispatch transcript identities"
+}
+
+test_claude_watermark_failure_preserves_recoverable_metadata() {
+  local rec id out status cfg dir real_find
+  id=profile-claude-watermark-failure-z2c
+  rec=$(make_spawn_case profile-claude-watermark-failure claude "$id")
+  read_case_record "$rec"
+  cfg="$CASE_DIR/claude-config"
+  dir="$cfg/projects/$(printf '%s' "$WT_DIR" | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$dir"
+  real_find=$(command -v find)
+  cat > "$FAKEBIN_DIR/find" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"*.jsonl"*) printf '%s\n' 'synthetic transcript enumeration failure' >&2; exit 7 ;;
+esac
+exec "$real_find" "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/find"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$cfg" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model opus)
+  status=$?
+  [ "$status" -ne 0 ] || fail "claude spawn continued after watermark capture failed"
+  assert_contains "$out" "failed to capture the pre-dispatch model-evidence watermark" \
+    "watermark capture failure was not surfaced"
+  assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
+    "watermark failure left no durable endpoint record"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "watermark failure left no recoverable worktree identity"
+  assert_grep "model=opus" "$HOME_DIR/state/$id.meta" \
+    "watermark failure left no dispatched-model record"
+  assert_grep "spawned_at=" "$HOME_DIR/state/$id.meta" \
+    "watermark failure left no dispatch timestamp"
+  [ ! -s "$LAUNCH_LOG" ] || fail "watermark failure still launched the worker"
+  pass "watermark failure preserves recoverable metadata without launching"
 }
 
 test_codex_threads_model_and_effort() {
@@ -706,6 +744,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_claude_records_pre_dispatch_transcript_identities
+test_claude_watermark_failure_preserves_recoverable_metadata
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort

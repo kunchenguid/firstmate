@@ -2014,19 +2014,6 @@ else
   fi
 fi
 
-MODEL_EVIDENCE_WATERMARK=
-if [ "$HARNESS" = claude ]; then
-  MODEL_EVIDENCE_CWD=$WT
-  [ "$KIND" != secondmate ] || MODEL_EVIDENCE_CWD=$PROJ_ABS
-  if ! MODEL_EVIDENCE_WATERMARK=$(
-    CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}" \
-      "$FM_ROOT/bin/fm-model-verify.sh" --capture-watermark "$MODEL_EVIDENCE_CWD"
-  ); then
-    echo "error: failed to capture the pre-dispatch model-evidence watermark for $ID" >&2
-    exit 1
-  fi
-fi
-
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
@@ -2042,7 +2029,6 @@ META_WINDOW=$T
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   echo "spawned_at=$(date +%s)"
-  [ -z "$MODEL_EVIDENCE_WATERMARK" ] || printf '%s\n' "$MODEL_EVIDENCE_WATERMARK"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   [ -z "$ISSUE" ] || echo "issue=$ISSUE"
   # Default-off writes no traceparent= line (meta stays byte-identical).
@@ -2074,7 +2060,29 @@ META_WINDOW=$T
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+ORCA_ABORT_CLEANUP=0
+HERDR_PROJECTION_ABORT_CLEANUP=0
+
+MODEL_EVIDENCE_WATERMARK=
+MODEL_EVIDENCE_STORE=
+if [ "$HARNESS" = claude ]; then
+  MODEL_EVIDENCE_CWD=$WT
+  [ "$KIND" != secondmate ] || MODEL_EVIDENCE_CWD=$PROJ_ABS
+  if ! MODEL_EVIDENCE_WATERMARK=$(
+    CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}" \
+      "$FM_ROOT/bin/fm-model-verify.sh" --capture-watermark "$MODEL_EVIDENCE_CWD"
+  ); then
+    echo "error: failed to capture the pre-dispatch model-evidence watermark for $ID" >&2
+    exit 1
+  fi
+  MODEL_EVIDENCE_STORE=$(printf '%s\n' "$MODEL_EVIDENCE_WATERMARK" \
+    | sed -n 's/^model_evidence_store=//p' | tail -1)
+  [ -n "$MODEL_EVIDENCE_STORE" ] || {
+    echo "error: model-evidence watermark omitted its canonical store for $ID" >&2
+    exit 1
+  }
+  printf '%s\n' "$MODEL_EVIDENCE_WATERMARK" >> "$STATE/$ID.meta"
+fi
 
 sq_brief=$(fm_launch_shell_quote "$BRIEF")
 sq_turnend=$(fm_launch_shell_quote "$TURNEND")
@@ -2098,10 +2106,10 @@ LAUNCH=$(fm_launch_render \
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(fm_launch_shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
-fi
+  # an unset value is the single-store default and needs no prefix.
+  if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(fm_launch_shell_quote "$MODEL_EVIDENCE_STORE") $LAUNCH"
+  fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(fm_launch_shell_quote "$PROJ_ABS")
   sq_primary_home=$(fm_launch_shell_quote "$FM_HOME")
