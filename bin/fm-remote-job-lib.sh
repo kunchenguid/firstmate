@@ -135,7 +135,7 @@ fm_remote_job_nvm_default_selector() { # <account-home>
 
 fm_remote_job_nvm_selected_bin() { # <account-home>
   local account_home=$1 selector normalized directory base version major minor patch extra
-  local selected= fallback= selected_major=-1 selected_minor=-1 selected_patch=-1
+  local selected='' fallback='' selected_major=-1 selected_minor=-1 selected_patch=-1
   local fallback_major=-1 fallback_minor=-1 fallback_patch=-1 matches
   selector=$(fm_remote_job_nvm_default_selector "$account_home" 2>/dev/null || true)
   [ "$selector" != system ] || return 0
@@ -175,7 +175,11 @@ fm_remote_job_nvm_selected_bin() { # <account-home>
       selected_patch=$patch
     fi
   done
-  [ -n "$selected" ] && printf '%s\n' "$selected" || { [ -n "$fallback" ] && printf '%s\n' "$fallback"; }
+  if [ -n "$selected" ]; then
+    printf '%s\n' "$selected"
+  elif [ -n "$fallback" ]; then
+    printf '%s\n' "$fallback"
+  fi
 }
 
 fm_remote_job_compose_operator_path() { # <account-home>

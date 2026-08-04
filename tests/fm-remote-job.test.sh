@@ -79,6 +79,7 @@ DEFAULT_STATE="$TMP_ROOT/default-timeout-jobs"
 DEFAULT_BOUNDS=$(
   unset FM_REMOTE_JOB_QUEUE_TIMEOUT
   unset FM_REMOTE_JOB_TIMEOUT
+  # shellcheck disable=SC2030 # This source intentionally initializes subshell-only defaults.
   FM_REMOTE_JOB_STATE_ROOT="$DEFAULT_STATE"
   export FM_REMOTE_JOB_STATE_ROOT
   # shellcheck source=bin/fm-remote-job-lib.sh
@@ -94,9 +95,12 @@ DEFAULT_QUEUE_REMAINING=$((DEFAULT_QUEUE_DEADLINE - $(date +%s)))
 [ "$DEFAULT_EXECUTION_TIMEOUT" -ge 350 ] || fail "the default execution bound cannot contain a 300-second long poll"
 pass "default queue and execution bounds independently cover long polls"
 
+# shellcheck disable=SC2031 # The earlier assignment was confined to DEFAULT_BOUNDS.
 export FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT"
 export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
+# shellcheck disable=SC2031 # The sourced defaults above were confined to DEFAULT_BOUNDS.
 export FM_REMOTE_JOB_QUEUE_TIMEOUT=5
+# shellcheck disable=SC2031 # The sourced defaults above were confined to DEFAULT_BOUNDS.
 export FM_REMOTE_JOB_TIMEOUT=5
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"

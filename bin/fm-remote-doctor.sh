@@ -77,7 +77,7 @@ case "${1:-}" in
   --fix) MODE=fix; shift ;;
   --worker-tool-probe)
     [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
-    MODE=worker-tool-probe
+    MODE='worker-tool-probe'
     shift
     ;;
   *) usage ;;
@@ -118,8 +118,8 @@ set_check() { # <name> <value> [operator-action]
   local i=0
   while [ "$i" -lt "${#CHECK_NAMES[@]}" ]; do
     if [ "${CHECK_NAMES[$i]}" = "$1" ]; then
-      CHECK_VALUES[$i]=$2
-      CHECK_ACTIONS[$i]=${3:-}
+      CHECK_VALUES[i]=$2
+      CHECK_ACTIONS[i]=${3:-}
       return 0
     fi
     i=$((i + 1))

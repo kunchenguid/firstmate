@@ -352,6 +352,7 @@ pass "tracked-command authorization excludes checkout-local git"
 
 set +e
 out=$(
+  # shellcheck disable=SC2329 # Exported for indirect use by fm_on.
   command() {
     if [ "${1:-}" = -v ] && [ "${2:-}" = git ]; then return 1; fi
     builtin command "$@"
@@ -364,6 +365,7 @@ assert_contains "$out" 'mode=check' "the trusted doctor could not bootstrap whil
 printf '\n' >> "$REMOTE_ROOT/bin/fm-remote-doctor.sh"
 set +e
 out=$(
+  # shellcheck disable=SC2329 # Exported for indirect use by fm_on.
   command() {
     if [ "${1:-}" = -v ] && [ "${2:-}" = git ]; then return 1; fi
     builtin command "$@"
