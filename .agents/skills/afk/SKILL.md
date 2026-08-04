@@ -141,8 +141,8 @@ strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
 and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer
 verification - this exception is a busy-queue is treated as a delivered
 Enter, not a swallowed one. The herdr adapter observes the same opencode
-behavior but needs a separate fix; the gap is recorded in
-`docs/herdr-backend.md` rather than papered over here.
+behavior (and the same shape with a claude-on-herdr worker) and carries its
+own fallback on native agent-state; see `docs/herdr-backend.md`.
 
 ## Classification policy
 

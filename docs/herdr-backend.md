@@ -216,6 +216,8 @@ ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If a future Herdr version strips ANSI style, ghost suggestions become pending rather than empty, which safely defers injection and eventually raises the wedge alarm.
 
+`bin/fm-composer-lib.sh` also normalizes non-ASCII blanks (a harness composer pad that survives every reader's ASCII-only trim) to an ASCII space before classifying, so a genuinely empty composer padded that way still reads as empty rather than permanently `pending`; see [`verification/runtime-backends.md`](verification/runtime-backends.md#empty-composer-padding) for the captured bytes and affected harness.
+
 A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
 This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
@@ -291,7 +293,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Ghost and placeholder recognition depends on ANSI de-emphasis and fails safely to pending when unavailable.
 - Mid-session secondmate liveness is not implemented.
 - OpenCode 1.18.4 can accept Enter while busy without clearing the composer.
-  The tmux backend has a busy-queue fallback, but Herdr still reports this case as submit pending and needs a separate adapter fix.
+  Herdr resolves this with its own fallback on native agent-state: once the Enter-retry budget is spent, a `working` agent proves the Enter was queued and the send reports delivered, while an idle or human-blocked pane still reports pending so a genuine swallow fails loudly.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points

@@ -125,6 +125,86 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+# --- Non-ASCII composer padding (task fm-send-false-negative-herdr) ---------
+#
+# claude 2.x pads its EMPTY composer with U+00A0 NO-BREAK SPACE, not an ASCII
+# space (verified live 2026-08-04 on herdr 0.7.x: the composer row's real typed
+# content extracts to bytes `e2 9d af c2 a0`). Every trim here and in the
+# adapters uses `[[:space:]]`, which under the fleet's C locale is ASCII-only,
+# so the U+00A0 survived, the content never equalled the bare glyph, and an
+# EMPTY claude composer classified as `pending`. That permanent false
+# "unsubmitted text" made the away-mode injector defer every escalation on a
+# claude pane and made every fm-send to a busy claude+herdr pane report a
+# swallowed Enter that had in fact landed.
+#
+# The classifier must therefore read a blank-padded composer exactly as it reads
+# an ASCII-padded one - in BOTH directions. Under-normalizing revives the false
+# pending; over-normalizing would call a composer holding real text empty and
+# let the injector type over it, so the padded-real-text cases below are the
+# load-bearing half of this pin.
+NBSP=$(printf '\xc2\xa0')
+
+test_nbsp_padded_empty_composer_is_empty() {
+  local g out
+  for g in '❯' '›'; do
+    out=$(classify 0 "$g$NBSP")
+    [ "$out" = empty ] \
+      || fail "a U+00A0-padded agent glyph '$g' must read empty (claude's real empty composer), got '$out'"
+    out=$(classify 1 "$g$NBSP")
+    [ "$out" = empty ] \
+      || fail "a bordered U+00A0-padded agent glyph '$g' must read empty, got '$out'"
+  done
+  out=$(classify 0 "$NBSP")
+  [ "$out" = empty ] || fail "a composer holding only U+00A0 must read empty, got '$out'"
+  pass "fm_composer_classify_content: a U+00A0-padded empty composer reads empty, not pending"
+}
+
+test_nbsp_padded_real_text_is_still_pending() {
+  local out
+  out=$(classify 0 "❯${NBSP}fix findings 1 and 3")
+  [ "$out" = pending ] || fail "U+00A0 between the glyph and real text must stay pending, got '$out'"
+  out=$(classify 0 "❯ deploy${NBSP}staging")
+  [ "$out" = pending ] || fail "real text containing U+00A0 must stay pending, got '$out'"
+  out=$(classify 1 "${NBSP}rebase onto main$NBSP")
+  [ "$out" = pending ] || fail "U+00A0-surrounded real text must stay pending, got '$out'"
+  pass "fm_composer_classify_content: U+00A0 normalization never turns real typed text into empty"
+}
+
+test_nbsp_padding_preserves_dead_shell_refusal() {
+  local g out
+  # The dead-shell safety rule outranks blank normalization: a bare shell glyph
+  # padded with U+00A0 is still a dead shell, never a safe injection target.
+  for g in '>' '$' '%' '#'; do
+    out=$(classify 0 "$g$NBSP")
+    [ "$out" = unknown ] \
+      || fail "a U+00A0-padded bare shell glyph '$g' must stay unknown, got '$out'"
+  done
+  pass "fm_composer_classify_content: U+00A0 padding does not weaken the bare-shell-glyph refusal"
+}
+
+test_nbsp_normalization_is_locale_independent() {
+  # U+00A0 is multibyte, so a character-indexed implementation would split it
+  # into its 0xC2 lead byte under LC_CTYPE=C and corrupt unrelated multibyte
+  # text. Prove the verdict is identical in a C and a UTF-8 locale, and that a
+  # row of other multibyte glyphs survives normalization as real text.
+  local lc out first=
+  for lc in C en_US.UTF-8 C.UTF-8; do
+    out=$(LC_ALL=$lc bash -c '
+      . "$1/bin/fm-composer-lib.sh"
+      fm_composer_classify_content 0 "$2"' _ "$ROOT" "❯$NBSP" 2>/dev/null) || continue
+    [ "$out" = empty ] \
+      || fail "a U+00A0-padded empty composer must read empty under LC_ALL=$lc, got '$out'"
+    out=$(LC_ALL=$lc bash -c '
+      . "$1/bin/fm-composer-lib.sh"
+      fm_composer_classify_content 0 "$2"' _ "$ROOT" "❯ ✻ résumé ── ok" 2>/dev/null)
+    [ "$out" = pending ] \
+      || fail "multibyte real text must stay pending under LC_ALL=$lc, got '$out'"
+    first=ran
+  done
+  [ -n "$first" ] || fail "no locale could be exercised for the normalization check"
+  pass "fm_composer_classify_content: U+00A0 normalization is locale-independent and leaves other multibyte text intact"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -134,3 +214,7 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_nbsp_padded_empty_composer_is_empty
+test_nbsp_padded_real_text_is_still_pending
+test_nbsp_padding_preserves_dead_shell_refusal
+test_nbsp_normalization_is_locale_independent

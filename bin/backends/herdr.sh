@@ -2681,10 +2681,44 @@ EOF
 #     re-invokes this function from scratch with the same text after seeing
 #     an error, which is a human/escalation decision, not an automatic
 #     retry).
+# Busy-queued Enter (task fm-send-false-negative-herdr): a harness can accept
+# Enter mid-turn as "send when this turn ends" and keep the typed text visible
+# in its composer until then (verified on OpenCode 1.18.4). The composer read
+# above then keeps saying `pending` for a steer that DID land, and fm-send exits
+# non-zero on a delivery that succeeded - which invites a resend that duplicates
+# the message in the harness's own input queue. The tmux adapter has carried a
+# fallback for this since fm_tmux_submit_enter_core (bin/fm-tmux-lib.sh); herdr
+# was recorded as a known gap needing its own fix rather than being folded into
+# that tmux path, and fm_backend_herdr_submit_busy_fallback is that fix.
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
 # literally "the composer read empty".
+
+# fm_backend_herdr_submit_busy_fallback: the last word on an Enter-retry budget
+# that ran out with the composer still reading `pending`. A pane whose NATIVE
+# agent-state says the agent is mid-turn accepted and queued that Enter, so the
+# steer landed and the caller must NOT re-send; report `empty`. An idle pane
+# keeps `pending`, the genuine swallow, so a real delivery failure still fails
+# loudly instead of being papered over.
+#
+# This reads fm_backend_herdr_classify_agent_status, NOT the submit variant, and
+# the difference is deliberate: `blocked` is an agent parked on a human prompt,
+# not an agent grinding through a turn. Enter at a permission dialog answers the
+# dialog, it is not queued for later, so a blocked pane must keep reporting
+# `pending`. Only `working` proves a queued Enter.
+#
+# Native agent-state is used rather than a rendered busy footer (the tmux
+# adapter's only available signal) because herdr exposes the semantic state
+# directly, and a signal the harness reports about itself cannot be broken by a
+# vendor restyling its spinner.
+fm_backend_herdr_submit_busy_fallback() {  # <session> <pane_id> -> empty|pending
+  local state
+  state=$(fm_backend_herdr_classify_agent_status \
+    "$(fm_backend_herdr_agent_status_raw "$1" "$2")")
+  if [ "$state" = busy ]; then printf 'empty'; else printf 'pending'; fi
+}
+
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
@@ -2708,8 +2742,11 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       unknown) printf 'unknown'; return 0 ;;
     esac
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    [ "$i" -lt "$retries" ] || break
   done
+  # Enter-retry budget spent and the composer still reads pending: let the
+  # native agent-state decide between a queued Enter and a genuine swallow.
+  fm_backend_herdr_submit_busy_fallback "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
 # fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors

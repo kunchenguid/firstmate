@@ -394,8 +394,48 @@ Real captures verified these active distinctions:
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.
+- Claude pads its EMPTY composer with U+00A0, not an ASCII space, and its queued-message indicator is dim ghost text.
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
+
+#### Empty-composer padding
+
+Read-only captures taken on 2026-08-04 from live claude 2.1.220 panes under Herdr 0.7.x, via `herdr --session <s> pane read <pane> --source recent --lines 200 --format ansi`.
+
+An idle, empty claude composer extracts to these real-content bytes, an `❯` followed by U+00A0:
+
+```text
+e2 9d af c2 a0
+```
+
+A busy claude pane that has just queued a message renders the same padded glyph plus an SGR-2 dim indicator, which the shared ghost extractor drops:
+
+```text
+\033[0m\033[38;2;153;153;153m❯\xc2\xa0\033[0m\033[2mPress up to edit queued messages\033[0m
+```
+
+Every trim in the readers matches ASCII whitespace only, so before `fm_composer_normalize_blanks` both rows classified `pending`: every claude composer read as holding unsent input, which deferred away-mode escalations and made each send to a busy claude pane report a swallowed Enter for a steer that had landed.
+All 14 live claude panes sampled that day classified `pending` before the fix and `empty` after, except one that genuinely held pasted text and correctly stayed `pending`.
+
+The capture layer matters and the two backends differ: `tmux capture-pane` normalizes the same padding to `e2 9d af 20`, so this defect is invisible on the tmux path and is pinned only by the Herdr byte-exact fixtures in `tests/fm-backend-herdr.test.sh`.
+
+The per-harness drift guard below covers the shared classifier in both directions and reports any installed harness it could not exercise:
+
+```sh
+FM_COMPOSER_EMPTY_DRIFT=1 tests/fm-composer-empty-drift-live-e2e.test.sh
+```
+
+Observed on 2026-08-04:
+
+```text
+ok - composer emptiness: claude 2.1.220 (Claude Code) classifies pending and empty correctly
+# unverified on this machine (not installed): opencode pi-signed grok kimi
+# unverified on this machine (installed but never reached a composer): codex/codex-cli 0.144.6 pi/0.80.2
+# exercised 1 installed harness(es)
+```
+
+Codex and Pi were unauthenticated on that machine and never reached a composer, so they are reported unverified rather than passed.
+A live guard over Herdr's own reader still needs a Herdr lab session and is not yet written.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:
 
 ```sh

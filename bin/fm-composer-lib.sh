@@ -160,6 +160,47 @@ fm_composer_strip_ghost() {
   '
 }
 
+# NON-ASCII BLANKS are the third concern this owner carries (task
+# fm-send-false-negative-herdr): a harness may pad its composer with a Unicode
+# blank instead of an ASCII space, and every trim in this file and in the
+# adapters uses `[[:space:]]`, which under the fleet's C locale matches ASCII
+# whitespace ONLY. Verified live on 2026-08-04: claude 2.x renders its EMPTY
+# composer as the prompt glyph followed by U+00A0 NO-BREAK SPACE (bytes
+# `e2 9d af c2 a0`), so the trim left a bare U+00A0 behind, the content never
+# equalled the bare glyph, and a genuinely empty claude composer classified as
+# `pending`. That permanent false "unsubmitted text" made the away-mode injector
+# defer every escalation on a claude+herdr pane and made every fm-send to a BUSY
+# claude+herdr pane report a swallowed Enter that had actually landed.
+# fm_composer_classify_content normalizes these blanks to spaces before it
+# judges, so the existing empty/glyph/idle rules apply unchanged.
+# Which adapters SEE the pad is a capture-layer fact, not a classifier one:
+# herdr's `pane read --format ansi` returns the U+00A0 verbatim, while
+# `tmux capture-pane` normalizes it to an ASCII space, so the same claude
+# release reached this classifier padded on one backend and unpadded on the
+# other. Normalizing here keeps the verdict identical either way instead of
+# leaving it dependent on which backend happened to read the pane.
+# Only glyphs OBSERVED in a real fleet harness composer belong in the list
+# below; each entry is an empirical fact, not a guess, because widening it
+# widens what counts as an empty (safe-to-inject) composer.
+# Each entry is one whole glyph, held as its exact UTF-8 BYTES. The list is an
+# array rather than one string because a multibyte glyph cannot be walked
+# character by character in a locale-independent way: under LC_CTYPE=C a
+# substring expansion would split U+00A0 into its lead byte 0xC2 and replace
+# every 0xC2 in the row instead, corrupting unrelated multibyte text.
+FM_COMPOSER_BLANKS=("$(printf '\xc2\xa0')")   # U+00A0, claude 2.x's empty-composer pad
+
+# fm_composer_normalize_blanks: map every FM_COMPOSER_BLANKS glyph in <text> to
+# an ASCII space and trim the result, so an all-blank composer collapses to the
+# empty string and a padded prompt glyph collapses to the bare glyph.
+fm_composer_normalize_blanks() {  # <text>
+  local text=$1 blank
+  for blank in "${FM_COMPOSER_BLANKS[@]}"; do
+    text=${text//"$blank"/ }
+  done
+  text="${text#"${text%%[![:space:]]*}"}"
+  printf '%s' "${text%"${text##*[![:space:]]}"}"
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
@@ -183,6 +224,10 @@ fm_composer_idle_matches() {
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # Callers trim with ASCII-only [[:space:]], so a harness's non-ASCII composer
+  # padding survives their trim and would otherwise read as real typed text.
+  content=$(fm_composer_normalize_blanks "$content")
+  plain_content=$(fm_composer_normalize_blanks "$plain_content")
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;

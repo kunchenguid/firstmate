@@ -3126,6 +3126,156 @@ test_send_text_submit_popup_autocomplete_requires_second_enter() {
   pass "fm_backend_herdr_send_text_submit: a slash-command popup's placeholder fill on Enter #1 never flips agent_status to working, so it does not short-circuit as submitted; Enter #2 is retried and lands it"
 }
 
+# --- The false-negative submit report (task fm-send-false-negative-herdr) ----
+#
+# Two independent defects made `fm-send` to a BUSY claude-on-herdr pane report
+# "text not submitted (delivery unconfirmed; verdict=pending)" for steers that
+# had actually landed, and a resend after that false report duplicated the
+# message in the harness's own input queue. Both fixtures below are captured
+# byte-for-byte, read-only, from the live claude 2.x panes of a real herdr
+# 0.7.x session on 2026-08-04.
+#
+#   1. claude pads its composer with U+00A0 NO-BREAK SPACE (`\xc2\xa0`), not an
+#      ASCII space. Every trim is ASCII-only under the fleet's C locale, so the
+#      pad survived, the content never equalled the bare `❯`, and EVERY claude
+#      composer - idle, empty, nothing typed - classified as `pending`. Fixed in
+#      the shared owner (bin/fm-composer-lib.sh); pinned here because the herdr
+#      reader is what the busy-pane submit path actually consults.
+#   2. Once the message IS queued, claude replaces the composer's content with a
+#      dim "Press up to edit queued messages" indicator. The ghost stripper
+#      correctly drops the dim run, leaving exactly the U+00A0-padded prompt
+#      glyph - which defect 1 then read as pending.
+#
+# The pending direction must survive both fixes: a busy pane whose composer
+# still holds the typed text is a genuine swallow and must NOT read empty.
+
+test_composer_state_claude_nbsp_padded_empty_composer_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Live capture, claude 2.x idle: the composer row is "❯" + U+00A0, between the
+  # two solid horizontal separators claude 2.x draws around its input.
+  printf '\xe2\x9c\xbb Cooked for 9m 40s\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  \xe2\x8f\xb5\xe2\x8f\xb5 bypass permissions on\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a real claude 2.x empty composer ('❯' + U+00A0) must read empty, got '$out' (regression: the ASCII-only trim left the U+00A0 behind, so every claude pane read pending forever)"
+  pass "fm_backend_herdr_composer_state: claude 2.x's U+00A0-padded empty composer reads empty"
+}
+
+test_composer_state_claude_queued_message_indicator_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-queued"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Live capture taken 1.5s after Enter on a BUSY claude pane: the typed message
+  # moved into the queue and the composer row is the grey prompt glyph, its
+  # U+00A0 pad, and claude's SGR-2 dim queued-message indicator.
+  printf '\xe2\x9c\xbb Recombobulating\xe2\x80\xa6 (2m 42s)\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\033[0m\033[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0\033[0m\033[2mPress up to edit queued messages\033[0m\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  \xe2\x8f\xb5\xe2\x8f\xb5 bypass permissions on \xc2\xb7 esc to interrupt\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a claude composer showing only the dim queued-message indicator must read empty (the message WAS delivered), got '$out'"
+  pass "fm_backend_herdr_composer_state: claude's dim queued-message indicator reads empty, not a swallowed Enter"
+}
+
+test_composer_state_claude_nbsp_padded_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Live capture of the OTHER direction, taken between send-text and Enter: the
+  # typed line sits unsubmitted after the same U+00A0-padded prompt glyph. This
+  # is the shape a genuine swallow leaves behind, and normalizing the pad must
+  # not swallow it too.
+  printf '\xe2\x9c\xbb Recombobulating\xe2\x80\xa6 (2m 34s)\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0land the rebase captain\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real text after a U+00A0-padded prompt glyph must still read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: U+00A0 normalization still reports real unsubmitted text as pending"
+}
+
+# --- submit: the busy-queued-Enter fallback ---------------------------------
+#
+# A harness can accept Enter mid-turn as "send when this turn ends" and keep the
+# typed text visible in the composer until then (verified on OpenCode 1.18.4).
+# The busy-baseline submit path reads the composer, so it kept saying `pending`
+# for a steer that HAD landed and fm-send exited non-zero on a successful
+# delivery - which invites a resend that duplicates the message in the harness's
+# own input queue. The tmux adapter has had a fallback for this since
+# fm_tmux_submit_enter_core; herdr's own fallback reads native agent-state
+# instead of a rendered footer.
+#
+# The three states are deliberately NOT interchangeable: only `working` proves a
+# queued Enter. `blocked` is an agent parked on a human prompt, where Enter
+# answers the dialog rather than being queued, so it must keep failing loudly.
+
+test_submit_busy_fallback_maps_agent_state_to_verdict() {
+  local dir log resp fb out case_id raw expect
+  dir="$TMP_ROOT/submit-busy-fallback-unit"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"
+  fb=$(make_herdr_fakebin "$dir")
+  for case_id in 'working:empty' 'idle:pending' 'done:pending' 'blocked:pending' 'garbage:pending' ':pending'; do
+    raw=${case_id%%:*}; expect=${case_id#*:}
+    : > "$log"; rm -f "$resp"/*.out "$resp"/.count 2>/dev/null || true
+    printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$raw" > "$resp/1.out"
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_submit_busy_fallback default w1:p2' "$ROOT" )
+    [ "$out" = "$expect" ] \
+      || fail "the busy fallback must map agent_status '$raw' to '$expect', got '$out'"
+  done
+  pass "fm_backend_herdr_submit_busy_fallback: only a working agent proves a queued Enter; idle, done, blocked and unreadable all stay pending"
+}
+
+test_send_text_submit_busy_pane_reports_queued_enter_as_delivered() {
+  local dir log resp fb out pending_cap enter_count
+  dir="$TMP_ROOT/submit-busy-queued"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The opencode busy-queue shape: the composer keeps showing our text the whole
+  # time the Enter sits queued.
+  pending_cap=$(printf '\xe2\x9c\xbb working\n\xe2\x9d\xaf hello captain\n')
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"   # pre-Enter baseline: busy
+  printf '%s\n' "$pending_cap" > "$resp/4.out"                                  # composer after Enter #1
+  printf '%s\n' "$pending_cap" > "$resp/6.out"                                  # composer after Enter #2
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"   # fallback: still mid-turn
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a busy pane whose Enter-retry budget ran out must report the Enter as queued/delivered, got '$out' (this false 'pending' is what made fm-send fail on landed steers and invite duplicating resends)"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "the fallback must run only AFTER the Enter-retry budget is spent, saw $enter_count Enter(s)"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")" -eq 1 ] || fail "the fallback must never retype the text"
+  pass "fm_backend_herdr_send_text_submit: a busy pane still showing the typed text reports the Enter as queued (delivered), not swallowed"
+}
+
+test_send_text_submit_idle_pane_still_reports_genuine_swallow() {
+  local dir log resp fb out pending_cap
+  dir="$TMP_ROOT/submit-busy-fallback-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Same retried-Enter path, but the turn ended while we retried: an IDLE pane
+  # still holding our text is a real swallow and must keep failing loudly.
+  pending_cap=$(printf '\xe2\x9c\xbb done\n\xe2\x9d\xaf hello captain\n')
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '%s\n' "$pending_cap" > "$resp/4.out"
+  printf '%s\n' "$pending_cap" > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "an idle pane still holding the typed text is a genuine swallow and must stay pending, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: the busy fallback does not paper over a genuine swallow on an idle pane"
+}
+
+test_send_text_submit_blocked_pane_still_reports_swallow() {
+  local dir log resp fb out pending_cap
+  dir="$TMP_ROOT/submit-busy-fallback-blocked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A human-blocked pane is parked on a prompt, not grinding through a turn:
+  # Enter there answers the dialog and is never queued for later.
+  pending_cap=$(printf '\xe2\x9c\xbb blocked\n\xe2\x9d\xaf hello captain\n')
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '%s\n' "$pending_cap" > "$resp/4.out"
+  printf '%s\n' "$pending_cap" > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a human-blocked pane must not be reported as having queued the Enter, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: a human-blocked pane keeps reporting pending rather than claiming a queued Enter"
+}
+
 test_send_text_submit_confirms_blocked_after_enter() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-blocked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3968,6 +4118,13 @@ test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
+test_composer_state_claude_nbsp_padded_empty_composer_is_empty
+test_composer_state_claude_queued_message_indicator_is_empty
+test_composer_state_claude_nbsp_padded_real_text_is_pending
+test_submit_busy_fallback_maps_agent_state_to_verdict
+test_send_text_submit_busy_pane_reports_queued_enter_as_delivered
+test_send_text_submit_idle_pane_still_reports_genuine_swallow
+test_send_text_submit_blocked_pane_still_reports_swallow
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
