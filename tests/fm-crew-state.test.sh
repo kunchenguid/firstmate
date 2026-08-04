@@ -1326,6 +1326,39 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+test_liveness_file_transport_accepts_valid_and_refuses_missing_or_malformed() {
+  reset_fakes
+  local d valid malformed out
+  d=$(new_case liveness-file)
+  make_repo_on_branch "$d/wt" fm/feat-liveness-file
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/liveness-file.meta" "window=fm:fm-liveness-file" \
+    "worktree=$d/wt" "kind=scout" "harness=claude"
+  valid="$d/liveness.json"
+  malformed="$d/malformed.json"
+  jq -n '{records:[{id:"liveness-file",activity:"active",
+    endpoint:{presence:"verified_present"},worker:{presence:"verified_present"},
+    output:{changed:true},cpu:{delta_ms:30,rate_ms_per_minute:900}}]}' > "$valid"
+  printf '{not-json\n' > "$malformed"
+
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_LIVENESS_FILE="$valid" "$CREW_STATE" liveness-file)
+  assert_contains "$out" "state: working" "valid liveness file was not consumed"
+  assert_contains "$out" "source: process-output" "valid liveness file lost its evidence source"
+
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_LIVENESS_FILE="$d/missing.json" "$CREW_STATE" liveness-file)
+  assert_contains "$out" "state: unknown" "missing liveness file did not fail closed"
+  assert_contains "$out" "liveness measurement unavailable" "missing liveness file hid its refusal"
+
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_LIVENESS_FILE="$malformed" "$CREW_STATE" liveness-file)
+  assert_contains "$out" "state: unknown" "malformed liveness file did not fail closed"
+  assert_contains "$out" "liveness measurement unavailable" "malformed liveness file hid its refusal"
+  pass "liveness file transport accepts valid evidence and refuses missing or malformed payloads"
+}
+
+test_liveness_file_transport_accepts_valid_and_refuses_missing_or_malformed
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded

@@ -50,6 +50,11 @@
 #      attributed to this crew, absent or unreadable liveness reports unknown ·
 #      process-output rather than trusting a stale status log.
 #
+# FM_CREW_STATE_LIVENESS_FILE lets the fleet snapshot point every member at one
+# shared measured JSON file without copying the growing fleet payload into each
+# exec environment; a missing, symlinked, or malformed file remains unknown.
+# FM_CREW_STATE_LIVENESS_JSON remains a direct-call compatibility seam.
+#
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
 set -u
@@ -460,14 +465,22 @@ fi
 
 # --- fallback: no run attributed to this crew ------------------------------
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-if [ -n "${FM_CREW_STATE_LIVENESS_JSON:-}" ]; then
+if [ -n "${FM_CREW_STATE_LIVENESS_FILE:-}" ]; then
+  LIVENESS_FILE=$FM_CREW_STATE_LIVENESS_FILE
+  if [ -f "$LIVENESS_FILE" ] && [ ! -L "$LIVENESS_FILE" ]; then
+    LIVE_ROW=$(jq -c --arg id "$ID" '[.records[]? | select(.id==$id)][0] // empty' "$LIVENESS_FILE" 2>/dev/null || true)
+  else
+    LIVE_ROW=
+  fi
+elif [ -n "${FM_CREW_STATE_LIVENESS_JSON:-}" ]; then
   LIVENESS_JSON=$FM_CREW_STATE_LIVENESS_JSON
+  LIVE_ROW=$(printf '%s' "$LIVENESS_JSON" | jq -c --arg id "$ID" '[.records[]? | select(.id==$id)][0] // empty' 2>/dev/null || true)
 else
   LIVENESS_BIN=${FM_LIVENESS_SNAPSHOT_BIN:-$SCRIPT_DIR/fm-liveness-snapshot.sh}
   LIVENESS_JSON=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$LIVENESS_BIN" --json --id "$ID" 2>/dev/null) || LIVENESS_JSON='{"records":[]}'
+  LIVE_ROW=$(printf '%s' "$LIVENESS_JSON" | jq -c --arg id "$ID" '[.records[]? | select(.id==$id)][0] // empty' 2>/dev/null || true)
 fi
-LIVE_ROW=$(printf '%s' "$LIVENESS_JSON" | jq -c --arg id "$ID" '[.records[]? | select(.id==$id)][0] // empty' 2>/dev/null || true)
 [ -n "$LIVE_ROW" ] || emit unknown process-output "liveness measurement unavailable"
 ACTIVITY=$(printf '%s' "$LIVE_ROW" | jq -r '.activity // "unverified"')
 ENDPOINT_PRESENCE=$(printf '%s' "$LIVE_ROW" | jq -r '.endpoint.presence // "unverified"')
