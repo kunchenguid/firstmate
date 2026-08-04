@@ -9,7 +9,7 @@
 #
 # Each child runs under env -i with the shared filesystem-composed PATH, HOME,
 # FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. Commands receive their
-# captured stdin and have a 300-second default timeout. Their stdout and stderr
+# captured stdin and have a 360-second default timeout. Their stdout and stderr
 # are independently constrained to the job library's 1048576-byte bound. A
 # record is marked done only after its bounded outputs and numeric exit status
 # have been committed. The library header owns the exact record fields and
@@ -91,6 +91,30 @@ worker_lock_recent() {
   [ $((now - mtime)) -le 10 ]
 }
 
+worker_quarantined_execution_stopped() { # <account-home>
+  local account_home=$1 job state kind file pid
+  fm_remote_job_regular_bounded "$WORKER_LOCK/quarantine" 256 || return 1
+  fm_remote_job_lock_owner_matches_process "$account_home" && return 1
+  for job in "$FM_REMOTE_JOB_JOBS"/job-*; do
+    [ -d "$job" ] && [ ! -L "$job" ] || continue
+    state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
+    [ "$state" = running ] || continue
+    for kind in process group; do
+      case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
+      [ ! -e "$file" ] && [ ! -L "$file" ] && continue
+      [ ! -L "$file" ] || return 1
+      pid=$(worker_read_process_id "$file") || return 1
+      worker_process_or_group_alive "$kind" "$pid" && return 1
+    done
+  done
+}
+
+worker_recover_quarantine() { # <account-home>
+  worker_quarantined_execution_stopped "$1" || return 1
+  [ ! -L "$WORKER_LOCK/quarantine" ] || return 1
+  rm -f -- "$WORKER_LOCK/quarantine"
+}
+
 worker_acquire_lock() {
   local account_home=$1 attempt=0
   while [ "$attempt" -lt 150 ]; do
@@ -100,7 +124,10 @@ worker_acquire_lock() {
       return 0
     fi
     [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
-    if [ -e "$WORKER_LOCK/quarantine" ] || [ -L "$WORKER_LOCK/quarantine" ]; then return 3; fi
+    if [ -e "$WORKER_LOCK/quarantine" ] || [ -L "$WORKER_LOCK/quarantine" ]; then
+      worker_recover_quarantine "$account_home" || return 3
+      continue
+    fi
     if fm_remote_job_lock_owner_matches_process "$account_home"; then return 2; fi
     if fm_remote_job_probe "$account_home" || worker_lock_recent; then
       attempt=$((attempt + 1))

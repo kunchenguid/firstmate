@@ -17,8 +17,9 @@ RUNTIME_BIN="$TMP_ROOT/runtime-bin"
 FAKE_PERL_LOG="$TMP_ROOT/perl.log"
 REAL_GIT=$(command -v git)
 OTHER_PID=
+RECOVERY_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
-trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -n "$RECOVERY_WORKER_PID" ]; then kill "$RECOVERY_WORKER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
 
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" "$REMOTE_ROOT/bin/"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
@@ -68,6 +69,20 @@ git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
 git -C "$REMOTE_ROOT" add AGENTS.md bin
 git -C "$REMOTE_ROOT" commit -qm 'remote job fixture'
+
+DEFAULT_STATE="$TMP_ROOT/default-timeout-jobs"
+DEFAULT_DEADLINE=$(
+  unset FM_REMOTE_JOB_TIMEOUT
+  FM_REMOTE_JOB_STATE_ROOT="$DEFAULT_STATE"
+  export FM_REMOTE_JOB_STATE_ROOT
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh </dev/null >/dev/null
+  cat "$DEFAULT_STATE/jobs/$FM_REMOTE_JOB_ID/deadline"
+)
+DEFAULT_REMAINING=$((DEFAULT_DEADLINE - $(date +%s)))
+[ "$DEFAULT_REMAINING" -ge 350 ] || fail "the default worker deadline cannot contain a 300-second long poll"
+pass "the default worker deadline leaves setup headroom beyond supported long polls"
 
 export FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT"
 export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
@@ -281,5 +296,54 @@ kill -KILL -- "-$GROUP_PID" 2>/dev/null || true
 sleep 3
 assert_absent "$QUARANTINE_SIDE_EFFECT" "the quarantined command mutated after explicit termination"
 pass "failed shutdown quarantines ownership against replacement workers"
+
+RECOVERY_HOME="$TMP_ROOT/recovery-account"
+RECOVERY_STATE="$TMP_ROOT/recovery-jobs"
+RECOVERY_JOB="$RECOVERY_STATE/jobs/job-quarantine"
+mkdir -p "$RECOVERY_HOME" "$RECOVERY_STATE/jobs" "$RECOVERY_STATE/logs" \
+  "$RECOVERY_STATE/worker.lock" "$RECOVERY_JOB/.claim"
+chmod 700 "$RECOVERY_HOME" "$RECOVERY_STATE" "$RECOVERY_STATE/jobs" "$RECOVERY_STATE/logs" \
+  "$RECOVERY_STATE/worker.lock" "$RECOVERY_JOB" "$RECOVERY_JOB/.claim"
+sleep 20 &
+QUARANTINED_PROCESS_PID=$!
+sleep 0.01 &
+QUARANTINE_OWNER_PID=$!
+wait "$QUARANTINE_OWNER_PID" 2>/dev/null || true
+printf '%s\n' "$QUARANTINE_OWNER_PID" > "$RECOVERY_STATE/worker.lock/pid"
+printf 'stale\n' > "$RECOVERY_STATE/worker.lock/start"
+printf 'stale\n' > "$RECOVERY_STATE/worker.lock/command"
+printf 'active execution could not be confirmed stopped\n' > "$RECOVERY_STATE/worker.lock/quarantine"
+printf 'running\n' > "$RECOVERY_JOB/state"
+printf '%s\n' "$QUARANTINE_OWNER_PID" > "$RECOVERY_JOB/.claim/owner"
+printf '%s\n' "$QUARANTINED_PROCESS_PID" > "$RECOVERY_JOB/.claim/supervisor"
+: > "$RECOVERY_JOB/stdout"
+: > "$RECOVERY_JOB/stderr"
+chmod 600 "$RECOVERY_STATE/worker.lock"/* "$RECOVERY_JOB/state" "$RECOVERY_JOB/.claim"/* \
+  "$RECOVERY_JOB/stdout" "$RECOVERY_JOB/stderr"
+touch -t 200001010000 "$RECOVERY_STATE/worker.lock"
+set +e
+HOME="$RECOVERY_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$RECOVERY_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
+  > "$TMP_ROOT/recovery-refused.out" 2> "$TMP_ROOT/recovery-refused.err"
+RECOVERY_REFUSED_RC=$?
+set -e
+[ "$RECOVERY_REFUSED_RC" -ne 0 ] || fail "quarantine recovery ignored a recorded live process"
+assert_present "$RECOVERY_STATE/worker.lock/quarantine" "a live recorded process lost quarantine protection"
+kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+wait "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+HOME="$RECOVERY_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$RECOVERY_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
+  > "$TMP_ROOT/recovery-worker.out" 2> "$TMP_ROOT/recovery-worker.err" &
+RECOVERY_WORKER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$RECOVERY_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$RECOVERY_STATE/worker.ready" "a stopped quarantined execution did not permit worker recovery"
+assert_absent "$RECOVERY_STATE/worker.lock/quarantine" "recovered worker retained stale quarantine"
+kill -TERM "$RECOVERY_WORKER_PID"
+wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
+RECOVERY_WORKER_PID=
+pass "quarantine clears only after recorded execution has stopped"
 
 echo "ALL TESTS PASSED"
