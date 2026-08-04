@@ -249,9 +249,12 @@ This section is the single owner of the canonical schema and its per-field seman
 
 ```json
 {
+  "_policy": { "version": "<policy revision>" },
   "rules": [
     {
       "when": "<natural-language condition describing a kind of task>",
+      "route": "<route id>",
+      "floor": "<capability-floor id>",
       "use": [
         { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
       ],
@@ -259,7 +262,7 @@ This section is the single owner of the canonical schema and its per-field seman
     }
   ],
   "default": [
-    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
+    { "route": "<route id>", "floor": "<capability-floor id>", "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
   ]
 }
 ```
@@ -281,10 +284,11 @@ This is a record only: it selects nothing, enforces nothing, and changes no rout
 It exists because a run-time capability escalation may never lower the capability floor the work started at, and an escalation cannot be checked against a floor that was never written down.
 
 Firstmate is the only thing that matches a natural-language dispatch rule, so it names the route it matched to `fm-spawn.sh --route <id>`, or the reserved token `default` when no rule matched and the top-level `default` profile was used.
-Three optional fields supply the recorded values, and a home that omits them simply records nothing resolvable: a rule's `route` and `floor`, the `default` profile's `route` and `floor`, and a top-level `_policy.version` string recorded verbatim as `policy_revision`.
+Three optional fields supply the recorded values, and an omitted field makes its corresponding recorded value unresolved: a rule's `route` and `floor`, the `default` profile's `route` and `floor`, and a top-level `_policy.version` string recorded as `policy_revision` without shortening it to an abbreviated revision.
+To keep the metadata record single-line, `policy_revision` retains only the first input line and folds its control characters to spaces.
 Their meaning and assignment belong to routing policy; `bin/fm-dispatch-record-lib.sh` only reads them, and it owns the resolution contract.
 
-Anything unresolvable records the literal token `unknown`, never a blank value, an omitted line, or another task's value: no route declared, no dispatch config, no `jq`, a route absent from the config, or rules that disagree about a route's floor.
+Anything unresolvable records the literal token `unknown`, never a blank value, an omitted line, or another task's value: no route declared, no usable dispatch config or `jq`, an absent or invalid route or floor, or rules that disagree about a route's floor.
 "Resolved to the explicit default" and "could not be resolved" therefore stay distinguishable, which matters because a field populated only when resolution succeeds would make a floor look recorded while under-reporting it.
 An omitted `--route` records `unknown` rather than assuming a route, so a relaunch that should keep a task's floor has to name the same route again.
 A secondmate is a persistent home rather than a routed task, so it records none of these fields and `--route` is refused on that spawn.
