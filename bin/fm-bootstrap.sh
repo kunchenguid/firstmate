@@ -120,6 +120,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -500,7 +502,7 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause remote_host remote_rc
+  local meta id window harness backend target agent_state out cause remote_host remote_rc readiness_reason
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -511,6 +513,20 @@ secondmate_liveness_sweep() {
     harness=$(fm_meta_get "$meta" harness)
     remote_host=$(fm_meta_get "$meta" remote_host)
     if [ -n "$remote_host" ]; then
+      remote_rc=0
+      fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || remote_rc=$?
+      if [ "$remote_rc" -eq 255 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+        continue
+      fi
+      if [ "$remote_rc" -ne 0 ]; then
+        readiness_reason=$(printf '%s\n' "$FM_REMOTE_READINESS_OUT" \
+          | awk '/^check [^=]+=(fixable|human):|^action:|^error:/ { print; exit }')
+        [ -n "$readiness_reason" ] || readiness_reason=$(first_line "$FM_REMOTE_READINESS_OUT")
+        [ -n "$readiness_reason" ] || readiness_reason="unknown readiness failure"
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote readiness failed on $remote_host: $readiness_reason"
+        continue
+      fi
       if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" 2>/dev/null); then
         remote_rc=0
       else

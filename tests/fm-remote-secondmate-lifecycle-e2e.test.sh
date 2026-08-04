@@ -173,6 +173,13 @@ if [ "$command_name" = fm-remote-doctor.sh ]; then
   printf 'ok: remote second-mate readiness confirmed on this host\n'
   exit 0
 fi
+if [ "${FM_FAKE_SSH_MODE:-normal}" = doctor-fixable ] \
+  && [ "$command_name" = fm-remote-secondmate-control.sh ] \
+  && [ "$_command_action" = state ] \
+  && [ ! -f "$FM_FAKE_DOCTOR_REPAIRED" ]; then
+  printf 'unreadable\n'
+  exit 0
+fi
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
@@ -707,6 +714,24 @@ assert_contains "$UPDATE_OUT" 'synced:' "remote update did not report a host-loc
 assert_present "$REMOTE_HOME/REMOTE_UPDATE_PROBE" "remote update did not materialize the code-root commit"
 pass "remote update imports and fast-forwards the persistent home on its configured host"
 
+rm -f "$TMP_ROOT/doctor.repaired"
+: > "$DOCTOR_LOG"
+[ "$(FM_FAKE_SSH_MODE=doctor-fixable remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = unreadable ] \
+  || fail "the stopped-server fixture did not make the pre-repair endpoint probe unreadable"
+launches_before_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
+BOOT_REPAIRED=$(FM_FAKE_SSH_MODE=doctor-fixable remote_env "$ROOT/bin/fm-bootstrap.sh")
+[ "$(cat "$DOCTOR_LOG")" = 'doctor-fixable -
+doctor-fixable --fix
+doctor-fixable -' ] || fail "liveness did not check, repair, and re-check readiness before probing"$'\n'"$(cat "$DOCTOR_LOG")"
+assert_not_contains "$BOOT_REPAIRED" 'SECONDMATE_LIVENESS: secondmate ios:' \
+  "successful pre-probe readiness repair produced a liveness failure"
+launches_after_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_repair" -eq "$launches_after_repair" ] \
+  || fail "readiness repair introduced a new remote relaunch point"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the endpoint was not probed successfully after readiness repair"
+pass "startup repairs remote readiness before probing without relaunching"
+
 # Host loss maps to unknown/unavailable and never creates a local replacement.
 launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
 rm -rf -- "$PARENT/state/.watch.lock"
@@ -722,6 +747,8 @@ printf '%s' "$UNAVAILABLE" | jq -e '.tasks[] | select(.id == "ios") | .paths.hom
 rm -f "$PARENT/state/.wake-queue"
 launches_after=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$launches_before" -eq "$launches_after" ] || fail "unreachable projection attempted a replacement launch"
+assert_present "$PARENT/state/ios.meta" "unreachable readiness removed the parent route metadata"
+assert_grep '- ios ' "$PARENT/data/secondmates.md" "unreachable readiness removed the registry route"
 pass "unreachable remote state remains unknown with no local respawn or failover"
 
 # Retirement delegates its safety check to the remote home. An in-flight child
