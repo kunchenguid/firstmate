@@ -259,6 +259,7 @@ test_pending_reply_pid_identity_is_locale_invariant() (
   fm_pending_reply_set "$rec" recovery_sender_identity "$expected" \
     || fail "could not record sender identity"
 
+  # shellcheck disable=SC2016 # Child script intentionally uses single quotes.
   observed=$(env -u LANG -u LC_ALL LC_CTYPE=UTF-8 bash -c '
     set -u
     lib=$1
