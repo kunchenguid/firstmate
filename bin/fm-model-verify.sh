@@ -192,7 +192,7 @@ claude_config_dir() {
 }
 
 canonical_path() {
-  local input=$1 absolute cursor suffix= base part captured
+  local input=$1 absolute cursor suffix='' base part captured
   local sentinel=__FM_CANONICAL_PATH_SENTINEL__
   [ -n "$input" ] || return 1
   case "$input" in
