@@ -19,6 +19,8 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 JOB_LABEL=dev.firstmate.remote-job
 CASE_N=0
+DOCTOR_WORKER_PID=
+trap 'if [ -n "$DOCTOR_WORKER_PID" ]; then kill "$DOCTOR_WORKER_PID" 2>/dev/null || true; fi; fm_test_cleanup || true' EXIT
 
 # A fixture must be able to present a host with NO herdr, so the doctor never
 # sees the runner's own PATH. Only the two required tools are re-exposed, by
@@ -35,10 +37,13 @@ BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
 # fake launchctl report an existing Aqua login session.
 new_case() {
   local platform=$1 want_herdr=${2:-with-herdr} want_gui=${3:-gui}
+  unset CASE_REMOTE_JOB_ACTIVE
+  unset CASE_PLATFORM_OVERRIDE
   CASE_N=$((CASE_N + 1))
   CASE_DIR="$TMP_ROOT/case$CASE_N"
   CASE_BIN="$CASE_DIR/bin"
   CASE_HOME="$CASE_DIR/home"
+  CASE_PROJECT_HOME="$CASE_DIR/project-home"
   CASE_STATE="$CASE_DIR/state"
   CASE_LAUNCHCTL_LOG="$CASE_STATE/launchctl.log"
   CASE_FORBIDDEN_LOG="$CASE_STATE/forbidden.log"
@@ -46,7 +51,7 @@ new_case() {
   CASE_PLIST="$CASE_HOME/Library/LaunchAgents/$LABEL.plist"
   CASE_INTERACTIVE_PLIST="$CASE_HOME/Library/LaunchAgents/$INTERACTIVE_LABEL.plist"
   CASE_JOB_PLIST="$CASE_HOME/Library/LaunchAgents/$JOB_LABEL.plist"
-  mkdir -p "$CASE_BIN" "$CASE_HOME" "$CASE_STATE"
+  mkdir -p "$CASE_BIN" "$CASE_HOME" "$CASE_PROJECT_HOME" "$CASE_STATE"
   printf 'false\n' > "$CASE_HERDR_RUNNING"
   : > "$CASE_LAUNCHCTL_LOG"
   : > "$CASE_FORBIDDEN_LOG"
@@ -213,6 +218,7 @@ doctor() {
   set +e
   DOCTOR_OUT=$(
     HOME="$CASE_HOME" \
+    FM_HOME="$CASE_PROJECT_HOME" \
     PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH" \
     FM_FAKE_STATE="$CASE_STATE" \
     FM_FAKE_LAUNCHCTL_LOG="$CASE_LAUNCHCTL_LOG" \
@@ -223,7 +229,8 @@ doctor() {
     FM_FAKE_JOB_PLIST="$CASE_JOB_PLIST" \
     FM_FAKE_JOB_WORKER="$ROOT/bin/fm-remote-job-worker.sh" \
     FM_FAKE_LAUNCH_AGENT_LOG="$CASE_HOME/Library/Logs/$LABEL.log" \
-    FM_REMOTE_JOB_ACTIVE=1 \
+    FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
+    FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
     "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
   )
   DOCTOR_RC=$?
@@ -549,6 +556,47 @@ assert_contains "$DOCTOR_OUT" 'fix required-treehouse=failed:' \
 [ "$(cat "$CASE_HOME/.local/bin/treehouse")" = 'operator wrapper' ] \
   || fail "--fix overwrote an operator-owned wrapper"
 pass "--fix creates only owned version-manager wrappers and never clobbers an operator file"
+
+new_case Linux with-herdr no-gui
+CASE_REMOTE_JOB_ACTIVE=
+CASE_PLATFORM_OVERRIDE=Linux
+rm -f "$CASE_BIN/sleep" "$CASE_BIN/uname"
+mkdir -p "$CASE_HOME/.local/bin"
+for tool in herdr tasks-axi treehouse claude; do
+  ln -s "$CASE_BIN/$tool" "$CASE_HOME/.local/bin/$tool"
+done
+HOME="$CASE_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  "$ROOT/bin/fm-remote-job-worker.sh" > "$CASE_STATE/worker.out" 2> "$CASE_STATE/worker.err" &
+DOCTOR_WORKER_PID=$!
+for _ in $(seq 1 100); do
+  [ -f "$CASE_HOME/.firstmate/remote-job/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$CASE_HOME/.firstmate/remote-job/worker.ready" "the stale-identity fixture worker did not start"
+printf 'stale-worker-identity\n' > "$CASE_HOME/.firstmate/remote-job/worker.identity"
+doctor
+expect_code 1 "$DOCTOR_RC" "doctor accepted a live worker with stale code identity"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker=fixable: the running remote job worker does not match the current Firstmate code' \
+  "doctor did not classify stale worker identity as fixable"
+assert_contains "$DOCTOR_OUT" 'check remote-job-probe=fixable: the remote job worker identity is stale' \
+  "doctor probed through stale worker code"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not replace the stale worker identity"
+assert_contains "$DOCTOR_OUT" 'fix remote-job-worker=applied:' "--fix did not report refreshing the stale worker"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' "the refreshed worker was not confirmed ready"
+assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
+  "doctor did not probe tools through the refreshed worker"
+DOCTOR_WORKER_PID=$(cat "$CASE_HOME/.firstmate/remote-job/worker.pid")
+kill -TERM "$DOCTOR_WORKER_PID"
+for _ in $(seq 1 100); do
+  kill -0 "$DOCTOR_WORKER_PID" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$DOCTOR_WORKER_PID" 2>/dev/null; then
+  kill -KILL "$DOCTOR_WORKER_PID" 2>/dev/null || true
+fi
+DOCTOR_WORKER_PID=
+pass "doctor refreshes stale worker identity before probing tools"
 
 # --- the entrypoint symlink is recreated when it is missing ------------------
 

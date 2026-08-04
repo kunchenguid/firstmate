@@ -246,6 +246,12 @@ remote_job_probe_ok() {
   [ $((now - mtime)) -le 10 ]
 }
 
+remote_job_identity_ok() {
+  [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] && return 0
+  remote_job_probe_ok || return 1
+  fm_remote_job_worker_identity_matches "$FM_ROOT" "${HOME:-}"
+}
+
 check_remote_job_worker() {
   local worker
   worker="$FM_ROOT/bin/fm-remote-job-worker.sh"
@@ -289,11 +295,16 @@ check_remote_job_worker() {
       record remote-job-worker-loaded "skip: Aqua launch agents do not apply on $PLATFORM"
     fi
   fi
-  if remote_job_probe_ok; then
-    record remote-job-probe "ok: the remote job worker published a fresh heartbeat"
-  else
+  if ! remote_job_probe_ok; then
     record remote-job-probe "fixable: the remote job worker has not reported a fresh probe" \
       "rerun this command with --fix to restart the worker, then rerun through fm-on.sh"
+  elif ! remote_job_identity_ok; then
+    set_check remote-job-worker "fixable: the running remote job worker does not match the current Firstmate code" \
+      "rerun this command with --fix to reload the current worker"
+    record remote-job-probe "fixable: the remote job worker identity is stale, so its runtime cannot be probed" \
+      "rerun this command with --fix to reload the current worker"
+  else
+    record remote-job-probe "ok: the remote job worker published a fresh heartbeat"
   fi
 }
 
@@ -746,7 +757,7 @@ if [ "$MODE" = fix ]; then
   run_checks
 fi
 
-if [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || ! remote_job_probe_ok; then
+if [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || ! remote_job_identity_ok; then
   report_required_tools
 else
   report_required_tools_from_worker
