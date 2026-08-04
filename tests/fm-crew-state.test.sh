@@ -1504,7 +1504,13 @@ EOF
   assert_contains "$out" "state: unknown" "a completed lookup with no run falls through"
   PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working absent \
     && fail "a completed lookup that found no run was treated as provably working"
-  pass "a completed lookup that finds no run never degrades to the recorded step"
+  FM_FAKE_NM_RC=124
+  out=$(run_crew_state "$d" absent)
+  assert_not_contains "$out" "run-step-degraded" "a later timeout must not resurrect the absent run"
+  assert_contains "$out" "state: unknown" "a later timeout still surfaces the crew after confirmed absence"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working absent \
+    && fail "a timed-out lookup resurrected a run invalidated by confirmed absence"
+  pass "a completed lookup invalidates the recorded step before a later timeout"
 }
 
 # SAFETY: live positive evidence outranks a remembered step. A harness that is

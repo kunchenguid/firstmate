@@ -222,6 +222,10 @@ runstep_record_write() {  # <state> <detail>
   return 0
 }
 
+runstep_record_clear() {
+  rm -f "$RUNSTEP_RECORD" 2>/dev/null || true
+}
+
 # Print "<state>\t<detail>\t<age-seconds>" for a record still inside the
 # freshness bound; return 1 for a missing, malformed, or expired record.
 runstep_record_read() {
@@ -583,6 +587,7 @@ COARSE_STATUS=""
 # branch, and only a failure may degrade to the recorded run-step below. A
 # genuine absence still falls through to the pane and status-log sources.
 LOOKUP_FAILED=0
+LOOKUP_COMPLETED=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -599,6 +604,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
+      LOOKUP_COMPLETED=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
@@ -612,6 +618,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       if [ "$runs_rc" != 0 ] || [ -z "$runs_out" ]; then
         LOOKUP_FAILED=1
       else
+        LOOKUP_COMPLETED=1
         COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH" "$runs_out")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
@@ -620,6 +627,10 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       fi
     fi
   fi
+fi
+
+if [ "$LOOKUP_COMPLETED" = 1 ] && [ "$HAVE_RUN" = 0 ]; then
+  runstep_record_clear
 fi
 
 # --- run-step authoritative path -------------------------------------------
