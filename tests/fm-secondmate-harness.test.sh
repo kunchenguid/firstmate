@@ -18,8 +18,10 @@
 #      config/startup-memory-budget, and config/trace-context -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, Herdr
-#      presentation opt-in, startup-memory budget, and trace context inherit the
-#      primary's settings.
+#      presentation choice, startup-memory budget, and trace context inherit the
+#      primary's settings. config/herdr-presentation-spaces is default-ON, so an
+#      absent primary file and an absent destination file both mean on and the
+#      generic absence mirror already converges that item correctly.
 #      It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
 #      config push).
@@ -1334,6 +1336,55 @@ test_backend_inheritance_present_and_absent() {
   pass "B12b backend inheritance: present values and primary absence converge exactly"
 }
 
+# config/herdr-presentation-spaces is default-ON, so this item's convergence is
+# asserted through the verdict the spawn gate actually reads in the destination
+# home, not through file presence alone: mirroring the primary's absence must
+# converge a secondmate to the same default rather than turning its projection off.
+sm_presentation_verdict() {  # <config-dir> -> on|off
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    if fm_backend_herdr_presentation_enabled "$1"; then printf "on\n"; else printf "off\n"; fi
+  ' "$ROOT" "$1" 2>/dev/null
+}
+
+test_presentation_inheritance_default_on_and_opt_out() {
+  local w head out err status verdict
+  w=$(new_world presentation-inherit)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  err="$w/presentation-inherit.err"
+
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation default push should succeed"
+  [ -e "$w/sm/config/herdr-presentation-spaces" ] \
+    && fail "primary default must not write an opt-out downstream"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = on ] || fail "primary default left the secondmate projection $verdict"
+
+  mkdir -p "$w/sm/config"
+  printf 'off\n' > "$w/sm/config/herdr-presentation-spaces"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation reconverge push should succeed"
+  assert_contains "$out" "herdr-presentation-spaces: pushed - mirrored primary absence" \
+    "a local secondmate opt-out should reconverge on the primary default"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = on ] || fail "primary default did not reconverge a locally opted-out secondmate ($verdict)"
+
+  printf 'off\n' > "$w/home/config/herdr-presentation-spaces"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation opt-out push should succeed"
+  assert_contains "$out" "herdr-presentation-spaces: pushed" "explicit opt-out should report pushed"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = off ] || fail "explicit primary opt-out left the secondmate projection $verdict"
+
+  : > "$w/home/config/herdr-presentation-spaces"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation legacy opt-in push should succeed"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = on ] || fail "a legacy primary opt-in file left the secondmate projection $verdict"
+  pass "B12c presentation inheritance: the primary default converges on, and only an explicit opt-out propagates off"
+}
+
 test_bootstrap_sweep_surfaces_config_propagation_failure() {
   local w c1 out fail_line
   w=$(new_world boot-prop-fail)
@@ -2426,6 +2477,7 @@ test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
+test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation
 test_config_push_propagates_reports_without_ff_or_nudge
