@@ -261,6 +261,21 @@ FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=22837
 The supported external-Codex result is an early refusal with no away flag, daemon record, or daemon lock because the surface has no safe asynchronous callback into its active thread.
 The current operator mechanism and supported route are owned by [`supervision-protocols/codex.md`](../supervision-protocols/codex.md).
 
+### External Codex Stop continuity
+
+The external-Codex Stop escape was reproduced and corrected on 2026-08-04.
+The original sequence was one Stop block, one bounded foreground checkpoint, then a `stop_hook_active=true` Stop that allowed the turn to end after the checkpoint removed its watcher lock.
+`tests/fm-turnend-guard.test.sh` now makes that sequence public, proves the external Codex re-block after quiet expiry, pins the observed 219-second and 545-second stale-beacon cases, and proves that an empty fleet remains a silent non-looping Stop.
+The preserved ordinary default loop guard is the smallest counterfactual, while Claude's distinct repeated-rewake path remains covered by its `--claude` cooperative tests and is not evidence that Codex has an asynchronous callback.
+
+```sh
+bin/fm-test-run.sh tests/fm-turnend-guard.test.sh tests/fm-watch-checkpoint.test.sh tests/fm-claude-stop-autoarm.test.sh
+```
+
+The supported-script reproduction observed `first_stop_rc=2`, `checkpoint_rc=124`, `escape_stop_rc=0`, and no watcher lock before the correction.
+After the correction, the same fixture observed `first_stop_rc=2`, `checkpoint_rc=124`, `escape_stop_rc=2`, and no watcher lock.
+The ordinary default-mode continuation remains the disconfirming control, and the Claude `--claude` auto-arm path remains separately covered rather than reused as Codex callback evidence.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

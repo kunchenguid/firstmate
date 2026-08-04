@@ -28,15 +28,17 @@
 # primary checkout - the main home or a genuinely marked secondmate home - and
 # stay a silent, fast no-op inside child task worktrees.
 #
-# Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
-# Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
-# takes precedence when both spellings are present. A true value means the
-# current stop attempt already follows a block, so this guard always allows it.
-# Passive harness adapters provide their own one-follow-up guard before calling
-# this script.
-# That bounds those harnesses to at most one forced continuation per turn -
-# never a wedged, un-endable session - while still nagging again on a later turn
-# if the problem persists.
+# Loop-guard, Grok and ordinary default mode: never block twice in the same turn.
+# Grok uses stopHookActive; typed camel-case takes precedence when both spellings
+# are present. A true value means the current stop attempt already follows a
+# block, so those paths allow it. Passive harness adapters provide their own
+# one-follow-up guard before calling this script.
+# External Codex is different: a quiet foreground checkpoint ends its watcher
+# before the following Stop, and Codex supplies no durable callback or owner.
+# When the tracked Codex adapter marks that surface with FM_TURNEND_HARNESS=codex
+# and CODEX_THREAD_ID, a true stop_hook_active must re-check supervision and
+# block again while it is needed. The later no-work gate keeps an empty fleet
+# from looping.
 #
 # Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
 # marks EVERY stop after ANY stop-hook-driven continuation stop_hook_active=true,
@@ -106,7 +108,8 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ] \
+  && { [ "${FM_TURNEND_HARNESS:-}" != codex ] || [ -z "${CODEX_THREAD_ID:-}" ]; }; then
   exit 0
 fi
 

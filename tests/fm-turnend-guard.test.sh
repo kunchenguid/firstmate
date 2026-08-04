@@ -191,7 +191,25 @@ make_secondmate_linked_home_dir() {
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" | env -u CODEX_THREAD_ID CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+run_hook_external_codex() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s}' "$stop_active" | env -u CLAUDECODE CODEX_THREAD_ID=fixture FM_TURNEND_HARNESS=codex FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+set_mtime_seconds_ago() {
+  local seconds=$1 path=$2 epoch stamp
+  epoch=$(( $(date +%s) - seconds ))
+  if stamp=$(date -r "$epoch" '+%Y%m%d%H%M.%S' 2>/dev/null); then
+    touch -mt "$stamp" "$path"
+  elif stamp=$(date -d "@$epoch" '+%Y%m%d%H%M.%S' 2>/dev/null); then
+    touch -mt "$stamp" "$path"
+  else
+    fail "host cannot set a deterministic beacon age"
+  fi
 }
 
 nonexistent_pid() {
@@ -427,9 +445,62 @@ test_hook_loop_guard_allows_retry() {
   dir=$(make_primary_dir "$TMP_ROOT/hook-loopguard")
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" true); status=$?
-  expect_code 0 "$status" "hook must allow the stop when stop_hook_active is already true"
+  expect_code 0 "$status" "ordinary default hook must allow the stop when stop_hook_active is already true"
   [ -z "$out" ] || fail "hook produced output on the loop-guarded retry: $out"
-  pass "fm-turnend-guard: stop_hook_active=true always allows the stop (never blocks twice in one turn)"
+  pass "fm-turnend-guard: ordinary default stop_hook_active=true allows the bounded continuation"
+}
+
+test_external_codex_checkpoint_expiry_reblocks_until_empty() {
+  local dir checkpoint out status stale_age
+  dir=$(make_primary_dir "$TMP_ROOT/codex-checkpoint-expiry")
+  : > "$dir/state/task1.meta"
+
+  out=$(run_hook_external_codex "$dir" false); status=$?
+  expect_code 2 "$status" "external Codex initial blind Stop must force a checkpoint continuation"
+
+  checkpoint=$(CODEX_THREAD_ID=fixture FM_HOME="$dir" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 2>&1); status=$?
+  expect_code 124 "$status" "external Codex bounded checkpoint must end quietly"
+  assert_contains "$checkpoint" "checkpoint: no actionable wake within 1s" "external Codex checkpoint did not report its bounded expiry"
+  assert_absent "$dir/state/.watch.lock/pid" "external Codex checkpoint left a watcher owner after expiry"
+
+  out=$(run_hook_external_codex "$dir" true); status=$?
+  expect_code 2 "$status" "external Codex stop_hook_active escape must re-block after the checkpoint owner disappears"
+  assert_contains "$out" "TURN WOULD END BLIND" "external Codex re-block lost the blind-turn banner"
+
+  for stale_age in 219 545; do
+    : > "$dir/state/.last-watcher-beat"
+    set_mtime_seconds_ago "$stale_age" "$dir/state/.last-watcher-beat"
+    out=$(FM_GUARD_GRACE=180 run_hook_external_codex "$dir" true); status=$?
+    expect_code 2 "$status" "external Codex ${stale_age}s stale beacon must not reopen the stop_hook_active escape"
+    assert_contains "$out" "TURN WOULD END BLIND" "external Codex ${stale_age}s stale beacon lost the blind-turn banner"
+  done
+
+  rm -f "$dir/state/task1.meta"
+  out=$(run_hook_external_codex "$dir" true); status=$?
+  expect_code 0 "$status" "external Codex must not loop once the fleet is empty"
+  [ -z "$out" ] || fail "external Codex idle Stop produced output: $out"
+  pass "fm-turnend-guard: external Codex re-blocks checkpoint expiry and the 219s/545s stale incidents without looping when idle"
+}
+
+test_external_codex_allows_a_verified_live_checkpoint_owner() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/codex-live-checkpoint-owner")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify external Codex checkpoint owner"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_external_codex "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "external Codex must allow a live identity-matched checkpoint owner"
+  [ -z "$out" ] || fail "external Codex healthy Stop produced output: $out"
+  pass "fm-turnend-guard: external Codex allows a verified live checkpoint owner"
 }
 
 # A secondmate's OWN home runs a primary firstmate session and must be guarded
@@ -796,6 +867,7 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'guard=%s\n' "$0"
+printf 'harness=%s\n' "${FM_TURNEND_HARNESS:-missing}"
 cat
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
@@ -803,6 +875,7 @@ EOF
   out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
   assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
+  assert_contains "$out" "harness=codex" "codex hook must mark the shared guard's harness surface"
   assert_contains "$out" "$payload" "codex hook must pass the original payload to the guard"
   pass ".codex/hooks.json: Stop hook uses hook process root when payload cwd is outside"
 }
@@ -1556,6 +1629,8 @@ test_hook_x_mode_only_blocks_in_default_mode
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
+test_external_codex_checkpoint_expiry_reblocks_until_empty
+test_external_codex_allows_a_verified_live_checkpoint_owner
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry
