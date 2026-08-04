@@ -152,6 +152,37 @@ fm_lock_abs_path() {
   printf '%s/%s\n' "$dir" "$base"
 }
 
+# Cached result of whether ln -s produces a real, working symlink on this
+# filesystem. Verified broken: some Windows/Git-Bash (MSYS) setups without
+# Developer Mode or SeCreateSymbolicLinkPrivilege silently create an ordinary
+# empty directory instead of a symlink when the target is a directory - `ln -s`
+# reports success (exit 0, no error) but `[ -L ... ]`/`readlink` on the result
+# say it never happened. That breaks every ownerdir+symlink claim below forever
+# (the "lock" this creates can never be verified as owned, never expires, and
+# the steal fallback recurses into deeper .steal.steal... paths without bound
+# trying to work around it), so probe once and fall back to a plain mkdir
+# claim - see fm_lock_try_create_plain.
+FM_FS_SUPPORTS_SYMLINKS=
+fm_fs_supports_symlinks() {
+  if [ -z "$FM_FS_SUPPORTS_SYMLINKS" ]; then
+    local probe_dir probe_link
+    probe_dir=$(mktemp -d "$STATE/.symlink-probe.XXXXXX" 2>/dev/null) || probe_dir=
+    if [ -n "$probe_dir" ]; then
+      probe_link="${probe_dir}.link"
+      rm -rf "$probe_link" 2>/dev/null
+      if ln -s "$probe_dir" "$probe_link" 2>/dev/null && [ -L "$probe_link" ]; then
+        FM_FS_SUPPORTS_SYMLINKS=1
+      else
+        FM_FS_SUPPORTS_SYMLINKS=0
+      fi
+      rm -rf "$probe_link" "$probe_dir" 2>/dev/null
+    else
+      FM_FS_SUPPORTS_SYMLINKS=0
+    fi
+  fi
+  [ "$FM_FS_SUPPORTS_SYMLINKS" = 1 ]
+}
+
 fm_lock_owner_dir() {
   local lockdir=$1 lock_abs
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
@@ -178,8 +209,14 @@ fm_lock_link_owner() {
 
 fm_lock_points_to_owner() {
   local lockdir=$1 ownerdir=$2 actual
-  actual=$(readlink "$lockdir" 2>/dev/null) || return 1
-  [ "$actual" = "$ownerdir" ]
+  if [ -L "$lockdir" ]; then
+    actual=$(readlink "$lockdir" 2>/dev/null) || return 1
+    [ "$actual" = "$ownerdir" ]
+    return
+  fi
+  # Plain-mkdir shape (fm_fs_supports_symlinks is false): lockdir is claimed
+  # directly and is its own owner directory, so "points to" reduces to identity.
+  [ -n "$lockdir" ] && [ "$lockdir" = "$ownerdir" ]
 }
 
 fm_lock_discard_owner() {
@@ -233,9 +270,37 @@ fm_lock_claim() {
   return 0
 }
 
+# fm_lock_try_create's fallback when fm_fs_supports_symlinks is false: claim
+# lockdir directly via mkdir - already proven atomic and reliable here (unlike
+# ln -s, see fm_fs_supports_symlinks) since fm_lock_owner_dir's mktemp -d
+# already depends on it - instead of a separate owner directory linked in by a
+# symlink. lockdir is its own owner in this shape; fm_lock_release,
+# fm_lock_remove_path, and fm_lock_recheck_stale_owner already understand a
+# plain, non-symlink lockdir as a valid owned lock and need no changes.
+fm_lock_try_create_plain() {
+  local lockdir=$1 allowed_steal_owner=${2:-}
+  mkdir "$lockdir" 2>/dev/null || return 1
+  if ! fm_lock_prepare_owner "$lockdir"; then
+    fm_lock_clean_known_files "$lockdir"
+    rmdir "$lockdir" 2>/dev/null || true
+    return 1
+  fi
+  if fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+    fm_lock_clean_known_files "$lockdir"
+    rmdir "$lockdir" 2>/dev/null || true
+    return 1
+  fi
+  FM_LOCK_OWNER_DIR=$lockdir
+  return 0
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
+  if ! fm_fs_supports_symlinks; then
+    fm_lock_try_create_plain "$lockdir" "$allowed_steal_owner"
+    return
+  fi
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
