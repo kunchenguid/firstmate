@@ -595,6 +595,13 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
+  # `.` is a POSIX special builtin: when the file cannot be found, bash EXITS a
+  # non-interactive shell rather than returning, so the `|| return 1` after each
+  # source below can never run for a MISSING adapter. Callers whose contract is
+  # "refuse cleanly and change nothing" - fm-teardown.sh's herdr preflight, which
+  # must retain every durable task record and explain the retry - depend on
+  # getting that non-zero back, so prove the file is readable first.
+  [ -r "$FM_BACKEND_LIB_DIR/backends/$name.sh" ] || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then

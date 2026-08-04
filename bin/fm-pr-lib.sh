@@ -17,6 +17,10 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+_FM_PR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PR_LIB_DIR="."
+# shellcheck source=bin/fm-stat-lib.sh
+. "$_FM_PR_LIB_DIR/fm-stat-lib.sh"
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -213,37 +217,17 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
-fm_pr_file_mode() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %Lp "$1" 2>/dev/null
-  else
-    stat -c %a "$1" 2>/dev/null
-  fi
-}
+# The registration safety checks (single link, 0600, same device) read file
+# metadata through bin/fm-stat-lib.sh, the one probe-bound owner. A `uname`
+# branch here fails CLOSED on a host where GNU coreutils shadows BSD stat, which
+# would refuse every legitimate check registration (issue #1601).
+fm_pr_file_mode() { fm_stat_mode "$1"; }
 
-fm_pr_file_device() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %d "$1" 2>/dev/null
-  else
-    stat -c %d "$1" 2>/dev/null
-  fi
-}
+fm_pr_file_device() { fm_stat_device "$1"; }
 
-fm_pr_file_link_count() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %l "$1" 2>/dev/null
-  else
-    stat -c %h "$1" 2>/dev/null
-  fi
-}
+fm_pr_file_link_count() { fm_stat_nlink "$1"; }
 
-fm_pr_file_inode() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %i "$1" 2>/dev/null
-  else
-    stat -c %i "$1" 2>/dev/null
-  fi
-}
+fm_pr_file_inode() { fm_stat_inode "$1"; }
 
 fm_pr_file_identity() {
   local device inode

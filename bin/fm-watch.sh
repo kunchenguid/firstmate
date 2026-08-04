@@ -67,6 +67,14 @@ mkdir -p "$STATE"
 # The native event fast-path and only its true dependencies have one narrow
 # production owner. The Herdr event-wait smoke test consumes this same owner
 # without sourcing the entire watcher graph.
+# Every file timestamp this watcher reads - signal signatures, the pause
+# fingerprint's deadline, its own beacon and lock ages - goes through the one
+# probe-bound stat owner. A hand-rolled flavor guess here would collapse the
+# fingerprint's deadline to a constant and strand a pause on its long recheck,
+# or age a live lock as abandoned (issue #1601); fm-stat-lib.sh's header owns
+# the full reasoning.
+# shellcheck source=bin/fm-stat-lib.sh
+. "$SCRIPT_DIR/fm-stat-lib.sh"
 # shellcheck source=bin/fm-push-transition-lib.sh
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -92,26 +100,6 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # including the event-wait splice below - and returns before acquiring the lock
 # or starting the loop. Running it as a script executes the runtime exactly as
 # before, byte-for-byte.
-
-# Portable stat. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU) stat uses `-c <fmt>`.
-# Do NOT use the `stat -f <fmt> ... || stat -c <fmt> ...` fallback form: on Linux
-# `stat -f` is *filesystem* stat and writes a partial filesystem dump ("File: ...",
-# "Blocks: ...") to stdout before failing, so the fallback's correct output gets
-# appended to that garbage. Arithmetic under `set -u` then aborts on the stray
-# token (e.g. the word "File" read as an unset variable), which silently kills the
-# watcher mid-cycle. `uname` does not answer which stat this host actually runs
-# either - GNU coreutils installed ahead of /usr/bin makes a Darwin box speak
-# `-c` and read `-f` as that same filesystem dump (issue #1601), which would
-# collapse the pause fingerprint's deadline to a constant and strand a pause on
-# its long recheck. Probe the real binary once on a path that always exists and
-# bind the right form.
-if stat -c %Y / >/dev/null 2>&1; then
-  stat_mtime() { stat -c %Y "$1" 2>/dev/null; }        # epoch seconds of mtime
-  stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }    # size:mtime signature
-else
-  stat_mtime() { stat -f %m "$1" 2>/dev/null; }
-  stat_sig()   { stat -f '%z:%Fm' "$1" 2>/dev/null; }
-fi
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
@@ -186,12 +174,10 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
-# The one derivation of a window's per-key state-file suffix (.hash-, .stale-,
-# .paused-, .paused-class-, ...). Every site that names those files routes
-# through this, so a sibling can never key the same file differently.
-pause_cache_key() {  # <window>
-  printf '%s' "$1" | tr ':/.' '___'
-}
+# The key derivation and the pause/stale marker set both live in
+# fm-classify-lib.sh (fm_state_file_key, fm_clear_pause_state,
+# fm_clear_pause_tracking) because the away-mode daemon retires the very files
+# this watcher writes. Naming one of them here again is how a marker leaks.
 
 # Fingerprint the cheap local facts that can invalidate a cached canonical
 # pause without another no-mistakes read: newest event bytes/signature, current
@@ -200,16 +186,16 @@ pause_cache_key() {  # <window>
 pause_class_fingerprint() {  # <window> <task>
   local win=$1 task=$2 key statusf meta wt head='' status_sig='' busy_gen='' busy_state=''
   local status_epoch=0 resurfaced_epoch=0 anchor deadline phase=fresh now
-  key=$(pause_cache_key "$win")
+  key=$(fm_state_file_key "$win")
   statusf="$STATE/$task.status"
   meta="$STATE/$task.meta"
   wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -z "$wt" ] || head=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)
-  status_sig=$(stat_sig "$statusf" 2>/dev/null || true)
+  status_sig=$(fm_stat_sig "$statusf" 2>/dev/null || true)
   busy_gen=$(cat "$STATE/$task.busy-gen" 2>/dev/null || true)
   busy_state=$(cat "$STATE/$task.busy-state" 2>/dev/null || true)
-  status_epoch=$(stat_mtime "$statusf" 2>/dev/null || echo 0)
-  resurfaced_epoch=$(stat_mtime "$STATE/.paused-resurfaced-$key" 2>/dev/null || echo 0)
+  status_epoch=$(fm_stat_mtime "$statusf" 2>/dev/null || echo 0)
+  resurfaced_epoch=$(fm_stat_mtime "$STATE/.paused-resurfaced-$key" 2>/dev/null || echo 0)
   case "$status_epoch" in ''|*[!0-9]*) status_epoch=0 ;; esac
   case "$resurfaced_epoch" in ''|*[!0-9]*) resurfaced_epoch=0 ;; esac
   anchor=$status_epoch
@@ -232,12 +218,13 @@ pause_class_fingerprint() {  # <window> <task>
 # timer for a whole recheck window. Everything else (active, parked, failed,
 # unknown, resumed, and status-log pauses) keeps the conservative fresh read.
 # Prints "<class> <source>" - both from fm-classify-lib.sh, the one owner of the
-# canonical-line vocabulary - because the caller must distinguish the current-
-# state owner's matched passive-monitor pause (source: run-step) from an
-# ordinary status-log pause, which keeps the live-worker fail-open below.
+# canonical-line vocabulary AND of the reader invocation (crew_state_read) -
+# because the caller must distinguish the current-state owner's matched
+# passive-monitor pause (source: run-step) from an ordinary status-log pause,
+# which keeps the live-worker fail-open below.
 paused_absorb_class_cached() {  # <window> <task>
   local win=$1 task=$2 key cache fingerprint cached_fingerprint line class src tmp
-  key=$(pause_cache_key "$win")
+  key=$(fm_state_file_key "$win")
   cache="$STATE/.paused-class-$key"
   fingerprint=$(pause_class_fingerprint "$win" "$task")
   if [ -f "$cache" ]; then
@@ -252,7 +239,7 @@ paused_absorb_class_cached() {  # <window> <task>
       fi
     fi
   fi
-  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+  line=$(crew_state_read "$task")
   class=$(crew_absorb_class_line "$line")
   src=$(crew_state_line_source "$line")
   if [ "$class" = paused ] && [ "$src" = run-step ]; then
@@ -414,12 +401,12 @@ busy_turn_over_age() {  # <task>
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
-  key=$(pause_cache_key "$win")
+  key=$(fm_state_file_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   statusf="$STATE/$task.status"
-  mtime=$(stat_mtime "$statusf")
+  mtime=$(fm_stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
@@ -431,20 +418,6 @@ handle_paused_stale() {  # <window> <task> <hash>
     wake "$reason"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
-}
-
-clear_pause_state() {  # <window>
-  local win=$1 key
-  key=$(pause_cache_key "$win")
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
-    "$STATE/.paused-class-$key"
-}
-
-clear_pause_tracking() {  # <window>
-  local win=$1 key
-  key=$(pause_cache_key "$win")
-  clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -463,7 +436,7 @@ clear_pause_tracking() {  # <window>
 # because .paused-class-<key> is its own (longer, invalidated) throttle.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last verdict class src agent_alive=unknown
-  key=$(pause_cache_key "$win")
+  key=$(fm_state_file_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$STATE/.paused-class-$key" "$STATE/.paused-rechecked-$key"
@@ -512,7 +485,7 @@ pause_state_class() {  # <window> <task>
 
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last
-  key=$(pause_cache_key "$win")
+  key=$(fm_state_file_key "$win")
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
@@ -533,7 +506,7 @@ surface_nonterminal_stale() {  # <window> <hash>
 # busy fleet. Persist the schedule as file mtimes instead.
 age_of() {  # seconds since file mtime; "due immediately" if missing
   local f=$1 m
-  m=$(stat_mtime "$f") || { echo 999999; return; }
+  m=$(fm_stat_mtime "$f") || { echo 999999; return; }
   echo $(( $(date +%s) - m ))
 }
 
@@ -549,7 +522,7 @@ scan_signals() {
   local f sig sf
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
-    sig=$(stat_sig "$f") || continue
+    sig=$(fm_stat_sig "$f") || continue
     sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
     if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
       printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
@@ -1025,17 +998,17 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
-    key=$(pause_cache_key "$w")
+    key=$(fm_state_file_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      clear_pause_tracking "$w"
+      fm_clear_pause_tracking "$w" "$STATE"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
-    key=$(pause_cache_key "$w")
+    key=$(fm_state_file_key "$w")
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"
@@ -1058,7 +1031,7 @@ EOF
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
-            *)      clear_pause_tracking "$w" ;;
+            *)      fm_clear_pause_tracking "$w" "$STATE" ;;
           esac
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
@@ -1123,7 +1096,7 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
-                clear_pause_tracking "$w"
+                fm_clear_pause_tracking "$w" "$STATE"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
@@ -1140,7 +1113,7 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_state "$w"
+                working) fm_clear_pause_state "$w" "$STATE"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
@@ -1161,7 +1134,7 @@ EOF
           rm -f "$ssf" "$ewf"
         fi
         if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
-          clear_pause_tracking "$w"
+          fm_clear_pause_tracking "$w" "$STATE"
         fi
       fi
     else
@@ -1176,10 +1149,10 @@ EOF
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$w" ;;
+          *)      fm_clear_pause_tracking "$w" "$STATE" ;;
         esac
       else
-        [ -e "$pf" ] && clear_pause_tracking "$w"
+        [ -e "$pf" ] && fm_clear_pause_tracking "$w" "$STATE"
       fi
     fi
   done < <(recorded_windows)

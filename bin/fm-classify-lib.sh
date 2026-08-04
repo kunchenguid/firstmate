@@ -363,10 +363,20 @@ signal_reason_is_actionable() {  # <file> ...
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
+  crew_absorb_class_line "$(crew_state_read "$1")"
+}
+
+# The ONE invocation of FM_CREW_STATE_BIN. Prints the canonical current-state
+# line for <id>, or nothing when the id is empty or the read fails - which
+# crew_absorb_class_line and crew_state_line_source both classify as `none` with
+# no source. A caller that wants the raw line (the watcher, to cache it) uses
+# this rather than re-rolling the invocation, so the reader binary, its argument
+# shape, and its failure handling stay in one place.
+crew_state_read() {  # <id>
   local id=$1 line
-  [ -n "$id" ] || { printf 'none'; return; }
+  [ -n "$id" ] || return 0
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  crew_absorb_class_line "$line"
+  printf '%s' "$line"
 }
 
 # The canonical-line -> working/paused/none mapping itself, split out so a
@@ -463,4 +473,40 @@ scan_captain_relevant_statuses() {  # <state>
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
   done
   return 0
+}
+
+# --- the watcher's per-window pause/stale marker namespace ------------------
+#
+# TWO owners share these files: bin/fm-watch.sh writes them during normal-mode
+# triage, and bin/fm-supervise-daemon.sh retires them from away mode when a
+# crew's status leaves paused:. Enumerating the set in both places is how a
+# marker gets orphaned - once the daemon removes .paused-<key>, the watcher's
+# own cleanup guard never fires again, so anything the daemon forgot leaks for
+# the life of the home. Adding a marker must therefore be a one-file change.
+
+# The one derivation of a window's (or task's) per-key state-file suffix
+# (.hash-, .stale-, .paused-, .paused-class-, .subsuper-*-, ...). Every site
+# that names those files routes through this, so a sibling can never key the
+# same file differently.
+fm_state_file_key() {  # <window-or-task>
+  printf '%s' "$1" | tr ':/.' '___'
+}
+
+# Remove <window>'s pause verdict and its throttles under <state>: the pause
+# marker itself, the short recheck and long re-surface throttles, and the cached
+# canonical run-step pause verdict.
+fm_clear_pause_state() {  # <window> <state>
+  local win=$1 state=$2 key
+  key=$(fm_state_file_key "$win")
+  rm -f "$state/.paused-$key" "$state/.paused-rechecked-$key" \
+    "$state/.paused-resurfaced-$key" "$state/.paused-class-$key"
+}
+
+# fm_clear_pause_state plus the stale-pane hash, its first-seen stamp, and the
+# wedge escalation counter: everything either supervisor keys off this window.
+fm_clear_pause_tracking() {  # <window> <state>
+  local win=$1 state=$2 key
+  fm_clear_pause_state "$win" "$state"
+  key=$(fm_state_file_key "$win")
+  rm -f "$state/.stale-$key" "$state/.stale-since-$key" "$state/.wedge-escalations-$key"
 }

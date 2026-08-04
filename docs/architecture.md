@@ -27,6 +27,9 @@ Its initial normal-mode status signal still surfaces through the no-verb path, w
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
+Both supervisors name their per-window state files - the stale hash and its first-seen stamp, the pause marker, its short recheck and long re-surface throttles, the cached run-step pause verdict, and the wedge escalation counter - through one shared key derivation and one shared retirement in `bin/fm-classify-lib.sh`, so away-mode cleanup can never leave behind a marker normal mode is no longer able to reach.
+Every file timestamp and metadata read in that supervision graph goes through `bin/fm-stat-lib.sh`, which probes the real `stat` binary once and binds the matching format flag, then refuses any value that is not well formed.
+The host's kernel name does not determine which `stat` is first on `PATH`, and a format-flag fallback chain can exit successfully with a diagnostic dump spliced into its output, so neither may decide the format; the readers that age the watcher beacon, prove a git lock abandoned, bound a pause recheck, and validate single-link private artifacts all depend on that one probe.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.

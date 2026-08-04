@@ -62,6 +62,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
+# shellcheck source=bin/fm-stat-lib.sh
+. "$SCRIPT_DIR/fm-stat-lib.sh"
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -172,17 +174,11 @@ nm_run_started_epoch() {  # <run-id>
   done
   echo $((value / 1000))
 }
-# Portable mtime. `uname` does not decide which stat this host actually runs:
-# GNU coreutils installed ahead of /usr/bin makes a Darwin box answer `stat -c`
-# and read `-f` as *filesystem* stat, which prints a multi-line dump instead of
-# an epoch (issue #1601). Probe the real binary once on a known path and bind
-# the right form, so the reader never guesses.
-if stat -c %Y / >/dev/null 2>&1; then
-  file_mtime() { stat -c %Y "$1" 2>/dev/null; }
-else
-  file_mtime() { stat -f %m "$1" 2>/dev/null; }
-fi
-status_mtime() { file_mtime "$LOG"; }
+# Portable mtime comes from bin/fm-stat-lib.sh, the one probe-bound owner: a
+# hand-rolled flavor guess here would read the newest event's time as a
+# filesystem dump and silently drop the pause-newer-than-run comparison
+# (issue #1601).
+status_mtime() { fm_stat_mtime "$LOG"; }
 pause_is_newer_than_run() {  # <run-id>
   local started event_mtime
   started=$(nm_run_started_epoch "$1") || return 1
@@ -191,10 +187,15 @@ pause_is_newer_than_run() {  # <run-id>
   [ "$event_mtime" -gt "$started" ]
 }
 
-# pane_readable is consulted ONLY in the no-run fallback below. The run-step path
-# stays authoritative regardless of pane liveness - judge by the run-step, not the
-# shell - so a finished crew whose endpoint has closed still reports its run-step
-# state (e.g. done) instead of being masked as unknown. Backend-aware
+# The run-step path stays authoritative regardless of pane liveness - judge by
+# the run-step, not the shell - so a finished crew whose endpoint has closed
+# still reports its run-step state (e.g. done) instead of being masked as
+# unknown. Endpoint liveness is therefore consulted in exactly two places: the
+# no-run fallback below, and the one matched-passive-monitor pause case, where
+# an affirmatively idle or confidently gone worker is itself part of the proof
+# that the attached CI monitor is passive rather than active work. Nothing else
+# in the run-step path may read pane_readable, crew_busy_verdict, or
+# fm_backend_agent_alive. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
 TASK_BACKEND=$(fm_backend_of_meta "$META")

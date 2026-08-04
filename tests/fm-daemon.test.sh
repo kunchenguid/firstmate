@@ -313,6 +313,37 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear() {
   pass "housekeeping clears an already-resumed watcher pause across both supervisors"
 }
 
+# Away mode retires the markers the NORMAL-mode watcher wrote. Once it removes
+# .paused-<key>, the watcher's own cleanup guard never fires again, so any marker
+# the daemon forgets leaks for the life of the home. Seed the complete watcher
+# set - including the cached run-step pause verdict - and require every one gone.
+test_housekeeping_retires_every_watcher_pause_marker() {
+  local dir state watcher_key win leftover=''
+  dir=$(make_supercase retire-watcher-markers)
+  state="$dir/state"
+  win="sess:fm-held-w10-retire"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-retire.meta"
+  printf 'working: upstream landed, resuming\n' > "$state/held-w10-retire.status"
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  [ "$watcher_key" = "$(fm_state_file_key "$win")" ] \
+    || fail "the daemon and the watcher no longer derive the same state-file key"
+  : > "$state/.paused-$watcher_key"
+  : > "$state/.paused-rechecked-$watcher_key"
+  : > "$state/.paused-resurfaced-$watcher_key"
+  printf 'fingerprint\nstate: paused · source: run-step · passive CI monitor remains attached\n' \
+    > "$state/.paused-class-$watcher_key"
+  : > "$state/.stale-$watcher_key"
+  : > "$state/.stale-since-$watcher_key"
+  : > "$state/.wedge-escalations-$watcher_key"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  for marker in paused paused-rechecked paused-resurfaced paused-class stale stale-since wedge-escalations; do
+    [ -e "$state/.$marker-$watcher_key" ] && leftover="$leftover .$marker-<key>"
+  done
+  [ -z "$leftover" ] \
+    || fail "away-mode cleanup orphaned watcher markers the watcher can no longer reach:$leftover"
+  pass "away mode retires the complete watcher pause/stale marker set, cached verdict included"
+}
+
 test_housekeeping_seeds_pause_marker_from_status() {
   local dir state key win
   dir=$(make_supercase seed-paused-status)
@@ -1843,6 +1874,7 @@ test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
+test_housekeeping_retires_every_watcher_pause_marker
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared

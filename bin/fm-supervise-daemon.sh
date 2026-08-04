@@ -151,6 +151,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # + verify-retry submit). Sourced at top level so BOTH the executed daemon and
 # the unit tests (which source this file for its pure functions) get the
 # corrected composer detection. Stale task rechecks use fm-backend.sh below.
+# shellcheck source=bin/fm-stat-lib.sh
+. "$FM_DAEMON_DIR/fm-stat-lib.sh"
+
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_DAEMON_DIR/fm-tmux-lib.sh"
 
@@ -228,16 +231,13 @@ AFK_FLAG_NAME=".afk"
 # classifiers can take an explicit state arg without depending on globals.
 _state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
 
-# --- portable stat (same trap as fm-watch.sh: no `stat -f || stat -c`) -------
-if [ "$(uname)" = Darwin ]; then
-  _stat_file_mtime() { stat -f %m "$1" 2>/dev/null; }
-else
-  _stat_file_mtime() { stat -c %Y "$1" 2>/dev/null; }
-fi
 _now() { date +%s; }
+# Portable mtime comes from bin/fm-stat-lib.sh (sourced above), the one
+# probe-bound owner: away mode ages the same pause and stale markers the
+# watcher does, so it must not guess the stat flavor independently.
 _file_age() {  # seconds since mtime; very large if missing
   local f=$1 m
-  m=$(_stat_file_mtime "$f") || { echo 999999; return; }
+  m=$(fm_stat_mtime "$f") || { echo 999999; return; }
   echo $(( $(_now) - m ))
 }
 
@@ -349,7 +349,7 @@ classify_signal() {  # <reason-after-colon> <state>
     # single source of truth shared between the per-wake signal path and the
     # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
     task=$(basename "$f"); task="${task%.status}"
-    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+    seen="$state/.subsuper-seen-status-$(fm_state_file_key "$task")"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
   done
   # strip a trailing " | " separator so the distilled line is clean
@@ -397,7 +397,7 @@ classify_stale() {  # <window> <state>
     fi
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
-    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+    seen="$state/.subsuper-seen-status-$(fm_state_file_key "$task")"
     if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
       printf 'self|stale + terminal (already escalated by signal): %s' "$last"
       return
@@ -431,18 +431,19 @@ classify_unknown() {  # <reason>
 # Seen:     state/.subsuper-seen-status-<task>  last status line the scan
 #           escalated, so the catch-all does not re-fire the same terminal.
 
-_stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
+# The key derivation is fm_state_file_key in fm-classify-lib.sh, shared with the
+# watcher, and so is the watcher-owned marker set this daemon retires below.
 
 stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
+  key=$(fm_state_file_key "$(window_to_task "$win" "$state")")
   marker="$state/.subsuper-stale-$key"
   [ -e "$marker" ] || _now > "$marker"
 }
 
 stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
+  key=$(fm_state_file_key "$(window_to_task "$win" "$state")")
   rm -f "$state/.subsuper-stale-$key"
 }
 
@@ -453,33 +454,34 @@ stale_marker_remove() {  # <window> <state>
 # distinct stale hashes map to one marker), keeping the cadence hash-immune.
 pause_marker_record() {  # <window> <state> - create if absent
   local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
+  key=$(fm_state_file_key "$(window_to_task "$win" "$state")")
   marker="$state/.subsuper-paused-$key"
   [ -e "$marker" ] || _now > "$marker"
 }
 
 pause_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
+  key=$(fm_state_file_key "$(window_to_task "$win" "$state")")
   rm -f "$state/.subsuper-paused-$key"
 }
 
+# Retire BOTH supervisors' pause tracking for one window: this daemon's own
+# task-keyed markers, and the whole watcher-owned window-keyed set through its
+# single owner. Once .paused-<key> is gone the watcher's own cleanup guard never
+# fires again, so anything left behind here leaks for the life of the home.
 clear_pause_tracking() {  # <window> <state>
-  local win=$1 state=$2 task key watcher_key
-  task=$(window_to_task "$win" "$state")
-  key=$(_stale_key "$task")
-  watcher_key=$(_stale_key "$win")
-  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
-    "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
-    "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
+  local win=$1 state=$2 key
+  key=$(fm_state_file_key "$(window_to_task "$win" "$state")")
+  rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key"
+  fm_clear_pause_tracking "$win" "$state"
 }
 
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   local win=$1 state=$2 last=$3 task key marker watcher_key
   task=$(window_to_task "$win" "$state")
-  key=$(_stale_key "$task")
+  key=$(fm_state_file_key "$task")
   marker="$state/.subsuper-paused-$key"
-  watcher_key=$(_stale_key "$win")
+  watcher_key=$(fm_state_file_key "$win")
   if status_is_paused "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
@@ -495,8 +497,8 @@ migrate_watcher_pause_markers() {  # <state>
     win=$(fm_backend_target_of_meta "$meta")
     [ -n "$win" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
-    key=$(_stale_key "$task")
-    watcher_key=$(_stale_key "$win")
+    key=$(fm_state_file_key "$task")
+    watcher_key=$(fm_state_file_key "$win")
     last=$(last_status_line "$state/$task.status")
     if status_is_paused "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"
@@ -525,7 +527,7 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
 # escalate path and the catch-all scan.
 mark_status_seen() {  # <state> <task> <last-line>
   local state=$1 task=$2 line=$3
-  printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
+  printf '%s' "$line" > "$state/.subsuper-seen-status-$(fm_state_file_key "$task")"
 }
 
 # Mark every captain-relevant status line a per-wake classification escalated as
@@ -1066,7 +1068,7 @@ housekeeping() {  # <state>
     local seen
     while IFS="$(printf '\t')" read -r f task last; do
       [ -n "$f" ] || continue
-      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+      seen="$state/.subsuper-seen-status-$(fm_state_file_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
@@ -1080,13 +1082,13 @@ window_for_task() {  # <task-key> [state]
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
-    [ "$(_stale_key "$task")" = "$key" ] || continue
+    [ "$(fm_state_file_key "$task")" = "$key" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
     [ -n "$w" ] && { printf '%s' "$w"; return 0; }
   done
   for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
     t=$(window_to_task "$w" "$state")
-    [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
+    [ "$(fm_state_file_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
   done
   return 1
 }

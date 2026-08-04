@@ -48,6 +48,14 @@ export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=fal
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Suites read file timestamps to age fixtures and to prime the watcher's .seen-*
+# signatures. They use production's own probe-bound owner rather than a private
+# `uname` branch, so a developer whose PATH puts GNU coreutils ahead of /usr/bin
+# does not see spurious failures from the very defect class the owner exists to
+# remove (issue #1601). fm_stat_mtime and fm_stat_sig come from here.
+# shellcheck source=bin/fm-stat-lib.sh
+. "$ROOT/bin/fm-stat-lib.sh"
+
 # --- reporters --------------------------------------------------------------
 
 fail() {

@@ -62,6 +62,8 @@
 
 # shellcheck source=bin/fm-marker-lib.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
+# shellcheck source=bin/fm-stat-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-stat-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -435,11 +437,7 @@ fm_pending_reply_find_resolve_line() {  # <status-file> <corr_id>
 fm_pending_reply_file_signature() {  # <path>
   local path=$1
   [ -f "$path" ] || { printf 'missing'; return 0; }
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    LC_ALL=C stat -f '%d:%i:%z:%m:%c' "$path" 2>/dev/null || printf 'unreadable'
-  else
-    LC_ALL=C stat -c '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null || printf 'unreadable'
-  fi
+  fm_stat_identity "$path" || printf 'unreadable'
 }
 
 fm_pending_reply_status_set_signature() {  # <status-dir>

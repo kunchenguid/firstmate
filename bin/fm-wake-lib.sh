@@ -9,9 +9,15 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
-# Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
-# confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
-# the platform (Git Bash/MSYS) that already pays the highest fork price.
+# Portable mtime comes from the one probe-bound owner; never re-derive a stat
+# flavor here (see bin/fm-stat-lib.sh for why uname cannot answer that).
+# shellcheck source=bin/fm-stat-lib.sh
+. "$FM_WAKE_LIB_DIR/fm-stat-lib.sh"
+# Resolved once at source time: fm_pid_identity runs inside 0.2s confirm and 0.5s
+# attach polls, and forking uname per call is a measurable cost on the platform
+# (Git Bash/MSYS) that already pays the highest fork price. This one is a KERNEL
+# question - does /proc behave like Linux - not a which-binary-is-first-on-PATH
+# one, so uname is the right source for it and the wrong source for stat.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 mkdir -p "$STATE"
 
@@ -64,17 +70,12 @@ fm_pid_identity() {
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
 
-fm_path_mtime() {
-  if [ "$_FM_UNAME" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
-  else
-    stat -c %Y "$1" 2>/dev/null
-  fi
-}
-
+# Seconds since mtime; "very old" when unreadable, so an unreadable beacon or
+# lock reads as abandoned rather than as fresh. fm_stat_mtime prints nothing
+# unless it holds a plain integer, so this arithmetic can never see a stray token.
 fm_path_age() {
   local path=$1 m
-  m=$(fm_path_mtime "$path") || { echo 999999; return; }
+  m=$(fm_stat_mtime "$path") || { echo 999999; return; }
   echo $(( $(date +%s) - m ))
 }
 

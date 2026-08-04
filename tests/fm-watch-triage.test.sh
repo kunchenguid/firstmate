@@ -64,12 +64,6 @@ wait_numeric_file() {
   return 1
 }
 
-# Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
-# fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
-file_mtime() {
-  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
-}
-
 # Set <file>'s mtime to exactly <epoch> seconds, for aging a busy-turn marker by
 # a precise amount (touch -t takes a local-time stamp, not an epoch, on both
 # platforms, so convert via BSD `date -r` or GNU `date -d @`).
@@ -84,9 +78,10 @@ set_mtime() {  # <epoch> <file>
 }
 
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
-# fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
+# fire on a pre-existing status. Not a re-implementation: this is the same
+# fm_stat_sig fm-watch.sh calls, reached through bin/fm-stat-lib.sh.
 seen_sig() {
-  if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+  fm_stat_sig "$1" 2>/dev/null
 }
 
 # Prime <file>'s .seen-* suppressor to its CURRENT signature, so the per-poll
@@ -1871,11 +1866,11 @@ test_beacon_stays_fresh_while_absorbing() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited while absorbing the first benign signal"; }
-  m1=$(file_mtime "$state/.last-watcher-beat")
+  m1=$(fm_stat_mtime "$state/.last-watcher-beat")
   # A second benign signal keeps it absorbing; the beacon must keep advancing.
   printf 'working: b\n' >> "$status_file"
   wait_live "$pid" 20 || { reap "$pid"; fail "watcher exited while absorbing a second benign signal"; }
-  m2=$(file_mtime "$state/.last-watcher-beat")
+  m2=$(fm_stat_mtime "$state/.last-watcher-beat")
   now=$(date +%s)
   if [ -z "$m1" ] || [ -z "$m2" ]; then
     reap "$pid"
