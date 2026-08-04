@@ -13,6 +13,7 @@ metadata:
 This skill is the single owner of Firstmate's subject-first contract for Lavish review surfaces.
 The installed `lavish-axi --help`, `lavish-axi design`, and matching `lavish-axi playbook ...` output remain authoritative for tool mechanics, visual guidance, polling behavior, supported playbooks, and design-system selection.
 Use those current tool instructions instead of building a competing artifact system or memorizing old flags.
+Generated secondmate, scout, and worker briefs must point agents here before Lavish review work; `tests/fm-brief.test.sh` covers that routing.
 
 ## Core contract
 

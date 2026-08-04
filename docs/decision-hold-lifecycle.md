@@ -43,7 +43,6 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
-Lavish subject-first brief cross-reference verification date: 2026-08-04.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -77,7 +76,6 @@ ok - main and secondmate captain actionability use the same blocker readiness
 
 $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
-ok - fm-brief.sh: every delegated workflow cross-references the Lavish subject-first policy
 
 $ bash tests/fm-teardown.test.sh
 all teardown safety cases passed
