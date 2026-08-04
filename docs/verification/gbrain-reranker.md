@@ -73,10 +73,10 @@ llama.cpp normalized architectures `120` and `121` to `120a` and `121a`, then co
 
 ## Service contract
 
-The enabled user unit is `~/.config/systemd/user/gbrain-reranker.service`.
+The active and enabled user unit is `~/.config/systemd/user/gbrain-reranker.service`.
 User lingering is enabled, so `default.target` activation persists across host boots without a system-level unit or sudo.
 The unit pins the GPU by UUID with `CUDA_VISIBLE_DEVICES`, loads the CUDA backend explicitly with `GGML_BACKEND_PATH`, and exposes the host driver through a directory containing only a `libcuda.so.1` symlink.
-The server is launched with `--reranking --offline --no-webui --host 127.0.0.1 --port 8081 --ctx-size 4096 --batch-size 512 --ubatch-size 512 --parallel 1 --n-gpu-layers 999`.
+The server is launched with `--reranking --offline --no-webui --host 127.0.0.1 --port 8081 --ctx-size 4096 --batch-size 4096 --ubatch-size 4096 --parallel 1 --n-gpu-layers 999`.
 The service uses `Restart=on-failure`, a two-second restart delay, a startup HTTP health probe, journal output, and a 200-message-per-30-second log rate limit.
 
 The current GBrain configuration commands are owned by [`gbrain.md`](../gbrain.md).
@@ -120,10 +120,13 @@ The observed result correctly placed the relevant passage at index 2 first:
 }
 ```
 
-That 268-token fixture proves the model's ordering behavior only for a short payload.
-At the current physical batch size of 512, representative archive inputs of 878, 1599, and 2868 tokens each returned HTTP 500 with `input ... is too large to process. increase the physical batch size (current batch size: 512)`.
-GBrain's failure log recorded the same response for real requests containing 5 to 26 documents and 724 to 1098 input tokens.
-GBrain still returned retrieval results through its non-reranked fallback, so provider health and a loopback connection do not establish successful archive-sized reranking.
+The 268-token fixed ordering fixture introduced for story #5 proves the model's ordering behavior only for a short payload.
+Because that payload fit the former physical batch size of 512, it did not exercise a representative full archive document and was insufficient to establish the archive retrieval guarantee.
+After the service moved to a 4096-token context with physical and micro-batch sizes both set to 4096, a rerank request containing a representative full archive document returned HTTP 200.
+The resulting archive-backed GBrain query and MiniMax synthesis evidence are recorded in [`gbrain-init-retrieval.md`](gbrain-init-retrieval.md).
+A deliberately oversized input beyond the 4096 service and context bound returned HTTP 500 from llama-server.
+For that bounded failure, GBrain records a rerank failure and then returns the non-reranked fallback ranking.
+The returned fallback keeps retrieval available, but operators must treat the visible rerank failure as failure rather than evidence of a successful rerank.
 
 ## GPU, recovery, and privacy evidence
 

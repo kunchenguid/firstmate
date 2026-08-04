@@ -29,8 +29,8 @@ The runtime configuration lives under `GBRAIN_HOME=/home/sungin/.local/share/gbr
 Those checks were the 1024-dimensional embedding configuration, reranker configuration, embedding reachability, and reranker reachability.
 The reranker used `llama-server-reranker:qwen3-reranker-0.6b-q8_0` at `http://127.0.0.1:8081/v1`.
 The MiniMax routing used `models.think=minimax:MiniMax-M3` and `provider_base_urls.minimax=https://api.minimax.io/v1`.
-The health result establishes configuration and reachability, not successful archive-sized reranking.
-The archive-sized functional check failed, and GBrain returned its non-reranked fallback results as detailed in [`gbrain-reranker.md`](gbrain-reranker.md).
+The health result establishes configuration and reachability, while the separate archive-sized functional check establishes successful reranking for a representative full archive document.
+That direct request returned HTTP 200 after the llama-server physical and micro-batch sizes were both raised to 4096, and an archive-backed GBrain query then completed with reranking as detailed in [`gbrain-reranker.md`](gbrain-reranker.md).
 
 ## Archive and local-network evidence
 
@@ -60,7 +60,8 @@ No cloud embedding or reranking connection appeared in the trace.
 
 With `MINIMAX_API_KEY` injected only from the mode-600 Pi authentication file, one `gbrain think --rounds 1` call asked `What local models and endpoints back GBrain retrieval, how were they verified, and what privacy boundary applies?` and completed with `Model: minimax:MiniMax-M3`, five gathered pages, and three distinct cited documents.
 The answer cited `firstmate-docs/gbrain-endpoints`, `firstmate-docs/gbrain-embedding-verification`, and `firstmate-docs/gbrain-reranker-verification`.
-Because archive-sized reranker requests failed during this verification, the completion proves cited hosted synthesis over local fallback results rather than successful reranking.
+After the reranker batch remediation, a repeat one-round MiniMax think completed with citations over archive-backed retrieval with local reranking.
+The 4096 service bound and the visible non-reranked fallback for deliberately oversized inputs are recorded in [`gbrain-reranker.md`](gbrain-reranker.md).
 
 With `MINIMAX_API_KEY` removed through `env -i`, the same `think` path returned no synthesis and printed `(no LLM available - set anthropic_api_key via gbrain config or ANTHROPIC_API_KEY env)` while retaining `Model: minimax:MiniMax-M3` in its summary.
 That is a clear no-answer state, but the current GBrain message incorrectly recommends the Anthropic credential rather than the missing MiniMax credential.

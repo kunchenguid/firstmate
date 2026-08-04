@@ -95,8 +95,9 @@ GBRAIN_HOME=/home/sungin/.local/share/gbrain/runtime \
 The embedding and reranking providers are local only.
 Set `OLLAMA_BASE_URL=http://127.0.0.1:11434/v1` on every command that can embed or query, because GBrain does not persist the command-scoped endpoint and otherwise falls back to `http://localhost:11434/v1`.
 The only configured hosted synthesis provider is `models.think=minimax:MiniMax-M3` through `https://api.minimax.io/v1`.
-The current reranker service passes reachability and short-fixture checks, but its physical batch size of 512 returns HTTP 500 for archive-sized inputs, so GBrain falls back to results that were not reranked as recorded in [verification/gbrain-reranker.md](verification/gbrain-reranker.md).
-Treat archive-sized local reranking as an open deployment blocker rather than a verified retrieval guarantee.
+The current reranker service uses a 4096-token context with physical and micro-batch sizes both set to 4096, and archive-representative inputs complete with local reranking as recorded in [verification/gbrain-reranker.md](verification/gbrain-reranker.md).
+An input beyond that service and context bound makes llama-server return HTTP 500, after which GBrain records a rerank failure and returns the non-reranked fallback ranking.
+Operators must treat that visible failure as a failed rerank rather than successful reranking, even though retrieval still returns fallback results.
 
 ## MiniMax credential contract and privacy boundary
 
