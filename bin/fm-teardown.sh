@@ -403,12 +403,16 @@ PUBLIC_FOLLOWUP_WORK_HOME=main
 PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
 PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=0
 PUBLIC_FOLLOWUP_RELAY_ACTIVE=0
+public_followup_canonical_home() {
+  local home=$1
+  case "$home" in /*) ;; *) return 1 ;; esac
+  CDPATH='' cd -- "$home" 2>/dev/null && pwd -P
+}
 public_followup_resolve_primary_home() {
   local parent=$1 child=$2 id=$3 parent_meta registry meta_home
   fm_pf_home_id_valid "secondmate:$id" || return 1
-  case "$parent" in /*) ;; *) return 1 ;; esac
-  parent=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
-  child=$(CDPATH='' cd -- "$child" 2>/dev/null && pwd -P) || return 1
+  parent=$(public_followup_canonical_home "$parent") || return 1
+  child=$(public_followup_canonical_home "$child") || return 1
   [ "$parent" != "$child" ] || return 1
   parent_meta="$parent/state/$id.meta"
   [ -f "$parent_meta" ] && [ ! -L "$parent_meta" ] || return 1
@@ -471,10 +475,23 @@ if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
     fi
   elif [ "$PARENT_ROUTE" = local ]; then
     PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
-    if fm_pf_home_id_valid "secondmate:$SECOND_MATE_ID"; then
+    PRIMARY_HOME_CANDIDATE=${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-$PARENT_ROUTE_HOME}
+    PARENT_BINDINGS_MATCH=1
+    if [ -n "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" ]; then
+      LIVE_PARENT_HOME=$(public_followup_canonical_home \
+        "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME") || PARENT_BINDINGS_MATCH=0
+      DURABLE_PARENT_HOME=$(public_followup_canonical_home \
+        "$PARENT_ROUTE_HOME") || PARENT_BINDINGS_MATCH=0
+      if [ "$PARENT_BINDINGS_MATCH" = 1 ] \
+        && [ "$LIVE_PARENT_HOME" != "$DURABLE_PARENT_HOME" ]; then
+        PARENT_BINDINGS_MATCH=0
+      fi
+    fi
+    if [ "$PARENT_BINDINGS_MATCH" = 1 ] \
+      && fm_pf_home_id_valid "secondmate:$SECOND_MATE_ID"; then
       PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$SECOND_MATE_ID"
       if PUBLIC_FOLLOWUP_HOME=$(public_followup_resolve_primary_home \
-          "$PARENT_ROUTE_HOME" "$FM_HOME" "$SECOND_MATE_ID"); then
+          "$PRIMARY_HOME_CANDIDATE" "$FM_HOME" "$SECOND_MATE_ID"); then
         PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
         PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
         if [ "$FORCE" != "--force" ] \

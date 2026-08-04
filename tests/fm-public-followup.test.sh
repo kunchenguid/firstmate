@@ -618,6 +618,8 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+  assert_absent "$child/.fm-secondmate-parent" \
+    "the legacy env-only binding case must not gain a durable parent record"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -775,7 +777,7 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
 }
 
 test_secondmate_teardown_durable_record_with_no_commitment_succeeds() {
-  local parent child parent_resolved rc out
+  local parent parent_alias child parent_resolved rc out
   parent=$(make_home teardown-durable-clean-parent relay-off)
   child="$TMP_ROOT/teardown-durable-clean-child"
   FM_SECONDMATE_CHARTER='Durable-record clean-cleanup regression charter.' \
@@ -786,6 +788,8 @@ test_secondmate_teardown_durable_record_with_no_commitment_succeeds() {
   make_fake_curl "$child" >/dev/null
   fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
+  parent_alias="$TMP_ROOT/teardown-durable-clean-parent-alias"
+  ln -s "$parent" "$parent_alias"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
   printf 'manual\n' > "$child/config/backlog-backend"
@@ -797,12 +801,45 @@ test_secondmate_teardown_durable_record_with_no_commitment_succeeds() {
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
-    FM_CONFIG_OVERRIDE="$child/config" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
+    FM_CONFIG_OVERRIDE="$child/config" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent_alias" \
     "$TEARDOWN" work-clean 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "a resolved parent with no owed commitment must allow cleanup (rc=$rc): $out"
   assert_not_contains "$out" "cannot resolve the primary home" \
     "a real durable-record-backed parent must resolve cleanly"
   pass "a resolved parent through the durable local record allows cleanup with nothing owed"
+}
+
+test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() {
+  local durable_parent live_parent child parent_resolved
+  durable_parent=$(make_home teardown-durable-conflict-recorded relay-off)
+  live_parent=$(make_home teardown-durable-conflict-live relay-off)
+  child="$TMP_ROOT/teardown-durable-conflict-child"
+  FM_SECONDMATE_CHARTER='Durable-record conflict regression charter.' \
+    FM_HOME="$durable_parent" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \
+    || fail "real secondmate seeding failed"
+  child=$(cd "$child" && pwd -P)
+  parent_resolved=$(cd "$durable_parent" && pwd -P)
+  make_fake_curl "$child" >/dev/null
+  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  assert_local_secondmate_parent_record "$child" "$parent_resolved"
+  fm_write_meta "$durable_parent/state/mate.meta" "kind=secondmate" "home=$child"
+  fm_git_init_commit "$child/projects/worktree"
+  printf 'manual\n' > "$child/config/backlog-backend"
+  fm_write_meta "$child/state/work-conflict.meta" \
+    "window=firstmate:fm-work-conflict" "endpoint_task_id=work-conflict" \
+    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "kind=ship" "mode=local-only"
+
+  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+    FM_CONFIG_OVERRIDE="$child/config" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$live_parent" \
+    expect_failure "conflicting live and durable parent bindings must refuse cleanup" \
+    "$TEARDOWN" work-conflict
+  assert_contains "$EXPECT_OUT" "cannot resolve the primary home for marked secondmate mate" \
+    "a conflicting live parent must produce the explicit durable-binding refusal"
+  assert_present "$child/state/work-conflict.meta" \
+    "a conflicting live parent must preserve child work metadata"
+  pass "conflicting live and durable parent bindings fail closed"
 }
 
 test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
@@ -1235,6 +1272,7 @@ test_local_secondmate_seed_publishes_parent_before_identity
 test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost
 test_secondmate_teardown_durable_record_missing_parent_registration_still_refuses
 test_secondmate_teardown_durable_record_with_no_commitment_succeeds
+test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings
 test_secondmate_teardown_rejects_unsafe_durable_parent_records
 test_relay_disabled_unmarked_teardown_skips_public_path
 test_relay_disabled_parent_allows_marked_child_teardown
