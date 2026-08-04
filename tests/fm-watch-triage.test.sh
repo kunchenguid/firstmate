@@ -199,6 +199,16 @@ test_classifier_primitives() {
     && fail "a key token in note prose changed the decision key"
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
+  printf '%s' "$open" | grep -F $'default\tneeds-decision\tmalformed' >/dev/null \
+    || fail "a malformed key slug did not fold under the default key"
+  printf 'working: unrelated later event\n' >> "$state/keys.status"
+  open=$(status_open_decisions "$state/keys.status")
+  printf '%s' "$open" | grep -F $'default\tneeds-decision\tmalformed' >/dev/null \
+    || fail "a later unrelated event closed the malformed-key decision"
+  printf 'resolved: captain answered the malformed-key question\n' >> "$state/keys.status"
+  open=$(status_open_decisions "$state/keys.status")
+  printf '%s' "$open" | grep -F $'default\t' >/dev/null \
+    && fail "a bare resolved: line did not close the malformed-key decision"
   cat > "$state/activity.status" <<'EOF'
 working [key=phase7]: Phase 7 started
 working [key=phase6]: Phase 6 started
@@ -221,6 +231,13 @@ EOF
   printf 'working: legacy start\ndone: legacy completion\n' > "$state/legacy-activity.status"
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
+  printf 'working [key=bad key]: malformed phase\n' > "$state/malformed-activity.status"
+  activity=$(status_open_activities "$state/malformed-activity.status")
+  printf '%s' "$activity" | grep -F $'default\tworking\tmalformed phase' >/dev/null \
+    || fail "a malformed-key working phase did not fold under the default key"
+  printf 'done: bare terminal event\n' >> "$state/malformed-activity.status"
+  [ -z "$(status_open_activities "$state/malformed-activity.status")" ] \
+    || fail "a bare terminal event did not close the malformed-key phase"
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 

@@ -122,7 +122,26 @@ assert_not_contains "$out" "ready" "malformed key decision never demoted to read
 printf 'blocked [key=also bad]: stuck on creds\n' > "$home/state/badkey.status"
 out=$(run_sl "$home")
 assert_contains "$out" "badkey blocked" "malformed key blocked still renders blocked"
+printf 'needs-decision [key=bad key]: pick a thing\nworking: still going\n' > "$home/state/badkey.status"
+out=$(run_sl "$home")
+assert_contains "$out" "1 needs you" "malformed key decision survives a later unrelated event"
+assert_contains "$out" "badkey needs you: pick a thing" "malformed key decision not masked by later working event"
+printf 'resolved: captain picked a thing\n' >> "$home/state/badkey.status"
+out=$(run_sl "$home")
+assert_not_contains "$out" "needs you" "bare resolved closes the malformed-key decision"
 pass "malformed decision keys still surface as needs-attention"
+
+# --- leading-zero env values reset to defaults --------------------------------
+
+home=$(make_home zeropad)
+fm_write_meta "$home/state/zp.meta" "window=w" "kind=ship"
+printf 'working: a very long note that keeps going well past the display budget for one task\n' \
+  > "$home/state/zp.status"
+out=$(run_sl "$home" FM_STATUSLINE_NOTE_CHARS=08 FM_STATUSLINE_FOLD_MAX_BYTES=00); code=$?
+expect_code 0 "$code" "leading-zero env values exit 0"
+assert_contains "$out" "a very long note" "leading-zero note budget resets to the default"
+assert_contains "$out" "…" "note still hard-truncated under the default budget"
+pass "leading-zero env values reset to defaults instead of erroring"
 
 # --- hostile task id sanitized -----------------------------------------------
 
