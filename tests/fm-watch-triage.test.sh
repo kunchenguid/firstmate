@@ -574,6 +574,10 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
 # It must surface at once, never wait out the wedge timer, so these users (a
 # non-no-mistakes crew, or any crew with no running pipeline) are never left hanging.
+# The agent is deliberately LIVE here (FM_FAKE_TMUX_CURRENT_COMMAND=grok): pause
+# absorption keys off the declared status verb, never off liveness, so a live crew
+# that did NOT declare a pause must keep producing ordinary stale wakes. This is
+# the no-wedge-detection-regression half of the paused-absorption contract.
 
 test_nonterminal_stale_not_working_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
@@ -581,7 +585,7 @@ test_nonterminal_stale_not_working_surfaced() {
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-stopped"
   printf 'idle prompt, finished' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/stopped.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/stopped.meta"
   # Non-terminal status (the crew never wrote a captain-relevant verb), .seen-*
   # primed so the signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
@@ -595,6 +599,7 @@ test_nonterminal_stale_not_working_surfaced() {
 
   # Even with a high wedge threshold, a not-provably-working stale surfaces at once.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -605,7 +610,7 @@ test_nonterminal_stale_not_working_surfaced() {
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer should not be set when surfacing immediately"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the immediate stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
-  pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
+  pass "a LIVE, not-provably-working, non-paused stale is surfaced immediately (never left to wait out the timer)"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
@@ -799,6 +804,46 @@ test_exited_and_live_declared_pause_and_captain_held_are_bounded() {
   pass "exited and LIVE declared-pause plus exited captain-held panes all use the bounded pause cadence, never a per-hash stale flood"
 }
 
+# --- the other half of the split: a LIVE captain-held endpoint still surfaces ---
+# The liveness gate survives for exactly one case. A captain-held transfer means the
+# work moved to a held-decision route and the agent is expected to have EXITED, so an
+# endpoint still running its harness contradicts the declaration and must surface
+# rather than hide on the pause cadence. The load-bearing guard is pause_state_class's
+# fast path: with .paused-<key> present and a fresh .paused-rechecked-<key> the crew
+# state is never re-read, so only the captain-held-plus-live check keeps this from
+# being absorbed. Pre-seed both markers so the fast path is the branch under test.
+test_live_captain_held_still_surfaces() {
+  local dir state fakebin out drain_out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case live-captain-held); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle agent pane after a captain-held transfer\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'captain-held [key=route]: tracked by held-decision-route\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle agent pane after a captain-held transfer")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A pause cadence already running, rechecked just now: the fast path applies.
+  : > "$state/.paused-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: pane · no current-state source available' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a still-live captain-held endpoint was absorbed on the pause cadence instead of surfacing"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "live captain-held endpoint did not print the bare stale wake"
+  grep -F "awaiting external" "$out" >/dev/null && fail "live captain-held endpoint was hidden behind the paused recheck label"
+  grep -F "possible wedge" "$out" >/dev/null && fail "live captain-held endpoint was mislabeled a possible wedge"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the live captain-held surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "stale: $window" >/dev/null \
+    || fail "live captain-held bare stale wake was not queued"
+  pass "a still-live captain-held endpoint surfaces a bare stale wake, keeping the liveness gate for the transfer case only"
+}
+
 # --- the 2026-08-03 flood reproduction: a LIVE declared pause on a churny idle
 #     pane must be absorbed on EVERY distinct hash, never surfaced per hash ------
 # A live crew holding a declared paused: often sits on a pane that still ticks (a
@@ -807,7 +852,7 @@ test_exited_and_live_declared_pause_and_captain_held_are_bounded() {
 # bare "stale:" wake for each one, costing firstmate a supervision turn per tick
 # all day. Every one must now be absorbed on the bounded cadence.
 test_live_declared_pause_churny_pane_not_flooded() {
-  local dir state fakebin out capture_file statusf window key pid round content wakes
+  local dir state fakebin out capture_file statusf window key sig pid round content wakes
   dir=$(make_case live-pause-churny); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
@@ -1920,6 +1965,7 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_and_live_declared_pause_and_captain_held_are_bounded
+test_live_captain_held_still_surfaces
 test_live_declared_pause_churny_pane_not_flooded
 test_live_declared_pause_resurfaces_on_bounded_cadence
 test_secondmate_paused_resurfaces_in_normal_mode
