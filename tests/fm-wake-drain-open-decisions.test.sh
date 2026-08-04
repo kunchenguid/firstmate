@@ -125,9 +125,30 @@ test_buried_decision_surfaces_on_the_empty_queue_fast_path() {
   pass "a buried open decision surfaces even when the wake queue itself is empty"
 }
 
+test_status_symlink_is_not_followed() {
+  local dir state out
+  dir=$(make_case status-symlink)
+  state="$dir/state"
+  out="$dir/drain.out"
+  mkdir -p "$dir/outside"
+  printf 'needs-decision [key=local]: keep this visible\n' > "$state/local.status"
+  printf 'needs-decision [key=foreign]: do not expose this\n' > "$dir/outside/foreign.status"
+  ln -s ../outside/foreign.status "$state/linked.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with a symlinked status file"
+
+  grep -F 'local [key=local] needs-decision: keep this visible' "$out" >/dev/null \
+    || fail "the valid local decision did not surface alongside a rejected status symlink"
+  if grep -F 'do not expose this' "$out" >/dev/null; then
+    fail "the fleet scan followed a status symlink outside the state directory"
+  fi
+  pass "the fleet-wide decision scan does not follow status symlinks"
+}
+
 test_buried_decision_still_surfaces
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
 test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
+test_status_symlink_is_not_followed

@@ -201,6 +201,20 @@ $set
 EOF
   printf '%s' "$out"
 }
+_fm_status_nofollow_read() {  # <status-file>
+  perl -MFcntl=:DEFAULT -e '
+    my ($path) = @ARGV;
+    sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    my @stat = stat $file or exit 1;
+    exit 1 unless -f _;
+    while (1) {
+      my $read = read($file, my $buffer, 65536);
+      exit 1 unless defined $read;
+      last unless $read;
+      print $buffer or exit 1;
+    }
+  ' "$1" 2>/dev/null
+}
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of
@@ -209,7 +223,7 @@ EOF
 # instead of trusting the last status line.
 status_open_decisions() {  # <status-file>
   local f=$1 line verb key note resolve held open='' stripped
-  [ -f "$f" ] && [ -r "$f" ] || return 0
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
@@ -229,7 +243,7 @@ status_open_decisions() {  # <status-file>
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac
-  done < "$f"
+  done < <(_fm_status_nofollow_read "$f")
   printf '%s' "$open"
 }
 
