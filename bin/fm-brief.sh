@@ -31,7 +31,7 @@
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
+#   direct-PR    implement -> push + open a forge change request (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
@@ -265,6 +265,58 @@ fi
 
 REPO=${POS[1]}
 
+# A normal project is cloned under the active home's projects directory. The
+# firstmate repo itself has no such clone, so its own root is the only fallback
+# when the caller-supplied repo name matches that root's basename. Do not infer
+# a forge from a missing project directory.
+resolve_brief_project_dir() {
+  local project_dir="$FM_HOME/projects/$REPO"
+  if [ -d "$project_dir" ]; then
+    printf '%s\n' "$project_dir"
+  elif [ "$REPO" = "$(basename "$FM_ROOT")" ]; then
+    printf '%s\n' "$FM_ROOT"
+  fi
+}
+
+BRIEF_FORGE=unknown
+BRIEF_FORGE_RULE="Use the forge tool appropriate for this project's origin remote and chrome-devtools-axi for browser operations. Do not assume GitHub."
+BRIEF_FORGE_TOOL='the appropriate forge tool'
+BRIEF_CHANGE_REQUEST='change request'
+BRIEF_CHANGE_REQUEST_STATUS='change request'
+BRIEF_PROJECT_DIR=$(resolve_brief_project_dir)
+if [ -z "$BRIEF_PROJECT_DIR" ]; then
+  echo "warning: could not determine forge for $REPO: project directory is unavailable; generated brief uses forge-neutral instructions" >&2
+else
+  BRIEF_ORIGIN=$(git -C "$BRIEF_PROJECT_DIR" remote get-url origin 2>/dev/null || true)
+  if [ -z "$BRIEF_ORIGIN" ]; then
+    echo "warning: could not determine forge for $REPO: origin remote is unavailable; generated brief uses forge-neutral instructions" >&2
+  else
+    BRIEF_HOST=$(printf '%s\n' "$BRIEF_ORIGIN" | sed -n \
+      -e 's#^[a-z][a-z0-9+.-]*://[^@/]*@\([^/:]*\).*#\1#p' \
+      -e 's#^[a-z][a-z0-9+.-]*://\([^/:]*\).*#\1#p' \
+      -e 's#^[^@/:]*@\([^/:]*\):.*#\1#p')
+    case "$BRIEF_HOST" in
+      github.com)
+        BRIEF_FORGE=github
+        BRIEF_FORGE_RULE='Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.'
+        BRIEF_FORGE_TOOL='`gh-axi`'
+        BRIEF_CHANGE_REQUEST='PR'
+        BRIEF_CHANGE_REQUEST_STATUS='PR'
+        ;;
+      gitlab.com|gitlab.*)
+        BRIEF_FORGE=gitlab
+        BRIEF_FORGE_RULE='Use glab for GitLab operations and chrome-devtools-axi for browser operations.'
+        BRIEF_FORGE_TOOL='`glab`'
+        BRIEF_CHANGE_REQUEST='merge request'
+        BRIEF_CHANGE_REQUEST_STATUS='MR'
+        ;;
+      *)
+        echo "warning: could not determine forge for $REPO: unrecognized origin host ${BRIEF_HOST:-unknown}; generated brief uses forge-neutral instructions" >&2
+        ;;
+    esac
+  fi
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -315,7 +367,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. $BRIEF_FORGE_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -352,14 +404,14 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge the change request.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+This task ships **direct-PR**: you raise the $BRIEF_CHANGE_REQUEST yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+When it is implemented and committed, push your branch and open the $BRIEF_CHANGE_REQUEST with $BRIEF_FORGE_TOOL, then append \`done: $BRIEF_CHANGE_REQUEST_STATUS {url}\` to the status file and stop.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the $BRIEF_CHANGE_REQUEST; firstmate relays the outcome.
 EOF
     ;;
   local-only)
@@ -427,7 +479,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. $BRIEF_FORGE_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

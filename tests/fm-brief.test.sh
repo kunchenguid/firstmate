@@ -217,6 +217,56 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# Forge guidance comes from the origin host, never a project-name convention.
+# The firstmate repo itself is the one supported fallback because it has no
+# clone under FM_HOME/projects; an unavailable project remains forge-neutral.
+test_forge_specific_brief_guidance() {
+  local home self_root github_brief gitlab_dir gitlab_brief unknown_brief out
+  home="$TMP_ROOT/forge-guidance-home"
+  self_root="$TMP_ROOT/firstmate-self"
+  mkdir -p "$home/data" "$home/projects/kc-admin-web" "$self_root"
+
+  git -C "$self_root" init -q
+  git -C "$self_root" remote add origin https://github.com/example/firstmate-self.git
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$self_root" "$ROOT/bin/fm-brief.sh" forge-github firstmate-self --mode direct-PR \
+    >"$TMP_ROOT/forge-github.out" 2>"$TMP_ROOT/forge-github.err" \
+    || fail "GitHub firstmate-root brief should scaffold"
+  github_brief="$home/data/forge-github/brief.md"
+  assert_grep "Use gh-axi for GitHub operations" "$github_brief" \
+    "GitHub origin did not select gh-axi guidance"
+  assert_grep "open the PR with \`gh-axi\`" "$github_brief" \
+    "GitHub direct-PR brief did not retain gh-axi PR guidance"
+  assert_grep "done: PR {url}" "$github_brief" \
+    "GitHub direct-PR brief did not retain PR status output"
+  [ ! -s "$TMP_ROOT/forge-github.err" ] || fail "GitHub origin emitted an unexpected forge warning"
+
+  gitlab_dir="$home/projects/kc-admin-web"
+  git -C "$gitlab_dir" init -q
+  git -C "$gitlab_dir" remote add origin git@gitlab.bodoc.co.kr:aijinetcorp/front-end/kc-admin-web.git
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-gitlab kc-admin-web --mode direct-PR \
+    >"$TMP_ROOT/forge-gitlab.out" 2>"$TMP_ROOT/forge-gitlab.err" \
+    || fail "GitLab project brief should scaffold"
+  gitlab_brief="$home/data/forge-gitlab/brief.md"
+  assert_grep "Use glab for GitLab operations" "$gitlab_brief" \
+    "GitLab origin did not select glab guidance"
+  assert_grep "open the merge request with \`glab\`" "$gitlab_brief" \
+    "GitLab direct-PR brief did not require glab for the merge request"
+  assert_grep "done: MR {url}" "$gitlab_brief" \
+    "GitLab direct-PR brief did not report an MR artifact"
+  [ ! -s "$TMP_ROOT/forge-gitlab.err" ] || fail "GitLab origin emitted an unexpected forge warning"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-unknown missing-project --mode direct-PR 2>&1) \
+    || fail "unknown-forge brief should still scaffold"
+  unknown_brief="$home/data/forge-unknown/brief.md"
+  assert_grep "Use the forge tool appropriate for this project's origin remote" "$unknown_brief" \
+    "unknown forge brief did not stay forge-neutral"
+  assert_no_grep "Use gh-axi for GitHub operations" "$unknown_brief" \
+    "unknown forge brief silently fell back to GitHub"
+  assert_contains "$out" "warning: could not determine forge for missing-project" \
+    "unknown forge brief did not emit a visible warning"
+  pass "fm-brief.sh: forge guidance follows origin host and warns when unavailable"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -297,8 +347,8 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-direct-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
-    "direct-PR brief lost configured merge authority"
+  assert_grep "The configured merge authority decides whether to merge the change request; firstmate relays the outcome." "$brief" \
+    "forge-neutral direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
   id="brief-local-authority-a4"
@@ -712,6 +762,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_forge_specific_brief_guidance
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
