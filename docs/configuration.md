@@ -594,6 +594,9 @@ When it is unset or blank, `FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS` remains a co
 An invalid nonblank wait falls back to 1 second rather than interrupting teardown.
 Teardown never removes a lock during the retry window, and after that window it attempts stale-lock cleanup only for a still-present lock that passes the configured age and live-holder checks.
 
+Once a task worktree has been returned or removed, `fm-teardown.sh` also garbage-collects the Xcode DerivedData folders that belonged to that worktree, so orphaned DerivedData stops accumulating; the cleanup is best-effort and a failure warns rather than failing teardown of landed work.
+`bin/fm-derived-data-gc.sh` owns the matching and safety rules and also offers a manual `--orphans` sweep; `FM_DERIVED_DATA_ROOT` overrides the DerivedData root it scans, and a missing root or a host without `plutil` deletes nothing.
+
 `fm-fleet-sync.sh` applies the same shape to an orphaned `.git/packed-refs.lock`: it retries only Git's `Unable to create '...packed-refs.lock': File exists` fetch failure up to `FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES` times (nonnegative integer; unset, blank, or invalid uses the default of 3), waiting `FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS` seconds (nonnegative whole or fractional; invalid falls back to 1 second) before each.
 Only after those retries exhaust does it remove the lock, and only when it is provably stale - still present, mtime age at least `FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS` (default 30), and no `lsof` holder of the lock file or of the clone worktree itself (a live `git` keeps that as its cwd even in the window after it closes the lock and before it exits).
 A live lock, a missing `lsof`, any failed check, or any other fetch failure keeps today's behavior.
