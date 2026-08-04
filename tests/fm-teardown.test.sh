@@ -60,6 +60,8 @@ PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
+REAL_PS_FOR_TEST=$(command -v ps)
+export REAL_PS_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -119,8 +121,11 @@ case "${1:-}" in
     shift
     case "${1:-}" in
       status)
+        shift
+        run_id=""
+        if [ "${1:-}" = --run ]; then run_id=${2:-}; fi
         if [ -n "${FM_FAKE_NM_ABORT_LOG:-}" ] \
-           && [ -s "$FM_FAKE_NM_ABORT_LOG" ] \
+           && grep -Fxq "abort --run $run_id" "$FM_FAKE_NM_ABORT_LOG" 2>/dev/null \
            && [ "${FM_FAKE_NM_ABORT_NOOP:-0}" != 1 ]; then
           printf '%s\n' "${FM_FAKE_AXI_STATUS_AFTER_ABORT:-}"
         else
@@ -128,7 +133,8 @@ case "${1:-}" in
         fi
         ;;
       abort)
-        [ -z "${FM_FAKE_NM_ABORT_LOG:-}" ] || printf 'abort\n' >> "$FM_FAKE_NM_ABORT_LOG"
+        shift
+        [ -z "${FM_FAKE_NM_ABORT_LOG:-}" ] || printf 'abort %s\n' "$*" >> "$FM_FAKE_NM_ABORT_LOG"
         exit 0 ;;
     esac
     ;;
@@ -1864,10 +1870,10 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
 # A parked-at-a-gate `axi status` TOON payload for <branch>/<head>, matching
 # the shape no-mistakes actually emits (see tests/fm-crew-state.test.sh's
 # run_parked fixture, the same shape bin/fm-crew-state.sh's own tests pin).
-parked_axi_status_toon() {  # <branch> <head>
+parked_axi_status_toon() {  # <branch> <head> [run-id]
   cat <<EOF
 run:
-  id: "01RUN"
+  id: "${3:-01RUN}"
   branch: $1
   status: awaiting_approval
   awaiting_agent: parked 2m10s
@@ -1904,9 +1910,30 @@ test_parked_own_run_is_aborted_before_teardown() {
   expect_code 0 "$rc" "parked-run-abort: teardown should still succeed"
   assert_present "$case_dir/nm-abort.log" \
     "parked-run-abort: no-mistakes axi abort was never invoked for the task's own parked run"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-run-abort: no-mistakes axi abort did not target the verified run id"
   assert_grep "parked at a gate; aborting" "$case_dir/stderr" \
     "parked-run-abort: teardown did not report aborting the parked run before removing the worker"
   pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
+}
+
+test_different_parked_run_after_abort_does_not_refuse() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-replaced)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head" 01RUN)" \
+  FM_FAKE_AXI_STATUS_AFTER_ABORT="$(parked_axi_status_toon fm/task-x1 "$head" 02RUN)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-replaced: a different parked run should not imply abort failure"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-run-replaced: teardown did not abort only the verified run"
+  pass "a different parked run cannot be mistaken for the targeted abort failing"
 }
 
 test_parked_own_run_refuses_when_abort_is_unconfirmed() {
@@ -2084,6 +2111,50 @@ EOF
   pass "an erroring lsof scan refuses teardown and preserves the task"
 }
 
+test_reused_pid_identity_is_not_force_killed() {
+  local case_dir rc pid
+  case_dir=$(make_case reused-pid-identity)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  perl -e '$SIG{TERM} = "IGNORE"; sleep 300' &
+  pid=$!
+  disown
+  sleep 0.2
+  cat > "$case_dir/fakebin/lsof" <<EOF
+#!/usr/bin/env bash
+printf 'p%s\nfcwd\nn%s\n' '$pid' '$case_dir/wt'
+EOF
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_REUSED_PID:-}" ] \
+   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ] \
+   && [ "${5:-}" = -o ] && [ "${6:-}" = command= ]; then
+  count=0
+  [ ! -f "$FM_FAKE_PS_COUNT" ] || count=$(cat "$FM_FAKE_PS_COUNT")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_PS_COUNT"
+  if [ "$count" -le 2 ]; then printf 'Tue Aug  4 10:00:00 2026 perl sleeper\n'
+  else printf 'Tue Aug  4 10:00:01 2026 perl replacement\n'; fi
+  exit 0
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
+  FM_FAKE_REUSED_PID="$pid" FM_FAKE_PS_COUNT="$case_dir/ps-count" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "reused-pid-identity: teardown should skip the replacement process"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "reused-pid-identity: teardown force-killed a process whose start time changed"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "a reused pid with a different start time is never force-killed"
+}
+
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   local case_dir rc head pid abort_log
   case_dir=$(make_case abort-then-reap-then-remove-order)
@@ -2167,9 +2238,11 @@ test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_refuses_when_abort_is_unconfirmed
+test_different_parked_run_after_abort_does_not_refuse
 test_another_branchs_parked_run_is_never_touched
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
+test_reused_pid_identity_is_not_force_killed
 test_run_abort_precedes_process_reap_precedes_worktree_removal
