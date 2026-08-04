@@ -53,7 +53,8 @@
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
 #          gh-axi is also MISSING when its installed version is older than
-#          0.1.29.
+#          0.1.29, the first release whose bare --squash shorthand works for
+#          firstmate's non-interactive PR merge path.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.2.2+
 #          with update --archive-body and mv [<id>...]); an installed but
