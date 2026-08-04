@@ -937,6 +937,76 @@ run_review "$H_ANSWERED" show "$ANSWERED_ID" | jq -e '
   || fail "a reopen re-created an already-answered claim as a duplicate"
 [ "$(grep -c 'POST .*replies' "$GITHUB_LOG" || true)" -eq 1 ] \
   || fail "a reopen produced a second response for an already-answered claim"
+
+# A close and reopen that both happen between two polls never reaches the covered
+# cursor, so the exact-head review must be restored without relying on the pull
+# request having left the inventory first. The independent oracle is the intent's
+# own rule: an observed open PR at a relevant exact head owes one queued private
+# review. Gating reactivation on a changed covered head makes this fail while the
+# feedback item beside it is still restored.
+H_REOPEN_INPLACE=$(make_inline_home reopen-inplace-home IC_reopen_inplace 'A claim beside an unobserved close and reopen.')
+drain_pending_event "$H_REOPEN_INPLACE" "$TMP/reopen-inplace-home.json" 1350
+REOPEN_INPLACE_REVIEW=$(item_id_for "$H_REOPEN_INPLACE" initial-review)
+REOPEN_INPLACE_FEEDBACK=$(item_id_for "$H_REOPEN_INPLACE" feedback)
+jq -e --arg head "$sha_a" '.pulls["https://github.com/acme/widgets/pull/1"].covered_head==$head' \
+  "$H_REOPEN_INPLACE/state/pr-review/snapshot.json" >/dev/null \
+  || fail "the in-place reopen fixture did not establish a covered exact head"
+claim_item "$H_REOPEN_INPLACE" "$REOPEN_INPLACE_REVIEW" reopen-inplace-owner >/dev/null
+close_dataset
+set +e
+fake_review "$H_REOPEN_INPLACE" complete-review "$REOPEN_INPLACE_REVIEW" --head "$sha_a" --generation 1 \
+  --outcome clean --evidence-file "$TMP/evidence.md" >/dev/null 2>&1
+reopen_inplace_close_rc=$?
+set -e
+[ "$reopen_inplace_close_rc" -eq 7 ] || fail "the in-place reopen fixture could not close at a completion boundary"
+jq -e --arg head "$sha_a" '.pulls["https://github.com/acme/widgets/pull/1"].covered_head==$head' \
+  "$H_REOPEN_INPLACE/state/pr-review/snapshot.json" >/dev/null \
+  || fail "closing at a completion boundary unexpectedly moved the covered cursor"
+reopen_inplace_event=$(poll_fixture "$H_REOPEN_INPLACE" "$TMP/reopen-inplace-home.json" 1351) \
+  || fail "a pull request closed and reopened between polls regained no exact-head review"
+assert_contains "$reopen_inplace_event" '"changed":1' "the unobserved close and reopen restored more or less than the closed review"
+run_review "$H_REOPEN_INPLACE" show "$REOPEN_INPLACE_REVIEW" | jq -e --arg head "$sha_a" '
+  .state=="pending" and .outcome==null and .head==$head and .generation==2
+  and (has("closure")|not) and .reopened_from.closure.live_state=="closed"' >/dev/null \
+  || fail "the reopened exact-head review did not resume as a new durable generation"
+run_review "$H_REOPEN_INPLACE" show "$REOPEN_INPLACE_FEEDBACK" | jq -e '
+  .state=="pending" and .generation==1 and (has("reopened_from")|not)' >/dev/null \
+  || fail "the untouched claim beside the reopened review was disturbed"
+[ "$(item_json "$H_REOPEN_INPLACE" initial-review | jq 'length')" -eq 1 ] \
+  || fail "the in-place reopen duplicated the exact-head review"
+run_review "$H_REOPEN_INPLACE" acknowledge-event "$(printf '%s' "$reopen_inplace_event" | jq -r '.event_id')" >/dev/null
+poll_fixture "$H_REOPEN_INPLACE" "$TMP/reopen-inplace-home.json" 1352 >/dev/null 2>&1 || true
+run_review "$H_REOPEN_INPLACE" show "$REOPEN_INPLACE_REVIEW" | jq -e '.generation==2 and .state=="pending"' >/dev/null \
+  || fail "an unchanged in-place reopen reactivated twice"
+
+# Reactivation must never break the one-nonterminal-review-per-pull invariant.
+# A head that moves away and is later force-pushed back onto a previously closed
+# head has both a closed item and a live review owner at that exact head.
+H_REVERT="$TMP/revert-head-home"; new_home "$H_REVERT"
+REVERT_A="$TMP/revert-head-a.json"; write_observation "$REVERT_A" 1360 "[$(pull_json 1 captain "$sha_a" '["authored"]')]"
+REVERT_B="$TMP/revert-head-b.json"; write_observation "$REVERT_B" 1361 "[$(pull_json 1 captain "$sha_b" '["authored"]')]"
+drain_pending_event "$H_REVERT" "$REVERT_A" 1360
+REVERT_CLOSED_ID=$(item_id_for "$H_REVERT" initial-review)
+claim_item "$H_REVERT" "$REVERT_CLOSED_ID" revert-head-owner >/dev/null
+close_dataset
+set +e
+fake_review "$H_REVERT" complete-review "$REVERT_CLOSED_ID" --head "$sha_a" --generation 1 \
+  --outcome clean --evidence-file "$TMP/evidence.md" >/dev/null 2>&1
+revert_close_rc=$?
+set -e
+[ "$revert_close_rc" -eq 7 ] || fail "the force-push fixture could not close at a completion boundary"
+drain_pending_event "$H_REVERT" "$REVERT_B" 1361
+[ "$(item_json "$H_REVERT" initial-review | jq 'length')" -eq 2 ] \
+  || fail "the moved head did not create a second review owner beside the closed one"
+revert_event=$(poll_fixture "$H_REVERT" "$REVERT_A" 1362) \
+  || fail "a head force-pushed back onto a previously closed head failed the whole poll"
+printf '%s' "$revert_event" | jq -e '.category=="inventory"' >/dev/null \
+  || fail "reactivating behind a live review owner broke the private-state invariant: $revert_event"
+[ "$(run_review "$H_REVERT" list --json | jq '[.[]|select(.type=="initial-review" and .state!="terminal")]|length')" -eq 1 ] \
+  || fail "a force-pushed revert left more than one nonterminal review owning the pull request"
+run_review "$H_REVERT" show "$REVERT_CLOSED_ID" | jq -e '
+  .state=="terminal" and .outcome=="pull-closed-without-response"' >/dev/null \
+  || fail "a superseded closed review was reactivated behind the live review owner"
 pass "reopening restores coverage for closed items only and leaves every other terminal disposition intact"
 
 # Queue-before-snapshot crash replay creates one item, not zero or two.

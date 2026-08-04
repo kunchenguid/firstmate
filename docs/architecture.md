@@ -116,6 +116,7 @@ Original-thread responses to external feedback remain separate and permitted aft
 The only terminal feedback outcomes are fixed-and-replied, dismissed-and-replied, duplicate-and-replied, superseded-and-replied, captain-decision-pending, and pull-closed-without-response.
 A fresh live read that finds the pull request closed or merged ends the item durably at whichever completion boundary reached it, discards the pending public response, and releases the one-at-a-time lane, so a merged pull request can never strand queued work or wedge the single lane.
 Observing that pull request open again is live proof that it reopened, so exactly the items ended by that closure resume as a new durable generation at the observed head while every other terminal disposition and the normal deduplication rules stay untouched.
+Reactivation does not depend on the covered cursor having moved, because a close and a reopen can both land between two polls, and it never runs while another nonterminal review already owns that pull request.
 The lane record is a pointer rather than an owner: a lane naming a missing, terminal, or parked item is stale and is released on the next read, so a crash between a terminal write and its release cannot hold the lane or silence the poll's pending-work signal.
 An explicit per-PR opt-out preserves the last covered head and feedback cursor, so restoring coverage compares every intervening identity instead of accepting a fresh baseline.
 

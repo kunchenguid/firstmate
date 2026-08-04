@@ -412,8 +412,12 @@ function findOwningTask(url) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+function reviewItemId(url, head) {
+  return itemId("review", `${url}\u0000${head}`);
+}
+
 function newReviewItem(pull, now) {
-  const id = itemId("review", `${pull.url}\u0000${pull.head}`);
+  const id = reviewItemId(pull.url, pull.head);
   return {
     schema: ITEM_SCHEMA,
     id,
@@ -492,6 +496,12 @@ function closedByPullClosure(item) {
   return Boolean(item) && item.outcome === PULL_CLOSED_OUTCOME && item.state !== "opted-out";
 }
 
+function owningReviews(currentItems, url) {
+  return [...currentItems.values()].filter((item) =>
+    item.type === "initial-review" && item.url === url && !isTerminal(item) && item.state !== "opted-out",
+  );
+}
+
 function reconcileObservation(observation) {
   ensureState();
   const previous = readSnapshot();
@@ -507,10 +517,13 @@ function reconcileObservation(observation) {
     let coveredHead = prior.covered_head ?? null;
     let coveredFeedback = Array.isArray(prior.covered_feedback) ? prior.covered_feedback : [];
     if (!optedOut) {
+      const closedReview = currentItems.get(reviewItemId(pull.url, pull.head));
+      if (closedByPullClosure(closedReview) && owningReviews(currentItems, pull.url).length === 0) {
+        reopenClosedItem(closedReview, pull.head, observation.observed_at);
+        changed += 1;
+      }
       if (coveredHead !== pull.head) {
-        const inProgress = [...currentItems.values()].filter((item) =>
-          item.type === "initial-review" && item.url === pull.url && !isTerminal(item) && item.state !== "opted-out",
-        );
+        const inProgress = owningReviews(currentItems, pull.url);
         if (inProgress.length > 1) throw new PollError("private-state", `More than one nonterminal review owns ${pull.url}.`, true);
         if (inProgress.length === 1) {
           const item = inProgress[0];
@@ -532,11 +545,7 @@ function reconcileObservation(observation) {
           }
         } else {
           const item = newReviewItem(pull, observation.observed_at);
-          const closed = currentItems.get(item.id);
-          if (closedByPullClosure(closed)) {
-            reopenClosedItem(closed, pull.head, observation.observed_at);
-            changed += 1;
-          } else if (!existsSync(itemPath(item.id))) {
+          if (!existsSync(itemPath(item.id))) {
             writeItem(item);
             currentItems.set(item.id, item);
             changed += 1;
