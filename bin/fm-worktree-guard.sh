@@ -14,9 +14,16 @@
 #
 # WHAT IT CATCHES
 # `treehouse status --json` reports a slot "available" when it has no lease, no
-# live process, and a clean working tree. It does NOT consider whether HEAD carries
-# commits unreachable from the default branch, so a slot holding a
+# live process, and a clean working tree. It does NOT consider whether HEAD still
+# holds content the default branch never received, so a slot holding a
 # finished-but-unlanded branch is allocatable and the next spawn detaches it.
+#
+# WHAT "UNLANDED" MEASURES AGAINST
+# bin/fm-landed-lib.sh owns that question and the reasons commit reachability
+# and a single remote-tracking ref are both the wrong instrument. This guard's
+# own policy on top of it: a slot is empty when ANY ref carrying the default
+# branch's name already contains HEAD's content, because containment in any
+# trunk proves the content outlives the slot.
 # Uncommitted content is separately protected by treehouse itself: it reports
 # such a slot "dirty", skips it, and refuses outright rather than reclaiming one
 # when every slot is dirty. The exposure this guard closes is therefore
@@ -56,6 +63,8 @@ FM_GUARD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$FM_GUARD_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$FM_GUARD_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-landed-lib.sh
+. "$FM_GUARD_DIR/fm-landed-lib.sh"
 
 usage() {
   awk '/^# Usage:/ { on = 1 } on { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' \
@@ -71,28 +80,12 @@ real_or_raw() {  # <path>
   fi
 }
 
-# The default-branch ref to measure reachability against, preferring the remote
-# tracking ref so a stale local branch cannot make unlanded work look landed.
-# Non-zero when no default ref resolves, which the caller treats as evidence
-# (unverifiable, so not demonstrably empty) rather than guessing.
-default_ref() {  # <worktree>
-  local wt=$1 ref branch
-  ref=$(git --no-optional-locks -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ] && git --no-optional-locks -C "$wt" rev-parse --verify --quiet "refs/remotes/$ref" >/dev/null 2>&1; then
-    printf 'refs/remotes/%s\n' "$ref"
-    return 0
-  fi
-  for branch in main master; do
-    if git --no-optional-locks -C "$wt" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
-      printf 'refs/remotes/origin/%s\n' "$branch"
-      return 0
-    fi
-    if git --no-optional-locks -C "$wt" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
-      printf 'refs/heads/%s\n' "$branch"
-      return 0
-    fi
-  done
-  return 1
+# Commits in <worktree> not reachable from <ref>, or "unknown". Used only to
+# WORD a refusal that fm_landed_tree_contains has already decided; it is never
+# the test itself, because a squash or a rebase leaves this count non-zero long
+# after the content landed.
+ahead_count() {  # <worktree> <ref>
+  git --no-optional-locks -C "$1" rev-list --count "$2..HEAD" 2>/dev/null || echo unknown
 }
 
 # Live-work evidence in <worktree>, printed as one short phrase, or non-zero
@@ -103,7 +96,8 @@ default_ref() {  # <worktree>
 # evidence. A false refusal is a loud, actionable stop; a false pass destroys
 # work.
 worktree_evidence() {  # <worktree>
-  local wt=$1 top dirty branch ref ahead
+  local wt=$1 top dirty branch name ref ahead refs contains
+  local best_ref='' best_ahead='' first_ref='' proven=1
   # A slot treehouse lists but whose directory is gone has nothing to lose:
   # treehouse recreates it on acquire.
   [ -e "$wt" ] || return 1
@@ -117,29 +111,52 @@ worktree_evidence() {  # <worktree>
     printf '%s uncommitted or untracked entries\n' "$dirty"
     return 0
   fi
-  if ! ref=$(default_ref "$wt"); then
+  if ! name=$(fm_landed_default_branch_name "$wt") || ! refs=$(fm_landed_candidate_refs "$wt" "$name"); then
     printf 'no resolvable default branch, so unlanded work cannot be ruled out\n'
     return 0
   fi
-  branch=$(git --no-optional-locks -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  ahead=$(git --no-optional-locks -C "$wt" rev-list --count "$ref..HEAD" 2>/dev/null || echo unknown)
-  case "$ahead" in
-    ''|*[!0-9]*)
-      printf 'HEAD cannot be compared against %s\n' "${ref#refs/}"
-      return 0
-      ;;
-  esac
-  if [ "$ahead" != 0 ]; then
-    local noun=commits
-    [ "$ahead" = 1 ] && noun=commit
-    if [ -n "$branch" ]; then
-      printf 'branch %s with %s %s not on %s\n' "$branch" "$ahead" "$noun" "${ref#refs/}"
-    else
-      printf 'detached HEAD with %s %s not on %s\n' "$ahead" "$noun" "${ref#refs/}"
+  # The slot is demonstrably empty when ANY ref carrying the default-branch name
+  # already contains HEAD's content. Testing every candidate rather than one
+  # chosen ref is what makes this correct for a fleet whose remote-tracking ref
+  # is not the landing target: containment in any trunk proves the content
+  # survives this slot, so releasing it loses nothing. It cannot pass unlanded
+  # work off a stale ref either - if HEAD carries content no candidate has, no
+  # candidate reports it contained.
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    [ -n "$first_ref" ] || first_ref=$ref
+    fm_landed_tree_contains "$wt" "$ref"
+    contains=$?
+    [ "$contains" -eq 0 ] && return 1
+    # Only a proven "not contained" may word a refusal about unlanded commits;
+    # an inconclusive read still refuses, but says so as unverifiable.
+    [ "$contains" -eq 1 ] || continue
+    ahead=$(ahead_count "$wt" "$ref")
+    # A non-numeric count cannot word a refusal, and a zero count contradicts
+    # "not contained"; both fall through to the unverifiable wording.
+    case "$ahead" in ''|*[!0-9]*) continue ;; esac
+    [ "$ahead" -gt 0 ] || continue
+    if [ "$proven" = 1 ] || [ "$ahead" -lt "$best_ahead" ]; then
+      best_ref=$ref
+      best_ahead=$ahead
+      proven=0
     fi
+  done <<EOF
+$refs
+EOF
+  if [ "$proven" != 0 ]; then
+    printf 'HEAD cannot be compared against %s\n' "${first_ref#refs/}"
     return 0
   fi
-  return 1
+  branch=$(git --no-optional-locks -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  local noun=commits
+  [ "$best_ahead" = 1 ] && noun=commit
+  if [ -n "$branch" ]; then
+    printf 'branch %s with %s %s not on %s\n' "$branch" "$best_ahead" "$noun" "${best_ref#refs/}"
+  else
+    printf 'detached HEAD with %s %s not on %s\n' "$best_ahead" "$noun" "${best_ref#refs/}"
+  fi
+  return 0
 }
 
 # The firstmate task recording <worktree>, as "<id> <pid> <identity>" with the

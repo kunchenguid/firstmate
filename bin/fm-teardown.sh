@@ -177,6 +177,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-admission-lib.sh
 . "$SCRIPT_DIR/fm-admission-lib.sh"
+# shellcheck source=bin/fm-landed-lib.sh
+. "$SCRIPT_DIR/fm-landed-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -907,15 +909,14 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# Is the branch's content already present in the up-to-date default branch?
+# Teardown owns the POLICY here - refresh the remote first, and measure against
+# that remote whenever an origin exists - while bin/fm-landed-lib.sh owns the
+# containment instrument itself and why content beats commit reachability.
+# Returns non-zero when inconclusive (no default ref, unreadable refs, or a
+# merge conflict), so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
+  local name ref
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -925,11 +926,7 @@ content_in_default() {
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  fm_landed_tree_contains "$WT" "$ref"
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
