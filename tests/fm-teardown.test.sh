@@ -118,7 +118,15 @@ case "${1:-}" in
   axi)
     shift
     case "${1:-}" in
-      status) printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;;
+      status)
+        if [ -n "${FM_FAKE_NM_ABORT_LOG:-}" ] \
+           && [ -s "$FM_FAKE_NM_ABORT_LOG" ] \
+           && [ "${FM_FAKE_NM_ABORT_NOOP:-0}" != 1 ]; then
+          printf '%s\n' "${FM_FAKE_AXI_STATUS_AFTER_ABORT:-}"
+        else
+          printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
+        fi
+        ;;
       abort)
         [ -z "${FM_FAKE_NM_ABORT_LOG:-}" ] || printf 'abort\n' >> "$FM_FAKE_NM_ABORT_LOG"
         exit 0 ;;
@@ -433,11 +441,15 @@ git_index_lock_path() {
 }
 
 # fakebin/lsof stub: no process ever holds anything open (lsof's not-found exit
-# code), so a lock's staleness is decided by age alone.
+# code), so a lock's staleness is decided by age alone. The cwd scan is a
+# separate successful empty query.
 add_lsof_no_holder() {
   local case_dir=$1
   cat > "$case_dir/fakebin/lsof" <<'SH'
 #!/usr/bin/env bash
+case " $* " in
+  *" -d cwd "*) exit 0 ;;
+esac
 exit 1
 SH
   chmod +x "$case_dir/fakebin/lsof"
@@ -516,7 +528,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
-  PATH="$case_dir/fakebin:$PATH" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
 
@@ -993,10 +1005,8 @@ test_lsof_error_never_clears_index_lock() {
   set -e
 
   expect_code 1 "$rc" "lsof-error-index-lock: teardown should refuse when lsof errors"
-  assert_grep "lsof check failed" "$case_dir/stderr" \
+  assert_grep "REFUSED: cannot determine leaked processes" "$case_dir/stderr" \
     "lsof-error-index-lock: teardown did not report the lsof failure"
-  assert_grep "not provably stale" "$case_dir/stderr" \
-    "lsof-error-index-lock: teardown did not explain the refusal"
   assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
     "lsof-error-index-lock: teardown removed a lock after lsof failed"
   [ -e "$lock" ] || fail "lsof-error-index-lock: lock file was removed after lsof failed"
@@ -1899,6 +1909,42 @@ test_parked_own_run_is_aborted_before_teardown() {
   pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
 }
 
+test_parked_own_run_refuses_when_abort_is_unconfirmed() {
+  local case_dir rc head pid
+  case_dir=$(make_case parked-run-abort-unconfirmed)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_FAKE_NM_ABORT_NOOP=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "parked-run-abort-unconfirmed: teardown should refuse"
+  assert_grep "REFUSED: no-mistakes run for task-x1 is still parked after axi abort" "$case_dir/stderr" \
+    "parked-run-abort-unconfirmed: teardown did not explain the parked-run refusal"
+  assert_present "$case_dir/wt" \
+    "parked-run-abort-unconfirmed: teardown removed the worktree after refusing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "parked-run-abort-unconfirmed: teardown removed task metadata after refusing"
+  assert_absent "$case_dir/treehouse.log" \
+    "parked-run-abort-unconfirmed: teardown returned the worktree after refusing"
+  kill -0 "$pid" 2>/dev/null || fail "parked-run-abort-unconfirmed: process reap ran before refusal"
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "teardown refuses before reap or removal when a task-owned run remains parked"
+}
+
 test_another_branchs_parked_run_is_never_touched() {
   local case_dir rc
   case_dir=$(make_case parked-run-not-ours)
@@ -1975,6 +2021,67 @@ test_leaked_tasktmp_process_is_reaped() {
   assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
     "leaked-tasktmp-reap: teardown did not report reaping the leaked tasktmp process"
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
+}
+
+test_lsof_absent_reaps_tmux_process_group() {
+  local case_dir rc pid
+  case_dir=$(make_case lsof-absent-process-group-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  perl -e 'setpgrp(0, 0); chdir shift or die; exec "sleep", "300"' "$case_dir/wt" &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "lsof-absent-process-group-reap: setup sleeper did not start"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
+  printf '%s\n' '$pid'
+fi
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH=/usr/bin:/bin \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "lsof-absent-process-group-reap: tmux process group survived teardown"
+  fi
+  assert_grep "reaping leaked worktree process group" "$case_dir/stderr" \
+    "lsof-absent-process-group-reap: teardown did not use the process-group fallback"
+  pass "missing lsof falls back to reaping the tmux pane process group"
+}
+
+test_lsof_error_refuses_before_removal() {
+  local case_dir rc
+  case_dir=$(make_case lsof-error-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "lsof-error-refusal: teardown should refuse"
+  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (lsof failed)" "$case_dir/stderr" \
+    "lsof-error-refusal: teardown did not explain the lsof refusal"
+  assert_present "$case_dir/wt" "lsof-error-refusal: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "lsof-error-refusal: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" "lsof-error-refusal: teardown returned the worktree"
+  pass "an erroring lsof scan refuses teardown and preserves the task"
 }
 
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
@@ -2059,7 +2166,10 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
+test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_another_branchs_parked_run_is_never_touched
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_lsof_absent_reaps_tmux_process_group
+test_lsof_error_refuses_before_removal
 test_run_abort_precedes_process_reap_precedes_worktree_removal

@@ -378,15 +378,7 @@ nm_run_head_matches_worktree() {
 # sha for this branch row matches the worktree head under the same rules as
 # nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
 nm_coarse_head_matches_worktree() {  # <short-sha>
-  local run_head=$1 local_full run_full
-  [ -n "$run_head" ] || return 1
-  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
-  [ "$run_full" = "$local_full" ] && return 0
-  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
-    return 0
-  fi
-  return 1
+  fm_nm_head_matches_worktree "$WT" "$1"
 }
 
 HAVE_RUN=0

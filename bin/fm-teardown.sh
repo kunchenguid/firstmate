@@ -1063,11 +1063,10 @@ validate_worktree_teardown_safety() {
 # match so the caller knows it is safe to abort - never a guess.
 NM_TEARDOWN_TIMEOUT=${FM_TEARDOWN_NM_TIMEOUT:-10}
 case "$NM_TEARDOWN_TIMEOUT" in ''|*[!0-9]*) NM_TEARDOWN_TIMEOUT=10 ;; esac
-task_run_is_own_parked_run() {  # <worktree>
-  local wt=$1 branch out run_branch run_head status outcome awaiting has_gate
+task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
+  local wt=$1 out=$2 branch run_branch run_head status outcome awaiting has_gate
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   [ -n "$branch" ] || return 1
-  out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
   [ -n "$out" ] || return 1
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
@@ -1084,47 +1083,56 @@ task_run_is_own_parked_run() {  # <worktree>
   [ -n "$awaiting" ] || [ "$has_gate" = 1 ]
 }
 
+task_run_is_own_parked_run() {  # <worktree>
+  local wt=$1 out
+  out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
+  task_status_is_own_parked_run "$wt" "$out"
+}
+
 # Abort THIS task's own parked no-mistakes run before the worker that would
 # have answered its gate is removed, so no run is left orphaned holding a
 # fleet slot. Only KIND=ship drives a no-mistakes validation of its own
 # worktree (scouts and secondmates never do, mirroring bin/fm-crew-state.sh);
 # a run not attributed to this exact branch+head is left completely alone.
-# Best-effort past that point: a CLI that cannot be reached leaves the run for
-# a later manual `no-mistakes axi abort --run <id>` rather than blocking
-# teardown on a daemon communication hiccup.
 conclude_task_no_mistakes_run() {  # <worktree>
-  local wt=$1
+  local wt=$1 out
   [ "$KIND" = ship ] || return 0
   [ -d "$wt" ] || return 0
   command -v no-mistakes >/dev/null 2>&1 || return 0
   task_run_is_own_parked_run "$wt" || return 0
   echo "teardown: no-mistakes run for $ID is parked at a gate; aborting before the worker is removed" >&2
-  fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi abort >/dev/null 2>&1 || true
-  # fm_nm_run always reports success (its bounded-call contract discards the
-  # underlying exit code so a communication hiccup never trips `set -e` here);
-  # verify the effect instead of trusting the abort call's own exit status.
-  if task_run_is_own_parked_run "$wt"; then
-    echo "warning: no-mistakes run for $ID still reads parked after axi abort; it may need a manual no-mistakes axi abort --run <id>" >&2
+  fm_nm_run_checked "$wt" "$NM_TEARDOWN_TIMEOUT" axi abort >/dev/null 2>&1 || true
+  if ! out=$(fm_nm_run_checked "$wt" "$NM_TEARDOWN_TIMEOUT" axi status); then
+    echo "REFUSED: no-mistakes run for $ID is still parked after axi abort; confirm it stopped (no-mistakes axi status) or abort it manually (no-mistakes axi abort --run <id>) before retrying teardown." >&2
+    return 1
+  fi
+  if task_status_is_own_parked_run "$wt" "$out"; then
+    echo "REFUSED: no-mistakes run for $ID is still parked after axi abort; confirm it stopped (no-mistakes axi status) or abort it manually (no-mistakes axi abort --run <id>) before retrying teardown." >&2
+    return 1
   fi
 }
 
 # Fix 2 (see script header): pids of every process whose CURRENT WORKING
 # DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
 # -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
-# documents as slow). Never $$ (this script's own pid). Empty output, never a
-# failure, when lsof is unavailable or nothing matches.
+# documents as slow). Never $$ (this script's own pid). Empty output when
+# nothing matches; failure means the scan could not establish a safe result.
 pids_with_cwd_under() {  # <dir>
-  local dir=$1 out pid path
+  local dir=$1 out pid path line
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
-  command -v lsof >/dev/null 2>&1 || return 0
-  dir=$(cd "$dir" && pwd -P) || return 0
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || true
+  dir=$(cd "$dir" && pwd -P) || return 1
+  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
   [ -n "$out" ] || return 0
   pid=
   while IFS= read -r line; do
     case "$line" in
-      p*) pid=${line#p} ;;
+      p*)
+        pid=${line#p}
+        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+        ;;
+      fcwd) [ -n "$pid" ] || return 1 ;;
       n*)
+        [ -n "$pid" ] || return 1
         path=${line#n}
         case "$path" in
           "$dir"|"$dir"/*)
@@ -1132,26 +1140,70 @@ pids_with_cwd_under() {  # <dir>
             ;;
         esac
         ;;
+      '') ;;
+      *) return 1 ;;
     esac
   done <<EOF
 $out
 EOF
 }
 
+reap_task_backend_process_group() {  # <label>
+  local label=$1 leader pgid own_pgid
+  if [ "$BACKEND" != tmux ]; then
+    echo "warning: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
+    return 0
+  fi
+  leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
+  case "$leader" in ''|*[!0-9]*)
+    echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
+    return 0
+    ;;
+  esac
+  pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || pgid=""
+  pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
+  case "$pgid" in ''|*[!0-9]*|0|1)
+    echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
+    return 0
+    ;;
+  esac
+  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
+  own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
+  if [ "$pgid" = "$own_pgid" ]; then
+    echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
+    return 0
+  fi
+  echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+  sleep 1
+  if kill -0 -- "-$pgid" 2>/dev/null; then
+    echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
+    kill -KILL -- "-$pgid" 2>/dev/null || true
+  fi
+}
+
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
 # - both unique per task and never shared - before either is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
-# the recheck. Best-effort: a missing lsof leaves nothing to find and is a
-# silent no-op, never a teardown refusal.
+# the recheck. A missing lsof uses the backend process-group fallback; an lsof
+# scan error refuses before destructive teardown.
 reap_task_worktree_processes() {  # <label> <dir>...
-  local label=$1 dir pids pid remaining
+  local label=$1 dir dir_pids pids pid remaining
   shift
+  if ! command -v lsof >/dev/null 2>&1; then
+    reap_task_backend_process_group "$label"
+    return 0
+  fi
   pids=""
   for dir in "$@"; do
     [ -n "$dir" ] || continue
+    if ! dir_pids=$(pids_with_cwd_under "$dir"); then
+      echo "REFUSED: cannot determine leaked processes under $dir for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      return 1
+    fi
     pids="$pids
-$(pids_with_cwd_under "$dir")"
+$dir_pids"
   done
   pids=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
   [ -n "$pids" ] || return 0
