@@ -9,10 +9,15 @@
 #   fm-procevent-lavish.sh retire <artifact.html>
 #
 # arm        Register the canonical source, reconcile it through the generic
-#            runner, and report armed only after that exact source has a live
-#            owner. A failed confirmation returns nonzero and stays registered
-#            for the runner's ordinary restart recovery. A target session that
-#            has already ended or is missing is a hard failure too, reported as
+#            runner, and report armed only after that exact source has held live
+#            ownership for the runner's whole settle window. That window is what
+#            makes the verdict about the review session and not merely about the
+#            listener process: the published poll takes a moment to answer, so a
+#            confirmation that ended when the process appeared would report a
+#            handoff ready and only then learn the session was already gone.
+#            A failed confirmation returns nonzero and stays registered for the
+#            runner's ordinary restart recovery. A target session that has
+#            already ended or is missing is a hard failure too, reported as
 #            exactly that: it cannot accept feedback, so it never becomes live,
 #            and re-arming it only polls an ended session again. Its terminal
 #            result is still captured, announced, and handled normally.
@@ -55,7 +60,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one

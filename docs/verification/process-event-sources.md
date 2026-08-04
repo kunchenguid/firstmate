@@ -75,6 +75,22 @@ Re-verified on 2026-08-04 on macOS (Darwin 25.5.0 arm64) with GNU Bash 3.2.57 ag
 The executable regression starts with a registration and no owner, invokes the public Lavish `arm`, and accepts success only after the stand-in listener has started and the exact source reports `owner=live` through the public list command.
 It repeats arm against that listener to prove one process and one registration generation, forces startup to exit before a durable wait to prove a nonzero diagnostic, and then proves ordinary `reconcile` recovers that same retained source.
 
+Liveness is confirmed only once it has held for an unbroken settle window, because the published poll does not answer instantly.
+A listener talking to a session that has already ended looks alive for as long as it takes the source to answer, so a confirmation shorter than that latency reports the handoff ready and only then watches the source retire itself.
+Measured against the installed build on 2026-08-04, `lavish-axi poll` on an artifact with no session returns `NOT_FOUND` after 1.18s, 1.14s, and 1.12s, and the ended-session verdict was measured at 1.58-1.62s.
+`FM_PROCEVENT_LIVE_SETTLE_SECONDS` therefore defaults to 2 seconds of live ownership, inside the `FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT` bound that defaults to 8.
+Driven end-to-end against that installed build, a session the agent had ended fails in 3 of 3 attempts naming the ended target, each attempt still capturing and retiring its own terminal result, and an artifact that never had a session fails the same way:
+
+```text
+real missing-session arm: exit=1 elapsed=2.29s
+registered: lavish-2c4dd7e6a39558da (lavish)
+error: the Lavish session for /private/.../never-opened.html ended or was missing before a live listener was established, so it cannot accept feedback and this handoff did not arm: lavish-2c4dd7e6a39558da
+no sources registered
+```
+
+A real open review still arms on the same path: `arm` returns `armed:` with `owner=live` after 3.88s, an identical repeat converges on that one listener, and ending the session yields exactly one captured result and automatic retirement.
+The executable coverage holds both halves at that timing: stand-ins that answer ended after 1.4s and missing after 1.2s must fail, and a healthy listener is reported ready only after the whole settle window.
+
 A session that already ended is covered as its own end-user case, because it cannot accept the feedback the handoff waits for.
 Against a stand-in that returns an ended session at once, `arm` fails and names the target session as what ended, never firstmate's own state, while that terminal result is still captured once, announced once, and left retired.
 The same distinction is proved directly on the runner's public `await-live`: exit 3 for a source its adapter classified terminal - whether its registration is already gone or its terminal retirement is still pending - and the separate missing-registration diagnostic for a source that was never registered.
@@ -97,9 +113,11 @@ ok - failed terminal retirement is fail-closed and idempotently recoverable
 ok - Lavish arm reports success only after the exact source listener is live, and repeated arm stays idempotent
 ok - failed Lavish listener startup is reported and the durable source recovers through reconcile
 ok - Lavish arm fails with a target-session diagnostic when that session already ended, and still arms the same artifact once it is reopened
+ok - a target session that answers ended or missing at real listener latency is still a diagnosed arm failure
 ok - await-live distinguishes a source that ended terminally from a registration that is not there
 ok - the ended verdict is backed by a result newer than the baseline taken for this attempt
 ok - the liveness confirmation bound is elapsed time that a held source boundary cannot stretch
+ok - liveness is confirmed only after the exact source holds live ownership for the whole settle window
 ...
 all procevent tests passed
 ```
@@ -120,6 +138,8 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
 | live Lavish arm handoff | the public arm command starts the exact source through ordinary reconciliation, withholds success until the listener is invoked and ownership is stably live, converges an identical repeat on one owner and registration generation, returns nonzero when startup cannot hold liveness, and leaves that failed registration recoverable by ordinary reconciliation |
 | an ended target session is a diagnosed arm failure | a stand-in session that has already ended makes the public arm command fail naming the ended target rather than missing firstmate state, polls exactly once, and still captures, announces, and retires that one terminal result; the runner's own `await-live` reports it as exit 3 whether retirement finished or is still pending, and keeps a separate diagnostic for a registration that is simply not there |
+| that failure holds at real verdict latency | stand-ins that answer ended after 1.4s and missing after 1.2s - the latencies measured on the installed build - still fail the public arm command with the target-session diagnostic, capture their one terminal result, announce it, and retire, so a listener that is merely alive while its session is already gone is never reported ready |
+| readiness requires an unbroken settle window | the public arm command reports ready no sooner than its settle window, the runner's own `await-live` confirms a continuously live owner only after that window has elapsed, and a live owner observed for less than a longer configured window fails with a diagnostic naming that window and keeps its registration for reconcile |
 | the ended verdict names one attempt | arming the same artifact after its earlier review ended succeeds on the reopened session's own live listener without re-polling the ended one; on the runner's boundary the same disappearing-registration state reports the missing registration when the only terminal result predates that attempt's `latest-sequence` baseline and the ending when it does not, and a non-numeric baseline is refused |
 | liveness confirmation bound | holding the per-source boundary from another process while a one-second confirmation runs returns nonzero at that bound with a concrete diagnostic and the registration retained, so the configured bound is elapsed time rather than a count of reads a concurrent ownership change can stretch |
 | bounded re-announcement until handled | a durably captured result with no handled acknowledgement is re-announced by `reconcile` with the same source and sequence on every call - not only the first restart after a crash - and a drained-but-unhandled wake resurfaces identically after a simulated replacement session |
