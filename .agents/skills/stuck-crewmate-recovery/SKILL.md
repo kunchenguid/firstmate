@@ -39,11 +39,16 @@ If the worktree or ownership cannot be reconciled safely, leave all state intact
 Escalate in order:
 
 1. Peek the pane.
-2. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home.
-3. If the crewmate is confused or looping, interrupt with the adapter's interrupt key, then redirect with one corrective line.
+2. If the wake carries a `demand-deep-inspection` reason and the pane shows none of the obvious symptoms below (not looping, not confused, not unresponsive - it just looks busy), that is not a pass.
+   Read the task's current diff, recent commits, and validation log before deciding anything else.
+   Real, on-track progress toward the brief needs no action beyond noting it.
+   No real progress - the same file state across multiple checks, a repeated failing command, or work that has drifted from the brief - is blocked; redirect it exactly like a confused or looping worker (step 4).
+   An expensive but genuinely moving step (a large refactor, a long test suite, a big build) is not blocked; do not interrupt work that is actually advancing just because it has run long.
+3. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home.
+4. If the crewmate is confused or looping, or step 2 found no real progress, interrupt with the adapter's interrupt key, then redirect with one corrective line.
    For example, for a single-Escape adapter: `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Escape`.
-4. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
+5. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
-5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+6. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
