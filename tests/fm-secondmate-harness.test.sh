@@ -601,6 +601,16 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # A crew/scout spawn LEASES its task worktree in-process: `treehouse get
+  # --lease` prints the leased path (FM_FAKE_PANE_PATH here), where the pane
+  # settles. A --secondmate spawn never reaches this, so exit 0 otherwise.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = get ] && printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 

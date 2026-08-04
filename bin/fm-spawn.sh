@@ -32,8 +32,8 @@
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
+#   terminal, so ship/scout Orca spawns do not lease a treehouse worktree; cmux
+#   is a session provider only, exactly like herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -614,6 +614,11 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+# Durable treehouse lease on the task worktree (see the acquisition site below).
+# The abort trap returns the lease only if the spawn aborts before the task is
+# recorded; on success it is cleared so the lease persists until teardown.
+TREEHOUSE_LEASE_ABORT_CLEANUP=0
+LEASED_WT=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -689,6 +694,14 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  # Release a task-worktree lease acquired by this aborting spawn so a failed
+  # launch never leaks a reserved pool slot. Only fires before the task is
+  # recorded (success clears the flag); mirrors the leased-home rollback path.
+  if [ "$TREEHOUSE_LEASE_ABORT_CLEANUP" = 1 ] && [ -n "$LEASED_WT" ]; then
+    TREEHOUSE_LEASE_ABORT_CLEANUP=0
+    ( cd "$PROJ_ABS" && treehouse return --force "$LEASED_WT" ) >/dev/null 2>&1 \
+      || echo "warning: failed to release leased task worktree $LEASED_WT during spawn abort; lease may still be held" >&2
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -1694,9 +1707,32 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Durably LEASE the task worktree under the task id, rather than a bare
+  # `treehouse get`. A bare get leaves the slot unleased, so after a crash or a
+  # stuck-crew relaunch the pool can hand the same slot back reset onto the
+  # default branch, losing the task's branch and in-flight commits - and then
+  # `no-mistakes axi respond`, which resolves the active run by the checked-out
+  # branch, can no longer find it. A lease reserves the slot (and its branch and
+  # commits) under this task id across restarts, skipped by any later
+  # get/prune, until teardown returns it; recovery re-binds to the SAME
+  # worktree. Mirrors the leased firstmate homes in bin/fm-home-seed.sh.
+  #
+  # The lease is non-interactive: it prints only the worktree path and opens no
+  # subshell, so cd the pane into it explicitly. The settle poll below still
+  # confirms the pane actually moved and validate_spawn_worktree still proves
+  # the resulting worktree is isolated from the primary checkout.
+  LEASED_WT=$( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" ) || {
+    echo "error: treehouse get --lease failed to lease a task worktree for $ID; inspect the pool under $PROJ_ABS" >&2
+    exit 1
+  }
+  [ -n "$LEASED_WT" ] || {
+    echo "error: treehouse get --lease reported no task worktree for $ID" >&2
+    exit 1
+  }
+  TREEHOUSE_LEASE_ABORT_CLEANUP=1
+  spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$LEASED_WT")"
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the pane's cwd to move from the project into the leased worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -1736,11 +1772,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: pane did not enter the leased task worktree within 60s; inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "leased task worktree" "$T"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -2075,6 +2111,9 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# The task (and its leased worktree=) is now durably recorded; teardown owns the
+# lease from here, so the abort trap must no longer return it.
+TREEHOUSE_LEASE_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

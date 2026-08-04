@@ -806,7 +806,14 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  # fm-spawn leases the task worktree: `treehouse get --lease` prints the leased
+  # worktree path (the same $wt the pane settles into); other subcommands exit 0.
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = get ] && printf '%s\n' "$wt"
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
@@ -876,7 +883,14 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  # fm-spawn leases the task worktree: `treehouse get --lease` prints the leased
+  # worktree path (the same $wt the pane settles into); other subcommands exit 0.
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = get ] && printf '%s\n' "$wt"
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 

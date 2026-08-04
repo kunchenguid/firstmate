@@ -610,6 +610,39 @@ test_no_mistakes_origin_remote_allows() {
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 
+# The task worktree is leased at spawn (bin/fm-spawn.sh), so an ordinary
+# teardown must RETURN that worktree to release the lease and free the pool
+# slot - otherwise leased slots would leak. This asserts teardown issues
+# `treehouse return --force <worktree>` on the ALLOW path. The unlanded-work
+# guard still gates that return: the REFUSE cases above exit before it runs, so
+# a leased worktree is never a way to bypass the safety check.
+test_teardown_returns_leased_worktree_to_release_lease() {
+  local case_dir rc thlog
+  case_dir=$(make_case nm-lease-release)
+  thlog="$case_dir/treehouse.log"
+  # Log every treehouse invocation so we can assert the lease-releasing return.
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$thlog"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-lease-release: teardown should succeed for landed work"
+  assert_grep "return --force $case_dir/wt" "$thlog" \
+    "teardown did not return the leased task worktree (its lease would leak)"
+  pass "teardown returns the leased task worktree to release its lease"
+}
+
 test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
@@ -1830,6 +1863,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_teardown_returns_leased_worktree_to_release_lease
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes

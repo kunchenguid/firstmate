@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
-# clear volatile state, refresh/prune the project's clone for PR-based ship
-# tasks, then print a backlog-refresh reminder for ship and scout teardowns
+# Tear down a finished task: return the treehouse worktree (which also releases
+# the durable lease bin/fm-spawn.sh took on it at spawn, freeing the pool slot
+# for reuse), release the Orca worktree, or retire a secondmate home; kill the
+# recorded runtime endpoint, clear volatile state, refresh/prune the project's
+# clone for PR-based ship tasks, then print a backlog-refresh reminder for ship
+# and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is

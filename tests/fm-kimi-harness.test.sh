@@ -125,7 +125,16 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  # fm-spawn leases the task worktree: `treehouse get --lease` prints the leased
+  # path (where the pane settles); every other subcommand exits silently.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = get ] && printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}}"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
   printf '%s\n' "$fakebin"
