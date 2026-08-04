@@ -49,11 +49,13 @@ REAL=\${FM_TEST_REAL_STAT:?FM_TEST_REAL_STAT unset}
 SHIM
   cat >> "$bin/stat" <<'SHIM'
 if "$REAL" -c %Y / >/dev/null 2>&1; then
-  real_datum() {  # <mtime|size|fullmode|uid|device|inode|nlink|ctime> <file>
+  real_datum() {  # <mtime|size|rawmode|uid|device|inode|nlink|ctime> <file>
+    local hex
     case "$1" in
       mtime)    "$REAL" -c %Y "$2" ;;
       size)     "$REAL" -c %s "$2" ;;
-      fullmode) "$REAL" -c %a "$2" ;;
+      rawmode)  hex=$("$REAL" -c %f "$2") || return 1
+                printf '%o\n' "$((16#$hex))" ;;
       uid)      "$REAL" -c %u "$2" ;;
       device)   "$REAL" -c %d "$2" ;;
       inode)    "$REAL" -c %i "$2" ;;
@@ -63,12 +65,10 @@ if "$REAL" -c %Y / >/dev/null 2>&1; then
   }
 else
   real_datum() {
-    local raw
     case "$1" in
       mtime)    "$REAL" -f %m "$2" ;;
       size)     "$REAL" -f %z "$2" ;;
-      fullmode) raw=$("$REAL" -f '%Mp%Lp' "$2") || return 1
-                printf '%o\n' "$((8#$raw))" ;;
+      rawmode)  "$REAL" -f %p "$2" ;;
       uid)      "$REAL" -f %u "$2" ;;
       device)   "$REAL" -f %d "$2" ;;
       inode)    "$REAL" -f %i "$2" ;;
@@ -78,16 +78,22 @@ else
   }
 fi
 
-# The two flavors render a mode differently, and that difference is under test:
-# GNU %a is the whole permission word, BSD %Lp keeps only the low nine bits
-# while %Mp carries setuid/setgid/sticky on its own.
-mode_piece() {  # <a|Lp|Mp> <file>
-  local want=$1 f=$2 full
-  full=$(real_datum fullmode "$f") || return 1
+# The two flavors render a mode differently, and that difference is what the
+# owner has to reconcile. Every rendering here derives from the raw st_mode, so
+# the shim reproduces each spelling faithfully instead of inheriting the
+# ambiguity under test: BSD %p is the whole raw mode, %Lp keeps only the low
+# nine bits, and %Mp carries setuid/setgid/sticky on its own - NEITHER of the
+# latter two zero-padded, which is precisely why concatenating them loses a
+# digit position for a short permission word. GNU %a is the whole permission
+# word.
+mode_piece() {  # <p|a|Lp|Mp> <file>
+  local want=$1 f=$2 raw
+  raw=$(real_datum rawmode "$f") || return 1
   case "$want" in
-    a)  printf '%o' "$((8#$full))" ;;
-    Lp) printf '%o' "$(( 8#$full & 8#777 ))" ;;
-    Mp) printf '%o' "$(( (8#$full >> 9) & 7 ))" ;;
+    p)  printf '%o' "$((8#$raw))" ;;
+    a)  printf '%o' "$(( 8#$raw & 8#7777 ))" ;;
+    Lp) printf '%o' "$(( 8#$raw & 8#777 ))" ;;
+    Mp) printf '%o' "$(( (8#$raw >> 9) & 7 ))" ;;
   esac
 }
 
@@ -115,6 +121,9 @@ expand() {  # <fmt> <file>
             else piece='?'; fi ;;
       %Mp*) rest=${rest#%Mp}
             if [ "$FLAVOR" = bsd ]; then piece=$(mode_piece Mp "$f") || return 1
+            else piece='?'; fi ;;
+      %p*)  rest=${rest#%p}
+            if [ "$FLAVOR" = bsd ]; then piece=$(mode_piece p "$f") || return 1
             else piece='?'; fi ;;
       %m*)  rest=${rest#%m};  piece=$(owned bsd mtime "$f") || return 1 ;;
       %z*)  rest=${rest#%z};  piece=$(owned bsd size "$f") || return 1 ;;
@@ -299,16 +308,37 @@ test_owner_signature_tracks_changes_under_every_stat_flavor() {
 }
 
 test_owner_reports_one_mode_vocabulary_on_every_flavor() {
-  local dir flavor f got
+  local dir flavor f got landed
   dir=$(make_case owner-mode)
   f="$dir/artifact"
   : > "$f"
-  # <chmod> <expected canonical mode>. The special-bit rows are the contract:
-  # BSD %Lp alone drops them, so a `mode = 600` check would accept a setuid
-  # private artifact on macOS while rejecting the identical file on Linux.
-  for row in '600 600' '700 700' '755 755' '4600 4600' '2700 2700' '1777 1777' '007 7'; do
+  # <chmod> <expected canonical mode> <bash test flag proving the special bit
+  # landed, or "-" for none>.
+  #
+  # The rows that cross a special bit with a SHORT permission word (4007, 4000,
+  # 2007, 1007) are the sharp ones. BSD renders neither %Mp nor %Lp zero-padded,
+  # so `%Mp%Lp` runs them together and 4007 collapses to "47" - still valid
+  # octal, so no downstream reformatting can tell it apart from a real mode 47.
+  # Equality callers absorb that by failing closed, but fm-fleet-snapshot.sh's
+  # `$((8#$mode & 0444))` readability mask silently flips: 0o40 & 0o444 is
+  # non-zero, 0o4000 & 0o444 is zero. Only a raw-st_mode read gets these right.
+  for row in '600 600 -' '700 700 -' '755 755 -' '4600 4600 -u' '2600 2600 -g' \
+             '2700 2700 -g' '1777 1777 -k' '007 7 -' '4007 4007 -u' \
+             '4000 4000 -u' '2007 2007 -g' '1007 1007 -k'; do
     set -- $row
-    chmod "$1" "$f"
+    chmod "$1" "$f" || fail "the host refused chmod $1, so this contract row cannot be trusted"
+    # Confirm the special bit really landed, independently of any stat flavor:
+    # a host that silently dropped it would otherwise make this row vacuous.
+    if [ "$3" != - ]; then
+      landed=no
+      case "$3" in
+        -u) [ -u "$f" ] && landed=yes ;;
+        -g) [ -g "$f" ] && landed=yes ;;
+        -k) [ -k "$f" ] && landed=yes ;;
+      esac
+      [ "$landed" = yes ] \
+        || fail "chmod $1 reported success but the $3 bit did not land; this host cannot prove the contract"
+    fi
     for flavor in gnu bsd native; do
       got=$(run_with_stat "$dir" "$flavor" '. "$ROOT/bin/fm-stat-lib.sh"; fm_stat_mode "'"$f"'"') \
         || fail "fm_stat_mode failed on a chmod $1 file under $flavor stat"
@@ -318,6 +348,33 @@ test_owner_reports_one_mode_vocabulary_on_every_flavor() {
   done
   chmod 600 "$f"
   pass "fm_stat_mode reports one canonical full mode - special bits included - on every flavor"
+}
+
+test_fleet_snapshot_readability_mask_agrees_across_flavors() {
+  local dir flavor f verdict
+  dir=$(make_case owner-mode-mask)
+  f="$dir/secondmates.md"
+  : > "$f"
+  # The one arithmetic consumer of fm_stat_mode, and the only caller that does
+  # not merely compare for equality. 4000 and 4100 are the rows that discriminate:
+  # a collapsed "40"/"41" keeps a bit inside the 0444 mask, so the registry would
+  # read as readable on macOS and unreadable on Linux from the same bytes.
+  for row in '600 readable' '4000 unreadable' '4100 unreadable' '4007 readable' \
+             '444 readable' '000 unreadable'; do
+    set -- $row
+    chmod "$1" "$f" || fail "the host refused chmod $1"
+    for flavor in gnu bsd native; do
+      verdict=$(run_with_stat "$dir" "$flavor" \
+        'set -u; . "$ROOT/bin/fm-stat-lib.sh"
+         mode=$(fm_stat_mode "'"$f"'") || mode=
+         if [ -z "$mode" ] || [ $((8#$mode & 0444)) -eq 0 ]; then echo unreadable; else echo readable; fi') \
+        || fail "the registry readability mask failed under $flavor stat on chmod $1"
+      [ "$verdict" = "$2" ] \
+        || fail "chmod $1 registry read as '$verdict' under $flavor stat, expected '$2'"
+    done
+  done
+  chmod 600 "$f"
+  pass "the fleet registry readability mask reaches the same verdict on every stat flavor"
 }
 
 test_private_artifact_checks_reject_special_bits_on_every_flavor() {
@@ -642,6 +699,7 @@ test_owner_reads_mtime_under_every_stat_flavor
 test_owner_refuses_unreadable_paths_instead_of_printing_garbage
 test_owner_signature_tracks_changes_under_every_stat_flavor
 test_owner_reports_one_mode_vocabulary_on_every_flavor
+test_fleet_snapshot_readability_mask_agrees_across_flavors
 test_private_artifact_checks_reject_special_bits_on_every_flavor
 test_watcher_beacon_age_survives_gnu_stat_shadowing
 test_watcher_beacon_age_reports_the_sentinel_only_when_truly_absent

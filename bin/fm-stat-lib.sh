@@ -46,13 +46,20 @@
 #
 # The two flavors also disagree on what a "mode" IS. GNU `%a` reports the full
 # permission word, so setuid/setgid/sticky show up as a leading digit; BSD `%Lp`
-# reports only the low nine bits and silently drops them, while `%Mp%Lp` keeps
-# them but pads inconsistently ("0600" for 0600, but "07" for 0007). A private
-# artifact check written as `mode = 600` therefore ACCEPTS a setuid file on
-# macOS and rejects the identical file on Linux. fm_stat_mode normalizes both
-# flavors to one canonical rendering - the full mode in octal with no leading
-# zeros, which is what GNU already prints - so 0600/0700 checks mean the same
-# thing everywhere and a special bit is always a mismatch.
+# reports only the low nine bits and silently drops them. A private artifact
+# check written as `mode = 600` would therefore ACCEPT a setuid file on macOS
+# and reject the identical file on Linux.
+#
+# Concatenating `%Mp%Lp` does not fix that, and the way it fails is positional,
+# not cosmetic: neither half is zero-padded, so the two digit strings run
+# together and a short low word swallows a column. chmod 4007 renders as "47"
+# and chmod 4000 as "40" - both valid octal, so no amount of downstream
+# reformatting can recover the missing position. BSD `%p` is the unambiguous
+# reader: it prints the raw st_mode ("104007"), which masked to its low 12 bits
+# is exactly the permission word GNU `%a` reports. fm_stat_mode masks both
+# flavors that way and renders one canonical octal string with no leading zeros,
+# so 0600/0700 checks mean the same thing everywhere and a special bit is always
+# a mismatch.
 
 if [ -z "${FM_STAT_LIB_SOURCED:-}" ]; then
   FM_STAT_LIB_SOURCED=1
@@ -71,7 +78,7 @@ if [ -z "${FM_STAT_LIB_SOURCED:-}" ]; then
     _fm_stat_mtime_raw() { stat -f %m "$1" 2>/dev/null; }
     _fm_stat_size_raw() { stat -f %z "$1" 2>/dev/null; }
     _fm_stat_sig_raw() { stat -f '%z:%Fm' "$1" 2>/dev/null; }
-    _fm_stat_mode_raw() { stat -f '%Mp%Lp' "$1" 2>/dev/null; }
+    _fm_stat_mode_raw() { stat -f %p "$1" 2>/dev/null; }
     _fm_stat_uid_raw() { stat -f %u "$1" 2>/dev/null; }
     _fm_stat_device_raw() { stat -f %d "$1" 2>/dev/null; }
     _fm_stat_inode_raw() { stat -f %i "$1" 2>/dev/null; }
@@ -97,8 +104,9 @@ if [ -z "${FM_STAT_LIB_SOURCED:-}" ]; then
   fm_stat_size() { _fm_stat_integer _fm_stat_size_raw "$1"; }
 
   # The FULL permission mode in octal, canonicalized to GNU's rendering (no
-  # leading zeros) on both flavors: 600, 700, 4600, 2755, 1777, 7. A setuid,
-  # setgid, or sticky bit is therefore always visible, so a caller comparing
+  # leading zeros) on both flavors: 600, 700, 4600, 2755, 1777, 4007, 7. The
+  # mask drops BSD `%p`'s file-type bits and is a no-op on GNU `%a`, so a
+  # setuid, setgid, or sticky bit is always visible and a caller comparing
   # against 600 or 700 rejects it on macOS exactly as it already does on Linux.
   fm_stat_mode() {
     local raw
@@ -106,7 +114,7 @@ if [ -z "${FM_STAT_LIB_SOURCED:-}" ]; then
     case "$raw" in
       ''|*[!0-7]*) return 1 ;;
     esac
-    printf '%o\n' "$((8#$raw))"
+    printf '%o\n' "$(( 8#$raw & 8#7777 ))"
   }
 
   # Owning user id, device and inode numbers, and the hard link count.
