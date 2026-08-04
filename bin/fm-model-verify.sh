@@ -192,31 +192,22 @@ claude_config_dir() {
 }
 
 canonical_path() {
-  local input=$1 absolute normalized=/ cursor suffix= base part
-  local parts=() stack=()
+  local input=$1 absolute cursor suffix= base part
   [ -n "$input" ] || return 1
   case "$input" in
     *$'\n'*) return 1 ;;
     /*) absolute=$input ;;
     *) absolute=$PWD/$input ;;
   esac
-  IFS=/ read -r -a parts <<< "$absolute"
-  for part in "${parts[@]}"; do
-    case "$part" in
-      ''|.) ;;
-      ..)
-        [ "${#stack[@]}" -eq 0 ] || unset "stack[$((${#stack[@]} - 1))]"
-        ;;
-      *) stack+=("$part") ;;
-    esac
+  cursor=$absolute
+  while [ "$cursor" != / ] && [ "${cursor%/}" != "$cursor" ]; do
+    cursor=${cursor%/}
   done
-  if [ "${#stack[@]}" -gt 0 ]; then
-    normalized=/$(IFS=/; printf '%s' "${stack[*]}")
-  fi
-  cursor=$normalized
   while [ ! -e "$cursor" ]; do
+    [ ! -L "$cursor" ] || return 1
     [ "$cursor" != / ] || return 1
     part=${cursor##*/}
+    case "$part" in ''|.|..) return 1 ;; esac
     suffix="/$part$suffix"
     cursor=${cursor%/*}
     [ -n "$cursor" ] || cursor=/

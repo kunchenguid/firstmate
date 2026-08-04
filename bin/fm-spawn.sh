@@ -2105,11 +2105,10 @@ LAUNCH=$(fm_launch_render \
 # back to the default ~/.claude store even when firstmate itself runs under a
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-  # an unset value is the single-store default and needs no prefix.
-  if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+# uses the same credential/config firstmate is authenticated with.
+if [ "$HARNESS" = claude ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(fm_launch_shell_quote "$MODEL_EVIDENCE_STORE") $LAUNCH"
-  fi
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(fm_launch_shell_quote "$PROJ_ABS")
   sq_primary_home=$(fm_launch_shell_quote "$FM_HOME")

@@ -111,6 +111,7 @@ It binds a mismatched worker to store A, invokes verification under store B cont
 It also requires missing `model=`, malformed `spawned_at=`, and watermark enumeration failure to remain loud, while a genuinely old record without binding fields retains its disclosed weaker attribution.
 
 The lifecycle cases require base endpoint metadata to exist when watermark capture fails, require forced teardown to print a mismatch without losing discard authority, and require recursive secondmate cleanup to print each child's verdict before removing its record.
+The store-binding cases require a default-store Claude launch to override a different backend-daemon ambient store, and require `link/../cfg` to resolve the link before applying the parent component.
 
 Focused command:
 

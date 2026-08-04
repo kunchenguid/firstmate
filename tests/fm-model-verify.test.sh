@@ -352,6 +352,18 @@ assert_contains "$out" "model_evidence_store=$CFG" "canonical evidence store is 
 assert_contains "$out" "model_evidence_before=existing.jsonl" "existing transcript identity is recorded"
 pass "spawn-time watermark capture records existing transcript identities"
 
+canonical_root="$TMP_ROOT/canonical-store"
+mkdir -p "$canonical_root/real/child" "$canonical_root/real/cfg"
+ln -s "$canonical_root/real/child" "$canonical_root/link"
+out=$(CLAUDE_CONFIG_DIR="$canonical_root/link/../cfg" \
+  FM_HOME="$HOME_DIR" "$VERIFY" --capture-watermark "$capture_wt" 2>&1); code=$?
+expect_code 0 "$code" "symlink-plus-parent evidence store canonicalizes"
+assert_contains "$out" "model_evidence_store=$canonical_root/real/cfg" \
+  "canonicalization did not resolve the symlink before its parent component"
+assert_not_contains "$out" "model_evidence_store=$canonical_root/cfg" \
+  "canonicalization stripped the parent component before resolving the symlink"
+pass "evidence-store canonicalization follows filesystem resolution order"
+
 # Without a timestamp, disagreeing evidence cannot be attributed. Guessing which
 # half belongs to this task would be exactly the silent pass to avoid.
 wt=$(meta unbound-ambiguous opus)

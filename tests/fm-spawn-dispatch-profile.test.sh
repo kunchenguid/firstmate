@@ -32,6 +32,15 @@ case "${1:-}" in
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          if [ -n "${FM_FAKE_RESOLVED_CLAUDE_STORE_LOG:-}" ]; then
+            case "$a" in
+              *claude*)
+                pinned=$(printf '%s\n' "$a" | sed -n "s/^CLAUDE_CONFIG_DIR='\([^']*\)'.*/\1/p")
+                printf '%s\n' "${pinned:-${FM_FAKE_DAEMON_CLAUDE_CONFIG_DIR:-}}" \
+                  > "$FM_FAKE_RESOLVED_CLAUDE_STORE_LOG"
+                ;;
+            esac
+          fi
         fi
         prev=$a
       done
@@ -93,7 +102,10 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_FAKE_DAEMON_CLAUDE_CONFIG_DIR="${FM_FAKE_DAEMON_CLAUDE_CONFIG_DIR:-}" \
+    FM_FAKE_RESOLVED_CLAUDE_STORE_LOG="${FM_FAKE_RESOLVED_CLAUDE_STORE_LOG:-}" \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -117,19 +129,22 @@ assert_meta_profile() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch runtime_home
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
+  runtime_home="$CASE_DIR/runtime-home"
+  mkdir -p "$runtime_home/.claude"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(HOME="$runtime_home" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="CLAUDE_CONFIG_DIR='$runtime_home/.claude' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -681,21 +696,30 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
 
-test_claude_omits_config_dir_prefix_when_unset() {
-  local rec id out status launch
+test_claude_pins_default_store_over_daemon_ambient_config() {
+  local rec id out status launch runtime_home daemon_cfg resolved_log recorded_store
   id=profile-claude-nocfgdir-z18
   rec=$(make_spawn_case profile-claude-nocfgdir claude "$id")
   read_case_record "$rec"
+  runtime_home="$CASE_DIR/runtime-home"
+  daemon_cfg="$CASE_DIR/daemon-claude-config"
+  resolved_log="$CASE_DIR/resolved-claude-store.log"
+  mkdir -p "$runtime_home/.claude" "$daemon_cfg"
 
-  # run_spawn pins CLAUDE_CONFIG_DIR empty by default, exercising the single-store
-  # default path where fm-spawn adds no prefix.
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(HOME="$runtime_home" FM_FAKE_DAEMON_CLAUDE_CONFIG_DIR="$daemon_cfg" \
+    FM_FAKE_RESOLVED_CLAUDE_STORE_LOG="$resolved_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn without CLAUDE_CONFIG_DIR should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
-    "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
-  pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
+  recorded_store=$(sed -n 's/^model_evidence_store=//p' "$HOME_DIR/state/$id.meta")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$runtime_home/.claude'" \
+    "claude launch did not pin the recorded default evidence store"
+  [ "$recorded_store" = "$runtime_home/.claude" ] \
+    || fail "default-store spawn recorded the wrong evidence store: $recorded_store"
+  [ "$(cat "$resolved_log")" = "$recorded_store" ] \
+    || fail "daemon ambient config overrode the recorded evidence store"
+  pass "claude pins the recorded default store over daemon ambient config"
 }
 
 test_non_claude_harness_ignores_config_dir() {
@@ -757,7 +781,7 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
-test_claude_omits_config_dir_prefix_when_unset
+test_claude_pins_default_store_over_daemon_ambient_config
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
