@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Render one durable Lavish decision, open it in a dedicated headed Chrome
-# profile, and arm a one-shot watcher check for its durable browser-profile
-# record with optional download corroboration.
+# Render one durable Lavish decision, assert its answering machinery before it
+# can be surfaced, open it in a dedicated headed Chrome profile, and arm a
+# one-shot watcher check for its durable browser-profile record with optional
+# download corroboration.
 #
 # Usage:
 #   fm-lavish-board.sh <decision-id> [--home <path>] [--downloads <path>]
@@ -23,6 +24,9 @@ Usage: fm-lavish-board.sh <decision-id> [--home <path>] [--downloads <path>]
 Render a self-contained Lavish board, open it in a headed dedicated Chrome
 profile, and arm a watcher check that captures the verified LAVISH-SUBMIT v2
 browser-profile record first and accepts a matching download as corroboration.
+The helper refuses before arming pickup or opening Chrome when the rendered
+page lacks radio choices, annotation inputs, or its schema-version-2 submit
+path.
 USAGE
 }
 
@@ -71,6 +75,62 @@ isolated_chrome() {
     fi
     chrome-devtools-axi "$@"
   )
+}
+
+assert_answerable_board() {
+  local board_path=$1
+  node - "$board_path" <<'NODE'
+const fs = require('node:fs');
+
+let html;
+try {
+  html = fs.readFileSync(process.argv[2], 'utf8');
+} catch (error) {
+  process.stderr.write(`could not read generated HTML: ${error.message}\n`);
+  process.exit(1);
+}
+
+const tags = (name) => html.match(new RegExp(`<${name}\\b[^>]*>`, 'gis')) ?? [];
+const hasAttribute = (tag, name, value = undefined) => {
+  const match = tag.match(new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`, 'is'));
+  if (match === null) return value === undefined && new RegExp(`\\b${name}(?:\\s|>|$)`, 'i').test(tag);
+  return value === undefined || match[2].toLowerCase() === value.toLowerCase();
+};
+const hasClass = (tag, className) => {
+  const match = tag.match(/\bclass\s*=\s*(["'])(.*?)\1/is);
+  return match !== null && match[2].split(/\s+/).includes(className);
+};
+
+const radios = tags('input').filter((tag) => hasAttribute(tag, 'type', 'radio'));
+const optionNotes = tags('textarea').filter((tag) => hasAttribute(tag, 'data-option-comment'));
+const questionNotes = tags('textarea').filter((tag) => hasAttribute(tag, 'data-question-note'));
+const questions = tags('section').filter((tag) => hasClass(tag, 'question'));
+const submit = tags('button').some((tag) => hasAttribute(tag, 'id', 'submit-button'));
+const missing = [];
+
+if (radios.length === 0) missing.push('radio choices');
+if (optionNotes.length === 0) missing.push('per-option annotation inputs');
+if (radios.length !== optionNotes.length) {
+  missing.push(`one per-option annotation for each radio (${optionNotes.length}/${radios.length})`);
+}
+if (questionNotes.length === 0) missing.push('per-question annotation inputs');
+if (questions.length === 0 || questionNotes.length !== questions.length) {
+  missing.push(`one per-question annotation for each question (${questionNotes.length}/${questions.length})`);
+}
+if (!submit) missing.push('submit button');
+if (!/\bschema_version\s*:\s*2\b/.test(html)) missing.push('schema_version 2 payload');
+if (!/querySelector\(\s*['"]#submit-button['"]\s*\)\.addEventListener\(\s*['"]click['"]/.test(html)) {
+  missing.push('submit click handler');
+}
+if (!/JSON\.stringify\(\s*payload\b/.test(html)) missing.push('JSON payload serialization');
+if (!/new Blob\(\s*\[\s*payloadJson\s*\]/.test(html)) missing.push('JSON download');
+if (!/window\.__lavishPayload\s*=\s*payload\b/.test(html)) missing.push('pickup payload publication');
+
+if (missing.length > 0) {
+  process.stderr.write(`missing ${missing.join(', ')}\n`);
+  process.exit(1);
+}
+NODE
 }
 
 write_evaluation_payload() {  # <evaluation-output> <target> <decision-id>
@@ -316,14 +376,21 @@ HTML_PATH="$STATE_DIR/lavish-board-$DECISION_ID.html"
 PAYLOAD_PATH="$STATE_DIR/lavish-board-$DECISION_ID.payload.json"
 PROFILE_PATH="$STATE_DIR/lavish-board-$DECISION_ID.chrome-profile"
 CHECK_PATH="$STATE_DIR/lavish-board-$DECISION_ID.check.sh"
-CHECK_TMP=$(mktemp "$STATE_DIR/.lavish-board-$DECISION_ID.check.XXXXXX")
 OPENED_AT=$(node -e 'process.stdout.write(String(Date.now()))')
 
+rm -f "$CHECK_PATH"
 "$LAVISH_BIN" board "$DECISION_ID" --home "$HOME_PATH" --out "$HTML_PATH"
+ANSWERABILITY_ERROR=
+if ! ANSWERABILITY_ERROR=$(assert_answerable_board "$HTML_PATH" 2>&1); then
+  rm -f "$HTML_PATH"
+  fail "refusing to surface an unanswerable board: $ANSWERABILITY_ERROR"
+fi
+
 rm -f "$PAYLOAD_PATH"
 mkdir -p "$PROFILE_PATH"
 [ -d "$PROFILE_PATH" ] && [ ! -L "$PROFILE_PATH" ] \
   || fail "unsafe Chrome profile directory: $PROFILE_PATH"
+CHECK_TMP=$(mktemp "$STATE_DIR/.lavish-board-$DECISION_ID.check.XXXXXX")
 {
   printf '#!/usr/bin/env bash\n'
   printf 'exec env FM_STATE_OVERRIDE=%q %q --check %q --home %q --state %q --session %q --downloads %q --opened-at %q\n' \

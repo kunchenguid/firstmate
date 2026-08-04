@@ -27,12 +27,8 @@ It then queues a redundant wake pointer and exits without waiting for firstmate.
 If wake enqueueing fails, the durable answer remains authoritative.
 The command prints `answer saved; wake not queued`, exits nonzero, and the next ordinary intake scan recovers it.
 
-`bin/fm-lavish-board.sh` renders the same immutable request into self-contained HTML and opens it with a decision-specific Chrome profile below the effective state root (`FM_STATE_OVERRIDE` or `$FM_HOME/state`).
-Submit first writes and reads back a browser-profile record, then shows a confirmation describing that durable record; the optional browser download is not treated as confirmed delivery.
-The armed check recovers the record from the same profile even after the visible browser closes, validates it through `lavish-axi collect`, and runs intake.
-After an answer is committed, the Firstmate wake adapter appends the durable wake pointer and may attempt visible prompt delivery only when the session lock proves a live supervisor route belongs to the same canonical `FM_HOME`.
-It never falls back to ambient terminal state, and a visible prompt names the manifest's declared destination rather than assuming a conventional path.
-If visible delivery is refused, the durable answer and wake pointer remain authoritative.
+`bin/fm-lavish-board.sh` owns the dedicated Chrome-profile launch, fail-closed answerability preflight, and bounded pickup integration around the generated file.
+Read that script's header or `--help` output for its current mechanics; the [`lavish-decisions` skill](../../.agents/skills/lavish-decisions/SKILL.md) owns when to invoke it and when to use the terminal fallback.
 
 ## Agent commands
 

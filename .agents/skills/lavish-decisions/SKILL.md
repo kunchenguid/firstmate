@@ -2,7 +2,7 @@
 name: lavish-decisions
 description: >-
   Agent-only workflow for creating durable captain-facing Lavish decisions.
-  Use before creating, repairing, or presenting a multi-option captain choice; route it through the durable file protocol, with the Firstmate board wrapper as the sole supported browser surface.
+  Use before creating, repairing, or presenting a multi-option captain choice; route it through the durable file protocol, with the Firstmate board wrapper as the sole supported browser surface, never a hand-authored page or built-in question tool.
   Never use an upstream served session, server, or poll for this workflow.
   Do not use it for read-only reports or simple yes/no questions.
 user-invocable: false
@@ -34,7 +34,9 @@ Use the firstmate-owned `lavish-axi` file protocol documented in `tools/lavish/R
    <exact Run: line emitted by lavish-axi create>
    ```
 
-   For a self-contained browser board, run `bin/fm-lavish-board.sh <decision-id> --home <resolved-absolute-home>` as documented in `tools/lavish/README.md`, then tell the captain the named decision board is open.
+   For a self-contained browser board, run `bin/fm-lavish-board.sh <decision-id> --home <resolved-absolute-home>` as documented in `tools/lavish/README.md`.
+   Only a successful exit authorizes reporting the board open because the helper checks its answering machinery before it arms pickup or opens Chrome.
+   Then tell the captain the named decision board is open.
    Do not surface or invent a session URL.
 
 The surfaced command is for the captain's shell, not firstmate's environment.
@@ -65,6 +67,7 @@ When a destination appears:
 Never start a server, create or share a session URL, poll, long-poll, register a filesystem watcher, schedule a timer sweep, or launch a resident server or listener process for Lavish decision capture.
 Do not use upstream `serve`, `poll`, browser, layout-audit, or session-lifecycle commands.
 The sole browser exception is `bin/fm-lavish-board.sh`, which opens a decision-specific profile and arms one ordinary bounded recovery check around the authoritative file protocol.
+Only that helper arms the pickup path; a hand-authored page is not a fallback because its answers cannot reach firstmate.
 
 Every core Lavish command must finish its bounded local file operation and exit.
 If `lavish answer` reports `answer saved; wake not queued`, do not ask the captain to answer again.

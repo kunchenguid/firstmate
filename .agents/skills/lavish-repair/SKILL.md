@@ -1,168 +1,83 @@
 ---
 name: lavish-repair
 description: >-
-  Agent-only recovery playbook for diagnosing and repairing served Lavish Editor boards that remain loading, lose live feedback, report that the agent is not listening, or prompt consideration of a Lavish or browser process restart.
-  Use before touching Lavish, Chrome, or chrome-devtools-axi processes during a served-board surface incident.
-  Do not use it for Firstmate's self-contained store-forward board or to design or revise a working decision; use `lavish-decisions` for those cases.
+  Agent-only recovery playbook for a self-contained Lavish board that fails answerability preflight, does not open in its isolated Chrome session, or submits without pickup.
+  Use before touching a Lavish board's state artifacts or Chrome session during a surface incident.
+  Do not use it to create or present a decision; use `lavish-decisions` for that.
 user-invocable: false
 metadata:
   internal: true
 ---
 
-# lavish-repair
+# Lavish repair
 
-Prove the failing layer before changing any process.
-This playbook applies only after proving the affected surface is an upstream served board with a `/session/` URL.
-For a self-contained board opened by `bin/fm-lavish-board.sh`, use `lavish-decisions` and `tools/lavish/README.md`; that path has no HTTP server or long-poll listener to repair.
-Use `lavish-axi --help` and its command help as the authority for current serving and polling mechanics.
-Consult the `data/learnings.md` content already included in the session-start digest for relevant prior incidents without violating the digest's read-once rule.
+Prove the failing layer before changing state or stopping a process.
+The Lavish fork has no server, session URL, live channel, listener, or poller to repair.
+Never invoke upstream serve, poll, or server-lifecycle commands.
 
-## Fleet-wide process safety gate
+## Start from the owners
 
-From a firstmate session, `pkill -f <pattern>` is a FLEET-WIDE DESTRUCTIVE COMMAND.
-The `-f` matcher searches each process's entire command line, and a crewmate launcher carries its full brief in that command line.
-An ordinary English phrase or tool name in a pattern can therefore select unrelated crew processes.
+Read `bin/fm-lavish-board.sh`'s header and `--help` output for the current preflight, dedicated-browser, and pickup mechanics.
+Read `tools/lavish/README.md` for the durable decision and payload protocol.
+Load `lavish-decisions` before completing the normal collect and consume workflow.
 
-Before sending any process signal:
+Establish the exact decision id, resolved Firstmate home, helper output, and named Chrome session before diagnosing the incident.
+Preserve any downloaded answer JSON, durable pickup payload, and unsubmitted captain input.
+Do not edit `request.md` or `manifest.toon`, because their digest and ordered questions are immutable.
 
-1. List candidates with `pgrep -fl '<candidate-pattern>'` and read every row.
-2. Inspect each candidate with `ps -p <pid> -o pid=,ppid=,etime=,command=`.
-3. Reject every shell, harness, crewmate launcher, or process whose role is not proven.
-4. Signal only one verified explicit PID with `kill <pid>`.
-5. Re-list and verify the intended result before considering another signal.
+## Diagnose in route order
 
-Never pipe unfiltered `pgrep` output into `kill`.
-If an external control path leaves no explicit-PID option, constrain its matcher to a runtime-specific shape that ordinary prose cannot contain, such as the full resolved binary path plus exact operational arguments or a freshly generated `user-data-dir=/tmp/<opaque-id>` path.
-List and inspect candidates again immediately before acting, and abort if any crew or shell appears.
-A full path copied into a brief is no longer a safe matcher.
+### 1. Answerability preflight
 
-The concrete counter-example is the 2026-07-28 incident.
-Firstmate ran `pkill -f 'chrome-devtools-axi'` after several crewmate briefs had mentioned that tool in ordinary instructions.
-Fifteen of sixteen live crewmate panes died, and a Codex account was pushed to a re-authentication prompt.
-The browser count was not proof of the failing layer, and the pattern matched the briefs rather than only browser bridges.
+When the helper refuses an unanswerable board, read its named missing components.
+Do not bypass the preflight, arm pickup by hand, or substitute hand-authored HTML.
+Resolve checkout or installed-tool version skew against the active helper and Lavish fork before trying the helper again.
 
-## Diagnose in cheapest-first order
+The helper has not opened Chrome or armed pickup when this check fails.
+Surface the exact terminal fallback emitted by `lavish-axi create` instead of reporting that a board is open.
 
-Gather the source file and session URL for every affected board before changing anything.
-Run every stage below and keep its evidence.
+### 2. Browser launch
 
-### 1. HTTP serving
+When preflight succeeds but opening Chrome fails, retain the helper's exact error and session name.
+The helper removes the armed check on an open failure, so do not report that submission pickup is active.
+Use current `chrome-devtools-axi` help to inspect only the helper's named isolated session.
+Never attach the board to the captain's main Chrome profile.
 
-Run this against each affected `/session/<id>` URL:
+If the isolated session cannot be restored safely, use the exact terminal fallback from the creation result.
 
-```sh
-curl -s -o /dev/null -w '%{http_code} %{time_total}\n' '<session-url>'
-```
+### 3. Board interaction
 
-A fast local `200` proves that the HTTP serving path responds, not that the live channel works.
-It moves the fault boundary to the live channel, listener, or browser.
-Do not touch Chrome merely because the visible page looks slow.
-A refusal, timeout, or non-`200` keeps the server layer in scope.
+When the board is open but visibly broken, inspect that page in the named isolated session before reloading or reopening it.
+Protect any unsubmitted captain input before a page-level repair.
+If the rendered controls or submit machinery are missing, treat that as generator or version drift and return to the answerability-preflight branch.
 
-### 2. Live-channel listener leak
+### 4. Submission pickup
 
-Check the default detached-server log:
+The verified browser-profile record is the authoritative pickup route, and a matching download is optional corroboration.
+Keep the helper's existing one-shot check armed so Firstmate's ordinary watcher can recover the record even after the visible browser closes.
+Do not add another storage bridge, filesystem watcher, timer sweep, long poll, or resident process.
 
-```sh
-grep -c MaxListenersExceededWarning ~/.lavish-axi/server.log
-```
+Preserve a matching download for corroboration, but do not treat it as confirmed delivery.
+If the helper emits `lavish-submit: <decision-id> <payload-path>`, preserve that exact durable payload and continue through the `lavish-decisions` consume workflow.
+Confirm receipt only after `lavish-axi collect` validates and saves the answer.
 
-When `LAVISH_AXI_STATE_DIR` is set, use its `server.log` as documented by `lavish-axi server --help`.
-A nonzero count while multiple boards are simultaneously wedged is the known highest-probability live-channel failure.
-The signature is warnings for 11 `reload`, `agent-reply`, and `agent-presence` listeners against the default EventEmitter limit of 10.
-The log appends across restarts, so distinguish historical warnings from the current server before claiming an active leak.
-Inspect recent warning lines and compare their `(node:<pid>)` value with the server PID verified under the repair procedure below.
+### 5. Collection
 
-### 3. Listener presence
+Treat a named `lavish-axi collect` validation error as a payload or immutable-request mismatch, not a browser failure.
+Preserve the rejected payload for diagnosis and do not weaken the schema, key, option, annotation, or request-digest checks.
+Do not ask the captain to answer again when the same valid answer has already been saved durably.
 
-List poll candidates:
+## Process safety gate
 
-```sh
-pgrep -fl 'lavish-axi.*poll'
-```
+Prefer the helper's named Chrome-session controls over process signals.
+Never use `pkill -f` or signal a process selected only by a tool-name pattern, because crewmate launch commands can contain the same text.
+If an explicit process signal is genuinely required, list candidates, inspect every candidate's PID, parent, elapsed time, and full command, then signal only one PID whose isolated-session identity is proven.
+Never pipe unfiltered process-search output into `kill`.
+Recheck the named session after the action before considering another signal.
 
-Apply the process safety gate to the output.
-For each affected board, verify an actual Node process whose command is `lavish-axi poll <source-file>` for that board's source path.
-A shell or crewmate command that merely quotes those words is not a listener.
-A board without a live poll is inert by construction because the page has no agent listener.
+## Recovery boundary
 
-### 4. Browser boundary
-
-Consider browser-side exhaustion only after HTTP is fast, the current server lacks the listener-leak signature, and the exact board has a live poll.
-A large Chrome, headless, or bridge process count is a lead, not proof.
-Use `chrome-devtools-axi --help` and the relevant command help to inspect the exact board page and establish the browser failure before changing browser state.
-
-## Repair the proven layer
-
-Use the least-destructive branch that matches the evidence.
-
-### Server absent or not serving
-
-Re-serve each source file without opening another browser window:
-
-```sh
-lavish-axi '<source-file>' --no-open
-```
-
-The command starts the local server when needed and prints the session URL.
-Re-run the HTTP check, then attach a poll for every open board.
-If serving still fails, use `lavish-axi server --help` and the server log for the startup diagnosis rather than touching Chrome.
-
-### Poll absent
-
-Start the missing listener and leave it running:
-
-```sh
-lavish-axi poll '<source-file>'
-```
-
-Long-poll silence is normal.
-Confirm the actual poll process for that exact file with the listener-presence check.
-Do not restart the server or browser when attaching the missing poll repairs the board.
-
-### Current server has the listener leak
-
-List possible server processes without signaling them:
-
-```sh
-pgrep -fl 'lavish-axi/dist/cli.mjs server'
-```
-
-This selector can also appear inside a crewmate brief, so its output is discovery evidence only.
-Inspect every candidate with the safety-gate `ps` command.
-Confirm the intended Node process has the Lavish server entry point and expected `server --port <port>` arguments.
-When useful, corroborate the listener PID for the expected port with `lsof -nP -iTCP:<port> -sTCP:LISTEN`.
-If the candidates do not resolve to exactly one intended server, stop without signaling anything.
-
-Terminate only the verified numeric server PID:
-
-```sh
-kill <server-pid>
-```
-
-Re-serve every affected source file with `lavish-axi '<source-file>' --no-open`.
-Reattach `lavish-axi poll '<source-file>'` for every board and leave each poll running.
-Repeat the HTTP, current-log, and listener checks before reporting recovery.
-
-Session URLs survive a server restart when the same source files are re-served because Lavish derives session identity from each canonical source-file path and retains it in state.
-Do not treat the restart as URL loss or replace working links preemptively.
-
-### Proven browser failure
-
-Protect any unsubmitted captain input before reloading or reopening a page.
-Use current `chrome-devtools-axi` help to target the exact board page, and prefer repairing or reopening only that page with its existing session URL.
-Do not kill `chrome-devtools-axi` processes by name.
-If an exact browser process must be terminated, apply the fleet-wide safety gate and act only on a verified explicit PID with a run-specific binary or `user-data-dir` identity.
-Recheck the same URL and poll connection after the browser-side repair.
-
-## What survives a crew kill
-
-A process-kill incident is serious but does not erase landed or worktree-backed work.
-
-- Crewmate reports and completion artifacts under `data/<id>/` survive.
-- Leased worktrees, their working files, and their commits survive.
-- Pushed branches and PRs survive remotely.
-- Only the live agent process and its in-memory session are lost.
-
-Recover a dead crewmate by respawning it from its recorded worktree and brief.
-Load `stuck-crewmate-recovery` and `harness-adapters` before performing that recovery.
+A surface failure does not erase the durable decision, a downloaded payload, or a collected answer.
+Use `lavish show` and `lavish inbox` with the explicit Firstmate home to distinguish pending from already answered state.
+Reopen a board only when no submitted payload exists and the captain's unsubmitted input has been protected or is known to be absent.
+If the browser route remains unavailable, the exact `lavish answer ... --home ...` creation fallback keeps the decision answerable without browser infrastructure.
