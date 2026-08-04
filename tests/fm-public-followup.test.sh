@@ -655,6 +655,57 @@ assert_local_secondmate_parent_record() {
   ) || fail "real secondmate seeding must write the exact durable local parent record"
 }
 
+test_local_secondmate_seed_publishes_parent_before_identity() {
+  local parent child parent_resolved fakebin entered release manifest_out real_mv seed_pid wait_count
+  parent=$(make_home seed-publication-parent relay-off)
+  child="$TMP_ROOT/seed-publication-child"
+  parent_resolved=$(cd "$parent" && pwd -P)
+  fakebin=$(fm_fakebin "$TMP_ROOT/seed-publication-fake")
+  entered="$TMP_ROOT/seed-publication-entered"
+  release="$TMP_ROOT/seed-publication-release"
+  manifest_out="$TMP_ROOT/seed-publication.out"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+destination=${!#}
+case "$destination" in
+  */.fm-secondmate-home)
+    touch "$FM_TEST_PUBLISH_ENTERED"
+    wait_count=0
+    while [ ! -f "$FM_TEST_PUBLISH_RELEASE" ]; do
+      wait_count=$((wait_count + 1))
+      [ "$wait_count" -le 250 ] || exit 97
+      sleep 0.02
+    done
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+  PATH="$fakebin:$PATH" FM_HOME="$parent" \
+    FM_SECONDMATE_CHARTER='Local publication-order regression charter.' \
+    FM_TEST_REAL_MV="$real_mv" FM_TEST_PUBLISH_ENTERED="$entered" \
+    FM_TEST_PUBLISH_RELEASE="$release" \
+    "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects > "$manifest_out" 2>&1 &
+  seed_pid=$!
+  wait_count=0
+  while [ ! -f "$entered" ]; do
+    kill -0 "$seed_pid" 2>/dev/null \
+      || fail "local seeding exited before its identity completion marker: $(cat "$manifest_out")"
+    wait_count=$((wait_count + 1))
+    [ "$wait_count" -le 250 ] || fail "local seeding never reached its identity completion marker"
+    sleep 0.02
+  done
+  assert_local_secondmate_parent_record "$child" "$parent_resolved"
+  assert_absent "$child/.fm-secondmate-home" \
+    "the local identity marker must remain absent until durable parent publication completes"
+  touch "$release"
+  wait "$seed_pid" || fail "local seeding failed after publishing durable parent state: $(cat "$manifest_out")"
+  assert_present "$child/.fm-secondmate-home" \
+    "local seeding must publish its identity marker as the completion point"
+  pass "local seeding publishes durable parent state before its identity marker"
+}
+
 test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   local parent child parent_resolved
   parent=$(make_home teardown-durable-parent)
@@ -1180,6 +1231,7 @@ test_interrupted_delivery_refuses_to_repost
 test_outward_delivery_stays_with_the_owning_home
 test_delivery_requires_registration_before_posting
 test_secondmate_teardown_requires_parent_binding
+test_local_secondmate_seed_publishes_parent_before_identity
 test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost
 test_secondmate_teardown_durable_record_missing_parent_registration_still_refuses
 test_secondmate_teardown_durable_record_with_no_commitment_succeeds

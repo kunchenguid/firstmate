@@ -924,7 +924,6 @@ seed_home() {
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 
   projects_csv=$(join_projects "$@")
-  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
   # Durable record of this home's route to its parent, written once here next
   # to the identity marker: the cleanup check in fm-teardown.sh reads it so a
   # restart that drops the launch-time FM_PUBLIC_FOLLOWUP_PRIMARY_HOME prefix
@@ -934,7 +933,10 @@ seed_home() {
     printf 'schema=fm-secondmate-parent.v1\n'
     printf 'route=local\n'
     printf 'parent_home=%s\n' "$(resolved_path "$FM_HOME")"
-  } > "$home/$SUB_HOME_PARENT_MARKER"
+  } > "$home/$SUB_HOME_PARENT_MARKER.tmp.$$"
+  mv -f -- "$home/$SUB_HOME_PARENT_MARKER.tmp.$$" "$home/$SUB_HOME_PARENT_MARKER"
+  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER.tmp.$$"
+  mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
   SEED_COMMITTED=1
