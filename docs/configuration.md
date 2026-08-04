@@ -436,6 +436,8 @@ Lavish `arm` performs that same reconciliation immediately, then reports `armed`
 That bound is elapsed wall-clock time, so a concurrent ownership change holding the same per-source boundary cannot stretch a confirmation an operator or agent is waiting on.
 Registration alone is not a successful Lavish handoff: confirmation failure returns nonzero with a concrete ownership diagnostic while retaining the registration for ordinary reconciliation and restart recovery.
 A target session that ended or was missing before any live listener existed is a hard `arm` failure reported as exactly that, because such a session can never accept the feedback the handoff waits for; its terminal result is still captured, announced, and acknowledged normally, and re-arming it only polls an ended session again.
+That verdict is scoped to the attempt that reports it: it requires either a terminal claim on the exact current registration generation, or a captured result newer than the sequence baseline taken for that attempt.
+A canonical source id outlives any one session, so a result from an earlier ended review of the same artifact never makes a later arm of a reopened one report an ending.
 An identical repeated registration preserves its existing generation, so repeated Lavish arm converges on one listener without preventing that active generation's later terminal retirement.
 In supported steady state, a home with no registered source runs nothing, generates no state, and keeps its ordinary cadence.
 

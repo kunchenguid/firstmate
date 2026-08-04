@@ -75,7 +75,7 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local artifact=${1-} id real live_status=0
+  local artifact=${1-} id real baseline live_status=0
   [ -n "$artifact" ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   id=$(cmd_source_id "$artifact") || exit 1
@@ -83,12 +83,17 @@ cmd_arm() {
     || die "cannot resolve the artifact path: $artifact"
   # The plain blocking form: no --timeout-ms, so completion is a server event.
   "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- lavish-axi poll "$real" || exit 1
+  # A canonical id is the artifact path, so results captured from earlier reviews
+  # of the same file live on. Baselining here - after the registration exists and
+  # before anything can start - is what keeps the ended verdict below about THIS
+  # attempt rather than about a session that ended days ago.
+  baseline=$("$SCRIPT_DIR/fm-procevent.sh" latest-sequence "$id") || exit 1
   "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null || exit 1
   # Exit 3 is the runner's distinct "this source already ended" verdict. For
   # Lavish that means the review session ended or was never there, which is a
   # failed handoff however durably its terminal result was captured: an ended
   # session cannot receive the feedback this arm was asked to wait for.
-  "$SCRIPT_DIR/fm-procevent.sh" await-live "$id" >/dev/null || live_status=$?
+  "$SCRIPT_DIR/fm-procevent.sh" await-live "$id" "$baseline" >/dev/null || live_status=$?
   [ "$live_status" -ne 3 ] \
     || die "the Lavish session for $real ended or was missing before a live listener was established, so it cannot accept feedback and this handoff did not arm: $id"
   [ "$live_status" -eq 0 ] || exit 1

@@ -78,6 +78,8 @@ It repeats arm against that listener to prove one process and one registration g
 A session that already ended is covered as its own end-user case, because it cannot accept the feedback the handoff waits for.
 Against a stand-in that returns an ended session at once, `arm` fails and names the target session as what ended, never firstmate's own state, while that terminal result is still captured once, announced once, and left retired.
 The same distinction is proved directly on the runner's public `await-live`: exit 3 for a source its adapter classified terminal - whether its registration is already gone or its terminal retirement is still pending - and the separate missing-registration diagnostic for a source that was never registered.
+That ended verdict is proved to be scoped to the attempt reporting it.
+Arming the same artifact again once its review is reopened succeeds on its own listener with `owner=live`, and on the runner's own boundary a registration that disappears during confirmation reports the missing registration rather than an ending when the only terminal result predates that attempt's baseline, while the identical state with a baseline of 0 still reports the ending.
 The bound is proved to be elapsed time by holding the per-source boundary from another process while the confirmation runs: it returns nonzero with a concrete diagnostic and its registration intact instead of waiting out the holder.
 Measured directly against a holder that kept that boundary for 30 seconds:
 
@@ -94,8 +96,9 @@ $ tests/fm-procevent.test.sh
 ok - failed terminal retirement is fail-closed and idempotently recoverable
 ok - Lavish arm reports success only after the exact source listener is live, and repeated arm stays idempotent
 ok - failed Lavish listener startup is reported and the durable source recovers through reconcile
-ok - Lavish arm fails with a target-session diagnostic when that session already ended, and still keeps its captured result
+ok - Lavish arm fails with a target-session diagnostic when that session already ended, and still arms the same artifact once it is reopened
 ok - await-live distinguishes a source that ended terminally from a registration that is not there
+ok - the ended verdict is backed by a result newer than the baseline taken for this attempt
 ok - the liveness confirmation bound is elapsed time that a held source boundary cannot stretch
 ...
 all procevent tests passed
@@ -117,6 +120,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
 | live Lavish arm handoff | the public arm command starts the exact source through ordinary reconciliation, withholds success until the listener is invoked and ownership is stably live, converges an identical repeat on one owner and registration generation, returns nonzero when startup cannot hold liveness, and leaves that failed registration recoverable by ordinary reconciliation |
 | an ended target session is a diagnosed arm failure | a stand-in session that has already ended makes the public arm command fail naming the ended target rather than missing firstmate state, polls exactly once, and still captures, announces, and retires that one terminal result; the runner's own `await-live` reports it as exit 3 whether retirement finished or is still pending, and keeps a separate diagnostic for a registration that is simply not there |
+| the ended verdict names one attempt | arming the same artifact after its earlier review ended succeeds on the reopened session's own live listener without re-polling the ended one; on the runner's boundary the same disappearing-registration state reports the missing registration when the only terminal result predates that attempt's `latest-sequence` baseline and the ending when it does not, and a non-numeric baseline is refused |
 | liveness confirmation bound | holding the per-source boundary from another process while a one-second confirmation runs returns nonzero at that bound with a concrete diagnostic and the registration retained, so the configured bound is elapsed time rather than a count of reads a concurrent ownership change can stretch |
 | bounded re-announcement until handled | a durably captured result with no handled acknowledgement is re-announced by `reconcile` with the same source and sequence on every call - not only the first restart after a crash - and a drained-but-unhandled wake resurfaces identically after a simulated replacement session |
 | handled acknowledgement | `fm-procevent.sh handled <source-id> <sequence>` atomically and idempotently records handling at mode `0600`, fails without leaving a marker when private-mode enforcement fails, reports the first call distinctly from every repeat, stops further re-announcement once recorded, and never authorizes a paired effect twice across repeat calls |

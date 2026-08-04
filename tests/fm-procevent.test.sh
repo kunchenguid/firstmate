@@ -592,7 +592,37 @@ assert_contains "$(wake_payloads "$HARMEND")" "procevent lavish $lavish_end_id 1
   "the ended session's captured result was not announced"
 assert_absent "$HARMEND/state/procevent/$lavish_end_id.source" \
   "the ended session's source did not retire itself"
-pass "Lavish arm fails with a target-session diagnostic when that session already ended, and still keeps its captured result"
+
+# The human reopens the review on the same artifact, so the canonical source id
+# is unchanged and that ended session's terminal result stays in the inbox
+# forever. Arming the reopened session must succeed on its own listener: a result
+# from the session that ended can never be this attempt's outcome.
+LAVISH_REOPEN_BIN=$(fm_fakebin "$TMP_ROOT/lavish-reopened-stub")
+LAVISH_REOPEN_LISTENER="$TMP_ROOT/lavish-reopened-listener"
+export LAVISH_REOPEN_LISTENER
+cat > "$LAVISH_REOPEN_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${1-}" = poll ] && [ -f "${2-}" ] || exit 64
+printf '%s\n' "$$" > "$LAVISH_REOPEN_LISTENER"
+trap 'exit 0' TERM INT
+while :; do sleep 0.05; done
+SH
+chmod +x "$LAVISH_REOPEN_BIN/lavish-axi"
+reopen_status=0
+reopen_out=$(PATH="$LAVISH_REOPEN_BIN:$PATH" FM_HOME="$HARMEND" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_END_ART" 2>&1) || reopen_status=$?
+[ "$reopen_status" -eq 0 ] \
+  || fail "arming a reopened review was refused because an earlier session had ended: $reopen_out"
+assert_contains "$reopen_out" "armed: $lavish_end_id" "the reopened review was not reported armed"
+assert_not_contains "$reopen_out" "ended or was missing" \
+  "an older session's terminal result was reported as the reopened session ending"
+assert_present "$LAVISH_REOPEN_LISTENER" "the reopened review armed without its own listener"
+arm_owner=$(pe "$HARMEND" list | awk -v id="$lavish_end_id" '$1 == id { print $3 }')
+[ "$arm_owner" = live ] || fail "the reopened review armed with owner=$arm_owner"
+[ "$(cat "$LAVISH_END_COUNT")" = 1 ] \
+  || fail "arming the reopened review polled the ended session again"
+pe "$HARMEND" retire "$lavish_end_id" >/dev/null
+pass "Lavish arm fails with a target-session diagnostic when that session already ended, and still arms the same artifact once it is reopened"
 
 # The generic runner owns that distinction, so it is proved on its own public
 # command too: a source that ended terminally reads differently from one whose
@@ -619,6 +649,38 @@ assert_contains "$await_absent_out" "registration disappeared" \
   "a source with no registration and no captured result lost its own diagnostic"
 pass "await-live distinguishes a source that ended terminally from a registration that is not there"
 
+# The reachable misdiagnosis: an armed source whose registration disappears
+# during confirmation - a concurrent retire or home sweep, or reconcile
+# completing an earlier terminal retirement - while a result from an older,
+# genuinely ended generation is still in the inbox. Only the baseline this
+# attempt took keeps that stale result from being read as this attempt's ending.
+[ "$(pe_adapter "$HAWAIT" latest-sequence await-ends-src)" = 1 ] \
+  || fail "latest-sequence did not report the captured generation of an ended source"
+[ "$(pe_adapter "$HAWAIT" latest-sequence await-never-src)" = 0 ] \
+  || fail "latest-sequence did not report 0 for a source that captured nothing"
+pe_adapter "$HAWAIT" register endnow await-ends-src -- /bin/echo "reopened payload" >/dev/null
+pe_adapter "$HAWAIT" retire await-ends-src >/dev/null
+await_stale_status=0
+await_stale_out=$(pe_adapter "$HAWAIT" await-live await-ends-src 1 2>&1) || await_stale_status=$?
+[ "$await_stale_status" -eq 1 ] \
+  || fail "await-live exited $await_stale_status on an older generation's terminal result"
+assert_contains "$await_stale_out" "registration disappeared" \
+  "a stale terminal result was reported as this attempt's source ending"
+assert_not_contains "$await_stale_out" "ended before a live listener" \
+  "an older generation's ending was attributed to the generation being confirmed"
+await_baseline_status=0
+await_baseline_out=$(pe_adapter "$HAWAIT" await-live await-ends-src 0 2>&1) || await_baseline_status=$?
+[ "$await_baseline_status" -eq 3 ] \
+  || fail "await-live exited $await_baseline_status for a terminal result newer than its baseline"
+assert_contains "$await_baseline_out" "ended before a live listener" \
+  "a terminal result newer than the baseline lost the ended verdict"
+await_reject_status=0
+await_reject_out=$(pe_adapter "$HAWAIT" await-live await-ends-src not-a-sequence 2>&1) || await_reject_status=$?
+[ "$await_reject_status" -ne 0 ] || fail "await-live accepted a non-numeric baseline sequence"
+assert_contains "$await_reject_out" "baseline sequence must be a nonnegative integer" \
+  "an invalid baseline sequence was not refused with its own diagnostic"
+pass "the ended verdict is backed by a result newer than the baseline taken for this attempt"
+
 # The bound is real elapsed time: a concurrent ownership change holding the
 # per-source boundary must not stretch a confirmation the caller is waiting on.
 HCONT="$TMP_ROOT/hcont"; new_home "$HCONT"
@@ -636,8 +698,10 @@ cont_elapsed=$(( $(date +%s) - cont_started ))
 [ "$cont_status" -ne 0 ] || fail "await-live confirmed liveness it never managed to read"
 [ "$cont_elapsed" -le 5 ] \
   || fail "await-live waited ${cont_elapsed}s on a held source boundary despite its 1s bound"
-assert_contains "$cont_out" "cannot read ownership" \
-  "a confirmation blocked by the source boundary omitted its concrete diagnostic"
+assert_contains "$cont_out" "listener did not become live" \
+  "a confirmation blocked by the source boundary lost the one liveness diagnostic"
+assert_contains "$cont_out" "boundary stayed unavailable" \
+  "a confirmation blocked by the source boundary omitted that concrete cause"
 assert_present "$HCONT/state/procevent/contended-src.source" \
   "a blocked confirmation discarded the registration needed for reconcile recovery"
 : > "$CONT_RELEASE"
@@ -1282,6 +1346,8 @@ assert_contains "$runner_help" "await-live" \
   "the runner's help exposes its bounded exact-source liveness confirmation"
 assert_contains "$runner_help" "elapsed wall-clock bound" \
   "the runner's help states that the confirmation bound is elapsed time"
+assert_contains "$runner_help" "latest-sequence" \
+  "the runner's help exposes the baseline query its ended verdict depends on"
 assert_contains "$runner_help" "Exit 3" \
   "the runner's help distinguishes an ended source from a listener that never became live"
 assert_contains "$runner_help" "Durability boundary" \

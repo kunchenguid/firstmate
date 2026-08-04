@@ -7,7 +7,8 @@
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
 #   fm-procevent.sh start <source-id>
 #   fm-procevent.sh reconcile
-#   fm-procevent.sh await-live <source-id>
+#   fm-procevent.sh latest-sequence <source-id>
+#   fm-procevent.sh await-live <source-id> [<baseline-sequence>]
 #   fm-procevent.sh handled <source-id> <sequence>
 #   fm-procevent.sh retire <source-id>
 #   fm-procevent.sh sweep-home [--preflight]
@@ -31,15 +32,22 @@
 #            start a runner for any registered source that has no live owner.
 #            This is liveness repair only - it never discovers results by
 #            polling the source, because the child blocks on the source itself.
+# latest-sequence
+#            Print the newest durably captured result sequence for the exact
+#            source, or 0 when it has captured none. Take this immediately before
+#            arming to get the baseline await-live needs, so an older session's
+#            result cannot be read as this attempt's outcome.
 # await-live Verify that the exact registered source has a live owner, requiring
 #            five consecutive checks inside an elapsed wall-clock bound of
 #            FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT seconds (default 5) that a
 #            concurrent ownership change cannot stretch. It never starts a
 #            runner; call reconcile first. Exit 0 confirms liveness. Exit 3 means
 #            the source ENDED before any live listener was confirmed - its own
-#            adapter classified the captured result terminal - so it can never
-#            become live and retrying cannot help. Any other nonzero exit leaves
-#            the registration in place for ordinary reconcile recovery.
+#            adapter classified terminal a result captured after
+#            <baseline-sequence> (default 0), or its current registration
+#            generation holds a terminal claim - so it can never become live and
+#            retrying cannot help. Any other nonzero exit leaves the registration
+#            in place for ordinary reconcile recovery.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -91,7 +99,7 @@ MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 LIVE_CONFIRM_TIMEOUT=${FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT:-5}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,74p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,82p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -123,35 +131,47 @@ claim_state_label() {  # <fm_procevent_claim_state_locked exit code>
   esac
 }
 
-# The newest generation this source has durably captured, if any.
-latest_captured_result() {  # <source-id>
-  local id=$1 inbox result seq newest='' newest_seq=0
+# The newest generation this source has durably captured. Sets
+# LATEST_RESULT_SEQUENCE to 0 with an empty LATEST_RESULT_PATH when it has
+# captured none, so a caller can take a baseline before anything is armed.
+load_latest_captured_result() {  # <source-id>
+  local id=$1 inbox result seq
+  LATEST_RESULT_SEQUENCE=0
+  LATEST_RESULT_PATH=
   inbox=$(fm_procevent_inbox_dir "$STATE")
-  [ -d "$inbox" ] || return 1
+  [ -d "$inbox" ] || return 0
   for result in "$inbox/$id".*.result; do
     [ -f "$result" ] && [ ! -L "$result" ] || continue
     [ "$(fm_procevent_result_source_id "$result")" = "$id" ] || continue
     seq=$(fm_procevent_result_sequence "$result")
     case "$seq" in ''|*[!0-9]*) continue ;; esac
-    if [ "$seq" -gt "$newest_seq" ]; then
-      newest_seq=$seq
-      newest=$result
+    if [ "$seq" -gt "$LATEST_RESULT_SEQUENCE" ]; then
+      LATEST_RESULT_SEQUENCE=$seq
+      LATEST_RESULT_PATH=$result
     fi
   done
-  [ -n "$newest" ] || return 1
-  printf '%s\n' "$newest"
 }
 
-# Whether this source ended itself: its own adapter classified its newest
-# captured result terminal, which is the exact verdict this runner acts on when
-# it retires a source. A source that has ended is a different outcome from a
-# listener that never became live, and only the adapter's verdict tells them
-# apart once the registration is already gone.
-source_ended_terminally() {  # <source-id>
-  local id=$1 result adapter
-  result=$(latest_captured_result "$id") || return 1
-  adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null) || return 1
-  adapter_result_is_terminal "$adapter" "$result"
+# Whether this source ended itself AFTER the caller's baseline sequence: its own
+# adapter classified a newer captured result terminal, which is the exact verdict
+# this runner acts on when it retires a source. A source that has ended is a
+# different outcome from a listener that never became live, and only the
+# adapter's verdict tells them apart once the registration is already gone.
+#
+# The baseline is what keeps that verdict about the generation the caller is
+# actually confirming. A canonical source id outlives any one session - a Lavish
+# id is derived from the artifact path - so a result captured by an earlier,
+# genuinely ended session stays in the inbox forever. Without the baseline, a
+# registration that disappears during confirmation for an unrelated reason
+# (a concurrent retire or home sweep, or reconcile completing an earlier
+# terminal retirement) would be reported as this session having ended, which
+# would tell a caller to abandon a review surface that is live.
+source_ended_terminally_since() {  # <source-id> <baseline-sequence>
+  local id=$1 since=$2 adapter
+  load_latest_captured_result "$id"
+  [ "$LATEST_RESULT_SEQUENCE" -gt "$since" ] || return 1
+  adapter=$(fm_procevent_result_adapter "$LATEST_RESULT_PATH" 2>/dev/null) || return 1
+  adapter_result_is_terminal "$adapter" "$LATEST_RESULT_PATH"
 }
 
 read_adapter() {  # <source-id>
@@ -544,6 +564,17 @@ cmd_reconcile() {
   printf 'reconciled: published=%s started=%s stopped=%s uncertain=%s\n' "$published" "$started" "$stopped" "$uncertain"
 }
 
+# The baseline a caller takes before arming, so the confirmation below can tell
+# this attempt's outcome from a result an earlier session of the same canonical
+# source left behind.
+cmd_latest_sequence() {
+  local id=${1-}
+  [ "$#" -eq 1 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  load_latest_captured_result "$id"
+  printf '%s\n' "$LATEST_RESULT_SEQUENCE"
+}
+
 # Confirm a handoff without becoming another lifecycle owner. Reconcile remains
 # the only detached-start and recovery path; this command only reads the exact
 # source's claim under the same per-source boundary as list and ownership changes.
@@ -553,14 +584,18 @@ cmd_reconcile() {
 # Two properties are what make this safe to call inside a conversational turn.
 # The bound is elapsed wall-clock time, and the boundary is taken with the
 # non-blocking acquire, so a concurrent retire or reconcile holding it cannot
-# stretch the wait past the configured timeout. And a source whose own adapter
-# already classified its captured result terminal has ENDED: no amount of waiting
-# produces a live listener for it, so it exits 3 immediately and distinctly
-# rather than burning the window and reporting missing state.
+# stretch the wait past the configured timeout. And a source that ended - a
+# terminal claim on this exact registration generation, or an adapter-classified
+# terminal result newer than the caller's baseline - can never become live, so it
+# exits 3 immediately and distinctly rather than burning the window and reporting
+# missing state.
 cmd_await_live() {
-  local id=${1-} state=unread claim_state live_reads=0
-  [ "$#" -eq 1 ] || usage
+  local id=${1-} since=${2-0} state=unread claim_state live_reads=0 detail
+  [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  case "$since" in
+    ''|*[!0-9]*) die "baseline sequence must be a nonnegative integer: $since" ;;
+  esac
   case "$LIVE_CONFIRM_TIMEOUT" in
     ''|*[!0-9]*|0) die "FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT must be an integer from 1 to 300" ;;
   esac
@@ -593,20 +628,22 @@ cmd_await_live() {
     esac
     sleep 0.1
   done
-  if [ "$state" = terminal ] || { [ "$state" = unregistered ] && source_ended_terminally "$id"; }; then
+  if [ "$state" = terminal ] || { [ "$state" = unregistered ] && source_ended_terminally_since "$id" "$since"; }; then
     printf 'error: source %s ended before a live listener was confirmed: its own adapter classified the captured result terminal, so it will never produce another one\n' \
       "$id" >&2
     exit 3
   fi
+  [ "$state" != unregistered ] \
+    || die "source registration disappeared before listener liveness was confirmed: $id"
+  # One wording for every exhausted window, because which state the last sample
+  # caught is a race: an owner that appears late still fails confirmation, and a
+  # caller must never have to distinguish that from a source nothing ever owned.
+  detail="owner=$state"
   case "$state" in
-    unregistered)
-      die "source registration disappeared before listener liveness was confirmed: $id" ;;
-    unread)
-      die "cannot read ownership of source $id within ${LIVE_CONFIRM_TIMEOUT}s: its per-source boundary stayed unavailable; registration remains for reconcile" ;;
-    live)
-      die "listener ownership of source $id did not stay live for the whole ${LIVE_CONFIRM_TIMEOUT}s confirmation window; registration remains for reconcile" ;;
+    unread) detail="owner unread, the per-source boundary stayed unavailable" ;;
+    live) detail="owner=live for only $live_reads consecutive reads" ;;
   esac
-  die "listener did not become live for source $id within ${LIVE_CONFIRM_TIMEOUT}s (owner=$state); registration remains for reconcile"
+  die "listener did not become live for source $id within ${LIVE_CONFIRM_TIMEOUT}s ($detail); registration remains for reconcile"
 }
 
 # Stop a runner and the child it is blocked on. A runner started by reconcile is
@@ -842,6 +879,7 @@ case "${1-}" in
   start)      shift; cmd_start_public "$@" ;;
   _start)     shift; cmd_start "$@" ;;
   reconcile)  shift; cmd_reconcile "$@" ;;
+  latest-sequence) shift; cmd_latest_sequence "$@" ;;
   await-live) shift; cmd_await_live "$@" ;;
   handled)    shift; cmd_handled "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
