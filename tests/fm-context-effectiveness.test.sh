@@ -11,16 +11,19 @@ REMOTE_SOURCE=git:github.com/algal/pi-openai-server-compaction
 HANDOFF_DOC="$ROOT/docs/verification/context-effectiveness.md"
 MEASURED_PI_VERSION=0.83.0
 
-# The measured matrix in docs/verification/context-effectiveness.md is scoped to
-# one exact Pi build, and these checks drive that build's own dist modules. A
-# different installed version is recorded as a skip rather than a failure so a
-# routine Pi upgrade does not redden the default family.
 [ -f "$PI_PACKAGE_DIR/package.json" ] || { echo "skip: installed @earendil-works/pi-coding-agent package not found"; exit 0; }
 PI_PACKAGE_VERSION=$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$PI_PACKAGE_DIR/package.json" 2>/dev/null) \
   || PI_PACKAGE_VERSION=
-[ "$PI_PACKAGE_VERSION" = "$MEASURED_PI_VERSION" ] || {
-  echo "skip: measured context-effectiveness matrix records exact Pi $MEASURED_PI_VERSION, installed package is ${PI_PACKAGE_VERSION:-unreadable}"
-  exit 0
+
+# The measured matrix in docs/verification/context-effectiveness.md is scoped to
+# one exact Pi build, so only the checks that depend on that measurement gate on
+# it. A different installed version is recorded as a skip rather than a failure
+# so a routine Pi upgrade does not redden the default family. The version-
+# agnostic skill-discovery witness deliberately stays outside this gate.
+measured_pi_or_skip() {
+  [ "$PI_PACKAGE_VERSION" = "$MEASURED_PI_VERSION" ] && return 0
+  echo "skip: $1 is measured only against exact Pi $MEASURED_PI_VERSION, installed package is ${PI_PACKAGE_VERSION:-unreadable}"
+  return 1
 }
 
 load_skill_metadata() {
@@ -73,6 +76,10 @@ PY
 
 test_skill_discovery_and_trigger_precision() {
   local metadata mutant metadata_mutant
+  if [ ! -f "$PI_PACKAGE_DIR/dist/core/resource-loader.js" ]; then
+    echo "skip: installed Pi ${PI_PACKAGE_VERSION:-unknown} exposes no dist/core/resource-loader.js to discover skills through"
+    return 0
+  fi
   metadata=$(load_skill_metadata "$ROOT" "$TMP_ROOT/agent-actual") \
     || fail "Pi could not discover the evidence-consumption skill through its resource loader"
   metadata_has_precise_trigger "$metadata" \
@@ -188,6 +195,7 @@ write_primary_home_fixture() {
 
 test_documented_handoff_preserves_unrelated_state_and_disables_only_extensions() {
   local project backup overwrite_mutant filter_mutant out
+  measured_pi_or_skip "the documented primary-home settings handoff" || return 0
   project="$TMP_ROOT/settings-project"
   backup="$project/data/pi-settings-before-native-12k.json"
   write_primary_home_fixture "$project"
@@ -235,6 +243,7 @@ PY
 
 test_documented_handoff_is_reversible_and_refuses_unsafe_preconditions() {
   local project backup duplicate settled
+  measured_pi_or_skip "the documented handoff rollback and refusal contract" || return 0
   project="$TMP_ROOT/rollback-project"
   backup="$project/data/pi-settings-before-native-12k.json"
   write_primary_home_fixture "$project"
@@ -268,6 +277,7 @@ JSON
 
 test_installed_pi_version_is_recorded_without_claiming_broader_compatibility() {
   local runtime_version
+  measured_pi_or_skip "the recorded context-effectiveness version matrix" || return 0
   if ! command -v pi >/dev/null 2>&1; then
     echo "skip: pi not on PATH, so the installed Pi $PI_PACKAGE_VERSION CLI version could not be recorded"
     return 0
