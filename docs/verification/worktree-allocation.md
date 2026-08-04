@@ -57,8 +57,56 @@ $ treehouse status --json
 [{"name":"2","status":"available","path":".../2/repo",...}]   # while on fm/composer-nbsp-fix-sim
 ```
 
-So the exposure the guard closes is specifically a clean working tree plus commits not reachable from the default branch.
+So the exposure the guard closes is specifically a clean working tree plus content that no landing target carries.
 `get` also prefers reusing an available slot over creating a new one below `max_trees`, so an at-risk available slot is the next one handed out rather than a remote possibility.
+
+## What "unlanded" is measured against
+
+Verified 2026-08-03, against git 2.53.0 in isolated throwaway pools.
+
+A remote-tracking ref is the landing target only for a fleet that pushes to that remote and refetches it, and neither repository in this fleet does.
+`origin` here fetches from an upstream but pushes to a fork, so `refs/remotes/origin/main` tracks upstream while the fork trunk is the local branch.
+A slot sitting on the fork trunk exactly, with zero content difference from it, was refused:
+
+```
+$ git -C slot1 rev-parse HEAD; git -C proj rev-parse main     # identical
+597f72c...                                                    597f72c...
+$ fm-worktree-guard.sh check proj
+    found: detached HEAD with 3 commits not on remotes/origin/main
+```
+
+The same defect was measured the same day in a second, unrelated pool whose remote is simply never advanced, because that project replays and fast-forwards locally by design.
+Its slots refused with 286, 360, 361 and 362 `commits not on remotes/origin/v1.2-recovery`, while on every one of them the working tree was clean, `merge-base --is-ancestor HEAD v1.2-recovery` passed, and `rev-list --count v1.2-recovery..HEAD` was 0.
+One slot in that same pool was a genuine true positive carrying three real unlanded commits, so the guard was never simply broken; it was measuring against the wrong ref.
+The defect is therefore remote-tracking ref versus local trunk in general, not anything fork-specific, and `tests/fm-worktree-guard.test.sh` case (o5) pins both verdicts surviving in one pool.
+
+Commit reachability is also the wrong instrument on its own, because a squash merge leaves a landed branch permanently "ahead":
+
+```
+$ git -C slot2 rev-list --count refs/heads/main..HEAD         # after its content was squash-merged
+2
+```
+
+`bin/fm-landed-lib.sh` therefore tests whether a ref already CONTAINS what HEAD introduces, by 3-way merging and comparing trees, and the guard accepts a slot when any ref carrying the default branch's name contains it.
+Containment in any trunk proves the content outlives the slot.
+That widening cannot launder unlanded work: content no candidate carries is reported contained by no candidate, which `tests/fm-worktree-guard.test.sh` cases (q) and (q2) pin against a slot in this same stale-remote shape.
+
+## What the guard writes
+
+Verified 2026-08-03, against git 2.53.0.
+
+`git merge-tree --write-tree` writes its merged tree into the object store, so the containment test is not purely read-only.
+Measured on a slot whose merge result was a genuinely new tree:
+
+```
+loose objects: 25 -> 26   (delta 1)
+merged tree 696a3ec... type=tree
+referenced by any ref? 0
+HEAD/index/worktree still untouched: HEAD=f1f9fd9 dirty=''
+```
+
+The one object it adds is a dangling tree that no ref reaches, so `git gc` collects it, and no ref, HEAD, index, or working-tree file changes.
+This is the same instrument `bin/fm-teardown.sh` already runs against these repositories.
 
 ## Why `--json` is preferred, and why a fallback is still required
 
@@ -114,4 +162,5 @@ An absent record reads unresolved, never as a released slot, so a home that has 
 The guard never resets, cleans, forces, discards, or releases a slot; it only refuses a spawn.
 `bin/fm-teardown.sh` remains the sole releaser of a slot holding work and the owner of the complete landed-work test.
 The guard deliberately asks the strictly weaker, offline question "is this slot demonstrably empty?", so it neither restates nor weakens that contract.
-Every git read uses `--no-optional-locks` so inspecting another lane's worktree never writes its index.
+It shares only the containment instrument with teardown, never teardown's policy: teardown refreshes the remote first and measures against it, which the guard must not do because it inspects every available slot before every spawn.
+Every git read uses `--no-optional-locks` so inspecting another lane's worktree never writes its index, and the single dangling tree object recorded above is the only thing it adds.

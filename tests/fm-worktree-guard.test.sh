@@ -28,6 +28,11 @@
 #   (k) explicit operator authority                      -> exact path only
 #   (l) owner-fields on an unoccupied worktree           -> empty, never invented
 #   (m) the guard never mutates the slot it refuses
+#
+# Cases (o) through (r2) additionally pin the landing-target contract the guard
+# reads from bin/fm-landed-lib.sh: which refs may count as a landing target, and
+# that containment of CONTENT - not reachability of a commit - is what proves a
+# slot is safe to hand out.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -68,6 +73,48 @@ make_pool() {  # <case-name> <slot-count>
 
 slot_path() {  # <proj> <n>
   printf '%s/slots/%s\n' "$(dirname "$1")" "$2"
+}
+
+# A project whose `origin` FETCHES from an upstream the fleet never lands on, so
+# refs/remotes/origin/<default> tracks upstream while the LOCAL branch is the
+# real landing target. This is firstmate's own shape (origin fetches
+# kunchenguid/firstmate but pushes to the sbracewell64 fork) and the platform's
+# (a project that lands locally by design never advances its remote at all).
+# <default> defaults to main; pass v1.2-recovery to model a non-conventional
+# default branch reachable only through origin/HEAD.
+make_pool_stale_origin() {  # <case-name> <slot-count> [default-branch] [trunk-commits]
+  local name=$1 count=$2 default=${3:-main} extra=${4:-3} base proj i
+  base="$TMP_ROOT/$name"
+  proj="$base/proj"
+  mkdir -p "$proj"
+  git init -q --bare "$base/upstream.git"
+  git -C "$proj" init -q -b "$default"
+  printf 'base\n' > "$proj/README.md"
+  git -C "$proj" add README.md
+  git -C "$proj" commit -qm initial
+  git -C "$proj" remote add origin "$base/upstream.git"
+  git -C "$proj" push -q origin "$default"
+  git -C "$proj" remote set-head origin "$default"
+  # The trunk advances locally only; origin/<default> stays at the upstream tip.
+  for i in $(seq 1 "$extra"); do
+    printf 'trunk %s\n' "$i" > "$proj/trunk-$i.txt"
+    git -C "$proj" add "trunk-$i.txt"
+    git -C "$proj" commit -qm "trunk $i"
+  done
+  for i in $(seq 1 "$count"); do
+    git -C "$proj" worktree add --quiet --detach "$base/slots/$i" "$default"
+  done
+  printf '%s\n' "$proj"
+}
+
+# Assert the fixture really is the reported defect shape: the slot carries <n>
+# commits "not on" the remote-tracking ref, which is exactly the count the old
+# commit-reachability test turned into a refusal.
+assert_stale_origin_shape() {  # <slot> <default> <n> <label>
+  local slot=$1 default=$2 want=$3 label=$4 got
+  got=$(git -C "$slot" rev-list --count "refs/remotes/origin/$default..HEAD" 2>/dev/null)
+  [ "$got" = "$want" ] \
+    || fail "$label: fixture is not the stale-origin shape (ahead of origin/$default = ${got:-none}, want $want)"
 }
 
 # Put <slot> on a branch carrying <n> commits that are not on main.
@@ -426,5 +473,221 @@ case "$slot" in
     printf 'ok - (n6) skipped: temp root %s is not under the home directory\n' "$slot"
     ;;
 esac
+
+# --- (o) the landing target is not always the remote-tracking ref ------------
+#
+# Measured 2026-08-03: the guard refused EVERY spawn into a slot left at landed
+# state, because it counted commits against refs/remotes/origin/<default> and
+# neither of this fleet's repositories lands there. Firstmate authorized five
+# per-slot overrides in one session, all correct, which is how a safety
+# mechanism teaches its own bypass. These cases pin the refusal to real danger.
+
+proj=$(make_pool_stale_origin trunk-landed 1)
+slot=$(slot_path "$proj" 1)
+[ "$(git -C "$slot" rev-parse HEAD)" = "$(git -C "$proj" rev-parse main)" ] \
+  || fail "(o) fixture slot is not sitting on the local trunk"
+assert_stale_origin_shape "$slot" main 3 "(o)"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  || fail "(o) guard refused a slot sitting EXACTLY on the landing target: $out"
+[ -z "$out" ] || fail "(o) guard was not silent for a landed slot: $out"
+pass "(o) a slot at the local trunk passes even though the remote-tracking ref is stale"
+
+# --- (o2) an ancestor of the trunk is landed too -----------------------------
+
+proj=$(make_pool_stale_origin ancestor-landed 1)
+slot=$(slot_path "$proj" 1)
+git -C "$slot" checkout -q --detach main~2
+assert_stale_origin_shape "$slot" main 1 "(o2)"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  || fail "(o2) guard refused a slot whose HEAD is an ancestor of the trunk: $out"
+[ -z "$out" ] || fail "(o2) guard was not silent for an ancestor slot: $out"
+pass "(o2) a slot behind the trunk is landed, not unlanded work"
+
+# --- (o3) the platform shape: a non-conventional default, stale remote -------
+#
+# Measured 2026-08-03 on the agentic-engineering platform, a DIFFERENT pool and
+# a different cause from the fork case: slots refused with 286/360/361/362
+# "commits not on remotes/origin/v1.2-recovery" while on every one of them the
+# tree was clean, `merge-base --is-ancestor HEAD v1.2-recovery` passed, and
+# `rev-list --count v1.2-recovery..HEAD` was 0. That project replays and
+# fast-forwards LOCALLY by design, so its remote is simply never advanced.
+# The defect is remote-tracking-ref versus local-trunk in general, not anything
+# fork-specific, and the default branch here is reachable only through
+# origin/HEAD, so this also pins that the name resolves when it is neither main
+# nor master.
+
+proj=$(make_pool_stale_origin platform-shape 1 v1.2-recovery 4)
+slot=$(slot_path "$proj" 1)
+git -C "$slot" checkout -q --detach v1.2-recovery~2
+# The three facts measured on every falsely-refused platform slot.
+[ -z "$(git -C "$slot" status --porcelain)" ] || fail "(o3) fixture slot is not clean"
+git -C "$slot" merge-base --is-ancestor HEAD refs/heads/v1.2-recovery \
+  || fail "(o3) fixture slot is not an ancestor of the local trunk"
+[ "$(git -C "$slot" rev-list --count refs/heads/v1.2-recovery..HEAD)" = 0 ] \
+  || fail "(o3) fixture slot is not zero commits ahead of the local trunk"
+# ...while it reads far "ahead" of the stale remote, which is what refused it.
+assert_stale_origin_shape "$slot" v1.2-recovery 2 "(o3)"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  || fail "(o3) guard refused a locally-landed slot on a non-conventional default branch: $out"
+[ -z "$out" ] || fail "(o3) guard was not silent for the platform shape: $out"
+pass "(o3) a locally-landing project whose remote never advances is not treated as unlanded"
+
+# --- (o5) the same pool still separates a TRUE positive ----------------------
+#
+# On that platform pool one slot WAS a genuine true positive (3 real unlanded
+# commits) while its neighbours were false refusals, so the guard was never
+# simply broken. Both verdicts must survive in one pool: the unlanded slot is
+# named, the locally-landed one is not.
+
+proj=$(make_pool_stale_origin platform-mixed 2 v1.2-recovery 4)
+landed=$(slot_path "$proj" 1)
+danger=$(slot_path "$proj" 2)
+git -C "$landed" checkout -q --detach v1.2-recovery~1
+git -C "$danger" checkout -q -b fm/platform-unlanded v1.2-recovery
+for i in 1 2 3; do
+  printf 'real work %s\n' "$i" > "$danger/real-$i.txt"
+  git -C "$danger" add "real-$i.txt"
+  git -C "$danger" commit -qm "genuinely unlanded $i"
+done
+out=$(run_guard "$proj" "$(slot_json 1 available "$landed" 2 available "$danger")") \
+  && fail "(o5) guard accepted a pool containing a genuinely unlanded slot"
+assert_contains "$out" "slot 2: $danger" "(o5) names the true-positive slot"
+assert_contains "$out" "branch fm/platform-unlanded with 3 commits not on heads/v1.2-recovery" \
+  "(o5) reports the true positive against the local trunk, not the stale remote"
+case "$out" in
+  *"slot 1: $landed"*) fail "(o5) the locally-landed neighbour was refused alongside the true positive" ;;
+esac
+pass "(o5) one pool separates a genuinely unlanded slot from its locally-landed neighbours"
+
+# --- (o4) an origin that cannot be read is not a landing target --------------
+#
+# This one passed before the fix too: the old resolver already fell back to the
+# local branch when NO remote-tracking ref existed. It is kept as a regression
+# pin on that fallback, which the candidate-set rewrite had to preserve, not as
+# a reproduction of the defect.
+
+proj=$(make_pool origin-unusable 1)
+slot=$(slot_path "$proj" 1)
+git -C "$proj" remote add origin "$TMP_ROOT/origin-unusable/does-not-exist.git"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  || fail "(o4) guard refused a landed slot because origin was configured but unreadable: $out"
+[ -z "$out" ] || fail "(o4) guard was not silent when origin is unusable: $out"
+pass "(o4) a configured but unreadable origin falls back to the local default branch"
+
+# --- (p) content, not commit reachability: the squash case -------------------
+#
+# This fleet's history is full of squash merges, so a landed branch keeps a
+# non-zero commit count against the trunk forever. Reachability is the wrong
+# instrument by construction.
+
+proj=$(make_pool_stale_origin squash-landed 1)
+slot=$(slot_path "$proj" 1)
+give_unlanded_branch "$slot" fm/squashed 2
+git -C "$proj" merge --squash fm/squashed >/dev/null 2>&1
+git -C "$proj" commit -qm "squashed fm/squashed (#99)"
+[ "$(git -C "$slot" rev-list --count main..HEAD)" = 2 ] \
+  || fail "(p) fixture is not the squash shape"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  || fail "(p) guard refused a branch whose content landed via squash: $out"
+[ -z "$out" ] || fail "(p) guard was not silent for squash-landed content: $out"
+pass "(p) content that landed via squash is landed, though 2 commits remain unreachable"
+
+# --- (q) NEGATIVE CONTROL: genuine danger must still refuse ------------------
+#
+# The defect the guard exists for is real and nearly destroyed work twice. In
+# the very fixture that made the false refusals (stale remote, local trunk
+# ahead), work the trunk has never received must still refuse, naming the slot,
+# the evidence and the apparent owner exactly as before.
+
+proj=$(make_pool_stale_origin genuinely-unlanded 1)
+slot=$(slot_path "$proj" 1)
+give_unlanded_branch "$slot" fm/never-landed 2
+state="$(dirname "$proj")/state"
+mkdir -p "$state"
+pid=$(live_pid)
+fm_write_meta "$state/danger-task.meta" "worktree=$slot" \
+  "worktree_owner_pid=$pid" "worktree_owner_identity=$(identity_of "$pid")"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")" "$state") \
+  && fail "(q) guard accepted a slot holding work no trunk has ever received"
+assert_contains "$out" "still holds live work" "(q) refusal headline"
+assert_contains "$out" "slot 1: $slot" "(q) names the exact slot"
+assert_contains "$out" "branch fm/never-landed with 2 commits not on heads/main" "(q) names the exact evidence"
+assert_contains "$out" "task danger-task is still working here" "(q) names the apparent owner"
+assert_contains "$out" "Nothing was reset, cleaned, or discarded" "(q) states it destroyed nothing"
+head_before=$(git -C "$slot" rev-parse HEAD)
+[ "$(git -C "$slot" symbolic-ref --short HEAD)" = fm/never-landed ] || fail "(q) guard moved the slot off its branch"
+[ -n "$head_before" ] || fail "(q) guard lost the slot's HEAD"
+[ -z "$(git -C "$slot" status --porcelain)" ] || fail "(q) guard dirtied the slot"
+pass "(q) work no trunk has received still refuses, naming slot, evidence and owner, and changes nothing"
+
+# --- (q2) unlanded work is not laundered by a stale remote either ------------
+#
+# The inverse false-pass: content contained ONLY in a remote-tracking ref that
+# the local trunk lacks is still landed (it survives the slot), while content in
+# neither must refuse. This pins that widening the candidate set did not create
+# a way for any single stale ref to wave work through.
+
+proj=$(make_pool_stale_origin partial-landed 1)
+slot=$(slot_path "$proj" 1)
+git -C "$slot" checkout -q -b fm/half-landed main
+printf 'landed upstream\n' > "$slot/upstream-only.txt"
+git -C "$slot" add upstream-only.txt
+git -C "$slot" commit -qm "upstream-only work"
+git -C "$slot" push -q origin HEAD:refs/heads/main
+git -C "$proj" fetch -q origin
+printf 'never anywhere\n' > "$slot/nowhere.txt"
+git -C "$slot" add nowhere.txt
+git -C "$slot" commit -qm "work no ref has"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  && fail "(q2) guard accepted a branch whose newest commit exists on no ref"
+assert_contains "$out" "branch fm/half-landed" "(q2) names the branch still holding work"
+pass "(q2) a partly-pushed branch still refuses on the content no ref carries"
+
+# --- (r) an unreadable or ambiguous slot is never assumed safe ---------------
+
+proj=$(make_pool not-a-repo 1)
+slot=$(slot_path "$proj" 1)
+rm -rf "${slot:?}/.git"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  && fail "(r) guard accepted a slot it could not read as a git worktree"
+assert_contains "$out" "not a readable git worktree" "(r) reports the slot as unverifiable"
+assert_contains "$out" "still holds live work" "(r) refuses rather than allocating blind"
+pass "(r) a slot that cannot be read as a git worktree refuses instead of passing"
+
+# --- (r2) a repository with no default branch at all refuses -----------------
+
+proj=$(make_pool no-default 1)
+slot=$(slot_path "$proj" 1)
+git -C "$slot" checkout -q -b fm/orphan-work
+printf 'work\n' > "$slot/w.txt"
+git -C "$slot" add w.txt
+git -C "$slot" commit -qm "work"
+git -C "$proj" branch -m main scratch-only
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  && fail "(r2) guard accepted a slot in a repo with no resolvable default branch"
+assert_contains "$out" "no resolvable default branch" "(r2) reports the unresolvable default branch"
+pass "(r2) a repository with no resolvable default branch refuses rather than guessing"
+
+# --- (r3) an inconclusive comparison refuses as unverifiable ----------------
+#
+# When the slot's content and the trunk both changed the same lines, the 3-way
+# merge conflicts and containment cannot be decided. That is genuinely unlanded
+# work AND unverifiable, so it must refuse - and say so as unverifiable rather
+# than claim a commit count the test never established.
+
+proj=$(make_pool conflicting 1)
+slot=$(slot_path "$proj" 1)
+git -C "$slot" checkout -q -b fm/conflicting main
+printf 'slot version\n' > "$slot/README.md"
+git -C "$slot" add README.md
+git -C "$slot" commit -qm "slot edit"
+printf 'trunk version\n' > "$proj/README.md"
+git -C "$proj" add README.md
+git -C "$proj" commit -qm "trunk edit"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  && fail "(r3) guard accepted a slot whose containment could not be decided"
+assert_contains "$out" "HEAD cannot be compared against heads/main" "(r3) reports the comparison as unverifiable"
+assert_contains "$out" "still holds live work" "(r3) refuses rather than assuming safe"
+pass "(r3) a slot whose comparison conflicts refuses as unverifiable, not as a counted diff"
 
 printf '\nall fm-worktree-guard tests passed\n'
