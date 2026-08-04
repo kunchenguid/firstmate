@@ -180,6 +180,38 @@ else
 fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
+BEARINGS_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings.XXXXXX") || exit 1
+cleanup_bearings_tmp() { rm -rf -- "$BEARINGS_TMP"; }
+trap cleanup_bearings_tmp EXIT HUP INT TERM
+LANDED_SELECTION_FILE="$BEARINGS_TMP/landed-selection.json"
+CANDIDATE_PRS_FILE="$BEARINGS_TMP/candidate-prs.json"
+PR_DISCOVERY_FILE="$BEARINGS_TMP/pr-discovery.json"
+
+printf '%s' "$SNAP" | jq \
+  --argjson landed_n "$FM_BEARINGS_LANDED" \
+  --argjson landed_per_home_n "$FM_BEARINGS_LANDED_PER_HOME" \
+  --argjson all_landed "$ALL_LANDED" '
+  def round_robin_landed($n):
+    . as $groups
+    | [range(0; (($groups | map(length) | max) // 0)) as $i
+       | $groups[]
+       | select(length > $i)
+       | .[$i]][:$n];
+  ([ .backlog.records[] | select(.state == "done" and .structured and .kind != "captain")
+     | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
+  | ((.secondmate_landed.records) // []) as $mate_done
+  | ($main_done + $mate_done) as $all_rows
+  | ([ $all_rows | group_by(.home_id)[]
+       | sort_by([(.completion.date // ""), .id]) | reverse
+       | (if $all_landed == 1 then . else .[:$landed_per_home_n] end) ]) as $groups
+  | ($groups | add // []) as $per_home_capped
+  | ($per_home_capped | sort_by([(.completion.date // ""), .id]) | reverse) as $global_sorted
+  | {
+      selected:(if $all_landed == 1 then $global_sorted else ($groups | round_robin_landed($landed_n)) end),
+      per_home_capped_count:($per_home_capped | length),
+      home_cap_dropped:([ $all_rows | group_by(.home_id)[] | select(length > $landed_per_home_n) ] | length)
+    }' > "$LANDED_SELECTION_FILE" \
+  || { echo "fm-bearings-snapshot: landed selection failed" >&2; exit 1; }
 
 # --- live verification for every PR URL the projection can name ------------
 PR_STATUS='checked (0 PRs named)'
@@ -188,6 +220,7 @@ PR_REPOS_TOTAL=0
 PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
 PR_ROWS_MIN_TOTAL=0
+PR_DISCOVERY='[]'
 RECORDED_URL_TOTAL=$(printf '%s' "$SNAP" | jq '[.tasks[] | select(.kind != "secondmate") | .pr.url // empty] | length')
 
 # Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
@@ -225,11 +258,10 @@ $url
 }$url"
 }
 
-# URLs that can otherwise appear in recorded_prs or the bounded landed baseline.
+# URLs that can otherwise appear in recorded_prs or the final landed selection.
 while IFS= read -r url; do add_pr_url "$url"; done <<EOF
 $(printf '%s' "$SNAP" | jq -r --argjson all "$ALL_RECORDED_PRS" --argjson limit "$FM_BEARINGS_RECORDED_PRS" '[.tasks[] | select(.kind != "secondmate") | .pr.url // empty] | (if $all==1 then . else .[:$limit] end)[]')
-$(printf '%s' "$SNAP" | jq -r --argjson limit "$FM_BEARINGS_LANDED" '[.backlog.records[]? | select(.state=="done") | .pr_url // empty][:$limit][]')
-$(printf '%s' "$SNAP" | jq -r --argjson limit "$FM_BEARINGS_LANDED" '[.secondmate_landed.records[]? | .pr_url // empty][:$limit][]')
+$(jq -r '.selected[] | .pr_url // empty' "$LANDED_SELECTION_FILE")
 EOF
 
 repos=""
@@ -258,9 +290,25 @@ EOF
     if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
     nrepos=$((nrepos + 1))
     pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
-    api=$(ghaxi_bounded api "repos/$repo/pulls?state=open&per_page=$pr_fetch_limit" \
-      --jq 'map(.html_url) | join("\n")' 2>/dev/null) || continue
-    discovered=$(printf '%s\n' "$api" | decode_api_body 2>/dev/null) || continue
+    if ! api=$(ghaxi_bounded api "repos/$repo/pulls?state=open&per_page=$pr_fetch_limit" \
+      --jq 'map(.html_url) | join("\n")' 2>/dev/null); then
+      discovery=$(jq -n --arg repo "$repo" \
+        '{repo:$repo,verification:"NOT_VERIFIABLE",reason:"open PR discovery query failed or timed out",returned:null,complete:false}')
+      PR_DISCOVERY=$(jq -n --argjson rows "$PR_DISCOVERY" --argjson row "$discovery" '$rows + [$row]')
+      continue
+    fi
+    if [ "$(printf '%s\n' "$api" | sed -n 's/^[[:space:]]*truncated: //p' | head -1)" != false ]; then
+      discovery=$(jq -n --arg repo "$repo" \
+        '{repo:$repo,verification:"NOT_VERIFIABLE",reason:"open PR discovery response was truncated",returned:null,complete:false}')
+      PR_DISCOVERY=$(jq -n --argjson rows "$PR_DISCOVERY" --argjson row "$discovery" '$rows + [$row]')
+      continue
+    fi
+    if ! discovered=$(printf '%s\n' "$api" | decode_api_body 2>/dev/null); then
+      discovery=$(jq -n --arg repo "$repo" \
+        '{repo:$repo,verification:"NOT_VERIFIABLE",reason:"open PR discovery response was malformed",returned:null,complete:false}')
+      PR_DISCOVERY=$(jq -n --argjson rows "$PR_DISCOVERY" --argjson row "$discovery" '$rows + [$row]')
+      continue
+    fi
     returned=0
     while IFS= read -r url; do
       [ -n "$url" ] || continue
@@ -271,7 +319,13 @@ $discovered
 EOF
     if [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ]; then
       PR_ROWS_CAPPED=$((PR_ROWS_CAPPED + 1))
+      discovery=$(jq -n --arg repo "$repo" --argjson returned "$returned" --argjson limit "$FM_BEARINGS_PR_LIMIT" \
+        '{repo:$repo,verification:"NOT_VERIFIABLE",reason:("open PR discovery exceeded the per-repository limit of " + ($limit|tostring)),returned:$returned,complete:false}')
+    else
+      discovery=$(jq -n --arg repo "$repo" --argjson returned "$returned" \
+        '{repo:$repo,verification:"verified_live",reason:null,returned:$returned,complete:true}')
     fi
+    PR_DISCOVERY=$(jq -n --argjson rows "$PR_DISCOVERY" --argjson row "$discovery" '$rows + [$row]')
   done
   PR_REPOS_SHOWN=$nrepos
 fi
@@ -350,11 +404,17 @@ done <<EOF
 $URLS
 EOF
 CANDIDATE_PRS=$rows
+printf '%s\n' "$CANDIDATE_PRS" > "$CANDIDATE_PRS_FILE"
+printf '%s\n' "$PR_DISCOVERY" > "$PR_DISCOVERY_FILE"
 PR_ROWS_MIN_TOTAL=$named
 if [ "$unverified" -gt 0 ]; then
   PR_STATUS="checked ($named named; $unverified NOT_VERIFIABLE)"
 else
   PR_STATUS="checked ($named named; all verified live)"
+fi
+discovery_unverified=$(printf '%s' "$PR_DISCOVERY" | jq '[.[] | select(.verification == "NOT_VERIFIABLE")] | length')
+if [ "$discovery_unverified" -gt 0 ]; then
+  PR_STATUS="$PR_STATUS; discovery NOT_VERIFIABLE for $discovery_unverified repo(s)"
 fi
 
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
@@ -386,31 +446,22 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
   --argjson recorded_url_total "$RECORDED_URL_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
+  --slurpfile landed_selection_input "$LANDED_SELECTION_FILE" \
+  --slurpfile candidate_prs_input "$CANDIDATE_PRS_FILE" \
+  --slurpfile pr_discovery_input "$PR_DISCOVERY_FILE" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
-  def round_robin_landed($n):
-    . as $groups
-    | [range(0; (($groups | map(length) | max) // 0)) as $i
-       | $groups[]
-       | select(length > $i)
-       | .[$i]][:$n];
-  ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
+  ($landed_selection_input[0]) as $landed_selection
+  | ($candidate_prs_input[0]) as $candidate_prs
+  | ($pr_discovery_input[0]) as $pr_discovery
+  | ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
-  | ([ .backlog.records[] | select(.state == "done" and .structured and .kind != "captain")
-       | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
-  | ((.secondmate_landed.records) // []) as $mate_done
-  | ($main_done + $mate_done) as $all_landed_rows
-  | ([ $all_landed_rows | group_by(.home_id)[]
-       | sort_by([(.completion.date // ""), .id]) | reverse
-       | (if $all_landed == 1 then . else .[:$landed_per_home_n] end) ]) as $per_home_groups
-  | ($per_home_groups | add // []) as $per_home_capped
-  | ([ $all_landed_rows | group_by(.home_id)[] | select(length > $landed_per_home_n) ] | length) as $home_cap_dropped
-  | ($per_home_capped | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_sorted
-  | (if $all_landed == 1 then $landed_sorted else ($per_home_groups | round_robin_landed($landed_n)) end) as $done
+  | ($landed_selection.selected) as $done
+  | ($landed_selection.per_home_capped_count) as $per_home_capped_count
+  | ($landed_selection.home_cap_dropped) as $home_cap_dropped
   | ($done | map(.id)) as $done_ids
   | ([.tasks[] | select(.kind != "secondmate") | .id]) as $live_ids
   | ([.tasks[] | select(.kind != "secondmate" and .liveness.activity == "active") | .id]) as $working_ids
@@ -538,6 +589,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
          else {} end)
   | . + {candidate_prs:$candidate_prs}
+  | . + (if $include_prs == 1 then {pr_discovery:$pr_discovery} else {} end)
   | . + (if $f_bodies then {bodies:[ $snap.backlog.records[] | select(.structured and (.state == "queued" or .state == "done")) | {id, body:((.body_excerpt // .raw // "-") | trunc(200))} ]} else {} end)
   | . + (if $f_paths then {paths:[ $snap.tasks[] | {id, worktree:(.paths.worktree.path // "-"), home:(.paths.home.path // "-"), status:.paths.status_log.path, report:.paths.report.path} ]} else {} end)
   | . + (if $f_actions then {actions:[ $snap.tasks[] | {id, watch:(.actions.watch // .actions.send // "-"), steer:(.actions.steer // .actions.send // "-")} ]} else {} end)
@@ -550,7 +602,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $f_endpoints then empty else {surface:"healthy endpoint detail", reveal:"--fields endpoints"} end),
         (if $all_reports == 1 then empty else {surface:"full scout-report inventory", reveal:"--all-reports"} end),
         (if $all_queued == 1 then empty else {surface:"superseded queued items", reveal:"--all-queued"} end),
-        (if $all_landed == 0 and ($per_home_capped | length) > ($done | length) then {surface:("landed showing \($done | length) of \($per_home_capped | length)" + (($done | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"--all-landed"} else empty end),
+        (if $all_landed == 0 and $per_home_capped_count > ($done | length) then {surface:("landed showing \($done | length) of \($per_home_capped_count)" + (($done | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"--all-landed"} else empty end),
         (if $all_landed == 0 and $home_cap_dropped > 0 then {surface:("landed per-home capped at \($landed_per_home_n) for \($home_cap_dropped) home(s)"), reveal:"--all-landed"} else empty end),
         (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable backlog: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home backlogs"} else empty end),
         (if $all_landed == 0 and (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"--all-landed"} else empty end),

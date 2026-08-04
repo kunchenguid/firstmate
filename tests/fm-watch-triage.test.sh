@@ -633,6 +633,43 @@ test_measured_parked_stale_is_absorbed_without_wedge() {
   pass "measured parked stale is quiet without a wedge; neutralizing the measurement surfaces it"
 }
 
+test_nonterminal_measured_parked_stale_remains_bounded() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case nonterminal-measured-parked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-parked-working"
+  printf 'idle worker at prompt' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/parked-working.meta"
+  printf 'working: implementation under way\n' > "$state/parked-working.status"
+  sig=$(seen_sig "$state/parked-working.status"); printf '%s' "$sig" > "$state/.seen-parked-working_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle worker at prompt")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: process-output · exact worker at harness-relative idle baseline'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 35 || { reap "$pid"; fail "fresh nonterminal parked lane surfaced before its bound: $(cat "$out")"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "nonterminal parked lane did not retain a wedge timer"; }
+  [ ! -e "$state/.parked-$key" ] || { reap "$pid"; fail "nonterminal parked lane received permanent suppression"; }
+  reap "$pid"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "nonterminal parked lane never escalated past its bound"; }
+  grep -F "possible wedge" "$out" >/dev/null || fail "nonterminal parked escalation lacked wedge evidence"
+  unset FM_FAKE_CREW_STATE
+  pass "nonterminal measured parked lanes retain bounded wedge escalation"
+}
+
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -1913,6 +1950,7 @@ test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_measured_parked_stale_is_absorbed_without_wedge
+test_nonterminal_measured_parked_stale_remains_bounded
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed

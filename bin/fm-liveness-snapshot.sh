@@ -155,6 +155,14 @@ capture_output() {  # <backend> <target> <label>
   fi
 }
 
+remote_liveness_snapshot() {  # <id> <interval-ms>
+  if [ -n "${FM_LIVENESS_REMOTE_BIN:-}" ]; then
+    "$FM_LIVENESS_REMOTE_BIN" "$@"
+  else
+    "$SCRIPT_DIR/fm-on.sh" "$1" fm-remote-secondmate-control.sh liveness "$1" "$2"
+  fi
+}
+
 hash_output() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
@@ -208,6 +216,22 @@ metrics_for() {  # <snapshot> <worktree> <family> -> max_ms<TAB>pid_count<TAB>wo
   ' "$1"
 }
 
+unverified_remote_record() {  # <id> <harness> <worktree> <backend> <target>
+  local id=$1 harness=$2 worktree=$3 backend=$4 target=$5 family
+  family=$(harness_family "$harness")
+  [ "$target" = __FM_MISSING_TARGET__ ] && target=
+  jq -n -c --arg id "$id" --arg harness "$harness" --arg family "$family" \
+    --arg backend "$backend" --arg target "$target" --arg worktree "$worktree" '
+    {id:$id,harness:$harness,harness_family:$family,backend:$backend,
+     target:(if $target=="" then null else $target end),worktree:(if $worktree=="" then null else $worktree end),
+     endpoint:{presence:"unverified",raw:"remote_unreadable"},
+     worker:{presence:"unverified",pids_sample_1:0,pids_sample_2:0,
+       harness_processes_sample_1:0,harness_processes_sample_2:0},
+     output:{sample_1_readable:false,sample_2_readable:false,changed:false},
+     cpu:{sample_1_max_ms:0,sample_2_max_ms:0,delta_ms:0,rate_ms_per_minute:0,
+       baseline:"unverified",threshold_ms_per_minute:null},activity:"unverified"}'
+}
+
 METAS="$TMP/metas.tsv"
 : > "$METAS"
 for meta in "$STATE"/*.meta; do
@@ -216,9 +240,19 @@ for meta in "$STATE"/*.meta; do
   [ -z "$ONLY_ID" ] || [ "$id" = "$ONLY_ID" ] || continue
   worktree=$(meta_value "$meta" worktree)
   harness=$(meta_value "$meta" harness)
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$harness" "$worktree" "$backend" "$target" >> "$METAS"
+  remote_host=$(meta_value "$meta" remote_host)
+  if [ -n "$remote_host" ]; then
+    backend=$(meta_value "$meta" remote_backend)
+    target=$(meta_value "$meta" remote_target)
+    [ -n "$backend" ] || backend=unknown
+    [ -n "$target" ] || target=__FM_MISSING_TARGET__
+    route=remote
+  else
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    route=local
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$harness" "$worktree" "$backend" "$target" "$route" >> "$METAS"
 done
 
 if [ ! -s "$METAS" ]; then
@@ -235,12 +269,28 @@ PROCESS1_OK=true
 PROCESS2_OK=true
 process_snapshot "$SAMPLE1" || { PROCESS1_OK=false; : > "$SAMPLE1"; }
 
+REMOTE_JOBS="$TMP/remote-jobs.tsv"
+REMOTE_RECORDS="$TMP/remote-records.jsonl"
+: > "$REMOTE_JOBS"
+: > "$REMOTE_RECORDS"
+while IFS=$(printf '\t') read -r id harness worktree backend target route; do
+  [ "$route" = remote ] || continue
+  if [ "$backend" = unknown ] || [ "$target" = __FM_MISSING_TARGET__ ]; then
+    unverified_remote_record "$id" "$harness" "$worktree" "$backend" "$target" >> "$REMOTE_RECORDS"
+    continue
+  fi
+  remote_file="$TMP/remote-$id.json"
+  remote_liveness_snapshot "$id" "$INTERVAL_MS" > "$remote_file" 2>/dev/null &
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$!" "$remote_file" "$harness" "$worktree" "$backend" "$target" >> "$REMOTE_JOBS"
+done < "$METAS"
+
 ENDPOINTS="$TMP/endpoints.tsv"
 OUTPUT1="$TMP/output-1.tsv"
 : > "$ENDPOINTS"
 : > "$OUTPUT1"
-while IFS=$(printf '\t') read -r id harness worktree backend target; do
+while IFS=$(printf '\t') read -r id harness worktree backend target route; do
   [ -n "$id" ] || continue
+  [ "$route" = local ] || continue
   if [ -z "$target" ]; then
     verdict=unreadable
   else
@@ -265,10 +315,29 @@ sleep_seconds=$(awk -v ms="$INTERVAL_MS" 'BEGIN { printf "%.3f", ms/1000 }')
 sleep "$sleep_seconds"
 process_snapshot "$SAMPLE2" || { PROCESS2_OK=false; : > "$SAMPLE2"; }
 
-RECORDS="$TMP/records.jsonl"
-: > "$RECORDS"
-while IFS=$(printf '\t') read -r id harness worktree backend target; do
+while IFS=$(printf '\t') read -r id remote_pid remote_file harness worktree backend target; do
   [ -n "$id" ] || continue
+  remote_ok=false
+  if wait "$remote_pid" && jq -e \
+    --arg id "$id" --arg backend "$backend" --arg target "$target" --arg worktree "$worktree" --argjson interval "$INTERVAL_MS" '
+      .schema == "fm-liveness.v1" and .interval_ms == $interval
+      and (.records | length) == 1 and .records[0].id == $id
+      and .records[0].backend == $backend and .records[0].target == $target
+      and .records[0].worktree == $worktree
+    ' "$remote_file" >/dev/null 2>&1; then
+    jq -c '.records[0]' "$remote_file" >> "$REMOTE_RECORDS"
+    remote_ok=true
+  fi
+  if [ "$remote_ok" != true ]; then
+    unverified_remote_record "$id" "$harness" "$worktree" "$backend" "$target" >> "$REMOTE_RECORDS"
+  fi
+done < "$REMOTE_JOBS"
+
+RECORDS="$TMP/records.jsonl"
+cp "$REMOTE_RECORDS" "$RECORDS"
+while IFS=$(printf '\t') read -r id harness worktree backend target route; do
+  [ -n "$id" ] || continue
+  [ "$route" = local ] || continue
   family=$(harness_family "$harness")
   threshold=$(threshold_for "$family")
   IFS=$(printf '\t') read -r cpu1 pids1 workers1 <<EOF
@@ -363,5 +432,5 @@ jq -s \
   --argjson p1 "$PROCESS1_OK" \
   --argjson p2 "$PROCESS2_OK" \
   '{schema:"fm-liveness.v1",observed_at:$observed,interval_ms:$interval,
-    process_samples:{sample_1_readable:$p1,sample_2_readable:$p2},records:.}' \
+    process_samples:{sample_1_readable:$p1,sample_2_readable:$p2},records:(sort_by(.id))}' \
   "$RECORDS"

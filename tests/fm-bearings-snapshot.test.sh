@@ -26,9 +26,9 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 make_fakebin() {  # <dir>
   local fb
   fb=$(fm_fakebin "$1")
-  cat > "$fb/no-mistakes" <<'SH'
+cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-[ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
+[ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep "${FAKE_NM_SLEEP_SECS:-30}"
 exit 0
 SH
   cat > "$fb/tmux" <<'SH'
@@ -562,6 +562,30 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   pass "missing, invalid, unreadable, malformed, and timed-out homes stay explicit unknowns"
 }
 
+test_default_secondmate_timeout_covers_liveness_overhead() {
+  local home mate wt fakebin json
+  home=$(make_home default-secondmate-timeout)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  mate="$TMP_ROOT/default-timeout-home"
+  make_valid_secondmate_home default-timeout "$mate"
+  append_secondmate_registry "$home" default-timeout "$mate"
+  wt="$mate/projects/slow"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/slow
+  printf '## In flight\n- [ ] slow - Slow child (repo: sample) (kind: ship) (since 2026-07-13)\n\n## Queued\n\n## Done\n' > "$mate/data/backlog.md"
+  fm_write_meta "$mate/state/slow.meta" \
+    "window=firstmate:fm-slow" "worktree=$wt" "project=sample" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  fakebin=$(make_fakebin "$home")
+  json=$(FAKE_NM_SLEEP=1 FAKE_NM_SLEEP_SECS=9 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .secondmates | any(.id == "default-timeout" and .provenance == "structured-home"
+      and (.reason | contains("timed out") | not))
+  ' >/dev/null || fail "default secondmate timeout did not cover the structured liveness path: $json"
+  pass "default secondmate timeout covers the two-sample observation envelope"
+}
+
 test_oversized_secondmate_summary_stays_strict_unknown() {
   local home mate fakebin json i
   home=$(make_home oversized-home)
@@ -1084,6 +1108,9 @@ test_partial_github_failure_degrades() {
     .schema == "fm-bearings.v1"
       and (.candidate_prs | length) == 3
       and ([.candidate_prs[].verification] | all(. == "NOT_VERIFIABLE"))
+      and (.pr_discovery | any(.repo == "kunchenguid/firstmate"
+        and .verification == "NOT_VERIFIABLE" and .complete == false
+        and (.reason | contains("failed or timed out"))))
       and (.prs | test("NOT_VERIFIABLE"))
       and (.in_flight | length) > 0
   ' >/dev/null || fail "on gh failure the view must still emit, with an unavailable note: $json"
@@ -1094,10 +1121,13 @@ test_truncated_github_evidence_is_refused() {
   local home fakebin json
   home=$(make_home truncated-github); write_fixture "$home"
   fakebin=$(make_fakebin "$home")
-  json=$(FAKE_GH_TRUNCATED=true run "$home" "$fakebin" --json)
+  json=$(FAKE_GH_TRUNCATED=true run "$home" "$fakebin" --include-prs --json)
   printf '%s' "$json" | jq -e '
     (.candidate_prs | length) == 3
     and ([.candidate_prs[].verification] | all(. == "NOT_VERIFIABLE"))
+    and (.pr_discovery | any(.repo == "kunchenguid/firstmate"
+      and .verification == "NOT_VERIFIABLE" and .complete == false
+      and (.reason | contains("truncated"))))
     and (.prs | test("NOT_VERIFIABLE"))
   ' >/dev/null || fail "truncated gh-axi evidence was accepted as complete: $json"
   pass "truncated gh-axi bodies remain NOT_VERIFIABLE"
@@ -1199,6 +1229,8 @@ test_per_repository_pr_cap_is_disclosed() {
   toon=$(FM_BEARINGS_PR_LIMIT=2 FAKE_GH_MANY=1 run "$home" "$fakebin" --include-prs)
   printf '%s' "$json" | jq -e '
     (.candidate_prs | length) == 5
+    and (.pr_discovery | any(.repo == "kunchenguid/firstmate"
+      and .verification == "NOT_VERIFIABLE" and .complete == false))
     and ([.omitted[] | select(.surface | contains("candidate_prs showing"))] | length) == 1
   ' >/dev/null || fail "per-repository PR truncation was not disclosed: $json"
   assert_contains "$toon" 'candidate_prs showing' "TOON did not preserve PR truncation disclosure"
@@ -1282,6 +1314,42 @@ test_landed_includes_secondmate_home_merges() {
   grep -q 'gh-axi api repos/kunchenguid/firstmate/pulls/7 ' "$home/net.log" \
     || fail "main landed PR was named without live verification: $(cat "$home/net.log")"
   pass "landed includes both homes and live-verifies every merge URL"
+}
+
+test_every_final_landed_pr_is_live_verified() {
+  local home mate fakebin json i id pr artifact
+  home=$(make_home landed-verification-selection)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 8 ]; do
+    id=$(printf 'home-%02d' "$i")
+    pr=$((100 + i))
+    mate=$(make_landed_secondmate "$home" "$id")
+    append_landed_row "$mate" "$id-landed" "$id landed https://github.com/acme/repo/pull/$pr" 2026-07-10
+    i=$((i + 1))
+  done
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(FM_BEARINGS_LANDED=6 run "$home" "$fakebin" --json)
+  while IFS= read -r artifact; do
+    pr=${artifact##*/}
+    grep -q "gh-axi api repos/acme/repo/pulls/$pr " "$home/net.log" \
+      || fail "default final landed PR $pr was rendered without live verification: $(cat "$home/net.log")"
+  done <<EOF
+$(printf '%s' "$json" | jq -r '.landed[].artifact')
+EOF
+
+  : > "$home/net.log"
+  json=$(FM_BEARINGS_LANDED=1 run "$home" "$fakebin" --json --all-landed)
+  [ "$(printf '%s' "$json" | jq '.landed | length')" = 8 ] || fail "--all-landed did not render every fixture PR"
+  while IFS= read -r artifact; do
+    pr=${artifact##*/}
+    grep -q "gh-axi api repos/acme/repo/pulls/$pr " "$home/net.log" \
+      || fail "--all-landed PR $pr was rendered without live verification: $(cat "$home/net.log")"
+  done <<EOF
+$(printf '%s' "$json" | jq -r '.landed[].artifact')
+EOF
+  pass "every PR in the final landed selection is live-verified"
 }
 
 test_landed_default_balances_dominant_and_sparse_homes() {
@@ -2005,6 +2073,7 @@ test_parent_activity_evidence_is_bounded_and_disclosed
 test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
+test_default_secondmate_timeout_covers_liveness_overhead
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only
@@ -2015,6 +2084,7 @@ test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_verifies_every_named_pr
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
+test_every_final_landed_pr_is_live_verified
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
 test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap
