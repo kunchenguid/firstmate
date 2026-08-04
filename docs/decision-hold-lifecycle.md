@@ -76,6 +76,7 @@ ok - main and secondmate captain actionability use the same blocker readiness
 
 $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
+ok - fm-brief.sh: every delegated workflow cross-references the Lavish subject-first policy
 
 $ bash tests/fm-teardown.test.sh
 all teardown safety cases passed
