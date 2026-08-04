@@ -109,15 +109,19 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness traceparent
+  local id=$1 harness model effort traceparent
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  model=$(fm_meta_get "$REMOTE_ENDPOINT_META" model)
+  effort=$(fm_meta_get "$REMOTE_ENDPOINT_META" effort)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
+  printf 'model=%s\n' "$model"
+  printf 'effort=%s\n' "$effort"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
@@ -134,7 +138,7 @@ cmd_route() {
 
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out herdr_session
+  local current meta out herdr_session rc spawn_stderr_file spawn_stderr
 
   validate_id "$id"
   validate_home "$id"
@@ -169,13 +173,24 @@ cmd_launch() {
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
-  if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  spawn_stderr_file=$(mktemp "$CONTROL_STATE/.launch-stderr.XXXXXX") \
+    || die "remote launch diagnostics could not be captured"
+  if out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
-    "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>&1); then
+    "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>"$spawn_stderr_file"); then
+    rc=0
+  else
+    rc=$?
+  fi
+  spawn_stderr=$(cat "$spawn_stderr_file")
+  rm -f -- "$spawn_stderr_file"
+  if [ "$rc" -ne 0 ]; then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
+    [ -z "$spawn_stderr" ] || printf '%s\n' "$spawn_stderr" >&2
     die "remote host-local secondmate launch failed"
   fi
+  [ -z "$spawn_stderr" ] || printf '%s\n' "$spawn_stderr" >&2
   [ -f "$meta" ] || die "remote launch returned without endpoint metadata"
   herdr_session=$(fm_meta_get "$meta" herdr_session)
   [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \

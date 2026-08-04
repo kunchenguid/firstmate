@@ -563,6 +563,29 @@ secondmate_sync() {
   return 0
 }
 
+secondmate_respawn() {
+  local id=$1 out rc stderr_file stderr_output
+  stderr_file=$(mktemp "$STATE/.secondmate-respawn-stderr.XXXXXX") || {
+    echo "error: secondmate $id respawn diagnostics could not be captured"
+    return 1
+  }
+  if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>"$stderr_file"); then
+    rc=0
+  else
+    rc=$?
+  fi
+  stderr_output=$(cat "$stderr_file")
+  rm -f -- "$stderr_file"
+  if [ "$rc" -eq 0 ]; then
+    [ -z "$stderr_output" ] || printf '%s\n' "$stderr_output" >&2
+    [ -z "$out" ] || printf '%s\n' "$out"
+  else
+    [ -z "$stderr_output" ] || printf '%s\n' "$stderr_output"
+    [ -z "$out" ] || printf '%s\n' "$out"
+  fi
+  return "$rc"
+}
+
 # A relaunch replaces the endpoint record a digest may already have printed. On
 # the local pass that digest has not been composed yet, so the fact stays behind
 # FM_BOOTSTRAP_VERBOSE_FACTS as before; on the deferred network pass the digest
@@ -669,7 +692,7 @@ secondmate_liveness_one() {  # <meta> <id>
         ;;
       dead|missing)
         cause="remote endpoint $agent_state on its configured host"
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+        if out=$(secondmate_respawn "$id"); then
           SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           report_relaunch "$id" "$cause" "host=$remote_host"
         else
@@ -706,7 +729,7 @@ secondmate_liveness_one() {  # <meta> <id>
       else
         cause="recorded endpoint confidently missing"
       fi
-      if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+      if out=$(secondmate_respawn "$id"); then
         SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
         report_relaunch "$id" "$cause" "backend=$backend"
       else

@@ -114,6 +114,8 @@
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
+#   Raw launch commands cannot carry separate --model/--effort profile axes;
+#   put those flags directly in the raw command or the spawn is refused.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -400,7 +402,8 @@ fi
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent
+  local remote_traceparent remote_recorded_traceparent remote_model remote_effort
+  local remote_recorded_model remote_recorded_effort remote_stderr_file remote_stderr
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -558,26 +561,39 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  remote_stderr_file=$(mktemp "$STATE/.remote-spawn-stderr.XXXXXX") || {
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id launch diagnostics could not be captured" >&2
+    return 1
+  }
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
-    "${launch_args[@]}" < /dev/null 2>&1); then
+    "${launch_args[@]}" < /dev/null 2>"$remote_stderr_file"); then
     rc=0
   else
     rc=$?
   fi
+  remote_stderr=$(cat "$remote_stderr_file")
+  rm -f -- "$remote_stderr_file"
   if [ "$rc" -ne 0 ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     [ -z "$out" ] || printf '%s\n' "$out" >&2
+    [ -z "$remote_stderr" ] || printf '%s\n' "$remote_stderr" >&2
     if [ "$rc" -eq 255 ]; then
       echo "error: remote secondmate $id is unavailable or launch completion is unknown; preserved route $host:$home" >&2
     fi
     return "$rc"
   fi
+  [ -z "$remote_stderr" ] || printf '%s\n' "$remote_stderr" >&2
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  remote_model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
+  remote_effort=$(printf '%s\n' "$out" | sed -n 's/^effort=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -599,6 +615,31 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
+  if [ -z "$remote_model" ] || [ -z "$remote_effort" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned no actual model or effort; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
+  if [ "$model" != - ] && [ "$remote_model" != "$model" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id is already live with model '$remote_model', not requested model '$model'; live endpoint was not restarted" >&2
+    return 1
+  fi
+  if [ "$effort" != - ] && [ "$remote_effort" != "$effort" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id is already live with effort '$remote_effort', not requested effort '$effort'; live endpoint was not restarted" >&2
+    return 1
+  fi
+  remote_recorded_model=$remote_model
+  remote_recorded_effort=$remote_effort
+  [ "$remote_recorded_model" != default ] || remote_recorded_model=
+  [ "$remote_recorded_effort" != default ] || remote_recorded_effort=
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
@@ -618,8 +659,8 @@ spawn_remote_secondmate() {
     echo "mode=secondmate"
     echo "yolo=off"
     echo "tasktmp="
-    echo "model=${model#-}"
-    echo "effort=${effort#-}"
+    echo "model=$remote_recorded_model"
+    echo "effort=$remote_recorded_effort"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
     echo "remote_host=$host"
@@ -1181,8 +1222,10 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1226,6 +1269,19 @@ esac
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
+fi
+
+if [ "$RAW_LAUNCH" -eq 1 ]; then
+  RAW_PROFILE_INVALID=0
+  if [ -n "$MODEL" ]; then
+    echo "error: raw launch harness '$HARNESS' cannot thread requested model '$MODEL'; accepted model values through fm-spawn raw commands: no supported values; put the model flag in the raw command instead" >&2
+    RAW_PROFILE_INVALID=1
+  fi
+  if [ -n "$EFFORT" ]; then
+    echo "error: raw launch harness '$HARNESS' cannot thread requested effort '$EFFORT'; accepted effort values through fm-spawn raw commands: no supported values; put the effort flag in the raw command instead" >&2
+    RAW_PROFILE_INVALID=1
+  fi
+  [ "$RAW_PROFILE_INVALID" -eq 0 ] || exit 1
 fi
 
 case "$HARNESS" in

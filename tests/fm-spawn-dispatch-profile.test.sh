@@ -420,7 +420,7 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
-test_active_dispatch_profile_allows_raw_launch_command() {
+test_raw_codex_refuses_unthreaded_effort() {
   local rec id out status launch stderr_log err
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
@@ -429,18 +429,17 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   stderr_log="$CASE_DIR/spawn.stderr"
 
   out=$(run_ship_spawn_with_stderr "$stderr_log" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag" --effort high)
+    "$id" "$PROJ_DIR" "codex --custom-flag" --effort max)
   status=$?
-  expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
-  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default high
+  expect_code 1 "$status" "raw codex launch with a separate effort axis should be refused"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw codex refusal published requested effort as delivered metadata"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ -z "$launch" ] || fail "raw codex refusal still launched"$'\n'"actual: $launch"
   err=$(cat "$stderr_log")
-  assert_contains "$err" "warning: harness 'custom-agent' cannot thread requested effort 'high'; accepted effort values through fm-spawn: no supported values; raw launch commands must carry their own effort flags" \
-    "raw launch effort omission was not reported on stderr"
+  assert_contains "$err" "error: raw launch harness 'codex' cannot thread requested effort 'max'; accepted effort values through fm-spawn raw commands: no supported values; put the effort flag in the raw command instead" \
+    "raw codex refusal did not diagnose the unthreaded effort on stderr"
   assert_not_contains "$out" "cannot thread requested effort" "raw launch effort warning leaked onto stdout"
-  pass "raw launch commands stay unchanged and warn on stderr about unthreaded effort"
+  pass "raw codex commands refuse separate effort axes before launch or metadata publication"
 }
 
 test_claude_threads_model_and_effort() {
@@ -872,7 +871,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
-test_active_dispatch_profile_allows_raw_launch_command
+test_raw_codex_refuses_unthreaded_effort
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_max_effort
