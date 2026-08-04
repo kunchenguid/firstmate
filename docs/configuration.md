@@ -99,6 +99,17 @@ That evidence policy is specific to the firstmate repo: target projects may legi
 That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
 It intentionally runs the complete behavior-test inventory serially instead of reproducing the duration-balanced CI sharding owned by [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh) or delegating the test step to an agent.
 
+## Crosscheck reviewer
+
+`config/crosscheck-reviewer.json` selects the local independent identity for the PR merge-gate reviewer.
+It is gitignored and is not inferred from the author account or ambient Codex configuration.
+The current schema has one nonempty `reviewers` array, whose entries require exactly `harness`, `model`, `effort`, and `account_home`.
+The accepted policy profiles are Codex `gpt-5.6-sol` at `xhigh` effort and Claude `claude-opus-5` at `xhigh` effort.
+Every `account_home` must be an existing absolute directory.
+Crosscheck selects the first entry whose account and model both differ from the author identity recorded in task metadata.
+An absent or invalid file is an unavailable reviewer and therefore blocks crosscheck and merge.
+See [`crosscheck.md`](crosscheck.md) for the example file, evidence rules, and operator flow.
+
 ## Captain preferences (data/captain.md)
 
 Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.

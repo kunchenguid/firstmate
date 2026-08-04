@@ -58,7 +58,7 @@
 # fm-backlog-handoff.sh, fm-bootstrap.sh, fm-brief.sh, fm-config-push.sh,
 # fm-checkout-refresh.sh, fm-ensure-agents-md.sh, fm-fleet-sync.sh,
 # fm-home-seed.sh, fm-lock.sh,
-# fm-merge-local.sh, fm-pr-check.sh, fm-pr-merge.sh, fm-promote.sh,
+# fm-crosscheck.sh, fm-merge-local.sh, fm-pr-check.sh, fm-pr-merge.sh, fm-promote.sh,
 # fm-report-retention.sh, fm-report-stack.mjs, fm-review-diff.sh, fm-send.sh,
 # fm-session-start.sh, fm-spawn.sh, fm-supervise-daemon.sh,
 # fm-task-file-append.mjs, fm-teardown.sh, fm-update.sh, fm-wake-drain.sh,

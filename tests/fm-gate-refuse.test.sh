@@ -35,6 +35,7 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
+CROSSCHECK="$ROOT/bin/fm-crosscheck.sh"
 MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 SESSION_START="$ROOT/bin/fm-session-start.sh"
@@ -669,8 +670,9 @@ test_extended_mutating_entrypoints_refuse_gate_context() {
   stack="$TMP/extended-report-stack"
   mkdir -p "$home/state" "$home/data" "$home/projects"
 
-  for name in fleet-sync x-reply x-dismiss x-followup x-link x-poll watch watch-arm watch-checkpoint wake-drain brief ensure-agents lock review-diff supervise-daemon; do
+  for name in crosscheck fleet-sync x-reply x-dismiss x-followup x-link x-poll watch watch-arm watch-checkpoint wake-drain brief ensure-agents lock review-diff supervise-daemon; do
     case "$name" in
+      crosscheck) script=$(guarded_script "$NORMAL_CWD" "$CROSSCHECK"); set -- run task-x https://github.com/example/repo/pull/9 ;;
       fleet-sync) script=$(guarded_script "$NORMAL_CWD" "$FLEET_SYNC"); set -- --help ;;
       x-reply) script=$(guarded_script "$NORMAL_CWD" "$X_REPLY"); set -- request-x "reply" ;;
       x-dismiss) script=$(guarded_script "$NORMAL_CWD" "$X_DISMISS"); set -- request-x ;;

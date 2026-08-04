@@ -22,8 +22,8 @@ test_checked_in_plan_is_complete_balanced_and_deterministic() {
 
   out=$("$SHARDER" --check "$SHARD_COUNT") \
     || fail "checked-in behavior shard plan failed its coverage guard"
-  assert_contains "$out" "FM_BEHAVIOR_PLAN ok tests=93 shards=8" \
-    "coverage guard did not report the complete 93-test inventory"
+  assert_contains "$out" "FM_BEHAVIOR_PLAN ok tests=96 shards=8" \
+    "coverage guard did not report the complete 96-test inventory"
   "$SHARDER" --plan "$SHARD_COUNT" > "$plan_a"
   "$SHARDER" --plan "$SHARD_COUNT" > "$plan_b"
   cmp -s "$plan_a" "$plan_b" || fail "same durations produced different shard plans"
@@ -165,7 +165,7 @@ test_post_run_guard_requires_the_exact_executed_union() {
   write_complete_manifests "$plan" "$good"
   out=$("$SHARDER" --verify "$SHARD_COUNT" "$good") \
     || fail "post-run guard rejected the exact complete manifest union"
-  assert_contains "$out" "FM_BEHAVIOR_COMPLETENESS ok tests=93 shards=8" \
+  assert_contains "$out" "FM_BEHAVIOR_COMPLETENESS ok tests=96 shards=8" \
     "post-run guard did not report complete execution"
 
   cp -R "$good" "$missing"
@@ -241,8 +241,8 @@ test_teardown_partition_preserves_every_full_suite_case() {
     in_cases && /^\)$/ { exit }
     in_cases && $1 ~ /^test_[A-Za-z0-9_]+$/ { print $1 }
   ' "$TEARDOWN_SUITE" > "$listed"
-  [ "$(wc -l < "$listed" | tr -d ' ')" -eq 134 ] \
-    || fail "teardown partition does not retain all 134 normal-run cases"
+  [ "$(wc -l < "$listed" | tr -d ' ')" -eq 137 ] \
+    || fail "teardown partition does not retain all 137 normal-run cases"
   [ "$(LC_ALL=C sort "$listed" | uniq -d | wc -l | tr -d ' ')" -eq 0 ] \
     || fail "teardown partition lists a normal-run case more than once"
   comm -13 "$definitions" <(LC_ALL=C sort "$listed") > "$tmp/undefined.txt"
@@ -256,17 +256,17 @@ test_teardown_partition_preserves_every_full_suite_case() {
     | LC_ALL=C sort > "$expected_focused"
   cmp -s "$expected_focused" "$focused" \
     || fail "teardown partition dropped or absorbed a focused-only case"
-  [ "$(awk 'NR % 2 == 1 { count++ } END { print count + 0 }' "$listed")" -eq 67 ] \
-    || fail "teardown partition A does not own exactly 67 cases"
-  [ "$(awk 'NR % 2 == 0 { count++ } END { print count + 0 }' "$listed")" -eq 67 ] \
-    || fail "teardown partition B does not own exactly 67 cases"
+  [ "$(awk 'NR % 2 == 1 { count++ } END { print count + 0 }' "$listed")" -eq 69 ] \
+    || fail "teardown partition A does not own exactly 69 cases"
+  [ "$(awk 'NR % 2 == 0 { count++ } END { print count + 0 }' "$listed")" -eq 68 ] \
+    || fail "teardown partition B does not own exactly 68 cases"
   assert_grep 'FM_TEST_PART_INDEX=1 FM_TEST_PART_TOTAL=2' "$wrapper_a" \
     "teardown wrapper A does not select partition 1/2"
   assert_grep 'FM_TEST_PART_INDEX=2 FM_TEST_PART_TOTAL=2' "$wrapper_b" \
     "teardown wrapper B does not select partition 2/2"
   [ ! -e "$ROOT/tests/fm-teardown.test.sh" ] \
     || fail "the unsplit teardown test remains in the behavior inventory"
-  pass "teardown wrappers preserve all 134 normal cases and three focused-only cases"
+  pass "teardown wrappers preserve all 137 normal cases and three focused-only cases"
 }
 
 test_checked_in_plan_is_complete_balanced_and_deterministic

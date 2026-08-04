@@ -29,10 +29,11 @@
 20	tests/fm-backend-zellij-smoke.test.sh
 3820	tests/fm-backend-zellij.test.sh
 25568	tests/fm-backend.test.sh
-2000	tests/fm-behavior-shards.test.sh
 5222	tests/fm-backlog-handoff.test.sh
 17908	tests/fm-bearings-snapshot.test.sh
+2000	tests/fm-behavior-shards.test.sh
 9402	tests/fm-bootstrap.test.sh
+2000	tests/fm-bounded-io.test.sh
 1875	tests/fm-brief.test.sh
 13892	tests/fm-cd-pretool-check.test.sh
 475500	tests/fm-checkout-refresh.test.sh
@@ -40,6 +41,7 @@
 263	tests/fm-composer-ghost.test.sh
 30	tests/fm-composer-lib.test.sh
 10055	tests/fm-crew-state.test.sh
+75707	tests/fm-crosscheck.test.sh
 13991	tests/fm-daemon.test.sh
 340	tests/fm-decision-pretool-check.test.sh
 685	tests/fm-dispatch-select.test.sh
@@ -47,14 +49,15 @@
 3009	tests/fm-fleet-snapshot-view.test.sh
 50266	tests/fm-fleet-sync.test.sh
 8940	tests/fm-gate-refuse.test.sh
+4809	tests/fm-github-pr.test.sh
 25	tests/fm-gotmp.test.sh
 3459	tests/fm-grok-harness.test.sh
 6995	tests/fm-herdr-lab.test.sh
 98	tests/fm-lint.test.sh
 187	tests/fm-lock.test.sh
 1686	tests/fm-macos-permissions.test.sh
-1560	tests/fm-no-mistakes-reattach.test.sh
 3428	tests/fm-nm-step-liveness.test.sh
+1560	tests/fm-no-mistakes-reattach.test.sh
 10	tests/fm-pi-primary-live-e2e.test.sh
 80	tests/fm-pi-primary-types.test.sh
 3170	tests/fm-pi-watch-extension.test.sh

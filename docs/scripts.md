@@ -70,6 +70,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
 | `fm-checkout-lock-lib.sh` | Shared common-Git-directory lock identity and ownership for checkout mutation       |
 | `fm-process-tree-lib.sh` | Shared bounded command runner that terminates and reaps complete process trees         |
+| `fm_bounded_io.py`      | Shared Python bounds for process trees, aggregate output, JSON artifacts, and item batches |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inheritable-config propagation                        |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
 | `fm-lavish-board.sh`     | Open a self-contained decision board and arm its profile-first bounded submission check |
@@ -84,8 +85,11 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
+| `fm-github-pr.py`        | Adapt observed gh-axi TOON PR reads through a fail-closed read-only CLI               |
+| `fm-crosscheck.sh`       | Run, verify, or atomically merge through the durable exact-head PR finding ledger     |
+| `fm-crosscheck.py`       | Validate and execute crosscheck reviewer evidence and finding lifecycle transitions  |
 | `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
-| `fm-pr-merge.sh`         | Record PR metadata, then merge a task's PR from its full GitHub URL                  |
+| `fm-pr-merge.sh`         | Require exact-head crosscheck, record PR metadata, and atomically merge the reviewed SHA |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-report-contract-lib.sh` | Render the shared ship completion-report contract inserted into briefs and continuation prompts |
 | `fm-report-stack.mjs`    | Publish and browse machine-global, account-independent completion reports            |

@@ -200,8 +200,9 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 Review diffs go through `bin/fm-review-diff.sh`, which refreshes the authoritative base and, when task meta records `pr=`, compares against the reachable recorded `pr_head=` or a freshly fetched `refs/pull/<n>/head` before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crewmate branch until the evidence-hosting design changes.
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
-PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
-The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
+PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and the live `pr_head=` through `bin/fm-pr-check.sh`, requires a clear crosscheck ledger for that exact head and claims digest, and submits the reviewed SHA through GitHub's atomic merge API.
+[`crosscheck.md`](crosscheck.md) owns the finding lifecycle, executed evidence, independent-reviewer, installed-tool, and exact-head contracts.
+The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, defaults to `squash`, preserves supported immediate merge options, and rejects malformed URLs, repo overrides, asynchronous auto-merge, or branch deletion before recording merge state.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 Terminal auto-reaping invokes that exact teardown path without `--force`; it does not introduce a second or weaker landed-work definition.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.

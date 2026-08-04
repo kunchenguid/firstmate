@@ -80,6 +80,7 @@ tools/               independently versioned provider-neutral components, commit
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/claude-crew-model  Claude crewmate/scout model anchor; LOCAL, gitignored, inherited, and absent = `claude-opus-5`. An unreadable, empty, or `default` value fails closed instead of inheriting Claude CLI state (section 4)
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
+config/crosscheck-reviewer.json  policy-grade independent reviewer identity for the PR crosscheck merge gate; LOCAL, gitignored; see docs/crosscheck.md
 config/checkout-refresh  optional extra checkout and shallow scan-root directives for this home's safe checkout refresher; LOCAL, gitignored; see docs/configuration.md "Checkout refresh"
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/account-routing-mode  optional account routing policy (`off`, `observe`, or `enforce`); new ship/scout observe/enforce launches use direct account directories, secondmate launches retain legacy Agent Fleet routing, and existing managed metadata retains legacy Agent Fleet recovery; LOCAL, gitignored; default off; inherited by secondmate homes (docs/configuration.md "Agent Fleet account routing")
@@ -101,6 +102,8 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
   <id>/completion.md ship task completion report, published to the machine-global report stack through fail-closed teardown
+  <id>/crosscheck-ledger.json  durable exact-head finding lifecycle and review-attempt record for PR merge gating
+  <id>/crosscheck.md  readable report for the latest crosscheck attempt and all durable findings
   <id>/visuals/      optional screenshots and diagrams copied into that durable completion report
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
@@ -508,7 +511,7 @@ This do-not-fight rule does not license evidence commits in firstmate's own repo
 **yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge.
 With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain.
 Never merge a red PR even under yolo.
-`bin/fm-pr-merge.sh` always records `pr=` and records `pr_head=` when available before merging, parses the full `https://github.com/<owner>/<repo>/pull/<n>` URL into `gh-axi pr merge <n> --repo <owner>/<repo>`, and defaults to `--squash` unless an explicit merge method is forwarded after `--`; this holds even on a repo with no PR CI where the "checks green" signal that normally triggers `bin/fm-pr-check.sh` never fires - do not call `gh-axi pr merge` directly for a task's PR, or the recording step can be silently skipped and a later `fm-teardown.sh` has nothing to verify a squash merge against.
+`bin/fm-pr-merge.sh` always records `pr=` and the live `pr_head=`, requires a clear crosscheck ledger for that exact head and PR claims, and passes the reviewed SHA to GitHub's atomic merge API; do not call `gh-axi pr merge` or the API directly for a task's PR.
 After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
 
 ### Validate
@@ -517,6 +520,8 @@ For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger
 Load `harness-adapters` for the target harness's skill invocation form; natural language also works if uncertain.
 
 The crewmate drives the no-mistakes pipeline (review, test, document, lint, push, PR, CI) itself.
+As soon as a PR URL exists, run `bin/fm-crosscheck.sh run <id> <full GitHub PR URL>` independently so its policy-grade review can overlap the remaining no-mistakes work rather than becoming a serialized pipeline step.
+If the PR URL is not visible until no-mistakes returns, run crosscheck immediately at PR ready and do not present the PR as merge-ready until its report is clear.
 The ship brief intentionally does not restate no-mistakes gate mechanics; it points the crewmate to the version-matched SKILL.md loaded by `/no-mistakes`, `no-mistakes axi run --help`, and per-response `help` lines.
 Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, captain-owned decisions go back through `no-mistakes axi respond`, crewmate validation avoids `--yes`, and CI-green completion is reported as `done: PR {url} checks green`.
 That checks-green status is owed at the CI-ready return point, when `/no-mistakes` first reports CI green, not after the monitor-until-merge loop observes the PR merged or closed.
@@ -545,12 +550,14 @@ A step that `axi status` renders as `quiet` is NOT evidence that anything died: 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Before treating a no-mistakes ready signal as merge input, confirm `bin/fm-crew-state.sh <id>` reports `state: done`; a status-log PR URL alone is not currentness evidence, and `state: unknown` or `state: stale` with `do not merge` blocks this stage.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and GitHub's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+Ensure `bin/fm-crosscheck.sh run <id> <PR url>` has completed for the current head, then read `data/<id>/crosscheck.md`; a blocking or unreviewed report is not merge-ready.
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
 If the captain says "merge it", run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>` yourself; that instruction is the explicit approval.
 If `yolo=on`, merge a green/approved PR yourself the same way and post the required FYI.
-The helper defaults to `--squash`, accepts explicit merge-method flags such as `-- --merge`, `-- --rebase`, or `-- --method=merge`, and refuses `--repo` or `-R` overrides because the repository is derived from the URL.
+The helper defaults to `--squash`, accepts immediate merge-method flags such as `-- --merge`, `-- --rebase`, or `-- --method=merge`, and accepts `--subject`, `--body`, or `--body-file` for the atomic request.
+It refuses repository overrides, `--auto`, and `--delete-branch` because those options cannot preserve the same immediate expected-head merge contract.
 
 ### Ship teardown (only after merge is confirmed)
 

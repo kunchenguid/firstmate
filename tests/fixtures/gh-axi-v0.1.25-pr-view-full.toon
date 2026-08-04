@@ -1,0 +1,10 @@
+pull_request:
+  number: 72
+  title: "feat: observed contract fixture"
+  state: open
+  author: ruby-dlee
+  draft: no
+  merged: no
+  body: "Complete claims returned by --full."
+  comment_count: 0 — use --comments to see full comments
+  review_count: 0 — use --reviews to see full reviews

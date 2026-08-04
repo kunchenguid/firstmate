@@ -62,11 +62,29 @@ write_secondmate_registration() {
 
 
 test_fm_home_parameterization() {
-  local brief home_one home_two out
+  local brief fakebin home_one home_two out
   home_one="$TMP_ROOT/home one"
   home_two="$TMP_ROOT/home-two"
-  mkdir -p "$home_one/data" "$home_one/state" "$home_two/data" "$home_two/state"
+  fakebin="$TMP_ROOT/fm-home-gh-axi"
+  mkdir -p "$home_one/data" "$home_one/state" "$home_two/data" "$home_two/state" "$fakebin"
   printf '%s\n' '- app [local-only +yolo] - test app (added 2026-06-22)' > "$home_one/data/projects.md"
+
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "api /repos/example/repo/pulls/1")
+    sed \
+      -e 's/^number: 72$/number: 1/' \
+      -e 's#ruby-dlee/firstmate#example/repo#g' \
+      "$FM_TEST_PR_API_FIXTURE"
+    ;;
+  *)
+    echo "unsupported fake gh-axi invocation: $*" >&2
+    exit 97
+    ;;
+esac
+SH
+  chmod +x "$fakebin/gh-axi"
 
   out=$(FM_HOME="$home_one" "$ROOT/bin/fm-project-mode.sh" app)
   [ "$out" = "local-only on" ] || fail "fm-project-mode did not read projects.md from FM_HOME"
@@ -88,7 +106,11 @@ test_fm_home_parameterization() {
   grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
   printf 'project=x\n' > "$home_one/state/task-a.meta"
-  FM_HOME="$home_one" FM_GUARD_GRACE=999999 "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
+  FM_HOME="$home_one" \
+  FM_GH_AXI_BIN="$fakebin/gh-axi" \
+  FM_TEST_PR_API_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-pr-api.toon" \
+  FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
     || fail "fm-pr-check failed under FM_HOME"
   [ -f "$home_one/state/task-a.check.sh" ] || fail "pr check was not written under FM_HOME/state"
   [ ! -e "$home_two/state/task-a.check.sh" ] || fail "pr check leaked into another home"

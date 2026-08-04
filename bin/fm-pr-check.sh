@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: appends pr=<url> and GitHub's pr_head=<sha> to
 # state/<id>.meta when available, then arms the watcher's merge poll by writing
-# state/<id>.check.sh, which prints one line iff the PR is merged (the watcher's
-# check contract: output = wake firstmate, silence = keep sleeping).
+# state/<id>.check.sh, which prints one line when the PR is merged or its lookup
+# fails (the watcher's check contract: output = wake, silence = keep sleeping).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -52,13 +52,12 @@ if [ -z "$LOOKUP_GENERATION" ]; then
   fi
 fi
 fm_account_meta_lock_release "$META_LOCK"
-if [ -n "$LOOKUP_WT" ] && [ -d "$LOOKUP_WT" ]; then
-  if command -v gh >/dev/null 2>&1; then
-    if REMOTE_HEAD=$(cd "$LOOKUP_WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null); then
-      PR_HEAD=$REMOTE_HEAD
-    fi
-  fi
+if ! PR_HEAD_LOOKUP=$("$FM_ROOT/bin/fm-github-pr.py" head "$URL" 2>&1); then
+  PR_HEAD_DIAGNOSTIC=$(printf '%s' "$PR_HEAD_LOOKUP" | tr '\r\n' '  ')
+  printf 'UNREVIEWED: PR head lookup failed: %.500s\n' "$PR_HEAD_DIAGNOSTIC" >&2
+  exit 1
 fi
+PR_HEAD=$PR_HEAD_LOOKUP
 META_LOCK=$(fm_account_meta_lock_acquire "$STATE" "$ID") || exit 1
 release_meta_lock() {
   fm_account_meta_lock_release "$META_LOCK" >/dev/null 2>&1 || true
@@ -74,7 +73,7 @@ if [ -f "$META" ]; then
   if ! grep -qxF "pr=$URL" "$META"; then
     echo "pr=$URL" >> "$META"
   fi
-  if [ -n "$PR_HEAD" ] && [ "$CURRENT_WT" = "$LOOKUP_WT" ] && ! grep -qxF "pr_head=$PR_HEAD" "$META"; then
+  if [ "$CURRENT_WT" = "$LOOKUP_WT" ] && ! grep -qxF "pr_head=$PR_HEAD" "$META"; then
     echo "pr_head=$PR_HEAD" >> "$META"
   fi
 else
@@ -82,9 +81,19 @@ else
   exit 1
 fi
 CHECK_TMP=$(mktemp "$STATE/.$ID.check.XXXXXX") || exit 1
+printf -v PR_ADAPTER_Q '%q' "$FM_ROOT/bin/fm-github-pr.py"
+printf -v URL_Q '%q' "$URL"
 cat > "$CHECK_TMP" <<EOF
-state=\$(gh pr view "$URL" --json state -q .state 2>/dev/null)
-[ "\$state" = "MERGED" ] && echo "merged"
+if ! state=\$($PR_ADAPTER_Q state $URL_Q 2>&1); then
+  diagnostic=\$(printf '%s' "\$state" | tr '\r\n' '  ')
+  printf 'UNREVIEWED: PR state lookup failed: %.500s\n' "\$diagnostic"
+  exit 0
+fi
+case "\$state" in
+  OPEN) ;;
+  MERGED) echo "merged" ;;
+  *) printf 'UNREVIEWED: PR state is %.500s\n' "\$state" ;;
+esac
 EOF
 chmod +x "$CHECK_TMP"
 mv "$CHECK_TMP" "$STATE/$ID.check.sh"

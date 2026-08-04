@@ -68,7 +68,7 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TREEHOUSE_REAPER="$ROOT/bin/fm-treehouse-reap.sh"
-PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+PR_CHECK="${FM_TEST_PR_CHECK:-$ROOT/bin/fm-pr-check.sh}"
 # shellcheck source=bin/fm-checkout-lock-lib.sh disable=SC1091
 . "$ROOT/bin/fm-checkout-lock-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
@@ -443,6 +443,25 @@ add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
+case "$*" in
+  "api /repos/example/repo/pulls/7")
+    printf '%s\n' \
+      'number: 7' \
+      'state: open' \
+      'merged: false' \
+      'head:' \
+      '  ref: fm/task-x1' \
+      "  sha: $FM_TEST_PR_HEAD" \
+      '  repo:' \
+      '    full_name: example/repo' \
+      'base:' \
+      '  ref: main' \
+      '  sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+      '  repo:' \
+      '    full_name: example/repo'
+    exit 0
+    ;;
+esac
 case "${1:-} ${2:-}" in
   "pr list")
     printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,merged" ; exit 0 ;;
@@ -465,6 +484,33 @@ echo "error: pull request not found" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+install_pr_check_lookup_fake() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = "api /repos/example/repo/pulls/7" ] || exit 97
+[ -z "${FM_TEST_LOOKUP_READY:-}" ] || touch "$FM_TEST_LOOKUP_READY"
+while [ -n "${FM_TEST_LOOKUP_RELEASE:-}" ] && [ ! -f "$FM_TEST_LOOKUP_RELEASE" ]; do
+  sleep 0.05
+done
+printf '%s\n' \
+  'number: 7' \
+  'state: open' \
+  'merged: false' \
+  'head:' \
+  '  ref: fm/task-x1' \
+  "  sha: $FM_TEST_PR_HEAD" \
+  '  repo:' \
+  '    full_name: example/repo' \
+  'base:' \
+  '  ref: main' \
+  '  sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  '  repo:' \
+  '    full_name: example/repo'
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
 }
 
 append_pr_meta_for_current_head() {
@@ -1089,6 +1135,7 @@ test_pr_check_does_not_refresh_stale_pr_head() {
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_PR_HEAD="$pr_head" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
@@ -1097,6 +1144,7 @@ test_pr_check_does_not_refresh_stale_pr_head() {
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_PR_HEAD="$pr_head" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
@@ -1126,6 +1174,7 @@ test_pr_check_records_remote_head_when_local_lags() {
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_PR_HEAD="$pr_head" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
@@ -1134,6 +1183,114 @@ test_pr_check_records_remote_head_when_local_lags() {
   ! grep -qxF "pr_head=$local_head" "$case_dir/state/task-x1.meta" \
     || fail "pr-check-local-lags: recorded local HEAD instead of remote PR head"
   pass "fm-pr-check records the remote PR head when the local worktree lags"
+}
+
+test_pr_check_lookup_errors_are_loud_and_bounded() {
+  local case_dir rc url head wake wake_size
+  url=https://github.com/example/repo/pull/7
+  head=deadbeefcafefeed0000000000000000deadbeef
+
+  case_dir=$(make_case pr-check-setup-lookup-error)
+  write_meta "$case_dir" no-mistakes ship
+  add_gh_axi_error "$case_dir"
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 "$url" > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "PR head lookup error"
+  assert_grep 'UNREVIEWED: PR head lookup failed' "$case_dir/err" \
+    "setup lookup error was not loud"
+  ! grep -q '^pr=' "$case_dir/state/task-x1.meta" \
+    || fail "failed setup lookup still recorded the PR"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "failed setup lookup still armed the watcher"
+
+  case_dir=$(make_case pr-check-poll-lookup-error)
+  write_meta "$case_dir" no-mistakes ship
+  install_pr_check_lookup_fake "$case_dir"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_PR_HEAD="$head" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 "$url" >/dev/null \
+    || fail "PR watcher setup failed before its lookup-error exercise"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+python3 -c 'import sys; sys.stderr.write("lookup failed " * 200)'
+exit 42
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  wake=$(PATH="$case_dir/fakebin:$PATH" bash "$case_dir/state/task-x1.check.sh") \
+    || fail "lookup-error watcher wake exited nonzero"
+  assert_contains "$wake" 'UNREVIEWED: PR state lookup failed' \
+    "later lookup error remained silent"
+  wake_size=$(printf '%s' "$wake" | wc -c)
+  [ "$wake_size" -le 550 ] || fail "lookup-error watcher wake was unbounded: $wake_size bytes"
+  pass "PR lookup errors block setup and wake later polls loudly within a bound"
+}
+
+test_pr_check_without_worktree_still_performs_lookup() {
+  local case_dir rc staged url
+  case_dir=$(make_case pr-check-missing-worktree)
+  write_meta "$case_dir" no-mistakes ship
+  staged="$case_dir/state/.task-x1.meta.missing-worktree"
+  url=https://github.com/example/repo/pull/7
+  grep -v '^worktree=' "$case_dir/state/task-x1.meta" > "$staged"
+  mv "$staged" "$case_dir/state/task-x1.meta"
+  add_gh_axi_error "$case_dir"
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 "$url" > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "PR lookup without worktree metadata"
+  assert_grep 'UNREVIEWED: PR head lookup failed' "$case_dir/err" \
+    "missing worktree metadata bypassed the remote PR lookup"
+  assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" \
+    "missing worktree metadata still recorded an unreviewed PR"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "missing worktree metadata armed a watcher without a reviewed head"
+  pass "PR setup performs its remote lookup even without worktree metadata"
+}
+
+test_closed_pr_wakes_loudly_as_unreviewed() {
+  local case_dir head url wake wake_size
+  case_dir=$(make_case pr-check-closed-pr)
+  write_meta "$case_dir" no-mistakes ship
+  head=deadbeefcafefeed0000000000000000deadbeef
+  url=https://github.com/example/repo/pull/7
+  install_pr_check_lookup_fake "$case_dir"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_PR_HEAD="$head" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 "$url" >/dev/null \
+    || fail "PR watcher setup failed before closed-state exercise"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = "api /repos/example/repo/pulls/7" ] || exit 97
+printf '%s\n' \
+  'number: 7' \
+  'state: closed' \
+  'merged: false' \
+  'head:' \
+  '  ref: fm/task-x1' \
+  '  sha: deadbeefcafefeed0000000000000000deadbeef' \
+  '  repo:' \
+  '    full_name: example/repo' \
+  'base:' \
+  '  ref: main' \
+  '  sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  '  repo:' \
+  '    full_name: example/repo'
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  wake=$(PATH="$case_dir/fakebin:$PATH" bash "$case_dir/state/task-x1.check.sh") \
+    || fail "closed-state watcher wake exited nonzero"
+  assert_contains "$wake" 'UNREVIEWED: PR state is CLOSED' \
+    "closed PR remained silent in the watcher"
+  wake_size=$(printf '%s' "$wake" | wc -c)
+  [ "$wake_size" -le 550 ] || fail "closed-state watcher wake was unbounded: $wake_size bytes"
+  pass "closed PRs wake the watcher loudly as unreviewed"
 }
 
 test_pr_check_serializes_with_account_session_updates() {
@@ -1146,13 +1303,7 @@ test_pr_check_serializes_with_account_session_updates() {
   url=https://github.com/example/repo/pull/7
   head=deadbeefcafefeed0000000000000000deadbeef
   write_meta "$case_dir" no-mistakes ship
-  cat > "$case_dir/fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-touch "$FM_TEST_LOOKUP_READY"
-while [ ! -f "$FM_TEST_LOOKUP_RELEASE" ]; do sleep 0.05; done
-printf '%s\n' "$FM_TEST_PR_HEAD"
-SH
-  chmod +x "$case_dir/fakebin/gh"
+  install_pr_check_lookup_fake "$case_dir"
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
   FM_TEST_LOOKUP_READY="$lookup_ready" FM_TEST_LOOKUP_RELEASE="$lookup_release" \
   FM_TEST_PR_HEAD="$head" PATH="$case_dir/fakebin:$PATH" \
@@ -1187,13 +1338,7 @@ test_pr_check_rejects_reused_task_generation() {
   head=deadbeefcafefeed0000000000000000deadbeef
   staged="$state/.task-x1.meta.reused"
   write_meta "$case_dir" no-mistakes ship
-  cat > "$case_dir/fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-touch "$FM_TEST_LOOKUP_READY"
-while [ ! -f "$FM_TEST_LOOKUP_RELEASE" ]; do sleep 0.05; done
-printf '%s\n' "$FM_TEST_PR_HEAD"
-SH
-  chmod +x "$case_dir/fakebin/gh"
+  install_pr_check_lookup_fake "$case_dir"
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
   FM_TEST_LOOKUP_READY="$lookup_ready" FM_TEST_LOOKUP_RELEASE="$lookup_release" \
   FM_TEST_PR_HEAD="$head" PATH="$case_dir/fakebin:$PATH" \
@@ -1232,13 +1377,10 @@ test_pr_check_backfills_legacy_generation_and_records_state() {
   write_meta "$case_dir" no-mistakes ship
   grep -v '^generation_id=' "$meta" > "$staged"
   mv "$staged" "$meta"
-  cat > "$case_dir/fakebin/gh" <<SH
-#!/usr/bin/env bash
-printf '%s\n' '$head'
-SH
-  chmod +x "$case_dir/fakebin/gh"
+  install_pr_check_lookup_fake "$case_dir"
 
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" PATH="$case_dir/fakebin:$PATH" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_TEST_PR_HEAD="$head" \
+  PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 "$url" >/dev/null \
     || fail "PR check rejected legacy task metadata without a generation identity"
   grep -Eq '^generation_id=legacy:a[0-9a-f]{15}$' "$meta" \
@@ -1262,13 +1404,7 @@ test_pr_check_backfills_legacy_generation_before_race_check() {
   write_meta "$case_dir" no-mistakes ship
   grep -v '^generation_id=' "$meta" > "$staged"
   mv "$staged" "$meta"
-  cat > "$case_dir/fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-touch "$FM_TEST_LOOKUP_READY"
-while [ ! -f "$FM_TEST_LOOKUP_RELEASE" ]; do sleep 0.05; done
-printf '%s\n' "$FM_TEST_PR_HEAD"
-SH
-  chmod +x "$case_dir/fakebin/gh"
+  install_pr_check_lookup_fake "$case_dir"
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
   FM_TEST_LOOKUP_READY="$lookup_ready" FM_TEST_LOOKUP_RELEASE="$lookup_release" \
   FM_TEST_PR_HEAD="$head" PATH="$case_dir/fakebin:$PATH" \
@@ -5918,6 +6054,36 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-35-pr ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = crosscheck-pr-lookup ]; then
+  test_pr_check_does_not_refresh_stale_pr_head
+  test_pr_check_records_remote_head_when_local_lags
+  test_pr_check_lookup_errors_are_loud_and_bounded
+  test_pr_check_without_worktree_still_performs_lookup
+  test_closed_pr_wakes_loudly_as_unreviewed
+  test_pr_check_serializes_with_account_session_updates
+  test_pr_check_rejects_reused_task_generation
+  test_pr_check_backfills_legacy_generation_and_records_state
+  test_pr_check_backfills_legacy_generation_before_race_check
+  exit 0
+fi
+
+if [ -n "${FM_TEST_CASE:-}" ]; then
+  case "$FM_TEST_CASE" in
+    test_pr_check_without_worktree_still_performs_lookup|test_closed_pr_wakes_loudly_as_unreviewed)
+      "$FM_TEST_CASE"
+      exit 0
+      ;;
+    *) fail "unknown focused teardown test: $FM_TEST_CASE" ;;
+  esac
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-3-pr-check ]; then
+  test_pr_check_lookup_errors_are_loud_and_bounded
+  test_pr_check_without_worktree_still_performs_lookup
+  test_closed_pr_wakes_loudly_as_unreviewed
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = direct-spawn-cleanup ]; then
   test_retained_direct_spawn_requires_confirmed_endpoint_quiescence
   test_never_created_direct_spawn_endpoint_is_not_quiesced
@@ -6281,6 +6447,7 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_merged_pr_with_later_local_commit_refuses
   test_pr_check_does_not_refresh_stale_pr_head
   test_pr_check_records_remote_head_when_local_lags
+  test_pr_check_lookup_errors_are_loud_and_bounded
   test_pr_check_serializes_with_account_session_updates
   test_pr_check_rejects_reused_task_generation
   test_content_in_default_fallback_allows
@@ -6334,6 +6501,8 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_persistent_index_lock_exhausts_retries_and_refuses_loudly
   test_empty_retry_wait_uses_default_without_aborting
   test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+  test_closed_pr_wakes_loudly_as_unreviewed
+  test_pr_check_without_worktree_still_performs_lookup
 )
 
 for teardown_test_function in "${TEARDOWN_FULL_SUITE_CASES[@]}"; do
