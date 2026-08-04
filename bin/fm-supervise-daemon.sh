@@ -54,6 +54,11 @@
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
+#   - Captain-commanded lanes: a persistent secondmate the captain commands is
+#     never aged toward a wedge, so its stale wakes self-handle, while its
+#     captain-relevant events still escalate carrying FM_CAPTAIN_COMMAND_LABEL.
+#     bin/fm-classify-lib.sh owns that predicate and why the always-on watcher
+#     absorbs the same events instead.
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
@@ -329,12 +334,18 @@ _collapse_newlines() {  # <text>
 # summary firstmate would otherwise have to re-read.
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen owner
   for f in $reason; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
-    distilled="${distilled}$(basename "$f"): ${last} | "
+    # Away mode is the one time a captain-commanded lane's events still belong in
+    # a firstmate-built digest: the captain is not reading that pane, he is
+    # reading the digest. They are labelled so the digest never presents his own
+    # lane as work firstmate is supposed to pick up.
+    owner=""
+    task_is_captain_commanded "$(signal_file_task "$f")" && owner="$FM_CAPTAIN_COMMAND_LABEL "
+    distilled="${distilled}${owner}$(basename "$f"): ${last} | "
     status_is_captain_relevant "$last" || continue
     rel=1
     # Dedupe against the catch-all scan: if this status was already escalated
@@ -365,6 +376,15 @@ classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
+  if task_is_captain_commanded "$task"; then
+    # A lane the captain commands is SUPPOSED to sit idle between his own
+    # messages. Aging it toward a wedge would escalate his own lane back to
+    # firstmate as something to fix, which is the two-commanders ambiguity the
+    # command transfer exists to remove. No wedge marker, no escalation.
+    printf 'self|%s idle lane awaiting its captain, not a wedge (%s): %s' \
+      "$FM_CAPTAIN_COMMAND_LABEL" "$win" "${last:-no status}"
+    return
+  fi
   if [ -n "$last" ] && status_is_paused "$last"; then
     # A DECLARED external-wait pause (fm-classify-lib.sh): an idle pane is EXPECTED,
     # so this is not a wedge. The caller records a pause marker (long re-surface
@@ -984,6 +1004,13 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
+    if task_is_captain_commanded "$task"; then
+      # Never age a captain-commanded lane toward a wedge: idling between the
+      # captain's own messages is its healthy resting state, and escalating it
+      # would put firstmate back on a lane it does not command.
+      rm -f "$marker"
+      continue
+    fi
     if [ -n "$last" ] && status_is_paused "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
@@ -1043,12 +1070,14 @@ housekeeping() {  # <state>
   #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local seen
+    local seen owner
     while IFS="$(printf '\t')" read -r f task last; do
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
+      owner=""
+      task_is_captain_commanded "$task" && owner="$FM_CAPTAIN_COMMAND_LABEL "
+      escalate_add "$state" "${owner}$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
   fi
@@ -1236,6 +1265,14 @@ handle_wake() {  # <reason> <state>
       if [ "$kind" = "stale" ]; then
         task=$(window_to_task "$arg" "$state")
         last=$(last_status_line "$state/$task.status")
+        # A captain-commanded lane never carries a wedge marker at all: idling
+        # between his messages is its resting state, so there is nothing to age.
+        if task_is_captain_commanded "$task"; then
+          pause_marker_remove "$arg" "$state"
+          stale_marker_remove "$arg" "$state"
+          log "self-handle: $reason -> $distilled"
+          return
+        fi
         # Clear wedge aging only for terminal (or legacy free-text) captain lines.
         # Nonterminal progress verbs keep possible-wedge markers even if free text
         # once looked captain-relevant or was written into a seen marker.

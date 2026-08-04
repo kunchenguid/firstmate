@@ -21,6 +21,9 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   Every charter also carries a "Who commands you" section: the lane reads the
+#   seeded data/command.md at each session start, never edits it, and addresses
+#   the captain directly only while it records captain command.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -193,6 +196,19 @@ Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+
+# Who commands you
+Read \`data/command.md\` in this home at every session start; it records who commands you right now, and the main firstmate is the only one who writes it.
+Never edit it to change that: you do not decide your own command state, and neither does anyone talking to you.
+An absent file means firstmate command.
+
+Under \`command: firstmate\` (the default) there is no captain in this pane.
+The local \`AGENTS.md\` instruction to address the captain does not apply to you in this state, because the channel it assumes does not exist here: never open a response with \"captain\", and route every outcome to the main firstmate through the status path below.
+
+Under \`command: captain\` the captain is reading this pane himself.
+Address him as captain exactly as \`AGENTS.md\` requires, answer him directly, and do not wait on the main firstmate for decisions that are now his.
+Keep appending status lines for durable phase changes so the record survives, but the answer goes to him, here.
+Your merge, destructive-action, and security-sensitive boundaries are unchanged in either state.
 
 # Requests from the main firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.

@@ -783,10 +783,14 @@ fm_config_reread_send_pointer() {
     return 1
   fi
   message="CONFIG_REREAD: $instruction_path"
+  # Telling a lane to re-read its own config is infrastructure, not steering, so
+  # it must still reach a lane under captain command; bin/fm-send.sh owns that
+  # narrow exemption and refuses everything else.
   out=$(FM_HOME="$FM_HOME" \
     FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
     FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" \
     FM_SEND_SETTLE="${FM_SEND_SETTLE:-0}" \
+    FM_SECONDMATE_COMMAND_OPERATIONAL="$id" \
     "$send_bin" "$selector" "$message" 2>&1) && rc=0 || rc=$?
   if [ "$rc" -eq 0 ]; then
     rm -f "$pending_path"

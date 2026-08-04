@@ -75,6 +75,11 @@ add_sm_worktree() {
     printf 'harness=codex\n'
     printf 'home=%s/%s\n' "$w" "$id"
   } > "$w/home/state/$id.meta"
+  # The command record every registered lane has. Firstmate refuses to steer -
+  # and so refuses to nudge - a lane whose command state it cannot read.
+  [ -f "$w/home/data/secondmates.md" ] || printf '# Secondmates\n\n' > "$w/home/data/secondmates.md"
+  printf -- '- %s - Lane. (home: %s/%s; scope: test; projects: alpha; added 2026-01-01)\n' \
+    "$id" "$w" "$id" >> "$w/home/data/secondmates.md"
 }
 
 # bump_primary <w> <mode>: advance the PRIMARY's main branch by one local commit.

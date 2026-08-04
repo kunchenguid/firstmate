@@ -44,7 +44,7 @@
 #   recovery_turn_completed_epoch=
 #   escalated_epoch=
 #   resolved_epoch=
-#   resolved_via=           status | document | helper | empty
+#   resolved_via=           status | document | helper | notice | empty
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_sightings=   comma-separated identities of counted sightings
 #   wrong_home_scan_signature=
@@ -501,6 +501,26 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   return 0
 }
 
+# Close an expectation whose answer will never arrive on the status channel:
+# either the message never asked for one (a notice), or the answer arrived out of
+# band as a document the caller has already read and validated. The transition
+# lives here because this library owns the phase machine; a caller that wrote
+# phase=resolved itself would be a second owner. Returns 0 when the record is
+# resolved after the call. <via> must be `notice` or `document`.
+fm_pending_reply_retire_unanswered() {  # <state-dir> <corr_id> <notice|document>
+  local state=$1 corr=$2 via=$3 rec phase now
+  case "$via" in notice|document) ;; *) return 2 ;; esac
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  [ "$phase" != resolved ] || return 0
+  now=$(fm_pending_reply_now)
+  fm_pending_reply_set "$rec" phase resolved || return 1
+  fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
+  fm_pending_reply_set "$rec" resolved_via "$via" || return 1
+  return 0
+}
+
 # Observe backend busy/idle evidence for the active turn without reading chat.
 # busy_state must be one of: busy | idle | unknown.
 fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
@@ -679,9 +699,17 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
       send_status=1
     fi
   else
+    # The recovery resend carries the same narrow infrastructure exemption the
+    # original request needed, scoped to this exact lane id. Without it the one
+    # expectation a captain-commanded lane can still hold - firstmate's own
+    # handback request - could never be retried: the command guard would refuse
+    # the resend and report a delivery failure for a lane firstmate may not
+    # steer. Naming one lane never exempts another, and a damaged command record
+    # still blocks (bin/fm-send.sh).
     if [ -z "$parent_home" ] || [ ! -d "$parent_home" ]; then
       send_status=1
     elif ! env FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+      FM_SECONDMATE_COMMAND_OPERATIONAL="$task_id" \
       "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg"; then
       send_status=1
     fi

@@ -19,6 +19,11 @@
 #   - proving the destination is a genuine seeded secondmate home
 #     (.fm-secondmate-home marker, AGENTS.md + bin/), never a project clone, the
 #     active home, or the firstmate repo;
+#   - refusing outright while the destination lane is under CAPTAIN command, or
+#     while its command record is unrecognized or unreadable: firstmate does not
+#     route work into a lane it does not command, so the item stays in the main
+#     backlog under a captain-kind hold naming the lane and is re-evaluated at
+#     handback (secondmate-command-transfer skill);
 #   - moving only `## Queued` items, refusing `## In flight` and historical
 #     `## Done` records, which must stay with their home for pruning or
 #     archiving;
@@ -53,6 +58,8 @@ REG="$DATA/secondmates.md"
 MAIN_BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-secondmate-command-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
 
 [ $# -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
 ID=$1
@@ -228,6 +235,30 @@ backlog_key_noncanonical_body_lines() {
     capturing && /^[[:space:]]/ && !/^  / && /[^[:space:]]/ { print }
   ' "$file"
 }
+
+# Command guard: a lane under captain command has its own commander, and work
+# firstmate pushed into its queue would sit there unasked-for. In-scope work that
+# arrives while the captain holds a lane stays in the main backlog, held for the
+# lane, and is re-evaluated at handback (secondmate-command-transfer skill).
+#
+# This helper only ever targets a lane, so "no readable registry line" is a lost
+# authority, not "not a lane", and it blocks deliberately here rather than being
+# caught downstream by whichever field happens to be missing next.
+COMMAND_BLOCK=$(fm_secondmate_command_blocks_known_lane "$ID" "$REG" || true)
+case "$COMMAND_BLOCK" in
+  captain)
+    echo "error: $ID is under captain command; firstmate does not route work into its queue. Hold the item for the lane and hand it over after the lane returns to firstmate command." >&2
+    exit 1
+    ;;
+  invalid)
+    echo "error: $ID carries an unrecognized command value in $REG; repair that record before routing work into the lane." >&2
+    exit 1
+    ;;
+  unrecorded)
+    echo "error: $ID has no readable command record in $REG; it is either not a registered lane or its record is lost. Repair the registry before routing work into the lane." >&2
+    exit 1
+    ;;
+esac
 
 RAW_HOME=$(secondmate_home "$ID") || exit 1
 [ -n "$RAW_HOME" ] || { echo "error: secondmate $ID has no home in $REG" >&2; exit 1; }

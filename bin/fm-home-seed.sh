@@ -16,7 +16,8 @@
 #       refuses a home with project clones or project-registry entries, so it
 #       never converts populated homes in place. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
-#       initialized, an ignored .fm-secondmate-home identity marker is written, and
+#       initialized, an ignored .fm-secondmate-home identity marker is written,
+#       data/command.md records who commands the lane, and
 #       data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
@@ -34,6 +35,13 @@
 #       The label must be a single line without ";", "(", or ")".
 #       Reseeding without FM_SECONDMATE_LABEL preserves an already-registered
 #       label; setting it explicitly still wins.
+#       data/command.md is the derived, main-authoritative copy of the lane's
+#       command state, read-only to the lane, stating "firstmate" for a new home.
+#       A reseed is provisioning and never a command decision: it carries a
+#       recorded trailing "command:" field forward exactly as it preserves the
+#       label, leaves a captain-commanded lane's existing copy untouched, and
+#       refuses on an unrecognized value rather than quietly resetting it.
+#       bin/fm-secondmate-command.sh owns every other write of that state.
 #   fm-home-seed.sh validate
 #       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
 #       data/secondmates.md.
@@ -46,6 +54,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+
+# shellcheck source=bin/fm-secondmate-command-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -391,7 +402,7 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER"; do
+  for label in "data/projects.md" "data/charter.md" "data/command.md" "$SUB_HOME_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
@@ -599,6 +610,7 @@ SEED_PARENT_BRIEF_CREATED=0
 SEED_PARENT_BRIEF_DIR_CREATED=0
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
+SEED_COMMAND_EXISTED=0
 SEED_MARKER_EXISTED=0
 
 restore_seed_file() {
@@ -720,6 +732,7 @@ seed_rollback() {
       if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
+        restore_seed_file "$SEED_COMMAND_EXISTED" "$SEED_BACKUP_DIR/command.md" "$SEED_HOME/data/command.md"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
     fi
@@ -806,8 +819,25 @@ validate_secondmate_label() {
   esac
 }
 
+# The command state a reseed of <id> must carry forward, or empty for a lane
+# that is not registered yet. A reseed is provisioning, never a command decision:
+# silently rewriting a captain-commanded lane back to firstmate command would be
+# a transfer nobody decided, and it would be invisible because the registry and
+# the home marker revert together so the divergence check stays silent.
+prior_registry_command() {  # <id>
+  local id=$1 state rc=0
+  [ -f "$REG" ] || return 0
+  state=$(fm_secondmate_command_state "$id" "$REG") || rc=$?
+  case "$rc" in
+    0) [ "$state" = "$FM_SECONDMATE_COMMAND_DEFAULT" ] || printf '%s' "$state" ;;
+    2) printf 'invalid' ;;
+  esac
+  return 0
+}
+
 write_registry() {
   local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today label label_suffix prior_line
+  local prior_command command_suffix
   mkdir -p "$DATA"
   scope=$(registry_scope_for_brief "$brief")
   summary=$(registry_summary_for_brief "$brief")
@@ -826,13 +856,22 @@ write_registry() {
     validate_secondmate_label "$label" || return 1
     label_suffix="; label: $label"
   fi
+  # A reseed preserves the recorded command state the same way it preserves the
+  # label; only bin/fm-secondmate-command.sh ever changes it.
+  prior_command=$(prior_registry_command "$id")
+  if [ "$prior_command" = invalid ]; then
+    echo "error: $id carries an unrecognized command value in $REG; repair that record before reseeding this home" >&2
+    return 1
+  fi
+  command_suffix=
+  [ -z "$prior_command" ] || command_suffix="; command: $prior_command"
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
     grep -vE "^- $id( |$)" "$REG" > "$tmp" || true
   else
     : > "$tmp"
   fi
-  printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s%s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" "$label_suffix" >> "$tmp"
+  printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s%s%s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" "$label_suffix" "$command_suffix" >> "$tmp"
   mv "$tmp" "$REG"
 }
 
@@ -892,7 +931,7 @@ refuse_projectful_projectless_charter() {
 
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
-  local no_projects=0 arg
+  local no_projects=0 arg command_token
   local filtered=()
   shift 2
   # A deliberate --no-projects signal (anywhere in the project position) seeds a
@@ -939,6 +978,7 @@ seed_home() {
   SEED_PARENT_BRIEF_DIR_CREATED=0
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
+  SEED_COMMAND_EXISTED=0
   SEED_MARKER_EXISTED=0
   trap seed_rollback EXIT
   if [ -f "$REG" ]; then
@@ -978,6 +1018,10 @@ seed_home() {
   if [ -f "$home/data/charter.md" ]; then
     SEED_CHARTER_EXISTED=1
     cp "$home/data/charter.md" "$SEED_BACKUP_DIR/charter.md"
+  fi
+  if [ -f "$home/data/command.md" ]; then
+    SEED_COMMAND_EXISTED=1
+    cp "$home/data/command.md" "$SEED_BACKUP_DIR/command.md"
   fi
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     SEED_MARKER_EXISTED=1
@@ -1029,6 +1073,31 @@ seed_home() {
   done
 
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
+  # Every seeded home starts under firstmate command, stated rather than implied,
+  # so the charter's "read data/command.md" instruction always finds a record.
+  # bin/fm-secondmate-command.sh is the only thing that ever rewrites it, so a
+  # reseed of a lane the captain already commands leaves the existing marker
+  # exactly as that transfer wrote it, position pointer and all.
+  command_token=$(prior_registry_command "$id")
+  if [ "$command_token" = invalid ]; then
+    echo "error: $id carries an unrecognized command value in $REG; repair that record before reseeding this home" >&2
+    return 1
+  fi
+  [ -n "$command_token" ] || command_token=firstmate
+  if [ "$command_token" = captain ] && [ -f "$home/data/command.md" ]; then
+    :
+  else
+    {
+      printf '# Command state\n\n'
+      printf 'command: %s\n' "$command_token"
+      printf 'recorded: seed\n\n'
+      printf 'The primary firstmate writes this file; it is read-only here.\n'
+      printf 'The authority is the command field on this lane in the primary home secondmate registry.\n'
+      printf 'Never edit this file to change who commands this lane - a lane cannot transfer itself.\n'
+      printf 'Under command: firstmate there is no captain in this pane: never address the captain, and route every report to the main firstmate.\n'
+      printf 'Under command: captain the captain reads this pane himself: address him directly, and do not wait on the main firstmate for decisions that are now his.\n'
+    } > "$home/data/command.md"
+  fi
 
   projects_csv=$(join_projects "$@")
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"

@@ -34,6 +34,11 @@
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
+#     command is populated for secondmates only - firstmate, captain, invalid, or
+#     unrecorded, read from data/secondmates.md - and is null for every other
+#     kind. actions.send is offered only for a lane whose record reads firstmate;
+#     any other value drops the affordance and says why, so the view never
+#     presents the captain's own lane as ordinary firstmate work.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -496,6 +501,18 @@ task_json_lines() {
       agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
     fi
 
+    # Who commands this lane. The steer affordance below is dropped for anything
+    # other than firstmate command: fm-send is the backstop, but a structured
+    # view that offers firstmate a steer against the captain's own lane is
+    # exactly the mis-attribution the command record exists to remove. Only a
+    # readable `firstmate` record earns the affordance, so a lost or damaged one
+    # withholds it too.
+    command_state=""
+    if [ "$kind" = secondmate ]; then
+      command_state=$(fm_secondmate_command_state "$id" "$DATA/secondmates.md" 2>/dev/null || true)
+      [ -n "$command_state" ] || command_state=unrecorded
+    fi
+
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$meta")
     status_json=$event_json
@@ -515,6 +532,7 @@ task_json_lines() {
       --arg projects "$projects" \
       --arg backend "$backend" \
       --arg target "$target" \
+      --arg command_state "$command_state" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
@@ -546,6 +564,7 @@ task_json_lines() {
           home:$home_path,
           report:$report
         },
+        command:($command_state | if . == "" then null else . end),
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
@@ -562,7 +581,14 @@ task_json_lines() {
           last_event_text:$last_event_raw
         },
         actions:(
-          if $kind == "secondmate" then
+          if $kind == "secondmate" and $command_state != "firstmate" then
+            {send:null,
+             watch:"read status/doc return channel; do not routinely fm-peek a secondmate for answers",
+             return_channel_note:(if $command_state == "captain"
+               then "Under captain command: firstmate does not steer this lane, route work into it, or retire it. Hand it back with bin/fm-secondmate-command.sh first."
+               else "Command record unreadable: repair it (bin/fm-secondmate-command.sh status) before steering this lane."
+               end)}
+          elif $kind == "secondmate" then
             {send:"bin/fm-send.sh fm-\($id) \u0027<request>\u0027",
              watch:"read status/doc return channel; do not routinely fm-peek a secondmate for answers",
              return_channel_note:"Secondmate answers come back through status/doc paths after a marked fm-send request."}

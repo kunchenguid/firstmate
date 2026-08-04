@@ -29,6 +29,29 @@
 # an explicit backend-target escape-hatch target, and the --key path are never
 # marked - their behavior is unchanged.
 #
+# Command guard: any send to a secondmate selector - text or --key - is refused
+# outright when that lane is under CAPTAIN command, or when its command record is
+# unreadable (bin/fm-secondmate-command-lib.sh). "Unreadable" includes a missing
+# registry and a registry with no line for the lane: the target's meta already
+# says kind=secondmate, so an absent record is a lost authority, not a crewmate.
+# Firstmate does not steer, and does not interrupt, a lane it does not command.
+# The refusal happens before any pending-reply record exists and before any
+# keystroke reaches the endpoint, so nothing is left half-done.
+#
+# FM_SECONDMATE_COMMAND_OPERATIONAL=<exact lane id> is the one narrow exemption,
+# for messages that are infrastructure rather than work: the handback request
+# issued by bin/fm-secondmate-command.sh and its recovery resend
+# (bin/fm-pending-reply-lib.sh), the "your command state just changed - re-read
+# data/command.md" nudge either transfer direction sends, and the "re-read your
+# own instructions or config" nudges after a sync (bin/fm-bootstrap.sh,
+# bin/fm-config-inherit-lib.sh).
+# Those tell a lane about its own files; they never hand it work or answer for
+# it, so the exemption covers `captain` and `unrecorded` alike. It deliberately
+# does NOT cover an UNREADABLE record - a line that exists but whose command
+# field cannot be parsed - because an authority that cannot be read is not
+# authority, and captain command may be exactly what is unreadable. Setting the
+# variable by hand to deliver work is stepping around the guard, not using it.
+#
 # Parent-owned pending-reply expectation: every newly marked secondmate request
 # also receives a privacy-safe correlation id and a durable parent record under
 # state/pending-replies/ before delivery (bin/fm-pending-reply-lib.sh). Delivery
@@ -60,6 +83,8 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
 fi
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+SECONDMATE_REG="$DATA/secondmates.md"
 if [ ! -d "$FM_HOME" ]; then
   echo "error: FM_HOME '$FM_HOME' is not a directory; fm-send cannot resolve this home's state" >&2
   exit 1
@@ -75,6 +100,8 @@ fi
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-secondmate-command-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -205,6 +232,51 @@ TARGET_TASK_ID=
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+fi
+
+# Command guard: firstmate does not steer, or interrupt, a lane it does not
+# command. This runs before any pending-reply record is created and before the
+# backend is touched, so a refused send leaves no trace. Only the narrow
+# infrastructure exemption named in the header gets through, and only for the
+# exact lane it names; a damaged command record blocks everything, including
+# that, because an authority that cannot be read is not authority.
+#
+# The target's own meta has already established kind=secondmate here, so this
+# uses the known-lane predicate against THIS home's resolved registry path: a
+# missing registry, or a registry with no line for a lane that demonstrably
+# exists, is a lost authority rather than "not a lane", and refuses.
+if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ -n "$TARGET_TASK_ID" ]; then
+  FM_SEND_COMMAND_BLOCK=$(fm_secondmate_command_blocks_known_lane "$TARGET_TASK_ID" "$SECONDMATE_REG" || true)
+  case "$FM_SEND_COMMAND_BLOCK" in
+    captain)
+      if [ "${FM_SECONDMATE_COMMAND_OPERATIONAL:-}" != "$TARGET_TASK_ID" ]; then
+        echo "error: $TARGET_TASK_ID is under captain command; firstmate does not steer it. Hand it back through bin/fm-secondmate-command.sh before sending it work." >&2
+        exit 1
+      fi
+      ;;
+    invalid)
+      # A registry line EXISTS but its command field cannot be parsed. The
+      # operational exemption deliberately does NOT apply: an authority that
+      # cannot be read is not authority, and captain command may be exactly what
+      # is unreadable. Distinct from `unrecorded` below.
+      echo "error: $TARGET_TASK_ID has a registry line in $SECONDMATE_REG whose command field cannot be parsed; captain command may be what is unreadable. Repair that line before sending." >&2
+      exit 1
+      ;;
+    unrecorded)
+      # NO registry line exists for this lane, so no transfer could ever have
+      # been recorded (command state is representable only as that line's
+      # field). A work steer still refuses - it is frequent and cheap to retry,
+      # so the conservative default costs nothing. An infrastructure message
+      # naming this exact lane still passes, because it only tells the lane
+      # about its own files and there is no captain conversation to interrupt;
+      # without this, a mid-session config or instruction re-read nudge could
+      # never reach an unregistered lane.
+      if [ "${FM_SECONDMATE_COMMAND_OPERATIONAL:-}" != "$TARGET_TASK_ID" ]; then
+        echo "error: $TARGET_TASK_ID is a lane here but $SECONDMATE_REG has no registry line for it; firstmate does not steer a lane whose command state is unrecorded. Repair that record before sending." >&2
+        exit 1
+      fi
+      ;;
+  esac
 fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to

@@ -37,7 +37,8 @@ Only when no matching run exists does it fall back to the pane busy-signature an
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 For herdr, that pane fallback trusts a native `busy` verdict outright, but corroborates native `idle` or unknown verdicts against the recorded harness's rendered busy signature before deciding the crew is not working.
-For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
+For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, each registered lane's recorded command state, and secondmate return-channel guidance.
+A lane whose record does not read `firstmate` carries no steer affordance and says why instead, so neither view offers firstmate a steer against a lane it does not command.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
 
@@ -190,6 +191,11 @@ The parent guards every marked request against a missing correlated report witho
 Explicit backend-target sends and direct human typing stay unmarked, so captain intervention in a secondmate pane remains conversational.
 After seeding a secondmate, `fm-backlog-handoff.sh` validates the fleet-specific handoff, then atomically delegates already-judged in-scope queued item moves to `tasks-axi mv` so the domain queue starts in the right place.
 Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
+
+A lane can also move between firstmate command and captain command.
+The registry line's optional `command:` field is the single owner of that answer, chosen over `state/` because `state/<id>.meta` is rewritten by every relaunch, which would let a recovery respawn silently pull a lane back under firstmate command with nobody deciding it; the seeded home's `data/command.md` is a derived, main-authoritative copy so the lane knows which state it is in.
+While a lane is under captain command, `fm-send.sh` refuses to steer or interrupt it, `fm-backlog-handoff.sh` refuses to route work into it, `fm-teardown.sh` refuses to retire it, the watcher absorbs its status events instead of waking firstmate, and the away-mode daemon labels rather than self-handles them and never ages the lane toward a wedge - while the session-start liveness sweep still relaunches a confirmed-dead endpoint, reporting every such relaunch because the captain's conversation in that pane did not survive it.
+The [`secondmate-command-transfer` skill](../.agents/skills/secondmate-command-transfer/SKILL.md) owns the two-way procedure, the onramp's unsafe-state refusals, and the offramp's mandatory position report; `bin/fm-secondmate-command.sh`'s header owns the mechanics.
 
 Secondmate homes converge conservatively to the primary's version and declared inherited local material at launch and during locked session start.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, and mid-session local-material push contract.

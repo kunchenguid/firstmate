@@ -20,11 +20,22 @@
 # paused, or neither. Callers run it ONLY on no-verb signal handling and first
 # sighting of a stale hash, never on every wake, so the per-wake triage stays
 # cheap.
+#
+# task_is_captain_commanded is the other non-status-file read: it answers from
+# this home's secondmate registry whether a lane is under captain command. It is
+# deliberately shared but applied by each consumer rather than inside the scan
+# they have in common, because their correct behavior there is opposite; the
+# function's own comment owns that contract.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
 # bin/ script (which sets its own SCRIPT_DIR) or directly by a test.
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
+
+# The command-state reader. A persistent lane the CAPTAIN commands reports to him
+# directly, so its events must not be triaged as work firstmate has to wake for.
+# shellcheck source=bin/fm-secondmate-command-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-secondmate-command-lib.sh"
 
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
@@ -278,6 +289,38 @@ status_open_activities() {  # <status-file-or-dash>
   _fm_status_open_activities_stream < "$f"
 }
 
+# 0 when <task> is a persistent secondmate the CAPTAIN commands right now. The
+# durable answer, its one owner, and the deliberate transfer that changes it are
+# owned by bin/fm-secondmate-command-lib.sh and the secondmate-command-transfer
+# skill; this is the single place the supervisors ask.
+#
+# It is deliberately NOT applied inside scan_captain_relevant_statuses: that scan
+# is shared by two consumers whose correct behavior here is opposite. The
+# always-on watcher must absorb such a lane (the captain is reading its pane, so
+# waking firstmate re-creates the two-commanders ambiguity), while the away-mode
+# daemon must keep escalating it (the captain is away and reading only the
+# digest). Each consumer applies this predicate for itself.
+task_is_captain_commanded() {  # <task>
+  [ -n "${1:-}" ] || return 1
+  fm_secondmate_command_is_captain "$1"
+}
+
+# The one label both supervisors use when a captain-commanded lane appears in
+# text the captain will read, so an away-mode digest never presents his own lane
+# as work firstmate is supposed to pick up.
+# shellcheck disable=SC2034 # Read by fm-supervise-daemon.sh, not this lib.
+FM_CAPTAIN_COMMAND_LABEL='[under captain command]'
+
+# The task id a signal-wake file belongs to, or empty for a file shape that
+# carries no task (used by the signal predicates below).
+signal_file_task() {  # <file>
+  local base=${1##*/}
+  case "$base" in
+    *.status)     printf '%s' "${base%.status}" ;;
+    *.turn-ended) printf '%s' "${base%.turn-ended}" ;;
+  esac
+}
+
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {
@@ -308,6 +351,9 @@ signal_reason_is_actionable() {  # <file> ...
   for f in "$@"; do
     [ -e "$f" ] || continue
     case "$f" in *.status) ;; *) continue ;; esac
+    # A lane under captain command answers to him, not to firstmate: its events
+    # are already in front of the person who has to act on them.
+    task_is_captain_commanded "$(signal_file_task "$f")" && continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
     status_is_captain_relevant "$last" && return 0
@@ -369,17 +415,17 @@ crew_is_paused() {  # <id>
 # task ids by stripping the .status / .turn-ended suffix; a no-verb wake with nothing
 # provably working must surface, so an empty/unresolvable list returns 1.
 signal_crew_provably_working() {  # <file> ...
-  local f base task seen=""
+  local f task seen=""
   for f in "$@"; do
-    base=${f##*/}
-    case "$base" in
-      *.status)     task=${base%.status} ;;
-      *.turn-ended) task=${base%.turn-ended} ;;
-      *)            continue ;;
-    esac
+    task=$(signal_file_task "$f")
     [ -n "$task" ] || continue
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
+    # A captain-commanded lane counts as absorbed rather than as evidence: it is
+    # supposed to sit idle between the captain's own messages, and firstmate has
+    # no business waking on it. It still joins `seen`, so a wake naming only such
+    # lanes is absorbed instead of falling through to the empty-list surface.
+    task_is_captain_commanded "$task" && continue
     crew_is_provably_working "$task" || return 1
   done
   [ -n "$seen" ] || return 1

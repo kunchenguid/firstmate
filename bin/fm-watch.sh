@@ -9,6 +9,11 @@
 # working signal is never silently swallowed. A declared external-wait pause is
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
+# A persistent secondmate under CAPTAIN command is absorbed on every path -
+# signal, stale, and heartbeat backstop - and is never pre-marked surfaced, so a
+# status written while he holds it still surfaces if the lane later returns to
+# firstmate command (bin/fm-classify-lib.sh owns that predicate and why the
+# away-mode daemon's behavior is deliberately the opposite).
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -552,6 +557,10 @@ mark_all_captain_relevant_surfaced() {
   local f task last
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
+    # Never pre-suppress a captain-commanded lane: firstmate did not surface it,
+    # so marking it surfaced would silently swallow that status if the lane later
+    # comes back under firstmate command.
+    task_is_captain_commanded "$task" && continue
     printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
   done < <(scan_captain_relevant_statuses "$STATE")
 }
@@ -568,6 +577,10 @@ heartbeat_scan_finds_actionable() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
+    # A lane under captain command reports to the captain in its own pane, which
+    # he is reading. Backstopping it into a firstmate wake would put two
+    # commanders on one lane, which is exactly what the transfer removes.
+    task_is_captain_commanded "$task" && continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
@@ -874,7 +887,12 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
-    if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
+    # An idle secondmate pane is healthy by design, so only a DECLARED pause -
+    # which must re-surface on its own long cadence - reaches the stale path at
+    # all. A lane under captain command is exempt even from that: it is supposed
+    # to sit idle between the captain's own messages, and re-surfacing it to
+    # firstmate would hand the lane two commanders.
+    if [ "$kind" = secondmate ] && { task_is_captain_commanded "$task" || ! status_is_paused "$last"; }; then
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue

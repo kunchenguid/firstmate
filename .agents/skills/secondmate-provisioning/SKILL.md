@@ -29,6 +29,8 @@ The home-seeded `data/charter.md` is the sole owner of boilerplate idle-by-defau
 The `scope:` field is used during intake.
 The `projects:` field is a non-exclusive clone list, not ownership.
 An optional trailing `; label: <display name>` field (after `added <date>`) pins the secondmate's session display name, for example `SM API`; `fm-spawn` re-reads it on every relaunch and derives `SM <Title-cased id suffix>` when it is absent, so set an explicit label whenever the derived form is wrong (acronyms, house names).
+An optional trailing `; command: <firstmate|captain>` field records who commands that lane; an absent field means `firstmate`, and `bin/fm-secondmate-command.sh` is the only thing that ever writes it.
+The complete two-way transfer procedure and everything that changes while the captain holds a lane are owned by the [`secondmate-command-transfer` skill](../secondmate-command-transfer/SKILL.md); never hand-edit this field.
 
 ## Charter and seed
 
@@ -65,6 +67,7 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the required `.fm-secondmate-home` identity marker, which is gitignored and must remain in place for home validation.
+It writes `data/command.md` as well - the derived, main-authoritative copy of the lane's command state that the charter has it read at every session start - stating `firstmate` for a new lane and carrying a recorded `command:` field forward on a reseed, leaving a captain-commanded lane's existing copy untouched.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
@@ -147,6 +150,7 @@ It accepts in-scope `## Queued` entries only and refuses `## In flight` and hist
 Done records stay with their home for pruning or archiving.
 It is idempotent; an item already in the secondmate backlog is skipped.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
+It also refuses outright while the destination lane is under captain command, or while its command record is unrecognized or unreadable; in-scope work then stays in the main backlog under a captain-kind hold naming the lane, as owned by the [`secondmate-command-transfer` skill](../secondmate-command-transfer/SKILL.md).
 Do not hand off `local-only` items.
 
 ## Recovery
@@ -154,6 +158,7 @@ Do not hand off `local-only` items.
 The locked session-start sweep in `bin/fm-bootstrap.sh` already accounts for every registered secondmate before you act.
 It classifies each recorded endpoint through the recovery-grade `fm_backend_agent_state` contract in `bin/fm-backend.sh` and relaunches only from `dead` or `missing`; an `alive`, `ambiguous`, `unreadable`, or `unverified` target is preserved untouched rather than respawned on a guess.
 Every skipped or failed guarantee prints a `SECONDMATE_LIVENESS:` line, whose handling is owned by `bootstrap-diagnostics`.
+Relaunching is infrastructure rather than command, so the sweep still relaunches a confirmed-dead lane under captain command - and reports that one on the same prefix whatever the verbosity setting, because the captain's conversation in that pane did not survive the restart.
 Only tmux and herdr have verified classifiers, so a secondmate on another backend, or one whose recorded harness is outside the verified set, is reported rather than auto-respawned.
 
 For `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report and respawn it with:
@@ -178,6 +183,7 @@ It never initiates a survey or audit during recovery.
 A secondmate is persistent by default.
 An empty queue is healthy and does not trigger teardown.
 Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent second mate.
+Teardown refuses outright, with or without `--force`, while that lane is under captain command; hand it back through `secondmate-command-transfer` first.
 
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.

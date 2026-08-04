@@ -63,7 +63,11 @@
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
-# Secondmates (kind=secondmate in meta) are retired explicitly. Normal
+# Secondmates (kind=secondmate in meta) are retired explicitly. Teardown refuses
+# outright, with or without --force, while the lane is under CAPTAIN command or
+# its command record is unreadable or unrecognized: firstmate does not retire a
+# lane it does not command, so hand it back with bin/fm-secondmate-command.sh
+# first (secondmate-command-transfer skill). Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
 # child work, kills child runtime endpoints, and removes the retired home. Removing a
@@ -124,6 +128,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-secondmate-command-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -160,6 +166,48 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+
+# Command guard: retiring a lane is the most irreversible thing firstmate can do
+# to it, so it is refused outright while the captain commands that lane - with or
+# without --force. Hand the lane back first (bin/fm-secondmate-command.sh); only
+# then is retirement firstmate's to decide, and still only on an explicit word.
+#
+# The meta has already established that this id IS a lane, so the two missing-
+# record cases are deliberately NOT one condition here (see
+# bin/fm-secondmate-command-lib.sh):
+#   - a line that EXISTS but whose command field cannot be parsed blocks, because
+#     captain command may be exactly what is unreadable;
+#   - NO line at all proceeds and says so, because command state is representable
+#     only as that line's field, so no transfer could have been recorded, and
+#     refusing would strand the home, worktree and lease with no way to reclaim
+#     them.
+# Steering keeps refusing all three (bin/fm-send.sh): a steer is cheap to retry,
+# retirement is the only path that reclaims the resources.
+if [ "$KIND" = secondmate ]; then
+  TEARDOWN_COMMAND_BLOCK=$(fm_secondmate_command_blocks_known_lane "$ID" "$SECONDMATE_REG" || true)
+  case "$TEARDOWN_COMMAND_BLOCK" in
+    captain)
+      echo "REFUSED: $ID is under captain command; firstmate does not retire a lane it does not command. Hand it back first." >&2
+      exit 1
+      ;;
+    invalid)
+      # A registry line EXISTS but its command field cannot be parsed. Captain
+      # command may be exactly what is unreadable here, so an authority that
+      # cannot be read is not authority. Distinct from `unrecorded` below.
+      echo "REFUSED: $ID has a registry line in $SECONDMATE_REG whose command field cannot be parsed; captain command may be what is unreadable. Repair that line before retiring the lane." >&2
+      exit 1
+      ;;
+    unrecorded)
+      # NO registry line exists for this lane. Command state is representable
+      # only as that line's trailing field, so no transfer could ever have been
+      # recorded and the lane is firstmate-commanded by definition. Refusing
+      # here would strand the home, worktree and never-recycled treehouse lease
+      # permanently, protecting a state the design makes unreachable. Proceed -
+      # but never silently, or a deliberate decision looks like a missing check.
+      echo "note: $ID has no registry line in $SECONDMATE_REG, so no command transfer was ever recorded for it; retiring it as firstmate-commanded. This is not the same as an unreadable command field, which refuses."
+      ;;
+  esac
+fi
 
 default_branch() {
   local ref branch

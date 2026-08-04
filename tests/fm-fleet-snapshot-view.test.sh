@@ -65,6 +65,13 @@ make_home() {  # <name>
 write_fixture() {  # <home>
   local home=$1
   mkdir -p "$home/projects/alpha-worktree" "$home/projects/scout-worktree" "$home/secondmate-home"
+  # A registered lane, so the snapshot reads a real command record for it: an
+  # unregistered kind=secondmate meta is a lost authority, not a steerable lane.
+  cat > "$home/data/secondmates.md" <<EOF
+# Secondmates
+
+- secondmate-task - Owns the delegated scope. (home: $home/secondmate-home; scope: delegated; projects: alpha; added 2026-07-01)
+EOF
   cat > "$home/data/backlog.md" <<EOF
 ## In flight
 - [ ] scout-task - Scout Task data/scout-task/report.md (repo: alpha) (kind: scout) (since 2026-07-07)
@@ -540,6 +547,41 @@ EOF
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 
+test_snapshot_carries_lane_command_state() {
+  # The structured view firstmate reads to decide what to act on must say who
+  # commands each lane, and must not offer a steer against one it does not
+  # command. fm-send refusing is the backstop, not the contract.
+  local home fakebin out view
+  home=$(make_home lane-command)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "secondmate-task")
+    | .command == "firstmate"
+      and (.actions.send | contains("bin/fm-send.sh fm-secondmate-task"))
+  ' >/dev/null || fail "a firstmate-commanded lane must report its state and keep its steer affordance: $out"
+  printf '%s' "$out" | jq -e '
+    [.tasks[] | select(.kind != "secondmate") | .command] | all(. == null)
+  ' >/dev/null || fail "command state is a lane fact only; other kinds must report null"
+
+  sed -i.bak 's/added 2026-07-01)/added 2026-07-01; command: captain)/' "$home/data/secondmates.md"
+  rm -f "$home/data/secondmates.md.bak"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "secondmate-task")
+    | .command == "captain"
+      and .actions.send == null
+      and (.actions.return_channel_note | contains("captain command"))
+  ' >/dev/null || fail "a captain-commanded lane must drop the steer affordance and say why: $out"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_not_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
+    "the rendered view must not advertise a steer against the captain's own lane"
+  assert_contains "$view" "no steer (command: captain)" \
+    "the rendered view must say why the lane offers no steer"
+  pass "the snapshot carries lane command state and withholds a steer firstmate may not make"
+}
+
 test_view_renders_snapshot() {
   local home fakebin view
   home=$(make_home view)
@@ -853,6 +895,7 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
+test_snapshot_carries_lane_command_state
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
 test_held_backlog_item_is_distinguishable

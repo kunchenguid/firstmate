@@ -141,6 +141,8 @@ Classify each wake this way:
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle.
   The daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a captain-relevant status line the per-wake classifier might miss.
+- Any wake for a secondmate under captain command -> `stale` self-handles with no wedge aging, while its captain-relevant events still escalate under a label marking it as his lane.
+  The [`secondmate-command-transfer` skill](../secondmate-command-transfer/SKILL.md) owns that behavior and why the always-on watcher's is deliberately the opposite.
 - Unknown reason, or any uncertainty -> escalate fail-safe.
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 = immediate) and flushed as one single-line digest prefixed with the current operational prefix, carrying pre-read status summaries and a recommended action.
