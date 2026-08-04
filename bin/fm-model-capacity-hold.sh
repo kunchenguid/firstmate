@@ -114,14 +114,18 @@ command_register() {
   validate_line dispatch-ref "$dispatch"
   mkdir -p "$STATE" "$RECEIPTS"
   acquire_lifecycle_lock
+  receipt="$RECEIPTS/$id.registered"
   if [ -e "$MARKER" ]; then
     existing_id=$(fm_model_capacity_hold_value "$MARKER" hold_id) || fail "active hold marker is malformed"
     [ "$existing_id" = "$id" ] || fail "another model-capacity hold is active: $existing_id"
+    registration_matches "$MARKER" "$id" "$reason" "$dispatch" \
+      || fail "active hold metadata does not match retry: $id"
+    registration_matches "$receipt" "$id" "$reason" "$dispatch" \
+      || fail "active hold registration receipt does not match retry: $receipt"
     printf 'registered: %s already active\n' "$id"
     return 0
   fi
   timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-  receipt="$RECEIPTS/$id.registered"
   if [ -e "$receipt" ]; then
     [ ! -e "$RECEIPTS/$id.released" ] && [ ! -e "$RECEIPTS/$id.active-marker-retired" ] \
       || fail "hold registration was already released: $id"

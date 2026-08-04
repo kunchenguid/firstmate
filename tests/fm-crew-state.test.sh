@@ -71,7 +71,6 @@ case "${1:-}" in
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
-        printf '%s\n' "${FM_FAKE_WORKER_LOG:-}"
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
     ;;
@@ -123,21 +122,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  cat > "$fb/ps" <<'SH'
-#!/usr/bin/env bash
-set -u
-if printf '%s\n' "$*" | grep -F -- '-p 4242' >/dev/null; then
-  [ -n "${FM_FAKE_WORKER_PS_STATE:-}" ] || exit 1
-  if printf '%s\n' "$*" | grep -F -- 'lstart=' >/dev/null; then
-    printf '%s\n' "${FM_FAKE_WORKER_IDENTITY:-Mon Aug  3 12:00:00 2026 codex native worker}"
-  else
-    printf '%s codex native worker\n' "$FM_FAKE_WORKER_PS_STATE"
-  fi
-  exit 0
-fi
-exec /bin/ps "$@"
-SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr" "$fb/ps"
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -185,18 +170,8 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  FM_FAKE_WORKER_PS_STATE='S+'
-  FM_FAKE_WORKER_IDENTITY='Mon Aug  3 12:00:00 2026 codex native worker'
-  FM_FAKE_WORKER_LOG=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_WORKER_PS_STATE FM_FAKE_WORKER_IDENTITY FM_FAKE_WORKER_LOG
-}
-
-worker_start_log() {
-  local identity_hex
-  identity_hex=$(printf '%s' "$FM_FAKE_WORKER_IDENTITY" | od -An -v -tx1 | tr -d '[:space:]')
-  printf 'codex started pid=4242 pid-identity-hex=%s\n' "$identity_hex"
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -381,70 +356,6 @@ test_active_run_is_authoritative() {
   assert_contains "$out" "source: run-step" "active run -> run-step source"
   assert_contains "$out" "validating (running)" "active run reports the step"
   pass "active run-step is authoritative"
-}
-
-test_headless_pipeline_worker_liveness_overrides_pane_interruption() {
-  reset_fakes
-  local d out
-  d=$(new_case headless-live)
-  make_repo_on_branch "$d/wt" fm/headless-live
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/headless-live.meta" "window=fm:fm-headless-live" "worktree=$d/wt" "kind=ship" "harness=codex"
-  FM_FAKE_AXI_STATUS="$(run_running fm/headless-live)"
-  FM_FAKE_WORKER_LOG=$(worker_start_log)
-  FM_FAKE_WORKER_PS_STATE='S+'
-  FM_FAKE_TMUX_MISSING=1
-  out=$(run_crew_state "$d" headless-live)
-  assert_contains "$out" 'state: working' "live detached worker was recorded halted with its pane gone"
-  assert_contains "$out" 'headless pipeline worker live pid=4242' \
-    "run-step did not distinguish the detached worker from its interrupted pane"
-  pass "live headless pipeline worker remains working independently of pane interruption"
-}
-
-test_dead_or_suspended_pipeline_worker_is_not_recorded_working() {
-  reset_fakes
-  local d out
-  d=$(new_case headless-dead)
-  make_repo_on_branch "$d/wt" fm/headless-dead
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/headless-dead.meta" "window=fm:fm-headless-dead" "worktree=$d/wt" "kind=ship" "harness=codex"
-  FM_FAKE_AXI_STATUS="$(run_running fm/headless-dead)"
-  FM_FAKE_WORKER_LOG=$(worker_start_log)
-  FM_FAKE_WORKER_PS_STATE=''
-  out=$(run_crew_state "$d" headless-dead)
-  assert_not_contains "$out" 'state: working' "dead step worker inherited the stale running row"
-  assert_contains "$out" 'headless pipeline worker dead pid=4242' \
-    "dead step worker was not distinguished from the run record"
-
-  FM_FAKE_WORKER_PS_STATE='T'
-  out=$(run_crew_state "$d" headless-dead)
-  assert_not_contains "$out" 'state: working' "suspended step worker inherited the stale running row"
-  assert_contains "$out" 'headless pipeline worker suspended pid=4242' \
-    "suspended step worker was not distinguished from a live worker"
-
-  FM_FAKE_WORKER_PS_STATE='Z+'
-  out=$(run_crew_state "$d" headless-dead)
-  assert_not_contains "$out" 'state: working' "zombie step worker inherited the stale running row"
-  assert_contains "$out" 'headless pipeline worker dead pid=4242' \
-    "zombie step worker was not classified as dead"
-  pass "dead, suspended, and zombie workers never inherit a stale running verdict"
-}
-
-test_reused_pipeline_worker_pid_is_not_live() {
-  reset_fakes
-  local d out
-  d=$(new_case headless-reused)
-  make_repo_on_branch "$d/wt" fm/headless-reused
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/headless-reused.meta" "window=fm:fm-headless-reused" "worktree=$d/wt" "kind=ship" "harness=codex"
-  FM_FAKE_AXI_STATUS="$(run_running fm/headless-reused)"
-  FM_FAKE_WORKER_LOG=$(worker_start_log)
-  FM_FAKE_WORKER_IDENTITY='Mon Aug  3 12:01:00 2026 codex unrelated replacement'
-  out=$(run_crew_state "$d" headless-reused)
-  assert_contains "$out" 'state: blocked' "reused allowed-family PID was reported live"
-  assert_contains "$out" 'headless pipeline worker identity replaced pid=4242' \
-    "reused PID did not contradict the bound worker identity"
-  pass "reused worker PID cannot impersonate the recorded process birth"
 }
 
 test_unbound_pipeline_worker_preserves_authoritative_state() {
@@ -1421,9 +1332,6 @@ test_missing_run_head_falls_back_to_current_state() {
 }
 
 test_active_run_is_authoritative
-test_headless_pipeline_worker_liveness_overrides_pane_interruption
-test_dead_or_suspended_pipeline_worker_is_not_recorded_working
-test_reused_pipeline_worker_pid_is_not_live
 test_unbound_pipeline_worker_preserves_authoritative_state
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded

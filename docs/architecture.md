@@ -33,9 +33,10 @@ A declared external wait trades that silence for one bounded recheck per pause w
 Crew status files are append-only wake-event logs, not current-state fields.
 Because of that, a per-wake read of only the latest line can bury an earlier still-open `needs-decision`/`blocked` under later unrelated appends; `fm-wake-drain.sh` prints a separate, fleet-wide OPEN DECISIONS section on every drain (including the empty-queue path session-start relies on), built from `fm-classify-lib.sh`'s `status_open_decisions` fold so the buried decision keeps surfacing until it is explicitly resolved.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
-For a running step with a recorded native-agent PID in the current step log, that process identity must still be live and unsuspended; a pane interrupt does not stop it, and a dead or suspended bound PID is reported as a pipeline contradiction rather than working.
-Older or unsupported run shapes without a verifiable PID remain explicitly indeterminate at the process layer instead of borrowing pane liveness.
-The script header owns the exact run-head ancestry rules.
+No-mistakes currently records native-agent worker PIDs without a process-birth identity, so `fm-crew-state.sh` does not use those PIDs to override an authoritative working run-step.
+If a recorded worker dies without an exit marker and that PID is reused by Codex, Claude, or another allowed-family agent process, the stale run can still be reported as working.
+Closing this boundary requires the no-mistakes launcher to emit an exact process-birth identity and a compatible minimum version that Firstmate can require; that producer change is outside this repository.
+The script header owns the exact run-head ancestry rules and points here for the worker-PID containment boundary.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.

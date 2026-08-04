@@ -182,8 +182,59 @@ test_matching_orphan_release_is_repaired() {
   pass "matching interrupted release receipt retires the active marker"
 }
 
+test_active_same_id_requires_matching_metadata() {
+  local home out err rc receipt
+  home="$TMP_ROOT/same-id-home"
+  make_home "$home"
+  FM_HOME="$home" "$HOLD" register reserve-shared \
+    --reason 'first owner reservation' --dispatch-ref 'dispatch first owner' >/dev/null \
+    || fail "could not prepare same-id retry case"
+  out=$(FM_HOME="$home" "$HOLD" register reserve-shared \
+    --reason 'first owner reservation' --dispatch-ref 'dispatch first owner') \
+    || fail "matching same-id registration was not idempotent"
+  assert_contains "$out" 'registered: reserve-shared already active' \
+    "matching same-id registration did not report the active reservation"
+
+  err="$home/reason-mismatch.err"
+  rc=0
+  FM_HOME="$home" "$HOLD" register reserve-shared \
+    --reason 'second owner reservation' --dispatch-ref 'dispatch first owner' \
+    >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "same-id registration accepted a different reason"
+  assert_grep 'active hold metadata does not match retry' "$err" \
+    "same-id reason collision did not identify the metadata mismatch"
+
+  err="$home/dispatch-mismatch.err"
+  rc=0
+  FM_HOME="$home" "$HOLD" register reserve-shared \
+    --reason 'first owner reservation' --dispatch-ref 'dispatch second owner' \
+    >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "same-id registration accepted a different dispatch reference"
+  assert_grep 'active hold metadata does not match retry' "$err" \
+    "same-id dispatch collision did not identify the metadata mismatch"
+
+  receipt="$home/data/model-capacity-holds/reserve-shared.registered"
+  {
+    printf 'schema=fm-model-capacity-hold.v1\n'
+    printf 'hold_id=reserve-shared\n'
+    printf 'reason=first owner reservation\n'
+    printf 'dispatch_ref=tampered receipt owner\n'
+    printf 'registered_at=2026-08-03T12:02:00Z\n'
+  } > "$receipt"
+  err="$home/receipt-mismatch.err"
+  rc=0
+  FM_HOME="$home" "$HOLD" register reserve-shared \
+    --reason 'first owner reservation' --dispatch-ref 'dispatch first owner' \
+    >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "same-id registration accepted a mismatched durable receipt"
+  assert_grep 'active hold registration receipt does not match retry' "$err" \
+    "same-id receipt collision did not identify the durable metadata mismatch"
+  pass "active same-id retries require matching reservation metadata"
+}
+
 test_registered_hold_blocks_send_until_digest_bound_release
 test_registered_hold_blocks_spawn_before_fleet_mutation
 test_registration_serializes_competing_hold_ids
 test_matching_orphan_registration_is_repaired
 test_matching_orphan_release_is_repaired
+test_active_same_id_requires_matching_metadata
