@@ -428,13 +428,28 @@ if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
   # a home seeded before this record existed, which preserves today's exact
   # env-var-only behavior for that legacy home rather than guessing its route.
   PARENT_ROUTE_FILE="$FM_HOME/$SUB_HOME_PARENT_MARKER"
+  PARENT_ROUTE_RECORD=absent
   PARENT_ROUTE=
   PARENT_ROUTE_HOME=
-  if [ -f "$PARENT_ROUTE_FILE" ] && [ ! -L "$PARENT_ROUTE_FILE" ]; then
-    PARENT_ROUTE=$(fm_meta_get "$PARENT_ROUTE_FILE" route)
-    PARENT_ROUTE_HOME=$(fm_meta_get "$PARENT_ROUTE_FILE" parent_home)
+  if [ -e "$PARENT_ROUTE_FILE" ] || [ -L "$PARENT_ROUTE_FILE" ]; then
+    PARENT_ROUTE_RECORD=invalid
+    if [ -f "$PARENT_ROUTE_FILE" ] && [ ! -L "$PARENT_ROUTE_FILE" ] \
+      && [ "$(fm_meta_get "$PARENT_ROUTE_FILE" schema)" = fm-secondmate-parent.v1 ]; then
+      PARENT_ROUTE=$(fm_meta_get "$PARENT_ROUTE_FILE" route)
+      PARENT_ROUTE_HOME=$(fm_meta_get "$PARENT_ROUTE_FILE" parent_home)
+      case "$PARENT_ROUTE" in
+        local)
+          [ -n "$PARENT_ROUTE_HOME" ] && PARENT_ROUTE_RECORD=valid
+          ;;
+        remote)
+          PARENT_ROUTE_RECORD=valid
+          ;;
+      esac
+    fi
   fi
-  if [ "$PARENT_ROUTE" = remote ]; then
+  if [ "$PARENT_ROUTE_RECORD" = invalid ]; then
+    PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
+  elif [ "$PARENT_ROUTE" = remote ]; then
     # The entire promised-public-reply subsystem is same-filesystem by
     # construction (bin/fm-public-followup-emit.sh header): a parent recorded
     # on another machine can never hold a delegated promise for this child, so

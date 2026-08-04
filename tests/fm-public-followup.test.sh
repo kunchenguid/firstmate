@@ -648,6 +648,13 @@ test_secondmate_teardown_requires_parent_binding() {
 # the real bin/fm-teardown.sh cleanup path against a home real fm-home-seed.sh
 # produced, never a hand-crafted marker.
 
+assert_local_secondmate_parent_record() {
+  local child=$1 parent=$2
+  cmp -s "$child/.fm-secondmate-parent" <(
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent"
+  ) || fail "real secondmate seeding must write the exact durable local parent record"
+}
+
 test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   local parent child parent_resolved
   parent=$(make_home teardown-durable-parent)
@@ -660,12 +667,7 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   make_fake_curl "$child" >/dev/null
   fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
 
-  assert_present "$child/.fm-secondmate-parent" \
-    "real secondmate seeding must write a durable parent record"
-  assert_grep 'route=local' "$child/.fm-secondmate-parent" \
-    "a same-filesystem secondmate must be recorded with a local route"
-  assert_grep "parent_home=$parent_resolved" "$child/.fm-secondmate-parent" \
-    "the durable record must name the real resolved parent home"
+  assert_local_secondmate_parent_record "$child" "$parent_resolved"
 
   seed_commitment "$parent" pf-durable req-durable x secondmate:mate work-child
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
@@ -691,15 +693,17 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
 }
 
 test_secondmate_teardown_durable_record_missing_parent_registration_still_refuses() {
-  local parent child
+  local parent child parent_resolved
   parent=$(make_home teardown-durable-missing-parent)
   child="$TMP_ROOT/teardown-durable-missing-child"
   FM_SECONDMATE_CHARTER='Durable-record missing-registration regression charter.' \
     FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \
     || fail "real secondmate seeding failed"
   child=$(cd "$child" && pwd -P)
+  parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
   fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
@@ -720,15 +724,17 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
 }
 
 test_secondmate_teardown_durable_record_with_no_commitment_succeeds() {
-  local parent child rc out
+  local parent child parent_resolved rc out
   parent=$(make_home teardown-durable-clean-parent)
   child="$TMP_ROOT/teardown-durable-clean-child"
   FM_SECONDMATE_CHARTER='Durable-record clean-cleanup regression charter.' \
     FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \
     || fail "real secondmate seeding failed"
   child=$(cd "$child" && pwd -P)
+  parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
   fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
   printf 'manual\n' > "$child/config/backlog-backend"
@@ -746,6 +752,43 @@ test_secondmate_teardown_durable_record_with_no_commitment_succeeds() {
   assert_not_contains "$out" "cannot resolve the primary home" \
     "a real durable-record-backed parent must resolve cleanly"
   pass "a resolved parent through the durable local record allows cleanup with nothing owed"
+}
+
+test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
+  local case_name parent child parent_record
+  for case_name in symlink invalid-route; do
+    parent=$(make_home "teardown-durable-$case_name-parent" relay-off)
+    child="$TMP_ROOT/teardown-durable-$case_name-child"
+    FM_SECONDMATE_CHARTER='Unsafe durable-record regression charter.' \
+      FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \
+      || fail "real secondmate seeding failed for $case_name"
+    child=$(cd "$child" && pwd -P)
+    make_fake_curl "$child" >/dev/null
+    fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+    fm_write_meta "$child/state/work-child.meta" \
+      "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
+      "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    parent_record="$child/.fm-secondmate-parent"
+    case "$case_name" in
+      symlink)
+        mv "$parent_record" "$parent_record.valid"
+        ln -s .fm-secondmate-parent.valid "$parent_record"
+        ;;
+      invalid-route)
+        printf 'schema=fm-secondmate-parent.v1\nroute=garbage\n' > "$parent_record"
+        ;;
+    esac
+
+    PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+      FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+      expect_failure "an unsafe $case_name durable parent record must refuse cleanup" \
+      "$TEARDOWN" work-child
+    assert_contains "$EXPECT_OUT" "cannot resolve the primary home for marked secondmate mate" \
+      "an unsafe $case_name durable parent record must produce the explicit binding refusal"
+    assert_present "$child/state/work-child.meta" \
+      "an unsafe $case_name durable parent record must preserve child work metadata"
+  done
+  pass "unsafe durable parent records fail closed before cleanup"
 }
 
 test_relay_disabled_unmarked_teardown_skips_public_path() {
@@ -1140,6 +1183,7 @@ test_secondmate_teardown_requires_parent_binding
 test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost
 test_secondmate_teardown_durable_record_missing_parent_registration_still_refuses
 test_secondmate_teardown_durable_record_with_no_commitment_succeeds
+test_secondmate_teardown_rejects_unsafe_durable_parent_records
 test_relay_disabled_unmarked_teardown_skips_public_path
 test_relay_disabled_parent_allows_marked_child_teardown
 test_secondmate_parent_binding_matches_literal_id

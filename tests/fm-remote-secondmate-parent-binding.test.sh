@@ -149,12 +149,9 @@ FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
 # --- the durable record itself: the fundamental part of the fix -------------
 assert_present "$REMOTE_HOME/.fm-secondmate-parent" \
   "real remote provisioning must write a durable parent record"
-assert_grep 'route=remote' "$REMOTE_HOME/.fm-secondmate-parent" \
-  "a cross-machine secondmate must be recorded with a remote route"
-assert_grep 'parent_host=remote-mac' "$REMOTE_HOME/.fm-secondmate-parent" \
-  "the durable record must carry the parent's SSH alias for diagnostics"
-assert_no_grep "$PARENT" "$REMOTE_HOME/.fm-secondmate-parent" \
-  "a remote durable record must never carry a path meaningful only on the parent's filesystem"
+cmp -s "$REMOTE_HOME/.fm-secondmate-parent" <(
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=remote-mac\n'
+) || fail "real remote provisioning must write the exact durable remote parent record"
 
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null \
   || fail "real remote secondmate launch failed"
