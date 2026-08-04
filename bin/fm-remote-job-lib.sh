@@ -8,7 +8,7 @@
 # runtime PATH.
 #
 # A job directory is mode 0700 and contains root, home, argv (NUL-delimited),
-# stdin, stdout, stderr, exit, and state. Stage writes state=queued last. The
+# stdin, stdout, stderr, deadline, exit, and state. Stage writes state=queued last. The
 # worker atomically claims a job with .claim, changes state to running, writes
 # bounded stdout/stderr and exit, then publishes state=done last. Callers wait
 # for done, relay stdout and stderr separately, then reap only their completed
@@ -315,8 +315,17 @@ fm_remote_job_read_state() { # <job-dir>
   case "$value" in queued|running|'done') printf '%s\n' "$value" ;; *) return 1 ;; esac
 }
 
+fm_remote_job_read_deadline() { # <job-dir>
+  local job=$1 value
+  fm_remote_job_regular_bounded "$job/deadline" 32 || return 1
+  value=$(tr -d '\n' < "$job/deadline")
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -gt 0 ] || return 1
+  printf '%s\n' "$value"
+}
+
 fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdin is captured
-  local account_home=$1 root=$2 home=$3 command=$4 stage id destination bytes
+  local account_home=$1 root=$2 home=$3 command=$4 stage id destination bytes deadline
   shift 4
   fm_remote_job_prepare_state "$account_home" || return 1
   root=$(fm_remote_job_canonical_existing_dir "$root") || {
@@ -334,15 +343,17 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
     return 1
   }
   chmod 700 "$stage" || { rm -rf -- "$stage"; return 1; }
+  deadline=$(( $(date +%s) + FM_REMOTE_JOB_TIMEOUT ))
   if ! printf '%s\n' "$root" > "$stage/root" ||
     ! printf '%s\n' "$home" > "$stage/home" ||
+    ! printf '%s\n' "$deadline" > "$stage/deadline" ||
     ! printf '%s\0' "$command" "$@" > "$stage/argv" ||
     ! head -c "$((FM_REMOTE_JOB_MAX_BYTES + 1))" > "$stage/stdin"; then
     rm -rf -- "$stage"
     FM_REMOTE_JOB_ERROR="cannot capture remote job input"
     return 1
   fi
-  for bytes in root home argv stdin; do chmod 600 "$stage/$bytes" || { rm -rf -- "$stage"; return 1; }; done
+  for bytes in root home deadline argv stdin; do chmod 600 "$stage/$bytes" || { rm -rf -- "$stage"; return 1; }; done
   fm_remote_job_regular_bounded "$stage/argv" "$FM_REMOTE_JOB_MAX_BYTES" || {
     rm -rf -- "$stage"
     FM_REMOTE_JOB_ERROR="remote job argv exceeds the ${FM_REMOTE_JOB_MAX_BYTES}-byte bound"
@@ -368,13 +379,17 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
 }
 
 fm_remote_job_wait() { # <account-home> <id>
-  local account_home=$1 id=$2 job state deadline exit_value
+  local account_home=$1 id=$2 job state execution_deadline wait_deadline exit_value
   fm_remote_job_prepare_state "$account_home" || return 1
   job=$(fm_remote_job_job_dir "$id") || {
     FM_REMOTE_JOB_ERROR="remote job record disappeared or became unsafe"
     return 1
   }
-  deadline=$(( $(date +%s) + FM_REMOTE_JOB_TIMEOUT + FM_REMOTE_JOB_WAIT_GRACE ))
+  execution_deadline=$(fm_remote_job_read_deadline "$job") || {
+    FM_REMOTE_JOB_ERROR="remote job deadline is invalid"
+    return 1
+  }
+  wait_deadline=$((execution_deadline + FM_REMOTE_JOB_WAIT_GRACE))
   while :; do
     state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
     case "$state" in
@@ -399,7 +414,7 @@ fm_remote_job_wait() { # <account-home> <id>
       queued|running) ;;
       *) FM_REMOTE_JOB_ERROR="remote job state is invalid"; return 1 ;;
     esac
-    if [ "$(date +%s)" -ge "$deadline" ]; then
+    if [ "$(date +%s)" -ge "$wait_deadline" ]; then
       FM_REMOTE_JOB_ERROR="remote job did not complete within its bounded wait"
       return 1
     fi
@@ -412,14 +427,14 @@ fm_remote_job_reap() { # <account-home> <id>; only removes an exact completed re
   fm_remote_job_prepare_state "$account_home" || return 1
   job=$(fm_remote_job_job_dir "$id") || return 1
   [ "$(fm_remote_job_read_state "$job")" = 'done' ] || return 1
-  for file in root home argv stdin stdout stderr exit state; do
+  for file in root home deadline argv stdin stdout stderr exit state; do
     [ -e "$job/$file" ] || continue
     [ ! -L "$job/$file" ] || return 1
     rm -f -- "$job/$file" || return 1
   done
   if [ -e "$job/.claim" ] || [ -L "$job/.claim" ]; then
     [ -d "$job/.claim" ] && [ ! -L "$job/.claim" ] || return 1
-    rm -f -- "$job/.claim/owner" || return 1
+    rm -f -- "$job/.claim/owner" "$job/.claim/supervisor" "$job/.claim/group" "$job/.claim/armed" || return 1
     rmdir "$job/.claim" || return 1
   fi
   rmdir "$job"
