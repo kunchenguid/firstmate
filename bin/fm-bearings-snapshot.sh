@@ -37,24 +37,14 @@
 # secondmate home whose backlog was unreadable. Each selected PR artifact is then
 # live-verified; the local landed selection itself remains deterministic.
 # The default landed baseline is balanced across homes: each home keeps its internal
-# newest-first ordering, homes iterate in deterministic id order, sparse homes do not
-# waste capacity, and --all-landed switches back to the complete global newest-first
-# order.
+# newest-first ordering, homes iterate in deterministic id order, and sparse homes do
+# not waste capacity.
 #
 # Flags:
 #   (default)        compact projection, TOON, live-verifies every named PR
 #   --json           the same projected model as JSON (machine/debug; parity form)
 #   --include-prs    ALSO do live open-PR discovery in candidate repositories
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
-#   --all-in-flight  include every in-flight task
-#   --all-decisions  include every open decision
-#   --all-secondmates include every aggregated secondmate record
-#   --all-landed     include every landed record from every home (default: bounded)
-#   --all-reports    include the full scout-report inventory (default: relevant only)
-#   --all-queued     include superseded queued items (default: dropped)
-#   --all-recorded-prs include every locally recorded PR
-#   --all-unhealthy  include every unhealthy endpoint
-#   --all-pr-repos   query every discovered repository under --include-prs
 #   -h,--help        usage
 #
 # Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
@@ -99,11 +89,6 @@ validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 usage() {
   cat <<'EOF'
 usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
-                               [--all-in-flight] [--all-decisions]
-                               [--all-secondmates] [--all-landed]
-                               [--all-reports] [--all-queued]
-                               [--all-recorded-prs] [--all-unhealthy]
-                               [--all-pr-repos]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Every PR URL named by the output is verified live; --include-prs also discovers.
@@ -117,43 +102,24 @@ landed merges this home's Done with registered secondmate homes' Done, bounded b
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
   order while preserving each home's internal newest-first order; sparse homes do
-  not waste capacity. --all-landed reveals the full global newest-first set.
+  not waste capacity.
 For every registered secondmate, readable structured facts from its own home are
   authoritative, including independently trustworthy surfaces from a partial summary.
   Parent events and bounded terminal reads are labeled fallback or contradiction
   evidence and never become current work.
-Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
-  --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
-  --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
+Opt-in surfaces: --fields bodies|paths|actions|endpoints and --include-prs
+  (adds bounded candidate_prs discovery).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 EOF
 }
 
 FORMAT=toon
 INCLUDE_PRS=0
-ALL_REPORTS=0
-ALL_QUEUED=0
-ALL_IN_FLIGHT=0
-ALL_DECISIONS=0
-ALL_SECONDMATES=0
-ALL_LANDED=0
-ALL_RECORDED_PRS=0
-ALL_UNHEALTHY=0
-ALL_PR_REPOS=0
 FIELDS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
     --include-prs) INCLUDE_PRS=1 ;;
-    --all-reports) ALL_REPORTS=1 ;;
-    --all-queued) ALL_QUEUED=1 ;;
-    --all-in-flight) ALL_IN_FLIGHT=1 ;;
-    --all-decisions) ALL_DECISIONS=1 ;;
-    --all-secondmates) ALL_SECONDMATES=1 ;;
-    --all-landed) ALL_LANDED=1 ;;
-    --all-recorded-prs) ALL_RECORDED_PRS=1 ;;
-    --all-unhealthy) ALL_UNHEALTHY=1 ;;
-    --all-pr-repos) ALL_PR_REPOS=1 ;;
     --fields) shift; FIELDS=${1:-} ;;
     --fields=*) FIELDS=${1#--fields=} ;;
     -h|--help) usage; exit 0 ;;
@@ -170,15 +136,7 @@ command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2
 "$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
-if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
-  if [ "$ALL_LANDED" = 1 ]; then
-    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_INCLUDE_LIVENESS=1 FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
-  else
-    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_INCLUDE_LIVENESS=1 FM_SNAPSHOT_SECONDMATES=0 "$FLEET" --json) || exit $?
-  fi
-else
-  SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_INCLUDE_LIVENESS=1 "$FLEET" --json) || exit $?
-fi
+SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_INCLUDE_LIVENESS=1 "$FLEET" --json) || exit $?
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
 BEARINGS_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings.XXXXXX") || exit 1
@@ -194,8 +152,7 @@ PR_VERIFICATION_ROWS_FILE="$BEARINGS_TMP/pr-verification.jsonl"
 
 printf '%s' "$SNAP" | jq \
   --argjson landed_n "$FM_BEARINGS_LANDED" \
-  --argjson landed_per_home_n "$FM_BEARINGS_LANDED_PER_HOME" \
-  --argjson all_landed "$ALL_LANDED" '
+  --argjson landed_per_home_n "$FM_BEARINGS_LANDED_PER_HOME" '
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -208,11 +165,10 @@ printf '%s' "$SNAP" | jq \
   | ($main_done + $mate_done) as $all_rows
   | ([ $all_rows | group_by(.home_id)[]
        | sort_by([(.completion.date // ""), .id]) | reverse
-       | (if $all_landed == 1 then . else .[:$landed_per_home_n] end) ]) as $groups
+       | .[:$landed_per_home_n] ]) as $groups
   | ($groups | add // []) as $per_home_capped
-  | ($per_home_capped | sort_by([(.completion.date // ""), .id]) | reverse) as $global_sorted
   | {
-      selected:(if $all_landed == 1 then $global_sorted else ($groups | round_robin_landed($landed_n)) end),
+      selected:($groups | round_robin_landed($landed_n)),
       per_home_capped_count:($per_home_capped | length),
       home_cap_dropped:([ $all_rows | group_by(.home_id)[] | select(length > $landed_per_home_n) ] | length)
     }' > "$LANDED_SELECTION_FILE" \
@@ -262,7 +218,7 @@ $url
 
 # URLs that can otherwise appear in recorded_prs or the final landed selection.
 while IFS= read -r url; do add_pr_url "$url"; done <<EOF
-$(printf '%s' "$SNAP" | jq -r --argjson all "$ALL_RECORDED_PRS" --argjson limit "$FM_BEARINGS_RECORDED_PRS" '[.tasks[] | select(.kind != "secondmate") | .pr.url // empty] | (if $all==1 then . else .[:$limit] end)[]')
+$(printf '%s' "$SNAP" | jq -r --argjson limit "$FM_BEARINGS_RECORDED_PRS" '[.tasks[] | select(.kind != "secondmate") | .pr.url // empty][:$limit][]')
 $(jq -r '.selected[] | .pr_url // empty' "$LANDED_SELECTION_FILE")
 EOF
 
@@ -289,7 +245,7 @@ EOF
   for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
   nrepos=0
   for repo in $repos; do
-    if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
+    if [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
     nrepos=$((nrepos + 1))
     pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
     if ! api=$(ghaxi_bounded api "repos/$repo/pulls?state=open&per_page=$pr_fetch_limit" \
@@ -443,14 +399,6 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson recorded_prs_n "$FM_BEARINGS_RECORDED_PRS" \
   --argjson unhealthy_n "$FM_BEARINGS_UNHEALTHY" \
   --argjson include_prs "$INCLUDE_PRS" \
-  --argjson all_in_flight "$ALL_IN_FLIGHT" \
-  --argjson all_decisions "$ALL_DECISIONS" \
-  --argjson all_secondmates "$ALL_SECONDMATES" \
-  --argjson all_landed "$ALL_LANDED" \
-  --argjson all_reports "$ALL_REPORTS" \
-  --argjson all_queued "$ALL_QUEUED" \
-  --argjson all_recorded_prs "$ALL_RECORDED_PRS" \
-  --argjson all_unhealthy "$ALL_UNHEALTHY" \
   --argjson pr_repos_total "$PR_REPOS_TOTAL" \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
@@ -562,8 +510,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
              (.state == "queued" or
               (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
          | select(.captain_actionable != true)
-         | select(($all_queued == 1)
-                  or (((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")) | not))
+         | select((((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")) | not))
          | {id, title:(.title | trunc(60)),
             blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
             reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:"(main)"} ]
@@ -576,7 +523,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:$m.id} ]) as $gates_all
   | ([ .scout_reports[]
        | . as $r
-       | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
+       | select(($rel_ids | index($r.id)) != null)
        | {id, path} ]) as $reports_all
   | ([ $candidate_prs[] | select(.task != "-")
        | {id:.task,url,state,mergedAt,verification} ]) as $recorded_prs_all
@@ -586,17 +533,17 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       home: $home,
       generated: $now,
       prs: $prs,
-      in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
-      secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
-      decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
+      in_flight: $in_flight_all[:$in_flight_n],
+      secondmates: $secondmates_all[:$secondmates_n],
+      decisions_open: $decisions_all[:$decisions_n],
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
-      gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
-      reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
-      recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
+      gates: $gates_all[:$gates_n],
+      reports: $reports_all[:$reports_n],
+      recorded_prs: $recorded_prs_all[:$recorded_prs_n]
     }
   | . + (if ($unhealthy_all | length) > 0 then
-           {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
+           {unhealthy_endpoints:$unhealthy_all[:$unhealthy_n]}
          else {} end)
   | . + {candidate_prs:$candidate_prs}
   | . + (if $include_prs == 1 then {pr_discovery:$pr_discovery} else {} end)
@@ -610,30 +557,30 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $f_paths then empty else {surface:"task paths", reveal:"--fields paths"} end),
         (if $f_actions then empty else {surface:"watch/steer actions", reveal:"--fields actions"} end),
         (if $f_endpoints then empty else {surface:"healthy endpoint detail", reveal:"--fields endpoints"} end),
-        (if $all_reports == 1 then empty else {surface:"full scout-report inventory", reveal:"--all-reports"} end),
-        (if $all_queued == 1 then empty else {surface:"superseded queued items", reveal:"--all-queued"} end),
-        (if $all_landed == 0 and $per_home_capped_count > ($done | length) then {surface:("landed showing \($done | length) of \($per_home_capped_count)" + (($done | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"--all-landed"} else empty end),
-        (if $all_landed == 0 and $home_cap_dropped > 0 then {surface:("landed per-home capped at \($landed_per_home_n) for \($home_cap_dropped) home(s)"), reveal:"--all-landed"} else empty end),
+        {surface:"full scout-report inventory", reveal:"not included in bounded core"},
+        {surface:"superseded queued items", reveal:"not included in bounded core"},
+        (if $per_home_capped_count > ($done | length) then {surface:("landed showing \($done | length) of \($per_home_capped_count)" + (($done | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"bounded core"} else empty end),
+        (if $home_cap_dropped > 0 then {surface:("landed per-home capped at \($landed_per_home_n) for \($home_cap_dropped) home(s)"), reveal:"bounded core"} else empty end),
         (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable backlog: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home backlogs"} else empty end),
-        (if $all_landed == 0 and (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"--all-landed"} else empty end),
+        (if (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"bounded core"} else empty end),
         ((($snap.main_inventory.orphan_in_flight // []) | length) as $n
          | if $n > 0 then {surface:("main in-flight backlog item(s) have no child metadata: \($n)"), reveal:"inspect main data/backlog.md In flight vs state/*.meta"} else empty end),
         ((($snap.main_inventory.unstructured_current_count // 0)) as $n
          | if $n > 0 then {surface:("main unstructured current backlog row(s): \($n)"), reveal:"inspect main data/backlog.md In flight and Queued free-form rows"} else empty end),
-        (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
-        (if $all_secondmates == 0 and ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"--all-secondmates"} else empty end),
+        (if ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"bounded core"} else empty end),
+        (if ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"bounded core"} else empty end),
         (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
         (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
         (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
         (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.input_truncated == true or .parent_event.activity_scan.retained_truncated == true)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence truncated for \($n) record(s)"), reveal:"raise FM_SNAPSHOT_PARENT_ACTIVITY_LINES, FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, or FM_SNAPSHOT_PARENT_ACTIVITIES"} else empty end),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.available == false)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence unavailable for \($n) record(s)"), reveal:"inspect the parent status logs"} else empty end),
-        (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
-        (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
-        (if $all_reports == 0 and ($reports_all | length) > $reports_n then {surface:("reports showing \($reports_n) of \($reports_all | length)"), reveal:"--all-reports"} else empty end),
-        (if $all_recorded_prs == 0 and $recorded_url_total > (.recorded_prs | length) then {surface:("recorded_prs showing \(.recorded_prs | length) of \($recorded_url_total)"), reveal:"--all-recorded-prs"} else empty end),
-        (if $all_unhealthy == 0 and ($unhealthy_all | length) > $unhealthy_n then {surface:("unhealthy_endpoints showing \($unhealthy_n) of \($unhealthy_all | length)"), reveal:"--all-unhealthy"} else empty end),
-        (if $include_prs == 1 and $pr_repos_total > $pr_repos_shown then {surface:("PR repositories showing \($pr_repos_shown) of \($pr_repos_total)"), reveal:"--all-pr-repos"} else empty end),
+        (if ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"bounded core"} else empty end),
+        (if ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"bounded core"} else empty end),
+        (if ($reports_all | length) > $reports_n then {surface:("reports showing \($reports_n) of \($reports_all | length)"), reveal:"bounded core"} else empty end),
+        (if $recorded_url_total > (.recorded_prs | length) then {surface:("recorded_prs showing \(.recorded_prs | length) of \($recorded_url_total)"), reveal:"bounded core"} else empty end),
+        (if ($unhealthy_all | length) > $unhealthy_n then {surface:("unhealthy_endpoints showing \($unhealthy_n) of \($unhealthy_all | length)"), reveal:"bounded core"} else empty end),
+        (if $include_prs == 1 and $pr_repos_total > $pr_repos_shown then {surface:("PR repositories showing \($pr_repos_shown) of \($pr_repos_total)"), reveal:"bounded core"} else empty end),
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
         (if $include_prs == 1 then empty else {surface:"additional live open-PR discovery", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }

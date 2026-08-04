@@ -445,7 +445,8 @@ test_event_hints_follow_reconciled_current_state() {
     "$home/projects/active-decision" \
     "$home/projects/active-blocked" \
     "$home/projects/stale-decision" \
-    "$home/projects/stale-blocked"
+    "$home/projects/stale-blocked" \
+    "$home/projects/unknown-decision"
   fm_write_meta "$home/state/active-decision.meta" \
     "window=firstmate:fm-active-decision" \
     "worktree=$home/projects/active-decision" \
@@ -486,6 +487,14 @@ test_event_hints_follow_reconciled_current_state() {
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-blocked busy --gen "$hint_gen" \
     --source claude-hook --event user-prompt-submit
   printf 'blocked: old failure\n' > "$home/state/stale-blocked.status"
+  fm_write_meta "$home/state/unknown-decision.meta" \
+    "window=firstmate:fm-unknown-decision" \
+    "worktree=$home/projects/unknown-decision" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'needs-decision [key=unknown-route]: choose a route\n' > "$home/state/unknown-decision.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
@@ -498,6 +507,10 @@ test_event_hints_follow_reconciled_current_state() {
       and task("stale-decision").hints.pending_decision == false
       and task("stale-blocked").current_state.state == "working"
       and task("stale-blocked").hints.blocked_event == false
+      and task("unknown-decision").current_state.state == "unknown"
+      and task("unknown-decision").current_state.source == "process-output"
+      and task("unknown-decision").hints.pending_decision == true
+      and task("unknown-decision").hints.open_decisions[0].key == "unknown-route"
   ' >/dev/null || fail "event hints must follow reconciled current state"
   pass "snapshot event hints follow reconciled current state"
 }
