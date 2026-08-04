@@ -541,6 +541,36 @@ fm_remote_job_launchagent_loaded() { # <remote-root> <account-home> <uid>
 
 fm_remote_job_worker_pid_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.pid"; }
 fm_remote_job_worker_ready_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.ready"; }
+fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.identity"; }
+
+fm_remote_job_code_identity() { # <remote-root> <account-home>
+  local root=$1 account_home=$2 git_bin library_hash worker_hash
+  [ -f "$root/bin/fm-remote-job-lib.sh" ] && [ ! -L "$root/bin/fm-remote-job-lib.sh" ] || return 1
+  [ -f "$root/bin/fm-remote-job-worker.sh" ] && [ ! -L "$root/bin/fm-remote-job-worker.sh" ] || return 1
+  fm_remote_job_compose_operator_path "$account_home" >/dev/null
+  git_bin=$(fm_remote_job_operator_tool git 2>/dev/null || true)
+  [ -n "$git_bin" ] || return 1
+  library_hash=$("$git_bin" hash-object -- "$root/bin/fm-remote-job-lib.sh" 2>/dev/null) || return 1
+  worker_hash=$("$git_bin" hash-object -- "$root/bin/fm-remote-job-worker.sh" 2>/dev/null) || return 1
+  case "$library_hash:$worker_hash" in *[!0-9a-f:]*) return 1 ;; esac
+  [ -n "$library_hash" ] && [ -n "$worker_hash" ] || return 1
+  printf '%s:%s\n' "$library_hash" "$worker_hash"
+}
+
+fm_remote_job_worker_identity_matches() { # <remote-root> <account-home>
+  local root=$1 account_home=$2 identity_file expected actual extra
+  [ "${FM_REMOTE_JOB_ACTIVE:-}" != 1 ] || return 0
+  fm_remote_job_prepare_state "$account_home" || return 1
+  identity_file=$(fm_remote_job_worker_identity_path)
+  fm_remote_job_regular_bounded "$identity_file" 256 || return 1
+  IFS= read -r actual < "$identity_file" || return 1
+  if IFS= read -r extra < <(tail -n +2 "$identity_file"); then
+    : "$extra"
+    return 1
+  fi
+  expected=$(fm_remote_job_code_identity "$root" "$account_home") || return 1
+  [ "$actual" = "$expected" ]
+}
 
 fm_remote_job_worker_alive() { # <account-home>
   local account_home=$1 pid
@@ -562,10 +592,10 @@ fm_remote_job_probe() { # <account-home>; a fresh worker heartbeat or active job
   [ $((now - mtime)) -le 10 ]
 }
 
-fm_remote_job_wait_for_probe() { # <account-home>
-  local account_home=$1 i=0
+fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
+  local root=$1 account_home=$2 i=0
   while [ "$i" -lt 100 ]; do
-    fm_remote_job_probe "$account_home" && return 0
+    fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
     i=$((i + 1))
     sleep 0.1
   done
@@ -611,14 +641,33 @@ fm_remote_job_reload_launchagent() { # <account-home> <uid>
 }
 
 fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 worker pid
+  local root=$1 account_home=$2 worker pid i
   worker="$root/bin/fm-remote-job-worker.sh"
   [ -f "$worker" ] && [ ! -L "$worker" ] && [ -x "$worker" ] || {
     FM_REMOTE_JOB_ERROR="remote job worker is not a genuine executable in the configured code root"
     return 1
   }
-  if fm_remote_job_worker_alive "$account_home"; then return 0; fi
   fm_remote_job_prepare_state "$account_home" || return 1
+  if fm_remote_job_worker_alive "$account_home"; then
+    if fm_remote_job_worker_identity_matches "$root" "$account_home"; then return 0; fi
+    pid=$(cat "$(fm_remote_job_worker_pid_path)" 2>/dev/null || true)
+    case "$pid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="running remote job worker has an invalid pid record"; return 1 ;; esac
+    kill -TERM "$pid" 2>/dev/null || {
+      FM_REMOTE_JOB_ERROR="could not stop the stale remote job worker"
+      return 1
+    }
+    wait "$pid" 2>/dev/null || true
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+      i=$((i + 1))
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      FM_REMOTE_JOB_ERROR="stale remote job worker did not stop safely"
+      return 1
+    fi
+    FM_REMOTE_JOB_REPAIRED=1
+  fi
   nohup env \
     HOME="$account_home" \
     FM_ROOT_OVERRIDE="$root" \
@@ -627,10 +676,11 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     "$worker" >> "$FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log" 2>&1 < /dev/null &
   pid=$!
   case "$pid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="could not start the remote job worker"; return 1 ;; esac
+  FM_REMOTE_JOB_REPAIRED=1
 }
 
 fm_remote_job_ensure_worker() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 platform uid
+  local root=$1 account_home=$2 platform uid identity_matches=0
   FM_REMOTE_JOB_ERROR=
   FM_REMOTE_JOB_REPAIRED=0
   root=$(fm_remote_job_canonical_existing_dir "$root") || {
@@ -647,6 +697,7 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
     return 1
   }
   platform=$(fm_remote_job_platform)
+  fm_remote_job_worker_identity_matches "$root" "$account_home" && identity_matches=1
   if [ "$platform" = darwin ]; then
     uid=$(id -u 2>/dev/null || true)
     case "$uid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="remote account uid is unavailable; run fm-on.sh <route> fm-remote-doctor.sh --fix"; return 1 ;; esac
@@ -658,19 +709,19 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
       fm_remote_job_write_launchagent "$root" "$account_home" || return 1
       FM_REMOTE_JOB_REPAIRED=1
     fi
-    if ! fm_remote_job_launchagent_loaded "$root" "$account_home" "$uid" || [ "$FM_REMOTE_JOB_REPAIRED" -eq 1 ]; then
+    if ! fm_remote_job_launchagent_loaded "$root" "$account_home" "$uid" ||
+      [ "$FM_REMOTE_JOB_REPAIRED" -eq 1 ] || [ "$identity_matches" -eq 0 ]; then
       fm_remote_job_reload_launchagent "$account_home" "$uid" || return 1
       FM_REMOTE_JOB_REPAIRED=1
     fi
   else
     fm_remote_job_start_linux_worker "$root" "$account_home" || return 1
-    FM_REMOTE_JOB_REPAIRED=1
   fi
-  fm_remote_job_wait_for_probe "$account_home" && return 0
+  fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
   if [ "$platform" = darwin ]; then
     fm_remote_job_reload_launchagent "$account_home" "$uid" || return 1
     FM_REMOTE_JOB_REPAIRED=1
-    fm_remote_job_wait_for_probe "$account_home" && return 0
+    fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
   fi
   # shellcheck disable=SC2034 # Sourceable API consumed by the entrypoint and remote doctor.
   FM_REMOTE_JOB_ERROR="remote job worker did not report ready after startup"

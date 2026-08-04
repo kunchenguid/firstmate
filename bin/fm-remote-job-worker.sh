@@ -23,7 +23,6 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
 . "$SCRIPT_DIR/fm-remote-job-lib.sh"
 
 WORKER_ACTIVE_JOB=
-WORKER_ACTIVE_SUPERVISOR_PID=
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
 
@@ -54,12 +53,24 @@ worker_publish_pid() {
   mv -f -- "$tmp" "$pid_file"
 }
 
+worker_publish_identity() {
+  local account_home=$1 identity identity_file tmp
+  identity=$(fm_remote_job_code_identity "$FM_ROOT" "$account_home") || return 1
+  identity_file=$(fm_remote_job_worker_identity_path)
+  tmp=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.identity.XXXXXX") || return 1
+  printf '%s\n' "$identity" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$identity_file"
+}
+
 worker_cleanup() {
-  local pid_file ready
+  local pid_file ready identity
   pid_file=$(fm_remote_job_worker_pid_path)
   ready=$(fm_remote_job_worker_ready_path)
+  identity=$(fm_remote_job_worker_identity_path)
   [ ! -L "$pid_file" ] && rm -f -- "$pid_file" 2>/dev/null || true
   [ ! -L "$ready" ] && rm -f -- "$ready" 2>/dev/null || true
+  [ ! -L "$identity" ] && rm -f -- "$identity" 2>/dev/null || true
   rmdir "$FM_REMOTE_JOB_STATE/worker.lock" 2>/dev/null || true
 }
 
@@ -95,6 +106,8 @@ worker_stop_recorded_execution() { # <job-dir>
     [ ! -L "$file" ] || return 1
     pid=$(worker_read_process_id "$file") || return 1
     worker_signal_process_or_group "$kind" TERM "$pid"
+    worker_signal_process_or_group "$kind" KILL "$pid"
+    wait "$pid" 2>/dev/null || true
   done
   attempt=0
   while [ "$attempt" -lt 100 ]; do
@@ -109,40 +122,25 @@ worker_stop_recorded_execution() { # <job-dir>
     [ "$still_alive" -eq 1 ] || break
     sleep 0.01
   done
-  if [ "$still_alive" -eq 1 ]; then
-    for kind in process group; do
-      case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
-      [ -e "$file" ] || continue
-      pid=$(worker_read_process_id "$file") || return 1
-      worker_signal_process_or_group "$kind" KILL "$pid"
-    done
-    attempt=0
-    while [ "$attempt" -lt 100 ]; do
-      attempt=$((attempt + 1))
-      still_alive=0
-      for kind in process group; do
-        case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
-        [ -e "$file" ] || continue
-        pid=$(worker_read_process_id "$file") || return 1
-        worker_process_or_group_alive "$kind" "$pid" && still_alive=1
-      done
-      [ "$still_alive" -eq 1 ] || break
-      sleep 0.01
-    done
-  fi
   [ "$still_alive" -eq 0 ] || return 1
   rm -f -- "$job/.claim/supervisor" "$job/.claim/group" "$job/.claim/armed"
 }
 
 worker_stop_active_execution() {
-  local supervisor=${WORKER_ACTIVE_SUPERVISOR_PID:-} job=${WORKER_ACTIVE_JOB:-}
-  if [ -n "$supervisor" ]; then
-    kill -TERM "$supervisor" 2>/dev/null || true
-    wait "$supervisor" 2>/dev/null || true
+  local job=${WORKER_ACTIVE_JOB:-} owner owner_pid state
+  if [ -n "$job" ]; then
+    worker_stop_recorded_execution "$job" || return 1
+  else
+    for job in "$FM_REMOTE_JOB_JOBS"/job-*; do
+      [ -d "$job" ] && [ ! -L "$job" ] || continue
+      state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
+      [ "$state" = running ] || continue
+      owner="$job/.claim/owner"
+      owner_pid=$(worker_read_process_id "$owner" 2>/dev/null || true)
+      [ "$owner_pid" = "${BASHPID:-$$}" ] || continue
+      worker_stop_recorded_execution "$job" || return 1
+    done
   fi
-  [ -n "$job" ] || return 0
-  worker_stop_recorded_execution "$job" || return 1
-  WORKER_ACTIVE_SUPERVISOR_PID=
   WORKER_ACTIVE_JOB=
 }
 
@@ -232,138 +230,80 @@ worker_publish_result() { # <job-dir> <exit>
 }
 
 worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
-  local job=$1 timeout=$2 supervisor_file armed_file rc tmp
+  local job=$1 timeout=$2 group_file armed_file group_pid rc tmp deadline timed_out=0
   shift 2
-  supervisor_file="$job/.claim/supervisor"
+  group_file="$job/.claim/group"
   armed_file="$job/.claim/armed"
   WORKER_ACTIVE_JOB=$job
-  perl -e '
-    use strict;
-    use warnings;
-    use Fcntl qw(O_CREAT O_EXCL O_WRONLY);
-    my $seconds = shift @ARGV;
-    my $group_file = shift @ARGV;
-    my $armed_file = shift @ARGV;
-    $seconds =~ /\A\d+\z/ or exit 125;
-    pipe(my $gate_read, my $gate_write) or exit 125;
-    my $pid = 0;
-    my $reason = 0;
-    my $signal = sub {
-      my ($exit_status) = @_;
-      $reason = $exit_status;
-      if ($pid > 1) {
-        kill q(TERM), -$pid;
-        kill q(KILL), -$pid;
-      }
-    };
-    local $SIG{ALRM} = sub { $signal->(124) };
-    local $SIG{HUP} = sub { $signal->(125) };
-    local $SIG{INT} = sub { $signal->(125) };
-    local $SIG{TERM} = sub { $signal->(125) };
-    $pid = fork();
-    defined $pid or exit 125;
-    if ($pid == 0) {
-      close $gate_write;
-      setpgrp(0, 0) or exit 125;
-      my $released = q{};
-      sysread($gate_read, $released, 1) == 1 or exit 125;
-      close $gate_read;
-      exec @ARGV;
-      exit 127;
-    }
-    close $gate_read;
-    sysopen(my $group, $group_file, O_WRONLY | O_CREAT | O_EXCL, 0600) or do {
-      kill q(KILL), -$pid;
-      waitpid($pid, 0);
-      exit 125;
-    };
-    print {$group} "$pid\n" or exit 125;
-    close $group or exit 125;
-    my $armed = 0;
-    for (1 .. 1000) {
-      last if $reason;
-      my @metadata = lstat $armed_file;
-      if (@metadata && -f _ && !-l _) {
-        $armed = 1;
-        last;
-      }
-      select undef, undef, undef, 0.01;
-    }
-    if (!$armed) {
-      kill q(KILL), -$pid;
-      waitpid($pid, 0);
-      unlink $group_file;
-      exit($reason || 125);
-    }
-    syswrite($gate_write, q{x}, 1) == 1 or exit 125;
-    close $gate_write;
-    alarm $seconds;
-    my $waited;
-    while (1) {
-      $waited = waitpid($pid, 0);
-      last if $waited >= 0;
-      next if $!{EINTR};
-      last;
-    }
-    alarm 0;
-    if ($reason) {
-      kill q(KILL), -$pid;
-      waitpid($pid, 0);
-    }
-    unlink $group_file;
-    unlink $armed_file;
-    exit $reason if $reason;
-    exit 125 if $waited < 0;
-    exit 128 + ($? & 127) if ($? & 127);
-    exit($? >> 8);
-  ' "$timeout" "$job/.claim/group" "$armed_file" "$@" &
-  WORKER_ACTIVE_SUPERVISOR_PID=$!
-  tmp=$(umask 077; mktemp "$job/.claim/.supervisor.XXXXXX") || {
-    kill -TERM "$WORKER_ACTIVE_SUPERVISOR_PID" 2>/dev/null || true
-    wait "$WORKER_ACTIVE_SUPERVISOR_PID" 2>/dev/null || true
-    WORKER_ACTIVE_SUPERVISOR_PID=
+  set -m
+  (
+    while [ ! -f "$armed_file" ] || [ -L "$armed_file" ]; do
+      [ -d "$job/.claim" ] && [ ! -L "$job/.claim" ] || exit 125
+      sleep 0.01
+    done
+    exec "$@"
+  ) &
+  group_pid=$!
+  set +m
+  tmp=$(umask 077; mktemp "$job/.claim/.group.XXXXXX") || {
+    worker_signal_process_or_group group KILL "$group_pid"
+    wait "$group_pid" 2>/dev/null || true
     WORKER_ACTIVE_JOB=
     return 125
   }
-  printf '%s\n' "$WORKER_ACTIVE_SUPERVISOR_PID" > "$tmp" || {
+  printf '%s\n' "$group_pid" > "$tmp" || {
     rm -f -- "$tmp"
-    kill -TERM "$WORKER_ACTIVE_SUPERVISOR_PID" 2>/dev/null || true
-    wait "$WORKER_ACTIVE_SUPERVISOR_PID" 2>/dev/null || true
-    WORKER_ACTIVE_SUPERVISOR_PID=
+    worker_signal_process_or_group group KILL "$group_pid"
+    wait "$group_pid" 2>/dev/null || true
     WORKER_ACTIVE_JOB=
     return 125
   }
-  if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$supervisor_file"; then
+  if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$group_file"; then
     rm -f -- "$tmp"
-    kill -TERM "$WORKER_ACTIVE_SUPERVISOR_PID" 2>/dev/null || true
-    wait "$WORKER_ACTIVE_SUPERVISOR_PID" 2>/dev/null || true
-    WORKER_ACTIVE_SUPERVISOR_PID=
+    worker_signal_process_or_group group KILL "$group_pid"
+    wait "$group_pid" 2>/dev/null || true
     WORKER_ACTIVE_JOB=
     return 125
   fi
   tmp=$(umask 077; mktemp "$job/.claim/.armed.XXXXXX") || {
-    kill -TERM "$WORKER_ACTIVE_SUPERVISOR_PID" 2>/dev/null || true
-    wait "$WORKER_ACTIVE_SUPERVISOR_PID" 2>/dev/null || true
-    rm -f -- "$supervisor_file"
-    WORKER_ACTIVE_SUPERVISOR_PID=
+    worker_signal_process_or_group group KILL "$group_pid"
+    wait "$group_pid" 2>/dev/null || true
+    rm -f -- "$group_file"
     WORKER_ACTIVE_JOB=
     return 125
   }
   if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$armed_file"; then
     rm -f -- "$tmp"
-    kill -TERM "$WORKER_ACTIVE_SUPERVISOR_PID" 2>/dev/null || true
-    wait "$WORKER_ACTIVE_SUPERVISOR_PID" 2>/dev/null || true
-    rm -f -- "$supervisor_file"
-    WORKER_ACTIVE_SUPERVISOR_PID=
+    worker_signal_process_or_group group KILL "$group_pid"
+    wait "$group_pid" 2>/dev/null || true
+    rm -f -- "$group_file"
     WORKER_ACTIVE_JOB=
     return 125
   fi
-  wait "$WORKER_ACTIVE_SUPERVISOR_PID"
+  deadline=$((SECONDS + timeout))
+  while worker_process_or_group_alive group "$group_pid"; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      worker_signal_process_or_group group TERM "$group_pid"
+      worker_signal_process_or_group group KILL "$group_pid"
+      timed_out=1
+      break
+    fi
+    sleep "$FM_REMOTE_JOB_POLL_SECONDS"
+  done
+  wait "$group_pid" 2>/dev/null
   rc=$?
-  rm -f -- "$supervisor_file" "$armed_file"
-  WORKER_ACTIVE_SUPERVISOR_PID=
+  rm -f -- "$group_file" "$armed_file"
   WORKER_ACTIVE_JOB=
+  [ "$timed_out" -eq 0 ] || return 124
   return "$rc"
+}
+
+worker_cleanup_output_capture() { # <job-dir> <stdout-reader> <stderr-reader>
+  local job=$1 stdout_reader=$2 stderr_reader=$3
+  kill "$stdout_reader" "$stderr_reader" 2>/dev/null || true
+  wait "$stdout_reader" 2>/dev/null || true
+  wait "$stderr_reader" 2>/dev/null || true
+  rm -f -- "$job/.stdout.pipe" "$job/.stderr.pipe"
 }
 
 worker_run_job() { # <account-home> <job-dir>
@@ -432,7 +372,11 @@ worker_run_job() { # <account-home> <job-dir>
     child_env+=("FM_REMOTE_JOB_PLATFORM_OVERRIDE=$FM_REMOTE_JOB_PLATFORM_OVERRIDE")
   fi
   remaining=$((deadline - $(date +%s)))
-  [ "$remaining" -gt 0 ] || { worker_publish_result "$job" 124; return; }
+  [ "$remaining" -gt 0 ] || {
+    worker_cleanup_output_capture "$job" "$stdout_reader" "$stderr_reader"
+    worker_publish_result "$job" 124
+    return
+  }
   set +e
   worker_run_with_timeout "$job" "$remaining" "${child_env[@]}" \
     "$command_path" "${argv[@]:1}" < "$job/stdin" > "$stdout_pipe" 2> "$stderr_pipe"
@@ -490,6 +434,7 @@ main() {
   fi
   trap worker_cleanup EXIT
   trap worker_shutdown HUP INT TERM
+  worker_publish_identity "$account_home" || { worker_error "cannot publish worker code identity"; exit 1; }
   worker_publish_pid || { worker_error "cannot publish worker pid"; exit 1; }
   while :; do
     worker_write_heartbeat || { worker_error "cannot update worker heartbeat"; exit 1; }

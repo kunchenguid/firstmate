@@ -13,7 +13,10 @@ REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
 ACCOUNT_HOME="$TMP_ROOT/account"
 STATE_ROOT="$TMP_ROOT/remote-jobs"
-mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME"
+RUNTIME_BIN="$TMP_ROOT/runtime-bin"
+FAKE_PERL_LOG="$TMP_ROOT/perl.log"
+REAL_GIT=$(command -v git)
+mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 trap 'if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
 
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" "$REMOTE_ROOT/bin/"
@@ -49,6 +52,12 @@ cat > "$REMOTE_ROOT/bin/fm-output-job.sh" <<'SH'
 head -c 1200000 < /dev/zero
 SH
 chmod +x "$REMOTE_ROOT/bin"/*.sh
+cat > "$RUNTIME_BIN/perl" <<'SH'
+#!/bin/bash
+printf 'invoked\n' >> "$FM_FAKE_PERL_LOG"
+exit 127
+SH
+chmod +x "$RUNTIME_BIN/perl"
 
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
@@ -58,12 +67,13 @@ git -C "$REMOTE_ROOT" commit -qm 'remote job fixture'
 
 export FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT"
 export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
-export FM_REMOTE_JOB_TIMEOUT=1
+export FM_REMOTE_JOB_TIMEOUT=5
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
-HOME="$ACCOUNT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
-  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_TIMEOUT=1 \
+HOME="$ACCOUNT_HOME" PATH="$RUNTIME_BIN:/usr/bin:/bin:/usr/sbin:/sbin" FM_FAKE_PERL_LOG="$FAKE_PERL_LOG" \
+  FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_TIMEOUT=5 \
   "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" > "$TMP_ROOT/worker.out" 2> "$TMP_ROOT/worker.err" &
 for _ in $(seq 1 100); do
   [ -f "$STATE_ROOT/worker.ready" ] && break
@@ -93,8 +103,19 @@ assert_contains "$OUT" 'secret=absent' "ambient environment crossed into the wor
 case "$OUT" in *"$REMOTE_ROOT/bin:$ACCOUNT_HOME/.local/bin:"*) : ;; *) fail "worker PATH omitted its fixed root and account head" ;; esac
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the completed job could not be reaped"
 assert_absent "$JOB_DIR" "reap retained a completed job record"
+assert_absent "$FAKE_PERL_LOG" "the worker invoked an unavailable Perl runtime"
 pass "the worker preserves bounded argv and stdin in an empty environment"
 
+OLD_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+printf '\n' >> "$REMOTE_ROOT/bin/fm-remote-job-worker.sh"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+[ "$NEW_WORKER_PID" != "$OLD_WORKER_PID" ] || fail "ensure retained a worker running stale code"
+fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "the replacement worker did not publish the current code identity"
+pass "ensure replaces a live worker after its code changes"
+
+FM_REMOTE_JOB_TIMEOUT=1
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
@@ -155,6 +176,23 @@ sleep 3
 assert_absent "$SHUTDOWN_SIDE_EFFECT" "the active command mutated after worker shutdown"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the interrupted job could not be reaped"
 pass "worker shutdown terminates the active command tree before replacement"
+
+mkdir -p "$ACCOUNT_HOME/.local/bin"
+cat > "$ACCOUNT_HOME/.local/bin/git" <<SH
+#!/bin/bash
+if [ "\${3:-}" = ls-files ]; then sleep 2; fi
+exec "$REAL_GIT" "\$@"
+SH
+chmod +x "$ACCOUNT_HOME/.local/bin/git"
+FM_REMOTE_JOB_TIMEOUT=1
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 124 ] || fail "the pre-execution deadline did not publish a timeout result"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the pre-execution timeout leaked output readers or FIFOs"
+rm -f -- "$ACCOUNT_HOME/.local/bin/git"
+pass "pre-execution deadline expiry cleans output capture resources"
 
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-output-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
