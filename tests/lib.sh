@@ -34,6 +34,18 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Keep DerivedData garbage collection hermetic for every suite. fm-teardown.sh
+# runs bin/fm-derived-data-gc.sh whenever a task worktree path is already gone,
+# and that helper falls back to ~/Library/Developer/Xcode/DerivedData - so on a
+# developer's macOS host any test driving the real teardown would walk their live
+# DerivedData. Pin an empty fixture root instead; suites that actually exercise
+# the GC override this with a fixture of their own. mkdir failure is tolerated
+# because the helper treats a missing root as a quiet no-op, which is equally
+# hermetic.
+FM_TEST_DERIVED_DATA_ROOT="${TMPDIR:-/tmp}/fm-test-derived-data-empty"
+mkdir -p "$FM_TEST_DERIVED_DATA_ROOT" 2>/dev/null || true
+export FM_DERIVED_DATA_ROOT="${FM_DERIVED_DATA_ROOT:-$FM_TEST_DERIVED_DATA_ROOT}"
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

@@ -669,12 +669,21 @@ write_dd_plist() {
 EOF
 }
 
-# Teardown integration for bin/fm-derived-data-gc.sh: after the worktree is
-# returned, teardown garbage-collects the Xcode DerivedData dir whose
-# WorkspacePath lived under that worktree, while protected caches and dirs for
-# live workspaces survive. Needs plutil to read the fixture plist; without it
-# the helper itself deletes nothing, so there is nothing to assert.
-test_teardown_runs_derived_data_gc_after_worktree_return() {
+# Teardown integration for bin/fm-derived-data-gc.sh, scoped to the case the
+# teardown hook actually fires on: a task worktree whose path no longer exists
+# once backend cleanup has run (the Orca-style per-task worktree, or a path that
+# was already gone). In that case teardown garbage-collects the Xcode
+# DerivedData dir whose WorkspacePath lived under that worktree, while protected
+# caches and dirs for live workspaces survive.
+#
+# This case deliberately does NOT cover the default treehouse-backed backends:
+# `treehouse return` leaves the pooled worktree directory on disk, so the hook's
+# path-is-gone guard does not fire there. Making the GC reach pooled worktrees is
+# tracked as separate follow-up work.
+#
+# Needs plutil to read the fixture plist; without it the helper itself deletes
+# nothing, so there is nothing to assert.
+test_teardown_runs_derived_data_gc_when_worktree_path_is_gone() {
   if ! command -v plutil >/dev/null 2>&1; then
     pass "teardown DerivedData GC integration (not run: plutil unavailable)"
     return 0
@@ -686,8 +695,12 @@ test_teardown_runs_derived_data_gc_after_worktree_return() {
   # Push the task branch to origin and fetch so the worktree sees it.
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
-  # The default treehouse mock leaves the worktree in place; replace it with
-  # one that removes the worktree, as the real `treehouse return` does.
+  # The real `treehouse return` terminates lingering processes and returns the
+  # worktree to its pool, leaving the directory on disk (its removal verbs are
+  # `destroy` and `prune`), and the default mock matches that. Replace it with a
+  # mock that removes the directory purely to stand in for a backend whose task
+  # worktree really is gone by this point, which is what the teardown hook's
+  # path-is-gone guard requires.
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 while [ "$#" -gt 0 ]; do
@@ -715,7 +728,7 @@ SH
   assert_absent "$dd/App-aaa" "dd-gc: DerivedData dir for the removed worktree was not collected"
   assert_present "$dd/ModuleCache.noindex" "dd-gc: protected cache was removed"
   assert_present "$dd/Other-bbb" "dd-gc: DerivedData dir for a live workspace was removed"
-  pass "teardown garbage-collects the removed worktree's DerivedData (caches and live workspaces kept)"
+  pass "teardown garbage-collects DerivedData for a worktree whose path is gone (caches and live workspaces kept)"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -2542,7 +2555,7 @@ EOF
 
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
-test_teardown_runs_derived_data_gc_after_worktree_return
+test_teardown_runs_derived_data_gc_when_worktree_path_is_gone
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
