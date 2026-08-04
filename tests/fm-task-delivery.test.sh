@@ -252,21 +252,21 @@ test_project_mode_maps_the_conditional_policy() {
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
-  [ "$out" = "no-mistakes off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
+  [ "$out" = "no-mistakes off off off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
   err=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>&1 >/dev/null)
   [ -z "$err" ] || fail "a registered conditional policy still warned as unknown: $err"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" yoloproj 2>/dev/null)
-  [ "$out" = "no-mistakes on" ] || fail "conditional policy dropped its +yolo posture (got '$out')"
+  [ "$out" = "no-mistakes on off off" ] || fail "conditional policy dropped its +yolo posture (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --raw prodproj 2>/dev/null)
-  [ "$out" = "no-mistakes-prod-only off" ] || fail "--raw did not expose the registered annotation (got '$out')"
+  [ "$out" = "no-mistakes-prod-only off off off" ] || fail "--raw did not expose the registered annotation (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --raw flatproj 2>/dev/null)
-  [ "$out" = "direct-PR off" ] || fail "--raw altered a flat registered mode (got '$out')"
+  [ "$out" = "direct-PR off off off" ] || fail "--raw altered a flat registered mode (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
-  [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
+  [ "$out" = "no-mistakes off off off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
   err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
   assert_contains "$err" "unknown mode" "a typo'd registry mode stopped warning"
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"

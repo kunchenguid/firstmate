@@ -40,7 +40,7 @@ run_brief() {
 # apostrophe-driven parse error, and the full no-mistakes DoD lands in the file.
 test_no_mistakes_brief_scaffolds() {
   local id=nm-default-z1 out status brief
-  out=$(run_brief "$id" nmrepo); status=$?
+  out=$(run_brief "$id" nmrepo --mode no-mistakes); status=$?
   expect_code 0 "$status" "no-mistakes brief should scaffold (status)"
   assert_not_contains "$out" "unexpected EOF" "no-mistakes brief tripped the bash 3.2 parse bug"
   assert_contains "$out" "mode=no-mistakes" "no-mistakes brief did not report its mode"
@@ -50,10 +50,11 @@ test_no_mistakes_brief_scaffolds() {
     "no-mistakes DoD body is missing from the brief"
   assert_grep "After /no-mistakes reports CI green" "$brief" \
     "no-mistakes DoD tail is missing from the brief"
-  # Temporary workaround for the axi-run #351/#396 first-run bug: crews start
-  # via the git-hook path instead of `axi run`.
+  # Fallback for the axi-run #351/#396 first-run bug: the primary path is
+  # `no-mistakes axi run --intent`, with the git-push-to-start workaround
+  # documented as a fallback when that known bug is hit.
   assert_grep "git push no-mistakes fm/$id" "$brief" \
-    "no-mistakes DoD is missing the git-push-to-start workaround"
+    "no-mistakes DoD is missing the git-push-to-start fallback"
   assert_grep "#351" "$brief" \
     "no-mistakes DoD is missing the axi-run bug reference"
   assert_grep "stale no-mistakes mirror ref" "$brief" \
@@ -63,9 +64,11 @@ test_no_mistakes_brief_scaffolds() {
     "no-mistakes DoD is missing the validation-discipline hard rule"
   assert_grep "Drive ONE run to completion" "$brief" \
     "no-mistakes DoD is missing the one-run instruction"
-  # The very apostrophe that broke the old command substitution must survive verbatim.
-  assert_grep "no-mistakes' own guidance" "$brief" \
-    "the apostrophe-bearing DoD line did not make it into the brief"
+  # The apostrophe-bearing DoD line lives in a read -r -d '' assembly, not the
+  # $(cat <<EOF) command substitution the bash 3.2 bug lived in (guarded
+  # separately by fm-brief.test.sh's heredoc-in-substitution regression test).
+  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
+    "the no-mistakes guidance-reference sentence did not make it into the brief"
   pass "fm-brief: no-mistakes default brief scaffolds with its full DoD"
 }
 
@@ -76,7 +79,7 @@ test_no_mistakes_brief_scaffolds() {
 # push when extraction yields nothing.
 test_no_mistakes_brief_supplies_intent() {
   local id=nm-intent-z6 brief b64
-  run_brief "$id" nmrepo >/dev/null
+  run_brief "$id" nmrepo --mode no-mistakes >/dev/null
   brief="$HOME_D/data/$id/brief.md"
   assert_grep 'no-mistakes.intent=' "$brief" \
     "no-mistakes DoD is missing the intent push option"
@@ -96,10 +99,10 @@ test_no_mistakes_brief_supplies_intent() {
   # Extraction must run against this task's own absolute brief path.
   assert_grep "awk 'f&&/^# Setup\$/{exit} f; /^# Task\$/{f=1}' \"$brief\"" "$brief" \
     "no-mistakes DoD extraction does not target this task's own brief file"
-  # The revert note must name the --intent flag axi run gains it back through.
+  # The primary starting path (not just the fallback) must also name --intent.
   # shellcheck disable=SC2016  # single quotes are deliberate: backticks and quotes are literal brief text, matched not expanded
-  assert_grep 'reverted to `axi run --intent "<task text>"`' "$brief" \
-    "no-mistakes DoD revert note is missing the --intent flag"
+  assert_grep 'Start with `no-mistakes axi run --intent "<task text>"`' "$brief" \
+    "no-mistakes DoD is missing the primary --intent starting path"
 
   # The extraction snippet, run for real against this brief once its {TASK}
   # placeholder is filled, must actually produce the Task text, base64-encoded
@@ -123,7 +126,7 @@ test_no_mistakes_brief_supplies_intent() {
 # byte-for-byte-unchanged-by-default guarantee.
 test_tiered_brief_uses_trimmed_skip_set() {
   local brief
-  run_brief tier-z7 tieredrepo >/dev/null
+  run_brief tier-z7 tieredrepo --mode no-mistakes --tiered on >/dev/null
   brief="$HOME_D/data/tier-z7/brief.md"
   assert_grep "risk/size-tiered validation enabled" "$brief" \
     "tiered DoD is missing its tiered-mode heading"
@@ -142,7 +145,7 @@ test_tiered_brief_uses_trimmed_skip_set() {
   assert_grep "tier=2 reason=classifier-failed" "$brief" \
     "tiered DoD does not treat a classifier failure as tier=2"
 
-  run_brief tierci-z8 tieredcirepo >/dev/null
+  run_brief tierci-z8 tieredcirepo --mode no-mistakes --tiered on --ci-tests on >/dev/null
   brief="$HOME_D/data/tierci-z8/brief.md"
   assert_grep "no-mistakes.skip=document,test" "$brief" \
     "tiered+ci-tests DoD should skip document and test at tier=1"
@@ -157,12 +160,12 @@ test_tiered_brief_uses_trimmed_skip_set() {
 # substitution) scaffold and carry their mode-specific contract.
 test_other_modes_scaffold() {
   local status
-  run_brief dpr-z2 dprrepo >/dev/null; status=$?
+  run_brief dpr-z2 dprrepo --mode direct-PR >/dev/null; status=$?
   expect_code 0 "$status" "direct-PR brief should scaffold"
   assert_grep "ships **direct-PR**" "$HOME_D/data/dpr-z2/brief.md" \
     "direct-PR DoD missing from brief"
 
-  run_brief lo-z3 lorepo >/dev/null; status=$?
+  run_brief lo-z3 lorepo --mode local-only >/dev/null; status=$?
   expect_code 0 "$status" "local-only brief should scaffold"
   assert_grep "ships **local-only**" "$HOME_D/data/lo-z3/brief.md" \
     "local-only DoD missing from brief"
@@ -179,7 +182,7 @@ test_other_modes_scaffold() {
 # with exactly one newline after the final DoD sentence.
 test_no_trailing_blank_line() {
   local id=nm-tail-z5 brief lastbytes
-  run_brief "$id" nmrepo >/dev/null
+  run_brief "$id" nmrepo --mode no-mistakes >/dev/null
   brief="$HOME_D/data/$id/brief.md"
   lastbytes=$(tail -c 2 "$brief" | od -An -c | tr -d ' ')
   case "$lastbytes" in
