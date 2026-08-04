@@ -298,6 +298,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/hermes.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/opencode.md",
       "audience": "agent-runtime"
     },

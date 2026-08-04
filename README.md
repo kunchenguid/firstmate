@@ -58,7 +58,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, or OpenCode.
+- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, OpenCode, or Hermes.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
@@ -73,6 +73,8 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+
+Hermes is verified only as a persistent primary, launched through `bin/fm-hermes-primary.sh`; it is never a crewmate or secondmate runtime. Its tracked project plugin uses managed background-terminal completion notifications for watcher supervision and a turn-end backstop.
 
 ### Install and launch
 
