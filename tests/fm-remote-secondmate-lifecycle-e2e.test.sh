@@ -174,6 +174,14 @@ if [ "$command_name" = fm-remote-doctor.sh ]; then
   exit 0
 fi
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
+  launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'backend=tmux\n'
+    printf 'target=firstmate:fm-ios\n'
+    printf 'harness=codex\n'
+    exit 0
+    ;;
   provision-block-fail:fm-remote-home-provision.sh:*)
     touch "$FM_FAKE_SEED_ENTERED"
     while [ ! -f "$FM_FAKE_SEED_RELEASE" ]; do sleep 0.02; done
@@ -446,6 +454,50 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
+
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-nonherdr.meta"
+cp "$PARENT/data/secondmates.md" "$TMP_ROOT/registry-before-nonherdr.md"
+set +e
+FM_FAKE_SSH_MODE=launch-nonherdr-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-nonherdr-route.out" 2>&1
+nonherdr_parent_rc=$?
+set -e
+[ "$nonherdr_parent_rc" -ne 0 ] || fail "parent accepted a non-herdr remote launch route"
+assert_grep "remote launch returned backend 'tmux', expected herdr" "$TMP_ROOT/spawn-nonherdr-route.out" \
+  "parent refusal did not name the returned remote backend"
+cmp -s "$TMP_ROOT/parent-ios-before-nonherdr.meta" "$PARENT/state/ios.meta" \
+  || fail "parent rewrote its endpoint metadata after a non-herdr route refusal"
+cmp -s "$TMP_ROOT/registry-before-nonherdr.md" "$PARENT/data/secondmates.md" \
+  || fail "parent removed or changed the registry route after a non-herdr route refusal"
+
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-legacy.meta"
+cat > "$remote_route_meta" <<EOF
+window=firstmate:fm-ios
+worktree=$REMOTE_HOME
+project=$REMOTE_ROOT
+harness=codex
+kind=secondmate
+backend=tmux
+EOF
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-legacy-before-refusal.meta"
+printf 'fm-ios|%s\n' "$REMOTE_HOME" > "$TMUX_STATE"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr \
+  > "$TMP_ROOT/legacy-alive-refusal.out" 2>&1
+legacy_alive_rc=$?
+set -e
+[ "$legacy_alive_rc" -ne 0 ] || fail "remote control reused an alive legacy tmux endpoint"
+assert_grep "alive endpoint recorded on backend 'tmux'" "$TMP_ROOT/legacy-alive-refusal.out" \
+  "remote refusal did not name the alive endpoint's recorded backend"
+cmp -s "$TMP_ROOT/remote-ios-legacy-before-refusal.meta" "$remote_route_meta" \
+  || fail "remote refusal changed the legacy endpoint metadata"
+assert_present "$TMUX_STATE" "remote refusal killed the alive legacy endpoint"
+cmp -s "$TMP_ROOT/registry-before-nonherdr.md" "$PARENT/data/secondmates.md" \
+  || fail "remote legacy refusal removed or changed the registry route"
+mv -f "$TMP_ROOT/remote-ios-before-legacy.meta" "$remote_route_meta"
+rm -f "$TMUX_STATE"
+pass "non-herdr remote endpoints are refused without changing either route"
 
 rm -f "$TMP_ROOT/inherit.entered" "$TMP_ROOT/inherit.release" "$TMP_ROOT/inherit.payload"
 cat > "$PARENT/data/captain-shared.md" <<'EOF'

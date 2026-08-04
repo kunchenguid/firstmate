@@ -98,7 +98,13 @@ cmd_launch() {
   if [ -f "$meta" ]; then
     current=$(state_value "$id")
     case "$current" in
-      alive) print_route "$id"; return 0 ;;
+      alive)
+        backend=$(fm_backend_of_meta "$meta")
+        [ "$backend" = herdr ] \
+          || die "remote secondmate $id has an alive endpoint recorded on backend '$backend'; refusing reuse until it is explicitly migrated or retired"
+        print_route "$id"
+        return 0
+        ;;
       dead)
         backend=$(fm_backend_of_meta "$meta")
         target=$(fm_backend_target_of_meta "$meta")
