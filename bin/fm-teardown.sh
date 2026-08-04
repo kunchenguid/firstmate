@@ -496,6 +496,11 @@ remove_kimi_turnend_auth() {
 # this task's own firstmate hook wiring - so a project's own file, tracked or not,
 # is never touched. Both legacy shapes are covered: the bare turn-end touch and
 # the later busy-state hooks.
+# A worktree whose TRACKED copy the old wholesale write already overwrote is
+# deliberately left alone, so a ship teardown still sees a modified tracked file
+# and refuses on uncommitted changes; restoring it automatically would put
+# firstmate back to writing into a project. Recover it by hand in that worktree
+# with `git checkout -- .claude/settings.local.json`, then tear down again.
 remove_legacy_claude_worktree_settings() {
   local wt=$1 id=$2 rel='.claude/settings.local.json' f
   f="$wt/$rel"
