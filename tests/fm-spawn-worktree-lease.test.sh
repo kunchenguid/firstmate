@@ -44,6 +44,7 @@ make_lease_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+printf 'tmux %s\n' "$*" >> "${FM_FAKE_TH_LOG:?FM_FAKE_TH_LOG unset}"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -273,6 +274,8 @@ test_relaunch_rejects_unreadable_lease_status() {
     "unreadable-status relaunch did not surface the lease ambiguity"
   assert_no_grep '^get --lease ' "$THLOG" \
     "unreadable-status relaunch acquired a replacement lease"
+  assert_no_grep '^tmux new-window ' "$THLOG" \
+    "unreadable-status relaunch created an endpoint before validating the lease"
   [ "$(cat "$HOME_DIR/state/$id.meta")" = "$meta_before" ] \
     || fail "unreadable-status relaunch changed the recorded task metadata"
   pass "relaunch fails closed when recorded lease status is unreadable"
