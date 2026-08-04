@@ -503,14 +503,22 @@ test_ci_ready_done_log_beats_monitoring_run() {
   make_repo_on_branch "$d/wt" fm/feat-ci
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship"
+  seed_known_run_step "$d" feat-ci fm/feat-ci
   printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
+  arm_idle_record "$d/state" feat-ci
   local out; out=$(run_crew_state "$d" feat-ci)
   assert_contains "$out" "state: done" "ci-ready status log -> done"
   assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
   assert_contains "$out" "checks green" "ci-ready detail preserves the report"
   assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
+  FM_FAKE_NM_RC=124
+  out=$(run_crew_state "$d" feat-ci)
+  assert_contains "$out" "state: done" "a later timeout preserves the CI-ready verdict"
+  assert_contains "$out" "source: run-step-degraded" "a later timeout degrades from the CI-ready verdict"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-ci \
+    && fail "a timed-out lookup replayed stale working evidence after CI became ready"
+  pass "ci-ready status log updates the record before a later timeout"
 }
 
 # Regression for the PR #252 incident: the crew's own status log never got a

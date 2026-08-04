@@ -226,6 +226,11 @@ runstep_record_clear() {
   rm -f "$RUNSTEP_RECORD" 2>/dev/null || true
 }
 
+runstep_record_emit() {  # <state> <source> <detail>
+  runstep_record_write "$1" "${3:-}"
+  emit "$1" "$2" "${3:-}"
+}
+
 # Print "<state>\t<detail>\t<age-seconds>" for a record still inside the
 # freshness bound; return 1 for a missing, malformed, or expired record.
 runstep_record_read() {
@@ -733,7 +738,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      runstep_record_emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -744,7 +749,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      runstep_record_emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi
 
@@ -766,9 +771,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   # Remember this verdict so a later lookup that cannot complete degrades to it
   # instead of collapsing to unknown. Recorded from the authoritative run-step
   # path only, so nothing but a genuinely observed run is ever replayed.
-  runstep_record_write "$RUN_STATE" "$RUN_DETAIL"
-
-  emit "$RUN_STATE" run-step "$RUN_DETAIL"
+  runstep_record_emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
