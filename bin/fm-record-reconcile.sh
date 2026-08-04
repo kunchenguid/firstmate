@@ -5,10 +5,13 @@
 #
 # Usage: fm-record-reconcile.sh
 #
-# A `done:` producer or a producer declaring the complete-only
-# `awaiting-captain:` state while still In flight moves to Done with --no-prune
-# and an explicit retained-lifecycle note. Its endpoint metadata and worktree
-# remain; teardown separately refuses unlanded work. Scout rows move only after
+# Done means merged, never green-open: a terminal producer report proves work is
+# complete, not landed, so no row here is transitioned. A `done:` producer, or a
+# producer declaring the complete-only `awaiting-captain:` state, keeps its In
+# flight row and gains durable terminal-retention evidence (exact head, clean
+# tree) recorded both on the row and in the receipt. Because the row stays In
+# flight it releases no dependent, and only teardown - which separately refuses
+# unlanded work - retires it after landing. Scout rows are annotated only after
 # the report exists and the decision-hold completion gate verifies. Missing
 # metadata and orphan metadata are accounted in the receipt and preserved.
 set -eu
@@ -100,10 +103,18 @@ if fm_tasks_axi_compatible; then
         continue
       fi
     fi
-    (cd "$FM_HOME" && tasks-axi 'done' "$id" --no-prune \
-      --note "producer terminal status reconciled at $TERMINAL_HEAD; endpoint metadata and worktree retained pending landing, independent gate, or captain answer") >/dev/null \
-      || { append_event terminal-unreconciled "$id" 'tasks-axi transition failed; row preserved'; continue; }
-    append_event terminal-retained "$id" "moved from In flight to Done at head=$TERMINAL_HEAD with tree=clean; metadata and worktree retained"
+    # Done means merged. A terminal producer report proves the work is complete,
+    # not that it landed, so the row stays In flight and keeps releasing nothing
+    # until teardown confirms landing. Record the retention evidence in place
+    # instead of transitioning, and keep the write idempotent so repeated
+    # terminal wakes do not churn the row's body.
+    marker="terminal-retained: head=$TERMINAL_HEAD tree=clean"
+    if ! (cd "$FM_HOME" && tasks-axi show "$id" --full 2>/dev/null) | grep -Fq "$marker"; then
+      (cd "$FM_HOME" && tasks-axi update "$id" --archive-body --body \
+        "$marker; producer reported complete and its worktree is clean. Endpoint metadata and worktree are retained, and this row stays In flight - releasing no dependent - until teardown confirms the work landed.") >/dev/null \
+        || { append_event terminal-unreconciled "$id" 'tasks-axi retention annotation failed; row preserved'; continue; }
+    fi
+    append_event terminal-retained "$id" "retained in flight at head=$TERMINAL_HEAD with tree=clean; metadata and worktree retained pending landing"
   done < <(in_flight_ids)
 fi
 

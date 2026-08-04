@@ -34,9 +34,10 @@
 #                       secondmate liveness, pending remote handoff retry,
 #                       X-mode artifact writes, fleet sync) also run only when
 #                       locked.
-#   3. record reconcile - retires surfaced terminal rows into Done without
-#                       pruning and receipts every metadata/backlog mismatch.
-#                       It only runs while locked.
+#   3. record reconcile - records terminal-retention evidence on surfaced
+#                       terminal rows, which stay In flight until teardown
+#                       confirms landing, and receipts every metadata/backlog
+#                       mismatch. It only runs while locked.
 #   4. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   5. context digest - data/projects.md, data/secondmates.md, data/captain.md,

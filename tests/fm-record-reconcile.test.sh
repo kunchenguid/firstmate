@@ -7,6 +7,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-record-reconcile)
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+RECONCILE="$ROOT/bin/fm-record-reconcile.sh"
 
 append_status_wake() {  # <state-dir> <task-id>
   FM_STATE_OVERRIDE="$1" bash -c '
@@ -15,8 +16,8 @@ append_status_wake() {  # <state-dir> <task-id>
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$2" "$1"
 }
 
-test_terminal_row_reconciles_while_unlanded_work_remains() {
-  local home wt dirty_wt receipt head guard_root drain_out
+test_terminal_row_retained_in_flight_until_it_lands() {
+  local home wt dirty_wt receipt head guard_root drain_out crew_state
   home="$TMP_ROOT/home"
   wt="$home/projects/sample-terminal"
   mkdir -p "$home/data" "$home/state" "$home/projects" "$wt"
@@ -58,6 +59,9 @@ EOF
   fm_write_meta "$home/state/orphan-meta.meta" \
     'window=test:fm-orphan-meta' "worktree=$home/projects/orphan" 'project=sample' 'kind=ship'
   printf 'done: historical status with no metadata row\n' > "$home/state/orphan-status.status"
+  # Reconciliation refuses any row whose worker has resumed, so the drain path
+  # needs a current-state source. Export it so it survives into the reconcile
+  # child the drain spawns.
   crew_state="$home/crew-state"
   cat > "$crew_state" <<'SH'
 #!/usr/bin/env bash
@@ -73,16 +77,23 @@ SH
   mkdir -p "$guard_root"
   touch "$home/state/.last-watcher-beat"
   append_status_wake "$home/state" sample-terminal || fail "could not queue terminal status wake"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$guard_root" "$DRAIN" > "$drain_out" \
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$guard_root" FM_CREW_STATE_BIN="$crew_state" \
+    "$DRAIN" > "$drain_out" \
     || fail "terminal wake drain and record reconciliation failed"
   grep "$(printf '\tsignal\tsample-terminal.status\t')" "$drain_out" >/dev/null \
     || fail "terminal wake did not traverse the ordinary drain path"
-  ! sed -n '/^## In flight/,/^## /p' "$home/data/backlog.md" | grep -F -- '- [ ] sample-terminal -' >/dev/null \
-    || fail "terminal report still reads in flight"
-  sed -n '/^## Done/,$p' "$home/data/backlog.md" | grep -F -- '- [x] sample-terminal -' >/dev/null \
-    || fail "terminal report was not reconciled into Done"
-  sed -n '/^## Done/,$p' "$home/data/backlog.md" | grep -F -- '- [x] captain-wait -' >/dev/null \
-    || fail "complete awaiting-captain report was not reconciled into Done"
+  # Done means merged. A complete-but-unlanded producer keeps its In flight row
+  # so it releases no dependent, and carries durable retention evidence instead.
+  sed -n '/^## In flight/,/^## /p' "$home/data/backlog.md" | grep -F -- '- [ ] sample-terminal -' >/dev/null \
+    || fail "terminal report was released from In flight before it landed"
+  sed -n '/^## In flight/,/^## /p' "$home/data/backlog.md" | grep -F -- '- [ ] captain-wait -' >/dev/null \
+    || fail "complete awaiting-captain report was released from In flight before it landed"
+  ! sed -n '/^## Done/,$p' "$home/data/backlog.md" | grep -F -- 'sample-terminal' >/dev/null \
+    || fail "unlanded terminal report was recorded as Done"
+  ! sed -n '/^## Done/,$p' "$home/data/backlog.md" | grep -F -- 'captain-wait' >/dev/null \
+    || fail "unlanded awaiting-captain report was recorded as Done"
+  grep -F "terminal-retained: head=$head tree=clean" "$home/data/backlog.md" >/dev/null \
+    || fail "retained terminal row carries no terminal-retention evidence"
   grep -F -- '- [ ] dirty-terminal -' "$home/data/backlog.md" >/dev/null \
     || fail "dirty terminal row was retired despite uncommitted evidence"
   assert_present "$dirty_wt/uncommitted.txt" "reconciliation erased uncommitted evidence"
@@ -94,16 +105,16 @@ SH
   assert_present "$home/state/orphan-meta.meta" "reconciliation erased orphan metadata evidence"
   receipt=$(find "$home/data/record-reconciliation" -type f -name '*.receipt' | head -1)
   assert_present "$receipt" "reconciliation wrote no durable inventory receipt"
-  assert_grep $'terminal-retained\tsample-terminal' "$receipt" "receipt omitted the reconciled terminal row"
-  assert_grep $'terminal-retained\tcaptain-wait' "$receipt" "receipt omitted the reconciled captain-wait row"
+  assert_grep $'terminal-retained\tsample-terminal' "$receipt" "receipt omitted the retained terminal row"
+  assert_grep $'terminal-retained\tcaptain-wait' "$receipt" "receipt omitted the retained captain-wait row"
   assert_grep $'terminal-unreconciled\tdirty-terminal' "$receipt" "receipt omitted the dirty terminal refusal"
   assert_grep $'missing-meta\tmissing-meta' "$receipt" "receipt omitted metadata-count drift"
   assert_grep $'orphan-meta\torphan-meta' "$receipt" "receipt omitted the orphan metadata"
   assert_grep $'orphan-status\torphan-status' "$receipt" "receipt omitted the orphan status record"
-  assert_grep 'in_flight_count=2' "$receipt" "receipt omitted the reconciled in-flight count"
+  assert_grep 'in_flight_count=4' "$receipt" "receipt omitted the retained in-flight count"
   assert_grep 'metadata_count=4' "$receipt" "receipt omitted the retained metadata count"
-  assert_grep 'metadata_minus_in_flight=2' "$receipt" "receipt omitted explicit metadata-count drift"
-  pass "terminal row reconciles without cleaning unlanded work or erasing drift evidence"
+  assert_grep 'metadata_minus_in_flight=0' "$receipt" "receipt omitted explicit metadata-count drift"
+  pass "terminal row is retained in flight with retention evidence until it lands"
 }
 
 test_resumed_worker_overrides_stale_terminal_event() {
@@ -141,5 +152,5 @@ SH
   pass "active current state overrides a stale terminal event"
 }
 
-test_terminal_row_reconciles_while_unlanded_work_remains
+test_terminal_row_retained_in_flight_until_it_lands
 test_resumed_worker_overrides_stale_terminal_event
